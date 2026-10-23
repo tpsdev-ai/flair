@@ -5,8 +5,9 @@
  *
  * Writers under test: an owner POST, submitted without the skill tag, that
  * names an id or a `supersedes` target, and an owner DELETE. Each is
- * foreground: it waits within the owner budget and answers `503 memory_busy`
- * on a miss.
+ * foreground: each lock acquisition waits within the owner budget, and a miss
+ * answers `503 memory_busy`; a skill DELETE that finds its head outside the
+ * held ids acquires again, at most 3 acquisitions in all.
  *
  * The matrix: the writer first, held while it still holds the lock, against an
  * owner PUT and PATCH (refused `memory_busy`; after release the POST's write is

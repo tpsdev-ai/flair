@@ -2355,7 +2355,8 @@ export class Memory extends (databases as any).flair.Memory {
 
   /** `locked`: the POST holds the per-id lock, so its provider calls take the
    *  bounded path putLocked's take (MEMORY_LOCKED_PROVIDER_TIMEOUT_MS): a call
-   *  still pending at the bound, or answering after it, is refused. */
+   *  still pending at the bound, or answering after it, is refused once the
+   *  event loop runs again; a provider that never yields it can prevent that. */
   private async postLocked(content: any, context: any, locked: boolean) {
     // flair#2612: a POST body that is not a single JSON object — an array, null,
     // a string or a number — is refused here with a named 400 before any write
