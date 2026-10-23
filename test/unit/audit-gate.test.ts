@@ -928,6 +928,8 @@ describe("vendor-pinned nodes shipped in harper's bundle", () => {
     packages?: Record<string, string | Record<string, unknown>>;
     /** Symlinks to create: link path -> target path, both relative to the prefix. */
     links?: Record<string, string>;
+    /** Files written verbatim: path relative to the prefix -> contents. */
+    raw?: Record<string, string>;
   };
 
   function withBundlePrefix(files: BundleFiles, run: (prefix: string) => void) {
@@ -940,6 +942,10 @@ describe("vendor-pinned nodes shipped in harper's bundle", () => {
           join(prefix, path, "package.json"),
           JSON.stringify(typeof manifest === "string" ? { version: manifest } : manifest),
         );
+      }
+      for (const [path, contents] of Object.entries(files.raw ?? {})) {
+        mkdirSync(dirname(join(prefix, path)), { recursive: true });
+        writeFileSync(join(prefix, path), contents);
       }
       for (const [link, target] of Object.entries(files.links ?? {})) {
         mkdirSync(dirname(join(prefix, link)), { recursive: true });
@@ -1032,6 +1038,58 @@ describe("vendor-pinned nodes shipped in harper's bundle", () => {
         const problems = vendorPinnedNodeProblems(advisory("find-my-way", node, "9.6.0"), prefix).join("\n");
         expect(problems).toContain(node);
         expect(problems).toContain(`harper's tree has no package.json for "fastify"`);
+      },
+    );
+  });
+
+  it("refuses a nested node whose bundled top-level package.json is not valid JSON", () => {
+    const node = `${fastify}/node_modules/find-my-way`;
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "9.6.0", inBundle: true } },
+        packages: { [node]: "9.6.0" },
+        raw: { [`${fastify}/package.json`]: "{ not json" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("find-my-way", node, "9.6.0"), prefix).join("\n");
+        expect(problems).toContain(node);
+        expect(problems).toContain(`harper's package.json for "fastify" cannot be read or parsed`);
+      },
+    );
+  });
+
+  it("refuses a nested node whose bundled top-level package.json is not an object", () => {
+    const node = `${fastify}/node_modules/find-my-way`;
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "9.6.0", inBundle: true } },
+        packages: { [node]: "9.6.0" },
+        raw: { [`${fastify}/package.json`]: "null" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("find-my-way", node, "9.6.0"), prefix).join("\n");
+        expect(problems).toContain(node);
+        expect(problems).toContain(`harper's package.json for "fastify" is not a JSON object`);
+      },
+    );
+  });
+
+  it("refuses a nested node whose bundled top-level package.json cannot be read", () => {
+    // A directory in the manifest's place (made by writing a file below it): the
+    // read fails for every uid, root included.
+    const node = `${fastify}/node_modules/find-my-way`;
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "9.6.0", inBundle: true } },
+        packages: { [node]: "9.6.0", [`${fastify}/package.json/placeholder`]: "0.0.0" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("find-my-way", node, "9.6.0"), prefix).join("\n");
+        expect(problems).toContain(node);
+        expect(problems).toContain(`harper's package.json for "fastify" cannot be read or parsed`);
       },
     );
   });

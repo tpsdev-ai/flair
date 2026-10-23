@@ -615,6 +615,20 @@ function resolveHarperDependency(fromDir, harperDir, realHarper, name) {
   }
 }
 
+/** Read and parse a package.json under harper; an unreadable or invalid one throws a named error. */
+function readHarperManifest(manifestPath, name) {
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch (e) {
+    throw new Error(`harper's package.json for ${JSON.stringify(name)} cannot be read or parsed: ${e.message}`);
+  }
+  if (typeof pkg !== "object" || pkg === null || Array.isArray(pkg)) {
+    throw new Error(`harper's package.json for ${JSON.stringify(name)} is not a JSON object`);
+  }
+  return pkg;
+}
+
 /**
  * Whether harper's top-level package `target` is one of the bundled packages
  * `roots` or in their dependency closure. npm ships each bundled package's
@@ -638,7 +652,10 @@ function harperBundleIncludes(harperDir, roots, target, limit = 5000) {
     }
     const found = resolveHarperDependency(from, harperDir, realHarper, name);
     if (!found || seen.has(found.dir)) return false;
-    if (name === target && found.dir === targetDir) return true;
+    if (name === target && found.dir === targetDir) {
+      readHarperManifest(found.manifest, target);
+      return true;
+    }
     seen.add(found.dir);
     queue.push(found);
     return false;
@@ -657,9 +674,9 @@ function harperBundleIncludes(harperDir, roots, target, limit = 5000) {
 }
 
 /**
- * Evidence that harper shipped a node, from the release's own manifest set.
+ * Evidence that harper shipped a node.
  * Releases that ship npm-shrinkwrap.json are checked against its pin, unchanged.
- * A release without one is checked against the consumer install's package-lock
+ * A release without one requires both the consumer install's package-lock
  * (`inBundle: true` plus the recorded version) and harper's installed
  * package.json `bundleDependencies` (or `bundledDependencies`; `true` means the
  * packages in harper's `dependencies`). Anything else throws, and the caller blocks.
@@ -978,12 +995,13 @@ async function main() {
       }
     }
 
-    // Classification — vendor-pinned (harper's shrinkwrap or bundled tree). An
-    // advisory the npm observation reports under node_modules/harper/ is pinned
-    // by harper, not by flair's own overrides. Such an entry must say so. The
-    // label is DERIVED from the nodes, not a typed class: the entry's `class`
-    // stays whatever it is (vendor-pinned for a patched-but-pinned leaf,
-    // no-patch-published for an unmaintained one like validate.js).
+    // Classification — vendor-pinned under harper. An entry whose advisory the
+    // npm observation reports under node_modules/harper/ must say so. Only an
+    // entry classed vendor-pinned has its nodes checked against harper's
+    // shipped evidence (above). The label is DERIVED from the nodes, not a
+    // typed class: the entry's `class` stays whatever it is (vendor-pinned for
+    // a patched-but-pinned leaf, no-patch-published for an unmaintained one
+    // like validate.js).
     if (
       adv.source === "npm-install" &&
       (adv.nodes ?? []).some((n) => n.includes("node_modules/harper/"))
@@ -1052,8 +1070,8 @@ async function main() {
   }
 
   // FIXED-FOR-BUN-ONLY — advisories the bun lockfile observation no longer
-  // reports (the override fixed them) but the npm-install tree still carries
-  // at harper's shipped version.
+  // reports (the override fixed them) but the npm-install observation still
+  // reports, with every reported node under harper.
   const fixedForBunOnly = [];
   for (const entry of allowlist.entries) {
     if (!entry?.ghsa) continue;
@@ -1131,7 +1149,7 @@ async function main() {
 
   for (const { entry } of fixedForBunOnly) {
     console.log(
-      `  FIXED-FOR-BUN-ONLY: ${entry.ghsa} ${entry.package} — npm installs carry harper's shipped version until ${entry.removeWhen}`,
+      `  FIXED-FOR-BUN-ONLY: ${entry.ghsa} ${entry.package} — npm installs still report it under harper until ${entry.removeWhen}`,
     );
   }
   if (fixedForBunOnly.length) console.log("");
