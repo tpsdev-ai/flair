@@ -3109,7 +3109,7 @@ export class Memory extends (databases as any).flair.Memory {
     const ids = putLockIds(this, content);
     if (ids.length === 0) return memoryIdRequiredResponse();
     // Citation-on-write, queued by putLocked, runs after this lock is released:
-    // it takes each cited id's lock, and the target id's lock is not held then.
+    // it tries each cited id's lock, and the target id's lock is not held then.
     const afterRelease: Array<() => Promise<void>> = [];
     const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async () => {
       const result = await this.putLocked(content, query, afterRelease);

@@ -149,7 +149,7 @@ export async function recordUsageContribution(
 ): Promise<void> {
   // Global lock order (flair#2478): the sorted Memory id locks first, then the
   // usage ledger. Memory.put() records its citations after releasing its target
-  // id's lock, so a citation holds no other Memory id lock when it takes this
+  // id's lock, so a citation holds no other Memory id lock when it tries this
   // one. The whole contribution — the ledger check, any ledger create
   // and the count bump — runs under the memory id's write lock, taken once with
   // no wait: the count bump's decision is then made on a committed row an
