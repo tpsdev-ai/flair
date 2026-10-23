@@ -26,10 +26,17 @@
  * migration nullable String field — no new schema needed) to a value that
  * encodes the migration id, so "is this row done" is answered entirely by
  * re-reading the row itself (invariant IV: state lives IN the data).
+ *
+ * The write runs under the row's per-id Memory write lock (flair#2478 slice
+ * 3b): one non-waiting acquisition per row, around the write-back's read,
+ * decision, write and commit. A held row, an unresolved write outcome on it or
+ * a table with no lock writes nothing and is logged; the row stays pending for
+ * the next scan.
  */
 import { databases } from "harper";
 import { writeBackCommittedRow as writeBackCommittedRowImpl, type WriteBackFn } from "../write-back.js";
 import { txnPausePoint } from "../txn-pause-point.js";
+import { withMemoryWriteLockOnce } from "../memory-write-lock.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export const SYNTHETIC_MIGRATION_ID = "synthetic-ci-schema-stamp";
@@ -51,6 +58,8 @@ export interface MemoryTableLike {
   search(query: unknown): AsyncIterable<Record<string, unknown>>;
   get(id: string): Promise<Record<string, unknown> | null>;
   put(content: Record<string, unknown>): Promise<unknown>;
+  /** The table's per-id key lock (flair#2478); absent on a unit-test double unless it supplies one. */
+  primaryStore?: unknown;
 }
 
 function defaultMemoryTable(): MemoryTableLike {
@@ -99,20 +108,46 @@ export function createSyntheticTestMigration(
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
-        const outcome = await writeBackCommittedRow(
-          table as unknown as Parameters<WriteBackFn>[0],
-          id,
-          (existing: any) => {
-            if (!existing || existing.agentId !== RESERVED_TEST_AGENT_ID) return { skip: true } as const;
-            if (existing.source === SYNTHETIC_TARGET_MARKER) return { skip: true } as const; // already stamped — idempotent skip
+        // flair#2478 slice 3b: an automatic writer. It takes the id's per-id
+        // Memory write lock with one non-waiting acquisition, so its read,
+        // decision, write and commit sit on one committed basis while an owner
+        // write holds the id. A held id, an id with an unresolved write outcome
+        // or a table with no lock writes nothing here and is reported; the row
+        // stays pending for the next boot's scan.
+        const locked = await withMemoryWriteLockOnce(table.primaryStore, [id], async () => {
+          const result = await writeBackCommittedRow(
+            table as unknown as Parameters<WriteBackFn>[0],
+            id,
+            (existing: any) => {
+              if (!existing || existing.agentId !== RESERVED_TEST_AGENT_ID) return { skip: true } as const;
+              if (existing.source === SYNTHETIC_TARGET_MARKER) return { skip: true } as const; // already stamped — idempotent skip
 
-            // Only `source`: an incremental update, never a
-            // full-row put of the row read above (flair#2470).
-            return { idempotent: true, update: { source: SYNTHETIC_TARGET_MARKER } };
-          },
-          { label: "synthetic-test-migration", pausePre: () => txnPausePoint("synthetic-test-pre"), pausePoint: () => txnPausePoint("synthetic-test"), expectedRow: row },
-        );
-        if (!("skip" in outcome)) touchedIds.push(id);
+              // Only `source`: an incremental update, never a
+              // full-row put of the row read above (flair#2470).
+              return { idempotent: true, update: { source: SYNTHETIC_TARGET_MARKER } };
+            },
+            {
+              label: "synthetic-test-migration",
+              pausePre: () => txnPausePoint("synthetic-test-pre"),
+              pausePoint: () => txnPausePoint("synthetic-test"),
+              pauseAfterStage: () => txnPausePoint("synthetic-test-staged"),
+              confirmPoint: () => txnPausePoint("synthetic-test-confirm"),
+              expectedRow: row,
+            },
+          );
+          // Test-only: the write-back committed and the lock is still held.
+          const committed = txnPausePoint("synthetic-test-committed");
+          if (committed) await committed;
+          return result;
+        }, { phase: "synthetic-test-migration" });
+        if (locked.kind !== "done") {
+          console.warn(
+            "[synthetic-test-migration] %s: the per-id write lock answered %s; the row is left for the next scan",
+            id, locked.kind,
+          );
+          continue;
+        }
+        if (!("skip" in locked.value)) touchedIds.push(id);
       }
 
       return { processed: touchedIds.length, touchedIds };

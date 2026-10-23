@@ -108,6 +108,8 @@
  * description for that distinction.
  */
 
+import { TEST_FAULT_INJECTION_ENV } from "./txn-pause-point.js";
+
 /**
  * The nomic search-prefix `inputType` — closed union, not `string`. See the
  * file header: the VALUES `'document'`/`'query'` are what HFE 0.3.0's engine
@@ -117,6 +119,26 @@
  * every typed caller — don't.
  */
 export type EmbedInputType = "document" | "query";
+
+/**
+ * Test-only provider delay: the first call in this process whose text contains
+ * `FLAIR_TEST_EMBED_PROVIDER_DELAY_MATCH` waits
+ * `FLAIR_TEST_EMBED_PROVIDER_DELAY_MS` before reaching the backend. The delay
+ * happens only when `FLAIR_ENABLE_TEST_FAULT_INJECTION=1` and both settings are set.
+ */
+const TEST_EMBED_DELAY_MS_ENV = "FLAIR_TEST_EMBED_PROVIDER_DELAY_MS";
+const TEST_EMBED_DELAY_MATCH_ENV = "FLAIR_TEST_EMBED_PROVIDER_DELAY_MATCH";
+let testProviderDelayUsed = false;
+
+function testProviderDelayMs(text: string): number | undefined {
+  if (testProviderDelayUsed) return undefined;
+  if (process.env[TEST_FAULT_INJECTION_ENV] !== "1") return undefined;
+  const match = process.env[TEST_EMBED_DELAY_MATCH_ENV];
+  const ms = Number(process.env[TEST_EMBED_DELAY_MS_ENV]);
+  if (!match || !text.includes(match) || !Number.isFinite(ms) || ms <= 0) return undefined;
+  testProviderDelayUsed = true;
+  return ms;
+}
 
 const VALID_INPUT_TYPES: ReadonlySet<string> = new Set<EmbedInputType>(["document", "query"]);
 
@@ -362,6 +384,8 @@ function ensureProbeStarted(): void {
 export async function getEmbedding(text: string, inputType?: EmbedInputType): Promise<number[] | null> {
   ensureProbeStarted();
   try {
+    const providerDelay = testProviderDelayMs(text);
+    if (providerDelay !== undefined) await new Promise((resolve) => setTimeout(resolve, providerDelay));
     const models = await getModelsApi();
     const [vec] = await models.embed(text, buildEmbedOptions(inputType));
     if (!vec) return null;
