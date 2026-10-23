@@ -34,6 +34,10 @@ const REJECTED: Shape[] = [
   { name: "a later spread", opts: `{ timeout: ${TIMEOUT_MS}, ...{ timeout: undefined } }` },
   { name: "a const identifier holding a later spread", decl: `const opts = { timeout: ${TIMEOUT_MS}, ...{ timeout: undefined } };`, opts: "opts" },
   { name: "a later computed key", opts: `{ timeout: ${TIMEOUT_MS}, ["timeout"]: undefined }` },
+  {
+    name: "a getter on another property that deletes the timeout when the runtime reads it",
+    opts: `{ get cwd() { delete (this as { timeout?: number }).timeout; return undefined; }, timeout: ${TIMEOUT_MS} }`,
+  },
   { name: "a const identifier mutated after its declaration", decl: `const opts = { timeout: ${TIMEOUT_MS} };\nopts.timeout = 0;`, opts: "opts" },
   { name: "a let identifier reassigned", decl: `let opts: object = { timeout: ${TIMEOUT_MS} };\nopts = {};`, opts: "opts" },
 ];

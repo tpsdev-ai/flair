@@ -583,17 +583,20 @@ function propertyNameIs(name, key) {
 
 /**
  * The deadline the gate reads from an options object literal, or null
- * (flair#2782). The literal must have no spread and no computed key, and exactly
- * one property named `timeout`, a plain `timeout: <value>` assignment whose value
- * is a numeric literal `timeoutLiteralMs` accepts: `0`, `undefined`, `null`,
- * `void 0` and any other value are no deadline (flair#1825 r6).
+ * (flair#2782). The literal must have no spread, no computed key, no method, no
+ * get/set accessor and no property named `__proto__`, and exactly one property
+ * named `timeout`, a plain `timeout: <value>` assignment whose value is a
+ * numeric literal `timeoutLiteralMs` accepts: `0`, `undefined`, `null`, `void 0`
+ * and any other value are no deadline (flair#1825 r6).
  */
 function objectLiteralDeadlineMs(obj) {
   let timeoutProp = null;
   let count = 0;
   for (const prop of obj.properties) {
     if (ts.isSpreadAssignment(prop)) return null;
+    if (ts.isGetAccessorDeclaration(prop) || ts.isSetAccessorDeclaration(prop) || ts.isMethodDeclaration(prop)) return null;
     if (!prop.name || ts.isComputedPropertyName(prop.name)) return null;
+    if (propertyNameIs(prop.name, "__proto__")) return null;
     if (propertyNameIs(prop.name, "timeout")) {
       timeoutProp = prop;
       count++;

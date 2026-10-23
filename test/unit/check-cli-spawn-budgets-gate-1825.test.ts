@@ -778,6 +778,11 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
       { name: "a shorthand timeout", opts: "{ timeout }", expected: null },
       { name: "a timeout method", opts: "{ timeout() { return 5000; } }", expected: null },
       { name: "a timeout getter", opts: "{ get timeout() { return 5000; } }", expected: null },
+      { name: "a getter on another property", opts: '{ timeout: 5000, get cwd() { return "."; } }', expected: null },
+      { name: "a setter on another property", opts: "{ timeout: 5000, set cwd(value: string) {} }", expected: null },
+      { name: "a method on another property", opts: "{ timeout: 5000, env() { return {}; } }", expected: null },
+      { name: "a `__proto__` key", opts: "{ timeout: 5000, __proto__: {} }", expected: null },
+      { name: "a quoted `__proto__` key", opts: '{ timeout: 5000, "__proto__": {} }', expected: null },
     ];
 
     for (const c of OPTION_SHAPES) {
