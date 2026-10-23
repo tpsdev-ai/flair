@@ -49,9 +49,10 @@
 // The scanner masks string/template/regex CONTENTS for call matching, so a
 // `Bun.spawn(...)` quoted in a string is not mistaken for a call.
 //
-// SCANNING. Test files are read as TEXT, not parsed: no AST dependency, so the
-// gate runs before `bun install`. That makes one thing load-bearing — the
-// scanner must not confuse code with prose. Comments are masked (an apostrophe
+// SCANNING. Call matching runs on the source TEXT after masking, and the mask
+// comes from TypeScript's parser (the lockfile's `typescript`), so the gate
+// needs `bun install` first (the CI job installs it). That makes one thing
+// load-bearing: the scanner must not confuse code with prose. Comments are masked (an apostrophe
 // in "it's not in stderr" otherwise opens a string that swallows the case's
 // closing paren), and string / template / regex literals are skipped when
 // matching brackets (a regex like `/required option '--agent/` does the same).
@@ -207,11 +208,13 @@ function maskLiteralsAndComments(src, fileName = UNNAMED_SOURCE) {
   const blank = (from, to) => {
     for (let j = from; j < to && j < src.length; j++) if (src[j] !== "\n") out[j] = " ";
   };
-  // Every comment sits in the trivia between two tokens: the part before the
-  // first newline is the earlier token's TRAILING range, the rest the later
-  // token's LEADING range. Visiting every node and token (getChildren includes
-  // the tokens) therefore reaches every comment, inside template expressions
-  // too. A JSDoc comment is one of those ranges; its parsed nodes are skipped.
+  // Every comment sits in the trivia between two tokens, and TypeScript reports
+  // it as a TRAILING comment range of the earlier token or a LEADING range of
+  // the later one (a comment that starts on the earlier token's line, even a
+  // multiline block, is returned whole as a trailing range). Visiting every node
+  // and token (getChildren includes the tokens) and masking both kinds of range
+  // therefore reaches every comment, inside template expressions too. A JSDoc
+  // comment is one of those ranges; its parsed nodes are skipped.
   const leadingDone = new Set();
   const trailingDone = new Set();
   const visit = (node) => {
