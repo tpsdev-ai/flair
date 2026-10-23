@@ -619,12 +619,12 @@ describe("Bun Harper spawn preload", () => {
       "BASH_FUNC_node%%": `() { '${process.execPath}' --preload '${marker}' "$@"; }`,
     };
     const options = { cwd: resolve(import.meta.dir, "../.."), env, encoding: "utf8" as const, timeout: 5_000 };
-    const error = refused(() => spawnSync("/bin/bash", ["-c", "node ./dist/cli.js --version"], { ...options, timeout: 5_000 }),
+    const error = refused(() => spawnSync("/bin/bash", ["-c", "node ./dist/cli.js --version"], { cwd: options.cwd, env, encoding: "utf8", timeout: 5_000 }),
       "child_process.spawnSync", "TestRuntimeIdentityError");
     expect(error.message).toContain("shell string launching dist/cli.js");
     const log = spyOn(console, "warn").mockImplementation(() => {});
     try {
-      const result = spawnSync("/bin/bash", ["-c", "node ./dist/cli.js --version"], { ...options,
+      const result = spawnSync("/bin/bash", ["-c", "node ./dist/cli.js --version"], { cwd: options.cwd, encoding: "utf8",
         timeout: 5_000,
         env: { ...env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise Bash exported node function dispatching to Bun" },
       });
@@ -828,7 +828,7 @@ describe("Bun Harper spawn preload", () => {
     }
     const log = spyOn(console, "warn").mockImplementation(() => {});
     try {
-      const result = spawnSync(runtime, [cli, "init"], { ...options, timeout: 5_000,
+      const result = spawnSync(runtime, [cli, "init"], { encoding: "utf8", timeout: 5_000,
         env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise argument-dependent launcher" },
       });
       expect(result.status).toBe(0);
@@ -929,8 +929,8 @@ describe("Bun Harper spawn preload", () => {
       };
       const command = `UNUSED=value bun '${cli}' init`;
       const results = [
-        spawnSync(process.execPath, [cli, "init"], { ...options, timeout: 5_000 }),
-        spawnSync("/usr/bin/env", ["-u", "UNUSED", "OTHER=value", "bun", cli, "init"], { ...options, timeout: 5_000 }),
+        spawnSync(process.execPath, [cli, "init"], { encoding: "utf8", env: options.env, timeout: 5_000 }),
+        spawnSync("/usr/bin/env", ["-u", "UNUSED", "OTHER=value", "bun", cli, "init"], { encoding: "utf8", env: options.env, timeout: 5_000 }),
         spawnSync(command, { ...options, shell: true, timeout: 5_000 }),
         spawnSync("/bin/sh", ["-c", command], { ...options, timeout: 5_000 }),
         spawnSync("/bin/bash", ["-c", command], { ...options, timeout: 5_000 }),

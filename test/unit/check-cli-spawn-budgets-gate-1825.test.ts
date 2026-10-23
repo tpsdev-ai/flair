@@ -586,10 +586,10 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
   const spawnNoTimeout = (src: string) => offendersFor(src).spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout");
 
   /**
-   * What a real JavaScript parser (TypeScript's) says the one spawn call's
-   * options carry: the numeric `timeout` property of the options object literal,
-   * or of the initializer of the identifier passed as options; null when the
-   * object has no such property.
+   * The first numeric `timeout` property TypeScript's parser finds on the one
+   * spawn call's options object literal, or on the initializer of the identifier
+   * passed as options; null when there is none. It reads the source, not the
+   * deadline the runtime applies.
    */
   function parsedTimeout(src: string): number | null {
     const syntax = ts.transpileModule(src, { reportDiagnostics: true, compilerOptions: { target: ts.ScriptTarget.ES2022 } });
@@ -743,6 +743,84 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
   it("an options identifier whose one-line initializer holds only a nested timeout is no deadline", () => {
     for (const [form, src] of Object.entries(forms("{ env: { timeout: 5000 } }"))) {
       if (form.endsWith("identifier")) expectGateAgreesWithParser(src, null);
+    }
+  });
+
+  describe("the options rule (flair#2782)", () => {
+    /** findSpawnCalls and scanTree both give `expected` for every spawn call in `src`. */
+    function expectGateReads(src: string, expected: number | null) {
+      const { calls } = findSpawnCalls(src);
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) {
+        expect(call.isCliEntry).toBe(true);
+        expect(call.timeoutMs ?? null).toBe(expected);
+        expect(call.hasTimeout).toBe(expected !== null);
+      }
+      expect(spawnNoTimeout(src)).toBe(expected === null);
+    }
+
+    // The options rule (flair#2782): the argument, wrappers stripped, IS an object
+    // literal with no spread, no computed key and exactly one plain `timeout`, or a
+    // const identifier holding one that nothing else in the file touches.
+    const OPTION_SHAPES: Array<{ name: string; opts: string; expected: number | null }> = [
+      { name: "a parenthesized literal", opts: "({ timeout: 5000 })", expected: 5000 },
+      { name: "a literal `as` a type", opts: "{ timeout: 5000 } as SpawnSyncOptions", expected: 5000 },
+      { name: "a literal that `satisfies` a type", opts: "{ timeout: 5000 } satisfies SpawnSyncOptions", expected: 5000 },
+      { name: "a non-null literal", opts: "{ timeout: 5000 }!", expected: 5000 },
+      { name: "a literal at the start of `&&`", opts: "{ timeout: 5000 } && {}", expected: null },
+      { name: "a literal inside a conditional", opts: "true ? { timeout: 5000 } : {}", expected: null },
+      { name: "a spread before the timeout", opts: "{ ...base, timeout: 5000 }", expected: null },
+      { name: "a spread after the timeout", opts: "{ timeout: 5000, ...{ timeout: undefined } }", expected: null },
+      { name: "a computed key after the timeout", opts: '{ timeout: 5000, ["timeout"]: undefined }', expected: null },
+      { name: "a computed timeout key", opts: '{ ["timeout"]: 5000 }', expected: null },
+      { name: "a duplicate timeout", opts: "{ timeout: 5000, timeout: 6000 }", expected: null },
+      { name: "a duplicate quoted timeout", opts: '{ timeout: 5000, "timeout": 5000 }', expected: null },
+      { name: "timeout: 0", opts: "{ timeout: 0 }", expected: null },
+      { name: "timeout: undefined", opts: "{ timeout: undefined }", expected: null },
+      { name: "timeout: null", opts: "{ timeout: null }", expected: null },
+      { name: "timeout: void 0", opts: "{ timeout: void 0 }", expected: null },
+      { name: "a shorthand timeout", opts: "{ timeout }", expected: null },
+      { name: "a timeout method", opts: "{ timeout() { return 5000; } }", expected: null },
+      { name: "a timeout getter", opts: "{ get timeout() { return 5000; } }", expected: null },
+    ];
+
+    for (const c of OPTION_SHAPES) {
+      it(`${c.name}, inline and as a const identifier: the gate reads ${c.expected === null ? "no deadline" : c.expected}`, () => {
+        for (const src of Object.values(forms(c.opts))) expectGateReads(src, c.expected);
+      });
+    }
+
+    it("a spread argument at or before the options position is no deadline", () => {
+      expectGateReads(`test("t", () => {\n  spawnSync("bun", ...[["src/cli.ts", "status"]], { timeout: 5000 });\n}, 120_000);\n`, null);
+    });
+
+    const ARGV_REST = ARGV.replace('"bun", ', "");
+    /** `decl` then a case whose Bun.spawn and spawnSync both pass the identifier `opts`. */
+    const identifierSrc = (decl: string) =>
+      `${decl}\ntest("t", () => {\n  Bun.spawn(${ARGV}, opts);\n  spawnSync("bun", ${ARGV_REST}, opts);\n}, 120_000);\n`;
+
+    it("a clean const identifier used by two spawns gives both its deadline", () => {
+      expectGateReads(identifierSrc("const opts = { timeout: 5000 };"), 5000);
+    });
+
+    const IDENTIFIER_REJECTS: Array<{ name: string; decl: string }> = [
+      { name: "a let identifier", decl: "let opts = { timeout: 5000 };" },
+      { name: "a var identifier", decl: "var opts = { timeout: 5000 };" },
+      { name: "a const whose timeout is later set", decl: "const opts = { timeout: 5000 };\nopts.timeout = 0;" },
+      { name: "a const whose timeout element is later set", decl: 'const opts = { timeout: 5000 };\nopts["timeout"] = 0;' },
+      { name: "a const whose timeout is later deleted", decl: "const opts = { timeout: 5000 };\ndelete opts.timeout;" },
+      { name: "a const later passed to Object.assign", decl: "const opts = { timeout: 5000 };\nObject.assign(opts, { timeout: 0 });" },
+      { name: "a const later passed to Object.defineProperty", decl: 'const opts = { timeout: 5000 };\nObject.defineProperty(opts, "timeout", { value: 0 });' },
+      { name: "a const passed to another function", decl: "const opts = { timeout: 5000 };\nprepare(opts);" },
+      { name: "a const re-exported", decl: "const opts = { timeout: 5000 };\nexport { opts };" },
+      { name: "an exported const", decl: "export const opts = { timeout: 5000 };" },
+      { name: "a const whose name is declared again in another scope", decl: "const opts = { timeout: 5000 };\nfunction other(opts: object) { return 1; }" },
+    ];
+
+    for (const c of IDENTIFIER_REJECTS) {
+      it(`${c.name} is no deadline for either spawn that passes it`, () => {
+        expectGateReads(identifierSrc(c.decl), null);
+      });
     }
   });
 });

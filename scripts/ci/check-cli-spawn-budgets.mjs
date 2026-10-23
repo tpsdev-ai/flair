@@ -174,16 +174,6 @@ function scriptKindFor(fileName) {
 }
 
 /**
- * The source as TypeScript's parser reads it, with every comment and the text of
- * every string literal, template literal and regex literal replaced by spaces
- * (flair#2774). Newlines and length are kept, so every index still points at the
- * same character. A template's `${` and `}` and the expressions between them
- * stay as code: a `Bun.spawn(...)` of the CLI entry there IS a real call
- * (flair#1825). Used for spawn-CALL matching, so a `Bun.spawn(...)` mentioned in
- * a string or comment is not mistaken for a call. The argv/options TEXT a call
- * reports is sliced from the ORIGINAL source, so the CLI-entry check still reads
- * real literal text. A spawn's `timeout` is read from THIS text (flair#2774).
- *
  * A file the parser reports a syntax error in is refused with an error naming
  * it: the scan never falls back to the unmasked text.
  */
@@ -207,6 +197,17 @@ function parseSourceFile(src, fileName = UNNAMED_SOURCE) {
   return sf;
 }
 
+/**
+ * The source as TypeScript's parser reads it, with every comment and the text of
+ * every string literal, template literal and regex literal replaced by spaces
+ * (flair#2774). Newlines and length are kept, so every index still points at the
+ * same character. A template's `${` and `}` and the expressions between them
+ * stay as code: a `Bun.spawn(...)` of the CLI entry there IS a real call
+ * (flair#1825). Used for spawn-CALL matching, so a `Bun.spawn(...)` mentioned in
+ * a string or comment is not mistaken for a call. The argv/options TEXT a call
+ * reports is sliced from the ORIGINAL source, so the CLI-entry check still reads
+ * real literal text.
+ */
 function maskLiteralsAndComments(src, fileName = UNNAMED_SOURCE, sf = parseSourceFile(src, fileName)) {
   const out = src.split("");
   const blank = (from, to) => {
@@ -543,65 +544,141 @@ function textNamesCliEntry(text, ids) {
   return false;
 }
 
-/**
- * Every object literal in the file, keyed by its start index (flair#2782). The
- * spawn's options `timeout` is read from the AST, so a `timeout` key nested in
- * another object (env, an object inside a `${…}`) is not mistaken for the
- * spawn's own property.
- */
-function objectLiteralsByStart(sf) {
-  const byStart = new Map();
+/** Every call expression in the file, keyed by the index of its `(` (flair#2782). */
+function callExpressionsByOpenParen(sf) {
+  const byOpen = new Map();
   const visit = (node) => {
-    if (ts.isObjectLiteralExpression(node)) {
-      const start = node.getStart(sf);
-      const prev = byStart.get(start);
-      if (!prev || node.end > prev.end) byStart.set(start, node);
+    if (ts.isCallExpression(node)) byOpen.set(node.arguments.pos - 1, node);
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return byOpen;
+}
+
+/** `expr` without its parentheses and `as` / `satisfies` / non-null (`!`) wrappers. */
+function stripWrappers(expr) {
+  let e = expr;
+  while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isNonNullExpression(e)) {
+    e = e.expression;
+  }
+  return e;
+}
+
+/**
+ * The call's argument at `index`, wrappers stripped; null when there is no call,
+ * no argument there, or a spread argument at or before it (the runtime's
+ * position for it is then unknown).
+ */
+function argumentAt(call, index) {
+  if (!call) return null;
+  const args = call.arguments;
+  for (let i = 0; i <= index && i < args.length; i++) if (ts.isSpreadElement(args[i])) return null;
+  return index < args.length ? stripWrappers(args[index]) : null;
+}
+
+/** An identifier or string-literal property key equal to `key`. */
+function propertyNameIs(name, key) {
+  return (ts.isIdentifier(name) || ts.isStringLiteral(name)) && name.text === key;
+}
+
+/**
+ * The deadline the gate reads from an options object literal, or null
+ * (flair#2782). The literal must have no spread and no computed key, and exactly
+ * one property named `timeout`, a plain `timeout: <value>` assignment whose value
+ * is a numeric literal `timeoutLiteralMs` accepts: `0`, `undefined`, `null`,
+ * `void 0` and any other value are no deadline (flair#1825 r6).
+ */
+function objectLiteralDeadlineMs(obj) {
+  let timeoutProp = null;
+  let count = 0;
+  for (const prop of obj.properties) {
+    if (ts.isSpreadAssignment(prop)) return null;
+    if (!prop.name || ts.isComputedPropertyName(prop.name)) return null;
+    if (propertyNameIs(prop.name, "timeout")) {
+      timeoutProp = prop;
+      count++;
+    }
+  }
+  if (count !== 1 || !ts.isPropertyAssignment(timeoutProp)) return null;
+  return ts.isNumericLiteral(timeoutProp.initializer) ? timeoutLiteralMs(timeoutProp.initializer.text) : null;
+}
+
+/**
+ * True when `id` is the name of a property access, a qualified name's right side,
+ * an object-literal property, method or accessor, or a class, interface or enum
+ * member: a name, not a reference to a binding.
+ */
+function isPropertyName(id) {
+  const p = id.parent;
+  if (ts.isPropertyAccessExpression(p)) return p.name === id;
+  if (ts.isQualifiedName(p)) return p.right === id;
+  if (
+    ts.isPropertyAssignment(p) ||
+    ts.isPropertyDeclaration(p) ||
+    ts.isPropertySignature(p) ||
+    ts.isMethodDeclaration(p) ||
+    ts.isMethodSignature(p) ||
+    ts.isGetAccessorDeclaration(p) ||
+    ts.isSetAccessorDeclaration(p) ||
+    ts.isEnumMember(p)
+  ) {
+    return p.name === id;
+  }
+  return false;
+}
+
+/** Every identifier in the file that `isPropertyName` does not exclude, grouped by text. */
+function identifierReferences(sf) {
+  const byName = new Map();
+  const visit = (node) => {
+    if (ts.isIdentifier(node) && !isPropertyName(node)) {
+      const list = byName.get(node.text);
+      if (list) list.push(node);
+      else byName.set(node.text, [node]);
     }
     ts.forEachChild(node, visit);
   };
   visit(sf);
-  return byStart;
-}
-
-/** A property name (identifier, string literal, numeric literal) equal to `key`. */
-function propertyNameIs(name, key) {
-  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) return name.text === key;
-  return false;
+  return byName;
 }
 
 /**
- * The deadline an options span declares, or null (flair#2782). The span is the
- * options argument, or the one-line initializer of the identifier passed there.
- * A `timeout` counts only as a DIRECT property of that object literal, and only
- * a numeric literal value is a deadline: `timeout: 0`, `1e999` and any other
- * expression leave the spawn without one, as before (flair#1825 r6). A nested
- * object's `timeout` belongs to that object, not to the spawn.
+ * The deadline the gate reads from an options identifier, or null (flair#2782).
+ * It resolves only when the file declares it exactly once, as a non-exported
+ * `const` whose initializer (wrappers stripped) is an object literal the gate
+ * reads a deadline from, and every other reference to the name is the options
+ * argument of a spawn call this gate finds. Any other reference (a property or
+ * element write, `delete`, `Object.assign`, an argument to another function, an
+ * export) is no deadline.
  */
-function optionsTimeoutMs(sf, objectLiterals, span, source) {
-  if (!span) return null;
-  // The first non-trivia character of the span: whitespace and comments (a comment
-  // may sit between the comma and the options argument).
-  let start = span.start;
-  while (start < span.end) {
-    const ch = source[start];
-    if (/\s/.test(ch)) {
-      start++;
-    } else if (ch === "/" && source[start + 1] === "/") {
-      const nl = source.indexOf("\n", start);
-      start = nl === -1 || nl > span.end ? span.end : nl;
-    } else if (ch === "/" && source[start + 1] === "*") {
-      const end = source.indexOf("*/", start + 2);
-      start = end === -1 || end + 2 > span.end ? span.end : end + 2;
-    } else {
-      break;
+function identifierDeadlineMs(id, spawnOptionArgs, references) {
+  let decl = null;
+  for (const ref of references.get(id.text) ?? []) {
+    if (ts.isVariableDeclaration(ref.parent) && ref.parent.name === ref) {
+      if (decl) return null;
+      decl = ref.parent;
+    } else if (!spawnOptionArgs.has(ref)) {
+      return null;
     }
   }
-  const options = objectLiterals.get(start);
-  if (!options || options.end > span.end) return null;
-  for (const prop of options.properties) {
-    if (!ts.isPropertyAssignment(prop) || !propertyNameIs(prop.name, "timeout")) continue;
-    return ts.isNumericLiteral(prop.initializer) ? timeoutLiteralMs(prop.initializer.text) : null;
-  }
+  if (!decl?.initializer) return null;
+  const list = decl.parent;
+  if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.BlockScoped) !== ts.NodeFlags.Const) return null;
+  if (ts.isVariableStatement(list.parent) && (ts.getModifiers(list.parent) ?? []).length > 0) return null;
+  const init = stripWrappers(decl.initializer);
+  return ts.isObjectLiteralExpression(init) ? objectLiteralDeadlineMs(init) : null;
+}
+
+/**
+ * The deadline the gate reads from a spawn's options argument, or null
+ * (flair#2782): the argument, wrappers stripped, must BE an object literal the
+ * gate reads one from, or an identifier that resolves to one. A larger
+ * expression containing a literal (`{ timeout: 5000 } && {}`) is no deadline.
+ */
+function optionsDeadlineMs(arg, spawnOptionArgs, references) {
+  if (!arg) return null;
+  if (ts.isObjectLiteralExpression(arg)) return objectLiteralDeadlineMs(arg);
+  if (ts.isIdentifier(arg)) return identifierDeadlineMs(arg, spawnOptionArgs, references);
   return null;
 }
 
@@ -609,7 +686,7 @@ function optionsTimeoutMs(sf, objectLiterals, span, source) {
 export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
   const sf = parseSourceFile(source, fileName);
   const scan = maskLiteralsAndComments(source, fileName, sf);
-  const objectLiterals = objectLiteralsByStart(sf);
+  const callsByOpen = callExpressionsByOpenParen(sf);
   const ids = cliEntryIdentifiers(source);
   const aliases = aliasedSpawnFns(source);
   const constDecls = new Map();
@@ -619,6 +696,7 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
     constDecls.set(m[1], { start: after, end: lineEnd === -1 ? source.length : lineEnd });
   }
   const calls = [];
+  const optionsArgOf = new Map();
   const lineOf = (index) => source.slice(0, index).split("\n").length;
   const textAt = (span) => (span ? source.slice(span.start, span.end) : "");
   // The options span itself, or the one-line initializer of the identifier it names.
@@ -634,18 +712,16 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
     const args = topLevelArgs(scan, open);
     if (!args) continue;
     const argvText = BUN_ARGV_ARG_INDICES.map((i) => textAt(args.spans[i])).join(" ");
-    const optSpan = resolveOptSpan(args.spans[BUN_OPTIONS_ARG_INDEX]);
-    const optText = textAt(optSpan);
-    const optCode = optSpan ? scan.slice(optSpan.start, optSpan.end) : "";
-    calls.push({
+    const optText = textAt(resolveOptSpan(args.spans[BUN_OPTIONS_ARG_INDEX]));
+    const call = {
       fn,
       index: m.index,
       line: lineOf(m.index),
       text: `${argvText} ; ${optText}`,
-      optSpan,
-      optCode,
       isCliEntry: textNamesCliEntry(argvText, ids),
-    });
+    };
+    calls.push(call);
+    optionsArgOf.set(call, argumentAt(callsByOpen.get(open), BUN_OPTIONS_ARG_INDEX));
   }
   // node child_process forms — bare, or via a named alias (flair#1825).
   for (const m of scan.matchAll(/(^|[^\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
@@ -656,25 +732,24 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
     const args = topLevelArgs(scan, open);
     if (!args) continue;
     const argvText = (ARGV_ARG_INDICES.get(fn) ?? [0, 1]).map((i) => textAt(args.spans[i])).join(" ");
-    const optSpan = resolveOptSpan(args.spans[OPTIONS_ARG_INDEX.get(fn)]);
-    const optText = textAt(optSpan);
-    const optCode = optSpan ? scan.slice(optSpan.start, optSpan.end) : "";
-    calls.push({
+    const optText = textAt(resolveOptSpan(args.spans[OPTIONS_ARG_INDEX.get(fn)]));
+    const call = {
       fn: raw,
       index: m.index,
       line: lineOf(m.index),
       text: `${argvText} ; ${optText}`,
-      optSpan,
-      optCode,
       isCliEntry: textNamesCliEntry(argvText, ids),
-    });
+    };
+    calls.push(call);
+    optionsArgOf.set(call, argumentAt(callsByOpen.get(open), OPTIONS_ARG_INDEX.get(fn)));
   }
-  // A numeric `timeout` property, so a case budget can be checked against the sum
-  // of the waits inside it (flair#1825). Read from the OPTIONS expression only —
-  // an argv element never decides it (round 9 item 2) — and only from a direct
-  // property of the options object literal (flair#2782).
+  // The deadline the gate reads from each spawn's options argument (flair#2782), so
+  // a case budget can be checked against the sum of the waits inside it
+  // (flair#1825). An argv element never decides it (round 9 item 2).
+  const spawnOptionArgs = new Set([...optionsArgOf.values()].filter(Boolean));
+  const references = identifierReferences(sf);
   for (const call of calls) {
-    call.timeoutMs = optionsTimeoutMs(sf, objectLiterals, call.optSpan, source);
+    call.timeoutMs = optionsDeadlineMs(optionsArgOf.get(call), spawnOptionArgs, references);
     call.hasTimeout = call.timeoutMs !== null;
   }
   return { calls, ids };
