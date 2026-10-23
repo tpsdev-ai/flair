@@ -55,9 +55,9 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ALLOWLIST_PATH = join(REPO_ROOT, ".github", "audit-allowlist.json");
@@ -576,13 +576,39 @@ function topLevelPackageUnderHarper(node, harperRoot) {
   return parts[1] ? `${parts[0]}/${parts[1]}` : null;
 }
 
-/** Resolve a dependency inside harper's installed tree; never outside it. */
-function resolveHarperDependency(fromDir, harperRoot, name) {
+/**
+ * The real path of `path`, which must lie inside harper's installed tree
+ * (`realHarper`, the real path of harper's package directory). `label` names
+ * the path in the error.
+ */
+function realPathInsideHarper(path, realHarper, label) {
+  const real = realpathSync(path);
+  if (real !== realHarper && !real.startsWith(`${realHarper}${sep}`)) {
+    throw new Error(`${label} resolves outside harper's installed tree`);
+  }
+  return real;
+}
+
+/**
+ * Resolve a dependency inside harper's installed tree; never outside it: a
+ * candidate package.json whose real path is outside harper's tree throws.
+ * Returns the package directory and the real path of its package.json, or null.
+ */
+function resolveHarperDependency(fromDir, harperDir, realHarper, name) {
   let dir = fromDir;
   while (true) {
     const candidate = join(dir, "node_modules", name);
-    if (existsSync(join(candidate, "package.json"))) return candidate;
-    if (dir === harperRoot) return null;
+    try {
+      const manifest = realPathInsideHarper(
+        join(candidate, "package.json"),
+        realHarper,
+        relative(harperDir, join(candidate, "package.json")),
+      );
+      return { dir: candidate, manifest };
+    } catch (e) {
+      if (e.code !== "ENOENT" && e.code !== "ENOTDIR") throw e;
+    }
+    if (dir === harperDir) return null;
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -590,36 +616,41 @@ function resolveHarperDependency(fromDir, harperRoot, name) {
 }
 
 /**
- * Whether `target` is one of harper's bundled packages or a dependency of one.
- * `bundleDependencies` names harper's direct bundled packages; npm ships each
- * named package's dependency closure inside the tarball too, and installs that
- * closure at the top level of harper's tree (for example fast-uri through
- * fastify). Missing dependencies are skipped — they cannot be the node under
- * examination, and their absence does not enlarge the bundled set. The walk is
- * bounded independently of its input.
+ * Whether harper's top-level package `target` is one of the bundled packages
+ * `roots` or in their dependency closure. npm ships each bundled package's
+ * dependency closure inside the tarball too; closure members may be hoisted to
+ * the top level of harper's tree (for example fast-uri through fastify) or
+ * nested below it. Each dependency is resolved before it is compared with the
+ * target, and it matches only when it resolves to `node_modules/<target>` at
+ * harper's top level. Missing dependencies are skipped; their absence does not
+ * enlarge the bundled set. The walk makes at most `limit` lookups, the bundled
+ * packages included, and throws past that.
  */
-function harperBundleIncludes(harperRoot, declared, target, limit = 5000) {
+function harperBundleIncludes(harperDir, roots, target, limit = 5000) {
+  const realHarper = realpathSync(harperDir);
+  const targetDir = join(harperDir, "node_modules", target);
   const seen = new Set();
   const queue = [];
-  for (const name of declared) {
-    seen.add(name);
-    queue.push({ name, from: harperRoot });
-  }
-  let steps = 0;
-  while (queue.length) {
-    if (++steps > limit) {
-      throw new Error(`dependency closure for harper's bundled packages exceeded ${limit} entries`);
+  let lookups = 0;
+  const reaches = (from, name) => {
+    if (++lookups > limit) {
+      throw new Error(`dependency closure for harper's bundled packages exceeded ${limit} lookups`);
     }
-    const { name, from } = queue.shift();
-    if (name === target) return true;
-    const dir = resolveHarperDependency(from, harperRoot, name);
-    if (!dir) continue;
-    const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
-    for (const dep of Object.keys({ ...manifest.optionalDependencies, ...manifest.dependencies })) {
-      if (!seen.has(dep)) {
-        seen.add(dep);
-        queue.push({ name: dep, from: dir });
-      }
+    const found = resolveHarperDependency(from, harperDir, realHarper, name);
+    if (!found || seen.has(found.dir)) return false;
+    if (name === target && found.dir === targetDir) return true;
+    seen.add(found.dir);
+    queue.push(found);
+    return false;
+  };
+  for (const name of roots) {
+    if (reaches(harperDir, name)) return true;
+  }
+  while (queue.length) {
+    const { dir, manifest } = queue.shift();
+    const pkg = JSON.parse(readFileSync(manifest, "utf8"));
+    for (const dep of Object.keys({ ...pkg.optionalDependencies, ...pkg.dependencies })) {
+      if (reaches(dir, dep)) return true;
     }
   }
   return false;
@@ -630,8 +661,8 @@ function harperBundleIncludes(harperRoot, declared, target, limit = 5000) {
  * Releases that ship npm-shrinkwrap.json are checked against its pin, unchanged.
  * A release without one is checked against the consumer install's package-lock
  * (`inBundle: true` plus the recorded version) and harper's installed
- * package.json `bundleDependencies` (or `bundledDependencies`; `true` means all
- * of harper's dependencies). Anything else throws, and the caller blocks.
+ * package.json `bundleDependencies` (or `bundledDependencies`; `true` means the
+ * packages in harper's `dependencies`). Anything else throws, and the caller blocks.
  */
 function harperShippedVersion(npmPrefix, harperRoot, node) {
   const pinKey = node.slice(harperRoot.length + 1);
@@ -663,16 +694,28 @@ function harperShippedVersion(npmPrefix, harperRoot, node) {
   const declared = harperManifest?.bundleDependencies ?? harperManifest?.bundledDependencies;
   const topLevel = topLevelPackageUnderHarper(node, harperRoot);
   if (!topLevel) throw new Error(`cannot identify the top-level package under harper for ${pinKey}`);
-  if (declared !== true) {
-    if (!Array.isArray(declared)) {
-      throw new Error("harper's package.json declares no bundleDependencies");
+  let roots;
+  if (declared === true) {
+    const dependencies = harperManifest.dependencies ?? {};
+    if (typeof dependencies !== "object" || dependencies === null || Array.isArray(dependencies)) {
+      throw new Error("harper's package.json sets bundleDependencies to true but its dependencies field is not an object");
     }
-    const named = declared.filter((name) => typeof name === "string" && name);
-    if (!named.includes(topLevel) && !harperBundleIncludes(join(npmPrefix, harperRoot), named, topLevel)) {
-      throw new Error(
-        `${JSON.stringify(topLevel)} is not listed in harper's bundleDependencies and is not a dependency of a bundled package`,
-      );
-    }
+    roots = Object.keys(dependencies);
+  } else if (Array.isArray(declared)) {
+    roots = declared.filter((name) => typeof name === "string" && name);
+  } else {
+    throw new Error("harper's package.json declares no bundleDependencies");
+  }
+  const harperDir = join(npmPrefix, harperRoot);
+  if (!resolveHarperDependency(harperDir, harperDir, realpathSync(harperDir), topLevel)) {
+    throw new Error(`harper's tree has no package.json for ${JSON.stringify(topLevel)}`);
+  }
+  if (!harperBundleIncludes(harperDir, roots, topLevel)) {
+    throw new Error(
+      declared === true
+        ? `${JSON.stringify(topLevel)} is not in harper's dependencies (bundleDependencies is true) and is not in their dependency closure`
+        : `${JSON.stringify(topLevel)} is not listed in harper's bundleDependencies and is not in a bundled package's dependency closure`,
+    );
   }
   return { version: recorded, label: "the consumer package-lock records" };
 }
@@ -683,6 +726,7 @@ function harperShippedVersion(npmPrefix, harperRoot, node) {
  * and any audit-reported version with the version harper shipped it at: the
  * shrinkwrap pin for releases that carry one, otherwise the bundle evidence in the
  * consumer install's package-lock and harper's package.json. Empty node lists,
+ * a node package.json whose real path is outside harper's installed tree,
  * unreadable required metadata, and version mismatches block the gate; errors
  * name a node when one was reported.
  */
@@ -703,7 +747,12 @@ export function vendorPinnedNodeProblems(adv, npmPrefix) {
     const harperRoot = harperNodeRoot(node, adv.package);
     const pinKey = node.slice(harperRoot.length + 1);
     try {
-      const installed = JSON.parse(readFileSync(join(npmPrefix, node, "package.json"), "utf8"))?.version;
+      const manifest = realPathInsideHarper(
+        join(npmPrefix, node, "package.json"),
+        realpathSync(join(npmPrefix, harperRoot)),
+        `${pinKey}/package.json`,
+      );
+      const installed = JSON.parse(readFileSync(manifest, "utf8"))?.version;
       const reported = adv.nodeVersions?.[node];
       if (typeof installed !== "string" || !installed ||
           (reported !== undefined && (typeof reported !== "string" || !reported))) {
@@ -718,7 +767,7 @@ export function vendorPinnedNodeProblems(adv, npmPrefix) {
       }
     } catch (e) {
       problems.push(
-        `${adv.ghsa} (${adv.package}): cannot verify node ${JSON.stringify(node)} against harper's npm-shrinkwrap.json or its bundleDependencies listing: ${e.message}. Restore readable package and shrinkwrap evidence, or a consumer package-lock that marks the node inBundle and a harper package.json that lists it as bundled, then rerun the gate.`,
+        `${adv.ghsa} (${adv.package}): cannot verify node ${JSON.stringify(node)} against harper's npm-shrinkwrap.json or its bundleDependencies listing: ${e.message}. Restore readable package and shrinkwrap evidence, or a consumer package-lock that marks the node inBundle and a harper package.json whose bundleDependencies (true for all of its dependencies) names the node's top-level package or a package whose dependency closure contains it, then rerun the gate.`,
       );
     }
   }
