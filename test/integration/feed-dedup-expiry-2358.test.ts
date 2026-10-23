@@ -235,7 +235,7 @@ describe("deduplicated ephemeral feed expiry (flair#2358)", () => {
     expect(await readStored(harper, id)).toEqual(competed!);
   }, 60_000);
 
-  test("a competing request that finds the repair's id held skips the repair and reports the row it read", async () => {
+  test("a competing request that finds the repair's id held skips the repair and answers the allowlisted feed response from the matched, unrepaired row", async () => {
     const content = `deduplicated contended state ${randomUUID()}`;
     const id = `dedup-contended-${randomUUID()}`;
     await seedMemory(harper, agent, { id, agentId: agent.id, content, durability: "ephemeral" });

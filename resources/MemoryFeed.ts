@@ -332,11 +332,13 @@ export class FeedMemories extends Resource {
     stripServerStampedFields(record);
     // flair#2478 slice 3b: the ordinary (non-skill) write-back runs under the
     // id's per-id Memory write lock, so its read, decision and commit sit on one
-    // committed basis (the feed write is a foreground client write: a lock miss
-    // waits its budget, then refuses `503 memory_busy`). The write-back confirms
-    // its committed row as before. An omitted id is generated; a caller-supplied
-    // id can contend. The skill branch above returns before this lock; its
-    // conversion is deferred.
+    // committed basis. The feed write is a foreground client write: a held key
+    // waits its budget and can answer `503 memory_busy`; a marked id answers
+    // `503 write_outcome_unknown` at once; a store with no lock answers
+    // `503 memory_lock_unavailable`. The write-back confirms its committed row
+    // as before. An omitted id is generated; a caller-supplied id can contend.
+    // The skill branch above returns before this lock; its conversion is
+    // deferred.
     const locked = await withMemoryWriteLock(
       memoryLockStore(),
       [String(record.id)],
@@ -689,9 +691,10 @@ async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> 
   // flair#2478 slice 3b: the repair is an automatic writer. It takes the id's
   // per-id Memory write lock once and without waiting; a held id, an
   // outcome-unknown marker or a store with no lock skips the repair and
-  // reports it, and returns the matched row without its inline pointer fields,
-  // unrepaired. A later feed write repairs it only if the row still matches
-  // and still lacks an expiry.
+  // reports it, and returns the matched, unrepaired row with its inline
+  // pointer fields removed, from which the caller builds the normal
+  // allowlisted feed response. A later feed write repairs it only if the row
+  // still matches and still lacks an expiry.
   const locked = await withMemoryWriteLockOnce(
     memoryLockStore(),
     [id],

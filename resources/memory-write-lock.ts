@@ -5,8 +5,9 @@
  * writers converted so far: the visibility backfill and the promotion stamps
  * (slice 2), and the embedding backfill that follows a Memory write signed by
  * a verified Ed25519 agent (resources/auth-middleware.ts) and the
- * embedding-stamp migration's `.content`-suffix fallback (slice 3); the feed
- * ingest and dedup repair (resources/MemoryFeed.ts) and both `lastReflected`
+ * embedding-stamp migration's `.content`-suffix fallback (slice 3); the
+ * ordinary (non-skill) feed write-back and the feed dedup repair
+ * (resources/MemoryFeed.ts) and both `lastReflected`
  * stamps (resources/Memory.ts's derivedFrom sources and
  * resources/MemoryReflect.ts's gathered sources) (slice 3b part 2). The other
  * Memory writers convert in later parts.

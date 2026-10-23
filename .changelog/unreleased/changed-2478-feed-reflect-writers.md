@@ -1,4 +1,4 @@
-- **The feed ingest/repair and both `lastReflected` stamps write under the per-id Memory lock shared with owner PUT and PATCH.**
+- **The ordinary (non-skill) feed write-back, the feed dedup repair and both `lastReflected` stamps write under the per-id Memory lock shared with owner PUT and PATCH.**
 
   The ordinary (non-skill) write-back of `POST /FeedMemories` takes the target
   id's lock and commits before releasing it. An omitted id is generated; a
@@ -13,9 +13,11 @@
   no expiry) takes the id's lock with one non-waiting acquisition, re-reads the
   committed row under it, and writes only `expiresAt`. A held id, an
   outcome-unknown marker or a store with no lock skips the repair and logs it;
-  the response is the matched row, projected without its inline pointer fields
-  and unrepaired. A later feed write repairs it only if the row still matches
-  and still lacks an expiry.
+  the response is the normal allowlisted feed response derived from the
+  matched, unrepaired row, with inline pointer fields removed; fields the
+  response does not select (an unsupplied `contentHash`, for example) are
+  absent. A later feed write repairs it only if the row still matches and still
+  lacks an expiry.
 
   The `lastReflected` stamps — on a new row's `derivedFrom` sources and on the
   sources a reflection run read — take each source id's lock with one

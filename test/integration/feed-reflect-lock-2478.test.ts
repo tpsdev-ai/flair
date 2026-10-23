@@ -1,16 +1,18 @@
 /**
  * feed-reflect-lock-2478.test.ts — flair#2478 slice 3b part 2, real Harper.
  *
- * The feed ingest (resources/MemoryFeed.ts, POST /FeedMemories), the feed dedup
- * expiry repair, and both `lastReflected` stamps (resources/Memory.ts's
- * `derivedFrom` sources and resources/MemoryReflect.ts's gathered sources)
+ * The ordinary (non-skill) feed write-back (resources/MemoryFeed.ts, POST
+ * /FeedMemories), the feed dedup expiry repair, and both `lastReflected` stamps
+ * (resources/Memory.ts's `derivedFrom` sources and resources/MemoryReflect.ts's
+ * gathered sources)
  * take the per-memory-id write lock (resources/memory-write-lock.ts) for the id
  * they write. A writer decides on the committed row it reads under that lock,
  * stages an update of only its own fields — except the feed ingest, which is an
  * authored full-row replacement — commits before releasing, and confirms the
- * committed row. A foreground feed write that cannot take the lock waits its
- * budget and answers `503 memory_busy`; an automatic writer skips the row and
- * reports it.
+ * committed row. In the foreground feed write, a held key waits its budget and
+ * can answer `503 memory_busy`, a marked id answers `503 write_outcome_unknown`
+ * at once, and a store with no lock answers `503 memory_lock_unavailable`; an
+ * automatic writer skips the row and reports it.
  *
  * DETERMINISTIC ORDERING via the opt-in pause points
  * (FLAIR_ENABLE_TEST_FAULT_INJECTION + FLAIR_TEST_PAUSE_DIR):
@@ -254,7 +256,7 @@ describe("flair#2478 slice 3b — the feed dedup expiry repair (real Harper)", (
     expect(typeof (await h.readRow(id))?.expiresAt).toBe("string");
   }, 120_000);
 
-  it("a repair while the id is held skips and reports it, and returns the matched row unrepaired", async () => {
+  it("a repair while the id is held skips and reports it, and answers the allowlisted feed response from the matched, unrepaired row", async () => {
     const id = "frl-repair-miss";
     const text = "the skipped ephemeral feed row";
     await seedDedup(id, text);
