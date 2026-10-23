@@ -321,6 +321,7 @@ esac
     expect(res.error).toBeUndefined();
     expect(res.status).toBe(0);
     expect(res.stdout).toContain("PASS —");
+    expect(res.stdout).toContain("NOT-REPORTED-BY-BUN: GHSA-w2qp-rph6-63g4 fastify — npm reports it under harper; retire when ");
     expect(wrote).toBe(false);
   }, 12_000);
 
@@ -329,17 +330,17 @@ esac
     expect(res.error).toBeUndefined();
     expect(res.status).not.toBe(0);
     expect(res.stdout).toContain(hoistedNode);
-    expect(res.stdout).not.toContain("FIXED-FOR-BUN-ONLY");
+    expect(res.stdout).not.toContain("NOT-REPORTED-BY-BUN");
     expect(res.stdout).not.toContain("PASS —");
     expect(wrote).toBe(false);
   }, 12_000);
 
-  it("does not report a blocked pin mismatch as fixed for bun only", () => {
+  it("does not print a blocked pin mismatch as NOT-REPORTED-BY-BUN", () => {
     const { res } = runFixtureGate([harperNode], "5.12.0");
     expect(res.error).toBeUndefined();
     expect(res.status).not.toBe(0);
     expect(res.stdout).toContain("installed version 5.12.0");
-    expect(res.stdout).not.toContain("FIXED-FOR-BUN-ONLY");
+    expect(res.stdout).not.toContain("NOT-REPORTED-BY-BUN");
   }, 12_000);
 
   it("refuses unknown node evidence with a nonzero gate exit and no success output or writes", () => {
@@ -438,10 +439,10 @@ describe("the committed allowlist", () => {
     expect(adk.map((e) => e.ghsa)).toEqual(["GHSA-w5hq-g745-h8pq"]);
   });
 
-  it("marks harper-pinned npm advisories as npm-install-only (FIXED-FOR-BUN-ONLY)", () => {
+  it("marks harper-pinned npm advisories as npm-install-only (NOT-REPORTED-BY-BUN)", () => {
     // These are the advisories the npm-install observation surfaces that `bun
     // audit` never sees — harper's npm-shrinkwrap pins them. They must declare
-    // sources ["npm-install"] so the gate knows they are fixed for bun only.
+    // sources ["npm-install"] so the gate knows bun does not report them.
     const npmOnly = ALLOWLIST.entries.filter((e) => e.package === "fast-uri");
     // Exact IDs catch missing or substituted fast-uri advisories.
     expect(npmOnly.map((e) => e.ghsa).sort()).toEqual([

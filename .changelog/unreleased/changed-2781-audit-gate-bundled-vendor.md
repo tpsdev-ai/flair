@@ -5,3 +5,4 @@
   `inBundle`, or when its top-level package under harper is neither a bundled package
   nor in a bundled package's dependency closure. On every release, a vendor-pinned
   node under harper whose package.json resolves outside harper's installed tree blocks.
+  The gate's `FIXED-FOR-BUN-ONLY` output line is renamed `NOT-REPORTED-BY-BUN`.

@@ -1069,10 +1069,10 @@ async function main() {
     }
   }
 
-  // FIXED-FOR-BUN-ONLY — advisories the bun lockfile observation no longer
-  // reports (the override fixed them) but the npm-install observation still
-  // reports, with every reported node under harper.
-  const fixedForBunOnly = [];
+  // NOT-REPORTED-BY-BUN — allowlisted advisories that this run's npm-install
+  // observation reported, with every node under harper, and its bun lockfile
+  // observation did not report.
+  const notReportedByBun = [];
   for (const entry of allowlist.entries) {
     if (!entry?.ghsa) continue;
     const g = entry.ghsa.toUpperCase();
@@ -1087,7 +1087,7 @@ async function main() {
         a.nodes.every((n) => harperNodeRoot(n, a.package) !== null),
     );
     if (!npmAdv) continue;
-    fixedForBunOnly.push({ entry, npmAdv });
+    notReportedByBun.push({ entry, npmAdv });
   }
 
   // Check 7 — fixability drift.
@@ -1147,12 +1147,12 @@ async function main() {
   console.log(`  allowlisted (justified + dated):  ${allowed.length}`);
   console.log(`  blocking:                         ${blocked.length}\n`);
 
-  for (const { entry } of fixedForBunOnly) {
+  for (const { entry } of notReportedByBun) {
     console.log(
-      `  FIXED-FOR-BUN-ONLY: ${entry.ghsa} ${entry.package} — npm installs still report it under harper until ${entry.removeWhen}`,
+      `  NOT-REPORTED-BY-BUN: ${entry.ghsa} ${entry.package} — npm reports it under harper; retire when ${entry.removeWhen}`,
     );
   }
-  if (fixedForBunOnly.length) console.log("");
+  if (notReportedByBun.length) console.log("");
 
   if (allowed.length) {
     console.log("  Allowlisted:");
