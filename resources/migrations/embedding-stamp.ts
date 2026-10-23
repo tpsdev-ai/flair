@@ -35,10 +35,17 @@
  *
  * The request is the re-embed PATCH (flair#2296): body
  * `{"embedding": null, "embeddingModel": null}`. Memory.patch() embeds the row
- * the PATCH handler reads and writes `embedding`, `embeddingModel` and
- * `updatedAt`. Edits committed after this migration's read and before the PATCH
- * handler's stored-row read are kept (flair#2275). An edit committed while
- * Memory.patch() awaits the embedding is a separate, tracked window.
+ * the PATCH handler reads and writes `embedding`, `embeddingModel`, `updatedAt`
+ * and `embeddedContentHash` (and `instanceToken` on a legacy row that has none).
+ * Edits committed after this migration's read and before the PATCH handler's
+ * stored-row read are kept (flair#2275); the handler reads, embeds and commits
+ * under the id's per-id write lock (flair#2478, below). A text change by a
+ * writer outside that lock is detected only up to and including the request's
+ * final post-commit read-back: seen at an attempt's fresh read it is
+ * re-embedded; seen at the confirmation or a read-back, the attempt retries
+ * within its bound or the request refuses, as Memory.patch documents. A
+ * lock-bypassing write committed after that final read-back is not detected by
+ * this request.
  *
  * THIS IS LOAD-BEARING, confirmed empirically while building
  * test/integration/migrations-embedding-stamp-e2e.test.ts against real
@@ -158,12 +165,48 @@
  * would queue every legacy row at upgrade, and could leave pending a row that
  * cannot get a hash (one with an empty owner); a missing hash skips the
  * comparison instead.
+ *
+ * flair#2478 slice 3 — the per-id Memory write lock. Both write paths write
+ * under the id's lock shared with the owner verbs (resources/memory-write-lock.ts).
+ * The HTTP delegation's `PATCH /Memory/:id` takes it in Memory.patch (phase
+ * `patch-reembed`) with the owner budget; a refusal (`503 memory_busy`,
+ * `write_outcome_unknown`, `memory_provider_timeout`) is logged and leaves the
+ * row uncounted; the next scan decides whether it is still stale (an owner write
+ * can make it current meanwhile). Under the lock that PATCH re-reads the
+ * committed row and embeds its stored text, so an owner edit committed after
+ * this migration's read is the row it re-embeds; it writes only the embedding
+ * fields (and gives a legacy row with no `instanceToken` one) and commits before
+ * the lock is released. The `.content`-suffix fallback computes its vector
+ * first, then takes the id's lock (phase `embedding-stamp-content-suffix`) with
+ * one non-waiting acquisition per attempt; a retry acquires it again. On a
+ * held id, an id with an unresolved write outcome, or a store with no lock,
+ * that attempt writes nothing and is logged, and the row is left uncounted;
+ * the next scan decides whether it is still stale. After an earlier attempt
+ * for the same row committed unconfirmed, that line says the outcome is
+ * unknown, and the unconfirmed outcome is logged as well. Under the lock it re-reads the committed row, writes only when
+ * that row is the one it embedded, and commits and verifies the committed row
+ * before the release. A row changed at that in-lock read, or a change visible
+ * at the confirmation (which aborts the transaction), writes nothing and leaves
+ * the row uncounted. A readable read-back mismatch retries with a fresh read, a
+ * vector computed before the lock and a new acquisition, at most
+ * CONTENT_SUFFIX_REGEN_ATTEMPTS (3) attempts; an unreadable read-back, or the
+ * attempts exhausted, is logged as unconfirmed and leaves the row uncounted
+ * for the next scan. A retry after an unconfirmed attempt compares the row's
+ * stored vector with the vector that attempt staged (within a relative
+ * tolerance that accepts a float32 copy of an in-range component; a non-finite
+ * component never matches), not the stored text hash (null for a row with an
+ * empty owner): a match beside a changed text is not treated as current, so the
+ * retry re-embeds the current text. A row whose stamp is not current or whose
+ * stored hash does not match its text is re-embedded whatever vector it holds; the
+ * staged-vector comparison only decides, on a retry, whether a row that
+ * otherwise counts as current (a null hash passes for any text) is re-embedded.
  */
 import { databases } from "harper";
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { confirmCommittedRow, verifyCommittedFields } from "../write-back.js";
+import { confirmCommittedRow, verifyCommittedFields, type CommittedWriteVerdict } from "../write-back.js";
+import { withMemoryWriteLockOnce, type MemoryLockOutcome } from "../memory-write-lock.js";
 import { getEmbedding, getModelId } from "../embeddings-provider.js";
 import { withOwnedTransaction } from "../request-transaction.js";
 import { txnPausePoint } from "../txn-pause-point.js";
@@ -174,7 +217,7 @@ import type { Migration, RunBatchResult } from "./types.js";
 import { EMBEDDING_STAMP_ID } from "./stamp-outstanding.js";
 import { endsWithContentSelectorSuffix } from "../../src/lib/memory-id-policy.js";
 import { skillEmbedText } from "../skill-write.js";
-import { embeddedHashMatches, embeddedTextHash } from "../memory-embed-hash.js";
+import { embeddedHashMatches, embeddedTextHash, holdsOwnStaleVector, type StagedVector } from "../memory-embed-hash.js";
 
 export { EMBEDDING_STAMP_ID };
 
@@ -267,10 +310,33 @@ async function regenViaHttpPatch(
       body: JSON.stringify({ embedding: null, embeddingModel: null }),
       signal: AbortSignal.timeout(REGEN_HTTP_TIMEOUT_MS),
     });
+    if (res.status === 503) await logRegenRefusal(id, res);
     return res.ok;
   } catch {
     return false;
   }
+}
+
+/** A 503 from the re-embed request (flair#2478). `memory_busy` (the id stayed
+ *  held through the request's wait budget) and `memory_provider_timeout` (the
+ *  locked-provider bound) mean the request wrote nothing: a provider timeout
+ *  after an earlier attempt of the same request committed unconfirmed answers
+ *  `write_outcome_unknown` instead. `write_outcome_unknown` means the id has an
+ *  unresolved write, which can be this request's own re-embed (a committed row
+ *  it could not read back, or one whose read-back did not show the write, or a
+ *  step after a commit that failed before any read-back), so that write may have
+ *  committed. The
+ *  row is uncounted; the next scan decides whether it is still stale. Logs the
+ *  refusal's code. */
+async function logRegenRefusal(id: string, res: Response): Promise<void> {
+  let code = "unnamed";
+  try {
+    const body = (await res.json()) as { error?: unknown };
+    if (typeof body?.error === "string") code = body.error;
+  } catch {
+    // An unreadable refusal body is logged as unnamed.
+  }
+  console.warn("[embedding-stamp] %s: the re-embed request was refused 503 %s; the row is uncounted and the next scan decides whether it is still stale", id, code);
 }
 
 /** A vector this migration may stamp as current: a non-empty array of finite numbers. */
@@ -295,12 +361,30 @@ function rowEmbeddingCurrent(row: Record<string, unknown>, currentModelId: strin
 export interface ContentSuffixRegenDeps {
   embed: (text: string) => Promise<unknown>;
   inTransaction: <T>(fn: (txn: unknown) => Promise<T>) => Promise<T>;
+  /** The store whose per-id lock the fallback writes under: `Memory.primaryStore`
+   *  (flair#2478). With a store that has no lock nothing is written (never
+   *  unserialized) and the row is uncounted. */
+  lockStore?: () => unknown;
+}
+
+/** The Memory table's primary store, whose per-id lock the owner verbs take. */
+function defaultMemoryLockStore(): unknown {
+  return (defaultMemoryTable() as unknown as { primaryStore?: unknown }).primaryStore;
 }
 
 const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
   embed: (text) => getEmbedding(text, "document"),
   inTransaction: (fn) => withOwnedTransaction(undefined, fn),
+  lockStore: defaultMemoryLockStore,
 };
+
+/** One `.content`-suffix re-embed attempt: nothing written (`skipped`); not
+ *  attempted because the id's lock answered other than a completed callback
+ *  (`lock`); or written, committed and verified under the lock (`verified`). */
+type ContentSuffixAttempt =
+  | { kind: "skipped" }
+  | { kind: "lock"; outcome: Exclude<MemoryLockOutcome<unknown>["kind"], "done"> }
+  | { kind: "verified"; verdict: CommittedWriteVerdict; staged: StagedVector };
 
 /**
  * Re-embed a legacy row whose id ends in the `.content` property suffix. The
@@ -313,16 +397,24 @@ const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
  * (`skillEmbedText`: a skill row's `trigger` when present, else `content`); a
  * row with no such text is not embedded.
  *
+ * The vector is computed BEFORE the id's per-id write lock is taken
+ * (flair#2478): no provider call runs while the id is locked. Each call of this
+ * function is one attempt and tries the lock once, without waiting (the
+ * caller's retry calls it again); a held id, an unresolved-outcome marker or a store with no lock answers
+ * `lock` and writes nothing. Holding it, the attempt re-reads the committed row:
+ * a row that is not the one the vector was computed for (gone, or any field
+ * changed) is `skipped` and nothing is written; a later scan decides whether
+ * it is still stale, and if so computes again.
+ *
  * Writes a usable vector in an owned transaction. It STAGES an incremental
  * `update` of only `embedding`, `embeddingModel`, `updatedAt` and
- * `embeddedContentHash` — the same field-only write Memory's own re-embed branch
+ * `embeddedContentHash` — the field-only write Memory's own re-embed branch
  * uses (flair#2465), never a full-row put — and the write touches no other field
- * of the committed row.
+ * of the committed row. (Memory's re-embed branch also gives a legacy row with
+ * no `instanceToken` one, flair#2478; this fallback writes no token.)
  * Then it CONFIRMS the committed row (an explicit fresh context) is still the
  * row this transaction read and embedded; a row gone or distinguishably changed
- * at confirmation aborts the owned transaction and returns false. On success it
- * returns the row, the text basis and the staged fields, and the caller verifies
- * the committed row after the commit (retrying from a fresh read).
+ * at confirmation aborts the owned transaction (`skipped`, nothing written).
  *
  * The post-commit read detects surviving differences in compared fields,
  * identity or embedding text. The confirmation compares the WHOLE committed row
@@ -330,9 +422,12 @@ const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
  * identity list alone: a content-only change to a row that lacks a stored
  * incarnation token (a legacy row may lack one) still fails it. The vector is computed for text unchanged through confirmation.
  *
- * Returns the staged row and fields when the update is staged and confirmation
- * passes; otherwise false. A row that still exists with a stale stamp stays pending for
- * the next batch or cycle.
+ * After the commit, still holding the lock, it re-reads the committed row in a
+ * fresh context (flair#2656) and returns the verdict: `shown` only when the row
+ * still has this attempt's identity, the staged fields, and the text the vector
+ * was computed for. The lock is released after that read. A row this attempt
+ * did not confirm is uncounted; the next batch or scan decides whether it is
+ * still stale.
  */
 async function regenContentSuffixRow(
   table: MemoryTableLike,
@@ -340,43 +435,84 @@ async function regenContentSuffixRow(
   existing: Record<string, unknown>,
   current: string,
   deps: ContentSuffixRegenDeps,
-): Promise<{ identity: Record<string, unknown>; fields: Record<string, unknown>; text: string } | false> {
+): Promise<ContentSuffixAttempt> {
   try {
     const text = skillEmbedText(existing);
-    if (typeof text !== "string" || text.length === 0) return false;
+    if (typeof text !== "string" || text.length === 0) return { kind: "skipped" };
     const embedding = await deps.embed(text);
-    if (!isUsableEmbedding(embedding)) return false;
-    const staged = await deps.inTransaction(async (txn) => {
-      const fresh = await table.get(id, txn);
-      if (!fresh || !isDeepStrictEqual(fresh, existing)) return false;
-      // flair#2465: an incremental update of ONLY the embedding fields, not a
-      // full-row put. A full-row put carries this transaction's re-read row and
-      // can revert a field an owner edit committed meanwhile; this write touches
-      // only embedding/embeddingModel/updatedAt and the embedded-text hash.
-      const update = { embedding, embeddingModel: current, updatedAt: new Date().toISOString(), embeddedContentHash: embeddedTextHash(existing) ?? null };
-      await table.update(id, update, txn);
+    if (!isUsableEmbedding(embedding)) return { kind: "skipped" };
+    // Test-only: inert unless the fault-injection env opt-in is set and armed.
+    // The vector is computed and the id's lock is not yet taken.
+    const before = txnPausePoint("embedding-stamp-content-suffix-pre");
+    if (before) await before;
+    const locked = await withMemoryWriteLockOnce((deps.lockStore ?? defaultMemoryLockStore)(), [id], async (): Promise<ContentSuffixAttempt> => {
+      const staged = await stageContentSuffixUpdate(table, id, existing, current, embedding, text, deps);
+      if (!staged) return { kind: "skipped" };
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
-      // After the write is STAGED and before the transaction commits.
-      const pause = txnPausePoint("embedding-stamp-content-suffix");
-      if (pause) await pause;
-      // Stage first, then confirm the COMMITTED row is still the row this
-      // transaction read and embedded; gone or distinguishably changed at
-      // confirmation aborts (the staged write is discarded). Post-commit
-      // verification retries surviving differences in compared fields, identity
-      // or embedding text from a fresh read.
-      await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, fresh));
-      // Test-only: inert unless the fault-injection env opt-in is set and armed.
-      // Holds the regen after its final pre-commit confirmation and before its
-      // owned transaction commits (flair#2656).
-      const commitPause = txnPausePoint("embedding-stamp-content-suffix-commit");
-      if (commitPause) await commitPause;
-      return { identity: fresh, fields: update, text };
-    });
-    return staged;
+      // After this attempt's transaction commits and before its committed-row
+      // read-back; the lock is held.
+      const verifyPause = txnPausePoint("embedding-stamp-content-suffix-verify");
+      if (verifyPause) await verifyPause;
+      // The staged vector counts only when the committed row still carries the
+      // exact text the vector was computed for.
+      const verdict = await verifyCommittedFields(
+        table, id, staged.identity, staged.fields,
+        (committed) => skillEmbedText(committed) === staged.text,
+      );
+      // Test-only: the attempt has committed and read its row back; the lock is
+      // still held.
+      const committedPause = txnPausePoint("embedding-stamp-content-suffix-committed");
+      if (committedPause) await committedPause;
+      return { kind: "verified", verdict, staged: { embedding, text: staged.text } };
+    }, { phase: "embedding-stamp-content-suffix" });
+    if (locked.kind !== "done") return { kind: "lock", outcome: locked.kind };
+    return locked.value;
   } catch {
     // Includes CommittedRowChanged: the transaction was aborted, nothing written.
-    return false;
+    return { kind: "skipped" };
   }
+}
+
+/** The fallback's owned transaction, run while the caller holds the id's lock:
+ *  the re-read, the staged update, the committed-row confirmation and the commit.
+ *  Returns the staged row and fields, or false when the re-read row is not the
+ *  row the vector was computed for. A failed confirmation throws (the
+ *  transaction aborts). */
+async function stageContentSuffixUpdate(
+  table: MemoryTableLike,
+  id: string,
+  existing: Record<string, unknown>,
+  current: string,
+  embedding: number[],
+  text: string,
+  deps: ContentSuffixRegenDeps,
+): Promise<{ identity: Record<string, unknown>; fields: Record<string, unknown>; text: string } | false> {
+  return deps.inTransaction(async (txn) => {
+    const fresh = await table.get(id, txn);
+    if (!fresh || !isDeepStrictEqual(fresh, existing)) return false;
+    // flair#2465: an incremental update of ONLY the embedding fields, not a
+    // full-row put. A full-row put carries this transaction's re-read row and
+    // can revert a field an owner edit committed meanwhile; this write touches
+    // only embedding/embeddingModel/updatedAt and the embedded-text hash.
+    const update = { embedding, embeddingModel: current, updatedAt: new Date().toISOString(), embeddedContentHash: embeddedTextHash(existing) ?? null };
+    await table.update(id, update, txn);
+    // Test-only: inert unless the fault-injection env opt-in is set and armed.
+    // After the write is STAGED and before the transaction commits.
+    const pause = txnPausePoint("embedding-stamp-content-suffix");
+    if (pause) await pause;
+    // Stage first, then confirm the COMMITTED row is still the row this
+    // transaction read and embedded; gone or distinguishably changed at
+    // confirmation aborts (the staged write is discarded). Post-commit
+    // verification retries surviving differences in compared fields, identity
+    // or embedding text from a fresh read.
+    await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, fresh));
+    // Test-only: inert unless the fault-injection env opt-in is set and armed.
+    // Holds the regen after its final pre-commit confirmation and before its
+    // owned transaction commits (flair#2656).
+    const commitPause = txnPausePoint("embedding-stamp-content-suffix-commit");
+    if (commitPause) await commitPause;
+    return { identity: fresh, fields: update, text };
+  });
 }
 
 /**
@@ -506,39 +642,58 @@ export function createEmbeddingStampMigration(
           // staged fields and the text the vector was computed for.
           ok = false;
           let unconfirmed = false;
-          for (let attempt = 1; attempt <= CONTENT_SUFFIX_REGEN_ATTEMPTS; attempt++) {
-            const rowNow = attempt === 1 ? existing : await table.get(id);
-            if (!rowNow) break;
-            // A row another writer already made current is not this migration's
-            // write. Leave it uncounted; a later scan decides whether anything
-            // still needs re-embedding.
-            if (attempt > 1 && rowEmbeddingCurrent(rowNow as Record<string, unknown>, current)) break;
-            const staged = await regenContentSuffixRow(table, id, rowNow as Record<string, unknown>, current, contentSuffixRegen);
-            if (!staged) break;
-            // Test-only: inert unless the fault-injection env opt-in is set and
-            // armed. After this attempt's transaction commits and before its
-            // committed-row read-back.
-            const verifyPause = txnPausePoint("embedding-stamp-content-suffix-verify");
-            if (verifyPause) await verifyPause;
-            // Safe to retry from a fresh read: the same text yields the same
-            // vector and hash, and a retry restages `updatedAt`. A readable
-            // post-commit mismatch retries from a fresh read within
-            // CONTENT_SUFFIX_REGEN_ATTEMPTS; an unreadable verification stops
-            // without a retry. The staged vector counts only when the committed
-            // row still carries the exact text the vector was computed for.
-            const verdict = await verifyCommittedFields(
-              table, id, staged.identity, staged.fields,
-              (committed) => skillEmbedText(committed) === staged.text,
-            );
-            if (verdict === "shown") {
-              ok = true;
-              break;
+          // The vector and text of this row's last unconfirmed attempt.
+          let ownUnconfirmed: StagedVector | undefined;
+          // One guard over the whole retry loop (flair#2478): when the loop ends
+          // without a verified attempt after an attempt whose committed write is
+          // unconfirmed, by a break, a refusal or a thrown error, the unconfirmed
+          // outcome is logged exactly once. A later verified attempt sets `ok`,
+          // and nothing is logged. An error the loop itself throws (a retry's
+          // fresh read of the row) propagates to the runner after the line is
+          // logged; an error inside an attempt is caught by regenContentSuffixRow
+          // and ends the loop as a skipped attempt.
+          try {
+            for (let attempt = 1; attempt <= CONTENT_SUFFIX_REGEN_ATTEMPTS; attempt++) {
+              const rowNow = attempt === 1 ? existing : await table.get(id);
+              if (!rowNow) break;
+              // A row another writer already made current is not this migration's
+              // write. Leave it uncounted; a later scan decides whether anything
+              // still needs re-embedding. A row whose stored vector matches the
+              // vector this loop's last unconfirmed attempt staged (within a
+              // relative tolerance, holdsOwnStaleVector) while its text changed is
+              // not current, whatever its stored hash says: a row with an empty
+              // owner stores a null hash, which passes the hash comparison for any
+              // text (flair#2478). Who stored a matching vector is not known.
+              if (attempt > 1 && rowEmbeddingCurrent(rowNow as Record<string, unknown>, current) &&
+                  !holdsOwnStaleVector(rowNow as Record<string, unknown>, ownUnconfirmed)) break;
+              const attemptResult = await regenContentSuffixRow(table, id, rowNow as Record<string, unknown>, current, contentSuffixRegen);
+              if (attemptResult.kind === "lock") {
+                // This attempt wrote nothing. After an earlier unconfirmed attempt
+                // of this loop the row may hold that attempt's write, so the line
+                // says the outcome is unknown (the unconfirmed line below follows).
+                console.warn("[embedding-stamp] %s: the per-id write lock answered %s; %s; the row is uncounted and the next scan decides whether it is still stale", id, attemptResult.outcome, unconfirmed
+                  ? "this attempt wrote nothing, but an earlier attempt's write was not confirmed, so the outcome is unknown"
+                  : "nothing was written");
+                break;
+              }
+              if (attemptResult.kind === "skipped") break;
+              // Safe to retry from a fresh read: the same text yields the same
+              // vector and hash, and a retry restages `updatedAt`. A readable
+              // post-commit mismatch retries from a fresh read (and a new vector,
+              // computed before the lock) within CONTENT_SUFFIX_REGEN_ATTEMPTS; an
+              // unreadable verification stops without a retry.
+              if (attemptResult.verdict === "shown") {
+                ok = true;
+                break;
+              }
+              unconfirmed = true;
+              ownUnconfirmed = attemptResult.staged;
+              if (attemptResult.verdict === "unreadable") break;
             }
-            unconfirmed = true;
-            if (verdict === "unreadable") break;
-          }
-          if (!ok && unconfirmed) {
-            console.warn(`[embedding-stamp] ${id}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed, the row is uncounted and a later scan decides pending state`);
+          } finally {
+            if (!ok && unconfirmed) {
+              console.warn("[embedding-stamp] %s: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed, the row is uncounted and a later scan decides pending state", id);
+            }
           }
         } else {
           // Test-only: inert unless the fault-injection env opt-in is set and armed.

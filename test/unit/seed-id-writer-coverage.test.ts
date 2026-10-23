@@ -79,7 +79,7 @@ add("Memory", ["writer:patchRecord#1"],
 add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
   "BOOKKEEPING: usageCount + 1 and commit marker on a row the caller can read, through the shared write-back helper (flair#2441); the rest of the row is the stored row.");
 add("auth-middleware", ["writer:writeBackCommittedRow#1"],
-  "BOOKKEEPING: the embedding backfill for the id of a Memory write that already succeeded (and so passed the decision), through the shared helper (flair#2354).");
+  "BOOKKEEPING: the embedding backfill for the id of a Memory write that already succeeded (and so passed the decision), through the shared helper (flair#2354), under the id's per-id Memory write lock (flair#2478).");
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
   "BOOKKEEPING: lastReflected on the rows a reflection run read.");
 
@@ -94,7 +94,7 @@ add("promotion-stamp", ["writer:table.update#1"],
   "SERVER: stamps, in the manual promotion's own write transaction, the row it staged through Memory.put under a server-generated id — an incremental verdict update (flair#2478 slice 2).");
 add("migrations/embedding-stamp", [
   "writer:table.update#1",
-], "SERVER: the migration re-embeds a server-selected row through the raw table handle when its id ends in the `.content` property suffix — an id the by-id HTTP regen path cannot address; an incremental update of only the embedding fields (flair#2465).");
+], "SERVER: the migration re-embeds a server-selected row through the raw table handle when its id ends in the `.content` property suffix — an id the by-id HTTP regen path cannot address; an incremental update of only the embedding fields (flair#2465), under the id's per-id Memory write lock (flair#2478).");
 add("migrations/graph-heal", ["writer:table.put#1"], "SERVER: boot migration over server-selected rows.");
 add("migrations/synthetic-test-migration", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"], "SERVER: boot migration over server-selected rows, through the shared write-back helper (flair#2354).");
 add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:writeBackCommittedRow#1"], "SERVER: boot migration over server-selected rows, through the shared write-back helper (flair#2354).");

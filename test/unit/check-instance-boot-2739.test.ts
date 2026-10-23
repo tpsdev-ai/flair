@@ -4,7 +4,9 @@
  * scripts/ci/check-instance-boot.sh keeps the admin password out of `flair
  * init`'s argv: init is handed `--admin-pass-file`, and also inherits the
  * HDB_ADMIN_PASSWORD and FLAIR_ADMIN_PASS environment variables the script
- * exports with the same value. By default the script writes a generated
+ * exports; every case that reaches init asserts both hold
+ * readAdminPassFileSecure's value for the file init receives (flair#2758). By
+ * default the script writes a generated
  * password to a 0600 file inside a fresh `mktemp -d` directory under
  * RUNNER_TEMP (or /tmp) and removes that directory on exit through an EXIT
  * trap installed right after `mktemp -d`. An explicit PASS_FILE is not
@@ -16,7 +18,8 @@
  *
  * The live canary proves the default path boots; it does not read the file's
  * location, mode or lifetime. This pins them hermetically: a stub FLAIR_BIN
- * records its argv and the stat of the `--admin-pass-file` it is handed, then
+ * records its argv, the stat and a byte copy of the `--admin-pass-file` it is
+ * handed, and a sha256 digest of each credential variable it inherited, then
  * exits non-zero so the script takes its init-failure path at once. HOME,
  * TMPDIR, RUNNER_TEMP and LOG_DIR default to sandbox directories, the script
  * runs from a sandbox working directory, and FLAIR_PREFIX points at an empty
@@ -29,6 +32,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -42,6 +46,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
+import { readAdminPassFileSecure } from "../../src/lib/auth-resolve.ts";
 import { tempDir } from "../helpers/temp-dir.ts";
 
 const REPO = join(import.meta.dir, "..", "..");
@@ -51,16 +56,19 @@ const OPERATOR_VALUE = "operator-supplied-test-value-2739\n";
 
 /**
  * What the stub flair saw: its argv, the pass file as it was when flair got it, and the
- * LENGTH of each password-bearing variable it inherited (null when unset).
+ * sha256 hex digest of each password-bearing variable it inherited (null when unset).
  */
 interface Recorded {
   argv: string[];
   pass: null | { path: string; mode?: number; dirMode?: number; value?: string; error?: string };
-  envLengths: Record<string, number | null>;
+  envDigests: Record<string, string | null>;
 }
+
+const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
 
 /** The stub's recorder. `.cjs` so it is CommonJS whatever surrounds it. */
 const RECORDER = `"use strict";
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const argv = process.argv.slice(2);
@@ -75,15 +83,20 @@ if (at >= 0 && at + 1 < argv.length) {
       dirMode: fs.statSync(path.dirname(file)).mode & 0o777,
       value: fs.readFileSync(file, "utf8"),
     };
+    // A byte copy for the test to parse: the script removes the generated default when it exits.
+    fs.copyFileSync(file, process.env.FLAIR_STUB_PASS_COPY);
+    fs.chmodSync(process.env.FLAIR_STUB_PASS_COPY, 0o600);
   } catch (error) {
     pass = { path: file, error: String(error) };
   }
 }
-const envLengths = {};
+const envDigests = {};
 for (const name of ["HDB_ADMIN_PASSWORD", "FLAIR_ADMIN_PASS"]) {
-  envLengths[name] = name in process.env ? process.env[name].length : null;
+  envDigests[name] = name in process.env
+    ? crypto.createHash("sha256").update(process.env[name], "utf8").digest("hex")
+    : null;
 }
-fs.writeFileSync(process.env.FLAIR_STUB_RECORD, JSON.stringify({ argv, pass, envLengths }));
+fs.writeFileSync(process.env.FLAIR_STUB_RECORD, JSON.stringify({ argv, pass, envDigests }));
 process.exit(3);
 `;
 
@@ -98,6 +111,7 @@ interface Sandbox {
   shim: string;
   stub: string;
   record: string;
+  passCopy: string;
   mktempRecord: string;
 }
 
@@ -151,6 +165,7 @@ function sandbox(): Sandbox {
     shim,
     stub,
     record: join(root, "flair-stub-record.json"),
+    passCopy: join(root, "flair-stub-pass-copy"),
     mktempRecord,
   };
 }
@@ -158,7 +173,9 @@ function sandbox(): Sandbox {
 /**
  * Run the boot check from the sandbox working directory with ONLY the sandbox
  * environment (plus PATH, mktemp shim first). An `extra` value of undefined
- * unsets that variable.
+ * unsets that variable. When the run reached flair init, asserts both
+ * credential variables init inherited equal readAdminPassFileSecure's value for
+ * the file init received.
  */
 function runBoot(sb: Sandbox, extra: Record<string, string | undefined> = {}) {
   const env: Record<string, string> = {};
@@ -171,6 +188,7 @@ function runBoot(sb: Sandbox, extra: Record<string, string | undefined> = {}) {
     FLAIR_BIN: sb.stub,
     FLAIR_PREFIX: sb.prefix,
     FLAIR_STUB_RECORD: sb.record,
+    FLAIR_STUB_PASS_COPY: sb.passCopy,
     ...extra,
   };
   for (const [key, value] of Object.entries(merged)) if (value !== undefined) env[key] = value;
@@ -183,6 +201,12 @@ function runBoot(sb: Sandbox, extra: Record<string, string | undefined> = {}) {
   });
   mktempSeen.push(...mktempDirs(sb));
   expect(result.error).toBeUndefined();
+  const rec = readRecordIfAny(sb);
+  if (rec) {
+    expect(rec.pass?.error).toBeUndefined();
+    const initValue = sha256(readAdminPassFileSecure(sb.passCopy));
+    expect(rec.envDigests).toEqual({ HDB_ADMIN_PASSWORD: initValue, FLAIR_ADMIN_PASS: initValue });
+  }
   return result;
 }
 
@@ -221,13 +245,22 @@ function isUnder(child: string, parent: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-function writeOperatorPassFile(sb: Sandbox, mode = 0o600): string {
+function writeOperatorPassFile(sb: Sandbox, mode = 0o600, content = OPERATOR_VALUE): string {
   const passFile = join(sb.root, "operator", "admin-pass-input");
   mkdirSync(dirname(passFile), { recursive: true });
-  writeFileSync(passFile, OPERATOR_VALUE);
+  writeFileSync(passFile, content);
   chmodSync(passFile, mode);
   return passFile;
 }
+
+/** Endings readAdminPassFileSecure trims, each appended to TRIMMED_VALUE in an explicit pass file. */
+const TRIMMED_VALUE = "operator-supplied-test-value-2758";
+const TRAILING_WHITESPACE: Array<[string, string]> = [
+  ["a newline", "\n"],
+  ["a space", " "],
+  ["a tab", "\t"],
+  ["CRLF", "\r\n"],
+];
 
 /** Explicit pass files whose read fails for every uid, or yields an empty value. */
 const UNUSABLE: Array<[string, (sb: Sandbox) => string, string]> = [
@@ -487,6 +520,21 @@ describe("check-instance-boot.sh — the admin-pass input file handed to flair i
     expect(readFileSync(passFile, "utf8")).toBe(OPERATOR_VALUE);
     expect(statSync(passFile).mode & 0o777).toBe(0o600);
   }, CASE_BUDGET_MS);
+
+  test.each(TRAILING_WHITESPACE)(
+    "an explicit PASS_FILE ending in %s: both credential variables flair init inherits hold the value without it",
+    (_ending, suffix) => {
+      const sb = sandbox();
+      const passFile = writeOperatorPassFile(sb, 0o600, TRIMMED_VALUE + suffix);
+      const r = runBoot(sb, { PASS_FILE: passFile });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain("flair init failed");
+      const rec = readRecord(sb);
+      expect(passFileArg(rec)).toBe(passFile);
+      expect(rec.envDigests).toEqual({ HDB_ADMIN_PASSWORD: sha256(TRIMMED_VALUE), FLAIR_ADMIN_PASS: sha256(TRIMMED_VALUE) });
+    },
+    CASE_BUDGET_MS,
+  );
 
   test.each(UNUSABLE)(
     "an explicit PASS_FILE that %s: the script exits 1 naming the file, and flair init never runs",

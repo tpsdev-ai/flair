@@ -681,6 +681,9 @@ export class FederationPair extends Resource {
               // no field of the deleted row survives.
               if (!current) stagedFirstPeer = { ...firstPairPeerRow(instanceId, publicKey, role, endpoint), pairAttemptWriteId: claim.pairAttemptWriteId };
               try {
+                // The marker is this attempt's last-writer id for the field (see
+                // StagedPairPeer): a field-level competitor merged in this window
+                // can leave it on the committed row alongside its own fields.
                 stagedPeer = current ? { ...rePairedRow(current), pairAttemptWriteId: claim.pairAttemptWriteId } : stagedFirstPeer;
                 await writePeerRow(owned, stagedPeer);
               } catch (err) {
@@ -690,6 +693,12 @@ export class FederationPair extends Resource {
                 throw new PeerWriteFailedError(err);
               }
               if (stagedFirstPeer) await confirmFirstPairBeforeCommit(instanceId);
+              // Test-only: inert unless the fault-injection env opt-in is set and
+              // armed. Holds the existing-Peer re-pair after its Peer write and
+              // before the owned transaction commits, so a competing write to
+              // the same Peer can commit in between (flair#2691).
+              const beforeCommit = txnPausePoint("federation-pair-repair-token-before-commit");
+              if (beforeCommit) await beforeCommit;
               return claim;
             }),
           );
@@ -748,8 +757,15 @@ export class FederationPair extends Resource {
           if (!current) return pairingTokenRequiredRefusal();
           if (current.publicKey !== publicKey) return publicKeyMismatchRefusal();
           if (current.status === "revoked") return peerRevokedRefusal();
+          // Same last-writer marker as the token route (see StagedPairPeer).
           stagedPeer = { ...rePairedRow(current), pairAttemptWriteId: randomUUID() };
           await writePeerRow(owned, stagedPeer);
+          // Test-only: inert unless the fault-injection env opt-in is set and
+          // armed. Holds the no-token re-pair after its Peer write and before
+          // the owned transaction commits, so a competing write to the same
+          // Peer can commit in between (flair#2691).
+          const beforeCommit = txnPausePoint("federation-pair-repair-before-commit");
+          if (beforeCommit) await beforeCommit;
           return undefined;
         });
         if (refusal) return refusal;
@@ -891,6 +907,15 @@ function firstPairPeerRow(instanceId: string, publicKey: string, role: unknown, 
 
 type StagedPairingToken = { consumedBy: string; consumedAt: string; pairAttemptWriteId: string };
 
+/**
+ * A staged Peer row. `pairAttemptWriteId` is the id of the pairing attempt that
+ * last wrote this field: a LAST-WRITER marker for the field, not a
+ * last-confirmed marker for the row. Harper merges a field-level competing
+ * update with a staged write that commits around it, so a refused attempt's id
+ * can remain on a row whose other fields are the competitor's. The post-commit
+ * check in confirmTokenPairAfterCommit reads it as the id of this attempt's
+ * staged write; its presence does not report the attempt as confirmed.
+ */
 type StagedPairPeer = { id: string; pairAttemptWriteId: string } & Record<string, unknown>;
 
 async function confirmFirstPairBeforeCommit(instanceId: string): Promise<void> {

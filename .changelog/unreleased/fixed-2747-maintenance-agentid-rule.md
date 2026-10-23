@@ -1,0 +1,1 @@
+- **Admin memory maintenance refuses an `agentId` outside Flair's agent-id rule.** A value such as `agent/name` or a 65-character id used to be accepted as the run's target; it is now refused before any cleanup runs, in a dry run too. An admin run's refused `agentId` gets 400 `agentId must be a string matching ^[a-zA-Z0-9_-]{1,64}$`. A non-admin run still ignores the field.

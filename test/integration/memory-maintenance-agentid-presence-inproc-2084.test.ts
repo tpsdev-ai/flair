@@ -21,6 +21,7 @@ import { cp, mkdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModelId } from "../../resources/embeddings-provider.ts";
+import { AGENT_ID_RULE } from "../../src/lib/agent-id-rule.ts";
 import { startHarper, stopHarper, HARPER_STOP_BUDGET_MS, type HarperInstance } from "../helpers/harper-lifecycle";
 
 const SFX = Date.now().toString(36);
@@ -186,7 +187,7 @@ describe("MemoryMaintenance agentId presence on a direct in-process admin call (
     expect(reply.ok, JSON.stringify(reply)).toBe(false);
     if (reply.ok) return;
     expect(reply.status, JSON.stringify(reply)).toBe(400); // assertion: a supplied undefined is refused, not read as absent
-    expect(JSON.parse(reply.body ?? "null")).toEqual({ error: "agentId must be a non-blank string" }); // assertion: the refusal names the field
+    expect(JSON.parse(reply.body ?? "null")).toEqual({ error: `agentId must be a string matching ${AGENT_ID_RULE}` }); // assertion: the refusal names the field and the rule
 
     for (const s of seeded) {
       expect(await rowsOf(s.id), `${s.id} Memory or pointer row changed`).toBe(s.seededRows); // assertion: no Memory or pointer row changed (fresh reads)

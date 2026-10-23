@@ -23,12 +23,40 @@
  * Cross-agent restore is a 1.1+ feature.
  */
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { ApiHttpError } from "../lib/auth-resolve.js";
 import { readFileSync, existsSync, rmSync, mkdtempSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { extractSnapshot, createSnapshot } from "./snapshot.js";
 
 export type ApiCall = (method: string, path: string, body?: unknown) => Promise<any>;
+
+/** How long a memory write refused with `503 memory_provider_timeout` waits before its single retry. */
+const RESTORE_PROVIDER_RETRY_DELAY_MS = 1_000;
+
+/**
+ * The server's `error` code on an `ApiHttpError`, parsed from the response body
+ * that error carries. Returns undefined for a non-HTTP error or a body without
+ * a string `error` field.
+ */
+function apiErrorCode(err: unknown): string | undefined {
+  if (!(err instanceof ApiHttpError)) return undefined;
+  try {
+    const body = JSON.parse(err.message);
+    return body && typeof body === "object" && typeof body.error === "string" ? body.error : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A memory write refused with exactly 503 and `memory_provider_timeout`. */
+function isProviderTimeoutRefusal(err: unknown): boolean {
+  return err instanceof ApiHttpError && err.status === 503 && apiErrorCode(err) === "memory_provider_timeout";
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /**
  * Ops-API `search_by_conditions` helper (admin-authed). Harper's REST layer
@@ -62,10 +90,10 @@ export interface RestoreOpts {
   /** When true, plan and report what would happen — no API mutations. */
   dryRun?: boolean;
   /**
-   * After the PUT loop, GET back the agent's memories + souls and diff
-   * against the snapshot to detect silent failures (schema coercion, 4xx
-   * responses the apiCall layer masked, partial accepts). Default true.
-   * Disable only for tests that intentionally simulate inconsistent state.
+   * After the PUT loop, GET back the agent's memories + souls and compare
+   * their ids with the snapshot's: snapshot ids that are missing and ids the
+   * snapshot does not hold are reported. Row content is not compared. Default
+   * true. Disable only for tests that intentionally simulate inconsistent state.
    */
   verifyPostRestore?: boolean;
   /** Override tmpdir for testing. */
@@ -90,11 +118,18 @@ export interface RestoreResult {
     souls: number;
   };
   /**
+   * Memory ids whose write was refused with `503 memory_provider_timeout` and
+   * retried once. A row is listed here whether the retry succeeded or failed.
+   */
+  retried: {
+    memories: string[];
+  };
+  /**
    * Post-restore state verification. Populated when verifyPostRestore is on
    * (default). `missing*` IDs were in the snapshot but absent from Harper
-   * afterwards (silent PUT failure). `extra*` IDs were present afterwards
-   * but not in the snapshot (silent DELETE failure / lingering rows).
-   * Both fields being empty means the restore is byte-clean.
+   * afterwards. `extra*` IDs were present afterwards but not in the snapshot.
+   * Both fields being empty means the agent's memory and soul ids match the
+   * snapshot's; row content is not compared.
    */
   verified?: {
     expectedMemoryIds: string[];
@@ -162,6 +197,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     snapshotPath: opts.snapshotPath,
     deleted: { memories: 0, souls: 0, candidates: 0 },
     restored: { memories: 0, souls: 0 },
+    retried: { memories: [] },
     errors,
   };
 
@@ -325,19 +361,31 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   }
   for (const m of memories) {
     if (!m?.id) continue;
+    const id = String(m.id);
     try {
-      await opts.apiCall("PUT", `/Memory/${encodeRecordId(String(m.id))}`, m);
+      try {
+        await opts.apiCall("PUT", `/Memory/${encodeRecordId(id)}`, m);
+      } catch (err: any) {
+        // The write-lock contract states a provider-bound refusal wrote
+        // nothing, so replaying this one PUT cannot double-write the row.
+        if (!isProviderTimeoutRefusal(err)) throw err;
+        result.retried.memories.push(id);
+        await delay(RESTORE_PROVIDER_RETRY_DELAY_MS);
+        // No client-side timeout: a request abandoned at a client deadline
+        // could still commit after this row was recorded failed.
+        await opts.apiCall("PUT", `/Memory/${encodeRecordId(id)}`, m);
+      }
       result.restored.memories++;
     } catch (err: any) {
-      errors.push(`put-memory ${m.id}: ${err?.message ?? String(err)}`);
+      errors.push(`put-memory ${id}: ${err?.message ?? String(err)}`);
     }
   }
 
   // 7. Verify post-restore state (default on; opt-out via verifyPostRestore=false).
-  //    Catches silent failures: Harper schema coercion, 4xx responses the
-  //    apiCall layer masked as ok, partial-DELETE leftovers. Per-ID diff,
-  //    not just counts — count parity can hide simultaneous PUT+DELETE
-  //    failures that wash out numerically.
+  //    Compares ids only: it reports snapshot ids missing from the agent's
+  //    rows and ids present that the snapshot does not hold; row content is
+  //    not compared. Per-ID diff, not just counts — count parity can hide
+  //    simultaneous PUT+DELETE failures that wash out numerically.
   if (opts.verifyPostRestore !== false) {
     try {
       const verifyMem = asArray(await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`));

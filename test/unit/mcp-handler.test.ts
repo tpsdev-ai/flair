@@ -4,7 +4,8 @@
  * These are the auth-critical assertions the integration harness can't make at
  * the unit level:
  *
- *   - tools/list returns EXACTLY the 14 curated tools (no raw CRUD, no extras).
+ *   - tools/list returns EXACTLY the curated TOOLS definitions the caller may
+ *     list (no raw CRUD, no extras).
  *   - sub → Agent resolution: an existing Credential(kind:"idp", idpSubject=sub)
  *     maps to its principalId; an unknown sub with JIT OFF is DENIED (not run as
  *     anonymous/admin); an unknown sub with JIT ON provisions a NON-admin agent.
@@ -197,6 +198,14 @@ function storeCredential(id: any, fields: any, merge: boolean): void {
   else credentials = credentials.map((c, j) => (j === i ? (merge ? { ...c, ...fields, id } : { ...fields, id }) : c));
 }
 
+/** A Harper search's `conditions` (default operator "and"): the row matches when every condition holds. */
+function credentialMatches(row: any, query: any): boolean {
+  return (query?.conditions ?? []).every((c: any) => {
+    if (c.comparator !== "equals") throw new Error(`fake Credential.search: unsupported comparator ${c.comparator}`);
+    return row?.[c.attribute] === c.value;
+  });
+}
+
 // Constructable no-op base classes so the REAL resource modules (which do
 // `class X extends databases.flair.X` or `extends Resource`) link + load — we
 // then OVERRIDE them via __setHandlers, so these bases are never actually hit by
@@ -205,9 +214,9 @@ class NoopBase { constructor(_id?: any, _ctx?: any) {} }
 const databasesMock = {
   flair: {
     Credential: Object.assign(class extends NoopBase {}, {
-      search: async function* (_q: any) {
+      search: async function* (q: any) {
         if (credentialSearchError) throw credentialSearchError;
-        for (const c of credentials) yield c;
+        for (const c of credentials) if (credentialMatches(c, q)) yield c;
       },
       put: async (r: any) => { puts.push({ table: "Credential", record: r }); storeCredential(r.id, r, false); return r; },
       get: async (id: any, _ctx?: any) => credentials.find((c) => c?.id === id) ?? null,
@@ -283,8 +292,8 @@ afterAll(() => {
 });
 
 // ─── tools/list ──────────────────────────────────────────────────────────────
-describe("tools/list — exactly the 18 curated tools", () => {
-  it("returns the pinned tool names", async () => {
+describe("tools/list — the advertised tool definitions", () => {
+  it("returns the pinned tool names for a token subject with no principal", async () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: "s" }));
     const body = await parse(res);
     const names = body.result.tools.map((t: any) => t.name).sort();
@@ -305,13 +314,26 @@ describe("tools/list — exactly the 18 curated tools", () => {
       "skill_search",
       "skill_store",
       "soul_get",
-      "soul_set",
       "team_directory",
     ]);
     // No raw create_/delete_ resource mutators leaked in. (memory_update
     // itself is a curated semantic tool, not a raw `update_<resource>`
     // mutator — it's explicitly allow-listed here rather than excluded.)
     expect(names.some((n: string) => /^(create|delete)_/.test(n))).toBe(false);
+  });
+
+  it("omits soul_set for a resolved agent principal, admin or not (flair#2689)", async () => {
+    for (const role of ["agent", "admin"]) {
+      credentials = [{ id: `cred-${role}`, principalId: `agt_${role}`, kind: "idp", idpSubject: `sub-${role}`, status: "active" }];
+      agents = { [`agt_${role}`]: { id: `agt_${role}`, role, status: "active" } };
+      const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: `sub-${role}` }));
+      const body = await parse(res);
+      const names = body.result.tools.map((t: any) => t.name);
+      expect(names).not.toContain("soul_set");
+      // Every other tool is still advertised: the gate removes soul_set only.
+      expect(names).toContain("soul_get");
+      expect(names.length).toBe(17);
+    }
   });
 
   it("record_usage schema states the memoryId+memoryIds merge contract (flair#1410)", async () => {
@@ -323,6 +345,81 @@ describe("tools/list — exactly the 18 curated tools", () => {
     expect(tool.description).toMatch(/memoryId.*memoryIds/);
     expect(tool.inputSchema.properties.memoryId.description).toMatch(/[Mm]erged/);
     expect(tool.inputSchema.properties.memoryIds.description).toMatch(/[Mm]erged/);
+  });
+});
+
+// ─── tools/list — a caller whose principal cannot be resolved (flair#2760) ───
+describe("tools/list — a failed or refused resolution answers the tools/call error (flair#2760)", () => {
+  beforeEach(() => {
+    credentials = [{ id: "cred_erin", principalId: "agt_erin", kind: "idp", idpSubject: "sub-erin", status: "active" }];
+    agents["agt_erin"] = { id: "agt_erin", status: "active" };
+  });
+
+  /** A tools/list and a tools/call of a known tool by the same token subject. */
+  async function listAndCall(sub: string) {
+    const list = await parse(await mcpHandler(post({ jsonrpc: "2.0", id: 21, method: "tools/list" }, { sub })));
+    const call = await parse(await mcpHandler(post(
+      { jsonrpc: "2.0", id: 21, method: "tools/call", params: { name: "memory_search", arguments: { query: "hi" } } },
+      { sub },
+    )));
+    return { list, call };
+  }
+
+  async function ungatedToolNames(): Promise<string[]> {
+    const { TOOLS } = await import("../../resources/mcp-tools.ts");
+    return Object.keys(TOOLS).filter((name) => name !== "soul_set").sort();
+  }
+
+  it("a failed credential read: tools/list returns the tools/call error and no list, and provisions nothing with JIT on", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    credentialSearchError = new Error("storage unavailable");
+    const { list, call } = await listAndCall("sub-erin");
+    expect(list.result).toBeUndefined();
+    expect(list.id).toBe(21);
+    expect(list.error?.code).toBe(-32000);
+    expect(list.error?.message).toContain("the credential for this token's subject could not be read");
+    expect(list.error).toEqual(call.error);
+    expect(lastCall).toBeNull();
+    expect(puts).toEqual([]);
+  });
+
+  const failures: [string, () => void, number, string][] = [
+    ["a failed read of the principal's status", () => { agentGetError = new Error("storage unavailable"); }, -32000, "the status of principal 'agt_erin' could not be read"],
+    ["a deactivated principal", () => { agents["agt_erin"] = { id: "agt_erin", status: "deactivated" }; }, -32001, "principal 'agt_erin' is deactivated"],
+    ["a credential naming a principal that does not exist", () => { delete agents["agt_erin"]; }, -32001, "principal 'agt_erin', which does not exist"],
+    ["a subject whose only credential is revoked", () => { credentials = [{ ...credentials[0], status: "revoked" }]; }, -32001, "cred_erin"],
+    [
+      "an error that is not a refusal",
+      () => { agents["agt_erin"] = { id: "agt_erin", status: "active", get role(): string { throw new Error("unreadable field"); } }; },
+      -32000,
+      "the token subject could not be resolved to a principal",
+    ],
+  ];
+  for (const [label, arrange, code, text] of failures) {
+    it(`${label}: tools/list returns the tools/call error and no list`, async () => {
+      arrange();
+      const { list, call } = await listAndCall("sub-erin");
+      expect(list.result).toBeUndefined();
+      expect(list.error?.code).toBe(code);
+      expect(list.error?.message).toContain(text);
+      expect(list.error).toEqual(call.error);
+      expect(lastCall).toBeNull();
+    });
+  }
+
+  it("an unmapped subject still lists every ungated tool and writes nothing, with JIT on", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    const body = await parse(await mcpHandler(post({ jsonrpc: "2.0", id: 22, method: "tools/list" }, { sub: "sub-unmapped" })));
+    expect(body.error).toBeUndefined();
+    expect(body.result.tools.map((t: any) => t.name).sort()).toEqual(await ungatedToolNames());
+    expect(await resolveAgentFromSub("sub-unmapped", undefined, false)).toBeNull();
+    expect(puts).toEqual([]);
+  });
+
+  it("a mapped, active agent still lists every tool but soul_set", async () => {
+    const body = await parse(await mcpHandler(post({ jsonrpc: "2.0", id: 23, method: "tools/list" }, { sub: "sub-erin" })));
+    expect(body.error).toBeUndefined();
+    expect(body.result.tools.map((t: any) => t.name).sort()).toEqual(await ungatedToolNames());
   });
 });
 

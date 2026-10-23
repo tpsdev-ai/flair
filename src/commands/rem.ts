@@ -1383,7 +1383,7 @@ export function register(program: Command): void {
         console.error("Error: --agent or FLAIR_AGENT_ID env required");
         process.exit(1);
       }
-      const { runNightlyCycle, formatPendingCandidates, formatAutoPromoted } = await import("../rem/runner.js");
+      const { runNightlyCycle, formatPendingCandidates, formatCount, formatAutoPromoted } = await import("../rem/runner.js");
       // The runner is agent-authed and cannot reach the ops port itself. When
       // admin credentials are available, inject ops-API and admin-authed REST
       // helpers so the pending-candidate count and the admin-gated dedup step
@@ -1451,8 +1451,8 @@ export function register(program: Command): void {
         if (result.snapshotPath) {
           console.log(`Snapshot:   ${result.snapshotPath}`);
         }
-        console.log(`Memories:   ${row.memoryCount ?? "—"}`);
-        console.log(`Souls:      ${row.soulCount ?? "—"}`);
+        console.log(`Memories:   ${formatCount(row.memoryCount)}`);
+        console.log(`Souls:      ${formatCount(row.soulCount)}`);
         console.log(`Pending:    ${formatPendingCandidates(row.pendingCandidates)}`);
         if (typeof row.archived === "number" || typeof row.expired === "number") {
           // #1503: `archived` counts validTo-expired and old-session rows the
@@ -1689,6 +1689,9 @@ export function register(program: Command): void {
           }
           console.log(`  Deleted:      ${result.deleted.memories} memories, ${result.deleted.souls} souls, ${result.deleted.candidates} candidates`);
           console.log(`  Restored:     ${result.restored.memories} memories, ${result.restored.souls} souls`);
+          if (result.retried.memories.length > 0) {
+            console.log(`  Retried:      ${result.retried.memories.length} memories (${result.retried.memories.join(", ")})`);
+          }
           if (result.errors.length > 0) {
             console.log(`  Errors:`);
             for (const e of result.errors) console.log(`    - ${e}`);
