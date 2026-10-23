@@ -804,6 +804,18 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
       expectGateReads(identifierSrc("const opts = { timeout: 5000 };"), 5000);
     });
 
+    it("a const declared in the case body that holds both spawns gives both its deadline", () => {
+      const src = `test("t", () => {\n  const opts = { timeout: 5000 };\n  Bun.spawn(${ARGV}, opts);\n  spawnSync("bun", ${ARGV_REST}, opts);\n}, 120_000);\n`;
+      expectGateReads(src, 5000);
+    });
+
+    it("a const is no deadline for spawns inside a `with` statement", () => {
+      const src =
+        `const opts = { timeout: 5000 };\nwith ({ opts: {} }) {\n  test("t", () => {\n` +
+        `    Bun.spawn(${ARGV}, opts);\n    spawnSync("bun", ${ARGV_REST}, opts);\n  }, 120_000);\n}\n`;
+      expectGateReads(src, null);
+    });
+
     const IDENTIFIER_REJECTS: Array<{ name: string; decl: string }> = [
       { name: "a let identifier", decl: "let opts = { timeout: 5000 };" },
       { name: "a var identifier", decl: "var opts = { timeout: 5000 };" },
@@ -816,6 +828,8 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
       { name: "a const re-exported", decl: "const opts = { timeout: 5000 };\nexport { opts };" },
       { name: "an exported const", decl: "export const opts = { timeout: 5000 };" },
       { name: "a const whose name is declared again in another scope", decl: "const opts = { timeout: 5000 };\nfunction other(opts: object) { return 1; }" },
+      { name: "a const declared in a block the spawns are outside of", decl: "{\n  const opts = { timeout: 5000 };\n}" },
+      { name: "a const in a file that references eval", decl: 'const opts = { timeout: 5000 };\neval("1");' },
     ];
 
     for (const c of IDENTIFIER_REJECTS) {

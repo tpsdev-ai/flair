@@ -566,8 +566,8 @@ function stripWrappers(expr) {
 
 /**
  * The call's argument at `index`, wrappers stripped; null when there is no call,
- * no argument there, or a spread argument at or before it (the runtime's
- * position for it is then unknown).
+ * no argument there, or a spread argument at or before it (after a spread, the
+ * scanner declines to determine positions).
  */
 function argumentAt(call, index) {
   if (!call) return null;
@@ -646,21 +646,57 @@ function identifierReferences(sf) {
 }
 
 /**
- * The deadline the gate reads from an options identifier, or null (flair#2782).
- * It resolves only when the file declares it exactly once, as a non-exported
- * `const` whose initializer (wrappers stripped) is an object literal the gate
- * reads a deadline from, and every other reference to the name is the options
- * argument of a spawn call this gate finds. Any other reference (a property or
- * element write, `delete`, `Object.assign`, an argument to another function, an
- * export) is no deadline.
+ * True when the file has a `with` statement or references `eval`: either can bind
+ * a name at run time, so no identifier is resolved in it (flair#2782).
  */
-function identifierDeadlineMs(id, spawnOptionArgs, references) {
+function hasDynamicScope(sf, references) {
+  if (references.has("eval")) return true;
+  let found = false;
+  const visit = (node) => {
+    if (found) return;
+    if (ts.isWithStatement(node)) found = true;
+    else ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return found;
+}
+
+/**
+ * The node a `const` declaration is scoped to: its block, case block, source
+ * file or module block, or the `for` statement it heads; null for any other
+ * position (flair#2782).
+ */
+function constScopeOf(decl) {
+  const holder = decl.parent.parent;
+  if (ts.isForStatement(holder)) return holder;
+  if (!ts.isVariableStatement(holder)) return null;
+  const container = holder.parent;
+  if (ts.isCaseClause(container) || ts.isDefaultClause(container)) return container.parent;
+  if (ts.isBlock(container) || ts.isSourceFile(container) || ts.isModuleBlock(container)) return container;
+  return null;
+}
+
+/**
+ * The deadline the gate reads from an options identifier, or null (flair#2782).
+ * It resolves only when the file has no `with` statement and no `eval`, declares
+ * the name exactly once, as a non-exported `const` whose initializer (wrappers
+ * stripped) is an object literal the gate reads a deadline from, and every other
+ * reference to the name is the options argument of a spawn call this gate finds
+ * inside the scope of that `const`. Any other reference (one outside that scope,
+ * a property or element write, `delete`, `Object.assign`, an argument to another
+ * function, an export) is no deadline.
+ */
+function identifierDeadlineMs(id, ctx) {
+  if (ctx.dynamicScope) return null;
   let decl = null;
-  for (const ref of references.get(id.text) ?? []) {
+  const uses = [];
+  for (const ref of ctx.references.get(id.text) ?? []) {
     if (ts.isVariableDeclaration(ref.parent) && ref.parent.name === ref) {
       if (decl) return null;
       decl = ref.parent;
-    } else if (!spawnOptionArgs.has(ref)) {
+    } else if (ctx.spawnOptionArgs.has(ref)) {
+      uses.push(ref);
+    } else {
       return null;
     }
   }
@@ -668,6 +704,8 @@ function identifierDeadlineMs(id, spawnOptionArgs, references) {
   const list = decl.parent;
   if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.BlockScoped) !== ts.NodeFlags.Const) return null;
   if (ts.isVariableStatement(list.parent) && (ts.getModifiers(list.parent) ?? []).length > 0) return null;
+  const scope = constScopeOf(decl);
+  if (!scope || uses.some((ref) => ref.pos < scope.pos || ref.end > scope.end)) return null;
   const init = stripWrappers(decl.initializer);
   return ts.isObjectLiteralExpression(init) ? objectLiteralDeadlineMs(init) : null;
 }
@@ -678,10 +716,10 @@ function identifierDeadlineMs(id, spawnOptionArgs, references) {
  * gate reads one from, or an identifier that resolves to one. A larger
  * expression containing a literal (`{ timeout: 5000 } && {}`) is no deadline.
  */
-function optionsDeadlineMs(arg, spawnOptionArgs, references) {
+function optionsDeadlineMs(arg, ctx) {
   if (!arg) return null;
   if (ts.isObjectLiteralExpression(arg)) return objectLiteralDeadlineMs(arg);
-  if (ts.isIdentifier(arg)) return identifierDeadlineMs(arg, spawnOptionArgs, references);
+  if (ts.isIdentifier(arg)) return identifierDeadlineMs(arg, ctx);
   return null;
 }
 
@@ -749,10 +787,14 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
   // The deadline the gate reads from each spawn's options argument (flair#2782), so
   // a case budget can be checked against the sum of the waits inside it
   // (flair#1825). An argv element never decides it (round 9 item 2).
-  const spawnOptionArgs = new Set([...optionsArgOf.values()].filter(Boolean));
   const references = identifierReferences(sf);
+  const ctx = {
+    spawnOptionArgs: new Set([...optionsArgOf.values()].filter(Boolean)),
+    references,
+    dynamicScope: hasDynamicScope(sf, references),
+  };
   for (const call of calls) {
-    call.timeoutMs = optionsDeadlineMs(optionsArgOf.get(call), spawnOptionArgs, references);
+    call.timeoutMs = optionsDeadlineMs(optionsArgOf.get(call), ctx);
     call.hasTimeout = call.timeoutMs !== null;
   }
   return { calls, ids };

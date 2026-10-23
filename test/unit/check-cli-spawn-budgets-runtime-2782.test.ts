@@ -1,9 +1,9 @@
 // check-cli-spawn-budgets-runtime-2782.test.ts — the spawn-budget gate's options
 // rule (flair#2782) checked against real runtimes. Each shape is written once and
-// used twice: as the options of a CLI-entry spawn the gate reads, and as the
-// options of a real Node `child_process.spawnSync` (in a `node` process) and a
-// real `Bun.spawnSync` (in a `bun` process) of a child that sleeps longer than
-// the timeout. Each accepted shape here must time the child out; each rejected
+// used four times: as the options of a CLI-entry `spawnSync` and a CLI-entry
+// `Bun.spawnSync` that the gate reads, and as the options of a real Node
+// `child_process.spawnSync` (in a `node` process) and a real `Bun.spawnSync` (in
+// a `bun` process) of a child that sleeps longer than the timeout. Each accepted shape here must time the child out; each rejected
 // shape here must let it run to the end.
 
 import { describe, expect, it } from "bun:test";
@@ -14,8 +14,11 @@ const TIMEOUT_MS = 200;
 const CHILD_SLEEP_MS = 1_500;
 const CHILD = `["-e", "setTimeout(() => {}, ${CHILD_SLEEP_MS})"]`;
 
-/** `decl` runs before the spawn (identifier forms); `opts` is the options argument. */
-type Shape = { name: string; decl?: string; opts: string };
+/**
+ * `decl` runs before the spawn (identifier forms); `opts` is the options argument;
+ * `around` is code written before and after the spawn statement.
+ */
+type Shape = { name: string; decl?: string; opts: string; around?: [string, string] };
 
 const ACCEPTED: Shape[] = [
   { name: "an object literal", opts: `{ timeout: ${TIMEOUT_MS} }` },
@@ -40,11 +43,23 @@ const REJECTED: Shape[] = [
   },
   { name: "a const identifier mutated after its declaration", decl: `const opts = { timeout: ${TIMEOUT_MS} };\nopts.timeout = 0;`, opts: "opts" },
   { name: "a let identifier reassigned", decl: `let opts: object = { timeout: ${TIMEOUT_MS} };\nopts = {};`, opts: "opts" },
+  {
+    name: "a const in a block the spawn is outside of, while the spawn's `opts` is a global",
+    decl: `(globalThis as { opts?: object }).opts = {};\n{\n  const opts = { timeout: ${TIMEOUT_MS} };\n}`,
+    opts: "opts",
+  },
+  {
+    name: "a const shadowed by a `with` object around the spawn",
+    decl: `const opts = { timeout: ${TIMEOUT_MS} };`,
+    opts: "opts",
+    around: ["with ({ opts: {} }) {", "}"],
+  },
 ];
 
 /** The gate's deadline for `shape` as the options of a CLI-entry spawn, per spawn family. */
 function gateDeadlines(shape: Shape): Array<number | null> {
-  const wrap = (call: string) => `${shape.decl ?? ""}\ntest("t", () => {\n  ${call}\n}, 120_000);\n`;
+  const [before, after] = shape.around ?? ["", ""];
+  const wrap = (call: string) => `${shape.decl ?? ""}\n${before}\ntest("t", () => {\n  ${call}\n}, 120_000);\n${after}\n`;
   return [
     wrap(`spawnSync("bun", ["src/cli.ts", "status"], ${shape.opts});`),
     wrap(`Bun.spawnSync(["bun", "src/cli.ts", "status"], ${shape.opts});`),
@@ -67,9 +82,9 @@ const RUNTIMES = [
     // transpiler, which leaves the runtime expression unchanged.
     script: (s: Shape) =>
       ts.transpileModule(
-        `const { spawnSync } = require("node:child_process");\n${s.decl ?? ""}\n` +
+        `const { spawnSync } = require("node:child_process");\n${s.decl ?? ""}\n${s.around?.[0] ?? ""}\n` +
           `const started = Date.now();\nconst r = spawnSync(process.execPath, ${CHILD}, ${s.opts});\n` +
-          `console.log(JSON.stringify({ runtime: process.versions.bun ? "bun" : "node", timedOut: r.error?.code === "ETIMEDOUT", status: r.status, ms: Date.now() - started }));\n`,
+          `console.log(JSON.stringify({ runtime: process.versions.bun ? "bun" : "node", timedOut: r.error?.code === "ETIMEDOUT", status: r.status, ms: Date.now() - started }));\n${s.around?.[1] ?? ""}\n`,
         { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
       ).outputText,
   },
@@ -78,8 +93,8 @@ const RUNTIMES = [
     expectedRuntime: "bun",
     command: () => process.execPath,
     script: (s: Shape) =>
-      `${s.decl ?? ""}\nconst started = Date.now();\nconst r = Bun.spawnSync([process.execPath, ...${CHILD}], ${s.opts});\n` +
-      `console.log(JSON.stringify({ runtime: process.versions.bun ? "bun" : "node", timedOut: r.exitedDueToTimeout === true, status: r.exitCode, ms: Date.now() - started }));\n`,
+      `${s.decl ?? ""}\n${s.around?.[0] ?? ""}\nconst started = Date.now();\nconst r = Bun.spawnSync([process.execPath, ...${CHILD}], ${s.opts});\n` +
+      `console.log(JSON.stringify({ runtime: process.versions.bun ? "bun" : "node", timedOut: r.exitedDueToTimeout === true, status: r.exitCode, ms: Date.now() - started }));\n${s.around?.[1] ?? ""}\n`,
   },
 ];
 
