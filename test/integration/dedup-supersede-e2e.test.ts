@@ -20,14 +20,10 @@
 // returning) and test/integration/auth-middleware-e2e.test.ts (TPS-Ed25519
 // signing helpers + admin-op seeding pattern).
 //
-// GOTCHA (load-bearing for every scenario below): resources/Memory.ts's own
-// doc comments establish that the Memory schema only exposes HTTP PUT — a
-// raw HTTP POST /Memory 404s with "Memory does not have a post method
-// implemented". Memory.post() IS reachable, but only via an in-process
-// resource instantiation (resources/mcp-tools.ts), never over real HTTP. So
-// every write in this file is a signed HTTP PUT with an explicit id — which
-// is also the MORE representative choice: Memory.ts's own comments note the
-// real #526 field bug flowed through put(), not post().
+// WRITE VERB: every Memory write in this file is a signed HTTP PUT with an
+// explicit id, the verb flair-client's write() issues; Memory.ts's own
+// comments note the real #526 field bug flowed through put(), not post(). An
+// HTTP POST /Memory reaches Memory.post() too; this file does not exercise it.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";

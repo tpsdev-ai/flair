@@ -287,7 +287,8 @@ function postLockIds(resource: unknown, content?: unknown): string[] {
 }
 
 /** The lock ids a DELETE names: the addressed id and any body id(s), dropping
- *  non-id values. delete() adds the live head a skill DELETE closes. */
+ *  non-id values. For a skill row, delete() adds the live head it closes when
+ *  that head is another row. */
 function deleteLockIds(resource: unknown, id: unknown): string[] {
   const ids = putLockIds(resource, id && typeof id === "object" ? id : undefined);
   if (typeof id === "string" || typeof id === "number") ids.push(String(id));
@@ -659,12 +660,9 @@ const memoryAuthGate = makeAuthGate();
  * Memory.post() directly, got ZERO dedup checking. Moving the gate here makes
  * it apply uniformly regardless of transport (HTTP PUT vs in-process post()).
  *
- * NOTE on HTTP verbs: the Memory schema only exposes PUT over HTTP (a raw
- * HTTP POST /Memory returns "Memory does not have a post method implemented"
- * — see src/cli.ts's `flair test` command and commit 2fa6d22 / ops-pj5).
- * `Memory.post()` IS reachable, but only via an in-process resource
- * instantiation (as resources/mcp-tools.ts does) — never via the real HTTP
- * POST route. Because flair-client's write() (used by flair-mcp, the CLI, and
+ * NOTE on HTTP verbs: `Memory.post()` is reached by an HTTP POST /Memory and
+ * by an in-process resource instantiation (as resources/mcp-tools.ts does).
+ * Because flair-client's write() (used by flair-mcp, the CLI, and
  * every other integration package) issues an HTTP PUT, the actual
  * field-observed bug (#526) flows through Memory.put(), not Memory.post().
  * The gate below is therefore a SHARED helper invoked from both post() and
@@ -1153,15 +1151,11 @@ async function hasWriteGrant(granteeId: string, ownerId: string, ctx?: unknown):
 }
 
 /**
- * Shared by post() AND put(): the Memory schema only exposes a working HTTP
- * PUT route (a raw HTTP POST /Memory 404s with "Memory does not have a post
- * method implemented" — see src/cli.ts's `flair test` command / commit
- * 2fa6d22 / ops-pj5). Memory.post() IS reachable, but only via an in-process
- * resource instantiation (resources/mcp-tools.ts does this). Since
- * flair-client's write()/update() — used by flair-mcp, the CLI, and every
- * other integration package — issue HTTP PUT, `supersedes` must be fully
- * handled (validated, authorized, and closed) from BOTH entry points for the
- * real-world write path to actually get the fix, not just the in-process one.
+ * Shared by post() AND put(): Memory.post() is reached by an HTTP POST /Memory
+ * and by an in-process resource instantiation (resources/mcp-tools.ts does
+ * this), and flair-client's write()/update() — used by flair-mcp, the CLI, and
+ * every other integration package — issue HTTP PUT, so `supersedes` must be
+ * fully handled (validated, authorized, and closed) from BOTH entry points.
  *
  * Validates the `supersedes` field's shape and, for a cross-agent supersede,
  * requires a "write" MemoryGrant from the target's owner (reuses the existing
@@ -2336,19 +2330,20 @@ export class Memory extends (databases as any).flair.Memory {
     return joined;
   }
 
-  /** POST takes the per-id lock for the ids it names (URL and body) and for the
-   *  canonical id of its `supersedes` reference, and holds it across the
-   *  handler's read, decision and write and the predecessor's close
-   *  (flair#2478 slice 1 part 2). The handler joins the request's open
+  /** A non-skill POST takes the per-id lock for the ids it names (URL and
+   *  body) and for the canonical id of its `supersedes` reference, and holds
+   *  it across the handler's read, decision and write and the predecessor's
+   *  close (flair#2478 slice 1 part 2). Its row writes join an open request
    *  transaction, which commits after the lock is released. A pure create
-   *  under a fresh server-allocated id names no id and takes no lock. */
+   *  under a fresh server-allocated id, and a skill POST, take no lock. */
   async post(content: any, context?: any) {
     // flair#2307: resolve the `supersedes` reference to its canonical id once,
-    // before the lock ids are taken, so the lock, the predecessor read and the
-    // close all name that id (a selector or encoded spelling resolves to it).
+    // before lock selection (some POSTs take no lock), so the predecessor read,
+    // the close and any lock taken name that id (a selector or encoded
+    // spelling resolves to it).
     canonicalizeSupersedes(content);
-    // A skill POST is a skill version write, which joins the request
-    // transaction; it is not converted to the per-id lock here (later slice).
+    // A skill POST is a skill version write; it takes no Memory lock here
+    // (later slice).
     const ids = isSkillWrite(content) ? [] : postLockIds(this, content);
     if (ids.length === 0) return this.postLocked(content, context);
     const outcome = await withMemoryWriteLock(
@@ -2427,7 +2422,7 @@ export class Memory extends (databases as any).flair.Memory {
     // same fields.
     const suppliedText = suppliedStoredTextFields(content);
     // `content.supersedes` is already canonical: post() resolved it before
-    // taking the lock (canonicalizeSupersedes runs once per request).
+    // lock selection (canonicalizeSupersedes runs once per request).
     // flair#2573: an empty `embedding` in the body is an omitted one. It is
     // removed before the omission check and prepareSkillBody, so every later
     // step, a skill update's carried vector included, sees a body without it.

@@ -1,14 +1,15 @@
 /**
  * owner-post-delete-lock-2478.test.ts — flair#2478 slice 1 part 2: an owner
- * POST and an owner DELETE take the per-id Memory write lock, real Harper.
+ * non-skill POST and an owner DELETE take the per-id Memory write lock, real
+ * Harper.
  *
- * Writers under test: an owner POST that names an id or a `supersedes` target,
- * and an owner DELETE. Each is foreground: it waits within the owner budget
+ * Writers under test: an owner non-skill POST that names an id or a
+ * `supersedes` target, and an owner DELETE. Each is foreground: it waits within the owner budget
  * and answers `503 memory_busy` on a miss.
  *
  * The matrix: the writer first, held while it still holds the lock, against an
- * owner PUT and PATCH (refused `memory_busy`; after release the writer's write
- * is stored); an owner write first, held after its commit, against the writer
+ * owner PUT and PATCH (refused `memory_busy`; after release the POST's write is
+ * stored and the DELETE leaves the row absent); an owner write first, held after its commit, against the writer
  * (refused `memory_busy`; for the POST with its `supersedes` reference spelled
  * plainly, with a `.agentId` selector and percent-encoded, all of which resolve
  * to the held row); a DELETE of an older skill version, which closes the live
