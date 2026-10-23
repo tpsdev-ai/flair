@@ -141,6 +141,10 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     const reported = await runDoctor(ADMIN_PASS);
     expect(reported.stdout, "the below-filter invalid id was not reported").toContain(seeded);
     expect(reported.stdout).toContain("outside the agent-ID rule");
+    const reportedFlat = reported.stdout.replace(/\s+/g, " ");
+    expect(reportedFlat, "the revised fix hint was not printed").toContain(
+      "run its own authenticated non-admin maintenance when the stored id can authenticate (the signed TPS-Ed25519 header cannot carry a colon or whitespace); that run deletes the agent's expired ephemeral Memory rows",
+    );
     expect(issueCount(reported.stdout), "the reported invalid id did not move the summary").toBe(baseCount + 1);
 
     // 3. A roster read that fails (wrong admin credential) is a counted issue —

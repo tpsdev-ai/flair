@@ -49,9 +49,10 @@
 // The scanner masks string/template/regex CONTENTS for call matching, so a
 // `Bun.spawn(...)` quoted in a string is not mistaken for a call.
 //
-// SCANNING. Test files are read as TEXT, not parsed: no AST dependency, so the
-// gate runs before `bun install`. That makes one thing load-bearing — the
-// scanner must not confuse code with prose. Comments are masked (an apostrophe
+// SCANNING. Call matching runs on the source TEXT after masking, and the mask
+// comes from TypeScript's parser (the lockfile's `typescript`), so the gate
+// needs `bun install` first (the CI job installs it). That makes one thing
+// load-bearing: the scanner must not confuse code with prose. Comments are masked (an apostrophe
 // in "it's not in stderr" otherwise opens a string that swallows the case's
 // closing paren), and string / template / regex literals are skipped when
 // matching brackets (a regex like `/required option '--agent/` does the same).
@@ -68,6 +69,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isUnitTestFile } from "./test-files.mjs";
+import ts from "typescript";
 
 /**
  * The trusted baseline of exceptions (flair#1825). It replaces the old in-script
@@ -77,11 +79,13 @@ import { isUnitTestFile } from "./test-files.mjs";
 export const BASELINE_PATH = join(dirname(fileURLToPath(import.meta.url)), "cli-spawn-budgets.baseline.json");
 
 /**
- * The ONE commit whose base legitimately has no baseline file: the origin/main
- * sha this gate's baseline was introduced from (flair#1825). The seed path is
- * taken ONLY when the base ref resolves to exactly this sha. Any OTHER base with
- * no baseline file is a hard failure — a base ref repointed at any pre-baseline
- * commit must not be enough. Full 40-char sha, read with `git merge-base`.
+ * The seed-introduction anchor: the origin/main sha this gate's baseline was
+ * introduced from (flair#1825). The seed path is taken ONLY when the base ref
+ * resolves to this sha or to a commit that descends from it. Any OTHER base with
+ * no baseline file is a hard failure — a base ref repointed at a commit outside
+ * that history must not be enough. Full 40-char sha: `git rev-parse` resolves
+ * the base ref (and this sha), and `git merge-base --is-ancestor` checks that the
+ * base descends from it.
  */
 export const SEED_INTRODUCTION_BASE = "4904699d80b55d9f299fe8e061aa80e4de8e9edc";
 
@@ -157,95 +161,96 @@ function skipRegex(src, i) {
   return i;
 }
 
+/** The name `findSpawnCalls` parses a source under when the caller names no file. */
+const UNNAMED_SOURCE = "source.ts";
+
+/** TypeScript's ScriptKind for a test file name, by extension (case-insensitive). */
+function scriptKindFor(fileName) {
+  const ext = /\.([^./\\]+)$/.exec(fileName)?.[1]?.toLowerCase();
+  if (ext === "tsx") return ts.ScriptKind.TSX;
+  if (ext === "jsx") return ts.ScriptKind.JSX;
+  if (ext === "js" || ext === "mjs" || ext === "cjs") return ts.ScriptKind.JS;
+  return ts.ScriptKind.TS;
+}
+
 /**
- * Like maskComments, but ALSO blanks the CONTENTS of string / regex literals and
- * the literal TEXT of template literals (same length). Used for spawn-CALL
- * matching, so a `Bun.spawn(...)` mentioned inside a plain string is not
- * mistaken for a call. A template's `${…}` EXPRESSIONS are left as CODE — a
- * `Bun.spawn(...)` of the CLI entry there IS a real call (flair#1825). The
- * argv/options TEXT a call reports is sliced from the ORIGINAL source, so the
- * CLI-entry and timeout checks still read real literal text.
+ * The source as TypeScript's parser reads it, with every comment and the text of
+ * every string literal, template literal and regex literal replaced by spaces
+ * (flair#2774). Newlines and length are kept, so every index still points at the
+ * same character. A template's `${` and `}` and the expressions between them
+ * stay as code: a `Bun.spawn(...)` of the CLI entry there IS a real call
+ * (flair#1825). Used for spawn-CALL matching, so a `Bun.spawn(...)` mentioned in
+ * a string or comment is not mistaken for a call. The argv/options TEXT a call
+ * reports is sliced from the ORIGINAL source, so the CLI-entry check still reads
+ * real literal text. A spawn's `timeout` is read from THIS text (flair#2774).
+ *
+ * A file the parser reports a syntax error in is refused with an error naming
+ * it: the scan never falls back to the unmasked text.
  */
-function maskLiteralsAndComments(src) {
+function maskLiteralsAndComments(src, fileName = UNNAMED_SOURCE) {
+  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, scriptKindFor(fileName));
+  const diagnostics = sf.parseDiagnostics;
+  if (!Array.isArray(diagnostics)) {
+    throw new Error(
+      `cannot read TypeScript's parse diagnostics for ${fileName} (typescript ${ts.version}); ` +
+        "refusing to scan it unmasked (flair#2774).",
+    );
+  }
+  if (diagnostics.length > 0) {
+    const first = diagnostics[0];
+    const { line, character } = sf.getLineAndCharacterOfPosition(first.start ?? 0);
+    throw new Error(
+      `${fileName}:${line + 1}:${character + 1}: TypeScript cannot parse this file ` +
+        `(${ts.flattenDiagnosticMessageText(first.messageText, " ")}); refusing to scan it unmasked (flair#2774).`,
+    );
+  }
   const out = src.split("");
   const blank = (from, to) => {
     for (let j = from; j < to && j < src.length; j++) if (src[j] !== "\n") out[j] = " ";
   };
-  let i = 0;
-  while (i < src.length) {
-    const ch = src[i];
-    if (ch === '"' || ch === "'") {
-      const end = skipNonCode(src, i);
-      blank(i, end);
-      i = end > i ? end : i + 1;
-      continue;
+  // Every comment sits in the trivia between two tokens, and TypeScript reports
+  // it as a TRAILING comment range of the earlier token or a LEADING range of
+  // the later one (a comment that starts on the earlier token's line, even a
+  // multiline block, is returned whole as a trailing range). Visiting every node
+  // and token (getChildren includes the tokens) and masking both kinds of range
+  // therefore reaches every comment, inside template expressions too. A JSDoc
+  // comment is one of those ranges; its parsed nodes are skipped.
+  const leadingDone = new Set();
+  const trailingDone = new Set();
+  const visit = (node) => {
+    if (node.kind >= ts.SyntaxKind.FirstJSDocNode && node.kind <= ts.SyntaxKind.LastJSDocNode) return;
+    if (!leadingDone.has(node.pos)) {
+      leadingDone.add(node.pos);
+      for (const r of ts.getLeadingCommentRanges(src, node.pos) ?? []) blank(r.pos, r.end);
     }
-    if (ch === "`") {
-      // Template: blank the literal TEXT, but leave `${…}` expressions as code.
-      out[i] = " "; // opening backtick
-      let j = i + 1;
-      while (j < src.length) {
-        if (src[j] === "\\") {
-          blank(j, j + 2);
-          j += 2;
-          continue;
-        }
-        if (src[j] === "`") {
-          out[j] = " "; // closing backtick
-          j++;
-          break;
-        }
-        if (src[j] === "$" && src[j + 1] === "{") {
-          j += 2;
-          let depth = 1;
-          while (j < src.length && depth > 0) {
-            if (src[j] === "{") depth++;
-            else if (src[j] === "}") {
-              depth--;
-              if (depth === 0) {
-                j++;
-                break;
-              }
-            }
-            j++;
-          }
-          continue;
-        }
-        if (src[j] !== "\n") out[j] = " ";
-        j++;
-      }
-      i = j;
-      continue;
+    if (!trailingDone.has(node.end)) {
+      trailingDone.add(node.end);
+      for (const r of ts.getTrailingCommentRanges(src, node.end) ?? []) blank(r.pos, r.end);
     }
-    if (ch === "/" && src[i + 1] === "/") {
-      while (i < src.length && src[i] !== "\n") {
-        out[i] = " ";
-        i++;
-      }
-      continue;
+    const children = node.getChildren(sf);
+    if (children.length > 0) {
+      for (const child of children) visit(child);
+      return;
     }
-    if (ch === "/" && src[i + 1] === "*") {
-      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) {
-        if (src[i] !== "\n") out[i] = " ";
-        i++;
-      }
-      if (i < src.length) {
-        out[i] = " ";
-        out[i + 1] = " ";
-        i += 2;
-      }
-      continue;
+    const start = node.getStart(sf);
+    switch (node.kind) {
+      case ts.SyntaxKind.StringLiteral:
+      case ts.SyntaxKind.NoSubstitutionTemplateLiteral:
+      case ts.SyntaxKind.RegularExpressionLiteral:
+        blank(start, node.end);
+        break;
+      case ts.SyntaxKind.TemplateHead: // `text${ — keep the `${`
+        blank(start, node.end - 2);
+        break;
+      case ts.SyntaxKind.TemplateMiddle: // }text${ — keep the `}` and the `${`
+        blank(start + 1, node.end - 2);
+        break;
+      case ts.SyntaxKind.TemplateTail: // }text` — keep the `}`
+        blank(start + 1, node.end);
+        break;
     }
-    if (ch === "/" && regexCanStart(src, i)) {
-      const j = skipRegex(src, i);
-      if (j !== i) {
-        blank(i, j + 1);
-        i = j + 1;
-        continue;
-      }
-    }
-    i++;
-  }
+  };
+  visit(sf);
   return out.join("");
 }
 
@@ -535,24 +540,24 @@ function textNamesCliEntry(text, ids) {
 }
 
 /** All spawn-family calls in the file (node forms + Bun forms), with CLI-entry targeting. */
-export function findSpawnCalls(source) {
-  const scan = maskLiteralsAndComments(source);
+export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
+  const scan = maskLiteralsAndComments(source, fileName);
   const ids = cliEntryIdentifiers(source);
   const aliases = aliasedSpawnFns(source);
   const constDecls = new Map();
   for (const m of scan.matchAll(/(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g)) {
     const after = m.index + m[0].length;
     const lineEnd = source.indexOf("\n", after);
-    constDecls.set(m[1], source.slice(after, lineEnd === -1 ? source.length : lineEnd));
+    constDecls.set(m[1], { start: after, end: lineEnd === -1 ? source.length : lineEnd });
   }
   const calls = [];
   const lineOf = (index) => source.slice(0, index).split("\n").length;
   const textAt = (span) => (span ? source.slice(span.start, span.end) : "");
-  const resolveOptText = (optSpan) => {
-    const own = textAt(optSpan);
-    const trimmed = own.trim();
-    if (optSpan && /^[A-Za-z_$][\w$]*$/.test(trimmed)) return constDecls.get(trimmed) ?? "";
-    return own;
+  // The options span itself, or the one-line initializer of the identifier it names.
+  const resolveOptSpan = (optSpan) => {
+    const trimmed = textAt(optSpan).trim();
+    if (optSpan && /^[A-Za-z_$][\w$]*$/.test(trimmed)) return constDecls.get(trimmed) ?? null;
+    return optSpan ?? null;
   };
   // Bun.spawn / Bun.spawnSync — argv array FIRST, options SECOND (flair#1825).
   for (const m of scan.matchAll(/(^|[^\w$.])Bun\.(spawn|spawnSync)\s*\(/g)) {
@@ -561,17 +566,20 @@ export function findSpawnCalls(source) {
     const args = topLevelArgs(scan, open);
     if (!args) continue;
     const argvText = BUN_ARGV_ARG_INDICES.map((i) => textAt(args.spans[i])).join(" ");
-    const optText = resolveOptText(args.spans[BUN_OPTIONS_ARG_INDEX]);
+    const optSpan = resolveOptSpan(args.spans[BUN_OPTIONS_ARG_INDEX]);
+    const optText = textAt(optSpan);
+    const optCode = optSpan ? scan.slice(optSpan.start, optSpan.end) : "";
     calls.push({
       fn,
       index: m.index,
       line: lineOf(m.index),
       text: `${argvText} ; ${optText}`,
-      // The OPTIONS text is kept separately: a `timeout` is read from HERE only,
-      // never from argv (round 9 item 2).
-      optText,
+      // The OPTIONS text is kept separately, sliced from the call-matching mask
+      // (flair#2774): a `timeout` is read from HERE only, never from argv
+      // (round 9 item 2).
+      optCode,
       isCliEntry: textNamesCliEntry(argvText, ids),
-      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optText),
+      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optCode),
     });
   }
   // node child_process forms — bare, or via a named alias (flair#1825).
@@ -583,22 +591,24 @@ export function findSpawnCalls(source) {
     const args = topLevelArgs(scan, open);
     if (!args) continue;
     const argvText = (ARGV_ARG_INDICES.get(fn) ?? [0, 1]).map((i) => textAt(args.spans[i])).join(" ");
-    const optText = resolveOptText(args.spans[OPTIONS_ARG_INDEX.get(fn)]);
+    const optSpan = resolveOptSpan(args.spans[OPTIONS_ARG_INDEX.get(fn)]);
+    const optText = textAt(optSpan);
+    const optCode = optSpan ? scan.slice(optSpan.start, optSpan.end) : "";
     calls.push({
       fn: raw,
       index: m.index,
       line: lineOf(m.index),
       text: `${argvText} ; ${optText}`,
-      optText,
+      optCode,
       isCliEntry: textNamesCliEntry(argvText, ids),
-      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optText),
+      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optCode),
     });
   }
   // A numeric `timeout:` value, so a case budget can be checked against the sum
   // of the waits inside it (flair#1825).
   for (const call of calls) {
     // OPTIONS ONLY: an argv element must never decide `hasTimeout` (round 9 item 2).
-    const m = (call.optText ?? "").match(/(?:^|[^\w$.])timeout\s*[:=]\s*([^\s,;)}\]]+)/);
+    const m = (call.optCode ?? "").match(/(?:^|[^\w$.])timeout\s*[:=]\s*([^\s,;)}\]]+)/);
     // ONLY the EXACT token `[1-9][0-9]*` (underscores allowed) is a deadline:
     // `timeout: 0` is NO timeout (node and Bun), and `1e999` / `10000-10000` are
     // expressions, not positive integers — all are unbounded (flair#1825 r6).
@@ -943,8 +953,8 @@ function scopeOf(index, bodies, cases) {
   return bestCase ? bestCase.name : "<module>";
 }
 
-export function analyzeTestFile(source) {
-  const { calls, ids } = findSpawnCalls(source);
+export function analyzeTestFile(source, fileName = UNNAMED_SOURCE) {
+  const { calls, ids } = findSpawnCalls(source, fileName);
   const helpers = localHelpersThatSpawn(source, calls);
   const bodies = functionBodies(source);
   const cases = findCases(source, calls, helpers, bodies);
@@ -981,7 +991,7 @@ export function scanTree(root) {
   for (const file of files) {
     const rel = relative(root, file);
     const src = readFileSync(file, "utf8");
-    const { calls, cases } = analyzeTestFile(src);
+    const { calls, cases } = analyzeTestFile(src, rel);
     for (const call of calls) {
       if (call.isCliEntry && !call.hasTimeout) {
         spawnOffenders.push({

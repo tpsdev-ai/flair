@@ -28,6 +28,12 @@ import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { stripInlinePointerFields } from "./host-source-visibility.js";
 import { applyPromotionBinding } from "./promotion-binding.js";
+import { memoryBusyResponse, memoryLockUnavailableResponse, withMemoryWriteLock, withMemoryWriteLockOnce, writeOutcomeUnknownResponse } from "./memory-write-lock.js";
+
+/** The per-id Memory write-lock store (flair#2478). */
+function memoryLockStore(): unknown {
+  return (databases as any)?.flair?.Memory?.primaryStore;
+}
 
 /** Suppress an absent or mismatched promotion binding on a fed event's row
  *  value (flair#2478 slice 2). Non-object values and events pass through. */
@@ -324,86 +330,119 @@ export class FeedMemories extends Resource {
     // caller-supplied server-stamped field (instanceToken, provenance), then
     // PRESERVE the existing row's incarnation token, else generate one.
     stripServerStampedFields(record);
-    let refusal: Response | undefined;
-    let outcome: Awaited<ReturnType<typeof writeBackCommittedRow>>;
-    const table = (databases as any).flair.Memory;
-    try {
-      outcome = await writeBackCommittedRow(
-        {
-          get: (id, shared) => table.get(id, shared),
-          put: async (row, shared) => {
-            normalizeEmptyEmbedding(row);
-            const result = storageResult(await table.put(row, shared));
-            if (result instanceof Response) refusal = result;
-          },
-        },
-        record.id,
-        async (priorById: any) => {
-          if (priorById && priorById.agentId !== agentId) {
-            refusal = FORBIDDEN("forbidden: cannot write a feed memory owned by another agent");
-            return { skip: true };
+    // flair#2478 slice 3b: the ordinary (non-skill) write-back runs under the
+    // id's per-id Memory write lock, so its read, decision and commit sit on one
+    // committed basis. The feed write is a foreground client write: a held key
+    // waits its budget and can answer `503 memory_busy`; a marked id answers
+    // `503 write_outcome_unknown` at once; a store with no lock answers
+    // `503 memory_lock_unavailable`. The write-back confirms its committed row
+    // as before. An omitted id is generated; a caller-supplied id can contend.
+    // The skill branch above returns before this lock; its conversion is
+    // deferred.
+    const locked = await withMemoryWriteLock(
+      memoryLockStore(),
+      [String(record.id)],
+      async (): Promise<{ response: Response } | { written: Record<string, any> }> => {
+        let refusal: Response | undefined;
+        let outcome: Awaited<ReturnType<typeof writeBackCommittedRow>>;
+        const table = (databases as any).flair.Memory;
+        try {
+          outcome = await writeBackCommittedRow(
+            {
+              get: (id, shared) => table.get(id, shared),
+              put: async (row, shared) => {
+                normalizeEmptyEmbedding(row);
+                const result = storageResult(await table.put(row, shared));
+                if (result instanceof Response) refusal = result;
+              },
+            },
+            record.id,
+            async (priorById: any) => {
+              if (priorById && priorById.agentId !== agentId) {
+                refusal = FORBIDDEN("forbidden: cannot write a feed memory owned by another agent");
+                return { skip: true };
+              }
+              const written: Record<string, any> = { ...record };
+              if (visibilityOmitted) {
+                const stored = priorById?.visibility;
+                if (stored === PRIVATE_VISIBILITY || stored === SHARED_VISIBILITY) written.visibility = stored;
+                else if (durability === "ephemeral") written.visibility = PRIVATE_VISIBILITY;
+                else delete written.visibility;
+                const tierError = assertVisibilityAllowedForDurability(durability, written.visibility);
+                if (tierError) {
+                  refusal = Response.json({ error: "invalid_visibility_for_durability", message: tierError }, { status: 400 });
+                  return { skip: true };
+                }
+              }
+              written.instanceToken = priorById?.instanceToken ?? randomUUID();
+              // Feed ingest writes the INCOMING authored record as a full row (a
+              // semantic re-authoring on POST /FeedMemories): the stored row is
+              // REPLACED, not patched, and provenance is re-stamped from the resolved
+              // (trusted) identity and ONE server clock read (inside buildProvenance)
+              // rather than carrying the stored blob forward — a legacy row whose
+              // `verified.timestamp` came from a client `createdAt` must not keep
+              // presenting that value after a new write (flair#1960 r2). The feed
+              // body's own `createdAt` is recorded only as the CLAIM
+              // `provenance.claimed.createdAt`, never as a verified timestamp. The
+              // values this re-authoring derives from the stored row (the incarnation
+              // token, an omitted visibility, a carried expiry, the originator-instance and
+              // federation bookkeeping) are carried across; it never writes back a
+              // stale echo of the content it read, and it is a foreground client
+              // write, so the field-only rule for background stamps (flair#2470) does
+              // not apply to it.
+              written.provenance = buildProvenance(auth, written.createdAt, content);
+              // flair#1965 r2: this raw table write REPLACES the row, bypassing the
+              // Memory resource's write methods, so the create/update rule is
+              // applied here explicitly: a CREATE (no stored row) stamps this
+              // instance's own id and ignores any body value; an UPDATE keeps the
+              // STORED value (a body value neither replaces nor clears it). The
+              // receiver-side federation bookkeeping (`_originatorInstanceId` et al.)
+              // is likewise unsettable from a body — it stands as stored, or is
+              // dropped on a create. See resources/originator-instance.ts.
+              await applyOriginatorInstanceId(written, priorById);
+              applyFederationBookkeeping(written, priorById);
+              const expiryError = stampEphemeralExpiry(written, priorById);
+              if (expiryError) {
+                refusal = Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
+                return { skip: true };
+              }
+              return { idempotent: false, commitMarkerField: "writeBackWriteId", write: written };
+            },
+            {
+              ctx, label: "MemoryFeed.ingest",
+              pausePre: () => txnPausePoint("feed-ingest-pre"),
+              pausePoint: () => txnPausePoint("feed-ingest"),
+              pauseAfterStage: () => txnPausePoint("feed-ingest-staged"),
+              pauseBeforeCommit: () => txnPausePoint("feed-ingest-commit"),
+              expectedRow: existingRecord,
+            },
+          );
+        } catch (err) {
+          if (refusal) return { response: refusal };
+          if (err instanceof WriteBackConflictError) {
+            return {
+              response: err.outcome === "conflict" ? feedTargetChanged(record.id) : Response.json({
+                error: "feed_write_unconfirmed", outcome: err.outcome, message: err.message,
+              }, { status: 409 }),
+            };
           }
-          const written: Record<string, any> = { ...record };
-          if (visibilityOmitted) {
-            const stored = priorById?.visibility;
-            if (stored === PRIVATE_VISIBILITY || stored === SHARED_VISIBILITY) written.visibility = stored;
-            else if (durability === "ephemeral") written.visibility = PRIVATE_VISIBILITY;
-            else delete written.visibility;
-            const tierError = assertVisibilityAllowedForDurability(durability, written.visibility);
-            if (tierError) {
-              refusal = Response.json({ error: "invalid_visibility_for_durability", message: tierError }, { status: 400 });
-              return { skip: true };
-            }
-          }
-          written.instanceToken = priorById?.instanceToken ?? randomUUID();
-          // Feed ingest writes the INCOMING authored record as a full row (a
-          // semantic re-authoring on POST /FeedMemories): the stored row is
-          // REPLACED, not patched, and provenance is re-stamped from the resolved
-          // (trusted) identity and ONE server clock read (inside buildProvenance)
-          // rather than carrying the stored blob forward — a legacy row whose
-          // `verified.timestamp` came from a client `createdAt` must not keep
-          // presenting that value after a new write (flair#1960 r2). The feed
-          // body's own `createdAt` is recorded only as the CLAIM
-          // `provenance.claimed.createdAt`, never as a verified timestamp. The
-          // values this re-authoring derives from the stored row (the incarnation
-          // token, an omitted visibility, a carried expiry, the originator-instance and
-          // federation bookkeeping) are carried across; it never writes back a
-          // stale echo of the content it read, and it is a foreground client
-          // write, so the field-only rule for background stamps (flair#2470) does
-          // not apply to it.
-          written.provenance = buildProvenance(auth, written.createdAt, content);
-          // flair#1965 r2: this raw table write REPLACES the row, bypassing the
-          // Memory resource's write methods, so the create/update rule is
-          // applied here explicitly: a CREATE (no stored row) stamps this
-          // instance's own id and ignores any body value; an UPDATE keeps the
-          // STORED value (a body value neither replaces nor clears it). The
-          // receiver-side federation bookkeeping (`_originatorInstanceId` et al.)
-          // is likewise unsettable from a body — it stands as stored, or is
-          // dropped on a create. See resources/originator-instance.ts.
-          await applyOriginatorInstanceId(written, priorById);
-          applyFederationBookkeeping(written, priorById);
-          const expiryError = stampEphemeralExpiry(written, priorById);
-          if (expiryError) {
-            refusal = Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
-            return { skip: true };
-          }
-          return { idempotent: false, commitMarkerField: "writeBackWriteId", write: written };
-        },
-        { ctx, label: "MemoryFeed.ingest", pausePre: () => txnPausePoint("feed-ingest-pre"), pausePoint: () => txnPausePoint("feed-ingest"), expectedRow: existingRecord },
-      );
-    } catch (err) {
-      if (refusal) return refusal;
-      if (err instanceof WriteBackConflictError) {
-        return err.outcome === "conflict" ? feedTargetChanged(record.id) : Response.json({
-          error: "feed_write_unconfirmed", outcome: err.outcome, message: err.message,
-        }, { status: 409 });
-      }
-      throw err;
-    }
-    if (refusal) return refusal;
-    if ("skip" in outcome) return feedTargetChanged(record.id);
-    if (!("write" in outcome)) throw new Error("MemoryFeed.ingest: expected a full-record write plan");
-    const written = outcome.write;
+          throw err;
+        }
+        if (refusal) return { response: refusal };
+        if ("skip" in outcome) return { response: feedTargetChanged(record.id) };
+        if (!("write" in outcome)) throw new Error("MemoryFeed.ingest: expected a full-record write plan");
+        // Test-only: the write committed and the lock is still held.
+        const committed = txnPausePoint("feed-ingest-committed");
+        if (committed) await committed;
+        return { written: outcome.write };
+      },
+      { phase: "feed-ingest" },
+    );
+    if (locked.kind === "busy") return memoryBusyResponse(agentId);
+    if (locked.kind === "unknown") return writeOutcomeUnknownResponse();
+    if (locked.kind === "unavailable") return memoryLockUnavailableResponse();
+    if ("response" in locked.value) return locked.value.response;
+    const written = locked.value.written;
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(written);
     return feedWriteResponse(written, redactedValues, supplied);
@@ -649,6 +688,25 @@ async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> 
   const id = String(match.id);
   const idDenial = reservedSeedFeedWriteDenial("Memory", [id]) ?? refuseContentSuffixId([id]);
   if (idDenial) return idDenial;
+  // flair#2478 slice 3b: the repair is an automatic writer. It takes the id's
+  // per-id Memory write lock once and without waiting; a held id, an
+  // outcome-unknown marker or a store with no lock skips the repair and
+  // reports it, and returns the matched, unrepaired row with its inline
+  // pointer fields removed, from which the caller builds the normal
+  // allowlisted feed response. A later feed write repairs it only if the row
+  // still matches and still lacks an expiry.
+  const locked = await withMemoryWriteLockOnce(
+    memoryLockStore(),
+    [id],
+    () => repairDeduplicatedExpiryLocked(ctx, match, id),
+    { phase: "feed-dedup-repair" },
+  );
+  if (locked.kind === "done") return locked.value;
+  console.warn("[MemoryFeed] dedup expiry repair skipped: %s (id %s)", locked.kind, id);
+  return stripInlinePointerFields(match);
+}
+
+async function repairDeduplicatedExpiryLocked(ctx: unknown, match: any, id: string): Promise<any> {
   for (let attempt = 1; attempt <= FEED_DEDUP_REPAIR_ATTEMPTS; attempt++) {
     const outcome: { kind: "withheld"; response: Response } | { kind: "changed" } | { kind: "retry" } | { kind: "current"; row: any } | { kind: "written"; row: any } =
       await withOwnedTransaction(ctx, async (c) => {
@@ -661,6 +719,10 @@ async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> 
         // The committed row, in an explicit fresh context (not this transaction's snapshot).
         const committed = await (databases as any).flair.Memory.get(id, {});
         if (!isDeepStrictEqual(committed, stored)) return { kind: "retry" as const };
+        // Test-only: the last confirmation passed and the transaction has not
+        // committed yet.
+        const commitPoint = txnPausePoint("feed-dedup-repair-commit");
+        if (commitPoint) await commitPoint;
         const row: any = { ...stored };
         // A stored null is "no expiry": drop it so the shared rule stamps a fresh
         // tier TTL rather than refusing the null as malformed.
@@ -671,12 +733,18 @@ async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> 
         // full-row put of the row read above (flair#2470).
         const result = storageResult(await (databases as any).flair.Memory.update(id, { expiresAt: row.expiresAt }, c));
         if (result instanceof Response) return { kind: "withheld" as const, response: result };
+        // Test-only: the update is staged and the lock is still held.
+        const staged = txnPausePoint("feed-dedup-repair-staged");
+        if (staged) await staged;
         return { kind: "written" as const, row };
       });
     if (outcome.kind === "withheld") return outcome.response;
     if (outcome.kind === "retry") continue;
     if (outcome.kind === "changed") return feedDedupTargetChanged(id);
     if (outcome.kind === "current") return stripInlinePointerFields(outcome.row);
+    // Test-only: the update committed and the lock is still held.
+    const committedPoint = txnPausePoint("feed-dedup-repair-committed");
+    if (committedPoint) await committedPoint;
     const confirmed = await withOwnedTransaction(ctx, async (c) => (databases as any).flair.Memory.get(id, c));
     if (!isDedupMatch(confirmed, match) || confirmed.expiresAt !== outcome.row.expiresAt) return feedDedupTargetChanged(id);
     return stripInlinePointerFields(confirmed);
