@@ -576,6 +576,18 @@ function argumentAt(call, index) {
   return index < args.length ? stripWrappers(args[index]) : null;
 }
 
+/**
+ * The options argument of a call whose runtime reads options at `optionsIndex`
+ * only after an argv array at `argvIndex`, or null (flair#2782). The argv
+ * argument, wrappers stripped, must be an array literal: `Bun.spawn({ cmd }, …)`
+ * and `spawnSync(command, options, …)` select the overload that ignores the
+ * later argument.
+ */
+function optionsAfterArgv(call, argvIndex, optionsIndex) {
+  const argv = argumentAt(call, argvIndex);
+  return argv && ts.isArrayLiteralExpression(argv) ? argumentAt(call, optionsIndex) : null;
+}
+
 /** An identifier or string-literal property key equal to `key`. */
 function propertyNameIs(name, key) {
   return (ts.isIdentifier(name) || ts.isStringLiteral(name)) && name.text === key;
@@ -646,8 +658,9 @@ function identifierReferences(sf) {
 }
 
 /**
- * True when the file has a `with` statement or references `eval`: either can bind
- * a name at run time, so no identifier is resolved in it (flair#2782).
+ * True when the file has a `with` statement or an unqualified `eval` identifier
+ * (a property such as `globalThis.eval` is not one): either can bind a name at
+ * run time, so no identifier is resolved in it (flair#2782).
  */
 function hasDynamicScope(sf, references) {
   if (references.has("eval")) return true;
@@ -678,11 +691,11 @@ function constScopeOf(decl) {
 
 /**
  * The deadline the gate reads from an options identifier, or null (flair#2782).
- * It resolves only when the file has no `with` statement and no `eval`, declares
- * the name exactly once, as a non-exported `const` whose initializer (wrappers
- * stripped) is an object literal the gate reads a deadline from, and every other
- * reference to the name is the options argument of a spawn call this gate finds
- * inside the scope of that `const`. Any other reference (one outside that scope,
+ * It resolves only when the file has no `with` statement and no unqualified
+ * `eval`, declares the name exactly once, as a non-exported `const` whose
+ * initializer (wrappers stripped) is an object literal the gate reads a deadline
+ * from, and every other reference to the name is the options argument of a spawn
+ * call this gate finds inside the scope of that `const`. Any other reference (one outside that scope,
  * a property or element write, `delete`, `Object.assign`, an argument to another
  * function, an export) is no deadline.
  */
@@ -762,7 +775,7 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
       isCliEntry: textNamesCliEntry(argvText, ids),
     };
     calls.push(call);
-    optionsArgOf.set(call, argumentAt(callsByOpen.get(open), BUN_OPTIONS_ARG_INDEX));
+    optionsArgOf.set(call, optionsAfterArgv(callsByOpen.get(open), BUN_ARGV_ARG_INDICES[0], BUN_OPTIONS_ARG_INDEX));
   }
   // node child_process forms — bare, or via a named alias (flair#1825).
   for (const m of scan.matchAll(/(^|[^\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
@@ -782,11 +795,15 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
       isCliEntry: textNamesCliEntry(argvText, ids),
     };
     calls.push(call);
-    optionsArgOf.set(call, argumentAt(callsByOpen.get(open), OPTIONS_ARG_INDEX.get(fn)));
+    // `spawn`/`spawnSync`/`execFile`/`execFileSync` read options third only after an
+    // argv array; `exec`/`execSync`/`fork` read them second.
+    const optIndex = OPTIONS_ARG_INDEX.get(fn);
+    const ast = callsByOpen.get(open);
+    optionsArgOf.set(call, optIndex === 2 ? optionsAfterArgv(ast, 1, optIndex) : argumentAt(ast, optIndex));
   }
   // The deadline the gate reads from each spawn's options argument (flair#2782), so
   // a case budget can be checked against the sum of the waits inside it
-  // (flair#1825). An argv element never decides it (round 9 item 2).
+  // (flair#1825). A `timeout` inside argv is never read (round 9 item 2).
   const references = identifierReferences(sf);
   const ctx = {
     spawnOptionArgs: new Set([...optionsArgOf.values()].filter(Boolean)),

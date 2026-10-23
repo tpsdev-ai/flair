@@ -87,6 +87,12 @@ const RUNTIMES = [
           `console.log(JSON.stringify({ runtime: process.versions.bun ? "bun" : "node", timedOut: r.error?.code === "ETIMEDOUT", status: r.status, ms: Date.now() - started }));\n${s.around?.[1] ?? ""}\n`,
         { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
       ).outputText,
+    // `spawnSync(command, options, …)`: with no argv array, Node ignores the third argument.
+    ignoredGateCall: `spawnSync("src/cli.ts", { shell: true }, { timeout: ${TIMEOUT_MS} });`,
+    ignoredScript:
+      `const { spawnSync } = require("node:child_process");\nconst started = Date.now();\n` +
+      `const r = spawnSync(JSON.stringify(process.execPath) + " -e " + JSON.stringify("setTimeout(() => {}, ${CHILD_SLEEP_MS})"), { shell: true }, { timeout: ${TIMEOUT_MS} });\n` +
+      `console.log(JSON.stringify({ runtime: process.versions.bun ? "bun" : "node", timedOut: r.error?.code === "ETIMEDOUT", status: r.status, ms: Date.now() - started }));\n`,
   },
   {
     name: "Bun.spawnSync",
@@ -95,6 +101,11 @@ const RUNTIMES = [
     script: (s: Shape) =>
       `${s.decl ?? ""}\n${s.around?.[0] ?? ""}\nconst started = Date.now();\nconst r = Bun.spawnSync([process.execPath, ...${CHILD}], ${s.opts});\n` +
       `console.log(JSON.stringify({ runtime: process.versions.bun ? "bun" : "node", timedOut: r.exitedDueToTimeout === true, status: r.exitCode, ms: Date.now() - started }));\n${s.around?.[1] ?? ""}\n`,
+    // `Bun.spawnSync({ cmd }, …)`: the object form ignores a second argument.
+    ignoredGateCall: `Bun.spawnSync({ cmd: ["bun", "src/cli.ts", "status"] }, { timeout: ${TIMEOUT_MS} });`,
+    ignoredScript:
+      `const started = Date.now();\nconst r = Bun.spawnSync({ cmd: [process.execPath, ...${CHILD}] }, { timeout: ${TIMEOUT_MS} });\n` +
+      `console.log(JSON.stringify({ runtime: process.versions.bun ? "bun" : "node", timedOut: r.exitedDueToTimeout === true, status: r.exitCode, ms: Date.now() - started }));\n`,
   },
 ];
 
@@ -134,6 +145,21 @@ describe("accepted and rejected options shapes: the gate's reading matches real 
         expect(o.status, shape.name).toBe(0);
         expect(o.ms, shape.name).toBeGreaterThanOrEqual(CHILD_SLEEP_MS);
       }
+    }, 60_000);
+
+    it(`${runtime.name}: an options argument the call's overload ignores is no deadline, and the child runs to the end`, async () => {
+      const { calls } = findSpawnCalls(`test("t", () => {\n  ${runtime.ignoredGateCall}\n}, 120_000);\n`);
+      expect(calls.length).toBe(1);
+      expect(calls[0].isCliEntry).toBe(true);
+      expect(calls[0].timeoutMs ?? null).toBeNull();
+      const proc = Bun.spawn([runtime.command(), "-e", runtime.ignoredScript], { stdout: "pipe", stderr: "pipe", timeout: 30_000 });
+      const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      expect(code, stderr).toBe(0);
+      const o = JSON.parse(stdout) as Outcome;
+      expect(o.runtime).toBe(runtime.expectedRuntime);
+      expect(o.timedOut).toBe(false);
+      expect(o.status).toBe(0);
+      expect(o.ms).toBeGreaterThanOrEqual(CHILD_SLEEP_MS);
     }, 60_000);
   }
 });

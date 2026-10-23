@@ -791,6 +791,17 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
       });
     }
 
+    it("an options object after Bun's `{ cmd }` form or Node's options-without-argv form is no deadline", () => {
+      for (const call of [
+        'Bun.spawn({ cmd: ["bun", "src/cli.ts", "status"] }, { timeout: 5000 });',
+        'Bun.spawnSync({ cmd: ["bun", "src/cli.ts", "status"] }, { timeout: 5000 });',
+        'spawn("src/cli.ts", { shell: true }, { timeout: 5000 });',
+        'spawnSync("src/cli.ts", { shell: true }, { timeout: 5000 });',
+      ]) {
+        expectGateReads(`test("t", () => {\n  ${call}\n}, 120_000);\n`, null);
+      }
+    });
+
     it("a spread argument before the options position is no deadline", () => {
       expectGateReads(`test("t", () => {\n  spawnSync("bun", ...[["src/cli.ts", "status"]], { timeout: 5000 });\n}, 120_000);\n`, null);
     });
