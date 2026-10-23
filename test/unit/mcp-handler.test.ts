@@ -198,6 +198,14 @@ function storeCredential(id: any, fields: any, merge: boolean): void {
   else credentials = credentials.map((c, j) => (j === i ? (merge ? { ...c, ...fields, id } : { ...fields, id }) : c));
 }
 
+/** A Harper search's `conditions` (default operator "and"): the row matches when every condition holds. */
+function credentialMatches(row: any, query: any): boolean {
+  return (query?.conditions ?? []).every((c: any) => {
+    if (c.comparator !== "equals") throw new Error(`fake Credential.search: unsupported comparator ${c.comparator}`);
+    return row?.[c.attribute] === c.value;
+  });
+}
+
 // Constructable no-op base classes so the REAL resource modules (which do
 // `class X extends databases.flair.X` or `extends Resource`) link + load — we
 // then OVERRIDE them via __setHandlers, so these bases are never actually hit by
@@ -206,9 +214,9 @@ class NoopBase { constructor(_id?: any, _ctx?: any) {} }
 const databasesMock = {
   flair: {
     Credential: Object.assign(class extends NoopBase {}, {
-      search: async function* (_q: any) {
+      search: async function* (q: any) {
         if (credentialSearchError) throw credentialSearchError;
-        for (const c of credentials) yield c;
+        for (const c of credentials) if (credentialMatches(c, q)) yield c;
       },
       put: async (r: any) => { puts.push({ table: "Credential", record: r }); storeCredential(r.id, r, false); return r; },
       get: async (id: any, _ctx?: any) => credentials.find((c) => c?.id === id) ?? null,
@@ -404,6 +412,7 @@ describe("tools/list — a failed or refused resolution answers the tools/call e
     const body = await parse(await mcpHandler(post({ jsonrpc: "2.0", id: 22, method: "tools/list" }, { sub: "sub-unmapped" })));
     expect(body.error).toBeUndefined();
     expect(body.result.tools.map((t: any) => t.name).sort()).toEqual(await ungatedToolNames());
+    expect(await resolveAgentFromSub("sub-unmapped", undefined, false)).toBeNull();
     expect(puts).toEqual([]);
   });
 
