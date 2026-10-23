@@ -368,9 +368,8 @@ describe("validateFragmentBody — one entry per fragment", () => {
 
 // ─── Fixed-fragment guard (flair#1498) ───────────────────────────────────────
 //
-// A changelog fragment must not claim a GHSA the audit gate flags
-// FIXED-FOR-BUN-ONLY: those advisories are fixed for bun installs only and still
-// reach npm installs via harper's npm-shrinkwrap. Claiming them "fixed" in the
+// A changelog fragment must not claim "fixed" for an npm-install-only GHSA: the
+// allowlist says npm installs still report it. Claiming it "fixed" in the
 // changelog would overstate the fix.
 
 describe("fixedForBunOnlyGhsas", () => {
@@ -406,11 +405,10 @@ describe("fixedFragmentsClaimingPinned", () => {
     expect(offenders).toEqual([{ name: "fixed-fastify.md", ghsa: "GHSA-W2QP-RPH6-63G4" }]);
   });
 
-  test("ignores the gate's own FIXED-FOR-BUN-ONLY label", () => {
-    // Quoting the gate's label is the gate saying the advisory is NOT fixed for
-    // npm installs — it is not a claim, so it must not be flagged.
+  test("ignores the gate's own NOT-REPORTED-BY-BUN label", () => {
+    // Quoting the gate's label is not a "fixed" claim, so it must not be flagged.
     const offenders = fixedFragmentsClaimingPinned(
-      [{ name: "changed-audit.md", body: "- **Changed.** The gate now prints FIXED-FOR-BUN-ONLY: GHSA-w2qp-rph6-63g4.\n" }],
+      [{ name: "changed-audit.md", body: "- **Changed.** The gate now prints NOT-REPORTED-BY-BUN: GHSA-w2qp-rph6-63g4.\n" }],
       pinned,
     );
     expect(offenders).toEqual([]);

@@ -235,7 +235,7 @@ describe("deduplicated ephemeral feed expiry (flair#2358)", () => {
     expect(await readStored(harper, id)).toEqual(competed!);
   }, 60_000);
 
-  test("a competing request that stamps the expiry first: the response carries the current stamped row", async () => {
+  test("a competing request that finds the repair's id held skips the repair and answers the allowlisted feed response from the matched, unrepaired row", async () => {
     const content = `deduplicated contended state ${randomUUID()}`;
     const id = `dedup-contended-${randomUUID()}`;
     await seedMemory(harper, agent, { id, agentId: agent.id, content, durability: "ephemeral" });
@@ -250,9 +250,14 @@ describe("deduplicated ephemeral feed expiry (flair#2358)", () => {
     expect(released, "the repair was not paused and released by this test").toBe("go");
     expect(competed?.status).toBe(200);
 
+    // flair#2478: the repair takes the matched id's per-id Memory write lock
+    // once, without waiting. The competing request cannot repair while the
+    // first request holds the id, so it reports the matched row it read
+    // (still without an expiry) and leaves the repair to the holder; the
+    // holder's expiry is the one stored.
+    expect(competed?.body.expiresAt ?? null).toBeNull();
     const stored = await readStored(harper, id);
     expect(typeof stored?.expiresAt).toBe("string");
-    expect(competed?.body.expiresAt).toBe(stored!.expiresAt);
     expect(response.status).toBe(200);
     // The stored row, less contentHash, which the request did not supply (flair#2561).
     const { contentHash, ...reported } = stored!;

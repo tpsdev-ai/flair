@@ -98,7 +98,7 @@ add("MemoryPurge", ["writer:memory.delete#1"],
   "Physical-removal path: removes the named rows (and a skill row's lineage) through the raw table handle — a removal, not a skill write, so the post/put SkillScan gate does not apply.");
 add("MemoryPurge", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read handle (MemoryPurge reads each row and searches a skill lineage); its delete is the site classified above.");
-add("MemoryReflect", ["writer:patchRecordSilent#1"],
+add("MemoryReflect", ["writer:patchRecord#1"],
   "lastReflected stamp — non-skill.");
 add("MemoryReindex", ["writer:writeBackCommittedRow#1"],
   "Admin-only reindex re-PUT through the shared write-back helper (flair#2354): re-writes the row it reads, not a new skill write.");
@@ -146,8 +146,12 @@ add("AdminMemory", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only admin alias.");
 add("Federation", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (merge reads the source record).");
-add("MemoryReflect", ["alias-source:(databases as any).flair.Memory#1"],
-  "Read-only alias (reflect reads source memories).");
+add("MemoryReflect", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any)?.flair?.Memory#1"],
+  "Read-only aliases (reflect reads source memories; the lastReflected patch names its handle) and the per-id Memory write-lock handle (flair#2478).");
+add("Memory", ["alias-source:(databases as any).flair.Memory#13"],
+  "The derivedFrom lastReflected patchRecord's table handle (flair#2478) — a partial, non-skill stamp.");
+add("MemoryFeed", ["alias-source:(databases as any)?.flair?.Memory#1"],
+  "The per-id Memory write-lock handle for the feed ingest and dedup repair; it performs no Memory row write (flair#2478).");
 add("MemoryReindex", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (reindex reads rows to re-embed).");
 add("auth-middleware", ["alias-source:(databases as any).flair.Memory#1"],
