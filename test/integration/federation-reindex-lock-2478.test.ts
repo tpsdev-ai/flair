@@ -1,5 +1,6 @@
 /**
- * federation-reindex-lock-2478.test.ts — flair#2478 slice 3c (real Harper).
+ * federation-reindex-lock-2478.test.ts — flair#2478 slice 3c (eight real-Harper
+ * cases and one fake-table case).
  *
  * The federation merge of an incoming Memory row and the batch reindex writer
  * take the id's per-id Memory write lock: an owner PUT/PATCH racing either one
@@ -193,6 +194,10 @@ describe("flair#2478 slice 3c — the batch reindex writer holds the id's lock (
     expect(body.stats.reindexed, JSON.stringify(body.stats)).toBeGreaterThan(0);
     const writes = h.writesBy(id, "reindex-put");
     expect(writes.length, "no Memory write was traced under the reindex lock phase").toBe(1);
+    expect(writes[0].method, "the reindex did not write a full row").toBe("put");
+    expect(writes[0].fields, "the re-PUT staged a field set other than the seeded row's").toEqual(
+      ["agentId", "content", "contentHash", "createdAt", "durability", "id", "instanceToken", "visibility"],
+    );
   }, 120_000);
 
   it("an owner PATCH racing the reindex at reindex-put is refused memory_busy; the re-PUT completes", async () => {

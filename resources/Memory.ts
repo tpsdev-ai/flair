@@ -3223,8 +3223,8 @@ export class Memory extends (databases as any).flair.Memory {
       // flair#2478 slice 3c: confirm the committed row after the commit. A
       // re-PUT that joined a request transaction has not committed yet (the
       // caller owns that commit); every other re-PUT owns and has settled its
-      // transaction here. An unreadable or mismatching committed row is never
-      // reported as success.
+      // transaction here. For a re-PUT that owns its transaction, an
+      // unreadable or mismatching committed row is never reported as success.
       if (!reindexJoinsRequestTxn) {
         const committedVerdict = await verifyCommittedFields(
           (databases as any).flair.Memory,

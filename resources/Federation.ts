@@ -1606,10 +1606,13 @@ export class FederationSync extends Resource {
               }
               if (record.table === "Memory") {
                 normalizeEmptyEmbedding(mergedData);
-                // flair#2478 slice 3c: the Memory merge writes only the fields
-                // this merge selected, never the whole row it read. Under the
-                // id's lock the in-transaction row is the committed row, so the
-                // update cannot carry back a field another writer changed.
+                // flair#2478 slice 3c: mergedData was built before the id's
+                // lock was taken; this write decision runs under the lock, on
+                // the in-transaction row, and the whole-row check against
+                // `local` follows it. A new row is a full put. An existing row
+                // gets an incremental update of the fields where mergedData
+                // differs from it, unless the strip fallback below rewrites
+                // the whole row.
                 if (row == null) return { idempotent: true, write: mergedData };
                 // A field the merge stripped (a pointer attribute on a dirty
                 // row) is absent from mergedData; an incremental update cannot
@@ -1643,11 +1646,14 @@ export class FederationSync extends Resource {
           );
           if (record.table === "Memory") {
             // flair#2478 slice 3c: the merge takes the id's per-id Memory write
-            // lock, once and without waiting: an automatic writer never
-            // overwrites an owner's write. A held id, an unresolved earlier
+            // lock, once and without waiting, around its write-back. The lock
+            // does not serialize it against a PUT that joined another
+            // transaction, which can commit after that PUT releases the lock
+            // (resources/memory-write-lock.ts). A held id, an unresolved earlier
             // write or a store with no lock writes nothing for the record and is
-            // reported as merge_target_busy (a retryable skip reason, so the
-            // SyncLog row records it and a later re-offer can merge it).
+            // reported as merge_target_busy (a retryable skip reason: the
+            // response carries it, the best-effort SyncLog row records it when
+            // that write succeeds, and a later re-offer can merge it).
             const locked = await withMemoryWriteLockOnce(memoryLockStore(), [record.id], writeMerge, { phase: "federation-merge" });
             if (locked.kind !== "done") return { reason: "merge_target_busy" };
             outcome = locked.value;

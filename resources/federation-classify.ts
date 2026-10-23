@@ -90,8 +90,9 @@ export type SkipReason =
   | "merge_target_changed"
   // flair#2478 slice 3c: a Memory merge could not take the row's per-id write
   // lock (held, or the id's earlier write outcome is unresolved). Nothing was
-  // written; the skip is recorded in SyncLog's skippedReasons and returned in
-  // the response's refused list, and a later re-offer can merge it.
+  // written; the skip is returned in the response's refused list, the
+  // best-effort SyncLog row records it in skippedReasons when that write
+  // succeeds, and a later re-offer can merge it.
   | "merge_target_busy"
   // ─── flair#2455 slice 1: the reasons recordSkip already emitted as bare
   // strings. Typing them closes the union at the sites that produced them;
