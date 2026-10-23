@@ -43,6 +43,7 @@ import {
   MemoryProviderTimeout,
   memoryProviderTimeoutResponse,
   withMemoryWriteLock,
+  withMemoryWriteLockOnce,
   writeOutcomeUnknownResponse,
   type MemoryLockOutcome,
 } from "./memory-write-lock.js";
@@ -1043,19 +1044,51 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
  * lastReflected keys off updatedAt (the write moment), NOT createdAt — since
  * #1336 a create may carry a backdated caller createdAt, and the reflection
  * bookkeeping must record when the derivation actually ran.
+ *
+ * flair#2478 slice 3b: each stamp takes the source id's per-id Memory write
+ * lock, once and without waiting, and reads the committed row under it. A held
+ * id, an outcome-unknown marker or a store with no lock skips that source and
+ * reports it; the stamp is an automatic writer, and its incremental update
+ * preserves the owner's other fields while updating `lastReflected`. The patch
+ * is an incremental update of `lastReflected`, decided on the committed row,
+ * and confirmed on the committed row after the commit.
  */
 async function markDerivedSourcesReflected(content: any): Promise<void> {
   if (!Array.isArray(content.derivedFrom) || content.derivedFrom.length === 0) return;
   const now = content.updatedAt;
+  const table = (databases as any).flair.Memory;
   for (const sourceId of content.derivedFrom) {
     try {
-      const src = await (databases as any).flair.Memory.get(sourceId);
-      if (src) {
-        const reflectPatch = { lastReflected: now };
-        stripUndeclaredMemoryAttributes(reflectPatch);
-        await patchRecord((databases as any).flair.Memory, sourceId, reflectPatch, {
-          pausePre: () => txnPausePoint("last-reflected-pre"), pausePoint: () => txnPausePoint("last-reflected"), expectedRow: src,
-        }).catch(() => {});
+      const reflectPatch = { lastReflected: now };
+      stripUndeclaredMemoryAttributes(reflectPatch);
+      const outcome = await withMemoryWriteLockOnce(memoryWriteLockStore(), [String(sourceId)], async () => {
+        // The committed row, read under the lock.
+        const stored = await table.get(String(sourceId), {});
+        if (stored == null) return { kind: "gone" as const };
+        try {
+          await patchRecord((databases as any).flair.Memory, String(sourceId), reflectPatch, {
+            pausePre: () => txnPausePoint("last-reflected-pre"),
+            pausePoint: () => txnPausePoint("last-reflected"),
+            pauseAfterStage: () => txnPausePoint("last-reflected-staged"),
+            pauseBeforeCommit: () => txnPausePoint("last-reflected-commit"),
+            expectedRow: stored,
+          });
+        } catch (err) {
+          console.warn("[Memory] lastReflected stamp skipped for %s (write-back refused: %s)", String(sourceId), (err as Error)?.name ?? "error");
+          return { kind: "failed" as const };
+        }
+        const verdict = await verifyCommittedFields(table, String(sourceId), stored, reflectPatch);
+        if (verdict !== "shown") {
+          console.warn("[Memory] lastReflected stamp skipped for %s (unconfirmed: %s)", String(sourceId), verdict);
+          return { kind: "unconfirmed" as const };
+        }
+        // Test-only: the update committed and the lock is still held.
+        const committed = txnPausePoint("last-reflected-committed");
+        if (committed) await committed;
+        return { kind: "stamped" as const };
+      }, { phase: "last-reflected" });
+      if (outcome.kind !== "done") {
+        console.warn("[Memory] lastReflected stamp skipped for %s (%s)", String(sourceId), outcome.kind);
       }
     } catch {}
   }

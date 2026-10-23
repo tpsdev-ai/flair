@@ -13,7 +13,7 @@
  */
 import { writeBackCommittedRow, type WriteBackOptions } from "./write-back.js";
 
-export type PatchRecordOptions = Partial<Pick<WriteBackOptions, "ctx" | "pausePre" | "pausePoint" | "label" | "attempts" | "expectedRow" | "matches">>;
+export type PatchRecordOptions = Partial<Pick<WriteBackOptions, "ctx" | "pausePre" | "pausePoint" | "pauseAfterStage" | "pauseBeforeCommit" | "label" | "attempts" | "expectedRow" | "matches">>;
 
 export async function patchRecord(
   table: any,
