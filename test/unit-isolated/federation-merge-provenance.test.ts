@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto.js";
 import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
 import { installFakeHarperTransaction } from "../helpers/fake-harper-txn.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double.ts";
 
 const PEER_ID = "inst-remote";
 let peerStore: Map<string, any>;
@@ -56,6 +57,7 @@ mock.module("harper", () => ({
         search: () => emptyGen(),
       },
       Memory: {
+        primaryStore: memoryLockDouble(),
         get: async (id: string) => memoryStore.get(id) ?? null,
         put: async (r: any) => {
           if (writeRace === "conflict") memoryStore.set(r.id, { ...memoryStore.get(r.id), content: "competing" });
@@ -65,6 +67,10 @@ mock.module("harper", () => ({
           if (harperTxn.stage(r.id, { row: r })) return r;
           memoryStore.set(r.id, { ...r });
           return r;
+        },
+        update: async (id: string, patch: Record<string, unknown>) => {
+          const row = { ...memoryStore.get(id), ...patch };
+          if (!harperTxn.stage(id, { row })) memoryStore.set(id, row);
         },
         search: () => emptyGen(),
       },
