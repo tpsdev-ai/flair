@@ -5,9 +5,10 @@
  * Harper: the `Credential(kind:"idp", idpSubject=sub)` lookup and the mapped
  * principal's `Agent` read. Each is failed once by a test-only hook under
  * FLAIR_ENABLE_TEST_FAULT_INJECTION, for a token subject named by the hook's own
- * setting. A `tools/list` on that subject answers with the JSON-RPC error a
- * `tools/call` by the same caller gets, and lists no tools; the next request
- * from the same subject is answered normally. A second instance boots with the
+ * setting. The first requests from two tagged subjects mapped to the same
+ * principal produce equal errors: a `tools/list` from one answers with the
+ * JSON-RPC error a `tools/call` from the other gets, and lists no tools; the
+ * next request from a tagged subject is answered normally. A second instance boots with the
  * same settings and the gate off, and neither setting has any effect there.
  *
  * The two calls that are compared use two subjects: each hook fails once per
@@ -101,7 +102,7 @@ async function mcp(token: string, method: string, params?: Record<string, unknow
   return JSON.parse(text);
 }
 
-/** A `tools/call` of a by-id read: it fails at resolution or reads one row, and never embeds. */
+/** A `tools/call` of a by-id read: it fails at resolution or attempts one by-id read, and never embeds. */
 function callMemoryGet(token: string): Promise<any> {
   return mcp(token, "tools/call", { name: "memory_get", arguments: { id: `mcp-rf-absent-${sfx}` } });
 }
