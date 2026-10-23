@@ -749,6 +749,8 @@ describe("round 10: the SEED stdout says exactly what it guarantees (flair#1825)
     }
   };
   const available = hasCommit(SEED_INTRODUCTION_BASE) && hasCommit(PRE_BASELINE_BASE);
+  // The real gate scans the full test tree, parsing each file with TypeScript's
+  // parser (flair#2774), hence the explicit timeout on this case.
   it.skipIf(!available)(`the SEED text names the ACTUAL base sha and says it DESCENDS from the anchor${available ? "" : " — skipped: the anchor or the pre-baseline commit is not in this checkout"}`, () => {
     const r = spawnSync("node", [join(root, "scripts", "ci", "check-cli-spawn-budgets.mjs")], {
       cwd: root,
