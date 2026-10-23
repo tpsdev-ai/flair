@@ -2,8 +2,8 @@
 
   `POST /MemoryMaintenance` takes the id's lock, once and without waiting,
   around each row's archive/expiry action. An archived row is written as an
-  incremental update of `archived` and `archivedAt`; an expired row is
-  deleted with its pointer and deletion-history rows in one owned
+  incremental update of `archived` and `archivedAt`; an expired row and its
+  pointer row are deleted in one owned
   transaction. The action decides on the committed row read under the lock,
   commits before releasing, and re-reads the committed row afterwards: an
   archive whose staged fields are not on that row is reported as skipped, and
@@ -11,8 +11,12 @@
 
   A usage contribution (POST /RecordUsage and citation-on-write) takes the
   memory id's lock before the usage-ledger lock, so the count bump's
-  read-modify-write runs on a row no owner write can change under it. The
-  count bump writes `usageCount` and the helper's commit marker.
+  read-modify-write runs on a row that an ordinary owner PUT or PATCH in the
+  same Harper process, which holds the lock until it commits, cannot change
+  under it. Not serialized with it: a composed or `_reindex` PUT that commits
+  after releasing its lock, an owner DELETE (until #2787), and a raw
+  operations write. The count bump writes `usageCount` and the helper's commit
+  marker.
 
   A run or contribution that cannot take the lock — a held id, an id whose
   last write's outcome is unresolved, or a store with no lock — writes

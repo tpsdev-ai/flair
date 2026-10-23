@@ -117,9 +117,13 @@ export class UsageLedgerReadError extends Error {
  *
  * flair#2478: the whole contribution runs under the memory id's per-id write
  * lock (resources/memory-write-lock.ts), taken before the ledger lock and once
- * without waiting. The count bump is then decided on a committed row no owner
- * write can change under it. A contribution that cannot take that lock, or the
- * ledger lock, writes nothing for that id and is logged as skipped.
+ * without waiting. The count bump is then decided on a committed row that an
+ * ordinary owner PUT or PATCH in the same Harper process, which holds the lock
+ * until it commits, cannot change under it. Not serialized with it: a
+ * composed or `_reindex` PUT that commits after releasing its lock, an owner
+ * DELETE (until #2787), and a raw operations write. A contribution that cannot
+ * take that lock, or the ledger lock, writes nothing for that id and is logged
+ * as skipped.
  *
  * The count bump is the shared write-back helper (write-back.ts): the row is
  * read inside a transaction this call OWNS, the bump is built from THAT read,
@@ -146,8 +150,9 @@ export async function recordUsageContribution(
   // Global lock order (flair#2478): the sorted Memory id locks first, then the
   // usage ledger. The whole contribution — the ledger check, any ledger create
   // and the count bump — runs under the memory id's write lock, taken once with
-  // no wait: the count bump's decision is then made on a committed row no owner
-  // write can change under it.
+  // no wait: the count bump's decision is then made on a committed row an
+  // ordinary owner PUT or PATCH cannot change under it (the writes it does not
+  // serialize are named above).
   const memoryOutcome = await withMemoryWriteLockOnce(
     (databases as any)?.flair?.Memory?.primaryStore,
     [memoryId],

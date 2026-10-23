@@ -330,10 +330,10 @@ export class MemoryMaintenance extends Resource {
                 continue;
               }
               if (outcome.value.kind !== "archived") { stats.skipped++; continue; }
-              // The committed row must still show the staged archive fields. A
-              // mismatch means another writer's write is the stored one: the
-              // row was not archived by this run, and it is reported as
-              // skipped. An unreadable read is reported as a failed item.
+              // The committed row must still show the staged archive fields. On
+              // a mismatch the row read now does not show this run's write, so
+              // the archive is unconfirmed; it is reported as skipped. An
+              // unreadable read is reported as a failed item.
               const verdict = await verifyCommittedFields(
                 (databases as any).flair.Memory,
                 record.id,

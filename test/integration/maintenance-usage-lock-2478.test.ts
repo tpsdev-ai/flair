@@ -8,7 +8,8 @@
  * asserts the archive writer's committed update names only `archived` and
  * `archivedAt`, and the usage writer's only `usageCount` and its commit marker
  * `writeBackWriteId`; the expiry writer writes no fields (it deletes the row). Each decides on the committed row it reads under the
- * lock, stages an update of only the fields it owns, commits before releasing,
+ * lock, stages its write (the archive and usage writers an update of only the
+ * fields they own, the expiry writer a delete), commits before releasing,
  * and confirms its result on the committed row. A writer that cannot take the
  * lock skips the row and reports it.
  *
@@ -26,11 +27,12 @@
  *     its last confirmation;
  *   - memory-put-committed: an owner PUT after its commit while it holds the id.
  *
- * An owner PUT/PATCH to an id a writer holds waits its budget and is refused
- * `503 memory_busy` (the code and the caller id only); the owner's values land
- * once the lock is released, beside the writer's own fields. A raw ops write
- * takes no lock: a writer that sees one at its confirmation skips, and one that
- * commits it later is caught by the writer's post-commit confirmation.
+ * An owner PUT/PATCH to an id a writer holds is refused `503 memory_busy` (the
+ * code and the caller id only) when the hold outlasts the owner's wait budget.
+ * The archive and usage cases that see that refusal then send a separate owner
+ * request after the release and assert its values are stored. A raw ops write
+ * takes no lock; a writer's post-commit verification read catches one that
+ * changes the writer's result only if it commits before that read.
  *
  * Throwaway HOME + data dir, ephemeral ports.
  */
@@ -47,6 +49,8 @@ import { RaceHarness, composeTracedComponent } from "../helpers/embedding-writer
 interface TestAgent { id: string; publicKey: Uint8Array; secretKey: Uint8Array; }
 const newAgent = (id: string): TestAgent => ({ id, ...nacl.sign.keyPair() });
 const owner = newAgent("mul-owner");
+/** A second registered agent: the competing usage contribution's caller. */
+const reader = newAgent("mul-reader");
 
 let harper: HarperInstance;
 let pauseDir: string;
@@ -206,7 +210,7 @@ beforeAll(async () => {
   }
   await opsCall({
     operation: "upsert", database: "flair", table: "Agent",
-    records: [{ id: owner.id, name: owner.id, role: "agent", publicKey: Buffer.from(owner.publicKey).toString("base64"), createdAt: new Date().toISOString() }],
+    records: [owner, reader].map((agent) => ({ id: agent.id, name: agent.id, role: "agent", publicKey: Buffer.from(agent.publicKey).toString("base64"), createdAt: new Date().toISOString() })),
   });
 }, 240_000);
 
@@ -316,7 +320,7 @@ describe("flair#2478 slice 3b — the maintenance archive writer (real Harper)",
 });
 
 describe("flair#2478 slice 3b — the maintenance expiry writer (real Harper)", () => {
-  it("held after staging: an owner PUT is refused memory_busy, then the delete commits and the owner's later write creates the row again", async () => {
+  it("held after staging: an owner PUT is refused memory_busy, then the delete commits", async () => {
     const id = "mul-exp-staged";
     await seed(id, { durability: "ephemeral", visibility: "private", expiresAt: PAST });
     const point = "maintenance-expiry-staged";
@@ -420,20 +424,22 @@ describe("flair#2478 slice 3b — the usage-count writer (real Harper)", () => {
     expect(row?.visibility).toBe("private");
   }, 120_000);
 
-  it("a contribution while the id is held is skipped and reported: no second ledger row, no second bump", async () => {
+  it("a second agent's contribution while the id is held is skipped and reported: no ledger row for that agent, no second bump", async () => {
     const id = "mul-use-miss";
     await seed(id);
     const point = "usage-count-staged";
     arm(point);
     const held = recordUsage(owner, id);
     await pauseAt(point);
-    const second = await recordUsage(owner, id);
+    const second = await recordUsage(reader, id);
     expect(second.status, `second RecordUsage: ${await second.clone().text()}`).toBe(200);
     release(point);
     await held;
     await assertReleased(point);
     expect(await waitForLog("[usage-recording] contribution skipped: busy"), "the skipped contribution was not reported").toBe(true);
     expect((await readRow(id))?.usageCount).toBe(1);
+    expect((await readLedger(owner.id, id))?.id).toBe(`${owner.id}:${id}`);
+    expect(await readLedger(reader.id, id), "the skipped contribution wrote a ledger row").toBeNull();
   }, 120_000);
 
   it("owner first: an owner PUT holding the id makes the contribution skip, and the owner's fields are stored", async () => {
