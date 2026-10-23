@@ -251,9 +251,12 @@ export class RaceHarness {
     return this.trace(id).filter((entry) => entry.writer === writer);
   }
   /** Every traced write by `writer` on `id` is an incremental update of exactly `fields`. */
-  expectIncrementalWrites(id: string, writer: string, fields: string[] = EMBEDDING_UPDATE_FIELDS): void {
+  expectIncrementalWrites(id: string, writer: string, fields: string[] = EMBEDDING_UPDATE_FIELDS, expectedCount?: number): void {
     const writes = this.writesBy(id, writer);
     expect(writes.length, `no Memory write by ${writer} was traced for ${id}`).toBeGreaterThan(0);
+    if (expectedCount !== undefined) {
+      expect(writes.length, `${writer} wrote ${id} ${writes.length} times`).toBe(expectedCount);
+    }
     for (const entry of writes) {
       expect(entry.method, `${writer} wrote ${id} with ${entry.method}`).toBe("update");
       expect(entry.fields).toEqual([...fields].sort());

@@ -101,15 +101,18 @@ async function updateRow(row: Record<string, unknown>): Promise<void> {
 async function deleteRow(id: string): Promise<void> {
   await ops({ operation: "delete", database: "flair", table: "Memory", ids: [id] });
 }
-async function purgeRow(id: string): Promise<void> {
+async function purgeBusy(id: string): Promise<{ status: number; body: any }> {
   const res = await fetch(`${harper.httpURL}/MemoryPurge`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: basicAuth() },
     body: JSON.stringify({ ids: [id] }),
     signal: AbortSignal.timeout(30_000),
   });
-  const text = await res.text();
-  expect(res.status, `MemoryPurge: ${text.slice(0, 300)}`).toBe(200);
+  return { status: res.status, body: await res.json() };
+}
+async function purgeRow(id: string): Promise<void> {
+  const { status, body } = await purgeBusy(id);
+  expect(status, `MemoryPurge: ${JSON.stringify(body).slice(0, 300)}`).toBe(200);
 }
 
 /** Rows in MemoryDeletionHistory for one memory id. */
@@ -416,20 +419,22 @@ describe("flair#2441 — Memory.put confirms the stored row (real Harper)", () =
     expect(await readRow(id), "Memory.put re-created the deleted row").toBeNull();
   }, 60_000);
 
-  it("a PURGE between the read and the write is refused and the row stays purged", async () => {
+  // flair#2478 slice 3b: the purge takes the target's per-id write lock, so a
+  // purge that arrives while the put holds the id is refused busy and deletes
+  // nothing; once the put has committed, a purge removes the row.
+  it("a PURGE between the read and the write is refused busy and lands once the put commits", async () => {
     const id = `csr-put-purge-${Date.now()}`;
     await seed(id, randomUUID());
-    const { response, paused, released, observed } = await withPaused(
-      "memory-put", () => put(id, "put v2"), () => purgeRow(id),
-      () => waitForRowGone(id, 15_000),
-    );
+    const { response, paused, released, competed } = await withPaused("memory-put", () => put(id, "put v2"), () => purgeBusy(id));
     expect(paused, "Memory.put was not paused").toBe(true);
     expect(released).toBe("go");
-    expect(observed, "the PURGE did not become visible to a fresh read").toBe(true);
+    expect(competed?.status).toBe(503);
+    expect(competed?.body).toEqual({ error: "memory_busy", caller: "admin" });
     const text = await response.clone().text();
-    expect(response.status, text.slice(0, 200)).toBe(409);
-    expect(JSON.parse(text).error).toBe("stored_row_changed");
-    expect(await readRow(id), "Memory.put re-created the purged row").toBeNull();
+    expect(response.status, text.slice(0, 200)).toBeLessThan(300);
+    expect(await readRow(id), "the refused purge removed the row").not.toBeNull();
+    await purgeRow(id);
+    expect(await readRow(id), "the purge did not remove the row the put committed").toBeNull();
   }, 60_000);
 
   it("a same-id REPLACE with a new token is refused and not overwritten", async () => {
@@ -471,21 +476,19 @@ describe("flair#2441 — Memory.put confirms the stored row (real Harper)", () =
     expect(JSON.parse(text).error).toBe("stored_row_changed");
   }, 60_000);
 
-  it("a PURGE between the staged write and its commit is refused and the row stays purged", async () => {
+  it("a PURGE between the staged write and its commit is refused busy and lands once the put commits", async () => {
     const id = `csr-put-staged-purge-${Date.now()}`;
     await seed(id, randomUUID());
-    const { response, paused, released, observed } = await withPaused(
-      "memory-put-staged", () => put(id, "put v2"), () => purgeRow(id),
-      () => waitForRowGone(id, 15_000),
-    );
+    const { response, paused, released, competed } = await withPaused("memory-put-staged", () => put(id, "put v2"), () => purgeBusy(id));
     expect(paused, "Memory.put was not paused after staging its write").toBe(true);
     expect(released).toBe("go");
-    expect(observed, "the PURGE did not become visible to a fresh read").toBe(true);
-    // The competitor's row stands, and the put is refused by name, not answered with success.
-    expect(await readRow(id), "Memory.put re-created the purged row").toBeNull();
+    expect(competed?.status).toBe(503);
+    expect(competed?.body).toEqual({ error: "memory_busy", caller: "admin" });
     const text = await response.clone().text();
-    expect(response.status, text.slice(0, 200)).toBe(409);
-    expect(JSON.parse(text).error).toBe("stored_row_changed");
+    expect(response.status, text.slice(0, 200)).toBeLessThan(300);
+    expect(await readRow(id), "the refused purge removed the row").not.toBeNull();
+    await purgeRow(id);
+    expect(await readRow(id), "the purge did not remove the row the put committed").toBeNull();
   }, 60_000);
 
   it("a same-id REPLACE between the staged write and its commit is refused and not overwritten", async () => {
