@@ -355,7 +355,8 @@ export class ReflectMemories extends Resource {
         // write lock, once and without waiting, and reads the committed row
         // under it. A held id, an outcome-unknown marker or a store with no
         // lock skips that source and reports it; a stamp is an automatic
-        // writer and never overwrites an owner's write. The patch is an
+        // writer, and its incremental update preserves the owner's other
+        // fields while updating `lastReflected`. The patch is an
         // incremental update of `lastReflected`, and its committed row is
         // confirmed before the lock is released. A stamp failure cannot fail
         // the request.

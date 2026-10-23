@@ -330,12 +330,13 @@ export class FeedMemories extends Resource {
     // caller-supplied server-stamped field (instanceToken, provenance), then
     // PRESERVE the existing row's incarnation token, else generate one.
     stripServerStampedFields(record);
-    // flair#2478 slice 3b: the write-back runs under the id's per-id Memory
-    // write lock, so its read, decision and commit sit on one committed basis
-    // (the feed write is a foreground client write: a lock miss waits its
-    // budget, then refuses `503 memory_busy`). The write-back confirms its
-    // committed row as before; a pure create has a fresh id, so the lock is
-    // uncontended.
+    // flair#2478 slice 3b: the ordinary (non-skill) write-back runs under the
+    // id's per-id Memory write lock, so its read, decision and commit sit on one
+    // committed basis (the feed write is a foreground client write: a lock miss
+    // waits its budget, then refuses `503 memory_busy`). The write-back confirms
+    // its committed row as before. An omitted id is generated; a caller-supplied
+    // id can contend. The skill branch above returns before this lock; its
+    // conversion is deferred.
     const locked = await withMemoryWriteLock(
       memoryLockStore(),
       [String(record.id)],
@@ -688,8 +689,9 @@ async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> 
   // flair#2478 slice 3b: the repair is an automatic writer. It takes the id's
   // per-id Memory write lock once and without waiting; a held id, an
   // outcome-unknown marker or a store with no lock skips the repair and
-  // reports it, and the matched row is returned unchanged for the next feed
-  // write to retry.
+  // reports it, and returns the matched row without its inline pointer fields,
+  // unrepaired. A later feed write repairs it only if the row still matches
+  // and still lacks an expiry.
   const locked = await withMemoryWriteLockOnce(
     memoryLockStore(),
     [id],

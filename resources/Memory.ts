@@ -1048,9 +1048,10 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
  * flair#2478 slice 3b: each stamp takes the source id's per-id Memory write
  * lock, once and without waiting, and reads the committed row under it. A held
  * id, an outcome-unknown marker or a store with no lock skips that source and
- * reports it; the stamp is an automatic writer and never overwrites an owner's
- * write. The patch is an incremental update of `lastReflected`, decided on the
- * committed row, and confirmed on the committed row after the commit.
+ * reports it; the stamp is an automatic writer, and its incremental update
+ * preserves the owner's other fields while updating `lastReflected`. The patch
+ * is an incremental update of `lastReflected`, decided on the committed row,
+ * and confirmed on the committed row after the commit.
  */
 async function markDerivedSourcesReflected(content: any): Promise<void> {
   if (!Array.isArray(content.derivedFrom) || content.derivedFrom.length === 0) return;

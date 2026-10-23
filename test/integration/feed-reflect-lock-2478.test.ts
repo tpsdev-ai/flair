@@ -254,15 +254,21 @@ describe("flair#2478 slice 3b — the feed dedup expiry repair (real Harper)", (
     expect(typeof (await h.readRow(id))?.expiresAt).toBe("string");
   }, 120_000);
 
-  it("a repair while the id is held skips and reports it, and returns the matched row unchanged", async () => {
+  it("a repair while the id is held skips and reports it, and returns the matched row unrepaired", async () => {
     const id = "frl-repair-miss";
     const text = "the skipped ephemeral feed row";
     await seedDedup(id, text);
+    const matched = await h.readRow(id);
     h.arm("feed-dedup-repair-staged");
     const held = feed(id, text, owner.id, "private");
     await h.assertPaused("feed-dedup-repair-staged");
     const second = await feed(id, text, owner.id, "private");
     expect(second.status, (await second.clone().text()).slice(0, 300)).toBe(200);
+    const skipped = await second.json();
+    const fields = ["id", "agentId", "content", "durability", "visibility", "createdAt", "instanceToken"];
+    for (const field of fields) expect(matched?.[field], `seeded ${field}`).toEqual(expect.any(String));
+    expect(Object.fromEntries(fields.map((f) => [f, skipped[f]]))).toEqual(Object.fromEntries(fields.map((f) => [f, matched[f]])));
+    expect(skipped.expiresAt ?? null).toBeNull();
     expect((await h.readRow(id))?.expiresAt ?? null).toBeNull();
     await h.release("feed-dedup-repair-staged");
     await held;
