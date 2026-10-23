@@ -41,6 +41,7 @@ class ReindexIndexUnconfirmed extends Error {
 }
 import { txnPausePoint } from "./txn-pause-point.js";
 import { buildReindexRow } from "./Memory.js";
+import { withMemoryWriteLockOnce } from "./memory-write-lock.js";
 
 type AgentDrift = { agentId: string; primary: number; indexed: number; missing: number };
 
@@ -49,11 +50,13 @@ type ReindexStats = {
   agentsWithDrift: number;
   totalMissing: number;
   reindexed: number;
+  skipped: number;
   errors: number;
   dryRun: boolean;
   agentFilter: string | null;
   drift: AgentDrift[];
   errorSamples: Array<{ id: string; message: string; outcome?: WriteBackConflictError["outcome"] }>;
+  skippedSamples: Array<{ id: string; reason: string }>;
 };
 
 export class MemoryReindex extends Resource {
@@ -89,11 +92,13 @@ export class MemoryReindex extends Resource {
       agentsWithDrift: 0,
       totalMissing: 0,
       reindexed: 0,
+      skipped: 0,
       errors: 0,
       dryRun,
       agentFilter,
       drift: [],
       errorSamples: [],
+      skippedSamples: [],
     };
 
     // Pass 1: primary-store scan. Count records per agent.
@@ -158,30 +163,48 @@ export class MemoryReindex extends Resource {
       for (const id of chunk) {
         try {
           let commitPauses = 0;
-          const outcome = await writeBackCommittedRow(
-            Memory,
-            id,
-            (record: any) => {
-              if (!record) return { skip: true };
-              // Built by the function Memory.put()'s `_reindex` branch uses,
-              // from this transaction's read.
-              const built = buildReindexRow({ ...record, _reindex: true }, record);
-              if (!("row" in built)) throw new Error(`${built.error}: ${built.message}`);
-              return { idempotent: true, write: built.row };
-            },
-            {
-              ctx, label: "MemoryReindex", expectedRow: selectedRows.get(id),
-              pausePre: () => txnPausePoint("reindex-put-pre"),
-              pausePoint: () => txnPausePoint("reindex-put"),
-              pauseBeforeCommit: () => {
-                switch (commitPauses++) {
-                  case 0: return txnPausePoint("reindex-put-commit");
-                  case 1: return txnPausePoint("reindex-put-commit-retry");
-                  default: return txnPausePoint("reindex-put-commit-retry-retry");
-                }
+          // flair#2478 slice 3c: an automatic writer takes the row's per-id
+          // Memory write lock once, without waiting. A held id, an unresolved
+          // earlier write or a store with no lock writes nothing for the row;
+          // the skip is reported in the result rather than dropped.
+          const locked = await withMemoryWriteLockOnce(
+            (databases as any)?.flair?.Memory?.primaryStore,
+            [id],
+            () => writeBackCommittedRow(
+              Memory,
+              id,
+              (record: any) => {
+                if (!record) return { skip: true };
+                // Built by the function Memory.put()'s `_reindex` branch uses,
+                // from this transaction's read.
+                const built = buildReindexRow({ ...record, _reindex: true }, record);
+                if (!("row" in built)) throw new Error(`${built.error}: ${built.message}`);
+                return { idempotent: true, write: built.row };
               },
-            },
+              {
+                ctx, label: "MemoryReindex", expectedRow: selectedRows.get(id),
+                pausePre: () => txnPausePoint("reindex-put-pre"),
+                pausePoint: () => txnPausePoint("reindex-put"),
+                pauseAfterStage: () => txnPausePoint("reindex-put-staged"),
+                pauseBeforeCommit: () => {
+                  switch (commitPauses++) {
+                    case 0: return txnPausePoint("reindex-put-commit");
+                    case 1: return txnPausePoint("reindex-put-commit-retry");
+                    default: return txnPausePoint("reindex-put-commit-retry-retry");
+                  }
+                },
+              },
+            ),
+            { phase: "reindex-put" },
           );
+          if (locked.kind !== "done") {
+            stats.skipped++;
+            if (stats.skippedSamples.length < 5) {
+              stats.skippedSamples.push({ id, reason: locked.kind });
+            }
+            continue;
+          }
+          const outcome = locked.value;
           if ("skip" in outcome) { stats.errors++; continue; }
           if (!("write" in outcome)) throw new Error("MemoryReindex: expected a full-row plan");
           const written = writtenByAgent.get(outcome.write.agentId);
@@ -231,7 +254,7 @@ export class MemoryReindex extends Resource {
     }
 
     return {
-      message: `reindex complete: ${stats.reindexed} re-indexed, ${stats.errors} errors, ${stats.totalMissing} pre-existing index gap${stats.totalMissing === 1 ? "" : "s"}`,
+      message: `reindex complete: ${stats.reindexed} re-indexed, ${stats.skipped} skipped, ${stats.errors} errors, ${stats.totalMissing} pre-existing index gap${stats.totalMissing === 1 ? "" : "s"}`,
       stats,
     };
   }

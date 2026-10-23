@@ -5,6 +5,7 @@
  * harper, write-back and Memory mocks.
  */
 import { beforeEach, expect, mock, test } from "bun:test";
+import { memoryLockDouble } from "../helpers/memory-lock-double.ts";
 
 const IDENTITY = ["id", "agentId", "instanceToken", "contentHash", "createdAt"];
 const rows = [
@@ -25,6 +26,7 @@ mock.module("harper", () => ({
   databases: {
     flair: {
       Memory: {
+        primaryStore: memoryLockDouble(),
         search: (query?: any) => (async function* () { for (const row of rows) if (!query || !missingIndex) yield { ...row }; })(),
         get: async (id: string) => rows.find((row) => row.id === id) ?? null,
         put: async () => {},

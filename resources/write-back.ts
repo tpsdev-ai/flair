@@ -476,7 +476,17 @@ function committedShowsWrite(committed: any, basis: any, decision: WriteBackPlan
   if ("skip" in decision) return true;
   if (!decision.idempotent && committed?.[decision.commitMarkerField] !== writeId) return false;
   if ("update" in decision) {
-    if (!sameStoredRow(committed, basis)) return false;
+    // An update may change an identity field (the federation merge carries the
+    // inbound contentHash). The committed row must then show the staged value
+    // of every identity field the update names, and the basis value of the
+    // others.
+    const identity: Record<string, any> = basis == null ? basis : { ...basis };
+    if (identity != null) {
+      for (const field of WRITE_BACK_IDENTITY_FIELDS) {
+        if (Object.hasOwn(decision.update, field)) identity[field] = decision.update[field];
+      }
+    }
+    if (!sameStoredRow(committed, identity)) return false;
     return Object.entries(decision.update).every(([field, value]) => (!decision.idempotent && field === decision.commitMarkerField) || isDeepStrictEqual(committed?.[field], value));
   }
   if (!sameStoredRow(committed, decision.write)) return false;

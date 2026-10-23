@@ -11,8 +11,10 @@
  * (non-skill) feed write-back and the feed dedup repair
  * (resources/MemoryFeed.ts) and both `lastReflected` stamps
  * (resources/Memory.ts's derivedFrom sources and resources/MemoryReflect.ts's
- * gathered sources) (slice 3b part 2). The other Memory writers convert in
- * later parts.
+ * gathered sources) (slice 3b part 2); and the federation merge of an
+ * incoming Memory row (resources/Federation.ts) and the batch reindex writer
+ * (resources/MemoryReindex.ts) (slice 3c). The other Memory writers convert
+ * in later parts.
  *
  * A writer that must make its read, decision and write on one committed basis
  * runs under one key per ID of `Memory.primaryStore`'s lock: `["memory", fullStoredId]`.
@@ -273,15 +275,17 @@ export async function withMemoryWriteLock<T>(
  *  acquires again. Used by the automatic writers: the visibility
  *  backfill, the automatic promotion stamp, the embedding backfill, the
  *  embedding-stamp migration's `.content`-suffix fallback, the synthetic CI
- *  migration's re-stamp, the feed dedup repair and both `lastReflected`
- *  stamps. A held lock or a
+ *  migration's re-stamp, the feed dedup repair, both `lastReflected` stamps,
+ *  the federation merge of a Memory row and the batch
+ *  reindex writer. A held lock or a
  *  marker answers `busy`/`unknown`; that attempt of the writer writes nothing
  *  (an earlier attempt of the same call may have; each writer logs that).
  *  Whether the id is visited again is each writer's own rule (a later scan
  *  decides whether a migration row is still stale; the embedding backfill runs
  *  again only after the id's next successful HTTP Memory POST, PUT or PATCH
  *  signed by a verified Ed25519 agent, the requests that reach the auth
- *  middleware's post-response hook; a Basic-admin write starts none). */
+ *  middleware's post-response hook; a Basic-admin write starts none; a later
+ *  federation re-offer or reindex run retries the row). */
 export async function withMemoryWriteLockOnce<T>(
   store: unknown,
   ids: readonly (string | number)[],

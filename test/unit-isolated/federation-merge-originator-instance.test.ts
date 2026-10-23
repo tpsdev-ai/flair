@@ -30,6 +30,7 @@ import nacl from "tweetnacl";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto.js";
 import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
 import { installFakeHarperTransaction } from "../helpers/fake-harper-txn.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double.ts";
 
 const PEER_ID = "inst-remote";
 const ORIGIN = "instance-origin";
@@ -52,7 +53,9 @@ function emptyGen() {
 }
 
 function table(name: string) {
+  const store = memoryLockDouble();
   return {
+    primaryStore: store,
     get: async (id: string) => {
       if (name === "Memory" && pauseRead) {
         signalPause?.();
@@ -74,6 +77,10 @@ function table(name: string) {
       }
       stores[name].set(r.id, JSON.parse(JSON.stringify(r)));
       return r;
+    },
+    update: async (id: string, patch: Record<string, unknown>) => {
+      const row = { ...(stores[name].get(id) ?? {}), ...patch };
+      if (!harperTxn.stage(id, { table: name, row })) stores[name].set(id, JSON.parse(JSON.stringify(row)));
     },
     search: () => emptyGen(),
   };

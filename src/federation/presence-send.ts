@@ -47,6 +47,7 @@ export const PRESENCE_SEND_RETRYABLE_SKIP_REASONS: ReadonlySet<string> = new Set
   "future_timestamp",
   "unknown_originator_key",
   "merge_target_changed",
+  "merge_target_busy",
   "merge_error",
   "presence_agent_not_replicated",
 ]);
