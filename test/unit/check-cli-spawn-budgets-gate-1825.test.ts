@@ -587,26 +587,22 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
 
   /**
    * The first numeric `timeout` property TypeScript's parser finds on the one
-   * spawn call's options object literal, or on the initializer of the identifier
-   * passed as options; null when there is none. It reads the source, not the
-   * deadline the runtime applies.
+   * spawn call's options argument when that argument is an object literal; null
+   * otherwise. It reads the source, not the deadline the runtime applies.
    */
   function parsedTimeout(src: string): number | null {
     const syntax = ts.transpileModule(src, { reportDiagnostics: true, compilerOptions: { target: ts.ScriptTarget.ES2022 } });
     expect(syntax.diagnostics ?? []).toEqual([]);
     const sf = ts.createSourceFile("x.test.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-    const inits = new Map<string, ts.Expression>();
     const spawns: ts.CallExpression[] = [];
     const visit = (n: ts.Node): void => {
-      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) inits.set(n.name.text, n.initializer);
       if (ts.isCallExpression(n) && ["Bun.spawn", "spawnSync"].includes(n.expression.getText(sf))) spawns.push(n);
       ts.forEachChild(n, visit);
     };
     visit(sf);
     expect(spawns.length).toBe(1);
     const call = spawns[0];
-    let opts: ts.Expression | undefined = call.arguments[call.expression.getText(sf) === "Bun.spawn" ? 1 : 2];
-    if (opts && ts.isIdentifier(opts)) opts = inits.get(opts.text);
+    const opts: ts.Expression | undefined = call.arguments[call.expression.getText(sf) === "Bun.spawn" ? 1 : 2];
     if (!opts || !ts.isObjectLiteralExpression(opts)) return null;
     for (const p of opts.properties) {
       if (ts.isPropertyAssignment(p) && propertyName(p.name) === "timeout" && ts.isNumericLiteral(p.initializer)) return Number(p.initializer.text);
@@ -628,6 +624,9 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
     "Bun.spawn, options identifier": `const opts = ${opts};\ntest("t", () => {\n  Bun.spawn(${ARGV}, opts);\n}, 120_000);\n`,
     "spawnSync, options identifier": `const opts = ${opts};\ntest("t", () => {\n  spawnSync("bun", ${ARGV.replace('"bun", ', "")}, opts);\n}, 120_000);\n`,
   });
+
+  /** An options identifier is no deadline (flair#2782): only the inline forms read `inline`. */
+  const inlineOnly = (form: string, inline: number | null) => (form.endsWith("identifier") ? null : inline);
 
   /** The parser's answer, then findSpawnCalls and scanTree must both give it. */
   function expectGateAgreesWithParser(src: string, expected: number | null) {
@@ -654,7 +653,7 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
   for (const c of CASES) {
     it(`${c.name}: the gate reads ${c.expected === null ? "no deadline" : c.expected}, as the parser does`, () => {
       for (const [form, src] of Object.entries(forms(c.opts))) {
-        expectGateAgreesWithParser(src, c.expected);
+        expectGateAgreesWithParser(src, inlineOnly(form, c.expected));
       }
     });
   }
@@ -677,7 +676,7 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
 
     it(`a real options timeout after a regex literal after \`${r.name}\` is read as 90000, as the parser does`, () => {
       const opts = `{ env: { X: ${iife(r.body.replace("5000 ms", "1"))} }, timeout: 90_000 }`;
-      for (const src of Object.values(forms(opts))) expectGateAgreesWithParser(src, 90000);
+      for (const [form, src] of Object.entries(forms(opts))) expectGateAgreesWithParser(src, inlineOnly(form, 90000));
     });
   }
 
@@ -715,8 +714,8 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
     ] as const) {
       expectGateAgreesWithParser(inTemplate(`Bun.spawn(${ARGV}, ${opts})`), expected);
       expectGateAgreesWithParser(inTemplate(`spawnSync("bun", ${ARGV.replace('"bun", ', "")}, ${opts})`), expected);
-      expectGateAgreesWithParser(`const opts = ${opts};\n${inTemplate(`Bun.spawn(${ARGV}, opts)`)}`, expected);
-      expectGateAgreesWithParser(`const opts = ${opts};\n${inTemplate(`spawnSync("bun", ${ARGV.replace('"bun", ', "")}, opts)`)}`, expected);
+      expectGateAgreesWithParser(`const opts = ${opts};\n${inTemplate(`Bun.spawn(${ARGV}, opts)`)}`, null);
+      expectGateAgreesWithParser(`const opts = ${opts};\n${inTemplate(`spawnSync("bun", ${ARGV.replace('"bun", ', "")}, opts)`)}`, null);
     }
   });
 
@@ -730,13 +729,13 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
   });
 
   it("a top-level timeout after a nested one is read, for both spawn families", () => {
-    for (const src of Object.values(forms("{ env: { timeout: 5000 }, timeout: 90_000 }"))) {
-      expectGateAgreesWithParser(src, 90000);
+    for (const [form, src] of Object.entries(forms("{ env: { timeout: 5000 }, timeout: 90_000 }"))) {
+      expectGateAgreesWithParser(src, inlineOnly(form, 90000));
     }
   });
 
   it("a quoted top-level timeout key is read, for both spawn families", () => {
-    for (const src of Object.values(forms('{ "timeout": 5000 }'))) expectGateAgreesWithParser(src, 5000);
+    for (const [form, src] of Object.entries(forms('{ "timeout": 5000 }'))) expectGateAgreesWithParser(src, inlineOnly(form, 5000));
   });
 
   it("an options identifier whose one-line initializer holds only a nested timeout is no deadline", () => {
@@ -775,6 +774,7 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
       { name: "timeout: undefined", opts: "{ timeout: undefined }", expected: null },
       { name: "timeout: null", opts: "{ timeout: null }", expected: null },
       { name: "timeout: void 0", opts: "{ timeout: void 0 }", expected: null },
+      { name: "timeout: 5e3", opts: "{ timeout: 5e3 }", expected: null },
       { name: "a shorthand timeout", opts: "{ timeout }", expected: null },
       { name: "a timeout method", opts: "{ timeout() { return 5000; } }", expected: null },
       { name: "a timeout getter", opts: "{ get timeout() { return 5000; } }", expected: null },
@@ -786,8 +786,9 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
     ];
 
     for (const c of OPTION_SHAPES) {
-      it(`${c.name}, inline and as a const identifier: the gate reads ${c.expected === null ? "no deadline" : c.expected}`, () => {
-        for (const src of Object.values(forms(c.opts))) expectGateReads(src, c.expected);
+      const reads = c.expected === null ? "no deadline, inline or as a const identifier" : `${c.expected} inline and no deadline as a const identifier`;
+      it(`${c.name}: the gate reads ${reads}`, () => {
+        for (const [form, src] of Object.entries(forms(c.opts))) expectGateReads(src, inlineOnly(form, c.expected));
       });
     }
 
@@ -811,14 +812,19 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
     const identifierSrc = (decl: string) =>
       `${decl}\ntest("t", () => {\n  Bun.spawn(${ARGV}, opts);\n  spawnSync("bun", ${ARGV_REST}, opts);\n}, 120_000);\n`;
 
-    it("a clean const identifier used by two spawns gives both its deadline", () => {
-      expectGateReads(identifierSrc("const opts = { timeout: 5000 };"), 5000);
+    it("a const identifier is no deadline for either spawn that passes it, at file or case scope", () => {
+      expectGateReads(identifierSrc("const opts = { timeout: 5000 };"), null);
+      expectGateReads(`test("t", () => {\n  const opts = { timeout: 5000 };\n  Bun.spawn(${ARGV}, opts);\n  spawnSync("bun", ${ARGV_REST}, opts);\n}, 120_000);\n`, null);
     });
 
-    it("a const declared in the case body that holds both spawns gives both its deadline", () => {
-      const src = `test("t", () => {\n  const opts = { timeout: 5000 };\n  Bun.spawn(${ARGV}, opts);\n  spawnSync("bun", ${ARGV_REST}, opts);\n}, 120_000);\n`;
-      expectGateReads(src, 5000);
-    });
+    for (const member of ["opts", '"opts"']) {
+      it(`a const shadowed by the enum member ${member} is no deadline for either spawn in that enum`, () => {
+        const src =
+          `const opts = { timeout: 5000 };\nenum E {\n  ${member} = {} as any,\n` +
+          `  a = Bun.spawn(${ARGV}, opts as any) as any,\n  b = spawnSync("bun", ${ARGV_REST}, opts as any) as any,\n}\n`;
+        expectGateReads(src, null);
+      });
+    }
 
     it("a const is no deadline for spawns inside a `with` statement", () => {
       const src =

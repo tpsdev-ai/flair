@@ -598,8 +598,9 @@ function propertyNameIs(name, key) {
  * (flair#2782). The literal must have no spread, no computed key, no method, no
  * get/set accessor and no property named `__proto__`, and exactly one property
  * named `timeout`, a plain `timeout: <value>` assignment whose value is a
- * numeric literal `timeoutLiteralMs` accepts: `0`, `undefined`, `null`, `void 0`
- * and any other value are no deadline (flair#1825 r6).
+ * numeric literal whose source text `timeoutLiteralMs` accepts: `0`, `5e3`,
+ * `undefined`, `null`, `void 0` and any other value are no deadline (flair#1825
+ * r6).
  */
 function objectLiteralDeadlineMs(obj) {
   let timeoutProp = null;
@@ -615,125 +616,17 @@ function objectLiteralDeadlineMs(obj) {
     }
   }
   if (count !== 1 || !ts.isPropertyAssignment(timeoutProp)) return null;
-  return ts.isNumericLiteral(timeoutProp.initializer) ? timeoutLiteralMs(timeoutProp.initializer.text) : null;
-}
-
-/**
- * True when `id` is the name of a property access, a qualified name's right side,
- * an object-literal property, method or accessor, or a class, interface or enum
- * member: a name, not a reference to a binding.
- */
-function isPropertyName(id) {
-  const p = id.parent;
-  if (ts.isPropertyAccessExpression(p)) return p.name === id;
-  if (ts.isQualifiedName(p)) return p.right === id;
-  if (
-    ts.isPropertyAssignment(p) ||
-    ts.isPropertyDeclaration(p) ||
-    ts.isPropertySignature(p) ||
-    ts.isMethodDeclaration(p) ||
-    ts.isMethodSignature(p) ||
-    ts.isGetAccessorDeclaration(p) ||
-    ts.isSetAccessorDeclaration(p) ||
-    ts.isEnumMember(p)
-  ) {
-    return p.name === id;
-  }
-  return false;
-}
-
-/** Every identifier in the file that `isPropertyName` does not exclude, grouped by text. */
-function identifierReferences(sf) {
-  const byName = new Map();
-  const visit = (node) => {
-    if (ts.isIdentifier(node) && !isPropertyName(node)) {
-      const list = byName.get(node.text);
-      if (list) list.push(node);
-      else byName.set(node.text, [node]);
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sf);
-  return byName;
-}
-
-/**
- * True when the file has a `with` statement or an unqualified `eval` identifier
- * (a property such as `globalThis.eval` is not one): either can bind a name at
- * run time, so no identifier is resolved in it (flair#2782).
- */
-function hasDynamicScope(sf, references) {
-  if (references.has("eval")) return true;
-  let found = false;
-  const visit = (node) => {
-    if (found) return;
-    if (ts.isWithStatement(node)) found = true;
-    else ts.forEachChild(node, visit);
-  };
-  visit(sf);
-  return found;
-}
-
-/**
- * The node a `const` declaration is scoped to: its block, case block, source
- * file or module block, or the `for` statement it heads; null for any other
- * position (flair#2782).
- */
-function constScopeOf(decl) {
-  const holder = decl.parent.parent;
-  if (ts.isForStatement(holder)) return holder;
-  if (!ts.isVariableStatement(holder)) return null;
-  const container = holder.parent;
-  if (ts.isCaseClause(container) || ts.isDefaultClause(container)) return container.parent;
-  if (ts.isBlock(container) || ts.isSourceFile(container) || ts.isModuleBlock(container)) return container;
-  return null;
-}
-
-/**
- * The deadline the gate reads from an options identifier, or null (flair#2782).
- * It resolves only when the file has no `with` statement and no unqualified
- * `eval`, declares the name exactly once, as a non-exported `const` whose
- * initializer (wrappers stripped) is an object literal the gate reads a deadline
- * from, and every other reference to the name is the options argument of a spawn
- * call this gate finds inside the scope of that `const`. Any other reference (one outside that scope,
- * a property or element write, `delete`, `Object.assign`, an argument to another
- * function, an export) is no deadline.
- */
-function identifierDeadlineMs(id, ctx) {
-  if (ctx.dynamicScope) return null;
-  let decl = null;
-  const uses = [];
-  for (const ref of ctx.references.get(id.text) ?? []) {
-    if (ts.isVariableDeclaration(ref.parent) && ref.parent.name === ref) {
-      if (decl) return null;
-      decl = ref.parent;
-    } else if (ctx.spawnOptionArgs.has(ref)) {
-      uses.push(ref);
-    } else {
-      return null;
-    }
-  }
-  if (!decl?.initializer) return null;
-  const list = decl.parent;
-  if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.BlockScoped) !== ts.NodeFlags.Const) return null;
-  if (ts.isVariableStatement(list.parent) && (ts.getModifiers(list.parent) ?? []).length > 0) return null;
-  const scope = constScopeOf(decl);
-  if (!scope || uses.some((ref) => ref.pos < scope.pos || ref.end > scope.end)) return null;
-  const init = stripWrappers(decl.initializer);
-  return ts.isObjectLiteralExpression(init) ? objectLiteralDeadlineMs(init) : null;
+  return ts.isNumericLiteral(timeoutProp.initializer) ? timeoutLiteralMs(timeoutProp.initializer.getText()) : null;
 }
 
 /**
  * The deadline the gate reads from a spawn's options argument, or null
- * (flair#2782): the argument, wrappers stripped, must BE an object literal the
- * gate reads one from, or an identifier that resolves to one. A larger
- * expression containing a literal (`{ timeout: 5000 } && {}`) is no deadline.
+ * (flair#2782). Only an object literal written in the call (wrappers stripped)
+ * is read; an identifier or any other expression, including a larger expression
+ * containing a literal (`{ timeout: 5000 } && {}`), is no deadline.
  */
-function optionsDeadlineMs(arg, ctx) {
-  if (!arg) return null;
-  if (ts.isObjectLiteralExpression(arg)) return objectLiteralDeadlineMs(arg);
-  if (ts.isIdentifier(arg)) return identifierDeadlineMs(arg, ctx);
-  return null;
+function optionsDeadlineMs(arg) {
+  return arg && ts.isObjectLiteralExpression(arg) ? objectLiteralDeadlineMs(arg) : null;
 }
 
 /** All spawn-family calls in the file (node forms + Bun forms), with CLI-entry targeting. */
@@ -804,14 +697,8 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
   // The deadline the gate reads from each spawn's options argument (flair#2782), so
   // a case budget can be checked against the sum of the waits inside it
   // (flair#1825). A `timeout` inside argv is never read (round 9 item 2).
-  const references = identifierReferences(sf);
-  const ctx = {
-    spawnOptionArgs: new Set([...optionsArgOf.values()].filter(Boolean)),
-    references,
-    dynamicScope: hasDynamicScope(sf, references),
-  };
   for (const call of calls) {
-    call.timeoutMs = optionsDeadlineMs(optionsArgOf.get(call), ctx);
+    call.timeoutMs = optionsDeadlineMs(optionsArgOf.get(call));
     call.hasTimeout = call.timeoutMs !== null;
   }
   return { calls, ids };

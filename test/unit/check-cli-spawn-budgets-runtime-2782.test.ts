@@ -27,8 +27,6 @@ const ACCEPTED: Shape[] = [
   { name: "an object literal that `satisfies` a type", opts: `{ timeout: ${TIMEOUT_MS} } satisfies object` },
   { name: "a non-null object literal", opts: `{ timeout: ${TIMEOUT_MS} }!` },
   { name: "a quoted timeout key", opts: `{ "timeout": ${TIMEOUT_MS} }` },
-  { name: "a const identifier", decl: `const opts = { timeout: ${TIMEOUT_MS} };`, opts: "opts" },
-  { name: "a const identifier `as` a type", decl: `const opts = { timeout: ${TIMEOUT_MS} } as SpawnSyncOptions;`, opts: "opts" },
 ];
 
 const REJECTED: Shape[] = [
@@ -87,6 +85,14 @@ const RUNTIMES = [
           `console.log(JSON.stringify({ runtime: process.versions.bun ? "bun" : "node", timedOut: r.error?.code === "ETIMEDOUT", status: r.status, ms: Date.now() - started }));\n${s.around?.[1] ?? ""}\n`,
         { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
       ).outputText,
+    // The spawn sits in an enum member's initializer, where `opts` names the enum member.
+    enumScript: (member: string) =>
+      ts.transpileModule(
+        `const { spawnSync } = require("node:child_process");\nconst opts = { timeout: ${TIMEOUT_MS} };\nlet r: any;\nlet started = 0;\n` +
+          `enum E {\n  ${member} = {} as any,\n  run = ((started = Date.now()), (r = spawnSync(process.execPath, ${CHILD}, opts as any)), 0) as any,\n}\n` +
+          `console.log(JSON.stringify({ runtime: process.versions.bun ? "bun" : "node", timedOut: r.error?.code === "ETIMEDOUT", status: r.status, ms: Date.now() - started }));\n`,
+        { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+      ).outputText,
     // `spawnSync(command, options, …)`: with no argv array, Node ignores the third argument.
     ignoredGateCall: `spawnSync("src/cli.ts", { shell: true }, { timeout: ${TIMEOUT_MS} });`,
     ignoredScript:
@@ -101,6 +107,10 @@ const RUNTIMES = [
     script: (s: Shape) =>
       `${s.decl ?? ""}\n${s.around?.[0] ?? ""}\nconst started = Date.now();\nconst r = Bun.spawnSync([process.execPath, ...${CHILD}], ${s.opts});\n` +
       `console.log(JSON.stringify({ runtime: process.versions.bun ? "bun" : "node", timedOut: r.exitedDueToTimeout === true, status: r.exitCode, ms: Date.now() - started }));\n${s.around?.[1] ?? ""}\n`,
+    enumScript: (member: string) =>
+      `const opts = { timeout: ${TIMEOUT_MS} };\nlet r: any;\nlet started = 0;\n` +
+      `enum E {\n  ${member} = {} as any,\n  run = ((started = Date.now()), (r = Bun.spawnSync([process.execPath, ...${CHILD}], opts as any)), 0) as any,\n}\n` +
+      `console.log(JSON.stringify({ runtime: process.versions.bun ? "bun" : "node", timedOut: r.exitedDueToTimeout === true, status: r.exitCode, ms: Date.now() - started }));\n`,
     // `Bun.spawnSync({ cmd }, …)`: the object form ignores a second argument.
     ignoredGateCall: `Bun.spawnSync({ cmd: ["bun", "src/cli.ts", "status"] }, { timeout: ${TIMEOUT_MS} });`,
     ignoredScript:
@@ -146,6 +156,25 @@ describe("accepted and rejected options shapes: the gate's reading matches real 
         expect(o.ms, shape.name).toBeGreaterThanOrEqual(CHILD_SLEEP_MS);
       }
     }, 60_000);
+
+    for (const member of ["opts", '"opts"']) {
+      it(`${runtime.name}: a const shadowed by the enum member ${member} is no deadline, and the child runs to the end`, async () => {
+        for (const call of ['spawnSync("bun", ["src/cli.ts", "status"], opts as any)', 'Bun.spawnSync(["bun", "src/cli.ts", "status"], opts as any)']) {
+          const { calls } = findSpawnCalls(`const opts = { timeout: ${TIMEOUT_MS} };\nenum E {\n  ${member} = {} as any,\n  run = ${call} as any,\n}\n`);
+          expect(calls.length).toBe(1);
+          expect(calls[0].isCliEntry).toBe(true);
+          expect(calls[0].timeoutMs ?? null).toBeNull();
+        }
+        const proc = Bun.spawn([runtime.command(), "-e", runtime.enumScript(member)], { stdout: "pipe", stderr: "pipe", timeout: 30_000 });
+        const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+        expect(code, stderr).toBe(0);
+        const o = JSON.parse(stdout) as Outcome;
+        expect(o.runtime).toBe(runtime.expectedRuntime);
+        expect(o.timedOut).toBe(false);
+        expect(o.status).toBe(0);
+        expect(o.ms).toBeGreaterThanOrEqual(CHILD_SLEEP_MS);
+      }, 60_000);
+    }
 
     it(`${runtime.name}: an options argument the call's overload ignores is no deadline, and the child runs to the end`, async () => {
       const { calls } = findSpawnCalls(`test("t", () => {\n  ${runtime.ignoredGateCall}\n}, 120_000);\n`);
