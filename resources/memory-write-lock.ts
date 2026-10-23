@@ -7,8 +7,12 @@
  * verified Ed25519 agent (resources/auth-middleware.ts), the embedding-stamp
  * migration's `.content`-suffix fallback (slice 3), the synthetic CI
  * migration's re-stamp of its own rows, and the operator purge
- * (resources/MemoryPurge.ts, whole target set) (slice 3b). The other Memory
- * writers convert in later parts.
+ * (resources/MemoryPurge.ts, whole target set) (slice 3b); the ordinary
+ * (non-skill) feed write-back and the feed dedup repair
+ * (resources/MemoryFeed.ts) and both `lastReflected` stamps
+ * (resources/Memory.ts's derivedFrom sources and resources/MemoryReflect.ts's
+ * gathered sources) (slice 3b part 2). The other Memory writers convert in
+ * later parts.
  *
  * A writer that must make its read, decision and write on one committed basis
  * runs under one key per ID of `Memory.primaryStore`'s lock: `["memory", fullStoredId]`.
@@ -268,8 +272,9 @@ export async function withMemoryWriteLock<T>(
 /** One attempt, no wait, per call; a writer that retries calls it again and
  *  acquires again. Used by the automatic writers: the visibility
  *  backfill, the automatic promotion stamp, the embedding backfill, the
- *  embedding-stamp migration's `.content`-suffix fallback and the synthetic CI
- *  migration's re-stamp. A held lock or a
+ *  embedding-stamp migration's `.content`-suffix fallback, the synthetic CI
+ *  migration's re-stamp, the feed dedup repair and both `lastReflected`
+ *  stamps. A held lock or a
  *  marker answers `busy`/`unknown`; that attempt of the writer writes nothing
  *  (an earlier attempt of the same call may have; each writer logs that).
  *  Whether the id is visited again is each writer's own rule (a later scan

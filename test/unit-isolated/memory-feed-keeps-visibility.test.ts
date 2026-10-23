@@ -18,6 +18,7 @@ afterAll(() => txn.restore());
 const databasesMock = {
   flair: {
     Memory: {
+      primaryStore: { tryLock: () => true, unlock: () => {}, resetReadTxn: () => {} },
       get: async (id: string) => {
         getCount++;
         if (failGetAt !== null && getCount === failGetAt) throw new Error("storage unavailable");

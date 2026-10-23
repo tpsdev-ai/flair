@@ -11,6 +11,11 @@
  * next request from a tagged subject is answered normally. A second instance boots with the
  * same settings and the gate off, and neither setting has any effect there.
  *
+ * After the failed credential read is answered, a `tools/call` by the same
+ * subject writes a memory owned by the principal its `Credential` row maps it
+ * to, and a subject with no `Credential` row is refused the same call: recovery
+ * is the mapping, not only a list.
+ *
  * The two calls that are compared use two subjects: each hook fails once per
  * subject, so the subject that saw the failed tools/list is answered normally
  * afterwards. Both subjects of a case map to the same principal, so a refused
@@ -48,6 +53,8 @@ const PRINCIPAL_CALL_SUB = `${PRINCIPAL_READ_TAG}-call`;
 
 const CREDENTIAL_READ_PRINCIPAL = `mcp-rf-cred-${sfx}`;
 const PRINCIPAL_READ_PRINCIPAL = `mcp-rf-principal-${sfx}`;
+// No Credential row names this subject, so resolution refuses its tool calls.
+const UNMAPPED_SUB = `unmapped-${sfx}`;
 
 /** The tools listed for an active non-admin agent: every tool but the gated soul_set. */
 const UNGATED_TOOLS = Object.keys(TOOLS).filter((name) => name !== "soul_set").sort();
@@ -176,6 +183,30 @@ describe("/mcp tools/list answers a failed resolution read with the tools/call e
     const again = await mcp(await mintToken(CREDENTIAL_LIST_SUB), "tools/list");
     expect(again.error, JSON.stringify(again.error)).toBeUndefined();
     expect(again.result.tools.map((t: any) => t.name).sort()).toEqual(UNGATED_TOOLS);
+
+    // Recovery proves the mapping: the same subject's tools/call runs as the
+    // principal its Credential row names.
+    const token = await mintToken(CREDENTIAL_LIST_SUB);
+    const stored = await mcp(token, "tools/call", {
+      name: "memory_store",
+      arguments: { content: `mcp read-failure recovery ${sfx}` },
+    });
+    expect(stored.error, JSON.stringify(stored.error)).toBeUndefined();
+    const memoryId = stored.result?.structuredContent?.id;
+    expect(typeof memoryId, `memory_store echo: ${JSON.stringify(stored.result)?.slice(0, 300)}`).toBe("string");
+
+    const read = await mcp(token, "tools/call", { name: "memory_get", arguments: { id: memoryId } });
+    expect(read.error, JSON.stringify(read.error)).toBeUndefined();
+    expect(read.result?.structuredContent?.agentId).toBe(CREDENTIAL_READ_PRINCIPAL);
+
+    // The same call by a subject with no Credential row is refused.
+    const unmapped = await mcp(await mintToken(UNMAPPED_SUB), "tools/call", {
+      name: "memory_get",
+      arguments: { id: memoryId },
+    });
+    expect(unmapped.result, JSON.stringify(unmapped.result)?.slice(0, 300)).toBeUndefined();
+    expect(unmapped.error?.code, JSON.stringify(unmapped.error)).toBe(-32001);
+    expect(unmapped.error?.message).toContain("not a provisioned flair agent");
   }, 30_000);
 
   test("a failed principal read: tools/list answers the tools/call error, lists no tools, and the next list is normal", async () => {

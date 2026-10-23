@@ -127,7 +127,7 @@ add("MemoryPurge", ["writer:memory.delete#1"], "NON_EMBED",
   "Physical removal — a delete; never writes embeddingModel.");
 add("Memory", ["writer:patchRecord#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
   "derivedFrom/lastReflected patch and delete() — never write embeddingModel.");
-add("MemoryReflect", ["writer:patchRecordSilent#1"], "NON_EMBED", "lastReflected stamp — partial, non-embedding.");
+add("MemoryReflect", ["writer:patchRecord#1"], "NON_EMBED", "lastReflected stamp — partial, non-embedding.");
 add("hit-tracking", [
   "writer:this.pending.delete#1",
   "writer:this.cache.delete#1",

@@ -356,9 +356,8 @@ export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = F
 
 // ─── Fixed-fragment guard (flair#1498) ───────────────────────────────────────
 
-// A changelog fragment must not claim a GHSA the audit gate flags
-// FIXED-FOR-BUN-ONLY: those advisories are fixed for bun installs only and still
-// reach npm installs via harper's npm-shrinkwrap. Claiming them "fixed" in the
+// A changelog fragment must not claim "fixed" for an npm-install-only GHSA: the
+// allowlist says npm installs still report it. Claiming it "fixed" in the
 // changelog would overstate the fix. The pinned set is the allowlist entries
 // whose `sources` include "npm-install" but not "bun".
 export function fixedForBunOnlyGhsas(allowlist) {
@@ -372,14 +371,12 @@ export function fixedForBunOnlyGhsas(allowlist) {
 }
 
 // Fragments whose body uses the word "fixed" for a pinned GHSA. The word check is
-// case-insensitive and word-bounded so "fixed" in prose still counts, but
-// "FIXED-FOR-BUN-ONLY" (the gate's own label) does not — that label is the gate
-// saying the advisory is NOT fixed for npm installs, so quoting it is not a claim.
+// case-insensitive and word-bounded, so "fixed" in prose counts.
 export function fixedFragmentsClaimingPinned(fragments, pinnedGhsas) {
   const offenders = [];
   for (const f of fragments) {
     const body = f.body.toUpperCase();
-    if (!/\bFIXED\b(?!-FOR-BUN-ONLY)/.test(body)) continue;
+    if (!/\bFIXED\b/.test(body)) continue;
     for (const ghsa of pinnedGhsas) {
       if (body.includes(ghsa)) {
         offenders.push({ name: f.name, ghsa });
@@ -451,13 +448,12 @@ if (isMain) {
       const offenders = fixedFragmentsClaimingPinned(readFragments(), pinned);
       if (offenders.length > 0) {
         throw new FragmentError(
-          `"fixed" fragments claim a GHSA that is FIXED-FOR-BUN-ONLY (harper-pinned): ` +
+          `"fixed" fragments claim an npm-install-only GHSA (allowlist sources include "npm-install" but not "bun"): ` +
             offenders.map((o) => `${o.name} (${o.ghsa})`).join(", ") +
-            `. npm installs still carry these via harper's shrinkwrap — re-word the fragment ` +
-            `(e.g. "fixed for bun installs") or drop the claim.`,
+            `. Re-word the fragment without "fixed" (e.g. "bun installs no longer report it") or drop the claim.`,
         );
       }
-      process.stdout.write(`✓ no "fixed" fragment claims a FIXED-FOR-BUN-ONLY GHSA.\n`);
+      process.stdout.write(`✓ no "fixed" fragment claims an npm-install-only GHSA.\n`);
     } else if (cmd === "promote") {
       const version = process.argv[3];
       const dateArg = process.argv.find((a) => a.startsWith("--date="));
