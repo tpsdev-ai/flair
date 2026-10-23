@@ -3,7 +3,7 @@
 // used twice: as the options of a CLI-entry spawn the gate reads, and as the
 // options of a real Node `child_process.spawnSync` (in a `node` process) and a
 // real `Bun.spawnSync` (in a `bun` process) of a child that sleeps longer than
-// the timeout. A shape the gate accepts must time the child out; each rejected
+// the timeout. Each accepted shape here must time the child out; each rejected
 // shape here must let it run to the end.
 
 import { describe, expect, it } from "bun:test";
@@ -79,7 +79,7 @@ const RUNTIMES = [
   },
 ];
 
-/** Runs every shape under one runtime, all at once, and returns each outcome by shape name. */
+/** Runs `shapes` under one runtime, all at once, and returns each outcome by shape name. */
 async function runShapes(runtime: (typeof RUNTIMES)[number], shapes: Shape[]): Promise<Map<string, Outcome>> {
   const outcomes = await Promise.all(
     shapes.map(async (shape) => {
@@ -92,7 +92,7 @@ async function runShapes(runtime: (typeof RUNTIMES)[number], shapes: Shape[]): P
   return new Map(outcomes);
 }
 
-describe("the gate's accepted and rejected options shapes match real spawnSync behaviour (flair#2782)", () => {
+describe("accepted and rejected options shapes: the gate's reading matches real spawnSync behaviour (flair#2782)", () => {
   for (const runtime of RUNTIMES) {
     it(`${runtime.name}: each accepted shape times the child out`, async () => {
       const outcomes = await runShapes(runtime, ACCEPTED);

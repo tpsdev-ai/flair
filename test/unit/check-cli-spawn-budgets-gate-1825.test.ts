@@ -640,21 +640,20 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
     expect(spawnNoTimeout(src)).toBe(expected === null);
   }
 
-  const CASES: Array<{ name: string; opts: string; expected: number | null; oneLine: boolean }> = [
-    { name: "a block comment inside ${…}", opts: "{ env: { X: `${/* timeout: 5000 */ 1}` } }", expected: null, oneLine: true },
-    { name: "a line comment inside ${…}", opts: "{ env: { X: `${1 // timeout: 5000 ms\n}` } }", expected: null, oneLine: false },
-    { name: "a string inside ${…}", opts: '{ env: { X: `${"timeout: 5000 ms"}` } }', expected: null, oneLine: true },
-    { name: "a nested template inside ${…}", opts: "{ env: { X: `${`timeout: 5000 ms`}` } }", expected: null, oneLine: true },
-    { name: "a comment in a nested template's own ${…}", opts: "{ env: { X: `${`a${/* timeout: 5000 */ 1}b`}` } }", expected: null, oneLine: true },
-    { name: "a regex literal inside ${…}", opts: "{ env: { X: `${String(/timeout: 5000 ms/)}` } }", expected: null, oneLine: true },
-    { name: "template text after a `{` inside a string in ${…}", opts: '{ env: { X: `${"{"} timeout: 5000 ms` } }', expected: null, oneLine: true },
-    { name: "control: a real options timeout after a ${…} holding a commented one", opts: "{ env: { X: `${/* timeout: 1 */ 1}` }, timeout: 90_000 }", expected: 90000, oneLine: true },
+  const CASES: Array<{ name: string; opts: string; expected: number | null }> = [
+    { name: "a block comment inside ${…}", opts: "{ env: { X: `${/* timeout: 5000 */ 1}` } }", expected: null },
+    { name: "a line comment inside ${…}", opts: "{ env: { X: `${1 // timeout: 5000 ms\n}` } }", expected: null },
+    { name: "a string inside ${…}", opts: '{ env: { X: `${"timeout: 5000 ms"}` } }', expected: null },
+    { name: "a nested template inside ${…}", opts: "{ env: { X: `${`timeout: 5000 ms`}` } }", expected: null },
+    { name: "a comment in a nested template's own ${…}", opts: "{ env: { X: `${`a${/* timeout: 5000 */ 1}b`}` } }", expected: null },
+    { name: "a regex literal inside ${…}", opts: "{ env: { X: `${String(/timeout: 5000 ms/)}` } }", expected: null },
+    { name: "template text after a `{` inside a string in ${…}", opts: '{ env: { X: `${"{"} timeout: 5000 ms` } }', expected: null },
+    { name: "control: a real options timeout after a ${…} holding a commented one", opts: "{ env: { X: `${/* timeout: 1 */ 1}` }, timeout: 90_000 }", expected: 90000 },
   ];
 
   for (const c of CASES) {
     it(`${c.name}: the gate reads ${c.expected === null ? "no deadline" : c.expected}, as the parser does`, () => {
       for (const [form, src] of Object.entries(forms(c.opts))) {
-        if (!c.oneLine && form.endsWith("identifier")) continue; // the gate reads a ONE-LINE initializer only
         expectGateAgreesWithParser(src, c.expected);
       }
     });
@@ -747,7 +746,7 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
   });
 
   describe("the options rule (flair#2782)", () => {
-    /** findSpawnCalls and scanTree both give `expected` for every spawn call in `src`. */
+    /** findSpawnCalls gives `expected` for every spawn call in `src`; scanTree reports a spawn offender exactly when it is null. */
     function expectGateReads(src: string, expected: number | null) {
       const { calls } = findSpawnCalls(src);
       expect(calls.length).toBeGreaterThan(0);
@@ -759,9 +758,6 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
       expect(spawnNoTimeout(src)).toBe(expected === null);
     }
 
-    // The options rule (flair#2782): the argument, wrappers stripped, IS an object
-    // literal with no spread, no computed key and exactly one plain `timeout`, or a
-    // const identifier holding one that nothing else in the file touches.
     const OPTION_SHAPES: Array<{ name: string; opts: string; expected: number | null }> = [
       { name: "a parenthesized literal", opts: "({ timeout: 5000 })", expected: 5000 },
       { name: "a literal `as` a type", opts: "{ timeout: 5000 } as SpawnSyncOptions", expected: 5000 },
@@ -790,7 +786,7 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
       });
     }
 
-    it("a spread argument at or before the options position is no deadline", () => {
+    it("a spread argument before the options position is no deadline", () => {
       expectGateReads(`test("t", () => {\n  spawnSync("bun", ...[["src/cli.ts", "status"]], { timeout: 5000 });\n}, 120_000);\n`, null);
     });
 
