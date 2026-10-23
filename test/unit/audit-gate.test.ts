@@ -1690,6 +1690,63 @@ describe("vendor-pinned nodes shipped in harper's bundle", () => {
     );
   });
 
+  // The walk selects installed manifests, so closure membership does not depend on what an import can load.
+  it("accepts a closure package whose exports expose its manifest but no bare name or imported subpath", () => {
+    const node = "node_modules/harper/node_modules/manifest-only";
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "1.0.0", inBundle: true } },
+        packages: {
+          [node]: { name: "manifest-only", version: "1.0.0", exports: { "./package.json": "./package.json" } },
+          [fastify]: { name: "fastify", version: "5.12.5", dependencies: { "manifest-only": "*" } },
+        },
+      },
+      (prefix) => expect(vendorPinnedNodeProblems(advisory("manifest-only", node, "1.0.0"), prefix)).toEqual([]),
+    );
+  });
+
+  it("accepts a subpath-only closure package that the bundled package imports through a subpath", () => {
+    const node = "node_modules/harper/node_modules/subpath-only";
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "1.0.0", inBundle: true } },
+        // fastify's source imports subpath-only/sub; its manifest names the package, which is what the walk reads.
+        packages: {
+          [node]: { name: "subpath-only", version: "1.0.0", exports: { "./sub": "./sub.js" } },
+          [fastify]: { name: "fastify", version: "5.12.5", dependencies: { "subpath-only": "*" } },
+        },
+      },
+      (prefix) => expect(vendorPinnedNodeProblems(advisory("subpath-only", node, "1.0.0"), prefix)).toEqual([]),
+    );
+  });
+
+  it("selects a nested manifest with no loadable entry point over a loadable ancestor, blocking the ancestor's exception", () => {
+    const ancestor = "node_modules/harper/node_modules/shadow-pkg";
+    const nested = `${fastify}/node_modules/shadow-pkg`;
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [ancestor]: { version: "2.0.0", inBundle: true } },
+        packages: {
+          [ancestor]: { name: "shadow-pkg", version: "2.0.0", main: "./index.js" },
+          [nested]: { name: "shadow-pkg", version: "1.0.0" },
+          [fastify]: { name: "fastify", version: "5.12.5", dependencies: { "shadow-pkg": "*" } },
+        },
+        raw: { [`${ancestor}/index.js`]: "module.exports = {};\n" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("shadow-pkg", ancestor, "2.0.0"), prefix).join("\n");
+        expect(problems).toContain(ancestor);
+        // The walk never reaches the loadable ancestor, so its vendor-pinned exception is blocked, not granted.
+        expect(problems).toContain(
+          '"shadow-pkg" is not listed in harper\'s bundleDependencies and is not in a bundled package\'s dependency closure',
+        );
+      },
+    );
+  });
+
   it("refuses when the closure walk passes its lookup limit, counting the bundled packages", () => {
     withBundlePrefix(
       {

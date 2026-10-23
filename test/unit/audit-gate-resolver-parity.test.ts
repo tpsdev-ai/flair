@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 // @ts-expect-error — plain .mjs helper, no type declarations by design.
@@ -17,7 +17,13 @@ import { harperSearchPaths, resolveHarperDependency, vendorPinnedNodeProblems } 
 const NODE_TIMEOUT_MS = 30_000;
 const CASE_BUDGET_MS = 60_000;
 
-type Manifest = { name: string; version: string; dependencies?: Record<string, string>; bundleDependencies?: string[] };
+type Manifest = {
+  name: string;
+  version: string;
+  dependencies?: Record<string, string>;
+  bundleDependencies?: string[];
+  exports?: Record<string, string>;
+};
 
 const HARPER = "node_modules/harper";
 const deps = (...names: string[]) => Object.fromEntries(names.map((name) => [name, "*"]));
@@ -28,7 +34,7 @@ const PACKAGES: Record<string, Manifest> = {
   [HARPER]: {
     name: "harper",
     version: "1.0.0",
-    dependencies: deps("pkg-a", "@scope-s/pkg-d", "above-only", "nm-only"),
+    dependencies: deps("pkg-a", "@scope-s/pkg-d", "above-only", "nm-only", "exp-only-dot", "exp-sub-only"),
     bundleDependencies: ["pkg-a"],
   },
   [`${HARPER}/node_modules/pkg-a`]: {
@@ -50,6 +56,27 @@ const PACKAGES: Record<string, Manifest> = {
   [`${HARPER}/node_modules/node_modules/nm-only`]: { name: "nm-only", version: "1.0.0", dependencies: deps("pkg-c", "pkg-g") },
   // Required only by nm-only.
   [`${HARPER}/node_modules/pkg-g`]: { name: "pkg-g", version: "1.0.0" },
+  // Exports hide ./package.json; a correct gate still selects the installed manifest.
+  [`${HARPER}/node_modules/exp-only-dot`]: { name: "exp-only-dot", version: "1.0.0", exports: { ".": "./index.js" } },
+  [`${HARPER}/node_modules/exp-sub-only`]: { name: "exp-sub-only", version: "1.0.0", exports: { "./sub": "./sub.js" } },
+  // On disk so a name-shape check, not absence, rejects them; npm names never contain a mid-segment @.
+  [`${HARPER}/node_modules/a@b`]: { name: "a@b", version: "1.0.0" },
+  [`${HARPER}/node_modules/@scope-s/a@b`]: { name: "@scope-s/a@b", version: "1.0.0" },
+};
+
+const SYMLINKED = `${HARPER}/node_modules/shadow-requirer`;
+const SYMLINKED_TARGET = `${HARPER}/node_modules/.real/shadow-requirer`;
+
+/**
+ * Packages reached through the symlinked requirer only, so they stay out of the
+ * flat edge list. The listed requirer path searches harper's top-level
+ * node_modules; its real path searches `.real/node_modules` first, which holds a
+ * different copy of `dep-copy`.
+ */
+const SYMLINKED_PACKAGES: Record<string, Manifest> = {
+  [SYMLINKED_TARGET]: { name: "shadow-requirer", version: "1.0.0", dependencies: deps("dep-copy") },
+  [`${HARPER}/node_modules/.real/node_modules/dep-copy`]: { name: "dep-copy", version: "2.0.0" },
+  [`${HARPER}/node_modules/dep-copy`]: { name: "dep-copy", version: "1.0.0" },
 };
 
 let root: string | undefined;
@@ -62,10 +89,11 @@ afterAll(() => {
 function fixture(): { prefix: string; realHarper: string } {
   if (!root) {
     root = realpathSync(mkdtempSync(join(tmpdir(), "flair-audit-parity-")));
-    for (const [dir, manifest] of Object.entries(PACKAGES)) {
+    for (const [dir, manifest] of Object.entries({ ...PACKAGES, ...SYMLINKED_PACKAGES })) {
       mkdirSync(join(root, "prefix", dir), { recursive: true });
       writeFileSync(join(root, "prefix", dir, "package.json"), JSON.stringify(manifest));
     }
+    symlinkSync(join(root, "prefix", SYMLINKED_TARGET), join(root, "prefix", SYMLINKED));
     mkdirSync(join(root, "home"));
   }
   return { prefix: join(root, "prefix"), realHarper: join(root, "prefix", HARPER) };
@@ -90,13 +118,24 @@ function nodeAnswers(edgeList: Edge[]): NodeAnswer[] {
     script,
     [
       'import { createRequire } from "node:module";',
-      'import { readFileSync } from "node:fs";',
+      'import { readFileSync, realpathSync } from "node:fs";',
       'const edges = JSON.parse(readFileSync(0, "utf8"));',
+      "/** The package.json Node selected for dep, from resolve or from the exports error that named it. */",
+      "function selectedManifest(req, dep) {",
+      "  try {",
+      '    return req.resolve(dep + "/package.json");',
+      "  } catch (e) {",
+      '    if (e.code === "MODULE_NOT_FOUND") return null;',
+      '    if (e.code !== "ERR_PACKAGE_PATH_NOT_EXPORTED") throw e;',
+      "    const named = / in (.+package\\.json)$/.exec(e.message);",
+      "    if (!named) throw e;",
+      "    return named[1];",
+      "  }",
+      "}",
       "const answers = edges.map(({ requirer, dep }) => {",
       '  const req = createRequire(requirer + "/package.json");',
-      "  let resolved = null;",
-      '  try { resolved = req.resolve(dep + "/package.json"); } catch (e) { if (e.code !== "MODULE_NOT_FOUND") throw e; }',
-      "  return { resolved, paths: req.resolve.paths(dep) };",
+      "  const resolved = selectedManifest(req, dep);",
+      "  return { resolved: resolved === null ? null : realpathSync(resolved), paths: req.resolve.paths(dep) };",
       "});",
       "process.stdout.write(JSON.stringify(answers));",
       "",
@@ -140,8 +179,10 @@ describe("the audit gate's dependency lookup matches Node's resolver", () => {
       // The fixture exercises the cases the comparison is for.
       const byEdge = new Map(edgeList.map((edge, i) => [label(edge), answers[i]!]));
       const pkgA = `${HARPER}/node_modules/pkg-a`;
-      expect(edgeList.length).toBe(22);
+      expect(edgeList.length).toBe(24);
       expect(byEdge.get(`${pkgA} -> nm-only`)!.resolved).toBeNull();
+      expect(show(byEdge.get(`${HARPER} -> exp-only-dot`)!.resolved)).toBe(`${HARPER}/node_modules/exp-only-dot/package.json`);
+      expect(show(byEdge.get(`${HARPER} -> exp-sub-only`)!.resolved)).toBe(`${HARPER}/node_modules/exp-sub-only/package.json`);
       expect(show(byEdge.get(`${pkgA} -> above-only`)!.resolved)).toBe("node_modules/above-only/package.json");
       expect(show(byEdge.get(`${pkgA} -> pkg-b`)!.resolved)).toBe(`${pkgA}/node_modules/pkg-b/package.json`);
       expect(show(byEdge.get(`${HARPER}/node_modules/@scope-s/pkg-d -> pkg-e`)!.resolved)).toBe(
@@ -151,6 +192,49 @@ describe("the audit gate's dependency lookup matches Node's resolver", () => {
         `${pkgA}/node_modules`,
         `${HARPER}/node_modules`,
       ]);
+    },
+    CASE_BUDGET_MS,
+  );
+
+  it(
+    "rejects a dependency name with an @ inside a segment, and accepts name and @scope/name",
+    () => {
+      const { prefix, realHarper } = fixture();
+      expect(resolveHarperDependency(realHarper, realHarper, "a@b")).toBeNull();
+      expect(resolveHarperDependency(realHarper, realHarper, "@scope-s/a@b")).toBeNull();
+      expect(resolveHarperDependency(realHarper, realHarper, "pkg-a")?.dir).toBe(
+        join(prefix, HARPER, "node_modules", "pkg-a"),
+      );
+      expect(resolveHarperDependency(realHarper, realHarper, "@scope-s/pkg-d")?.dir).toBe(
+        join(prefix, HARPER, "node_modules", "@scope-s", "pkg-d"),
+      );
+    },
+    CASE_BUDGET_MS,
+  );
+
+  it(
+    "resolves a symlinked requirer's dependency from the requirer's real path, as Node does",
+    () => {
+      const { prefix, realHarper } = fixture();
+      const listedDir = join(prefix, SYMLINKED);
+      const realDir = realpathSync(listedDir);
+
+      // The closure walk queues the directory resolveHarperDependency returns.
+      const requirer = resolveHarperDependency(realHarper, realHarper, "shadow-requirer");
+      expect(requirer?.dir).toBe(realDir);
+
+      const gate = resolveHarperDependency(requirer!.dir, realHarper, "dep-copy");
+      expect(gate?.dir).toBe(join(prefix, HARPER, "node_modules", ".real", "node_modules", "dep-copy"));
+      expect(JSON.parse(readFileSync(gate!.manifest, "utf8")).version).toBe("2.0.0");
+
+      // Node loads the requirer through the symlink (preserveSymlinks=false), so it resolves from the real directory.
+      const answer = nodeAnswers([{ requirer: realDir, dep: "dep-copy" }])[0]!;
+      expect(answer.resolved).toBe(gate!.manifest);
+
+      // The listed path's own search reaches the shallower copy, which the gate must not select.
+      expect(resolveHarperDependency(listedDir, realHarper, "dep-copy")?.dir).toBe(
+        join(prefix, HARPER, "node_modules", "dep-copy"),
+      );
     },
     CASE_BUDGET_MS,
   );

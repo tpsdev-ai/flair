@@ -653,7 +653,7 @@ export function harperSearchPaths(fromDir, realHarper) {
 
 /** True for a dependency name shaped like an npm package name: `name` or `@scope/name`. */
 function isPackageName(name) {
-  return /^(?:@[^@/\\]+\/)?[^@/\\][^/\\]*$/.test(name) &&
+  return /^(?:@[^@/\\]+\/)?[^@/\\][^@/\\]*$/.test(name) &&
     !name.split("/").some((part) => part === "." || part === "..");
 }
 
@@ -670,6 +670,8 @@ export function resolveHarperDependency(fromDir, realHarper, name) {
   if (typeof name !== "string" || !isPackageName(name)) return null;
   for (const searchDir of harperSearchPaths(fromDir, realHarper)) {
     const relPath = relative(realHarper, join(searchDir, name));
+    // Walk installed manifests, not runtime imports: a package may export
+    // subpaths without exporting its bare name.
     let manifest;
     try {
       manifest = realPathInsideHarper(join(realHarper, relPath, "package.json"), realHarper, `${relPath}/package.json`);
