@@ -75,8 +75,9 @@
  * worker is not seen by another.
  *
  * The critical section contains the write paths' embedding calls — the ordinary
- * PUT's regen (and its create-path dedup probe), the re-embed PATCH's compute
- * and its recompute, and the PATCH embedding refresh — and each is bounded by
+ * PUT's regen (and its create-path dedup probe), a locked POST's dedup probe
+ * and embedding, the re-embed PATCH's compute and its recompute, and the PATCH
+ * embedding refresh — and each is bounded by
  * {@link MEMORY_LOCKED_PROVIDER_TIMEOUT_MS} through {@link boundLockedProviderCall};
  * a call still pending when the timeout callback runs, or one that settles after
  * the bound, is refused with `503 memory_provider_timeout` and nothing is
