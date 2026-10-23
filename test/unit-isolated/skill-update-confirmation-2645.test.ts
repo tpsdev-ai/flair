@@ -35,6 +35,7 @@ let closeSuccessorOnRead: "committed" | "transaction" | undefined;
 let failSuccessorConfirmation = false;
 let failRetryWrite = false;
 let failVersionConfirmation = false;
+let failUndoConfirmationOf: string | undefined;
 let supersedeOnSuccessorConfirmation = false;
 /** The next version is a delete of `rowId`, linked by hash to this update or not. */
 let followingDelete: { rowId: string; linked: boolean } | null = null;
@@ -99,6 +100,7 @@ const memoryTable = {
       }
       if (failSuccessorConfirmation && !ctx?.transaction && !rows.has(id)) throw new Error("successor confirmation unavailable");
     }
+    if (id === failUndoConfirmationOf && !ctx?.transaction && !rows.has(id)) throw new Error("undo confirmation unavailable");
     return rows.get(id) ?? null;
   },
   async put(row: Row, ctx: any) {
@@ -174,7 +176,7 @@ beforeEach(() => {
   versions.clear(); memories.clear(); events.clear(); locked = false; grantHeld = true;
   dropCloses = false; revokeOnRetry = false; closeWrites = 0; confirmationRead = false; failDeleteCommit = false;
   activeTransaction = undefined; losePredecessor = false; closeSuccessorOnRead = undefined;
-  failSuccessorConfirmation = false; failRetryWrite = false; failVersionConfirmation = false;
+  failSuccessorConfirmation = false; failRetryWrite = false; failVersionConfirmation = false; failUndoConfirmationOf = undefined;
   supersedeOnSuccessorConfirmation = false; followingDelete = null;
   (globalThis as any).transaction = async (ctx: any, cb: (txn: any) => Promise<any>) => {
     const writes: any[] = [];
@@ -427,9 +429,55 @@ for (const failure of ["version", "successor"] as const) {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected refusal");
     expect(result.response.status).toBe(500);
-    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the undo of a close that did not land could not be confirmed" });
+    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the skill write's undo could not be confirmed; check its outcome, because its version and event may persist" });
   });
 }
+
+/** Run `fn`, capturing `snapshot()` each time the journal's undo starts. */
+async function withUndoSnapshot<T>(snapshot: () => T, fn: () => Promise<any>): Promise<{ result: any; atUndo: T[] }> {
+  const undo = WriteJournal.prototype.undo;
+  const atUndo: T[] = [];
+  const spy = spyOn(WriteJournal.prototype, "undo").mockImplementation(function (this: any, ctx: any, transact: any) {
+    atUndo.push(snapshot());
+    return undo.call(this, ctx, transact);
+  });
+  try {
+    return { result: await fn(), atUndo };
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+test("an undo that commits but fails its confirmation read reports it unconfirmed, though the event, version and successor are removed", async () => {
+  failSuccessorConfirmation = true;
+  const committed = () => ({ events: events.size, versions: versions.size, successor: memories.has("successor") });
+  const { result, atUndo } = await withUndoSnapshot(committed, unlandedUpdate);
+  expect(atUndo).toEqual([{ events: 1, versions: 1, successor: true }]);
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected refusal");
+  expect(result.response.status).toBe(500);
+  expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the skill write's undo could not be confirmed; check its outcome, because its version and event may persist" });
+  expect(committed()).toEqual({ events: 0, versions: 0, successor: false });
+});
+
+test("a caller refusal whose undo commits but fails its confirmation read reports it unconfirmed", async () => {
+  failUndoConfirmationOf = "prepared";
+  const { result, atUndo } = await withUndoSnapshot(() => memories.has("prepared"), () => runSkillVersionWrite({
+    ctx: { request: { tpsAgent: "writer", tpsAgentIsAdmin: false, headers: new Headers({ authorization: "TPS-Ed25519 a1:1:n:s" }) } },
+    subjectId: "subject", agentId: "writer", head: async () => null,
+    plan: async (_head, shared) => {
+      await memoryTable.put({ id: "prepared", agentId: "writer", content: "prepare write", createdAt: "2020-01-01T00:00:00.000Z" }, shared);
+      return Response.json({ error: "caller_refused" }, { status: 409 });
+    },
+    hooks: {},
+  }));
+  expect(atUndo).toEqual([true]);
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected refusal");
+  expect(result.response.status).toBe(500);
+  expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the skill write's undo could not be confirmed; check its outcome, because its version and event may persist" });
+  expect(memories.has("prepared")).toBe(false);
+});
 
 test("exhausted update restores the exact removed pointer and confirms it after commit under the version lock", async () => {
   pointers.set("predecessor", originalPointer);
@@ -453,7 +501,7 @@ for (const failure of ["commit", "read"] as const) {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected refusal");
     expect(result.response.status).toBe(500);
-    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the undo of a close that did not land could not be confirmed" });
+    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the skill write's undo could not be confirmed; check its outcome, because its version and event may persist" });
   });
 }
 
@@ -466,7 +514,7 @@ for (const timing of ["before", "during"] as const) {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected refusal");
     expect(result.response.status).toBe(500);
-    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the undo of a close that did not land could not be confirmed; a different host-pointer row was left in place" });
+    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the skill write's undo could not be confirmed; check its outcome, because its version and event may persist; a different host-pointer row was left in place" });
     expect(pointers.get("predecessor")).toEqual(replacementPointer);
     expect(pointerConfirmationRead).toBe(true);
   });

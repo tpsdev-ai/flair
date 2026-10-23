@@ -5,6 +5,7 @@
  * Memory mocks.
  */
 import { beforeEach, expect, mock, test } from "bun:test";
+import { memoryLockDouble } from "../helpers/memory-lock-double.ts";
 
 const IDENTITY = ["id", "agentId", "instanceToken", "contentHash", "createdAt"];
 let rows: any[] = [];
@@ -38,6 +39,7 @@ mock.module("harper", () => ({
   databases: {
     flair: {
       Memory: {
+        primaryStore: memoryLockDouble(),
         search: (query?: any, options?: any) => (async function* () {
           const agentCondition = query?.conditions?.find((condition: any) => condition.attribute === "agentId");
           if (query?.conditions) indexQueries.push({ conditions: query.conditions, confirmation: options !== undefined });

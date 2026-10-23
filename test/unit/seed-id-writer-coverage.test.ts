@@ -48,9 +48,11 @@ add("Memory", [
   "writer:super.patch#1",
   "writer:(databases as any).flair.Memory.delete#1",
 ], "GUARDED: Memory.post/put/patch/delete call the decision on the URL and body ids first (the put _reindex branch included).");
+add("Memory", ["alias-source:(databases as any).flair.Memory#12"],
+  "SERVER: a read-only table handle for the reindex post-commit confirmation (flair#2478 slice 3c); it writes no row.");
 add("Memory", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
   "GUARDED: closeSupersededRecord and stageGrantedClose close `supersedes`, which validateAndAuthorizeSupersedes ran through the decision before the new row was written.");
-add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:writeBackCommittedRow#1"],
   "GUARDED: FeedMemories.post calls the decision on the body id before the write-back through the shared helper (flair#2354).");
 add("MemoryFeed", ["writer:table.put#1"],
   "GUARDED: the full-row put of the table adapter FeedMemories.post hands the shared write-back helper (flair#2561); the helper writes only the row it plans under `record.id`, which is the body or URL id the decision ran on, or a server-generated `<agentId>-<time>-<uuid>` id.");
@@ -58,6 +60,8 @@ add("MemoryFeed", ["writer:(databases as any).flair.Memory.update#1"],
   "GUARDED: the dedup expiry repair (flair#2358) calls the decision on the id it writes before the incremental update (flair#2470).");
 add("Federation", ["writer:writeBackCommittedRow#1"],
   "SERVER: another table — the Presence receipt branch (flair#2578 slice 1) writes a Presence row only; the reserved-seed decision is about Memory ids.");
+add("Federation", ["alias-source:(databases as any)?.flair?.Memory#1"],
+  "SERVER: a read-only table handle for the per-id write-lock store (flair#2478 slice 3c); it writes no row.");
 add("Federation", ["writer:writeBackCommittedRow#2"],
   "GUARDED: the merge of every synced table skips a reserved id (seed_id_not_federated) before the write-back through the shared helper (flair#2450).");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
@@ -80,14 +84,18 @@ add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "write
   "BOOKKEEPING: usageCount + 1 and commit marker on a row the caller can read, through the shared write-back helper (flair#2441); the rest of the row is the stored row.");
 add("auth-middleware", ["writer:writeBackCommittedRow#1"],
   "BOOKKEEPING: the embedding backfill for the id of a Memory write that already succeeded (and so passed the decision), through the shared helper (flair#2354), under the id's per-id Memory write lock (flair#2478).");
-add("MemoryReflect", ["writer:patchRecordSilent#1"],
-  "BOOKKEEPING: lastReflected on the rows a reflection run read.");
+add("MemoryReflect", ["writer:patchRecord#1"],
+  "BOOKKEEPING: lastReflected on the rows a reflection run read, under each id's per-id Memory write lock (flair#2478).");
+add("MemoryReflect", ["alias-source:(databases as any)?.flair?.Memory#1"],
+  "The per-id Memory write-lock handle for the lastReflected stamp; it performs no Memory row write (flair#2478).");
 
 // ── SERVER ──
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
   "SERVER: the sweep selects rows by state (expired ephemeral, closed, old session notes). The seed row is persistent and closing it by supersede requires the operator-source decision.");
 add("MemoryMaintenance", ["writer:table.delete#1"], "SERVER: MemoryHostSource pointer rows, another table.");
 add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "SERVER: admin-only re-PUT of each stored row with its own stored fields, through the shared helper (flair#2354).");
+add("MemoryReindex", ["alias-source:(databases as any)?.flair?.Memory#1"],
+  "SERVER: a read-only table handle for the per-id write-lock store (flair#2478 slice 3c); it writes no row.");
 add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:writeBackCommittedRow#1"],
   "SERVER: stamps a row the promotion just wrote through Memory.put under a server-generated id, via the shared write-back helper (flair#2354).");
 add("promotion-stamp", ["writer:table.update#1"],
@@ -118,18 +126,17 @@ add("Federation", [
 ], "SERVER: other tables.");
 add("MemoryReflect", ["writer:(databases as any).flair.MemoryCandidate.put#1"], "SERVER: another table.");
 add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"], "SERVER: another table.");
-add("Memory", ["alias-source:(databases as any).flair.Memory#2"],
+add("Memory", ["alias-source:(databases as any).flair.Memory#3"],
   "SERVER: confirmSkillDelete reads the committed row and supplies the guarded close retry's table handle; its put is classified above.");
 for (const [file, alias] of [
   ["Memory", "alias-source:(databases as any).flair.Memory#1"],
-  ["Memory", "alias-source:(databases as any).flair.Memory#3"],
-  // The committed-row confirms and post-commit verification reads: #3 the
-  // re-embed's confirm (flair#2465) and #4 its post-commit verification
-  // (flair#2656); #5 the class heritage. #6/#8/#9/#12 are the Memory PUT,
-  // composed PUT, PATCH and ordinary PUT verifyWrittenRow reads; #7/#10/#11
+  ["Memory", "alias-source:(databases as any).flair.Memory#4"],
+  // The committed-row confirms and post-commit verification reads: #4 the
+  // re-embed's confirm (flair#2465) and #5 its post-commit verification
+  // (flair#2656); #6 the class heritage. #7/#9/#10/#14 are the Memory PUT,
+  // composed PUT, PATCH and ordinary PUT verifyWrittenRow reads; #8/#11/#13
   // feed confirmCommittedRow the Memory PUT new row, the reindex re-PUT and
   // the composed PUT: committed-row reads only.
-  ["Memory", "alias-source:(databases as any).flair.Memory#4"],
   ["Memory", "alias-source:(databases as any).flair.Memory#5"],
   ["Memory", "alias-source:(databases as any).flair.Memory#6"],
   ["Memory", "alias-source:(databases as any).flair.Memory#7"],
@@ -137,12 +144,19 @@ for (const [file, alias] of [
   ["Memory", "alias-source:(databases as any).flair.Memory#9"],
   ["Memory", "alias-source:(databases as any).flair.Memory#10"],
   ["Memory", "alias-source:(databases as any).flair.Memory#11"],
-  ["Memory", "alias-source:(databases as any).flair.Memory#12"],
+  ["Memory", "alias-source:(databases as any).flair.Memory#13"],
+  ["Memory", "alias-source:(databases as any).flair.Memory#14"],
+  // The derivedFrom lastReflected patchRecord's table handle (flair#2478); its
+  // patch writer is classified as BOOKKEEPING above.
+  ["Memory", "alias-source:(databases as any).flair.Memory#2"],
   // The write-lock store handle (flair#2478) — a read of primaryStore, never a write.
   ["Memory", "alias-source:(databases as any)?.flair?.Memory#1"],
   ["AdminMemory", "alias-source:(databases as any).flair.Memory#1"],
   ["Federation", "alias-source:(databases as any).flair.Memory#1"],
   ["MemoryReflect", "alias-source:(databases as any).flair.Memory#1"],
+  // The lastReflected patchRecord's table handle (flair#2478); its patch writer
+  // is classified as BOOKKEEPING above.
+  ["MemoryReflect", "alias-source:(databases as any).flair.Memory#2"],
   ["MemoryReindex", "alias-source:(databases as any).flair.Memory#1"],
   ["auth-middleware", "alias-source:(databases as any).flair.Memory#1"],
   ["promotion-stamp", "alias-source:(databases as any).flair.Memory#1"],

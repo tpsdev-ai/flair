@@ -13,6 +13,7 @@ let writes: { method: "put" | "update"; id: string; fields: string[] }[];
 const databasesMock = {
   flair: {
     Memory: {
+      primaryStore: { tryLock: () => true, unlock: () => {}, resetReadTxn: () => {} },
       get: async (id: string) => memoryStore.get(id) ?? null,
       // Harper PUT semantics: the stored row IS the record (full replacement).
       put: async (record: any) => {

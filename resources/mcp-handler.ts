@@ -34,6 +34,7 @@ import { stampOriginatorOnCreate } from "./originator-instance.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
 import { credentialMapsPrincipal, credentialPrincipalId, credentialRefusal } from "../src/lib/credential-status-rule.js";
 import { resolveVersion } from "./version.js";
+import { TEST_FAULT_INJECTION_ENV } from "./txn-pause-point.js";
 
 // The MCP protocol revision we implement (initialize handshake).
 const PROTOCOL_VERSION = "2025-06-18";
@@ -161,6 +162,56 @@ function rpcError(id: any, code: number, message: string, httpStatus = 200) {
 
 // ─── sub → Agent resolution ─────────────────────────────────────────────────
 
+// Test-only read failures (flair#2794): the `Credential(kind:"idp",
+// idpSubject=sub)` lookup and the mapped principal's `Agent` read, each failing
+// for a token subject that contains its setting's value. A setting is read only
+// when FLAIR_ENABLE_TEST_FAULT_INJECTION=1 (resources/txn-pause-point.ts), and
+// each matching subject fails once, so the request after the failing one is
+// answered normally. Nothing in a request can arm either hook.
+//
+// flair#2799 — the fired-subject state is process-lifetime: it lives here for as
+// long as the server process does and never resets between requests. It holds
+// at most TEST_READ_FAILURE_FIRED_LIMIT (setting, subject) pairs so that a
+// long-lived process driven with many distinct subjects stops arming new faults
+// instead of growing without limit. Once the set is full, the hook answers false
+// (no fault) for every further pair and logs that once. An empty setting value
+// is inert: it matches nothing and is never added to the set.
+const TEST_CREDENTIAL_READ_FAIL_SUB_ENV = "FLAIR_TEST_MCP_CREDENTIAL_READ_FAIL_SUB";
+const TEST_PRINCIPAL_READ_FAIL_SUB_ENV = "FLAIR_TEST_MCP_PRINCIPAL_READ_FAIL_SUB";
+export const TEST_READ_FAILURE_FIRED_LIMIT = 1024;
+const testReadFailuresFired = new Set<string>();
+let testReadFailuresFullLogged = false;
+
+/**
+ * Should this subject's read fail once? Test-only; false unless
+ * FLAIR_ENABLE_TEST_FAULT_INJECTION=1 and the setting names a non-empty value
+ * the subject contains. Exported for the fired-state bound's unit test.
+ */
+export function testReadFailure(setting: string, sub: string): boolean {
+  if (process.env[TEST_FAULT_INJECTION_ENV] !== "1") return false;
+  const match = process.env[setting];
+  if (!match || !sub.includes(match)) return false;
+  const key = `${setting}\n${sub}`;
+  if (testReadFailuresFired.has(key)) return false;
+  if (testReadFailuresFired.size >= TEST_READ_FAILURE_FIRED_LIMIT) {
+    if (!testReadFailuresFullLogged) {
+      testReadFailuresFullLogged = true;
+      console.warn(
+        `[flair] test-only read-failure hook fired state reached its ${TEST_READ_FAILURE_FIRED_LIMIT}-pair limit; ` +
+          "no further test read failures will be injected in this process.",
+      );
+    }
+    return false;
+  }
+  testReadFailuresFired.add(key);
+  return true;
+}
+
+/** The fired-subject set's current size. Exported for the bound's unit test. */
+export function testReadFailureFiredCount(): number {
+  return testReadFailuresFired.size;
+}
+
 /**
  * Should an unknown IdP subject be JIT-provisioned into a new Principal+
  * Credential? Gated by an explicit, auditable trust anchor — an OPEN JIT-provision
@@ -255,6 +306,9 @@ async function resolveMapping(sub: string, clientId?: string, allowJitProvision 
   let mapped: any = null;
   let refused: any = null;
   try {
+    if (testReadFailure(TEST_CREDENTIAL_READ_FAIL_SUB_ENV, sub)) {
+      throw new Error("test-only fault: the IdP credential read failed");
+    }
     for await (const cred of (databases as any).flair.Credential.search({
       conditions: [
         { attribute: "kind", comparator: "equals", value: "idp" },
@@ -277,7 +331,7 @@ async function resolveMapping(sub: string, clientId?: string, allowJitProvision 
 
   if (mapped) {
     const principalId = credentialPrincipalId(mapped)!;
-    const principal = await requireActivePrincipal(principalId);
+    const principal = await requireActivePrincipal(principalId, sub);
     const resolved: ResolvedAgent = { agentId: principalId, isAdmin: agentRecordIsAdmin(principal) };
     if (clientId) resolved.clientId = clientId;
     return { agent: resolved, credential: mapped };
@@ -385,9 +439,12 @@ export class PrincipalRefusedError extends Error {
  * never elevates on its own. This surface is gated behind FLAIR_MCP_OAUTH and is
  * default-OFF.
  */
-async function requireActivePrincipal(principalId: string): Promise<any> {
+async function requireActivePrincipal(principalId: string, sub = ""): Promise<any> {
   let principal: any;
   try {
+    if (testReadFailure(TEST_PRINCIPAL_READ_FAIL_SUB_ENV, sub)) {
+      throw new Error("test-only fault: the principal read failed");
+    }
     principal = await (databases as any).flair.Agent.get(principalId);
   } catch {
     throw new PrincipalRefusedError(

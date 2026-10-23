@@ -78,8 +78,8 @@ add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");
 add("Memory", ["writer:(databases as any).flair.Memory.delete#1"],
   "Memory.delete(): removal, not a write.");
-add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4", "alias-source:(databases as any).flair.Memory#5", "alias-source:(databases as any).flair.Memory#6", "alias-source:(databases as any).flair.Memory#7", "alias-source:(databases as any).flair.Memory#8", "alias-source:(databases as any).flair.Memory#9", "alias-source:(databases as any).flair.Memory#10", "alias-source:(databases as any).flair.Memory#11", "alias-source:(databases as any).flair.Memory#12", "alias-source:(databases as any)?.flair?.Memory#1"],
-  "Table handles: #1 is handed to patchRecord; #2 supplies confirmSkillDelete's reads and close retry (writer:table.put#1 above); #3 is the re-embed's confirm (flair#2465) and #4 its post-commit verification (flair#2656); #5 is the class heritage; the optional handle reads the write-lock store. #6/#8/#9/#12 read committed rows for the Memory PUT skill path, the composed PUT, the PATCH and the ordinary PUT; #7, #10 and #11 hand confirmCommittedRow the Memory PUT new row, the reindex re-PUT and the composed PUT: all only read committed rows.");
+add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4", "alias-source:(databases as any).flair.Memory#5", "alias-source:(databases as any).flair.Memory#6", "alias-source:(databases as any).flair.Memory#7", "alias-source:(databases as any).flair.Memory#8", "alias-source:(databases as any).flair.Memory#9", "alias-source:(databases as any).flair.Memory#10", "alias-source:(databases as any).flair.Memory#11", "alias-source:(databases as any).flair.Memory#13", "alias-source:(databases as any).flair.Memory#14", "alias-source:(databases as any)?.flair?.Memory#1"],
+  "Table handles: #1 reads the derivedFrom lastReflected stamp's committed source row; #3 supplies confirmSkillDelete's reads and close retry (writer:table.put#1 above); #4 is the re-embed's confirm (flair#2465) and #5 its post-commit verification (flair#2656); #6 is the class heritage; the optional handle reads the write-lock store. #7/#9/#10/#14 read committed rows for the Memory PUT skill path, the composed PUT, the PATCH and the ordinary PUT; #8, #11 and #13 hand confirmCommittedRow the Memory PUT new row, the reindex re-PUT and the composed PUT: all only read committed rows.");
 
 // ── Non-skill writers in other modules ──
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1", "writer:table.put#1"],
@@ -98,7 +98,7 @@ add("MemoryPurge", ["writer:memory.delete#1"],
   "Physical-removal path: removes the named rows (and a skill row's lineage) through the raw table handle — a removal, not a skill write, so the post/put SkillScan gate does not apply.");
 add("MemoryPurge", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read handle (MemoryPurge reads each row and searches a skill lineage); its delete is the site classified above.");
-add("MemoryReflect", ["writer:patchRecordSilent#1"],
+add("MemoryReflect", ["writer:patchRecord#1"],
   "lastReflected stamp — non-skill.");
 add("MemoryReindex", ["writer:writeBackCommittedRow#1"],
   "Admin-only reindex re-PUT through the shared write-back helper (flair#2354): re-writes the row it reads, not a new skill write.");
@@ -146,10 +146,20 @@ add("AdminMemory", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only admin alias.");
 add("Federation", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (merge reads the source record).");
-add("MemoryReflect", ["alias-source:(databases as any).flair.Memory#1"],
-  "Read-only alias (reflect reads source memories).");
+add("Federation", ["alias-source:(databases as any)?.flair?.Memory#1"],
+  "Read-only alias for the per-id write-lock store (flair#2478 slice 3c).");
+add("MemoryReflect", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any)?.flair?.Memory#1"],
+  "Read-only aliases (reflect reads source memories; the lastReflected patch names its handle) and the per-id Memory write-lock handle (flair#2478).");
+add("Memory", ["alias-source:(databases as any).flair.Memory#2"],
+  "The derivedFrom lastReflected patchRecord's table handle (flair#2478) — a partial, non-skill stamp.");
+add("MemoryFeed", ["alias-source:(databases as any)?.flair?.Memory#1"],
+  "The per-id Memory write-lock handle for the feed ingest and dedup repair; it performs no Memory row write (flair#2478).");
 add("MemoryReindex", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (reindex reads rows to re-embed).");
+add("MemoryReindex", ["alias-source:(databases as any)?.flair?.Memory#1"],
+  "Read-only alias for the per-id write-lock store (flair#2478 slice 3c).");
+add("Memory", ["alias-source:(databases as any).flair.Memory#12"],
+  "Read-only alias for the reindex post-commit confirmation (flair#2478 slice 3c).");
 add("auth-middleware", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (auth reads rows).");
 add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1"],

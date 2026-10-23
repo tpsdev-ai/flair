@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 // @ts-expect-error — plain .mjs helper, no type declarations by design.
 import {
@@ -480,18 +480,18 @@ describe("vendor-pinned npm-install nodes", () => {
     withInstalledHarper((prefix) => {
       expect(vendorPinnedNodeProblems(advisory([]), prefix).join("\n")).toContain("reported no nodes");
       rmSync(join(prefix, "node_modules/harper/npm-shrinkwrap.json"));
-      expect(vendorPinnedNodeProblems(advisory([harperNode]), prefix).join("\n")).toContain(
-        "Restore readable package and shrinkwrap evidence",
-      );
+      const problems = vendorPinnedNodeProblems(advisory([harperNode]), prefix).join("\n");
+      expect(problems).toContain("Without npm-shrinkwrap.json in harper, restore a readable installed package.json, a consumer package-lock that marks the node inBundle");
+      expect(problems).not.toContain("shrinkwrap evidence");
     });
   });
 
   it("refuses a shrinkwrap whose package rows cannot be parsed", () => {
     withInstalledHarper((prefix) => {
       writeFileSync(join(prefix, "node_modules/harper/npm-shrinkwrap.json"), "{invalid");
-      expect(vendorPinnedNodeProblems(advisory([harperNode]), prefix).join("\n")).toContain(
-        "Restore readable package and shrinkwrap evidence",
-      );
+      const problems = vendorPinnedNodeProblems(advisory([harperNode]), prefix).join("\n");
+      expect(problems).toContain("Restore readable package and shrinkwrap evidence, then rerun the gate.");
+      expect(problems).not.toContain("inBundle");
     });
   });
 
@@ -638,6 +638,7 @@ esac
     expect(res.error).toBeUndefined();
     expect(res.status).toBe(0);
     expect(res.stdout).toContain("PASS —");
+    expect(res.stdout).toContain("NOT-REPORTED-BY-BUN: GHSA-w2qp-rph6-63g4 fastify — npm reports it under harper; retire when ");
     expect(wrote).toBe(false);
   }, 12_000);
 
@@ -646,17 +647,17 @@ esac
     expect(res.error).toBeUndefined();
     expect(res.status).not.toBe(0);
     expect(res.stdout).toContain(hoistedNode);
-    expect(res.stdout).not.toContain("FIXED-FOR-BUN-ONLY");
+    expect(res.stdout).not.toContain("NOT-REPORTED-BY-BUN");
     expect(res.stdout).not.toContain("PASS —");
     expect(wrote).toBe(false);
   }, 12_000);
 
-  it("does not report a blocked pin mismatch as fixed for bun only", () => {
+  it("does not print a blocked pin mismatch as NOT-REPORTED-BY-BUN", () => {
     const { res } = runFixtureGate([harperNode], "5.12.0");
     expect(res.error).toBeUndefined();
     expect(res.status).not.toBe(0);
     expect(res.stdout).toContain("installed version 5.12.0");
-    expect(res.stdout).not.toContain("FIXED-FOR-BUN-ONLY");
+    expect(res.stdout).not.toContain("NOT-REPORTED-BY-BUN");
   }, 12_000);
 
   it("refuses unknown node evidence with a nonzero gate exit and no success output or writes", () => {
@@ -755,10 +756,10 @@ describe("the committed allowlist", () => {
     expect(adk.map((e) => e.ghsa)).toEqual(["GHSA-w5hq-g745-h8pq"]);
   });
 
-  it("marks harper-pinned npm advisories as npm-install-only (FIXED-FOR-BUN-ONLY)", () => {
+  it("marks harper-pinned npm advisories as npm-install-only (NOT-REPORTED-BY-BUN)", () => {
     // These are the advisories the npm-install observation surfaces that `bun
     // audit` never sees — harper's npm-shrinkwrap pins them. They must declare
-    // sources ["npm-install"] so the gate knows they are fixed for bun only.
+    // sources ["npm-install"] so the gate knows bun does not report them.
     const npmOnly = ALLOWLIST.entries.filter((e) => e.package === "fast-uri");
     // Exact IDs catch missing or substituted fast-uri advisories.
     expect(npmOnly.map((e) => e.ghsa).sort()).toEqual([
@@ -1227,5 +1228,371 @@ describe("isVulnerable", () => {
   it("treats an empty range as matching nothing rather than everything", () => {
     // Failing open here would silently allowlist an advisory with no range.
     expect(isVulnerable("1.0.0", "")).toBe(false);
+  });
+});
+
+// ─── Harper-shipped evidence from a bundle (no shrinkwrap) ───────────────────
+
+describe("vendor-pinned nodes shipped in harper's bundle", () => {
+  const fastify = "node_modules/harper/node_modules/fastify";
+  const advisory = (pkg: string, node: string, version: string) => ({
+    ghsa: "GHSA-w2qp-rph6-63g4",
+    package: pkg,
+    nodes: [node],
+    nodeVersions: { [node]: version },
+  });
+
+  type BundleFiles = {
+    harper?: Record<string, unknown>;
+    lock?: Record<string, unknown>;
+    packages?: Record<string, string | Record<string, unknown>>;
+    /** Symlinks to create: link path -> target path, both relative to the prefix. */
+    links?: Record<string, string>;
+    /** Files written verbatim: path relative to the prefix -> contents. */
+    raw?: Record<string, string>;
+  };
+
+  function withBundlePrefix(files: BundleFiles, run: (prefix: string) => void) {
+    const prefix = mkdtempSync(join(tmpdir(), "flair-audit-bundle-"));
+    try {
+      mkdirSync(join(prefix, "node_modules", "harper"), { recursive: true });
+      for (const [path, manifest] of Object.entries(files.packages ?? {})) {
+        mkdirSync(join(prefix, path), { recursive: true });
+        writeFileSync(
+          join(prefix, path, "package.json"),
+          JSON.stringify(typeof manifest === "string" ? { version: manifest } : manifest),
+        );
+      }
+      for (const [path, contents] of Object.entries(files.raw ?? {})) {
+        mkdirSync(dirname(join(prefix, path)), { recursive: true });
+        writeFileSync(join(prefix, path), contents);
+      }
+      for (const [link, target] of Object.entries(files.links ?? {})) {
+        mkdirSync(dirname(join(prefix, link)), { recursive: true });
+        symlinkSync(join(prefix, target), join(prefix, link));
+      }
+      if (files.harper !== undefined) {
+        writeFileSync(join(prefix, "node_modules/harper/package.json"), JSON.stringify(files.harper));
+      }
+      if (files.lock !== undefined) {
+        writeFileSync(join(prefix, "package-lock.json"), JSON.stringify({ packages: files.lock }));
+      }
+      run(prefix);
+    } finally {
+      rmSync(prefix, { recursive: true, force: true });
+    }
+  }
+
+  it("accepts a node whose package is listed in bundleDependencies", () => {
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [fastify]: { version: "5.12.5", inBundle: true } },
+        packages: { [fastify]: "5.12.5" },
+      },
+      (prefix) => expect(vendorPinnedNodeProblems(advisory("fastify", fastify, "5.12.5"), prefix)).toEqual([]),
+    );
+  });
+
+  it("accepts a scoped package listed by its full name", () => {
+    const node = "node_modules/harper/node_modules/@fastify/static";
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["@fastify/static"] },
+        lock: { [node]: { version: "9.3.0", inBundle: true } },
+        packages: { [node]: "9.3.0" },
+      },
+      (prefix) => expect(vendorPinnedNodeProblems(advisory("@fastify/static", node, "9.3.0"), prefix)).toEqual([]),
+    );
+  });
+
+  it("accepts a package in harper's dependencies when bundleDependencies is true", () => {
+    const node = "node_modules/harper/node_modules/fast-uri";
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: true, dependencies: { "fast-uri": "^3.1.0" } },
+        lock: { [node]: { version: "3.1.0", inBundle: true } },
+        packages: { [node]: "3.1.0" },
+      },
+      (prefix) => expect(vendorPinnedNodeProblems(advisory("fast-uri", node, "3.1.0"), prefix)).toEqual([]),
+    );
+  });
+
+  it("refuses a package outside harper's dependencies and their closure when bundleDependencies is true", () => {
+    const node = "node_modules/harper/node_modules/left-pad";
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: true, dependencies: { fastify: "^5.12.0" } },
+        lock: { [node]: { version: "1.3.0", inBundle: true } },
+        packages: { [node]: "1.3.0", [fastify]: "5.12.5" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("left-pad", node, "1.3.0"), prefix).join("\n");
+        expect(problems).toContain(node);
+        expect(problems).toContain(`"left-pad" is not in harper's dependencies (bundleDependencies is true)`);
+      },
+    );
+  });
+
+  it("accepts a node nested inside a bundled package", () => {
+    const node = `${fastify}/node_modules/find-my-way`;
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "9.6.0", inBundle: true } },
+        packages: { [node]: "9.6.0", [fastify]: "5.12.5" },
+      },
+      (prefix) => expect(vendorPinnedNodeProblems(advisory("find-my-way", node, "9.6.0"), prefix)).toEqual([]),
+    );
+  });
+
+  it("refuses a nested node whose bundled top-level package has no package.json", () => {
+    const node = `${fastify}/node_modules/find-my-way`;
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "9.6.0", inBundle: true } },
+        packages: { [node]: "9.6.0" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("find-my-way", node, "9.6.0"), prefix).join("\n");
+        expect(problems).toContain(node);
+        expect(problems).toContain(`harper's tree has no package.json for "fastify"`);
+      },
+    );
+  });
+
+  it("refuses a nested node whose bundled top-level package.json is not valid JSON", () => {
+    const node = `${fastify}/node_modules/find-my-way`;
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "9.6.0", inBundle: true } },
+        packages: { [node]: "9.6.0" },
+        raw: { [`${fastify}/package.json`]: "{ not json" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("find-my-way", node, "9.6.0"), prefix).join("\n");
+        expect(problems).toContain(node);
+        expect(problems).toContain(`harper's package.json for "fastify" cannot be read or parsed`);
+      },
+    );
+  });
+
+  it("refuses a nested node whose bundled top-level package.json is not an object", () => {
+    const node = `${fastify}/node_modules/find-my-way`;
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "9.6.0", inBundle: true } },
+        packages: { [node]: "9.6.0" },
+        raw: { [`${fastify}/package.json`]: "null" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("find-my-way", node, "9.6.0"), prefix).join("\n");
+        expect(problems).toContain(node);
+        expect(problems).toContain(`harper's package.json for "fastify" is not a JSON object`);
+      },
+    );
+  });
+
+  it("refuses a nested node whose bundled top-level package.json cannot be read", () => {
+    // A directory in the manifest's place (made by writing a file below it): the
+    // read fails for every uid, root included.
+    const node = `${fastify}/node_modules/find-my-way`;
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "9.6.0", inBundle: true } },
+        packages: { [node]: "9.6.0", [`${fastify}/package.json/placeholder`]: "0.0.0" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("find-my-way", node, "9.6.0"), prefix).join("\n");
+        expect(problems).toContain(node);
+        expect(problems).toContain(`harper's package.json for "fastify" cannot be read or parsed`);
+      },
+    );
+  });
+
+  it("refuses a top-level copy when the bundled package resolves its own nested copy", () => {
+    const node = "node_modules/harper/node_modules/fast-uri";
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "3.1.0", inBundle: true } },
+        packages: {
+          [node]: "3.1.0",
+          [fastify]: { name: "fastify", version: "5.12.5", dependencies: { "fast-uri": "^3.0.0" } },
+          [`${fastify}/node_modules/fast-uri`]: "3.1.0",
+        },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("fast-uri", node, "3.1.0"), prefix).join("\n");
+        expect(problems).toContain(node);
+        expect(problems).toContain("not listed in harper's bundleDependencies");
+      },
+    );
+  });
+
+  it("refuses a node whose package directory is a symlink out of harper's tree", () => {
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [fastify]: { version: "5.12.5", inBundle: true } },
+        packages: { "elsewhere/fastify": "5.12.5" },
+        links: { [fastify]: "elsewhere/fastify" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("fastify", fastify, "5.12.5"), prefix).join("\n");
+        expect(problems).toContain(fastify);
+        expect(problems).toContain("node_modules/fastify/package.json resolves outside harper's installed tree");
+      },
+    );
+  });
+
+  it("refuses a node reached only through a bundled package that is a symlink out of harper's tree", () => {
+    const node = "node_modules/harper/node_modules/fast-uri";
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "3.1.0", inBundle: true } },
+        packages: {
+          [node]: "3.1.0",
+          "elsewhere/fastify": { name: "fastify", version: "5.12.5", dependencies: { "fast-uri": "^3.0.0" } },
+        },
+        links: { [fastify]: "elsewhere/fastify" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("fast-uri", node, "3.1.0"), prefix).join("\n");
+        expect(problems).toContain(node);
+        expect(problems).toContain("node_modules/fastify/package.json resolves outside harper's installed tree");
+      },
+    );
+  });
+
+  it("refuses when the closure walk passes its lookup limit, counting the bundled packages", () => {
+    withBundlePrefix(
+      {
+        harper: {
+          name: "harper",
+          version: "5.3.3",
+          bundleDependencies: Array.from({ length: 5001 }, (_, i) => `absent-${i}`),
+        },
+        lock: { [fastify]: { version: "5.12.5", inBundle: true } },
+        packages: { [fastify]: "5.12.5" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("fastify", fastify, "5.12.5"), prefix).join("\n");
+        expect(problems).toContain("exceeded 5000 lookups");
+      },
+    );
+  });
+
+  it("accepts a hoisted dependency of a bundled package", () => {
+    const node = "node_modules/harper/node_modules/fast-uri";
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "3.1.0", inBundle: true } },
+        packages: {
+          [node]: "3.1.0",
+          [fastify]: { name: "fastify", version: "5.12.5", dependencies: { "fast-uri": "^3.0.0" } },
+        },
+      },
+      (prefix) => expect(vendorPinnedNodeProblems(advisory("fast-uri", node, "3.1.0"), prefix)).toEqual([]),
+    );
+  });
+
+  it("refuses a node the consumer package-lock does not mark inBundle", () => {
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [fastify]: { version: "5.12.5" } },
+        packages: { [fastify]: "5.12.5" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("fastify", fastify, "5.12.5"), prefix).join("\n");
+        expect(problems).toContain(fastify);
+        expect(problems).toContain("does not mark");
+        expect(problems).toContain("inBundle");
+      },
+    );
+  });
+
+  it("refuses a node whose top-level package is not named in bundleDependencies", () => {
+    const node = "node_modules/harper/node_modules/left-pad";
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [node]: { version: "1.3.0", inBundle: true } },
+        packages: {
+          [node]: "1.3.0",
+          [fastify]: { name: "fastify", version: "5.12.5", dependencies: { "fast-uri": "^3.0.0" } },
+        },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("left-pad", node, "1.3.0"), prefix).join("\n");
+        expect(problems).toContain(node);
+        expect(problems).toContain("not listed in harper's bundleDependencies");
+      },
+    );
+  });
+
+  it("refuses a node whose installed version differs from the package-lock record", () => {
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [fastify]: { version: "5.12.5", inBundle: true } },
+        packages: { [fastify]: "5.12.0" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("fastify", fastify, "5.12.5"), prefix).join("\n");
+        expect(problems).toContain("installed version 5.12.0");
+        expect(problems).toContain("consumer package-lock records 5.12.5");
+      },
+    );
+  });
+
+  it("refuses an audit version that differs from the package-lock record", () => {
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: { [fastify]: { version: "5.12.5", inBundle: true } },
+        packages: { [fastify]: "5.12.5" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("fastify", fastify, "5.13.0"), prefix).join("\n");
+        expect(problems).toContain("audit version 5.13.0");
+      },
+    );
+  });
+
+  it("refuses when harper has neither a shrinkwrap nor a bundle listing", () => {
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3" },
+        lock: { [fastify]: { version: "5.12.5", inBundle: true } },
+        packages: { [fastify]: "5.12.5" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("fastify", fastify, "5.12.5"), prefix).join("\n");
+        expect(problems).toContain("declares no bundleDependencies");
+        expect(problems).toContain("npm-shrinkwrap.json");
+      },
+    );
+  });
+
+  it("refuses a node with no consumer package-lock entry", () => {
+    withBundlePrefix(
+      {
+        harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
+        lock: {},
+        packages: { [fastify]: "5.12.5" },
+      },
+      (prefix) => {
+        const problems = vendorPinnedNodeProblems(advisory("fastify", fastify, "5.12.5"), prefix).join("\n");
+        expect(problems).toContain("has no entry");
+      },
+    );
   });
 });
