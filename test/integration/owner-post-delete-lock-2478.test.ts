@@ -16,7 +16,8 @@
  * and percent-encoded, all of which resolve to the held row); a DELETE of an
  * older skill version, which closes the live head: an uncontended control, the
  * head held by an owner PATCH (refused `memory_busy`, nothing closed), and the
- * head replaced after the DELETE found it (the DELETE locks the new head;
+ * head replaced after the DELETE found it (the DELETE tries to acquire the
+ * new head's lock and is refused `memory_busy` while an owner PATCH holds it;
  * replaced on every attempt, it answers `memory_busy`); a lock-bypassing trace
  * assertion that each writer wrote under its phase. Seeded rows carry an
  * explicit visibility, an incarnation token and a bare current stamp so boot
@@ -228,7 +229,7 @@ describe("flair#2478 — owner DELETE of an older skill version locks the live h
     expect(await openVersions(stale)).toEqual([]);
   }, 120_000);
 
-  it("a head replaced after the DELETE found it: the DELETE locks the new head, which an owner PATCH holds, and is refused memory_busy", async () => {
+  it("a head replaced after the DELETE found it: the DELETE tries to acquire the new head's lock, which an owner PATCH holds, and is refused memory_busy", async () => {
     const stale = "opdl-skill-head-moved";
     const found = await seedOlderSkillVersion(stale);
     for (const point of HEAD_FOUND) h.clearMarkers(point);
