@@ -9,8 +9,14 @@
  * The matrix: the writer first, held while it still holds the lock, against an
  * owner PUT and PATCH (refused `memory_busy`; after release the writer's write
  * is stored); an owner write first, held after its commit, against the writer
- * (refused `memory_busy`); a lock-bypassing trace assertion that each writer
- * wrote under its phase. Seeded rows carry an
+ * (refused `memory_busy`; for the POST with its `supersedes` reference spelled
+ * plainly, with a `.agentId` selector and percent-encoded, all of which resolve
+ * to the held row); a DELETE of an older skill version, which closes the live
+ * head: an uncontended control, the head held by an owner PATCH (refused
+ * `memory_busy`, nothing closed), and the head replaced after the DELETE found
+ * it (the DELETE locks the new head; replaced on every attempt, it answers
+ * `memory_busy`); a lock-bypassing trace assertion that each writer wrote
+ * under its phase. Seeded rows carry an
  * explicit visibility, an incarnation token and a bare current stamp so boot
  * migrations leave them alone. Home-isolated ephemeral Harper; every URL is
  * asserted to be this test's own.
@@ -112,6 +118,170 @@ describe("flair#2478 — owner POST (real Harper)", () => {
       expect(h.writesBy(target, "post").length, "the close was not written under phase post").toBeGreaterThan(0);
     }, 120_000);
   }
+
+  // Each spelling resolves to the held row's id (resources/memory-id-guard.ts
+  // resolveMemoryReferenceId), the id the POST reads and closes.
+  for (const [form, spell] of [
+    ["plain", (id: string) => id],
+    ["a `.agentId` selector", (id: string) => `${id}.agentId`],
+    ["percent-encoded", (id: string) => `${id}%2EagentId`],
+  ] as const) {
+    it(`an owner PUT of a row, held after its commit, refuses a POST whose supersedes names that row (${form}) memory_busy; then the POST closes it`, async () => {
+      const slug = form.split(" ").at(-1)!.replace(/[^a-z]/g, "");
+      const target = `opdl-post-owner-first-${slug}`;
+      const successor = `opdl-post-owner-first-new-${slug}`;
+      await seed(target);
+      h.arm("memory-put-committed");
+      const pendingOwner = ownerWrite("PUT", target, OWNER_TEXT);
+      const post = () => h.signed(owner, "POST", "/Memory", {
+        id: successor, agentId: owner.id, content: WRITER_TEXT, visibility: "private", supersedes: spell(target),
+      });
+      try {
+        await paused("memory-put-committed");
+        const before = await h.readRow(target);
+        const body = await expectRefused(await post(), "memory_busy");
+        expect(body).toEqual({ error: "memory_busy", caller: owner.id });
+        expect(await h.readRow(successor), "the refused POST created its successor").toBeNull();
+        expect(await h.readRow(target), "the refused POST changed the held row").toEqual(before);
+        await h.release("memory-put-committed");
+      } finally {
+        h.letGo("memory-put-committed");
+      }
+      expect((await pendingOwner).status).toBe(200);
+      const res = await post();
+      expect([200, 201], await res.clone().text()).toContain(res.status);
+      expect((await h.readRow(successor))?.supersedes).toBe(target);
+      const closed = await h.readRow(target);
+      expect(closed?.content).toBe(OWNER_TEXT);
+      expect(typeof closed?.validTo, "the superseded row was not closed").toBe("string");
+      expect(h.writesBy(target, "post").length, "the close was not written under phase post").toBeGreaterThan(0);
+    }, 120_000);
+  }
+});
+
+const skillBody = (id: string, content: string) => ({
+  id, agentId: owner.id, content, trigger: `when to ${content}`, tags: ["skill"], durability: "persistent",
+});
+/** A skill subject's open versions (no `validTo`). */
+async function openVersions(subject: string): Promise<any[]> {
+  const rows = await h.ops({
+    operation: "search_by_value", database: "flair", table: "Memory",
+    search_attribute: "skillSubjectId", search_value: subject, get_attributes: ["*"],
+  });
+  return (rows as any[]).filter((row) => row.validTo == null);
+}
+/** Write a skill version of `subject` with an owner PUT of `at` (the subject's
+ *  id for its first version, then its live head); return the new live head's id. */
+async function writeSkillVersion(subject: string, at: string, content: string): Promise<string> {
+  const res = await h.signed(owner, "PUT", memPath(at), skillBody(at, content));
+  expect(res.status, await res.clone().text()).toBe(200);
+  const open = await openVersions(subject);
+  expect(open.length, `${subject}: not exactly one open version`).toBe(1);
+  return String(open[0].id);
+}
+/** Two versions: `subject` is then an older version and the live head is another row. */
+async function seedOlderSkillVersion(subject: string): Promise<string> {
+  await writeSkillVersion(subject, subject, "the first version of the tide table procedure");
+  const head = await writeSkillVersion(subject, subject, "the second version of the tide table procedure");
+  expect(head, "the second version did not get its own row").not.toBe(subject);
+  return head;
+}
+const HEAD_FOUND = ["memory-delete-head-first", "memory-delete-head-second", "memory-delete-head-third"] as const;
+
+describe("flair#2478 — owner DELETE of an older skill version locks the live head it closes (real Harper)", () => {
+  it("CONTROL: an uncontended DELETE of an older version closes the live head under phase delete", async () => {
+    const stale = "opdl-skill-control";
+    const head = await seedOlderSkillVersion(stale);
+    const res = await h.signed(owner, "DELETE", memPath(stale));
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect(typeof (await h.readRow(head))?.validTo, "the live head was not closed").toBe("string");
+    expect(await openVersions(stale)).toEqual([]);
+    expect(h.writesBy(head, "delete").length, "the close was not written under phase delete").toBeGreaterThan(0);
+  }, 120_000);
+
+  it("the live head held by an owner PATCH: the DELETE of an older version is refused memory_busy and closes nothing; after the release it closes the head", async () => {
+    const stale = "opdl-skill-head-held";
+    const head = await seedOlderSkillVersion(stale);
+    h.arm("memory-patch-entry");
+    const holder = h.signed(owner, "PATCH", memPath(head), { subject: "a metadata edit while the DELETE runs" });
+    try {
+      await paused("memory-patch-entry");
+      const before = [await h.readRow(stale), await h.readRow(head)];
+      const body = await expectRefused(await h.signed(owner, "DELETE", memPath(stale)), "memory_busy");
+      expect(body).toEqual({ error: "memory_busy", caller: owner.id });
+      expect([await h.readRow(stale), await h.readRow(head)], "the refused DELETE changed a version").toEqual(before);
+      expect(h.writesBy(head, "delete"), "the refused DELETE wrote the head").toEqual([]);
+      await h.release("memory-patch-entry");
+    } finally {
+      h.letGo("memory-patch-entry");
+    }
+    // A PATCH of a skill row is refused by the skill-write guard and writes nothing.
+    const held = await holder;
+    const heldText = await held.text();
+    expect(held.status, heldText).toBe(400);
+    expect(JSON.parse(heldText).error).toBe("skill_write_path");
+    const res = await h.signed(owner, "DELETE", memPath(stale));
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect(typeof (await h.readRow(head))?.validTo, "the live head was not closed").toBe("string");
+    expect(await openVersions(stale)).toEqual([]);
+  }, 120_000);
+
+  it("a head replaced after the DELETE found it: the DELETE locks the new head, which an owner PATCH holds, and is refused memory_busy", async () => {
+    const stale = "opdl-skill-head-moved";
+    const found = await seedOlderSkillVersion(stale);
+    for (const point of HEAD_FOUND) h.clearMarkers(point);
+    h.arm(HEAD_FOUND[0]);
+    const pendingDelete = h.signed(owner, "DELETE", memPath(stale));
+    let holder: Promise<Response> | undefined;
+    let replacement = "";
+    try {
+      await paused(HEAD_FOUND[0]);
+      // A newer version replaces the head the DELETE found, and an owner PATCH
+      // holds the new head; the DELETE's second attempt is not paused.
+      replacement = await writeSkillVersion(stale, found, "the third version of the tide table procedure");
+      h.arm("memory-patch-entry");
+      holder = h.signed(owner, "PATCH", memPath(replacement), { subject: "a metadata edit while the DELETE runs" });
+      await paused("memory-patch-entry");
+      const before = await h.readRow(replacement);
+      await h.release(HEAD_FOUND[0]);
+      const body = await expectRefused(await pendingDelete, "memory_busy");
+      expect(body).toEqual({ error: "memory_busy", caller: owner.id });
+      expect(await h.readRow(replacement), "the refused DELETE changed the new head").toEqual(before);
+      expect(h.writesBy(replacement, "delete"), "the refused DELETE wrote the new head").toEqual([]);
+      await h.release("memory-patch-entry");
+    } finally {
+      h.letGo(HEAD_FOUND[0]);
+      h.letGo("memory-patch-entry");
+    }
+    expect((await holder!).status).toBe(400);
+    expect((await openVersions(stale)).map((row) => String(row.id))).toEqual([replacement]);
+  }, 120_000);
+
+  it("a head replaced on every attempt: the DELETE answers memory_busy after its last attempt and closes nothing", async () => {
+    const stale = "opdl-skill-head-moves";
+    let head = await seedOlderSkillVersion(stale);
+    const first = head;
+    for (const point of HEAD_FOUND) h.arm(point);
+    const pendingDelete = h.signed(owner, "DELETE", memPath(stale));
+    const replaced: string[] = [];
+    try {
+      for (const [index, point] of HEAD_FOUND.entries()) {
+        await paused(point);
+        head = await writeSkillVersion(stale, head, `replacement ${index + 1} of the tide table procedure`);
+        replaced.push(head);
+        await h.release(point);
+      }
+      const body = await expectRefused(await pendingDelete, "memory_busy");
+      expect(body).toEqual({ error: "memory_busy", caller: owner.id });
+    } finally {
+      for (const point of HEAD_FOUND) h.letGo(point);
+    }
+    for (const id of [stale, first, ...replaced]) expect(h.writesBy(id, "delete"), `the refused DELETE wrote ${id}`).toEqual([]);
+    expect((await openVersions(stale)).map((row) => String(row.id))).toEqual([replaced[replaced.length - 1]]);
+    const res = await h.signed(owner, "DELETE", memPath(stale));
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect(await openVersions(stale)).toEqual([]);
+  }, 120_000);
 });
 
 describe("flair#2478 — owner DELETE (real Harper)", () => {
