@@ -88,6 +88,12 @@ export type SkipReason =
   // change committed after that final check is not seen. Nothing was written on
   // a refusal (flair#2441, flair#2450, flair#2475).
   | "merge_target_changed"
+  // flair#2478 slice 3c: a Memory merge could not take the row's per-id write
+  // lock (held, or the id's earlier write outcome is unresolved). Nothing was
+  // written; the skip is returned in the response's refused list, the
+  // best-effort SyncLog row records it in skippedReasons when that write
+  // succeeds, and a later re-offer can merge it.
+  | "merge_target_busy"
   // ─── flair#2455 slice 1: the reasons recordSkip already emitted as bare
   // strings. Typing them closes the union at the sites that produced them;
   // the exhaustive SKIP_REASON_CLASS map below then forces a retryable /
@@ -148,6 +154,7 @@ export const SKIP_REASON_CLASS = {
   id_mismatch: "non_retryable",
   invalid_expiry: "non_retryable",
   merge_target_changed: "retryable",
+  merge_target_busy: "retryable",
   merge_error: "retryable",
   invalid_agent_id: "non_retryable",
   skill_not_federated: "non_retryable",

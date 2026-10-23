@@ -31,7 +31,7 @@ import { putPointerRow, deletePointerRowViaTable, restorePointerRowIfAbsent, Poi
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { composesCallerWrite, isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { PredecessorVisibilityChanged, applyGrantedVisibility, committedVisibilityDiffers, predecessorVisibilityChangedRefusal } from "./grant-visibility.js";
-import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, grantedCloseRevokedRefusal, sameStoredRow, storedRowChangedRefusal, verifyCommittedFields, writeGrantHeld } from "./write-back.js";
+import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, grantedCloseRevokedRefusal, sameStoredRow, storedRowChangedRefusal, verifyCommittedFields, withoutHarperManagedFields, writeGrantHeld } from "./write-back.js";
 import { PAUSE_LIMIT_MS, txnPausePoint } from "./txn-pause-point.js";
 import {
   markMemoryWriteOutcomeUnknown,
@@ -3257,6 +3257,23 @@ export class Memory extends (databases as any).flair.Memory {
       // successful Response is replaced by the write_response_withheld
       // refusal (writeResultResponse).
       if (reindexed instanceof Response) return writeResultResponse(reindexed);
+      // flair#2478 slice 3c: confirm the committed row after the commit. A
+      // re-PUT that joined a request transaction has not committed yet (the
+      // caller owns that commit); every other re-PUT owns and has settled its
+      // transaction here. For a re-PUT that owns its transaction, an
+      // unreadable or mismatching committed row is never reported as success.
+      if (!reindexJoinsRequestTxn) {
+        const committedVerdict = await verifyCommittedFields(
+          (databases as any).flair.Memory,
+          reindexRow.id,
+          reindexRow,
+          withoutHarperManagedFields(reindexRow),
+        );
+        if (committedVerdict !== "shown") {
+          markMemoryWriteOutcomeUnknown(reindexRow.id);
+          return writeOutcomeUnknownResponse();
+        }
+      }
       noteMemoryUpsert(content);
       noteWriteStamp(reindexRow?.embeddingModel as string | null | undefined, reindexExisting); // embedding-space-guard slice 1 (see post())
       return rowWriteResponse(reindexed, reindexRow?.id, 0);

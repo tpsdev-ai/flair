@@ -45,6 +45,12 @@ export const ALLOWLIST: ReadonlyArray<{ file: string; contains: string; expected
     expectedCount: 2,
     reason: "key is filtered to the FLAIR_FEDERATION_ prefix, so it cannot be `__proto__`",
   },
+  {
+    file: "resources/Federation.ts",
+    contains: "patch[field] = value",
+    expectedCount: 1,
+    reason: "field iterates a Memory merge's mergedData after stripInboundMemoryRow removed its undeclared keys, so it cannot be `__proto__`",
+  },
 ];
 
 function listTsFiles(dir: string): string[] {

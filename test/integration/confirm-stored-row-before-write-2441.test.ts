@@ -357,19 +357,23 @@ describe("flair#2441 — the federation Memory merge confirms the stored row (re
     expect(await readRow(id), "the merge re-created the deleted row").toBeNull();
   }, 60_000);
 
-  it("a PURGE between the read and the write leaves the row purged", async () => {
+  // flair#2478 slices 3b and 3c: the merge holds the target's per-id write lock
+  // at this point and the purge takes it too, so a purge that arrives while the
+  // merge holds the id is refused busy and deletes nothing; once the merge has
+  // committed, a purge removes the row.
+  it("a PURGE between the read and the write is refused busy and lands once the merge commits", async () => {
     const id = `csr-fed-purge-${Date.now()}`;
     await seed(id, randomUUID(), "federated v1");
-    const { response, paused, released, observed } = await withPaused(
-      "federation-merge", () => push(id, "federated v2"), () => purgeRow(id),
-      () => waitForRowGone(id, 15_000),
-    );
+    const { response, paused, released, competed } = await withPaused("federation-merge", () => push(id, "federated v2"), () => purgeBusy(id));
     expect(paused, "the federation merge was not paused").toBe(true);
     expect(released).toBe("go");
-    expect(observed, "the PURGE did not become visible to a fresh read").toBe(true);
+    expect(competed?.status).toBe(503);
+    expect(competed?.body).toEqual({ error: "memory_busy", caller: "admin" });
     const body = await response.json() as any;
-    expect(body.merged, JSON.stringify(body)).toBe(0);
-    expect(await readRow(id), "the merge re-created the purged row").toBeNull();
+    expect(body.merged, JSON.stringify(body)).toBe(1);
+    expect((await readRow(id))?.content, "the refused purge removed the row").toBe("federated v2");
+    await purgeRow(id);
+    expect(await readRow(id), "the purge did not remove the row the merge committed").toBeNull();
   }, 60_000);
 
   it("a same-id REPLACE with a new token is not overwritten", async () => {
