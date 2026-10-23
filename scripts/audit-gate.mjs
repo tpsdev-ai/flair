@@ -737,6 +737,16 @@ function harperShippedVersion(npmPrefix, harperRoot, node) {
   return { version: recorded, label: "the consumer package-lock records" };
 }
 
+/** True unless harper's npm-shrinkwrap.json is missing; harperShippedVersion branches on the same read. */
+function harperShrinkwrapDecides(npmPrefix, harperRoot) {
+  try {
+    readFileSync(join(npmPrefix, harperRoot, "npm-shrinkwrap.json"));
+    return true;
+  } catch (e) {
+    return e.code !== "ENOENT";
+  }
+}
+
 /**
  * For a vendor-pinned exception, reject any npm-audit-reported node path outside
  * harper. When all reported paths are under harper, compare each installed version
@@ -783,8 +793,11 @@ export function vendorPinnedNodeProblems(adv, npmPrefix) {
         );
       }
     } catch (e) {
+      const remedy = harperShrinkwrapDecides(npmPrefix, harperRoot)
+        ? "Restore readable package and shrinkwrap evidence, then rerun the gate."
+        : "Without npm-shrinkwrap.json in harper, restore a readable installed package.json, a consumer package-lock that marks the node inBundle, and a harper package.json whose bundleDependencies (true for all of its dependencies) names the node's top-level package or a package whose dependency closure contains it, then rerun the gate.";
       problems.push(
-        `${adv.ghsa} (${adv.package}): cannot verify node ${JSON.stringify(node)} against harper's npm-shrinkwrap.json or its bundleDependencies listing: ${e.message}. Restore readable package and shrinkwrap evidence, or a consumer package-lock that marks the node inBundle and a harper package.json whose bundleDependencies (true for all of its dependencies) names the node's top-level package or a package whose dependency closure contains it, then rerun the gate.`,
+        `${adv.ghsa} (${adv.package}): cannot verify node ${JSON.stringify(node)} against harper's npm-shrinkwrap.json or its bundleDependencies listing: ${e.message}. ${remedy}`,
       );
     }
   }

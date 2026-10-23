@@ -170,18 +170,18 @@ describe("vendor-pinned npm-install nodes", () => {
     withInstalledHarper((prefix) => {
       expect(vendorPinnedNodeProblems(advisory([]), prefix).join("\n")).toContain("reported no nodes");
       rmSync(join(prefix, "node_modules/harper/npm-shrinkwrap.json"));
-      expect(vendorPinnedNodeProblems(advisory([harperNode]), prefix).join("\n")).toContain(
-        "Restore readable package and shrinkwrap evidence",
-      );
+      const problems = vendorPinnedNodeProblems(advisory([harperNode]), prefix).join("\n");
+      expect(problems).toContain("Without npm-shrinkwrap.json in harper, restore a readable installed package.json, a consumer package-lock that marks the node inBundle");
+      expect(problems).not.toContain("shrinkwrap evidence");
     });
   });
 
   it("refuses a shrinkwrap whose package rows cannot be parsed", () => {
     withInstalledHarper((prefix) => {
       writeFileSync(join(prefix, "node_modules/harper/npm-shrinkwrap.json"), "{invalid");
-      expect(vendorPinnedNodeProblems(advisory([harperNode]), prefix).join("\n")).toContain(
-        "Restore readable package and shrinkwrap evidence",
-      );
+      const problems = vendorPinnedNodeProblems(advisory([harperNode]), prefix).join("\n");
+      expect(problems).toContain("Restore readable package and shrinkwrap evidence, then rerun the gate.");
+      expect(problems).not.toContain("inBundle");
     });
   });
 
