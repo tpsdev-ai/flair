@@ -53,7 +53,7 @@ function ed25519Header(agent: TestAgent, method: string, path: string): string {
   return `TPS-Ed25519 ${agent.id}:${ts}:${nonce}:${sigB64}`;
 }
 
-/** Signed PUT to /Memory/<id> — the only HTTP-reachable create/update path. */
+/** Signed PUT to /Memory/<id>. */
 async function putMemory(harper: HarperInstance, agent: TestAgent, id: string, body: Record<string, any>): Promise<Response> {
   const path = `/Memory/${id}`;
   return fetch(`${harper.httpURL}${path}`, {

@@ -1,23 +1,24 @@
 /**
- * owner-post-delete-lock-2478.test.ts — flair#2478 slice 1 part 2: an owner
- * non-skill POST and an owner DELETE take the per-id Memory write lock, real
- * Harper.
+ * owner-post-delete-lock-2478.test.ts — flair#2478 slice 1 part 2: an
+ * untagged owner POST that names an id or a `supersedes` target, and an owner
+ * DELETE, take the per-id Memory write lock, real Harper.
  *
- * Writers under test: an owner non-skill POST that names an id or a
- * `supersedes` target, and an owner DELETE. Each is foreground: it waits within the owner budget
- * and answers `503 memory_busy` on a miss.
+ * Writers under test: an owner POST, submitted without the skill tag, that
+ * names an id or a `supersedes` target, and an owner DELETE. Each is
+ * foreground: it waits within the owner budget and answers `503 memory_busy`
+ * on a miss.
  *
  * The matrix: the writer first, held while it still holds the lock, against an
  * owner PUT and PATCH (refused `memory_busy`; after release the POST's write is
- * stored and the DELETE leaves the row absent); an owner write first, held after its commit, against the writer
- * (refused `memory_busy`; for the POST with its `supersedes` reference spelled
- * plainly, with a `.agentId` selector and percent-encoded, all of which resolve
- * to the held row); a DELETE of an older skill version, which closes the live
- * head: an uncontended control, the head held by an owner PATCH (refused
- * `memory_busy`, nothing closed), and the head replaced after the DELETE found
- * it (the DELETE locks the new head; replaced on every attempt, it answers
- * `memory_busy`); a lock-bypassing trace assertion that each writer wrote
- * under its phase. Seeded rows carry an
+ * stored and the DELETE leaves the row absent); an owner write first, held
+ * after its commit, against the writer (refused `memory_busy`; for the POST
+ * with its `supersedes` reference spelled plainly, with a `.agentId` selector
+ * and percent-encoded, all of which resolve to the held row); a DELETE of an
+ * older skill version, which closes the live head: an uncontended control, the
+ * head held by an owner PATCH (refused `memory_busy`, nothing closed), and the
+ * head replaced after the DELETE found it (the DELETE locks the new head;
+ * replaced on every attempt, it answers `memory_busy`); a lock-bypassing trace
+ * assertion that each writer wrote under its phase. Seeded rows carry an
  * explicit visibility, an incarnation token and a bare current stamp so boot
  * migrations leave them alone. Home-isolated ephemeral Harper; every URL is
  * asserted to be this test's own.

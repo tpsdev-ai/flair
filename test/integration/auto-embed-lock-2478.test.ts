@@ -373,7 +373,7 @@ describe("flair#2478 — an owner DELETE racing the backfill never leaves a row 
     try {
       await h.assertPaused(ENTRY);
       pendingDelete = h.signed(owner, "DELETE", memPath(id));
-      // The DELETE holds the id from its first read: the backfill is skipped.
+      // The DELETE holds the id: the backfill is skipped.
       await h.assertPaused("memory-delete");
       await h.release(ENTRY);
       expect(await h.waitForLog(`[auto-embed] ${id}: skipped; the per-id write lock answered busy`), "the backfill did not report the held id").toBe(true);

@@ -324,8 +324,8 @@ describe("flair#2478 — an owner DELETE racing the re-embed never leaves a row 
     const pendingDelete = h.signed(owner, "DELETE", memPath(id));
     try {
       await h.assertPaused("memory-delete");
-      // The DELETE holds the id from its first read: the re-embed waits out its
-      // budget, is refused and writes nothing.
+      // The DELETE holds the id: the re-embed waits out its budget, is refused
+      // and writes nothing.
       const before = await h.readRow(id);
       const body = await expectRefused(await reembed(id), "memory_busy");
       expect(body).toEqual({ error: "memory_busy", caller: owner.id });

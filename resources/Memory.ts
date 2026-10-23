@@ -288,7 +288,7 @@ function postLockIds(resource: unknown, content?: unknown): string[] {
 
 /** The lock ids a DELETE names: the addressed id and any body id(s), dropping
  *  non-id values. For a skill row, delete() adds the live head it closes when
- *  that head is another row. */
+ *  its discovery read finds that head and it is another row. */
 function deleteLockIds(resource: unknown, id: unknown): string[] {
   const ids = putLockIds(resource, id && typeof id === "object" ? id : undefined);
   if (typeof id === "string" || typeof id === "number") ids.push(String(id));
@@ -296,7 +296,7 @@ function deleteLockIds(resource: unknown, id: unknown): string[] {
 }
 
 /** Attempts of a DELETE to lock the live head its skill writer closes, when
- *  the head changes between its discovery and the writer's read. */
+ *  the head the writer resolves under the locks is not one of the held ids. */
 const SKILL_DELETE_HEAD_ATTEMPTS = 3;
 
 /** The ids a DELETE holds, and whether the skill writer found the head it
@@ -309,11 +309,10 @@ interface SkillDeleteHeadLock {
 /** Discovery only, with no lock held: when the addressed row is a skill row,
  *  the live head a DELETE of it closes (resolveSkillHead), if that head is
  *  another row (an older version's DELETE closes its subject's head). `read`
- *  reads the addressed row as deleteLocked's first read does. The skill writer
- *  checks the head again under the locks. A discovery read that fails, or
- *  finds more than one live head, adds no head: the skill writer's own read
- *  under the locks then refuses as it does on that failure, or, when it finds
- *  a head the DELETE does not hold, writes nothing. */
+ *  reads the addressed row as deleteLocked's first read does. A discovery read
+ *  that fails, or finds more than one live head, adds no head. Either way the
+ *  skill writer resolves the head again under the locks and writes only when
+ *  that head is one of the held ids. */
 async function skillDeleteHeadId(read: () => Promise<any>): Promise<string | null> {
   try {
     const record = await read();
@@ -662,8 +661,7 @@ const memoryAuthGate = makeAuthGate();
  *
  * NOTE on HTTP verbs: `Memory.post()` is reached by an HTTP POST /Memory and
  * by an in-process resource instantiation (as resources/mcp-tools.ts does).
- * Because flair-client's write() (used by flair-mcp, the CLI, and
- * every other integration package) issues an HTTP PUT, the actual
+ * Because flair-client's write() issues an HTTP PUT, the actual
  * field-observed bug (#526) flows through Memory.put(), not Memory.post().
  * The gate below is therefore a SHARED helper invoked from both post() and
  * put() — anchored in the same place the design calls out (Memory.post), but
@@ -1153,9 +1151,9 @@ async function hasWriteGrant(granteeId: string, ownerId: string, ctx?: unknown):
 /**
  * Shared by post() AND put(): Memory.post() is reached by an HTTP POST /Memory
  * and by an in-process resource instantiation (resources/mcp-tools.ts does
- * this), and flair-client's write()/update() — used by flair-mcp, the CLI, and
- * every other integration package — issue HTTP PUT, so `supersedes` must be
- * fully handled (validated, authorized, and closed) from BOTH entry points.
+ * this), and flair-client's write()/update() issue HTTP PUT, so `supersedes`
+ * must be fully handled (validated, authorized, and closed) from BOTH entry
+ * points.
  *
  * Validates the `supersedes` field's shape and, for a cross-agent supersede,
  * requires a "write" MemoryGrant from the target's owner (reuses the existing
@@ -1781,8 +1779,8 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
     head: (shared) => resolveSkillHead(subjectId, String(record.id), shared),
     plan: async (head, shared) => {
       // flair#2478: the head this delete closes must be an id the DELETE holds.
-      // A head that changed after delete() discovered it is not locked: write
-      // nothing; delete() discovers and locks again.
+      // A head outside the held ids is not locked: write nothing; delete()
+      // discovers and locks again.
       if (headLock) {
         headLock.outside = !!head && !headLock.ids.includes(String(head.id));
         if (headLock.outside) return storedRowChangedRefusal("Memory");
@@ -2330,20 +2328,23 @@ export class Memory extends (databases as any).flair.Memory {
     return joined;
   }
 
-  /** A non-skill POST takes the per-id lock for the ids it names (URL and
-   *  body) and for the canonical id of its `supersedes` reference, and holds
-   *  it across the handler's read, decision and write and the predecessor's
-   *  close (flair#2478 slice 1 part 2). Its row writes join an open request
-   *  transaction, which commits after the lock is released. A pure create
-   *  under a fresh server-allocated id, and a skill POST, take no lock. */
+  /** Unless it is submitted with the skill tag, a POST that names an id (URL
+   *  or body) or a `supersedes` reference takes the per-id lock for those ids,
+   *  the reference under its canonical id, and holds it across the handler's
+   *  read, decision and write and the predecessor's close (flair#2478 slice 1
+   *  part 2). Its non-skill row writes join an open request transaction, which
+   *  commits after the lock is released; a superseding skill write owns its
+   *  commit. A POST that names neither takes no lock. */
   async post(content: any, context?: any) {
     // flair#2307: resolve the `supersedes` reference to its canonical id once,
     // before lock selection (some POSTs take no lock), so the predecessor read,
     // the close and any lock taken name that id (a selector or encoded
     // spelling resolves to it).
     canonicalizeSupersedes(content);
-    // A skill POST is a skill version write; it takes no Memory lock here
-    // (later slice).
+    // A POST submitted with the skill tag is a skill version write; it takes
+    // no Memory lock here (later slice). Lock selection reads the submitted
+    // tags: an untagged POST that names a skill row (by id or `supersedes`)
+    // takes the lock, then inherits the tag (prepareSkillBody).
     const ids = isSkillWrite(content) ? [] : postLockIds(this, content);
     if (ids.length === 0) return this.postLocked(content, context);
     const outcome = await withMemoryWriteLock(
@@ -3840,14 +3841,15 @@ export class Memory extends (databases as any).flair.Memory {
     return buildWriteResponse(putResult.content, result, putResult.dedupMatch, putResult.redactedValues, putStaged);
   }
 
-  /** DELETE holds the addressed id's lock and, for a skill row, the lock of
-   *  the live head its skill writer closes (for an older version, another row)
-   *  across the reads it decides on, its write and its owned transaction's
-   *  commit. The head is found with no lock held and checked again by the skill
-   *  writer under the locks; if it changed, nothing is written and the DELETE
-   *  finds and locks the head again, at most SKILL_DELETE_HEAD_ATTEMPTS
-   *  attempts in all, then answers `503 memory_busy` (flair#2478 slice 1
-   *  part 2). */
+  /** Past the refusals that read no row, DELETE reads the addressed row with no
+   *  lock held (discovery only) and, for a skill row, finds the live head its
+   *  skill writer closes (for an older version, another row). It then takes the
+   *  addressed id's lock and that head's, which cover the authorization,
+   *  planning, write and owned transaction's commit that follow. When the head
+   *  the skill writer resolves under the locks is not one of the held ids,
+   *  nothing is written and the DELETE discovers and locks again, at most
+   *  SKILL_DELETE_HEAD_ATTEMPTS attempts in all, then answers `503 memory_busy`
+   *  (flair#2478 slice 1 part 2). */
   async delete(id: any) {
     const ids = deleteLockIds(this, id);
     if (ids.length === 0) return this.deleteLocked(id);
