@@ -7,8 +7,10 @@
  * is answered `memory_busy` while the writer holds the lock, and the writer
  * commits before releasing it. A writer that cannot take the lock writes
  * nothing and reports the row (the merge as `merge_target_busy`, the reindex
- * result as `skipped`). The composed component traces every Memory write by
- * the lock phase that ran it, so each writer's own field set is asserted.
+ * result as `skipped`). The composed component traces Memory.put and
+ * Memory.update by the lock phase that ran them: the federation control
+ * asserts selected included and excluded fields, and the reindex control
+ * asserts its exact field set.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
