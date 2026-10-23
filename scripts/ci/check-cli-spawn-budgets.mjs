@@ -68,6 +68,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isUnitTestFile } from "./test-files.mjs";
+import ts from "typescript";
 
 /**
  * The trusted baseline of exceptions (flair#1825). It replaces the old in-script
@@ -81,7 +82,9 @@ export const BASELINE_PATH = join(dirname(fileURLToPath(import.meta.url)), "cli-
  * introduced from (flair#1825). The seed path is taken ONLY when the base ref
  * resolves to this sha or to a commit that descends from it. Any OTHER base with
  * no baseline file is a hard failure — a base ref repointed at a commit outside
- * that history must not be enough. Full 40-char sha, read with `git merge-base`.
+ * that history must not be enough. Full 40-char sha: `git rev-parse` resolves
+ * the base ref (and this sha), and `git merge-base --is-ancestor` checks that the
+ * base descends from it.
  */
 export const SEED_INTRODUCTION_BASE = "4904699d80b55d9f299fe8e061aa80e4de8e9edc";
 
@@ -157,101 +160,94 @@ function skipRegex(src, i) {
   return i;
 }
 
+/** The name `findSpawnCalls` parses a source under when the caller names no file. */
+const UNNAMED_SOURCE = "source.ts";
+
+/** TypeScript's ScriptKind for a test file name, by extension (case-insensitive). */
+function scriptKindFor(fileName) {
+  const ext = /\.([^./\\]+)$/.exec(fileName)?.[1]?.toLowerCase();
+  if (ext === "tsx") return ts.ScriptKind.TSX;
+  if (ext === "jsx") return ts.ScriptKind.JSX;
+  if (ext === "js" || ext === "mjs" || ext === "cjs") return ts.ScriptKind.JS;
+  return ts.ScriptKind.TS;
+}
+
 /**
- * Like maskComments, but ALSO blanks the CONTENTS of string / regex literals and
- * the literal TEXT of template literals (same length). Used for spawn-CALL
- * matching, so a `Bun.spawn(...)` mentioned inside a plain string is not
- * mistaken for a call. A template's `${…}` EXPRESSIONS are read as CODE — a
- * `Bun.spawn(...)` of the CLI entry there IS a real call (flair#1825) — and the
- * comments and literals inside them are masked as at top level (flair#2774). The
- * argv/options TEXT a call reports is sliced from the ORIGINAL source, so the
- * CLI-entry check still reads real literal text. A spawn's `timeout` is read
- * from THIS text (flair#2774).
+ * The source as TypeScript's parser reads it, with every comment and the text of
+ * every string literal, template literal and regex literal replaced by spaces
+ * (flair#2774). Newlines and length are kept, so every index still points at the
+ * same character. A template's `${` and `}` and the expressions between them
+ * stay as code: a `Bun.spawn(...)` of the CLI entry there IS a real call
+ * (flair#1825). Used for spawn-CALL matching, so a `Bun.spawn(...)` mentioned in
+ * a string or comment is not mistaken for a call. The argv/options TEXT a call
+ * reports is sliced from the ORIGINAL source, so the CLI-entry check still reads
+ * real literal text. A spawn's `timeout` is read from THIS text (flair#2774).
+ *
+ * A file the parser reports a syntax error in is refused with an error naming
+ * it: the scan never falls back to the unmasked text.
  */
-function maskLiteralsAndComments(src) {
+function maskLiteralsAndComments(src, fileName = UNNAMED_SOURCE) {
+  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, scriptKindFor(fileName));
+  const diagnostics = sf.parseDiagnostics;
+  if (!Array.isArray(diagnostics)) {
+    throw new Error(
+      `cannot read TypeScript's parse diagnostics for ${fileName} (typescript ${ts.version}); ` +
+        "refusing to scan it unmasked (flair#2774).",
+    );
+  }
+  if (diagnostics.length > 0) {
+    const first = diagnostics[0];
+    const { line, character } = sf.getLineAndCharacterOfPosition(first.start ?? 0);
+    throw new Error(
+      `${fileName}:${line + 1}:${character + 1}: TypeScript cannot parse this file ` +
+        `(${ts.flattenDiagnosticMessageText(first.messageText, " ")}); refusing to scan it unmasked (flair#2774).`,
+    );
+  }
   const out = src.split("");
   const blank = (from, to) => {
     for (let j = from; j < to && j < src.length; j++) if (src[j] !== "\n") out[j] = " ";
   };
-  // Open template contexts, innermost last: TEMPLATE_TEXT while reading a
-  // template's literal text, or a number — the `{` depth — while reading one of
-  // its `${…}` expressions as code. The file's top level is code and is not on
-  // the stack. Every iteration advances `i`, so the loop ends within src.length.
-  const TEMPLATE_TEXT = "text";
-  const stack = [];
-  let i = 0;
-  while (i < src.length) {
-    const ch = src[i];
-    const top = stack.length > 0 ? stack[stack.length - 1] : null;
-    if (top === TEMPLATE_TEXT) {
-      if (ch === "\\") {
-        blank(i, i + 2);
-        i += 2;
-      } else if (ch === "`") {
-        out[i] = " "; // closing backtick
-        stack.pop();
-        i++;
-      } else if (ch === "$" && src[i + 1] === "{") {
-        stack.push(0); // `${` is kept: the expression is code
-        i += 2;
-      } else {
-        if (ch !== "\n") out[i] = " ";
-        i++;
-      }
-      continue;
+  // Every comment sits in the trivia between two tokens: the part before the
+  // first newline is the earlier token's TRAILING range, the rest the later
+  // token's LEADING range. Visiting every node and token (getChildren includes
+  // the tokens) therefore reaches every comment, inside template expressions
+  // too. A JSDoc comment is one of those ranges; its parsed nodes are skipped.
+  const leadingDone = new Set();
+  const trailingDone = new Set();
+  const visit = (node) => {
+    if (node.kind >= ts.SyntaxKind.FirstJSDocNode && node.kind <= ts.SyntaxKind.LastJSDocNode) return;
+    if (!leadingDone.has(node.pos)) {
+      leadingDone.add(node.pos);
+      for (const r of ts.getLeadingCommentRanges(src, node.pos) ?? []) blank(r.pos, r.end);
     }
-    if (top !== null && ch === "{") {
-      stack[stack.length - 1] = top + 1;
-      i++;
-      continue;
+    if (!trailingDone.has(node.end)) {
+      trailingDone.add(node.end);
+      for (const r of ts.getTrailingCommentRanges(src, node.end) ?? []) blank(r.pos, r.end);
     }
-    if (top !== null && ch === "}") {
-      if (top === 0) stack.pop(); // the `}` closing `${…}` is kept; template text resumes
-      else stack[stack.length - 1] = top - 1;
-      i++;
-      continue;
+    const children = node.getChildren(sf);
+    if (children.length > 0) {
+      for (const child of children) visit(child);
+      return;
     }
-    if (ch === '"' || ch === "'") {
-      const end = skipNonCode(src, i);
-      blank(i, end);
-      i = end > i ? end : i + 1;
-      continue;
+    const start = node.getStart(sf);
+    switch (node.kind) {
+      case ts.SyntaxKind.StringLiteral:
+      case ts.SyntaxKind.NoSubstitutionTemplateLiteral:
+      case ts.SyntaxKind.RegularExpressionLiteral:
+        blank(start, node.end);
+        break;
+      case ts.SyntaxKind.TemplateHead: // `text${ — keep the `${`
+        blank(start, node.end - 2);
+        break;
+      case ts.SyntaxKind.TemplateMiddle: // }text${ — keep the `}` and the `${`
+        blank(start + 1, node.end - 2);
+        break;
+      case ts.SyntaxKind.TemplateTail: // }text` — keep the `}`
+        blank(start + 1, node.end);
+        break;
     }
-    if (ch === "`") {
-      out[i] = " "; // opening backtick
-      stack.push(TEMPLATE_TEXT);
-      i++;
-      continue;
-    }
-    if (ch === "/" && src[i + 1] === "/") {
-      while (i < src.length && src[i] !== "\n") {
-        out[i] = " ";
-        i++;
-      }
-      continue;
-    }
-    if (ch === "/" && src[i + 1] === "*") {
-      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) {
-        if (src[i] !== "\n") out[i] = " ";
-        i++;
-      }
-      if (i < src.length) {
-        out[i] = " ";
-        out[i + 1] = " ";
-        i += 2;
-      }
-      continue;
-    }
-    if (ch === "/" && regexCanStart(src, i)) {
-      const j = skipRegex(src, i);
-      if (j !== i) {
-        blank(i, j + 1);
-        i = j + 1;
-        continue;
-      }
-    }
-    i++;
-  }
+  };
+  visit(sf);
   return out.join("");
 }
 
@@ -541,8 +537,8 @@ function textNamesCliEntry(text, ids) {
 }
 
 /** All spawn-family calls in the file (node forms + Bun forms), with CLI-entry targeting. */
-export function findSpawnCalls(source) {
-  const scan = maskLiteralsAndComments(source);
+export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
+  const scan = maskLiteralsAndComments(source, fileName);
   const ids = cliEntryIdentifiers(source);
   const aliases = aliasedSpawnFns(source);
   const constDecls = new Map();
@@ -954,8 +950,8 @@ function scopeOf(index, bodies, cases) {
   return bestCase ? bestCase.name : "<module>";
 }
 
-export function analyzeTestFile(source) {
-  const { calls, ids } = findSpawnCalls(source);
+export function analyzeTestFile(source, fileName = UNNAMED_SOURCE) {
+  const { calls, ids } = findSpawnCalls(source, fileName);
   const helpers = localHelpersThatSpawn(source, calls);
   const bodies = functionBodies(source);
   const cases = findCases(source, calls, helpers, bodies);
@@ -992,7 +988,7 @@ export function scanTree(root) {
   for (const file of files) {
     const rel = relative(root, file);
     const src = readFileSync(file, "utf8");
-    const { calls, cases } = analyzeTestFile(src);
+    const { calls, cases } = analyzeTestFile(src, rel);
     for (const call of calls) {
       if (call.isCliEntry && !call.hasTimeout) {
         spawnOffenders.push({
