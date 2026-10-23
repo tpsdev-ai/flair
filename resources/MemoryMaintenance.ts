@@ -241,8 +241,8 @@ export class MemoryMaintenance extends Resource {
                 continue;
               }
               if (outcome.value.kind !== "deleted") { stats.skipped++; continue; }
-              // The committed row must be gone: a delete whose commit did not
-              // land is not counted as expired. An unreadable read is reported
+              // The committed row must be gone: a row still present after the
+              // commit is not counted as expired. An unreadable read is reported
               // as a failed item, never as a success.
               let after: any;
               try {

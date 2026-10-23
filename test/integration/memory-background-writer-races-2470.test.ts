@@ -245,7 +245,7 @@ describe("cycleCompletedCleanly (the first-boot guard)", () => {
 });
 
 describe("flair#2470 — usage-count and archive patches write only their own fields (real Harper)", () => {
-  it("the usage-count bump writes only usageCount, so an owner content edit committed first survives and the count lands", async () => {
+  it("the usage-count bump writes only usageCount and its writeBackWriteId commit marker, so an owner content edit committed first survives and the count lands", async () => {
     const put = await editAs(owner, USAGE_ID, EDITED);
     expect(put.status, `the owner PUT did not answer 200: ${await put.clone().text()}`).toBe(200);
 
