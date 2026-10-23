@@ -1,5 +1,11 @@
 - **The ordinary (non-skill) feed write-back, the feed dedup repair and both `lastReflected` stamps write under the per-id Memory lock shared with owner PUT and PATCH.**
 
+  > **Heads-up:** `POST /FeedMemories` can now answer `503 memory_busy` (the id
+  > is held past the request's wait budget), `503 write_outcome_unknown` (an
+  > earlier write to the id has an unresolved outcome) or
+  > `503 memory_lock_unavailable` (the store has no lock). The lock is per Harper
+  > process: writes through another process are not serialized by it.
+
   The ordinary (non-skill) write-back of `POST /FeedMemories` takes the target
   id's lock and commits before releasing it. An omitted id is generated; a
   caller-supplied id can contend. The skill branch returns before this lock;
