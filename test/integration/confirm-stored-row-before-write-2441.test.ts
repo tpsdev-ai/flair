@@ -287,17 +287,22 @@ describe("flair#2441 — the usage-recording count bump confirms the stored row 
     ).toBe(true);
   }, 60_000);
 
-  it("a PURGE between the read and the write leaves the row purged", async () => {
+  // flair#2478 slice 3b: the count bump holds the id's per-id write lock and
+  // the purge takes it, so a purge that arrives while the bump holds the id is
+  // refused busy and deletes nothing; once the bump has committed, a purge
+  // removes the row.
+  it("a PURGE between the read and the write is refused busy and lands once the count bump commits", async () => {
     const id = `csr-usage-purge-${Date.now()}`;
     await seed(id, randomUUID());
-    const { paused, released, observed } = await withPaused(
-      "usage-count", () => record(id), () => purgeRow(id),
-      () => waitForRowGone(id, 15_000),
-    );
+    const { response, paused, released, competed } = await withPaused("usage-count", () => record(id), () => purgeBusy(id));
     expect(paused, "the usage count bump was not paused").toBe(true);
     expect(released).toBe("go");
-    expect(observed, "the PURGE did not become visible to a fresh read").toBe(true);
-    expect(await readRow(id), "the count bump re-created the purged row").toBeNull();
+    expect(competed?.status).toBe(503);
+    expect(competed?.body).toEqual({ error: "memory_busy", caller: "admin" });
+    expect(response.status, (await response.clone().text()).slice(0, 200)).toBe(200);
+    expect((await readRow(id))?.usageCount, "the refused purge removed the row, or the count bump did not land").toBe(1);
+    await purgeRow(id);
+    expect(await readRow(id), "the purge did not remove the row the count bump committed").toBeNull();
   }, 60_000);
 
   it("a same-id REPLACE with a new token is not overwritten", async () => {
