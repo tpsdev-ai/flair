@@ -187,7 +187,7 @@ function scriptKindFor(fileName) {
  * A file the parser reports a syntax error in is refused with an error naming
  * it: the scan never falls back to the unmasked text.
  */
-function maskLiteralsAndComments(src, fileName = UNNAMED_SOURCE) {
+function parseSourceFile(src, fileName = UNNAMED_SOURCE) {
   const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, scriptKindFor(fileName));
   const diagnostics = sf.parseDiagnostics;
   if (!Array.isArray(diagnostics)) {
@@ -204,6 +204,10 @@ function maskLiteralsAndComments(src, fileName = UNNAMED_SOURCE) {
         `(${ts.flattenDiagnosticMessageText(first.messageText, " ")}); refusing to scan it unmasked (flair#2774).`,
     );
   }
+  return sf;
+}
+
+function maskLiteralsAndComments(src, fileName = UNNAMED_SOURCE, sf = parseSourceFile(src, fileName)) {
   const out = src.split("");
   const blank = (from, to) => {
     for (let j = from; j < to && j < src.length; j++) if (src[j] !== "\n") out[j] = " ";
@@ -539,9 +543,73 @@ function textNamesCliEntry(text, ids) {
   return false;
 }
 
+/**
+ * Every object literal in the file, keyed by its start index (flair#2782). The
+ * spawn's options `timeout` is read from the AST, so a `timeout` key nested in
+ * another object (env, an object inside a `${…}`) is not mistaken for the
+ * spawn's own property.
+ */
+function objectLiteralsByStart(sf) {
+  const byStart = new Map();
+  const visit = (node) => {
+    if (ts.isObjectLiteralExpression(node)) {
+      const start = node.getStart(sf);
+      const prev = byStart.get(start);
+      if (!prev || node.end > prev.end) byStart.set(start, node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return byStart;
+}
+
+/** A property name (identifier, string literal, numeric literal) equal to `key`. */
+function propertyNameIs(name, key) {
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) return name.text === key;
+  return false;
+}
+
+/**
+ * The deadline an options span declares, or null (flair#2782). The span is the
+ * options argument, or the one-line initializer of the identifier passed there.
+ * A `timeout` counts only as a DIRECT property of that object literal, and only
+ * a numeric literal value is a deadline: `timeout: 0`, `1e999` and any other
+ * expression leave the spawn without one, as before (flair#1825 r6). A nested
+ * object's `timeout` belongs to that object, not to the spawn.
+ */
+function optionsTimeoutMs(sf, objectLiterals, span, source) {
+  if (!span) return null;
+  // The first non-trivia character of the span: whitespace and comments (a comment
+  // may sit between the comma and the options argument).
+  let start = span.start;
+  while (start < span.end) {
+    const ch = source[start];
+    if (/\s/.test(ch)) {
+      start++;
+    } else if (ch === "/" && source[start + 1] === "/") {
+      const nl = source.indexOf("\n", start);
+      start = nl === -1 || nl > span.end ? span.end : nl;
+    } else if (ch === "/" && source[start + 1] === "*") {
+      const end = source.indexOf("*/", start + 2);
+      start = end === -1 || end + 2 > span.end ? span.end : end + 2;
+    } else {
+      break;
+    }
+  }
+  const options = objectLiterals.get(start);
+  if (!options || options.end > span.end) return null;
+  for (const prop of options.properties) {
+    if (!ts.isPropertyAssignment(prop) || !propertyNameIs(prop.name, "timeout")) continue;
+    return ts.isNumericLiteral(prop.initializer) ? timeoutLiteralMs(prop.initializer.text) : null;
+  }
+  return null;
+}
+
 /** All spawn-family calls in the file (node forms + Bun forms), with CLI-entry targeting. */
 export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
-  const scan = maskLiteralsAndComments(source, fileName);
+  const sf = parseSourceFile(source, fileName);
+  const scan = maskLiteralsAndComments(source, fileName, sf);
+  const objectLiterals = objectLiteralsByStart(sf);
   const ids = cliEntryIdentifiers(source);
   const aliases = aliasedSpawnFns(source);
   const constDecls = new Map();
@@ -574,12 +642,9 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
       index: m.index,
       line: lineOf(m.index),
       text: `${argvText} ; ${optText}`,
-      // The OPTIONS text is kept separately, sliced from the call-matching mask
-      // (flair#2774): a `timeout` is read from HERE only, never from argv
-      // (round 9 item 2).
+      optSpan,
       optCode,
       isCliEntry: textNamesCliEntry(argvText, ids),
-      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optCode),
     });
   }
   // node child_process forms — bare, or via a named alias (flair#1825).
@@ -599,20 +664,17 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
       index: m.index,
       line: lineOf(m.index),
       text: `${argvText} ; ${optText}`,
+      optSpan,
       optCode,
       isCliEntry: textNamesCliEntry(argvText, ids),
-      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optCode),
     });
   }
-  // A numeric `timeout:` value, so a case budget can be checked against the sum
-  // of the waits inside it (flair#1825).
+  // A numeric `timeout` property, so a case budget can be checked against the sum
+  // of the waits inside it (flair#1825). Read from the OPTIONS expression only —
+  // an argv element never decides it (round 9 item 2) — and only from a direct
+  // property of the options object literal (flair#2782).
   for (const call of calls) {
-    // OPTIONS ONLY: an argv element must never decide `hasTimeout` (round 9 item 2).
-    const m = (call.optCode ?? "").match(/(?:^|[^\w$.])timeout\s*[:=]\s*([^\s,;)}\]]+)/);
-    // ONLY the EXACT token `[1-9][0-9]*` (underscores allowed) is a deadline:
-    // `timeout: 0` is NO timeout (node and Bun), and `1e999` / `10000-10000` are
-    // expressions, not positive integers — all are unbounded (flair#1825 r6).
-    call.timeoutMs = m ? timeoutLiteralMs(m[1]) : null;
+    call.timeoutMs = optionsTimeoutMs(sf, objectLiterals, call.optSpan, source);
     call.hasTimeout = call.timeoutMs !== null;
   }
   return { calls, ids };

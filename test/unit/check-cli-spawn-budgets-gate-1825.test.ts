@@ -609,9 +609,15 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
     if (opts && ts.isIdentifier(opts)) opts = inits.get(opts.text);
     if (!opts || !ts.isObjectLiteralExpression(opts)) return null;
     for (const p of opts.properties) {
-      if (ts.isPropertyAssignment(p) && p.name.getText(sf) === "timeout" && ts.isNumericLiteral(p.initializer)) return Number(p.initializer.text);
+      if (ts.isPropertyAssignment(p) && propertyName(p.name) === "timeout" && ts.isNumericLiteral(p.initializer)) return Number(p.initializer.text);
     }
     return null;
+  }
+
+  /** A property name's text, quoted or not (`"timeout"` and `timeout` are the same key). */
+  function propertyName(name: ts.PropertyName): string {
+    if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) return name.text;
+    return name.getText();
   }
 
   const ARGV = '["bun", "src/cli.ts", "status"]';
@@ -715,18 +721,28 @@ describe("comments and literals inside a template's ${…} in a spawn's options 
     }
   });
 
-  it("the timeout matcher reads a `timeout` key at ANY depth of the options code, not only a top-level key", () => {
-    // A real `timeout:` in an object written inside ${…} is code, so it stays
-    // readable. The gate counts it as the spawn's deadline, as it counts a
-    // nested object's key outside any template; the parser shows the options
-    // object itself carries no `timeout` in either case.
-    for (const opts of ["{ env: { X: `${JSON.stringify({ timeout: 5000 })}` } }", "{ env: { timeout: 5000 } }"]) {
-      for (const src of Object.values(forms(opts))) {
-        expect(parsedTimeout(src)).toBeNull();
-        const [call] = findSpawnCalls(src).calls;
-        expect(call.timeoutMs).toBe(5000);
-        expect(spawnNoTimeout(src)).toBe(false);
-      }
+  it("a timeout key nested in another object is no deadline, for both spawn families", () => {
+    // A nested object's `timeout` is that object's field, not the spawn's deadline
+    // (flair#2782): neither an `env` object's key nor an object written inside a
+    // `${…}` bounds the child.
+    for (const opts of ["{ env: { timeout: 5000 } }", "{ env: { X: `${JSON.stringify({ timeout: 5000 })}` } }"]) {
+      for (const src of Object.values(forms(opts))) expectGateAgreesWithParser(src, null);
+    }
+  });
+
+  it("a top-level timeout after a nested one is read, for both spawn families", () => {
+    for (const src of Object.values(forms("{ env: { timeout: 5000 }, timeout: 90_000 }"))) {
+      expectGateAgreesWithParser(src, 90000);
+    }
+  });
+
+  it("a quoted top-level timeout key is read, for both spawn families", () => {
+    for (const src of Object.values(forms('{ "timeout": 5000 }'))) expectGateAgreesWithParser(src, 5000);
+  });
+
+  it("an options identifier whose one-line initializer holds only a nested timeout is no deadline", () => {
+    for (const [form, src] of Object.entries(forms("{ env: { timeout: 5000 } }"))) {
+      if (form.endsWith("identifier")) expectGateAgreesWithParser(src, null);
     }
   });
 });

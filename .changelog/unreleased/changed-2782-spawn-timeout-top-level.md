@@ -1,0 +1,1 @@
+- **The CLI spawn-budget gate reads a spawn's `timeout` only from a direct property of its options object literal.** A `timeout` key inside a nested object such as `env: { timeout: 5000 }` is no longer treated as the spawn's deadline.
