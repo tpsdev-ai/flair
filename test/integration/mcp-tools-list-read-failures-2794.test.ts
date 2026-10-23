@@ -199,8 +199,7 @@ describe("/mcp tools/list answers a failed resolution read with the tools/call e
     expect(read.error, JSON.stringify(read.error)).toBeUndefined();
     expect(read.result?.structuredContent?.agentId).toBe(CREDENTIAL_READ_PRINCIPAL);
 
-    // The same call by a subject with no Credential row is refused, so the
-    // write above is the mapped principal's, not that of any resolved caller.
+    // The same call by a subject with no Credential row is refused.
     const unmapped = await mcp(await mintToken(UNMAPPED_SUB), "tools/call", {
       name: "memory_get",
       arguments: { id: memoryId },
