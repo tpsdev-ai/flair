@@ -37,8 +37,10 @@
  *    the owner holds the id through the re-embed's wait budget (the owner is
  *    held at a pause point); a re-embed that waits inside its budget plans from
  *    the owner's committed row;
- *  - an owner DELETE racing the re-embed at each held point, and a DELETE that
- *    read the row first: no row remains;
+ *  - an owner DELETE at each held point is refused `503 memory_busy` and the
+ *    row is unchanged; after the re-embed answers, a DELETE leaves no row; a
+ *    DELETE that read the row first holds the id (the re-embed is refused
+ *    `503 memory_busy` and writes nothing) and leaves no row;
  *  - text drift before the vector, after staging and in the confirmation-to-
  *    commit window; an uncontended positive control; an unreadable post-commit
  *    read (`503 write_outcome_unknown`, the id is fenced); a retry's provider
@@ -288,32 +290,28 @@ describe("flair#2478 — an owner write that holds the id first (real Harper)", 
 
 describe("flair#2478 — an owner DELETE racing the re-embed never leaves a row (real Harper)", () => {
   for (const [point, label] of HELD_POINTS) {
-    it(`a DELETE while the re-embed is held ${label} leaves no row`, async () => {
+    it(`a DELETE while the re-embed is held ${label} is refused memory_busy; after the re-embed answers, a DELETE leaves no row`, async () => {
       const id = `rl2478-delete-${point}`;
       await seed(id);
       h.arm(point);
       const pending = reembed(id);
       try {
         await h.assertPaused(point);
-        const del = await h.signed(owner, "DELETE", memPath(id));
-        expect(del.status, await del.clone().text()).toBe(200);
-        expect(await h.readRow(id)).toBeNull();
+        // The re-embed holds the id past the DELETE's wait budget.
+        const before = await h.readRow(id);
+        const body = await expectRefused(await h.signed(owner, "DELETE", memPath(id)), "memory_busy");
+        expect(body).toEqual({ error: "memory_busy", caller: owner.id });
+        expect(await h.readRow(id), "the refused DELETE changed the row").toEqual(before);
         await h.release(point);
       } finally {
         h.letGo(point);
       }
       const res = await pending;
-      const text = await res.text();
-      if (point === STAGED) {
-        expect(res.status, text).toBe(409);
-        expect(JSON.parse(text).error).toBe("stored_row_changed");
-      } else if (point === CONFIRMED) {
-        // The commit resolved over a newer delete; the post-commit read finds no
-        // row, and the retry's fresh read answers not found.
-        expect(res.status, text).toBe(404);
-      } else {
-        expect(res.status, text).toBe(200);
-      }
+      expect(res.status, await res.clone().text()).toBe(200);
+      await expectBoundTo(await h.readRow(id), ORIGINAL);
+      const del = await h.signed(owner, "DELETE", memPath(id));
+      expect(del.status, await del.clone().text()).toBe(200);
+      expect(await h.readRow(id)).toBeNull();
       await Bun.sleep(250);
       expect(await h.readRow(id), "a row exists after the DELETE answered success").toBeNull();
     }, 120_000);
@@ -326,10 +324,13 @@ describe("flair#2478 — an owner DELETE racing the re-embed never leaves a row 
     const pendingDelete = h.signed(owner, "DELETE", memPath(id));
     try {
       await h.assertPaused("memory-delete");
-      // The DELETE holds no per-id lock: the re-embed runs to completion.
-      const res = await reembed(id);
-      expect(res.status, await res.clone().text()).toBe(200);
-      await expectBoundTo(await h.readRow(id), ORIGINAL);
+      // The DELETE holds the id from its first read: the re-embed waits out its
+      // budget, is refused and writes nothing.
+      const before = await h.readRow(id);
+      const body = await expectRefused(await reembed(id), "memory_busy");
+      expect(body).toEqual({ error: "memory_busy", caller: owner.id });
+      expect(h.writesBy(id, WRITER), "the refused re-embed wrote").toEqual([]);
+      expect(await h.readRow(id), "the refused re-embed changed the row").toEqual(before);
       await h.release("memory-delete");
     } finally {
       h.letGo("memory-delete");
@@ -338,6 +339,7 @@ describe("flair#2478 — an owner DELETE racing the re-embed never leaves a row 
     expect(del.status, await del.clone().text()).toBe(200);
     await Bun.sleep(250);
     expect(await h.readRow(id), "a row exists after the DELETE answered success").toBeNull();
+    expect(h.writesBy(id, WRITER), "the re-embed wrote the deleted id").toEqual([]);
   }, 120_000);
 });
 

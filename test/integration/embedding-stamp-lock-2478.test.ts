@@ -221,7 +221,7 @@ afterAll(async () => {
 
 
 describe("flair#2478 — the migration's HTTP delegation holds the id's lock through its commit (real Harper)", () => {
-  it("held after staging, after confirmation and after commit: owner PUT and PATCH are refused; DELETEs leave no row; drift stores only the current text's vector", async () => {
+  it("held after staging, after confirmation and after commit: owner PUT, PATCH and DELETE are refused; DELETEs after the release leave no row; drift stores only the current text's vector", async () => {
     // a1 contention; a2-a4 DELETE at each held point; a5 drift after staging;
     // a6 drift before the request; a7 uncontended control.
     const ids = ["esl-a1", "esl-a2", "esl-a3", "esl-a4", "esl-a5", "esl-a6", "esl-a7"];
@@ -257,12 +257,21 @@ describe("flair#2478 — the migration's HTTP delegation holds the id's lock thr
     expect(afterPatch.content).toBe(EDITED);
     expect(afterPatch.visibility).toBe("shared");
 
+    // The request holds the id past the DELETE's wait budget: the DELETE is
+    // refused and changes nothing. Once the next row reaches `next`, this row's
+    // request has answered, and a DELETE leaves no row.
     const deleteAt = async (id: string, point: string, next: string) => {
       await h.assertPaused(point);
+      const before = await h.readRow(id);
+      const body = await expectRefused(await h.signed(owner, "DELETE", memPath(id)), "memory_busy");
+      expect(body).toEqual({ error: "memory_busy", caller: owner.id });
+      expect(await h.readRow(id), `${id}: the refused DELETE changed the row`).toEqual(before);
+      await handOff(point, next);
+      await h.assertPaused(next);
+      await expectBoundTo(await h.readRow(id), ORIGINAL);
       const del = await h.signed(owner, "DELETE", memPath(id));
       expect(del.status, await del.clone().text()).toBe(200);
       expect(await h.readRow(id)).toBeNull();
-      await handOff(point, next);
     };
     await deleteAt("esl-a2", STAGED, GATE);
     // a3: DELETE after confirmation.
@@ -288,9 +297,9 @@ describe("flair#2478 — the migration's HTTP delegation holds the id's lock thr
     await expectBoundTo(await h.readRow("esl-a6"), EDITED, ORIGINAL);
     await expectBoundTo(await h.readRow("esl-a7"), ORIGINAL);
     await expectBoundTo(await h.readRow("esl-a5"), EDITED, ORIGINAL);
-    expect(runs()[0]).toEqual({ processed: 4, touchedIds: ["esl-a1", "esl-a4", "esl-a6", "esl-a7"] });
+    expect(runs()[0]).toEqual({ processed: 6, touchedIds: ["esl-a1", "esl-a2", "esl-a3", "esl-a4", "esl-a6", "esl-a7"] });
     expect(runs()[1]).toEqual({ processed: 1, touchedIds: ["esl-a5"] });
-    for (const id of ["esl-a1", "esl-a5", "esl-a6", "esl-a7"]) h.expectIncrementalWrites(id, HTTP_WRITER);
+    for (const id of ["esl-a1", "esl-a2", "esl-a3", "esl-a4", "esl-a5", "esl-a6", "esl-a7"]) h.expectIncrementalWrites(id, HTTP_WRITER);
     for (const id of ["esl-a2", "esl-a3", "esl-a4"]) expect(await h.readRow(id)).toBeNull();
   }, 300_000);
 

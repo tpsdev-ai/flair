@@ -90,9 +90,10 @@ describe("the durability guard stays wired into all write paths", () => {
   }
 
   // Three separate REST entry points write a Memory: post(), patch() and put().
-  // Each needs its own guard, so each write body (the lock wrapper's `putLocked`
-  // / `patchLocked`, flair#2478) must call the validator once.
-  test.each(["post", "patchLocked", "putLocked"])("Memory.%s() calls the validator exactly once", (name) => {
+  // Each needs its own guard, so each write body (the lock wrapper's
+  // `postLocked` / `putLocked` / `patchLocked`, flair#2478) must call the
+  // validator once.
+  test.each(["postLocked", "patchLocked", "putLocked"])("Memory.%s() calls the validator exactly once", (name) => {
     const calls = methodBody(name).match(/assertValidDurability\(content\.durability\)/g) ?? [];
     expect(calls.length).toBe(1);
   });
