@@ -3108,8 +3108,11 @@ export class Memory extends (databases as any).flair.Memory {
   async put(content: any, query?: any) {
     const ids = putLockIds(this, content);
     if (ids.length === 0) return memoryIdRequiredResponse();
+    // Citation-on-write, queued by putLocked, runs after this lock is released:
+    // it takes each cited id's lock, and the target id's lock is not held then.
+    const afterRelease: Array<() => Promise<void>> = [];
     const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async () => {
-      const result = await this.putLocked(content, query);
+      const result = await this.putLocked(content, query, afterRelease);
       // Test-only: the verb body has returned and the lock is still held. A body
       // that owned its transaction has committed it; a composed or `_reindex` put
       // that joined another transaction has not.
@@ -3117,11 +3120,12 @@ export class Memory extends (databases as any).flair.Memory {
       if (committed) await committed;
       return result;
     }, { phase: "put" });
-    if (outcome.kind === "done") return outcome.value;
-    return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
+    if (outcome.kind !== "done") return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
+    for (const step of afterRelease) await step();
+    return outcome.value;
   }
 
-  private async putLocked(content: any, query?: any) {
+  private async putLocked(content: any, query: any, afterRelease: Array<() => Promise<void>>) {
     const reembedding = content?.embedding === null && content?.embeddingModel === null;
     // flair#2141 S2: check the seed's fixed id against the operator-source
     // reservation (resources/seed-reservation.ts).
@@ -3721,13 +3725,17 @@ export class Memory extends (databases as any).flair.Memory {
     if (putResult.close?.granteeId === undefined) await closeSupersededIfNeeded(ctx, putResult.content, putResult.close, "put");
 
     // flair#744 slice A: citation-on-write — POST-COMMIT, fully
-    // failure-isolated (see post()'s identical comment above).
+    // failure-isolated (see post()'s identical comment above). flair#2478: it
+    // is queued here and put() runs it after releasing this id's lock.
     if (putResult.usedMemoryIds !== undefined) {
-      try {
-        await recordCitations(ctx, putResult.auth, putResult.usedMemoryIds, new Date().toISOString());
-      } catch (err) {
-        console.error("Memory.put: citation recording failed (write already committed)", err);
-      }
+      const { auth: citingAuth, usedMemoryIds } = putResult;
+      afterRelease.push(async () => {
+        try {
+          await recordCitations(ctx, citingAuth, usedMemoryIds, new Date().toISOString());
+        } catch (err) {
+          console.error("Memory.put: citation recording failed (write already committed)", err);
+        }
+      });
     }
 
     return buildWriteResponse(putResult.content, result, putResult.dedupMatch, putResult.redactedValues, putStaged);

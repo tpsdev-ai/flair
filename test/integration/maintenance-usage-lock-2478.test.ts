@@ -25,6 +25,8 @@
  *     transaction (the competing write lands first);
  *   - usage-count-staged / usage-count-commit: the count bump is staged / past
  *     its last confirmation;
+ *   - usage-contribution-lock: a usage contribution before it tries the memory
+ *     id's lock;
  *   - memory-put-committed: an owner PUT after its commit while it holds the id.
  *
  * An owner PUT/PATCH to an id a writer holds is refused `503 memory_busy` (the
@@ -459,5 +461,43 @@ describe("flair#2478 slice 3b — the usage-count writer (real Harper)", () => {
     expect(row?.content).toBe("owner text holding the id");
     expect(row?.visibility).toBe("private");
     expect(await readLedger(owner.id, id)).toBeNull();
+  }, 120_000);
+});
+
+describe("flair#2478 slice 3b — citation-on-write from an owner PUT (real Harper)", () => {
+  it("a PUT of a higher-sorted id citing a lower-sorted id releases its own id's lock before the citation tries the cited id's lock, and records the citation", async () => {
+    const cited = "mul-cite-a";
+    const target = "mul-cite-z";
+    await seed(cited);
+    await seed(target);
+    const point = "usage-contribution-lock";
+    arm(point);
+    const pending = ownerWrite(owner, "PUT", target, { content: "the citing write", visibility: "shared", usedMemoryIds: [cited] });
+    await pauseAt(point);
+    // The citation has not tried the cited id's lock yet: the target id's lock
+    // must already be free, so an owner PATCH of the target is not refused.
+    const probe = await ownerWrite(owner, "PATCH", target, { content: "patched while the citation waits", visibility: "private" });
+    expect(probe.status, `owner PATCH of the target while the citation waits: ${await probe.clone().text()}`).toBeLessThan(300);
+    expect((await readRow(cited))?.usageCount).toBe(0);
+    release(point);
+    const res = await pending;
+    await assertReleased(point);
+    expect(res.status, `citing PUT: ${await res.clone().text()}`).toBe(200);
+    // The answer is the PUT's own write result, not the row the PATCH left.
+    expect(await res.json()).toMatchObject({ id: target, written: true, visibility: "shared" });
+    expect((await readRow(cited))?.usageCount).toBe(1);
+    expect((await readLedger(owner.id, cited))?.id).toBe(`${owner.id}:${cited}`);
+    expect((await readRow(target))?.content).toBe("patched while the citation waits");
+  }, 120_000);
+
+  it("a PUT citing its own id records the citation: no self-deadlock, no skip", async () => {
+    const id = "mul-cite-self";
+    await seed(id);
+    const res = await ownerWrite(owner, "PUT", id, { content: "a write that cites itself", visibility: "shared", usedMemoryIds: [id] });
+    expect(res.status, `self-citing PUT: ${await res.clone().text()}`).toBe(200);
+    const row = await readRow(id);
+    expect(row?.content).toBe("a write that cites itself");
+    expect(row?.usageCount).toBe(1);
+    expect((await readLedger(owner.id, id))?.id).toBe(`${owner.id}:${id}`);
   }, 120_000);
 });

@@ -148,11 +148,16 @@ export async function recordUsageContribution(
   canRead: CanReadMemory,
 ): Promise<void> {
   // Global lock order (flair#2478): the sorted Memory id locks first, then the
-  // usage ledger. The whole contribution — the ledger check, any ledger create
+  // usage ledger. Memory.put() records its citations after releasing its target
+  // id's lock, so a citation holds no other Memory id lock when it takes this
+  // one. The whole contribution — the ledger check, any ledger create
   // and the count bump — runs under the memory id's write lock, taken once with
   // no wait: the count bump's decision is then made on a committed row an
   // ordinary owner PUT or PATCH cannot change under it (the writes it does not
   // serialize are named above).
+  // Test-only: before this contribution tries the memory id's lock.
+  const beforeLock = txnPausePoint("usage-contribution-lock");
+  if (beforeLock) await beforeLock;
   const memoryOutcome = await withMemoryWriteLockOnce(
     (databases as any)?.flair?.Memory?.primaryStore,
     [memoryId],
