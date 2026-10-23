@@ -57,7 +57,7 @@ const PROVIDER_BOUND_ENV = {
   FLAIR_ENABLE_TEST_FAULT_INJECTION: "1",
   FLAIR_MEMORY_LOCK_PROVIDER_TIMEOUT_MS: "60000",
 };
-/** The restore child's budget, above the provider bound so a refusal is reported by the write rather than by the spawn. */
+/** The restore child's budget, above the provider bound: it gives a provider refusal additional headroom to reach the assertion; the whole restore can still exceed it. */
 const RESTORE_CHILD_TIMEOUT_MS = 90_000;
 const FETCH_LOG_PRELOAD = join(import.meta.dirname, "..", "helpers", "fetch-request-log-preload.ts");
 const AGENT_ID = "agent-a";
@@ -159,7 +159,7 @@ function runRestore(env: Record<string, string | undefined>, credential: string[
 function restoreFailure(result: { stdout: string; stderr: string }): string {
   const output = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
   return /memory_provider_timeout/.test(output)
-    ? `${output}\nprovider timeout: a memory write was refused with memory_provider_timeout (the instance's embedding provider bound), not a restore-targeting failure`
+    ? `${output}\nprovider timeout: output contains memory_provider_timeout; inspect the errors above for any additional failures`
     : output;
 }
 
