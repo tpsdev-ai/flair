@@ -29,6 +29,15 @@ const PAST = "2000-01-01T00:00:00.000Z";
 const POINTER = { v: 1, host: "host-a", kind: "run", id: "run-aaaaaaaa" };
 const ADMIN_ID = `mm-presence-admin-${SFX}`;
 const OWNER_ID = `mm-presence-owner-${SFX}`;
+/** The 400 body an admin run's out-of-rule agentId gets, remedy included. */
+const AGENT_ID_REFUSAL = {
+  error: `agentId must be a string matching ${AGENT_ID_RULE}`,
+  remedy:
+    "for a legacy stored agent id outside this rule, run that agent's own authenticated non-admin " +
+    "maintenance (POST /MemoryMaintenance with that agent's credential), which reaches its rows; or " +
+    "omit agentId to run fleet-wide, which also expires and archives other agents' eligible rows. " +
+    "A run scoped to an admin agentId needs an id that matches the rule.",
+};
 
 let harper: HarperInstance;
 let appDir = "";
@@ -187,12 +196,21 @@ describe("MemoryMaintenance agentId presence on a direct in-process admin call (
     expect(reply.ok, JSON.stringify(reply)).toBe(false);
     if (reply.ok) return;
     expect(reply.status, JSON.stringify(reply)).toBe(400); // assertion: a supplied undefined is refused, not read as absent
-    expect(JSON.parse(reply.body ?? "null")).toEqual({ error: `agentId must be a string matching ${AGENT_ID_RULE}` }); // assertion: the refusal names the field and the rule
+    expect(JSON.parse(reply.body ?? "null")).toEqual(AGENT_ID_REFUSAL); // assertion: the refusal names the field, the rule and the remedy
 
     for (const s of seeded) {
       expect(await rowsOf(s.id), `${s.id} Memory or pointer row changed`).toBe(s.seededRows); // assertion: no Memory or pointer row changed (fresh reads)
     }
   }, 90_000);
+
+  it("an admin call naming an agentId outside the agent-id rule is refused with the rule and the remedy", async () => {
+    const { sent, reply } = await maintainInProcess({ agentId: "agent/name" }, []);
+    expect(sent).toEqual({ ownKeys: ["agentId"], undefinedKeys: [] }); // control: the out-of-rule id was sent as an own property
+    expect(reply.ok, JSON.stringify(reply)).toBe(false);
+    if (reply.ok) return;
+    expect(reply.status, JSON.stringify(reply)).toBe(400); // assertion: the out-of-rule id is refused
+    expect(JSON.parse(reply.body ?? "null")).toEqual(AGENT_ID_REFUSAL); // assertion: the refusal names the rule and carries the exact remedy
+  }, 60_000);
 
   it("an admin call whose body has no agentId key runs fleet-wide", async () => {
     const own = await seed("absent");

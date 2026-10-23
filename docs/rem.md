@@ -118,6 +118,9 @@ What each tier actually guarantees:
 - persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it).
 - standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
 - ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.
+
+Maintenance runs are scoped: an agent's own run covers that agent's rows; an admin run that omits `agentId` is fleet-wide and expires or archives eligible rows of every agent; one that names an `agentId` covers that agent. An admin `agentId` must match the agent-id rule (`^[a-zA-Z0-9_-]{1,64}$`), so an agent whose stored id is outside the rule cannot be named in an admin-scoped run. That 400 names the rule and the remedy: run that agent's own authenticated non-admin maintenance, which reaches its rows, or run fleet-wide maintenance knowing that it also expires and archives other agents' eligible rows.
+
 - No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
 
 Soul is operator-authored identity, not a promotion target for learned candidates. `flair rem promote --to soul` is refused for stored candidate text even with operator credentials; promote learned claims to Memory instead.

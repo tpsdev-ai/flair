@@ -27,6 +27,15 @@ describe("flair#2359 — describeAgentIdRuleFinding", () => {
     expect(finding!.fixHint).toContain("flair agent add");
   });
 
+  it("states the removal consequence and the two maintenance options next to the existing remedy", () => {
+    const finding = describeAgentIdRuleFinding([{ id: "bad.id" }]);
+    expect(finding!.fixHint).toContain("flair agent remove");
+    expect(finding!.fixHint).toContain("deletes the agent's Memory and Soul rows");
+    expect(finding!.fixHint).toContain("run its own authenticated non-admin maintenance, which reaches them regardless of the stored id");
+    expect(finding!.fixHint).toContain("or run fleet-wide maintenance, which also expires and archives other agents' eligible rows");
+    expect(finding!.fixHint).toContain("an admin-scoped run needs an id that matches the rule");
+  });
+
   it("reports every non-conforming id, sorted", () => {
     const finding = describeAgentIdRuleFinding([{ id: "z.z" }, { id: "ok" }, { id: "a a" }]);
     expect(finding!.invalidIds).toEqual(["a a", "z.z"]);

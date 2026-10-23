@@ -52,8 +52,14 @@ const READ_PROBE: ProbeFiles = {
 };
 const READ_PROBE_LOG = "maintenance-read-probe-2084.jsonl";
 const MEMORY_READ_PROBE_LOG = "maintenance-memory-read-probe-2084.jsonl";
-/** The 400 body an admin run's refused agentId gets: it names the shared agent-id rule. */
-const AGENT_ID_REFUSAL = { error: `agentId must be a string matching ${AGENT_ID_RULE}` };
+/** The 400 body an admin run's refused agentId gets: it names the shared agent-id
+ *  rule and carries the remedy for a legacy stored id outside it. */
+const AGENT_ID_REMEDY =
+  "for a legacy stored agent id outside this rule, run that agent's own authenticated non-admin " +
+  "maintenance (POST /MemoryMaintenance with that agent's credential), which reaches its rows; or " +
+  "omit agentId to run fleet-wide, which also expires and archives other agents' eligible rows. " +
+  "A run scoped to an admin agentId needs an id that matches the rule.";
+const AGENT_ID_REFUSAL = { error: `agentId must be a string matching ${AGENT_ID_RULE}`, remedy: AGENT_ID_REMEDY };
 
 interface TestAgent {
   id: string;
@@ -492,7 +498,7 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
     await expectSweptOnly(null, fleet, before);
   }, 120_000);
 
-  it("(a) a non-admin run by an agent whose stored id is outside the agent-id rule removes its own orphan pointers", async () => {
+  it("(a) a non-admin run by an agent whose stored id is outside the agent-id rule reaches its rows and removes its own orphan pointers", async () => {
     // The Agent row and its pointers are seeded through the operations API,
     // which does not apply the agent-id rule.
     const legacy = makeAgent(`mm-legacy.${SFX}`);
@@ -502,6 +508,13 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
     ]);
     expect((JSON.parse(await readRows("Agent", "id", legacy.id)) as unknown[]).length, "the legacy agent row was seeded").toBe(1);
     await seedOrphans("legacy");
+    // A legacy Memory row whose validity ended: only this agent's own run can
+    // name the out-of-rule owner, and it must reach the row.
+    const legacyMemoryId = `mm-legacy-memory-${SFX}`;
+    const legacyToken = randomUUID();
+    await insertRows("Memory", [{ ...memoryRow(legacyMemoryId, legacy.id, false, legacyToken), validTo: PAST }]);
+    await insertRows("MemoryHostSource", [pointerRow(legacyMemoryId, legacy.id, legacyToken)]);
+    expect(JSON.parse(await readMemory(legacyMemoryId)).length, "the legacy Memory row was seeded").toBe(1);
     const legacyRows: Record<string, unknown>[] = [];
     for (let i = 0; i < 2; i++) {
       const id = `mm-legacy-orphan-${i}-${SFX}`;
@@ -514,6 +527,10 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
 
     const body = await maintain({ kind: "agent", agent: legacy, body: {} });
     expect(body.stats?.agent).toBe(legacy.id); // control: the run is scoped to the caller
+    expect(body.archived, JSON.stringify(body)).toBe(1); // assertion: its own run archived the legacy-id Memory row
+    const archived = JSON.parse(await readMemory(legacyMemoryId));
+    expect(archived[0]?.archived, JSON.stringify(archived)).toBe(true); // assertion: the legacy-id Memory row was reached
+    expect(await readPointer(legacyMemoryId), "the archived legacy Memory's pointer was not removed").toBe("[]"); // assertion: its pointer went with it
     await expectSweptOnly(legacy.id, body, before); // assertion: its orphan pointers are counted and removed, every other orphan unchanged
     await expectLiveUnchanged("legacy-id non-admin run");
 
@@ -589,9 +606,11 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
       (JSON.parse(await readRows("Memory", "agentId", agentId)) as unknown[]).length;
     const agentARows = await countMemory(agentA.id);
     const agentBRows = await countMemory(agentB.id);
+    const legacyRows = (JSON.parse(await readRows("Memory", "id", `mm-legacy-memory-${SFX}`)) as unknown[]).length;
     expect(agentARows, "the target agent has Memory rows").toBeGreaterThan(0);
     expect(agentBRows, "the other agent has Memory rows").toBeGreaterThan(0);
-    const totalRows = agentARows + agentBRows;
+    expect(legacyRows, "the archived legacy-id Memory row is still stored").toBe(1);
+    const totalRows = agentARows + agentBRows + legacyRows;
 
     rmSync(join(harper.installDir, MEMORY_READ_PROBE_LOG), { force: true });
     const body = await maintain({ kind: "admin", body: { agentId: agentA.id } });
