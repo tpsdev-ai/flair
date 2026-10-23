@@ -1712,10 +1712,14 @@ describe("vendor-pinned nodes shipped in harper's bundle", () => {
       {
         harper: { name: "harper", version: "5.3.3", bundleDependencies: ["fastify"] },
         lock: { [node]: { version: "1.0.0", inBundle: true } },
-        // fastify's source imports subpath-only/sub; its manifest names the package, which is what the walk reads.
+        // fastify's source requires subpath-only/sub; its manifest names the package, which is what the walk reads.
         packages: {
           [node]: { name: "subpath-only", version: "1.0.0", exports: { "./sub": "./sub.js" } },
           [fastify]: { name: "fastify", version: "5.12.5", dependencies: { "subpath-only": "*" } },
+        },
+        raw: {
+          [`${node}/sub.js`]: "module.exports = {};\n",
+          [`${fastify}/index.js`]: "module.exports = require('subpath-only/sub');\n",
         },
       },
       (prefix) => expect(vendorPinnedNodeProblems(advisory("subpath-only", node, "1.0.0"), prefix)).toEqual([]),

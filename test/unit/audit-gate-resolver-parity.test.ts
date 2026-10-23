@@ -102,7 +102,7 @@ function fixture(): { prefix: string; realHarper: string } {
 type Edge = { requirer: string; dep: string };
 type NodeAnswer = { resolved: string | null; paths: string[] };
 
-/** Every dependency edge of every package at or below harper's directory. */
+/** Every dependency edge of every package in the flat fixture list. */
 function edges(prefix: string): Edge[] {
   return Object.entries(PACKAGES)
     .filter(([dir]) => dir === HARPER || dir.startsWith(`${HARPER}/`))
