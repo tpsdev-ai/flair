@@ -168,18 +168,48 @@ function rpcError(id: any, code: number, message: string, httpStatus = 200) {
 // when FLAIR_ENABLE_TEST_FAULT_INJECTION=1 (resources/txn-pause-point.ts), and
 // each matching subject fails once, so the request after the failing one is
 // answered normally. Nothing in a request can arm either hook.
+//
+// flair#2799 — the fired-subject state is process-lifetime: it lives here for as
+// long as the server process does and never resets between requests. It holds
+// at most TEST_READ_FAILURE_FIRED_LIMIT (setting, subject) pairs so that a
+// long-lived process driven with many distinct subjects stops arming new faults
+// instead of growing without limit. Once the set is full, the hook answers false
+// (no fault) for every further pair and logs that once. An empty setting value
+// is inert: it matches nothing and is never added to the set.
 const TEST_CREDENTIAL_READ_FAIL_SUB_ENV = "FLAIR_TEST_MCP_CREDENTIAL_READ_FAIL_SUB";
 const TEST_PRINCIPAL_READ_FAIL_SUB_ENV = "FLAIR_TEST_MCP_PRINCIPAL_READ_FAIL_SUB";
+export const TEST_READ_FAILURE_FIRED_LIMIT = 1024;
 const testReadFailuresFired = new Set<string>();
+let testReadFailuresFullLogged = false;
 
-function testReadFailure(setting: string, sub: string): boolean {
+/**
+ * Should this subject's read fail once? Test-only; false unless
+ * FLAIR_ENABLE_TEST_FAULT_INJECTION=1 and the setting names a non-empty value
+ * the subject contains. Exported for the fired-state bound's unit test.
+ */
+export function testReadFailure(setting: string, sub: string): boolean {
   if (process.env[TEST_FAULT_INJECTION_ENV] !== "1") return false;
   const match = process.env[setting];
   if (!match || !sub.includes(match)) return false;
   const key = `${setting}\n${sub}`;
   if (testReadFailuresFired.has(key)) return false;
+  if (testReadFailuresFired.size >= TEST_READ_FAILURE_FIRED_LIMIT) {
+    if (!testReadFailuresFullLogged) {
+      testReadFailuresFullLogged = true;
+      console.warn(
+        `[flair] test-only read-failure hook fired state reached its ${TEST_READ_FAILURE_FIRED_LIMIT}-pair limit; ` +
+          "no further test read failures will be injected in this process.",
+      );
+    }
+    return false;
+  }
   testReadFailuresFired.add(key);
   return true;
+}
+
+/** The fired-subject set's current size. Exported for the bound's unit test. */
+export function testReadFailureFiredCount(): number {
+  return testReadFailuresFired.size;
 }
 
 /**
