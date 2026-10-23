@@ -26,7 +26,7 @@
 
 import { databases } from "harper";
 import { randomBytes } from "node:crypto";
-import { TOOLS, listToolDefs, type McpToolDef, type ResolvedAgent } from "./mcp-tools.js";
+import { TOOLS, listToolDefs, type ResolvedAgent } from "./mcp-tools.js";
 import { checkToolArguments, withoutNullArguments } from "./mcp-tool-arguments.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
 import { isPrincipalDeactivated } from "./agent-auth.js";
@@ -467,7 +467,7 @@ export async function mcpHandler(request: any): Promise<any> {
       return rpcResult(id, {});
 
     case "tools/list":
-      return rpcResult(id, { tools: await listToolsFor(request) });
+      return handleToolsList(request, id);
 
     case "tools/call":
       return handleToolCall(request, id, params);
@@ -478,29 +478,43 @@ export async function mcpHandler(request: any): Promise<any> {
 }
 
 /**
- * The tools `tools/list` advertises to this request's caller. The caller is
+ * tools/list: the tools advertised to this request's caller. The caller is
  * resolved the way handleToolCall resolves it (same sub lookup, same
  * active-principal rule), except that listing never JIT-provisions: for a
  * mapped subject each tool's `tools/list` gate is decided for the agent the
  * call would run as, while an unmapped subject lists with no principal even
- * when JIT provisioning is on (a call by it may provision one). A subject that
- * resolves to no principal — or whose resolution is refused — gets no gated
- * tool.
+ * when JIT provisioning is on (a call by it may provision one), and gets no
+ * gated tool. A resolution that fails or is refused is answered with the
+ * JSON-RPC error a tools/call of a known tool by the same caller gets, and no
+ * list (flair#2760).
  *
  * JIT provisioning is off here: a listing is a read and must not create a
  * principal.
  */
-async function listToolsFor(request: any): Promise<McpToolDef[]> {
+async function handleToolsList(request: any, id: any): Promise<any> {
   const clientId = typeof request?.mcp?.client_id === "string" ? request.mcp.client_id : undefined;
-  let agent: ResolvedAgent | null = null;
+  let agent: ResolvedAgent | null;
   try {
     agent = await resolveAgentFromSub(String(request?.mcp?.sub ?? ""), clientId, false);
-  } catch {
-    // A refused principal (deactivated, unreadable credential) is advertised no
-    // gated tool; the refusal itself is reported by tools/call, as before.
-    agent = null;
+  } catch (err) {
+    return resolutionFailure(id, err);
   }
-  return listToolDefs(agent);
+  return rpcResult(id, { tools: await listToolDefs(agent) });
+}
+
+/**
+ * The JSON-RPC error for a caller whose token subject could not be resolved to
+ * a principal: a refusal's own code and message, otherwise a generic
+ * `unavailable` error. tools/list and tools/call both answer with it.
+ */
+function resolutionFailure(id: any, err: unknown) {
+  if (err instanceof PrincipalRefusedError) return rpcError(id, err.rpcCode, err.message);
+  return rpcError(
+    id,
+    -32000,
+    "unavailable: the token subject could not be resolved to a principal, so the call was refused. " +
+      "Retry; if this persists, an operator should check the flair server log.",
+  );
 }
 
 /**
@@ -541,13 +555,7 @@ async function handleToolCall(request: any, id: any, params: any): Promise<any> 
   try {
     mapping = await resolveMapping(String(sub), clientId);
   } catch (err) {
-    if (err instanceof PrincipalRefusedError) return rpcError(id, err.rpcCode, err.message);
-    return rpcError(
-      id,
-      -32000,
-      "unavailable: the token subject could not be resolved to a principal, so the call was refused. " +
-        "Retry; if this persists, an operator should check the flair server log.",
-    );
+    return resolutionFailure(id, err);
   }
   if (!mapping) {
     // Sub verified by the AS but not mapped to a flair Agent (and JIT disabled /

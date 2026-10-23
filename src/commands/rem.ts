@@ -1689,6 +1689,9 @@ export function register(program: Command): void {
           }
           console.log(`  Deleted:      ${result.deleted.memories} memories, ${result.deleted.souls} souls, ${result.deleted.candidates} candidates`);
           console.log(`  Restored:     ${result.restored.memories} memories, ${result.restored.souls} souls`);
+          if (result.retried.memories.length > 0) {
+            console.log(`  Retried:      ${result.retried.memories.length} memories (${result.retried.memories.join(", ")})`);
+          }
           if (result.errors.length > 0) {
             console.log(`  Errors:`);
             for (const e of result.errors) console.log(`    - ${e}`);
