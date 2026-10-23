@@ -52,7 +52,7 @@ const PASS_MARKER = "PASS —";
 /**
  * The six consumer-install inputs: the flag, the allowlist source, the package
  * the flag's prefix must hold, and the workspace directory the job packs it
- * from. Every gate case gives each flag its own prefix.
+ * from.
  */
 const CONSUMER_INPUTS = [
   { flag: "--npm-install-prefix", source: "npm-install", pkg: "@tpsdev-ai/flair", dir: "." },
@@ -64,6 +64,8 @@ const CONSUMER_INPUTS = [
 ];
 /** The version of every fixture workspace manifest, and so of every packed fixture package. */
 const FIXTURE_VERSION = "1.0.0";
+/** The `dependencies` makeFixture gives the root input's workspace manifest; it gives the others none. */
+const ROOT_DEPENDENCIES = { [DEP]: "1.0.0" };
 /** The file name stem `npm pack` gives a package: `@scope/name` becomes `scope-name`. */
 const tarballStem = (pkg: string) => pkg.replace(/^@/, "").replace("/", "-");
 /** The gate's arguments: each input's flag followed by the prefix `prefixOf` gives it. */
@@ -231,9 +233,9 @@ interface FixtureOptions {
  * bun project with one dependency (its manifest is also the root input's
  * workspace manifest), the workspace manifest of each other input, and one
  * npm prefix per input. Each prefix holds the fixture dependency and its
- * input's install record, the rows an npm install of the packed tarball
- * writes (the real-npm identity cases below check that shape against real
- * npm). The tools' environment is not inherited: it holds only PATH (the
+ * input's install record, the files and rows an npm install of the packed
+ * tarball writes (the real-npm identity cases below check that shape against
+ * real npm). The tools' environment is not inherited: it holds only PATH (the
  * pinned bun's directory first), HOME, TMPDIR, the npm config file locations,
  * both tool caches and the gate's date. `npmLockfile: false` removes the root
  * input's prefix's package-lock.json.
@@ -251,7 +253,7 @@ function makeFixture(opts: FixtureOptions): Fixture {
 
   writeFileSync(
     join(root, "package.json"),
-    JSON.stringify({ name: "@tpsdev-ai/flair", version: FIXTURE_VERSION, private: true, dependencies: { [DEP]: "1.0.0" } }),
+    JSON.stringify({ name: "@tpsdev-ai/flair", version: FIXTURE_VERSION, private: true, dependencies: ROOT_DEPENDENCIES }),
   );
   if (opts.bunLockfile !== false) writeFileSync(join(root, "bun.lock"), BUN_LOCK);
   writeFileSync(join(root, "bunfig.toml"), `[install]\nregistry = "${opts.bunRegistry}"\n`);
@@ -266,9 +268,14 @@ function makeFixture(opts: FixtureOptions): Fixture {
     prefixes[input.source] = prefix;
     const tgz = `file:../packed/${tarballStem(input.pkg)}-${FIXTURE_VERSION}.tgz`;
     const manifest = { name: "consumer", version: "1.0.0", dependencies: { [DEP]: "1.0.0", [input.pkg]: tgz } };
-    for (const [pkg, version] of [[DEP, "1.0.0"], [input.pkg, FIXTURE_VERSION]] as const) {
+    // The installed package declares its workspace manifest's dependencies.
+    const dependencies = input.dir === "." ? ROOT_DEPENDENCIES : {};
+    for (const [pkg, record] of [
+      [DEP, { version: "1.0.0" }],
+      [input.pkg, { version: FIXTURE_VERSION, dependencies }],
+    ] as const) {
       mkdirSync(join(prefix, "node_modules", pkg), { recursive: true });
-      writeFileSync(join(prefix, "node_modules", pkg, "package.json"), JSON.stringify({ name: pkg, version }));
+      writeFileSync(join(prefix, "node_modules", pkg, "package.json"), JSON.stringify({ name: pkg, ...record }));
     }
     writeFileSync(join(prefix, "package.json"), JSON.stringify(manifest));
     if (opts.npmLockfile !== false || input.source !== "npm-install") {
@@ -281,7 +288,7 @@ function makeFixture(opts: FixtureOptions): Fixture {
           packages: {
             "": manifest,
             [`node_modules/${DEP}`]: { version: "1.0.0" },
-            [`node_modules/${input.pkg}`]: { version: FIXTURE_VERSION, resolved: tgz },
+            [`node_modules/${input.pkg}`]: { version: FIXTURE_VERSION, resolved: tgz, dependencies },
           },
         }),
       );
@@ -526,9 +533,14 @@ describe("ADK uuid paths from real npm audit", () => {
         const f = makeFixture({ bunRegistry: bunRegistry.url, npmRegistry: npmRegistry.url });
         const adkPrefix = join(f.root, "adk-prefix");
         const chain = ["@tpsdev-ai/adk-flair", "@google/adk", "@google-cloud/vertexai", "google-auth-library", "gaxios", "uuid"];
+        const adkTgz = `file:../packed/${tarballStem(chain[0]!)}-${FIXTURE_VERSION}.tgz`;
         const manifest = { name: "adk-consumer", version: "1.0.0", dependencies: {
-          "@tpsdev-ai/adk-flair": "1.0.0", ...(outside ? { uuid: "9.0.1" } : {}),
+          "@tpsdev-ai/adk-flair": adkTgz, ...(outside ? { uuid: "9.0.1" } : {}),
         } };
+        // The ADK workspace manifest declares the dependency its installed package does.
+        writeFileSync(join(f.root, "packages/adk-flair-js/package.json"), JSON.stringify({
+          name: chain[0], version: FIXTURE_VERSION, dependencies: { [chain[1]!]: "*" },
+        }));
         const packages: Record<string, object> = { "": manifest };
         let node = "";
         for (const [i, pkg] of chain.entries()) {
@@ -537,7 +549,7 @@ describe("ADK uuid paths from real npm audit", () => {
             dependencies: i + 1 < chain.length ? { [chain[i + 1]!]: "*" } : {},
           };
           // The ADK package's row is its install record from the packed tarball.
-          packages[node] = i === 0 ? { ...row, resolved: `file:../packed/${tarballStem(pkg)}-${FIXTURE_VERSION}.tgz` } : row;
+          packages[node] = i === 0 ? { ...row, resolved: adkTgz } : row;
           mkdirSync(join(adkPrefix, node), { recursive: true });
           writeFileSync(join(adkPrefix, node, "package.json"), JSON.stringify(row));
         }
@@ -590,36 +602,62 @@ describe("prefix identity against real npm installs (flair#2757)", () => {
     }
   }
 
+  const ROOT = "@tpsdev-ai/flair";
+  const MCP = "@tpsdev-ai/flair-mcp";
+  const PI = "@tpsdev-ai/pi-flair";
+  /** Keys of the two extra installs below. */
+  const DEV_MCP = "dev-only MCP";
+  const BARE_ROOT = "dependency-free root";
+
   /**
-   * For each input's package, and for one unrelated package, a dependency-free
-   * copy at the fixture version, packed by one real `npm pack` and installed by
-   * a real `npm install --ignore-scripts --omit=dev --offline` into its own
-   * prefix. Returns each package's prefix.
+   * Real installs, each by a real `npm install --ignore-scripts --offline`
+   * into its own prefix from archives real `npm pack` runs made: for each
+   * input, with --omit=dev, its package packed from the fixture's workspace
+   * manifest for it (without `private`), plus the packed fixture dependency
+   * that manifest declares (the root input's); with --omit=dev, an unrelated
+   * package; under DEV_MCP, the MCP archive installed with --save-dev and
+   * without --omit=dev, so it is on disk; under BARE_ROOT, with --omit=dev, a
+   * dependency-free archive with the root package's name and version.
+   * Returns each prefix by package name or by those keys.
    */
   function realInstalls(f: Fixture): Record<string, string> {
-    const pkgs = [...CONSUMER_INPUTS.map((input) => input.pkg), UNRELATED];
     const packed = join(f.root, "packed");
+    const bare = join(f.root, "packed-bare");
     mkdirSync(packed);
-    const sources = pkgs.map((pkg) => {
-      const dir = join(f.root, "pkgsrc", tarballStem(pkg));
+    mkdirSync(bare);
+    const source = (name: string, manifest: object) => {
+      const dir = join(f.root, "pkgsrc", name);
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "package.json"), JSON.stringify({ name: pkg, version: FIXTURE_VERSION }));
+      writeFileSync(join(dir, "package.json"), JSON.stringify(manifest));
       return dir;
-    });
-    npm(["pack", "--ignore-scripts", "--pack-destination", packed, ...sources], f.root, f.env);
-    const prefixes: Record<string, string> = {};
-    for (const pkg of pkgs) {
-      const prefix = join(f.root, "real", tarballStem(pkg));
+    };
+    const workspace = (input: (typeof CONSUMER_INPUTS)[number]) => {
+      const { private: _private, ...manifest } = JSON.parse(readFileSync(join(f.root, input.dir, "package.json"), "utf8"));
+      return manifest as { dependencies?: Record<string, string> };
+    };
+    npm([
+      "pack", "--ignore-scripts", "--pack-destination", packed,
+      ...CONSUMER_INPUTS.map((input) => source(tarballStem(input.pkg), workspace(input))),
+      source(DEP, { name: DEP, version: ROOT_DEPENDENCIES[DEP] }),
+      source(UNRELATED, { name: UNRELATED, version: FIXTURE_VERSION }),
+    ], f.root, f.env);
+    npm(["pack", "--ignore-scripts", "--pack-destination", bare, source("bare-root", { name: ROOT, version: FIXTURE_VERSION })], f.root, f.env);
+    const tgz = (dir: string, pkg: string, version = FIXTURE_VERSION) => join(dir, `${tarballStem(pkg)}-${version}.tgz`);
+    const install = (name: string, args: string[]) => {
+      const prefix = join(f.root, "real", name);
       mkdirSync(prefix, { recursive: true });
       writeFileSync(join(prefix, "package.json"), JSON.stringify({ name: "consumer", version: "1.0.0" }));
-      npm(
-        ["install", "--ignore-scripts", "--omit=dev", "--offline", "--no-audit", "--no-fund",
-          join(packed, `${tarballStem(pkg)}-${FIXTURE_VERSION}.tgz`)],
-        prefix,
-        f.env,
-      );
-      prefixes[pkg] = prefix;
+      npm(["install", "--ignore-scripts", "--offline", "--no-audit", "--no-fund", ...args], prefix, f.env);
+      return prefix;
+    };
+    const prefixes: Record<string, string> = {};
+    for (const input of CONSUMER_INPUTS) {
+      const deps = Object.entries(workspace(input).dependencies ?? {}).map(([dep, version]) => tgz(packed, dep, version));
+      prefixes[input.pkg] = install(tarballStem(input.pkg), ["--omit=dev", ...deps, tgz(packed, input.pkg)]);
     }
+    prefixes[UNRELATED] = install(UNRELATED, ["--omit=dev", tgz(packed, UNRELATED)]);
+    prefixes[DEV_MCP] = install("dev-mcp", ["--save-dev", tgz(packed, MCP)]);
+    prefixes[BARE_ROOT] = install("bare-root", ["--omit=dev", tgz(bare, ROOT)]);
     return prefixes;
   }
 
@@ -643,8 +681,6 @@ describe("prefix identity against real npm installs (flair#2757)", () => {
     }
   }
 
-  const MCP = "@tpsdev-ai/flair-mcp";
-  const PI = "@tpsdev-ai/pi-flair";
   const own = (real: Record<string, string>, input: (typeof CONSUMER_INPUTS)[number]) => real[input.pkg]!;
 
   function expectRefusedBeforeAudits(c: Awaited<ReturnType<typeof identityCase>>, ...lines: string[]): void {
@@ -702,6 +738,36 @@ describe("prefix identity against real npm installs (flair#2757)", () => {
     async () => {
       const c = await identityCase((real, input) => (input.pkg === PI ? real[MCP]! : own(real, input)));
       expectRefusedBeforeAudits(c, "--mcp-npm-install-prefix and --pi-npm-install-prefix name the same prefix");
+    },
+    CASE_BUDGET_MS,
+  );
+
+  it(
+    "exits 2 when a flag names a consumer that installs its package as a devDependency",
+    async () => {
+      const c = await identityCase((real, input) => (input.pkg === MCP ? real[DEV_MCP]! : own(real, input)));
+      expectRefusedBeforeAudits(
+        c,
+        `--mcp-npm-install-prefix ${c.real[DEV_MCP]} is not an npm install of the packed ${MCP}@${FIXTURE_VERSION}`,
+        'package.json does not name it in "dependencies" from a local .tgz (found null)',
+        'package.json also names it in "devDependencies"',
+        `package-lock.json marks "node_modules/${MCP}" "dev": true`,
+      );
+    },
+    CASE_BUDGET_MS,
+  );
+
+  it(
+    "exits 2 when a flag names an install of a dependency-free archive with its package's name and version",
+    async () => {
+      const c = await identityCase((real, input) => (input.pkg === ROOT ? real[BARE_ROOT]! : own(real, input)));
+      const differences = `declares dependencies that differ from package.json: ${DEP} is missing (expected "1.0.0")`;
+      expectRefusedBeforeAudits(
+        c,
+        `--npm-install-prefix ${c.real[BARE_ROOT]} is not an npm install of the packed ${ROOT}@${FIXTURE_VERSION}`,
+        `node_modules/${ROOT}/package.json ${differences}`,
+        `package-lock.json's "node_modules/${ROOT}" row ${differences}`,
+      );
     },
     CASE_BUDGET_MS,
   );

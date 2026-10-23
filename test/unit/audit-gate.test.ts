@@ -25,8 +25,8 @@ const TEST_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"
 /**
  * The six consumer-install inputs: the flag, the allowlist source, the package
  * the flag's prefix must hold, and the workspace directory the job packs it
- * from. Listed here, not imported from the gate, so dropping or changing an
- * input in the gate fails a case below.
+ * from. Listed here, not imported from the gate, so dropping an input from the
+ * gate fails a case below.
  */
 const CONSUMER_INPUTS = [
   { flag: "--npm-install-prefix", source: "npm-install", pkg: "@tpsdev-ai/flair", dir: "." },
@@ -49,17 +49,21 @@ function readJson(path: string, fallback: Record<string, any>): Record<string, a
 }
 
 /**
- * Writes the two files the gate's identity check reads from an npm install of
- * the packed tarball of `pkg` into `prefix`: the installed manifest (merged
- * into any already there) and a package-lock.json row resolved from a local
- * .tgz, in the shape npm writes (audit-gate-real-tools.test.ts checks real npm).
+ * Writes the files the gate's identity check reads from an npm install of the
+ * packed tarball of `pkg` into `prefix`: the installed manifest (merged into
+ * any already there), the consumer's package.json naming `pkg` in
+ * `dependencies` from a local .tgz, and package-lock.json's "" row and
+ * `node_modules/<pkg>` row to match, in the shape npm writes
+ * (audit-gate-real-tools.test.ts checks real npm).
  */
 function writeInstallRecord(prefix: string, pkg: string, version = FIXTURE_VERSION) {
   const dir = join(prefix, "node_modules", pkg);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "package.json"), JSON.stringify({ ...readJson(join(dir, "package.json"), {}), name: pkg, version }));
-  const lock = readJson(join(prefix, "package-lock.json"), { lockfileVersion: 3 });
   const tgz = `file:../packed/${pkg.replace(/^@/, "").replace("/", "-")}-${version}.tgz`;
+  const consumer = readJson(join(prefix, "package.json"), { name: "consumer", version: "1.0.0" });
+  writeFileSync(join(prefix, "package.json"), JSON.stringify({ ...consumer, dependencies: { ...consumer.dependencies, [pkg]: tgz } }));
+  const lock = readJson(join(prefix, "package-lock.json"), { lockfileVersion: 3 });
   const packages = lock.packages ?? {};
   packages[""] = { ...packages[""], dependencies: { ...packages[""]?.dependencies, [pkg]: tgz } };
   packages[`node_modules/${pkg}`] = { ...packages[`node_modules/${pkg}`], version, resolved: tgz };
@@ -77,6 +81,26 @@ function writeIdentities(root: string, prefixOf: (source: string) => string) {
     writeFileSync(manifest, JSON.stringify({ ...readJson(manifest, {}), name: input.pkg, version: FIXTURE_VERSION }));
     writeInstallRecord(prefixOf(input.source), input.pkg);
   }
+}
+
+/**
+ * Sets `deps` as the `dependencies` of `input`'s package in its workspace
+ * manifest under `root` and in `prefix`'s install record (the installed
+ * manifest and its package-lock.json row), so all three declare the same.
+ */
+function declareDependencies(
+  root: string,
+  input: (typeof CONSUMER_INPUTS)[number],
+  prefix: string,
+  deps: Record<string, string>,
+) {
+  for (const path of [join(root, input.dir, "package.json"), join(prefix, "node_modules", input.pkg, "package.json")]) {
+    writeFileSync(path, JSON.stringify({ ...readJson(path, {}), dependencies: deps }));
+  }
+  const lockPath = join(prefix, "package-lock.json");
+  const lock = readJson(lockPath, {});
+  lock.packages[`node_modules/${input.pkg}`] = { ...lock.packages[`node_modules/${input.pkg}`], dependencies: deps };
+  writeFileSync(lockPath, JSON.stringify(lock));
 }
 
 /** Every input's flag followed by its prefix. */
@@ -141,6 +165,7 @@ describe("the gate refuses to run bun-only", () => {
     expect(res.status).not.toBe(0);
     expect(res.stderr).toContain("--npm-install-prefix");
     expect(res.stderr).toContain("npm-install observation");
+    expect(res.stderr).toContain("missing --npm-install-prefix <dir> — the published @tpsdev-ai/flair package's");
   }, 6_000);
 
   it("exits non-zero when the ADK consumer observation is absent (flair#2398)", () => {
@@ -322,6 +347,93 @@ describe("the four added consumer-install inputs, stand-in tools (flair#2757)", 
       expectIdentityRefusal(res, `${mcp.flag} `, "not a local .tgz");
     }, 12_000);
 
+    /** Rewrites the MCP prefix's file `name` (package.json or package-lock.json) with `edit`. */
+    const editMcpFile = (prefixes: Record<string, string>, name: string, edit: (json: Record<string, any>) => void) => {
+      const path = join(prefixes[mcp.source]!, name);
+      const json = readJson(path, {});
+      edit(json);
+      writeFileSync(path, JSON.stringify(json));
+    };
+
+    for (const flag of ["dev", "optional", "devOptional", "peer", "extraneous"]) {
+      it(`exits 2 when package-lock.json marks the package's row "${flag}"`, () => {
+        const res = runGate({
+          setup: (prefixes) => editMcpFile(prefixes, "package-lock.json", (lock) => {
+            lock.packages[`node_modules/${mcp.pkg}`][flag] = true;
+          }),
+        });
+        expectIdentityRefusal(res, `${mcp.flag} `, `package-lock.json marks "node_modules/${mcp.pkg}" "${flag}": true`);
+      }, 12_000);
+    }
+
+    for (const field of ["devDependencies", "optionalDependencies", "peerDependencies"]) {
+      it(`exits 2 when the consumer's package.json names the package in ${field} instead of dependencies`, () => {
+        const res = runGate({
+          setup: (prefixes) => editMcpFile(prefixes, "package.json", (consumer) => {
+            consumer[field] = { [mcp.pkg]: consumer.dependencies[mcp.pkg] };
+            delete consumer.dependencies[mcp.pkg];
+          }),
+        });
+        expectIdentityRefusal(
+          res,
+          `${mcp.flag} `,
+          'package.json does not name it in "dependencies" from a local .tgz (found null)',
+          `package.json also names it in "${field}"`,
+        );
+      }, 12_000);
+    }
+
+    it("exits 2 when the consumer's package.json is missing", () => {
+      const res = runGate({ setup: (prefixes) => rmSync(join(prefixes[mcp.source]!, "package.json")) });
+      expectIdentityRefusal(res, `${mcp.flag} `, "no readable package.json");
+    }, 12_000);
+
+    it("exits 2 when package-lock.json's root row names the package with a registry spec", () => {
+      const res = runGate({
+        setup: (prefixes) => editMcpFile(prefixes, "package-lock.json", (lock) => {
+          lock.packages[""].dependencies[mcp.pkg] = FIXTURE_VERSION;
+        }),
+      });
+      expectIdentityRefusal(
+        res,
+        `${mcp.flag} `,
+        `package-lock.json's "" row does not name it in "dependencies" from a local .tgz (found "${FIXTURE_VERSION}")`,
+      );
+    }, 12_000);
+
+    it("exits 2 naming each dependency the installed manifest or the lock row declares differently from the workspace manifest", () => {
+      const declared = { zod: "4.3.6", "@tpsdev-ai/flair-client": "1.0.0" };
+      const installed = runGate({
+        setup: (prefixes, root) => {
+          declareDependencies(root, mcp, prefixes[mcp.source]!, declared);
+          const path = join(prefixes[mcp.source]!, "node_modules", mcp.pkg, "package.json");
+          writeFileSync(path, JSON.stringify({ ...readJson(path, {}), dependencies: { zod: "3.0.0", other: "1.0.0" } }));
+        },
+      });
+      expectIdentityRefusal(
+        installed,
+        `${mcp.flag} `,
+        `node_modules/${mcp.pkg}/package.json declares dependencies that differ from ${mcp.dir}/package.json: ` +
+          'zod is "3.0.0" (expected "4.3.6"), @tpsdev-ai/flair-client is missing (expected "1.0.0"), other "1.0.0" is not in the workspace manifest',
+      );
+      expect(installed.stderr).not.toContain(`"node_modules/${mcp.pkg}" row declares`);
+      const row = runGate({
+        setup: (prefixes, root) => {
+          declareDependencies(root, mcp, prefixes[mcp.source]!, declared);
+          editMcpFile(prefixes, "package-lock.json", (lock) => {
+            delete lock.packages[`node_modules/${mcp.pkg}`].dependencies;
+          });
+        },
+      });
+      expectIdentityRefusal(
+        row,
+        `${mcp.flag} `,
+        `package-lock.json's "node_modules/${mcp.pkg}" row declares dependencies that differ from ${mcp.dir}/package.json: ` +
+          'zod is missing (expected "4.3.6"), @tpsdev-ai/flair-client is missing (expected "1.0.0")',
+      );
+      expect(row.stderr).not.toContain(`node_modules/${mcp.pkg}/package.json declares`);
+    }, 24_000);
+
     for (const [name, contents] of [["missing", null], ["unparseable", "{invalid"]] as const) {
       it(`exits 2 when the prefix's package-lock.json is ${name}`, () => {
         const res = runGate({
@@ -360,7 +472,7 @@ describe("the four added consumer-install inputs, stand-in tools (flair#2757)", 
   describe("a vendor-pinned entry on one of these sources", () => {
     const vendorEntry = (introducedBy = "@tpsdev-ai/flair-mcp -> @modelcontextprotocol/sdk -> hono") =>
       entry(["npm-install-mcp"], { class: "vendor-pinned", version: "4.0.0", introducedBy });
-    const installChain = (prefixes: Record<string, string>) => {
+    const installChain = (prefixes: Record<string, string>, root: string) => {
       const rows: [string, object][] = [
         ["node_modules/@tpsdev-ai/flair-mcp", {
           name: "@tpsdev-ai/flair-mcp", version: FIXTURE_VERSION, dependencies: { "@modelcontextprotocol/sdk": "1.0.0" },
@@ -374,6 +486,8 @@ describe("the four added consumer-install inputs, stand-in tools (flair#2757)", 
         mkdirSync(join(prefixes["npm-install-mcp"]!, node), { recursive: true });
         writeFileSync(join(prefixes["npm-install-mcp"]!, node, "package.json"), JSON.stringify(manifest));
       }
+      const mcp = CONSUMER_INPUTS.find((input) => input.source === "npm-install-mcp")!;
+      declareDependencies(root, mcp, prefixes["npm-install-mcp"]!, { "@modelcontextprotocol/sdk": "1.0.0" });
     };
 
     it("passes when its chain resolves to the reported node at the entry's version", () => {
@@ -513,11 +627,13 @@ describe("vendor-pinned npm-install nodes", () => {
       mkdirSync(join(root, "bin"));
       mkdirSync(join(root, "home"));
       mkdirSync(join(root, "tmp"));
-      mkdirSync(join(root, harperNode), { recursive: true });
-      writeFileSync(join(root, "node_modules/harper/npm-shrinkwrap.json"), JSON.stringify({
+      // The prefix the stand-in npm reports the advisory in.
+      const tree = join(root, "tree");
+      mkdirSync(join(tree, harperNode), { recursive: true });
+      writeFileSync(join(tree, "node_modules/harper/npm-shrinkwrap.json"), JSON.stringify({
         packages: { "node_modules/fastify": { version: "5.11.3" } },
       }));
-      writeFileSync(join(root, harperNode, "package.json"), JSON.stringify({ version: installedVersion }));
+      writeFileSync(join(tree, harperNode, "package.json"), JSON.stringify({ version: installedVersion }));
       writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts/audit-gate.mjs")));
       writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({
         policy: { maxLifetimeDaysBySeverity: { moderate: 180 } },
@@ -539,7 +655,7 @@ describe("vendor-pinned npm-install nodes", () => {
       }));
       writeFileSync(join(root, "bin/bun"), "#!/bin/sh\nprintf '{}\\n'\n");
       const chain = ["@tpsdev-ai/adk-flair", "@google/adk", "@google-cloud/vertexai", "google-auth-library", "gaxios", "uuid"];
-      let parent = root;
+      let parent = tree;
       for (const [i, pkg] of chain.entries()) {
         parent = join(parent, "node_modules", pkg);
         mkdirSync(parent, { recursive: true });
@@ -561,10 +677,14 @@ describe("vendor-pinned npm-install nodes", () => {
       // The root and ADK inputs share these two directories (which one gets
       // the report depends on `adk`); every other input gets a clean-* prefix.
       const prefixOf = (source: string) =>
-        source === "npm-install" ? (adk ? join(root, "adk-prefix") : root)
-          : source === "npm-install-adk" ? (adk ? root : join(root, "adk-prefix"))
+        source === "npm-install" ? (adk ? join(root, "adk-prefix") : tree)
+          : source === "npm-install-adk" ? (adk ? tree : join(root, "adk-prefix"))
             : join(root, `clean-${source}`);
       writeIdentities(root, prefixOf);
+      if (adk) {
+        const adkInput = CONSUMER_INPUTS.find((input) => input.source === "npm-install-adk")!;
+        declareDependencies(root, adkInput, tree, { [chain[1]!]: "*" });
+      }
       writeFileSync(join(root, "bin/npm"), `#!/bin/sh
 case "$PWD" in
   */adk-prefix|*/clean-*) printf '%s\\n' '${empty}' ;;
@@ -582,7 +702,11 @@ esac
       const res = spawnSync(process.execPath, ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), ...prefixArgs(prefixOf)], {
         encoding: "utf8",
         timeout: 10_000,
-        env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, HOME: join(root, "home"), TMPDIR: join(root, "tmp"), AUDIT_GATE_TODAY: "2026-10-01" },
+        env: {
+          ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, HOME: join(root, "home"), TMPDIR: join(root, "tmp"), AUDIT_GATE_TODAY: "2026-10-01",
+          // bun caches its transpilation of a large script under HOME, which the snapshot covers; "0" turns that cache off.
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+        },
       });
       return { res, wrote: JSON.stringify(snapshot()) !== JSON.stringify(before) };
     } finally {

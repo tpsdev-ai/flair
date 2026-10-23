@@ -87,11 +87,12 @@ const REQUIRED_ENTRY_FIELDS = [
  *
  * Each input is a mandatory flag naming an install prefix. Before any audit
  * runs, the gate refuses a missing flag, two flags naming one prefix, and a
- * prefix that is not an npm install of that package at the version of the
- * workspace manifest the job packs (see `prefixIdentityProblems`). `source` is
- * the name an allowlist entry's `sources` uses for that tree. `vendor`, when
- * set, is the only direct dependency a vendor-pinned entry's chain may name
- * second.
+ * prefix whose install records fail `prefixIdentityProblems` against the
+ * workspace manifest the job packs: the package as a production dependency
+ * from a local tarball, with that manifest's version and `dependencies`.
+ * `source` is the name an allowlist entry's `sources` uses for that tree.
+ * `vendor`, when set, is the only direct dependency a vendor-pinned entry's
+ * chain may name second.
  */
 export const CONSUMER_INSTALLS = [
   { flag: "--npm-install-prefix", source: "npm-install", package: "@tpsdev-ai/flair", dir: "." },
@@ -908,11 +909,13 @@ async function latestPublishedVersion(pkg) {
  * ------------------------------------------------------------------ */
 
 /**
- * The version of the workspace manifest the job packs for `input`
- * (`<repo>/<dir>/package.json`, the file `npm pack` reads). Throws when that
- * manifest cannot be read, names a different package or has no version.
+ * The workspace manifest the job packs for `input` (`<repo>/<dir>/package.json`,
+ * the file `npm pack` reads): its path, its version and its `dependencies` (an
+ * empty object when it has none). Throws when that manifest cannot be read,
+ * names a different package, has no version, or has a `dependencies` field
+ * that is not an object of string specs.
  */
-export function packedManifestVersion(repoRoot, input) {
+export function packedManifest(repoRoot, input) {
   const rel = join(input.dir, "package.json");
   let manifest;
   try {
@@ -926,7 +929,15 @@ export function packedManifestVersion(repoRoot, input) {
   if (typeof manifest.version !== "string" || !manifest.version) {
     throw new Error(`the workspace manifest ${rel} has no version`);
   }
-  return manifest.version;
+  const dependencies = manifest.dependencies === undefined ? {} : manifest.dependencies;
+  if (!isObject(dependencies) || !Object.values(dependencies).every((spec) => typeof spec === "string")) {
+    throw new Error(`the workspace manifest ${rel} has a "dependencies" field that is not an object of string specs`);
+  }
+  return { path: rel, version: manifest.version, dependencies };
+}
+
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /** The prefix's direct dependencies as its package-lock.json records them, for refusal messages. */
@@ -935,15 +946,77 @@ function directDependencies(lock) {
   return deps.length ? `direct dependencies ${deps.join(", ")}` : "no direct dependencies";
 }
 
+/** A spec that installs a local tarball, as npm records one in a consumer's package.json and lockfile. */
+function isLocalTarballSpec(spec) {
+  return typeof spec === "string" && spec.startsWith("file:") && spec.endsWith(".tgz");
+}
+
+/** The root dependency fields other than `dependencies`; the package must be in none of them. */
+const NON_PRODUCTION_FIELDS = ["devDependencies", "optionalDependencies", "peerDependencies"];
+
+/** Lock-row flags of a node that is not a production dependency of the root. */
+const NON_PRODUCTION_FLAGS = ["dev", "optional", "devOptional", "peer", "extraneous"];
+
+/**
+ * What is wrong with `root` (the consumer's package.json, or the "" row of its
+ * package-lock.json, named `where`) as a root that depends on `name` in
+ * production from a local tarball.
+ */
+function productionLinkProblems(where, root, name) {
+  if (!isObject(root)) return [`${where} has no root package record`];
+  const problems = [];
+  const spec = isObject(root.dependencies) && Object.hasOwn(root.dependencies, name)
+    ? root.dependencies[name]
+    : undefined;
+  if (!isLocalTarballSpec(spec)) {
+    problems.push(`${where} does not name it in "dependencies" from a local .tgz (found ${JSON.stringify(spec ?? null)})`);
+  }
+  for (const field of NON_PRODUCTION_FIELDS) {
+    if (isObject(root[field]) && Object.hasOwn(root[field], name)) {
+      problems.push(`${where} also names it in "${field}"`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * How a `dependencies` field `found` differs from the workspace manifest's
+ * `expected`, as a list (empty when both declare the same names with the same
+ * specs). An absent field is an empty one.
+ */
+function dependencyDifferences(found, expected) {
+  const actual = found === undefined ? {} : found;
+  if (!isObject(actual)) return [`"dependencies" is ${JSON.stringify(actual)}, not an object`];
+  const differences = [];
+  for (const [dep, spec] of Object.entries(expected)) {
+    if (!Object.hasOwn(actual, dep)) differences.push(`${dep} is missing (expected ${JSON.stringify(spec)})`);
+    else if (actual[dep] !== spec) differences.push(`${dep} is ${JSON.stringify(actual[dep])} (expected ${JSON.stringify(spec)})`);
+  }
+  for (const dep of Object.keys(actual)) {
+    if (!Object.hasOwn(expected, dep)) differences.push(`${dep} ${JSON.stringify(actual[dep])} is not in the workspace manifest`);
+  }
+  return differences;
+}
+
 /**
  * What is wrong with `prefix` as an npm install of the packed tarball of
- * `name`@`version`, as a list (empty when nothing is). The prefix must hold
- * `node_modules/<name>/package.json` with that name and version, and its
- * package-lock.json (the tree `npm audit` reads) must record
- * `node_modules/<name>` at that version, resolved from a local `.tgz`. An
- * unreadable or unparseable file is a problem, never a pass.
+ * `name`, against `packed` (the workspace manifest the job packs, from
+ * `packedManifest`), as a list (empty when nothing is). The prefix must hold:
+ *
+ *   - `node_modules/<name>/package.json` with that name and version;
+ *   - a package-lock.json (the tree `npm audit` reads) that records
+ *     `node_modules/<name>` at that version, resolved from a local `.tgz`;
+ *   - a package.json, and a package-lock.json "" row, that name the package in
+ *     `dependencies` with a local `.tgz` spec and in none of
+ *     `NON_PRODUCTION_FIELDS`, and a `node_modules/<name>` lock row with none
+ *     of `NON_PRODUCTION_FLAGS`;
+ *   - in both the installed package.json and that lock row, the same
+ *     `dependencies` names and specs as the workspace manifest.
+ *
+ * An unreadable or unparseable file is a problem, never a pass.
  */
-export function prefixIdentityProblems(prefix, name, version) {
+export function prefixIdentityProblems(prefix, name, packed) {
+  const { version } = packed;
   const problems = [];
   let lock;
   try {
@@ -957,6 +1030,13 @@ export function prefixIdentityProblems(prefix, name, version) {
   } catch (e) {
     problems.push(`no readable node_modules/${name}/package.json (${e.code ?? e.message})`);
   }
+  let consumer;
+  try {
+    consumer = JSON.parse(readFileSync(join(prefix, "package.json"), "utf8"));
+  } catch (e) {
+    problems.push(`no readable package.json (${e.code ?? e.message})`);
+  }
+  const row = lock?.packages?.[`node_modules/${name}`];
   if (installed !== undefined) {
     if (installed?.name !== name) {
       problems.push(`node_modules/${name}/package.json names ${JSON.stringify(installed?.name)}`);
@@ -966,16 +1046,39 @@ export function prefixIdentityProblems(prefix, name, version) {
     }
   }
   if (lock !== undefined) {
-    const row = lock?.packages?.[`node_modules/${name}`];
-    if (!row || typeof row !== "object") {
+    if (!isObject(row)) {
       problems.push(`package-lock.json has no "node_modules/${name}" entry; found ${directDependencies(lock)}`);
     } else {
       if (row.version !== version) {
         problems.push(`package-lock.json records version ${JSON.stringify(row.version)}`);
       }
-      if (typeof row.resolved !== "string" || !row.resolved.startsWith("file:") || !row.resolved.endsWith(".tgz")) {
+      if (!isLocalTarballSpec(row.resolved)) {
         problems.push(`package-lock.json resolves it from ${JSON.stringify(row.resolved ?? null)}, not a local .tgz`);
       }
+    }
+  }
+
+  // Production linkage: the consumer depends on the package in production.
+  if (consumer !== undefined) problems.push(...productionLinkProblems("package.json", consumer, name));
+  if (lock !== undefined) {
+    problems.push(...productionLinkProblems('package-lock.json\'s "" row', lock?.packages?.[""], name));
+    if (isObject(row)) {
+      for (const flag of NON_PRODUCTION_FLAGS) {
+        if (row[flag] !== undefined && row[flag] !== false) {
+          problems.push(`package-lock.json marks "node_modules/${name}" ${JSON.stringify(flag)}: ${JSON.stringify(row[flag])}`);
+        }
+      }
+    }
+  }
+
+  // Dependency declarations: the installed package declares what the workspace manifest does.
+  const declarations = [];
+  if (isObject(installed)) declarations.push([`node_modules/${name}/package.json`, installed.dependencies]);
+  if (isObject(row)) declarations.push([`package-lock.json's "node_modules/${name}" row`, row.dependencies]);
+  for (const [where, found] of declarations) {
+    const differences = dependencyDifferences(found, packed.dependencies);
+    if (differences.length) {
+      problems.push(`${where} declares dependencies that differ from ${packed.path}: ${differences.join(", ")}`);
     }
   }
   return problems;
@@ -1019,16 +1122,17 @@ async function main() {
   for (const input of missing) {
     console.error(
       input.source === "npm-install"
-        ? "DEPENDENCY AUDIT GATE: missing --npm-install-prefix <dir> — the npm-install observation is mandatory; the gate refuses to run bun-only."
+        ? `DEPENDENCY AUDIT GATE: missing --npm-install-prefix <dir> — the published ${input.package} package's npm-install observation is mandatory; the gate refuses to run bun-only.`
         : `DEPENDENCY AUDIT GATE: missing ${input.flag} <dir> — the published ${input.package} package's consumer-install observation is mandatory; the gate refuses to run without it.`,
     );
   }
   if (missing.length) process.exit(2);
 
-  // Each prefix must be its own npm install of the package its flag names, at
-  // the version the job packed, so a clean prefix of another package (or one
-  // prefix passed twice) cannot stand in for an observation. Checked before
-  // any audit runs.
+  // Each prefix must be its own install and pass prefixIdentityProblems
+  // against the workspace manifest the job packs for its flag. A prefix of
+  // another package, a dev-only install, an archive whose dependencies differ
+  // from that manifest, or one prefix passed twice is refused before any audit
+  // runs.
   const identityProblems = [];
   const prefixOwner = new Map();
   for (const input of CONSUMER_INSTALLS) {
@@ -1041,17 +1145,17 @@ async function main() {
       continue;
     }
     prefixOwner.set(key, input.flag);
-    let version;
+    let packed;
     try {
-      version = packedManifestVersion(REPO_ROOT, input);
+      packed = packedManifest(REPO_ROOT, input);
     } catch (e) {
       identityProblems.push(`${e.message}.`);
       continue;
     }
-    const found = prefixIdentityProblems(prefix, input.package, version);
+    const found = prefixIdentityProblems(prefix, input.package, packed);
     if (found.length) {
       identityProblems.push(
-        `${input.flag} ${prefix} is not an npm install of the packed ${input.package}@${version}: ${found.join("; ")}.`,
+        `${input.flag} ${prefix} is not an npm install of the packed ${input.package}@${packed.version}: ${found.join("; ")}.`,
       );
     }
   }
@@ -1197,8 +1301,9 @@ async function main() {
 
   // Check 6 — staleness + sources mismatch.
   //
-  // A run that reaches this point has run every observation (the bun lockfile
-  // and each consumer install), so every declared source was observed. An
+  // A run that reaches this point has run `bun audit` and, on every
+  // consumer-install prefix (each passed the identity check above), `npm audit
+  // --omit=dev`, so each source an entry can declare has a report. An
   // entry is STALE when its advisory appears in no source at all; a SOURCES
   // MISMATCH when the observed sources and the declared sources do not agree
   // in either direction.
