@@ -25,6 +25,10 @@
  *     write of the target) is staged and the transaction has not committed;
  *     the lock is held. memory-purge-committed: the delete committed and was
  *     confirmed, still locked.
+ *   - memory-purge-resolve-first / -second / -last: that retry attempt's
+ *     target set is resolved (the first attempt's point sits after the initial
+ *     resolve) and not yet locked; a lineage member added there is picked up
+ *     by the locked re-resolve.
  *
  * The real-Harper write trace (test/helpers/embedding-writer-race.ts) asserts
  * the synthetic migration's update names only `source`, and that the purge
@@ -36,7 +40,7 @@
  * test's own.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
@@ -59,6 +63,9 @@ const P_COMMITTED = "synthetic-test-committed";
 const U_STAGED = "memory-purge-staged";
 const U_COMMIT = "memory-purge-commit";
 const U_COMMITTED = "memory-purge-committed";
+const U_RESOLVE_FIRST = "memory-purge-resolve-first";
+const U_RESOLVE_SECOND = "memory-purge-resolve-second";
+const U_RESOLVE_LAST = "memory-purge-resolve-last";
 
 let component: ProbeComponent;
 let home: string;
@@ -132,6 +139,30 @@ function forgetMigrationState(): void {
     if (existsSync(path)) rmSync(path, { force: true });
   }
 }
+/** The runner's recorded entry for `id`, whichever state-file layout it wrote. */
+function readMigrationStateEntry(id: string): Record<string, any> | null {
+  for (const path of [join(installDir, ".migrations", "state.json"), join(installDir, "data", ".migrations", "state.json")]) {
+    if (!existsSync(path)) continue;
+    let state: any;
+    try {
+      state = JSON.parse(readFileSync(path, "utf8"));
+    } catch (err) {
+      if (err instanceof SyntaxError) continue; // a poll can catch the file mid-write
+      throw err;
+    }
+    if (state && typeof state === "object" && state[id]) return state[id];
+  }
+  return null;
+}
+async function waitForMigrationStateEntry(id: string, outcome: string, timeoutMs = 60_000): Promise<Record<string, any> | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const entry = readMigrationStateEntry(id);
+    if (entry?.lastOutcome === outcome) return entry;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return readMigrationStateEntry(id);
+}
 /** Arm `next` (a different point), then release `point`. */
 async function handOff(point: string, next?: string): Promise<void> {
   expect(next, "a point cannot be armed while it is paused").not.toBe(point);
@@ -172,7 +203,7 @@ describe("flair#2478 slice 3b — the synthetic migration writer (real Harper)",
       const held = await h.readRow("smp-a1");
       expect(held.content, `${point}: an owner write landed`).toBe("content of smp-a1");
       expect(held.source, `${point}: the row was stamped before its commit`).toBe(point === P_COMMITTED ? MARKER : "not-yet");
-      if (point === P_COMMITTED) h.expectIncrementalWrites("smp-a1", SYNTHETIC_WRITER, ["source"]);
+      if (point === P_COMMITTED) h.expectIncrementalWrites("smp-a1", SYNTHETIC_WRITER, ["source"], 1);
       await handOff(point, next);
     }
 
@@ -182,7 +213,7 @@ describe("flair#2478 slice 3b — the synthetic migration writer (real Harper)",
     for (const id of ids) {
       const stored = await h.readRow(id);
       expect(stored.source, `${id} was not stamped`).toBe(MARKER);
-      h.expectIncrementalWrites(id, SYNTHETIC_WRITER, ["source"]);
+      h.expectIncrementalWrites(id, SYNTHETIC_WRITER, ["source"], 1);
     }
 
     // The ordinary path still works once the lock is free, and the owner's
@@ -224,6 +255,39 @@ describe("flair#2478 slice 3b — the synthetic migration writer (real Harper)",
     expect(await waitForCycleDone(), "the second cycle did not finish").toBe(true);
     expect((await h.readRow("smp-b2")).source).toBe(MARKER);
     expect((await h.readRow("smp-b1")).source).toBe(MARKER);
+  }, 300_000);
+
+  it("records the completion-gate halt, then stamps the held row on the next boot without a state reset", async () => {
+    const ids = ["smp-c1", "smp-c2"];
+    await seedAndReboot(ids.map((id) => row(id, reservedOwner.id)), P_STAGED);
+    await h.assertPaused(P_STAGED);
+
+    // Hold smp-c2's lock through the whole first cycle: an owner PUT that has
+    // staged its write owns the id, so the migration cannot stamp it.
+    h.arm("memory-put");
+    const pendingPut = ownerWrite("PUT", "smp-c2", "the owner's text that holds the row");
+    await h.assertPaused("memory-put");
+    await h.release(P_STAGED);
+
+    const refused = `[synthetic-test-migration] smp-c2: the per-id write lock answered busy`;
+    expect(await h.waitForLog(refused), `the skip of smp-c2 was not logged within 30s: ${refused}`).toBe(true);
+    // The completion gate sees the row still pending and records a halt.
+    const halted = await waitForMigrationStateEntry("synthetic-ci-schema-stamp", "halted");
+    expect(halted?.lastOutcome, "the completion-gate halt was not recorded in the state file").toBe("halted");
+    expect(String(halted?.reason)).toContain("rowsRemaining=1");
+    expect((await h.readRow("smp-c2")).source, "the held row was stamped while the owner held it").toBe("not-yet");
+
+    await h.release("memory-put");
+    const put = await pendingPut;
+    expect(put.status, await put.clone().text()).toBe(200);
+
+    // Restart WITHOUT deleting the state file: only a same-version success is
+    // short-circuited, so the recorded halt is retried and the row is stamped.
+    await stopHarper(h.harper, { keepInstallDir: true });
+    await boot();
+    expect(await waitForCycleDone(), "the retry cycle did not finish").toBe(true);
+    expect((await h.readRow("smp-c2")).source).toBe(MARKER);
+    expect((await h.readRow("smp-c1")).source).toBe(MARKER);
   }, 300_000);
 });
 
@@ -279,6 +343,52 @@ describe("flair#2478 slice 3b — the purge writer (real Harper)", () => {
     expect(purge.status, await purge.clone().text()).toBe(200);
     expect(await purge.json()).toEqual({ removed: 1, removedIds: ["pmp-b1"] });
     expect(await h.readRow("pmp-b1")).toBeNull();
+  }, 300_000);
+
+  it("retries with the expanded target set: the added lineage member is locked and deleted", async () => {
+    await h.seedMemory(row("pmp-d-skill", owner.id, { tags: ["skill"] }), {});
+    h.arm(U_RESOLVE_FIRST);
+    const pendingPurge = h.admin("POST", purgePath, { ids: ["pmp-d-skill"] });
+    await h.assertPaused(U_RESOLVE_FIRST);
+
+    // Added after the purge's first resolve, before its first locked re-resolve.
+    await h.seedMemory(row("pmp-d-lineage", owner.id, { skillSubjectId: "pmp-d-skill" }), {});
+    h.arm(U_STAGED);
+    await h.release(U_RESOLVE_FIRST);
+
+    // The retry locks the complete resolved set: the added member's lock
+    // refuses an owner write while the purge stages its delete.
+    await h.assertPaused(U_STAGED);
+    await expectBusy(await h.signed(owner, "PATCH", memPath("pmp-d-lineage"), { content: "an owner edit during the purge" }), owner.id);
+    await h.release(U_STAGED);
+
+    const purge = await pendingPurge;
+    expect(purge.status, await purge.clone().text()).toBe(200);
+    expect(await purge.json()).toEqual({ removed: 2, removedIds: ["pmp-d-skill", "pmp-d-lineage"] });
+    expect(await h.readRow("pmp-d-skill")).toBeNull();
+    expect(await h.readRow("pmp-d-lineage")).toBeNull();
+  }, 300_000);
+
+  it("refuses 409 memory_purge_targets_changed when the set keeps changing through the retry limit", async () => {
+    await h.seedMemory(row("pmp-e-skill", owner.id, { tags: ["skill"] }), {});
+    h.arm(U_RESOLVE_FIRST);
+    const pendingPurge = h.admin("POST", purgePath, { ids: ["pmp-e-skill"] });
+    for (const [point, next, member] of [
+      [U_RESOLVE_FIRST, U_RESOLVE_SECOND, "pmp-e-lineage-one"],
+      [U_RESOLVE_SECOND, U_RESOLVE_LAST, "pmp-e-lineage-two"],
+      [U_RESOLVE_LAST, null, "pmp-e-lineage-three"],
+    ] as const) {
+      await h.assertPaused(point);
+      await h.seedMemory(row(member, owner.id, { skillSubjectId: "pmp-e-skill" }), {});
+      await handOff(point, next ?? undefined);
+    }
+
+    const purge = await pendingPurge;
+    expect(purge.status, await purge.clone().text()).toBe(409);
+    expect(await purge.json()).toMatchObject({ error: "memory_purge_targets_changed" });
+    for (const id of ["pmp-e-skill", "pmp-e-lineage-one", "pmp-e-lineage-two", "pmp-e-lineage-three"]) {
+      expect(await h.readRow(id), `${id} was deleted by a refused purge`).not.toBeNull();
+    }
   }, 300_000);
 
   it("CONTROL: an uncontended purge removes every named row", async () => {

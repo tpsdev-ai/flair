@@ -71,6 +71,7 @@ import {
   writeOutcomeUnknownResponse,
 } from "./memory-write-lock.js";
 import { txnPausePoint } from "./txn-pause-point.js";
+import { withDetachedTxnAsync } from "./table-helpers.js";
 
 /** Attempts at resolving a target set that keeps changing under the locks. */
 const PURGE_SET_ATTEMPTS = 3;
@@ -115,11 +116,14 @@ interface PurgeTargets {
  * skill lineage (superseded version rows included). A read that fails
  * propagates — it never reads as "absent".
  */
-async function resolvePurgeTargets(memory: any, ids: readonly string[]): Promise<PurgeTargets> {
+async function resolvePurgeTargets(ctx: any, memory: any, ids: readonly string[]): Promise<PurgeTargets> {
   const rows = new Map<string, Record<string, any>>();
   const missing: string[] = [];
   for (const id of new Set(ids)) {
-    const row = await memory.get(id);
+    // Detach from the request's transaction: a lineage row committed by
+    // another request since this one started must be visible to the re-resolve
+    // under the locks.
+    const row = (await withDetachedTxnAsync(ctx, () => memory.get(id))) as Record<string, any> | null;
     if (!row) {
       missing.push(id);
       continue;
@@ -130,9 +134,16 @@ async function resolvePurgeTargets(memory: any, ids: readonly string[]): Promise
       ? row.skillSubjectId
       : Array.isArray(row.tags) && row.tags.includes("skill") ? rowId : null;
     if (!subjectId) continue;
-    for await (const sibling of memory.search({
-      conditions: [{ attribute: "skillSubjectId", comparator: "equals", value: subjectId }],
-    })) {
+    const siblings = await withDetachedTxnAsync(ctx, async () => {
+      const found: Record<string, any>[] = [];
+      for await (const sibling of memory.search({
+        conditions: [{ attribute: "skillSubjectId", comparator: "equals", value: subjectId }],
+      })) {
+        found.push(sibling);
+      }
+      return found;
+    });
+    for (const sibling of siblings) {
       if (sibling && typeof sibling.id === "string" && sibling.id.length > 0) rows.set(sibling.id, sibling);
     }
   }
@@ -160,7 +171,7 @@ export class MemoryPurge extends Resource {
     // Resolve the full target set before mutating: every named row plus, for a
     // skill row, every row in its skill lineage (superseded version rows
     // included). A read that fails propagates — it never reads as "absent".
-    let targets = await resolvePurgeTargets(memory, ids as string[]);
+    let targets = await resolvePurgeTargets(ctx, memory, ids as string[]);
     if (targets.missing.length > 0) {
       return reply(404, { error: "memory_purge_target_missing", ids: targets.missing });
     }
@@ -170,9 +181,17 @@ export class MemoryPurge extends Resource {
     // write). The set is re-resolved under the locks so a lineage member added
     // since the first read is locked too; a changed set restarts.
     for (let attempt = 1; attempt <= PURGE_SET_ATTEMPTS; attempt++) {
+      // Test-only: one point per attempt, so a test can change the target set
+      // between this attempt's resolve and its locked re-resolve.
+      const resolvePause = attempt === 1
+        ? txnPausePoint("memory-purge-resolve-first")
+        : attempt === 2
+          ? txnPausePoint("memory-purge-resolve-second")
+          : txnPausePoint("memory-purge-resolve-last");
+      if (resolvePause) await resolvePause;
       const lockedIds = [...targets.rows.keys()].sort();
       const locked = await withMemoryWriteLock(memory.primaryStore, lockedIds, async () => {
-        const current = await resolvePurgeTargets(memory, ids as string[]);
+        const current = await resolvePurgeTargets(ctx, memory, ids as string[]);
         if (current.missing.length > 0) return { kind: "missing" as const, ids: current.missing };
         const currentIds = [...current.rows.keys()].sort();
         if (currentIds.length !== lockedIds.length || currentIds.some((id, i) => id !== lockedIds[i])) {
