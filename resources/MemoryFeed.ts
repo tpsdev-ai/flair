@@ -692,9 +692,11 @@ function feedWriteResponse(result: any, redactedValues: number, supplied: Readon
  * committed read must equal the transaction's read before the write, else the
  * repair starts over (FEED_DEDUP_REPAIR_ATTEMPTS attempts, then the 409). A
  * change committed after that read and before the commit follows Harper's
- * timestamp order. After the commit, an owned read must show the match with
- * the written expiry (else the 409); that row is returned. Returned rows carry
- * no inline pointer fields (stripInlinePointerFields).
+ * timestamp order. After the commit, an owned read that shows the match with
+ * the written expiry returns that row; a read that does not show it is refused
+ * (409 FEED_DEDUP_TARGET_CHANGED_ERROR), and a read that fails rethrows, so the
+ * request answers 500. Returned rows carry no inline pointer fields
+ * (stripInlinePointerFields).
  */
 async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> {
   const id = String(match.id);
