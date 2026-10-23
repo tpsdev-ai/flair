@@ -2864,7 +2864,7 @@ export function describeAgentIdRuleFinding(rows: Array<{ id?: unknown }>): Agent
       "to maintain that agent's rows, run its own authenticated non-admin maintenance when the stored id " +
       "can authenticate (the signed TPS-Ed25519 header cannot carry a colon or whitespace); that run deletes " +
       "the agent's expired ephemeral Memory rows. For an id the header cannot represent, run fleet-wide " +
-      "maintenance, which reaches it and also expires and archives other agents' eligible rows — an " +
+      "maintenance, which reaches that agent's rows and also expires and archives other agents' eligible rows — an " +
       "admin-scoped run needs an id that matches the rule",
   };
 }
