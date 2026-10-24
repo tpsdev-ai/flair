@@ -3,11 +3,12 @@
  * `sendJsonRequest` (src/lib/auth-resolve.ts), its unknown-outcome error for
  * writes, and `rem restore`'s handling of that outcome (flair#2789).
  *
- * Every test talks to a real HTTP server (node:http); fetch is never mocked.
- * The never-answer and headers-then-stall servers are bounded by the deadline
- * under test, not by the test's own timer.
+ * Every test that uses a server talks to a real HTTP server (node:http); fetch
+ * is never mocked. The never-answer and headers-then-stall servers are bounded
+ * by the deadline under test, not by the test's own timer. The default-constant
+ * test starts no server.
  */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
@@ -22,6 +23,8 @@ import {
   tryAgentKeyFloor,
 } from "../../src/lib/auth-resolve.ts";
 import { applySnapshot, formatUnknownState, type ApiCall } from "../../src/rem/restore.ts";
+import { runNightlyCycle, type RunnerOpts } from "../../src/rem/runner.ts";
+import { summarizeNightlyOutcome, longRemRequestDeadline, LONG_REM_REQUEST_DEADLINE_MS } from "../../src/commands/rem.ts";
 import { createSnapshot } from "../../src/rem/snapshot.ts";
 
 const ADMIN_AUTH = `Basic ${Buffer.from("admin:stub-pass").toString("base64")}`;
@@ -206,7 +209,7 @@ describe("tryAgentKeyFloor — an unknown outcome stops the floor (flair#2789)",
 });
 
 describe("rem restore — an unknown write is recorded, never reported failed (flair#2789)", () => {
-  test("a write that commits after the deadline is unknown, verified present, and not an error", async () => {
+  test("a write that commits only after the deadline is unknown, and the post-restore read cannot see the late commit", async () => {
     const rows = new Map<string, Record<string, unknown>>();
     let putReceived = 0;
     const server = await serve((req, res) => {
@@ -230,9 +233,10 @@ describe("rem restore — an unknown write is recorded, never reported failed (f
         putReceived++;
         const id = decodeURIComponent(url.pathname.split("/")[2]!);
         const body = { id, agentId: "agent-a", content: "restored", durability: "persistent" };
-        // Commit now, answer after the client's deadline.
-        rows.set(id, body);
+        // Commit AFTER the client's 100 ms deadline has fired (at 300 ms), so
+        // the row lands after the client gave up on the response.
         setTimeout(() => {
+          rows.set(id, body);
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify(body));
         }, 300);
@@ -272,16 +276,177 @@ describe("rem restore — an unknown write is recorded, never reported failed (f
       expect(putReceived).toBe(1);
       expect(result.unknown.memories).toEqual(["m1"]);
       expect(result.errors).toEqual([]);
-      expect(result.status).toBe("completed");
+      expect(result.status).toBe("unresolved");
       expect(result.restored.memories).toBe(0);
       const state = result.verified?.unknownStates.find((s) => s.id === "m1");
-      expect(state).toEqual({ entity: "memory", id: "m1", present: true });
+      expect(state).toEqual({ entity: "memory", id: "m1", present: false });
       const line = formatUnknownState(state!);
-      expect(line).toContain("present on the target after restore");
-      expect(line).toContain("id-only check cannot tell");
-      expect(line).not.toContain("restored");
+      expect(line).toContain("absent from the target after restore");
+      expect(line).toContain("unresolved and its state is unverified");
+      expect(line).not.toContain("present on the target");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   }, 15_000);
+
+  test("an unknown DELETE stops that id's write: no PUT for it, and the result is unresolved", async () => {
+    const rows = new Map<string, Record<string, unknown>>([
+      ["m1", { id: "m1", agentId: "agent-a", content: "current", durability: "persistent" }],
+    ]);
+    const server = await serve((req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (req.method === "GET" && url.pathname === "/Memory") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify([...rows.values()]));
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/Soul") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("[]");
+        return;
+      }
+      if (req.method === "GET" && url.pathname.startsWith("/AdminMemoryCandidates/")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ candidates: [], hasMore: false }));
+        return;
+      }
+      if (req.method === "DELETE" && url.pathname === "/Memory/m1") {
+        return; // accept, never answer: the client's deadline decides
+      }
+      if (req.method === "PUT" || req.method === "DELETE") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("{}");
+        return;
+      }
+      res.writeHead(404);
+      res.end("not found");
+    });
+
+    const root = mkdtempSync(join(tmpdir(), "flair-2789-restore-del-"));
+    try {
+      const snapshot = await createSnapshot({
+        agentId: "agent-a",
+        flairVersion: "0.0.0-test",
+        memories: [{ id: "m1", agentId: "agent-a", content: "restored", durability: "persistent" }],
+        soul: null,
+        pendingCandidateCount: 0,
+        rootOverride: join(root, "snapshots"),
+      });
+      const apiCall: ApiCall = (method, path, body) =>
+        sendJsonRequest(new URL(path, server.baseUrl), method, body, ADMIN_AUTH, true, { deadlineMs: 150 });
+
+      const result = await applySnapshot({
+        agentId: "agent-a",
+        snapshotPath: snapshot.path,
+        flairVersion: "0.0.0-test",
+        apiCall,
+        preRestoreSnapshotRoot: join(root, "pre"),
+        tmpRootOverride: root,
+      });
+
+      expect(server.requests.filter((r) => r.method === "PUT")).toEqual([]);
+      expect(result.unknown.memories).toEqual(["m1"]);
+      expect(result.skippedAfterUnknownDelete.memories).toEqual(["m1"]);
+      expect(result.restored.memories).toBe(0);
+      expect(result.errors).toEqual([]);
+      expect(result.status).toBe("unresolved");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 15_000);
+});
+
+describe("rem nightly runner — a deadline expiry on a long route is unresolved, not failed (flair#2789)", () => {
+  let root: string;
+  let calls: Array<{ method: string; path: string }>;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "flair-2789-runner-"));
+    calls = [];
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function baseApi(): ApiCall {
+    return async (method, path) => {
+      calls.push({ method, path });
+      if (method === "GET" && path.startsWith("/Memory")) return [];
+      if (method === "GET" && path.startsWith("/Soul")) return [];
+      if (method === "POST" && path === "/MemoryMaintenance") return { expired: 0, archived: 0, total: 0, errors: 0 };
+      if (method === "POST" && path === "/ReflectMemories") {
+        return { candidates: [], count: 0, model: "default", gathered: 0, unreflected: 0 };
+      }
+      if (method === "POST" && path === "/MemoryDedupStats") {
+        return { clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-10-24T00:00:00.000Z" };
+      }
+      throw new Error(`unexpected api call: ${method} ${path}`);
+    };
+  }
+
+  function runnerOpts(overrides: Partial<RunnerOpts> = {}): RunnerOpts {
+    return {
+      agentId: "agent-a",
+      flairVersion: "0.0.0-test",
+      apiCall: baseApi(),
+      snapshotRoot: join(root, "snapshots"),
+      logPath: join(root, "logs", "rem-nightly.jsonl"),
+      pauseFlagPath: join(root, "rem.paused"),
+      envPaused: false,
+      healthProbe: async () => ({ ok: true, elapsedMs: 1 }),
+      ...overrides,
+    };
+  }
+
+  function throwingOn(route: string): ApiCall {
+    const base = baseApi();
+    return async (method, path, body) => {
+      if (method === "POST" && path === route) {
+        calls.push({ method, path });
+        throw new ApiRequestOutcomeUnknown(method, path, 900_000, undefined, "explicit");
+      }
+      return base(method, path, body);
+    };
+  }
+
+  test("maintenance's expiry ends the cycle unresolved, with no failed status and no distillation", async () => {
+    const result = await runNightlyCycle(runnerOpts({ apiCall: throwingOn("/MemoryMaintenance") }));
+
+    expect(result.status).toBe("unresolved");
+    expect(result.logRow.status).toBe("unresolved");
+    expect(result.logRow.errors).toEqual([]);
+    expect(result.logRow.outcomeUnknown).toHaveLength(1);
+    expect(result.logRow.outcomeUnknown![0]).toContain("may or may not have taken effect");
+    expect(calls.some((c) => c.path === "/ReflectMemories")).toBe(false);
+  }, 15_000);
+
+  test("reflection's expiry is carried as unresolved through the runner and its log, not failed", async () => {
+    const result = await runNightlyCycle(runnerOpts({ apiCall: throwingOn("/ReflectMemories") }));
+
+    expect(result.status).toBe("unresolved");
+    expect(result.logRow.status).toBe("unresolved");
+    expect(result.logRow.errors).toEqual([]);
+    expect(result.logRow.outcomeUnknown).toHaveLength(1);
+    expect(result.logRow.outcomeUnknown![0]).toContain("distillation");
+    expect(result.logRow.outcomeUnknown![0]).toContain("may or may not have taken effect");
+    expect(calls.some((c) => c.path === "/MemoryMaintenance")).toBe(true);
+  }, 15_000);
+
+  test("the nightly report exits 3 for an unknown outcome, 1 for an ordinary failure, 0 otherwise", () => {
+    expect(summarizeNightlyOutcome({ errors: [], skips: [], outcomeUnknown: ["maintenance: x"] }).exitCode).toBe(3);
+    expect(summarizeNightlyOutcome({ errors: ["dedup: forbidden"], skips: [], outcomeUnknown: ["maintenance: x"] }).exitCode).toBe(3);
+    expect(summarizeNightlyOutcome({ errors: ["dedup: forbidden"], skips: [] }).exitCode).toBe(1);
+    expect(summarizeNightlyOutcome({ errors: [], skips: [] }).exitCode).toBe(0);
+  });
+});
+
+describe("rem long-route deadline (flair#2789)", () => {
+  test("only the two long REM routes get the 900 s deadline", () => {
+    expect(LONG_REM_REQUEST_DEADLINE_MS).toBe(900_000);
+    expect(longRemRequestDeadline("POST", "/MemoryMaintenance")).toEqual({ deadlineMs: 900_000 });
+    expect(longRemRequestDeadline("POST", "/ReflectMemories")).toEqual({ deadlineMs: 900_000 });
+    expect(longRemRequestDeadline("GET", "/MemoryMaintenance")).toEqual({});
+    expect(longRemRequestDeadline("POST", "/ConsolidateMemories")).toEqual({});
+  });
 });
