@@ -1549,9 +1549,10 @@ export class FederationSync extends Resource {
         // flair#2475 extends it to Memory: Memory's identity fields
         // (instanceToken, contentHash, createdAt, agentId) do not move on a
         // field-only update, so an identity-only check let the merge put back
-        // a changed field's pre-change value. Memory writes the fields that
-        // differ from the in-transaction row as an incremental update, and
-        // rewrites the whole row only when a stripped field must be removed.
+        // a changed field's pre-change value. For an existing row, Memory
+        // writes the fields that differ from the in-transaction row as an
+        // incremental update, and rewrites the whole row only when a stripped
+        // field must be removed; a new row is a full put.
         let outcome: any;
         writeBackStarted = true;
         try {
@@ -1820,8 +1821,10 @@ export class FederationPeers extends Resource {
 /**
  * GET /FederationRetries — the rows of the sender's FederationRetry table
  * (flair#2455), admin view, split into `pending`, `terminal` and `malformed`.
- * No production sender path creates rows yet (a later slice activates the
- * sender); rows an admin writes are readable now.
+ * The generic-Memory sender (`runFederationSyncOnce`) creates a pending row on
+ * a retryable refusal or a first indeterminate outcome, and updates it on
+ * later attempts, outcomes and source changes; rows an admin writes are
+ * readable too.
  *
  * A row that breaks a sender convention (retryRowProblem: an id that is not its
  * tuple's key, an unknown state, reason or outcome) is listed under

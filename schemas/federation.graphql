@@ -42,9 +42,11 @@ type Peer @table(database: "flair") @export {
 
 # Sender-owned federation retry bookkeeping (flair#2455). The table is shaped
 # for one row per (peer, table, record) the receiver refused for a reason a
-# later re-offer could clear, plus locally observed unconfirmed sends. No
-# production sender path creates rows yet (a later slice activates the sender);
-# rows an admin writes are readable now. Local bookkeeping, EXCLUDED from
+# later re-offer could clear, plus locally observed unconfirmed sends. The
+# generic-Memory sender (`runFederationSyncOnce`) creates a pending row on a
+# retryable refusal or a first indeterminate outcome, and updates it on later
+# attempts, outcomes and source changes; rows an admin writes are readable now.
+# Local bookkeeping, EXCLUDED from
 # federation policy and the receive mapping, so no inbound sync record can write
 # it (a pushed record naming it that passes the receiver's payload-id check
 # skips as `unknown_table`). Admin-only on every

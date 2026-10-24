@@ -3354,7 +3354,7 @@ export class Memory extends (databases as any).flair.Memory {
       // unreadable or mismatching committed row is never reported as success.
       if (!reindexJoinsRequestTxn) {
         // Test-only: a fault-injection switch makes this confirmation read
-        // throw, so the unreadable branch below has a real-Harper case.
+        // throw.
         const verifyTable = txnFault("memory-reindex-verify")
           ? { get: async (): Promise<any> => { throw new Error("injected post-commit read failure"); } }
           : (databases as any).flair.Memory;
