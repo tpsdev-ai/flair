@@ -216,7 +216,7 @@ That would turn the most ordinary bug there is — `agentContext(session.agentId
 |---|---|
 | `agentContext(id)` | **Throws** `InProcessContextError` on a missing, empty or blank id. Takes **no options**, so no object spread into it can escalate. |
 | `adminContext(id)` | The *only* way to get admin authority. Same id guard. |
-| `internalContext()` | The *only* way to get the unfiltered verdict, and the only internal call the admin-only gate admits. |
+| `internalContext()` | The named way to get the unfiltered verdict; the admin-only gate admits the internal verdict only for a call that carries its marker. |
 | `collectionResource(Cls, context)` | Context is **required**; omitting it throws rather than granting `internal`. |
 
 The privileged paths are now the longest ones to type, and `git grep "adminContext\|internalContext"` enumerates every deliberate escalation in your codebase. These are runtime guards, not type annotations — a plain-JavaScript embedder gets exactly the same protection.
