@@ -191,6 +191,40 @@ describe("the locked transaction scope (flair#2478 part 3a)", () => {
     expect(result).toEqual({ kind: "done", value: { kind: "refused", response: refused } });
   });
 
+  test("a throwing confirmation does not stop the later staged writes from confirming", async () => {
+    const store = fakeStore();
+    const ctx: any = { log: [] as string[] };
+    const firstError = new Error("first confirmation failed");
+    const run = withMemoryWriteLock(store, ["a", "b", "c"], (held) =>
+      withLockedMemoryTransaction(held, ctx, async (tx) => {
+        const a = admitLockedMemoryWrite(held, tx, store, ["a"]);
+        const b = admitLockedMemoryWrite(held, tx, store, ["b"]);
+        const c = admitLockedMemoryWrite(held, tx, store, ["c"]);
+        void a.track("a", async (stage) => {
+          await sleep(5);
+          const committed = await stage();
+          ctx.log.push(`answer-a:${committed}:${store.held.has(KEY_A) ? "locked" : "unlocked"}`);
+          if (committed) throw firstError;
+        });
+        void b.track("b", async (stage) => {
+          await sleep(10);
+          const committed = await stage();
+          ctx.log.push(`answer-b:${committed}:${store.held.has(KEY_A) ? "locked" : "unlocked"}`);
+          return committed ? { answered: "b" } : undefined;
+        });
+        void c.track("c", async (stage) => {
+          await sleep(15);
+          const committed = await stage();
+          ctx.log.push(`answer-c:${committed}:${store.held.has(KEY_A) ? "locked" : "unlocked"}`);
+          return committed ? { answered: "c" } : undefined;
+        });
+        return "work";
+      }));
+    await expect(run).rejects.toThrow("first confirmation failed");
+    expect(ctx.log).toEqual(["committed", "answer-a:true:locked", "answer-b:true:locked", "answer-c:true:locked"]);
+    expect(store.held.size).toBe(0);
+  });
+
   test("a refused write aborts the transaction even when the work ignores it", async () => {
     const store = fakeStore();
     const ctx: any = { log: [] as string[] };

@@ -158,11 +158,17 @@ async function runScope<T>(
     if (committed) await committed;
     const confirmed: unknown[] = [];
     let refusal: Response | null = null;
+    let firstError: { error: unknown } | null = null;
     for (const confirm of state!.confirmations) {
-      const answer = await confirm();
-      if (answer instanceof Response) refusal ??= answer;
-      else confirmed.push(answer);
+      try {
+        const answer = await confirm();
+        if (answer instanceof Response) refusal ??= answer;
+        else confirmed.push(answer);
+      } catch (error) {
+        firstError ??= { error };
+      }
     }
+    if (firstError) throw firstError.error;
     if (refusal) return { kind: "refused", response: refusal };
     return { kind: "committed", value, confirmed };
   } catch (error) {
