@@ -471,6 +471,66 @@
       "added": "2026-10-09",
       "expires": "2026-11-02",
       "removeWhen": "a @google/adk release's dependency tree resolves uuid >= 11.1.1 (its @google-cloud/vertexai -> google-auth-library -> gaxios edge moves off uuid 9.x), or the ADK consumer install no longer reports this advisory"
+    },
+    {
+      "ghsa": "GHSA-w74x-v6f9-j3xg",
+      "package": "fast-uri",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> fast-uri",
+      "reason": "Published 2026-10-23; URI scheme spoofing via percent-encoded scheme decoding. Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides: harper 5.3.1, the version flair pins (package.json:69), pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair. The root override (fast-uri 4.2.3) keeps bun.lock on the fixed 4.x, but npm installs carry harper's pins. flair does not import fast-uri; the copies in an npm install of the flair package are harper's, reached through its fastify stack. harper 5.3.3 ships no npm-shrinkwrap.json, but its bundled tree still carries the same 3.1.0 and 4.2.1, so #2803 does not retire this entry. Fixed in 3.1.9 (3.x) and 4.2.3 (4.x); both pinned copies are affected.",
+      "added": "2026-10-24",
+      "expires": "2026-11-02",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves fast-uri >=3.1.9 on the 3.x line and >=4.2.3 on the 4.x line, or flair stops depending on harper."
+    },
+    {
+      "ghsa": "GHSA-wjr9-j795-jxcr",
+      "package": "fast-uri",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> fast-uri",
+      "reason": "Published 2026-10-23; host confusion via unchecked WHATWG host canonicalization. Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides: harper 5.3.1, the version flair pins (package.json:69), pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair. The root override (fast-uri 4.2.3) keeps bun.lock on the fixed 4.x, but npm installs carry harper's pins. flair does not import fast-uri; the copies in an npm install of the flair package are harper's, reached through its fastify stack. harper 5.3.3 ships no npm-shrinkwrap.json, but its bundled tree still carries the same 3.1.0 and 4.2.1, so #2803 does not retire this entry. Fixed in 3.1.9 (3.x) and 4.2.3 (4.x); only the 4.2.1 copy is affected: this advisory's 3.x range starts at 3.1.3, which harper's 3.1.0 predates.",
+      "added": "2026-10-24",
+      "expires": "2026-11-02",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves fast-uri >=4.2.3 on the 4.x line (its 3.x copy is outside this advisory's range), or flair stops depending on harper."
+    },
+    {
+      "ghsa": "GHSA-xhq7-xmqj-769h",
+      "package": "fast-uri",
+      "severity": "low",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> fast-uri",
+      "reason": "Published 2026-10-23; improper path equivalence in relative reference normalization. Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides: harper 5.3.1, the version flair pins (package.json:69), pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair. The root override (fast-uri 4.2.3) keeps bun.lock on the fixed 4.x, but npm installs carry harper's pins. flair does not import fast-uri; the copies in an npm install of the flair package are harper's, reached through its fastify stack. harper 5.3.3 ships no npm-shrinkwrap.json, but its bundled tree still carries the same 3.1.0 and 4.2.1, so #2803 does not retire this entry. Fixed in 3.1.9 (3.x) and 4.2.3 (4.x); both pinned copies are affected.",
+      "added": "2026-10-24",
+      "expires": "2026-11-02",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves fast-uri >=3.1.9 on the 3.x line and >=4.2.3 on the 4.x line, or flair stops depending on harper."
+    },
+    {
+      "ghsa": "GHSA-333x-w4r6-6crp",
+      "package": "fast-uri",
+      "severity": "low",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> fast-uri",
+      "reason": "Published 2026-10-23; scheme injection via an unescaped first-segment colon in suffix references. Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides: harper 5.3.1, the version flair pins (package.json:69), pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair. The root override (fast-uri 4.2.3) keeps bun.lock on the fixed 4.x, but npm installs carry harper's pins. flair does not import fast-uri; the copies in an npm install of the flair package are harper's, reached through its fastify stack. harper 5.3.3 ships no npm-shrinkwrap.json, but its bundled tree still carries the same 3.1.0 and 4.2.1, so #2803 does not retire this entry. Fixed in 3.1.9 (3.x) and 4.2.3 (4.x); both pinned copies are affected.",
+      "added": "2026-10-24",
+      "expires": "2026-11-02",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves fast-uri >=3.1.9 on the 3.x line and >=4.2.3 on the 4.x line, or flair stops depending on harper."
     }
   ]
 }
