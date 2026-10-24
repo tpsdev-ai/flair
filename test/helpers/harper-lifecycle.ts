@@ -329,12 +329,12 @@ const METAL_LIBRARY_EVENT_RE = /ggml_metal_library_init: (?:loaded in ([0-9.]+) 
 /**
  * What the captured log says about the embedding engine's Metal library
  * loads, for the readiness timeout. It counts start lines and "loaded in"
- * lines: when more loads started than logged "loaded in", it says how many,
- * with the last logged duration if there is one (a finished load followed by
- * a new start, or two interleaved loads, leaves the newer one unfinished);
- * otherwise the duration from the LAST "loaded in" line. A
- * `ggml_metal_library_init:` line of neither form says a load started with no
- * "loaded in" line; a log with none yields null.
+ * lines: when there are more start lines than "loaded in" lines, it says how
+ * many loads logged no "loaded in" line, with the last logged duration if there
+ * is one; otherwise the duration from the LAST "loaded in" line. If neither form
+ * matched, any other `ggml_metal_library_init:` line produces the generic
+ * "started and logged no 'loaded in' line" note; with no such line the result is
+ * null.
  */
 export function metalLibraryLoadNote(log: string): string | null {
   const text = String(log);
