@@ -153,7 +153,7 @@ describe("flair#2797 — retry row transitions", () => {
     expect(row.attempts).toBe(2);
   });
 
-  test("a read-back must echo every field the obligation depends on, including attempts", () => {
+  test("a read-back must echo the compared fields, including attempts", () => {
     const record = retryRowForAttempt(pending({ attempts: 1 }), NOW);
     const stored = { ...record, attempts: 1 };
     expect(retryRowConfirmation(record, stored)).toBe("attempts");

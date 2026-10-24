@@ -65,15 +65,15 @@ type FederationRetry @table(database: "flair") @sealed @export {
   recordId: String!                # the source row id
   state: String! @indexed          # "pending" | "terminal"
   firstRefusedAt: String! @indexed # the obligation's first recorded time (a refusal or an indeterminate outcome); the sender enforces no age bound yet
-  attempts: Int! @indexed          # incremented and persisted before each send of a row that already has a pending row (a first ordinary offer has none); the sender enforces no attempt bound yet
-  episodeId: String                # RESERVED: no sender writes it yet — intended as the obligation's generation, for rejecting stale completions
+  attempts: Int! @indexed          # incremented and persisted once per sender-level offer of a row that already has a valid pending row, before the send (a first ordinary offer has none); adaptive batch splitting can send the row more than once under one reservation; the sender enforces no attempt bound yet
+  episodeId: String                # RESERVED: the sender does not generate it; a terminal update copies an existing value from the row it transitions — intended as the obligation's generation, for rejecting stale completions
   recordFingerprint: String        # content fingerprint, for exhausted-row suppression
   lastReason: String               # the closed SkipReason, or a local reason
   lastAttemptSyncId: String        # the sync that last reserved an attempt
   lastAttemptAt: String
   completedAt: String              # when the row became terminal
   resolution: String               # which terminal outcome ended it
-  bound: String                    # RESERVED: no sender writes it yet — "attempts" | "age" | "both" for retry_exhausted; null otherwise
+  bound: String                    # RESERVED: the sender does not set a non-null value; a terminal update writes null — "attempts" | "age" | "both" for retry_exhausted; null otherwise
   createdAt: String!
   updatedAt: String
 }

@@ -22,8 +22,7 @@
  * sync record can write the table, even though receive `allowCreate` is public
  * (a record that passes the receiver's earlier payload-id check skips as
  * `unknown_table`). It is also not a sending table: the sync sender reads and
- * writes retry rows through its local operations endpoint, and no sync record
- * carries a retry row.
+ * writes retry rows through its local operations endpoint.
  *
  * ACCESS (design rev 2.1). Admin-only on read, create,
  * update AND delete — the FederationPeers/Peer pattern (resources/Peer.ts,

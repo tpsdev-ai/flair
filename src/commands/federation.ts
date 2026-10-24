@@ -882,7 +882,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       for (const row of list as RetryQueueRow[]) pendingRetries.set(row.id, row);
     }
 
-    /** Read one retry row back and confirm every field the obligation depends on. */
+    /** Read one retry row back and check it with retryRowConfirmation. */
     async function confirmRetryRow(operation: "upsert" | "update", record: Record<string, unknown>): Promise<void> {
       const read = await fetch(`${opsEndpoint}/`, {
         method: "POST",

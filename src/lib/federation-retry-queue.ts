@@ -220,9 +220,12 @@ const CONFIRM_FIELDS = [
 ] as const;
 
 /**
- * The first written field the stored row does not echo, or null when every
- * field the obligation depends on was persisted. A read-back that only agrees
- * on `state` and `lastReason` can hide an attempt that was never incremented.
+ * The first of `id`, `peerId`, `table`, `recordId`, `state`, `attempts`,
+ * `lastReason`, `lastAttemptAt`, `firstRefusedAt`, `createdAt`, `resolution`,
+ * `completedAt`, `updatedAt` and `bound` (CONFIRM_FIELDS, in that order) that
+ * the written record carries and the stored row does not echo; `row` when the
+ * stored row is null; otherwise null. A read-back that only agrees on `state`
+ * and `lastReason` can hide an attempt that was never incremented.
  */
 export function retryRowConfirmation(record: Record<string, unknown>, stored: Record<string, unknown> | null): string | null {
   if (stored === null) return "row";
