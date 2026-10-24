@@ -9,9 +9,11 @@
  * The receiver's response names each refused record and its reason
  * (`refused`). A reason in {@link MEMORY_RETRY_REASONS} may clear on a later
  * offer, so the sender keeps one pending row for that (hub, Memory, record)
- * tuple and offers the record again on a later cycle, independent of its own
- * cursor. Any other reason is final: an existing pending row becomes
- * `refused_terminal` and is never offered again.
+ * tuple and offers the record again on a later cycle while that pending row
+ * exists, independent of its own cursor. Any other reason is final: an
+ * existing pending row becomes `refused_terminal`, and the retry path does not
+ * select a terminal row again (a later row update can still select it through
+ * the ordinary cursor).
  */
 import { retryEntryKey } from "./federation-retry-key.js";
 
@@ -28,6 +30,13 @@ export const MEMORY_RETRY_REASONS: ReadonlySet<string> = new Set([
   "merge_target_busy",
   "merge_error",
   "presence_agent_not_replicated",
+]);
+
+/** Every `lastReason` a pending Memory row may hold: a retryable refusal name,
+ *  or the sender's own `retry_unknown`. */
+export const MEMORY_PENDING_REASONS: ReadonlySet<string> = new Set([
+  ...MEMORY_RETRY_REASONS,
+  "retry_unknown",
 ]);
 
 /** Every field the FederationRetry schema declares, in schema order. */
@@ -77,14 +86,28 @@ export interface RetryQueueRow {
   [field: string]: unknown;
 }
 
+/** Why a row must not be offered, or null when it keeps the sender's pending-row conventions. */
+export type RetryOfferProblem = "wrong_state" | "wrong_table" | "id_mismatch" | "unknown_reason";
+
+export function retryOfferProblem(row: RetryQueueRow, table = "Memory"): RetryOfferProblem | null {
+  if (row.state !== "pending") return "wrong_state";
+  if (row.table !== table) return "wrong_table";
+  if (typeof row.peerId !== "string" || typeof row.recordId !== "string") return "id_mismatch";
+  try {
+    if (retryEntryKey(row.peerId, row.table, row.recordId) !== row.id) return "id_mismatch";
+  } catch {
+    return "id_mismatch";
+  }
+  if (typeof row.lastReason !== "string" || !MEMORY_PENDING_REASONS.has(row.lastReason)) return "unknown_reason";
+  return null;
+}
+
 /** The pending rows whose backoff has elapsed at `nowMs`. A malformed row is never offered. */
 export function dueRetryRows(rows: readonly RetryQueueRow[], nowMs: number, table = "Memory"): RetryQueueRow[] {
   return rows.filter((row) => {
-    if (row.state !== "pending" || row.table !== table) return false;
-    if (typeof row.peerId !== "string" || typeof row.recordId !== "string") return false;
-    try {
-      if (retryEntryKey(row.peerId, row.table, row.recordId) !== row.id) return false;
-    } catch {
+    const problem = retryOfferProblem(row, table);
+    if (problem !== null) {
+      // Reported by the caller, not silently treated as absent.
       return false;
     }
     const attempts = typeof row.attempts === "number" && Number.isSafeInteger(row.attempts) && row.attempts > 0 ? row.attempts : 1;
@@ -102,13 +125,15 @@ export interface RefusalRowInput {
   reason: string;
   nowIso: string;
   existing?: RetryQueueRow | null;
+  /** The offer that produced this outcome already reserved its attempt. */
+  attemptReserved?: boolean;
 }
 
 /**
  * The row to write for a retryable refusal. A first refusal creates a pending
  * row with `attempts: 1`; a later one keeps `firstRefusedAt` and `createdAt`,
- * increments `attempts` and moves `lastAttemptAt`. `attempts` counts offers,
- * so the sender's own age bound and attempt bound have a number to read.
+ * increments `attempts` and moves `lastAttemptAt`, unless that offer already
+ * reserved its attempt before sending. `attempts` counts offers.
  */
 export function retryRowForRefusal(input: RefusalRowInput): Record<string, unknown> {
   const id = retryEntryKey(input.peerId, "Memory", input.recordId);
@@ -123,13 +148,73 @@ export function retryRowForRefusal(input: RefusalRowInput): Record<string, unkno
     recordId: input.recordId,
     state: "pending",
     firstRefusedAt: prior?.firstRefusedAt ?? input.nowIso,
-    attempts: priorAttempts + 1,
+    attempts: priorAttempts + (input.attemptReserved ? 0 : 1),
     lastReason: input.reason,
     lastAttemptAt: input.nowIso,
     createdAt: prior?.createdAt ?? input.nowIso,
     updatedAt: input.nowIso,
   };
   return row;
+}
+
+/**
+ * The row that reserves one offer attempt before a pending row is sent. The
+ * caller persists it; an unconfirmed send keeps it, so the next cycle waits
+ * out this attempt's backoff instead of re-offering at once.
+ */
+export function retryRowForAttempt(row: RetryQueueRow, nowIso: string): Record<string, unknown> {
+  const id = retryEntryKey(row.peerId, "Memory", row.recordId);
+  const priorAttempts = typeof row.attempts === "number" && Number.isSafeInteger(row.attempts) && row.attempts > 0
+    ? row.attempts
+    : 0;
+  const out: Record<string, unknown> = {
+    id,
+    peerId: row.peerId,
+    table: "Memory",
+    recordId: row.recordId,
+    state: "pending",
+    firstRefusedAt: row.firstRefusedAt ?? nowIso,
+    attempts: priorAttempts + 1,
+    lastAttemptAt: nowIso,
+    createdAt: row.createdAt ?? nowIso,
+    updatedAt: nowIso,
+  };
+  if (typeof row.lastReason === "string") out.lastReason = row.lastReason;
+  return out;
+}
+
+/** The fields a persisted retry row must carry back for the obligation to hold. */
+const CONFIRM_FIELDS = [
+  "id",
+  "peerId",
+  "table",
+  "recordId",
+  "state",
+  "attempts",
+  "lastReason",
+  "lastAttemptAt",
+  "firstRefusedAt",
+  "createdAt",
+  "resolution",
+  "completedAt",
+  "updatedAt",
+  "bound",
+] as const;
+
+/**
+ * The first written field the stored row does not echo, or null when every
+ * field the obligation depends on was persisted. A read-back that only agrees
+ * on `state` and `lastReason` can hide an attempt that was never incremented.
+ */
+export function retryRowConfirmation(record: Record<string, unknown>, stored: Record<string, unknown> | null): string | null {
+  if (stored === null) return "row";
+  for (const field of CONFIRM_FIELDS) {
+    if (!(field in record)) continue;
+    const expected = record[field] ?? null;
+    const actual = stored[field] ?? null;
+    if (actual !== expected) return field;
+  }
+  return null;
 }
 
 /** A pending row's terminal transition, carrying only declared fields. */

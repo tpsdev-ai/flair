@@ -12,6 +12,9 @@ import {
   MEMORY_RETRY_REASONS,
   dueRetryRows,
   retryBackoffMs,
+  retryOfferProblem,
+  retryRowConfirmation,
+  retryRowForAttempt,
   retryRowForRefusal,
   terminalRetryRow,
   type RetryQueueRow,
@@ -68,6 +71,14 @@ describe("flair#2797 — retry backoff and due selection", () => {
     expect(dueRetryRows([pending({ lastAttemptAt: null })], Date.parse(NOW))).toHaveLength(1);
     expect(dueRetryRows([pending({ lastAttemptAt: "not-a-date" })], Date.parse(NOW))).toHaveLength(1);
   });
+
+  test("a pending row with an unknown lastReason is not offered and is reported", () => {
+    const malformed = pending({ lastReason: "not_a_reason" });
+    expect(retryOfferProblem(malformed)).toBe("unknown_reason");
+    expect(dueRetryRows([malformed], Date.parse(NOW) + 60_000)).toEqual([]);
+    expect(retryOfferProblem(pending({ lastReason: "retry_unknown" }))).toBeNull();
+    expect(dueRetryRows([pending({ lastReason: "retry_unknown" })], Date.parse(NOW))).toHaveLength(1);
+  });
 });
 
 describe("flair#2797 — retry row transitions", () => {
@@ -94,6 +105,39 @@ describe("flair#2797 — retry row transitions", () => {
     expect(row.firstRefusedAt).toBe("2026-10-20T00:00:00.000Z");
     expect(row.createdAt).toBe("2026-10-20T00:00:00.000Z");
     expect(row.attempts).toBe(3);
+  });
+
+  test("an attempt is reserved before the send and kept if the send is unconfirmed", () => {
+    const reserved = retryRowForAttempt(pending({ attempts: 1, firstRefusedAt: "2026-10-20T00:00:00.000Z" }), NOW);
+    expect(reserved.attempts).toBe(2);
+    expect(reserved.lastAttemptAt).toBe(NOW);
+    expect(reserved.firstRefusedAt).toBe("2026-10-20T00:00:00.000Z");
+    expect(reserved.lastReason).toBe("merge_target_busy");
+    expect(reserved.state).toBe("pending");
+  });
+
+  test("a refusal of an offer whose attempt was reserved does not count it twice", () => {
+    const reserved = retryRowForAttempt(pending({ attempts: 1 }), NOW) as unknown as RetryQueueRow;
+    const row = retryRowForRefusal({
+      peerId: PEER,
+      recordId: ROW,
+      reason: "merge_target_busy",
+      nowIso: NOW,
+      existing: reserved,
+      attemptReserved: true,
+    });
+    expect(row.attempts).toBe(2);
+  });
+
+  test("a read-back must echo every field the obligation depends on, including attempts", () => {
+    const record = retryRowForAttempt(pending({ attempts: 1 }), NOW);
+    const stored = { ...record, attempts: 1 };
+    expect(retryRowConfirmation(record, stored)).toBe("attempts");
+    expect(retryRowConfirmation(record, { ...record })).toBeNull();
+    expect(retryRowConfirmation(record, { ...record, state: "terminal", attempts: 1 })).toBe("state");
+    const terminal = terminalRetryRow(pending({ attempts: 4 }), "merged", NOW);
+    expect(retryRowConfirmation(terminal, { ...terminal, resolution: "refused_terminal" })).toBe("resolution");
+    expect(retryRowConfirmation(terminal, { ...terminal })).toBeNull();
   });
 
   test("a terminal row carries the declared fields and a null bound", () => {

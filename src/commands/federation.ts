@@ -46,6 +46,9 @@ import { retryEntryKey } from "../lib/federation-retry-key.js";
 import {
   MEMORY_RETRY_REASONS,
   dueRetryRows,
+  retryOfferProblem,
+  retryRowConfirmation,
+  retryRowForAttempt,
   retryRowForRefusal,
   terminalRetryRow,
   type RetryQueueRow,
@@ -837,11 +840,18 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const instance = await api("GET", "/FederationInstance", undefined, apiOpts);
 
     // ── federation retry bookkeeping (flair#2797) ─────────────────────────
-    // A generic Memory row the hub refused for a retryable reason is kept in
-    // FederationRetry and offered again on a later cycle, independent of the
-    // since cursor. A non-retryable refusal ends the obligation.
+    // An eligible generic Memory row the hub refused for a retryable reason is
+    // kept in FederationRetry and offered again on a later cycle while that
+    // pending obligation exists, independent of the since cursor. A
+    // non-retryable refusal ends the obligation; the retry path does not select
+    // a terminal row again.
     const retryHeaders = { "Content-Type": "application/json", Authorization: auth };
+    // One projection for every Memory read: the cursor query and the retry
+    // re-read must not differ in what a row exposes to the signed batch.
+    const memorySelect = [...FEDERATION_MEMORY_SELECT];
     const pendingRetries = new Map<string, RetryQueueRow>();
+    /** Pending rows whose attempt this run reserved before sending. */
+    const reservedOffers = new Set<string>();
 
     async function loadPendingRetries(): Promise<void> {
       const res = await fetch(`${opsEndpoint}/`, {
@@ -867,6 +877,24 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       for (const row of list as RetryQueueRow[]) pendingRetries.set(row.id, row);
     }
 
+    /** Read one retry row back and confirm every field the obligation depends on. */
+    async function confirmRetryRow(operation: "upsert" | "update", record: Record<string, unknown>): Promise<void> {
+      const read = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: retryHeaders,
+        body: JSON.stringify({ operation: "search_by_hash", database: "flair", table: "FederationRetry", hash_values: [record.id], get_attributes: ["*"] }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!read.ok) throw new Error(`FederationRetry read-back failed (${read.status})`);
+      const rows = await read.json() as unknown;
+      if (!Array.isArray(rows)) throw new Error("FederationRetry read-back failed: body is not a row list");
+      const stored = (rows as any[]).find((r) => r.id === record.id) ?? null;
+      const mismatch = retryRowConfirmation(record, stored);
+      if (mismatch !== null) {
+        throw new Error(`FederationRetry ${operation} was not confirmed for ${String(record.id)} (${mismatch})`);
+      }
+    }
+
     /** Write one retry row; an unconfirmed write is an error, never a silent success. */
     async function writeRetryRow(operation: "upsert" | "update", record: Record<string, unknown>): Promise<void> {
       const res = await fetch(`${opsEndpoint}/`, {
@@ -876,27 +904,16 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         signal: AbortSignal.timeout(15_000),
       });
       if (!res.ok) throw new Error(`FederationRetry ${operation} failed (${res.status})`);
-      const body = await res.json().catch(() => null) as any;
       if (operation === "update") {
+        const body = await res.json().catch(() => null) as any;
         if (!Array.isArray(body?.update_hashes) || !body.update_hashes.map(String).includes(String(record.id))) {
           throw new Error(`FederationRetry update was not confirmed for ${String(record.id)}`);
         }
-        return;
       }
-      // The upsert answer does not name the row. Confirm it by reading it back:
-      // a write the sender cannot see is not a recorded obligation.
-      const read = await fetch(`${opsEndpoint}/`, {
-        method: "POST",
-        headers: retryHeaders,
-        body: JSON.stringify({ operation: "search_by_hash", database: "flair", table: "FederationRetry", hash_values: [record.id], get_attributes: ["*"] }),
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!read.ok) throw new Error(`FederationRetry read-back failed (${read.status})`);
-      const rows = await read.json() as unknown;
-      const stored = Array.isArray(rows) ? (rows as any[]).find((r) => r.id === record.id) : null;
-      if (!stored || stored.state !== record.state || stored.lastReason !== record.lastReason) {
-        throw new Error(`FederationRetry upsert was not confirmed for ${String(record.id)}`);
-      }
+      // The upsert answer does not name the row and an update's hash only says
+      // it matched one. Read the row back: a write the sender cannot see is not
+      // a recorded obligation.
+      await confirmRetryRow(operation, record);
     }
 
     async function retireRetry(row: RetryQueueRow, resolution: string, nowIso = new Date().toISOString()): Promise<void> {
@@ -908,7 +925,14 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       const res = await fetch(`${opsEndpoint}/`, {
         method: "POST",
         headers: retryHeaders,
-        body: JSON.stringify({ operation: "search_by_hash", database: "flair", table: "Memory", hash_values: [id], get_attributes: ["*"] }),
+        body: JSON.stringify({
+          operation: "search_by_conditions",
+          schema: "flair",
+          table: "Memory",
+          operator: "and",
+          conditions: [{ search_attribute: "id", search_type: "equals", search_value: id }],
+          get_attributes: memorySelect,
+        }),
         signal: AbortSignal.timeout(15_000),
       });
       if (!res.ok) throw new Error(`Memory read failed (${res.status})`);
@@ -929,20 +953,21 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         if (record.table !== "Memory") continue;
         const key = retryEntryKey(hub.id, "Memory", record.id);
         const prior = pendingRetries.get(key) ?? null;
+        const attemptReserved = reservedOffers.delete(key);
         if (undecided.has(keyOf(record.table, record.id))) {
           // The receiver did not decide this record. Offering it again is safe
           // (the merge is idempotent); `retry_unknown` is the sender's own name.
-          if (prior) {
-            const row = retryRowForRefusal({ peerId: hub.id, recordId: record.id, reason: "retry_unknown", nowIso, existing: prior });
-            await writeRetryRow("upsert", row);
-            pendingRetries.set(String(row.id), row as unknown as RetryQueueRow);
-          }
+          // A first offer records the obligation too, or the cursor advance
+          // would lose it.
+          const row = retryRowForRefusal({ peerId: hub.id, recordId: record.id, reason: "retry_unknown", nowIso, existing: prior, attemptReserved });
+          await writeRetryRow("upsert", row);
+          pendingRetries.set(String(row.id), row as unknown as RetryQueueRow);
           continue;
         }
         const reason = refused.get(keyOf(record.table, record.id));
         if (reason !== undefined) {
           if (MEMORY_RETRY_REASONS.has(reason)) {
-            const row = retryRowForRefusal({ peerId: hub.id, recordId: record.id, reason, nowIso, existing: prior });
+            const row = retryRowForRefusal({ peerId: hub.id, recordId: record.id, reason, nowIso, existing: prior, attemptReserved });
             await writeRetryRow("upsert", row);
             pendingRetries.set(String(row.id), row as unknown as RetryQueueRow);
           } else if (prior) {
@@ -1044,7 +1069,10 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
       const refused = parseSyncBatchRefused(body);
       const indeterminate = parseSyncBatchIndeterminate(body);
-      if (validatePresence) {
+      // A Memory batch changes the sender's retry state and advances its
+      // cursor, so its response must account for every offered record. Presence
+      // already requires the same. Other generic tables only carry counts.
+      if (validatePresence || batch[0]?.table === "Memory") {
         const outcomeBody = body as { refused?: unknown; indeterminate?: unknown };
         const validList = (raw: unknown, parsed: readonly unknown[]) =>
           raw === undefined || (Array.isArray(raw) && raw.length === parsed.length);
@@ -1088,7 +1116,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           res = await fetch(`${opsEndpoint}/`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: auth },
-            body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions: [query], get_attributes: table === "Memory" ? [...FEDERATION_MEMORY_SELECT] : ["*"] }),
+            body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions: [query], get_attributes: table === "Memory" ? memorySelect : ["*"] }),
             signal: AbortSignal.timeout(15_000),
           });
         } catch (err: any) {
@@ -1116,6 +1144,12 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         // selected by the since cursor is offered once (the set below). A row
         // that is gone or has become private ends its obligation here.
         const seen = new Set(rows.map((r: any) => r.id));
+        for (const pending of pendingRetries.values()) {
+          const problem = retryOfferProblem(pending);
+          if (problem !== null) {
+            console.warn(`⚠️  FederationRetry row ${pending.id} is not offered: ${problem}.`);
+          }
+        }
         for (const pending of dueRetryRows([...pendingRetries.values()], Date.now())) {
           if (seen.has(pending.recordId)) continue;
           const row = await loadMemoryRow(pending.recordId);
@@ -1127,6 +1161,12 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
             await retireRetry(pending, "source_ineligible");
             continue;
           }
+          // Reserve this offer before the send; an unconfirmed send keeps the
+          // reservation, so the next cycle waits out its backoff.
+          const reserved = retryRowForAttempt(pending, new Date().toISOString());
+          await writeRetryRow("upsert", reserved);
+          pendingRetries.set(String(reserved.id), reserved as unknown as RetryQueueRow);
+          reservedOffers.add(String(reserved.id));
           rows.push(row);
           seen.add(pending.recordId);
         }

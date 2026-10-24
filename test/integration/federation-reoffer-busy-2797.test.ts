@@ -4,7 +4,8 @@
  * A generic Memory row the receiver refused `merge_target_busy` (its id's write
  * lock was held) is kept in the sender's FederationRetry table and offered
  * again on a later cycle, even though the sender's cursor has already advanced
- * past the row's own `updatedAt`. A non-retryable refusal is never re-offered.
+ * past the row's own `updatedAt`. A non-retryable refusal leaves a terminal row
+ * that the retry path does not select again.
  *
  * The receiver holds the id's lock through the merge's existing pause point
  * (`federation-merge`): a second signed push from the same peer pauses there,
@@ -15,7 +16,7 @@
  * Two real, ephemeral, loopback, HOME-isolated Harpers. Fixtures are neutral
  * (`agent-a`, `flair_spoke_a`, `flair_hub_a`).
  */
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,6 +24,7 @@ import { join } from "node:path";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { keystore } from "../../src/keystore";
+import { FEDERATION_MEMORY_ATTRIBUTES } from "../../src/lib/federation-memory-attributes";
 import { retryEntryKey } from "../../src/lib/federation-retry-key";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
@@ -39,6 +41,8 @@ const b64url = (b: Uint8Array) => Buffer.from(b).toString("base64url");
 let sender: HarperInstance;
 let receiver: HarperInstance;
 let pauseDir: string;
+let proxy: any = null;
+let capturedSyncBodies: any[] = [];
 
 function assertOwnInstance(h: HarperInstance, what: string): void {
   for (const url of [h.httpURL, h.opsURL]) {
@@ -75,6 +79,38 @@ async function deleteRow(h: HarperInstance, table: string, id: string): Promise<
   await ops(h, { operation: "delete", table, hash_values: [id] });
 }
 
+/** Remove every retry row so a case starts without an earlier case's obligation. */
+async function clearRetries(): Promise<void> {
+  const rows = await ops(sender, { operation: "sql", sql: "SELECT * FROM flair.FederationRetry" });
+  for (const row of (Array.isArray(rows) ? rows : (rows?.results ?? [])) as any[]) {
+    await deleteRow(sender, "FederationRetry", row.id);
+  }
+}
+
+/** Put the sender's cursor ahead of every row already on the instance. */
+async function setCursorNow(): Promise<void> {
+  const now = new Date().toISOString();
+  await ops(sender, { operation: "update", table: "Peer", records: [{ id: HUB_ID, lastSyncAt: now, updatedAt: now }] });
+}
+
+function retryRow(recordId: string, lastReason: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+  const at = new Date(Date.now() - 60_000).toISOString();
+  return {
+    id: retryKey(recordId),
+    peerId: HUB_ID,
+    table: "Memory",
+    recordId,
+    state: "pending",
+    firstRefusedAt: at,
+    attempts: 1,
+    lastReason,
+    lastAttemptAt: at,
+    createdAt: at,
+    updatedAt: at,
+    ...over,
+  };
+}
+
 async function sync(): Promise<{ pushed: number; skipped: number; error?: Error }> {
   const { runFederationSyncOnce } = await import("../../src/cli");
   return runFederationSyncOnce({
@@ -107,6 +143,16 @@ function push(memory: Record<string, unknown>): Promise<Response> {
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(120_000),
   });
+}
+
+/** Wait until a direct push of this id is not refused merge_target_busy. */
+async function waitForMergeLock(id: string): Promise<void> {
+  for (let i = 0; i < 80; i++) {
+    const body = await (await push(memoryRow(id, `lock-probe-${i}`, new Date().toISOString()))).json() as any;
+    if (!body.skippedReasons?.merge_target_busy) return;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error("the merge lock was never released");
 }
 
 async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
@@ -160,6 +206,7 @@ beforeAll(async () => {
 }, 480_000);
 
 afterAll(async () => {
+  if (proxy) proxy.stop(true);
   if (sender) await stopHarper(sender);
   if (receiver) await stopHarper(receiver);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
@@ -275,4 +322,145 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
     expect(writtenBody.merged, JSON.stringify(writtenBody)).toBe(1);
     expect(writtenBody.syncLogWritten, JSON.stringify(writtenBody)).toBe(true);
   }, 120_000);
+
+  it("re-offers a projected row: the signed batch carries only declared fields", async () => {
+    await clearRetries();
+    await setCursorNow();
+    const id = "memory-projected-a";
+    const at = new Date(Date.now() - 600_000).toISOString();
+    await insertRow(sender, "Memory", { ...memoryRow(id, "projected", at), undeclaredProbe: "SENTINEL" });
+    await insertRow(sender, "FederationRetry", retryRow(id, "merge_target_busy"));
+
+    capturedSyncBodies = [];
+    proxy = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname !== "/FederationSync" || req.method !== "POST") return new Response("not found", { status: 404 });
+        const text = await req.text();
+        const body = JSON.parse(text);
+        if (Array.isArray(body.records) && body.records.length > 0) capturedSyncBodies.push(body);
+        return fetch(`${receiver.httpURL}/FederationSync`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: text,
+        });
+      },
+    });
+    expect(proxy.port).not.toBe(9925);
+    expect(proxy.port).not.toBe(9926);
+    await ops(sender, { operation: "update", table: "Peer", records: [{ id: HUB_ID, endpoint: `http://127.0.0.1:${proxy.port}`, updatedAt: new Date().toISOString() }] });
+    try {
+      const result = await sync();
+      expect(result.error, String(result.error)).toBeUndefined();
+      expect(result.pushed, JSON.stringify(result)).toBe(1);
+      expect(capturedSyncBodies).toHaveLength(1);
+      const data = capturedSyncBodies[0].records[0].data;
+      expect(data.content).toBe("projected");
+      expect(Object.keys(data).every((key) => (FEDERATION_MEMORY_ATTRIBUTES as readonly string[]).includes(key))).toBe(true);
+      expect(data.undeclaredProbe).toBeUndefined();
+    } finally {
+      await ops(sender, { operation: "update", table: "Peer", records: [{ id: HUB_ID, endpoint: receiver.httpURL, updatedAt: new Date().toISOString() }] });
+      proxy.stop(true);
+      proxy = null;
+    }
+  }, 180_000);
+
+  it("a first indeterminate offer records a pending row before the cursor advances", async () => {
+    await clearRetries();
+    await setCursorNow();
+    const id = "memory-first-indeterminate";
+    const updatedAt = new Date().toISOString();
+    await insertRow(sender, "Memory", memoryRow(id, "first-indeterminate", updatedAt));
+
+    for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.federation-merge`), { force: true });
+    writeFileSync(join(pauseDir, "arm.federation-merge"), "");
+    const first = await sync();
+    expect(first.error, String(first.error)).toBeUndefined();
+    expect(first.pushed, JSON.stringify(first)).toBe(0);
+
+    const pending = await readRow(sender, "FederationRetry", retryKey(id));
+    expect(pending, "a first indeterminate outcome recorded no obligation").not.toBeNull();
+    expect(pending.state).toBe("pending");
+    expect(pending.lastReason).toBe("retry_unknown");
+    expect(pending.attempts).toBe(1);
+
+    const hubPeer = await readRow(sender, "Peer", HUB_ID);
+    expect(Date.parse(hubPeer.lastSyncAt), "the cursor did not advance").toBeGreaterThan(Date.parse(updatedAt));
+
+    writeFileSync(join(pauseDir, "go.federation-merge"), "");
+    expect(await waitFor(join(pauseDir, "released.federation-merge"), 30_000), "the merge never released").toBe(true);
+    await waitForMergeLock(id);
+
+    const second = await sync();
+    expect(second.error, String(second.error)).toBeUndefined();
+    expect(second.pushed, `the first indeterminate row was not re-offered: ${JSON.stringify(second)}`).toBe(1);
+    const done = await readRow(sender, "FederationRetry", retryKey(id));
+    expect(done.state).toBe("terminal");
+    expect(done.resolution).toBe("merged");
+  }, 420_000);
+
+  it("a failed re-offer keeps the reserved attempt, so the next cycle waits its backoff", async () => {
+    await clearRetries();
+    await setCursorNow();
+    const id = "memory-failed-reoffer";
+    const at = new Date(Date.now() - 600_000).toISOString();
+    await insertRow(sender, "Memory", memoryRow(id, "failed-reoffer", at));
+    await insertRow(sender, "FederationRetry", retryRow(id, "merge_target_busy", { attempts: 1 }));
+    const before = await readRow(sender, "FederationRetry", retryKey(id));
+
+    await ops(sender, { operation: "update", table: "Peer", records: [{ id: HUB_ID, endpoint: `${receiver.httpURL}/bad`, updatedAt: new Date().toISOString() }] });
+    try {
+      const failed = await sync();
+      expect(failed.error, "the send to a 404 endpoint did not fail").toBeDefined();
+    } finally {
+      await ops(sender, { operation: "update", table: "Peer", records: [{ id: HUB_ID, endpoint: receiver.httpURL, updatedAt: new Date().toISOString() }] });
+    }
+
+    const reserved = await readRow(sender, "FederationRetry", retryKey(id));
+    expect(reserved.attempts, "the failed offer did not reserve an attempt").toBe(2);
+    expect(Date.parse(reserved.lastAttemptAt)).toBeGreaterThan(Date.parse(before.lastAttemptAt));
+
+    // attempts=2 backs off 30s; the immediate next cycle must not offer it.
+    const nextCycle = await sync();
+    expect(nextCycle.error, String(nextCycle.error)).toBeUndefined();
+    expect(nextCycle.pushed, `the row was offered before its backoff: ${JSON.stringify(nextCycle)}`).toBe(0);
+    expect(await readRow(receiver, "Memory", id)).toBeNull();
+
+    // Age the reservation past the backoff: the same row is then offered.
+    const aged = { ...reserved, lastAttemptAt: new Date(Date.now() - 31_000).toISOString() };
+    await ops(sender, { operation: "upsert", table: "FederationRetry", records: [aged] });
+    const after = await sync();
+    expect(after.error, String(after.error)).toBeUndefined();
+    expect(after.pushed, `the row was not offered after its backoff: ${JSON.stringify(after)}`).toBe(1);
+    expect((await readRow(receiver, "Memory", id)).content).toBe("failed-reoffer");
+  }, 240_000);
+
+  it("a pending row with an unknown lastReason is not offered and is reported", async () => {
+    await clearRetries();
+    await setCursorNow();
+    const id = "memory-bad-reason";
+    const at = new Date(Date.now() - 600_000).toISOString();
+    await insertRow(sender, "Memory", memoryRow(id, "bad-reason", at));
+    await insertRow(sender, "FederationRetry", retryRow(id, "not_a_reason"));
+
+    const warn = mock((...args: any[]) => {
+      void args;
+    });
+    const original = console.warn;
+    console.warn = warn as any;
+    try {
+      const result = await sync();
+      expect(result.error, String(result.error)).toBeUndefined();
+      expect(result.pushed, JSON.stringify(result)).toBe(0);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes(retryKey(id)) && String(call[0]).includes("unknown_reason"))).toBe(true);
+    } finally {
+      console.warn = original;
+    }
+    expect(await readRow(receiver, "Memory", id)).toBeNull();
+    const stored = await readRow(sender, "FederationRetry", retryKey(id));
+    expect(stored.state).toBe("pending");
+    expect(stored.attempts).toBe(1);
+  }, 180_000);
 });
