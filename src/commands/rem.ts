@@ -64,6 +64,21 @@ export type RemCli = {
 
 let cli: RemCli;
 
+/**
+ * The whole-request deadline for the two REM routes that can legitimately run
+ * longer: POST /MemoryMaintenance and POST /ReflectMemories. Every mode that
+ * calls them passes it from here — light and nightly call maintenance; rapid
+ * and nightly call reflection; restorative and nightly call both.
+ */
+export const LONG_REM_REQUEST_DEADLINE_MS = 900_000;
+
+/** `{ deadlineMs }` for those two routes, `{}` for every other request. */
+export function longRemRequestDeadline(method: string, path: string): { deadlineMs?: number } {
+  return method === "POST" && (path === "/MemoryMaintenance" || path === "/ReflectMemories")
+    ? { deadlineMs: LONG_REM_REQUEST_DEADLINE_MS }
+    : {};
+}
+
 /** Bind shared CLI helpers. cli.ts calls this immediately before register(program). */
 export function bindCli(fns: RemCli): void {
   cli = fns;
@@ -488,10 +503,10 @@ export function describeReflectError(err: unknown): { kind: "no-backend" | "dist
   return { kind: "other", text: message };
 }
 
-/** Print skips and errors; errors alone set exit 1. */
-export function summarizeNightlyOutcome(row: { errors: string[]; skips: string[] }): {
+/** Print skips, unknown outcomes and errors; errors alone set exit 1, an unknown outcome exit 3. */
+export function summarizeNightlyOutcome(row: { errors: string[]; skips: string[]; outcomeUnknown?: string[] }): {
   lines: string[];
-  exitCode: 0 | 1;
+  exitCode: 0 | 1 | 3;
 } {
   const lines: string[] = [];
   if (row.errors.length > 0) {
@@ -502,7 +517,16 @@ export function summarizeNightlyOutcome(row: { errors: string[]; skips: string[]
     lines.push("Skips:");
     for (const s of row.skips) lines.push(`  - ${s}`);
   }
-  return { lines, exitCode: row.errors.length > 0 ? 1 : 0 };
+  if (row.outcomeUnknown && row.outcomeUnknown.length > 0) {
+    lines.push("Unknown outcome:");
+    for (const u of row.outcomeUnknown) lines.push(`  - ${u}`);
+    lines.push("  These writes may or may not have taken effect. Re-run this cycle once the server has settled.");
+  }
+  // Exit 3 for an unknown write outcome, as `flair memory verify` and
+  // `memory compare-nodes` use 3 for "unknown": distinct from the 1 an
+  // ordinary failure exits with.
+  const exitCode = (row.outcomeUnknown?.length ?? 0) > 0 ? 3 : row.errors.length > 0 ? 1 : 0;
+  return { lines, exitCode };
 }
 
 const REM_PAUSE_FLAG = resolve(resolveHome(), ".flair", "rem.paused");
@@ -539,7 +563,7 @@ export function register(program: Command): void {
         const maint = await api("POST", "/MemoryMaintenance", {
           ...(agentId ? { agentId } : {}),
           dryRun,
-        });
+        }, longRemRequestDeadline("POST", "/MemoryMaintenance"));
 
         if (maint.error) {
           console.error(`Maintenance error: ${maint.error}`);
@@ -629,7 +653,7 @@ export function register(program: Command): void {
       if (opts.promptOnly) {
         // --prompt-only: EXACT pre-#710 behavior — prompt-return mode, unchanged.
         try {
-          const result = await api("POST", "/ReflectMemories", body);
+          const result = await api("POST", "/ReflectMemories", body, longRemRequestDeadline("POST", "/ReflectMemories"));
 
           if (result.error) {
             console.error(`Reflection error: ${result.error}`);
@@ -655,7 +679,7 @@ export function register(program: Command): void {
 
       // Default: execute mode — distill server-side, stage candidates.
       try {
-        const result = await api("POST", "/ReflectMemories", { ...body, execute: true });
+        const result = await api("POST", "/ReflectMemories", { ...body, execute: true }, longRemRequestDeadline("POST", "/ReflectMemories"));
         const candidates: any[] = Array.isArray(result.candidates) ? result.candidates : [];
 
         console.log(`\nModel:      ${result.model ?? "?"}`);
@@ -699,7 +723,7 @@ export function register(program: Command): void {
         const maint = await api("POST", "/MemoryMaintenance", {
           ...(agentId ? { agentId } : {}),
           dryRun,
-        });
+        }, longRemRequestDeadline("POST", "/MemoryMaintenance"));
 
         if (maint.error) {
           console.error(`Maintenance error: ${maint.error}`);
@@ -744,7 +768,7 @@ export function register(program: Command): void {
           const reflect = await api("POST", "/ReflectMemories", {
             agentId,
             scope: "all",
-          });
+          }, longRemRequestDeadline("POST", "/ReflectMemories"));
 
           if (reflect.error) {
             console.error(`Reflection error: ${reflect.error}`);
@@ -1241,13 +1265,10 @@ export function register(program: Command): void {
       // maintenance scans up to the run's row cap (measured 23.07 s over 403
       // live vectors, and a 3,065-row repro exceeded a 60 s client deadline —
       // test/bench/rem-responsiveness.md), and reflection waits on a generative
-      // backend. They get a longer deadline explicitly; every other call keeps
-      // the default.
-      const LONG_REM_REQUEST_DEADLINE_MS = 900_000;
-      const remDeadline = (method: string, path: string) =>
-        method === "POST" && (path === "/MemoryMaintenance" || path === "/ReflectMemories")
-          ? { deadlineMs: LONG_REM_REQUEST_DEADLINE_MS }
-          : {};
+      // backend. They get the shared 900 s deadline from
+      // longRemRequestDeadline; every other call resolves
+      // FLAIR_REQUEST_TIMEOUT_MS when it is set, else the default.
+      const remDeadline = longRemRequestDeadline;
       const agentApiCall = (method: string, path: string, body?: unknown) =>
         api(method, path, body, { agentId, agentIdSource: "flag", signedOnly: true, ...remDeadline(method, path) });
       const adminApiCall = adminPass
@@ -1331,7 +1352,7 @@ export function register(program: Command): void {
           console.log(`\nNote: REM refused to start because /Health could not be served.`);
           console.log(`Restore /Health before retrying, or \`flair rem pause\` to stop the scheduler.`);
         }
-        if (row.errors.length > 0 || row.skips.length > 0) {
+        if (row.errors.length > 0 || row.skips.length > 0 || (row.outcomeUnknown?.length ?? 0) > 0) {
           const outcome = summarizeNightlyOutcome(row);
           for (const line of outcome.lines) console.log(line);
           if (outcome.exitCode !== 0) process.exit(outcome.exitCode);
@@ -1516,22 +1537,31 @@ export function register(program: Command): void {
           const unknownCount =
             result.unknown.memories.length + result.unknown.souls.length + result.unknown.candidates.length;
           if (unknownCount > 0) {
-            console.log(`  Unknown:      ${unknownCount} writes ended at the request deadline; their outcome is unknown and they were not retried`);
+            console.log(`  Unknown:      ${unknownCount} ids ended at the request deadline; their write may or may not have taken effect and was not retried`);
             for (const state of result.verified?.unknownStates ?? []) {
               console.log(`    - ${formatUnknownState(state)}`);
             }
             for (const id of result.unknown.candidates) {
               console.log(`    - MemoryCandidate ${id}: verification does not read candidates back; its state is unverified`);
             }
+            if (result.skippedAfterUnknownDelete.memories.length + result.skippedAfterUnknownDelete.souls.length > 0) {
+              const ids = [...result.skippedAfterUnknownDelete.memories, ...result.skippedAfterUnknownDelete.souls];
+              console.log(`    - not written again after an unknown DELETE: ${ids.join(", ")} (a late DELETE could remove a restored row)`);
+            }
             if (!result.verified) {
               console.log(`    - memory and soul state not checked: post-restore verification did not run`);
             }
+            console.log(`  Re-run once the server has settled: \`flair rem restore ${date} --agent ${agentId} --apply\` (restore is re-runnable).`);
           }
           if (result.errors.length > 0) {
             console.log(`  Errors:`);
             for (const e of result.errors) console.log(`    - ${e}`);
           }
           if (result.status === "failed") process.exit(1);
+          // Exit 3 for an unknown write outcome, as `flair memory verify` and
+          // `memory compare-nodes` use 3 for "unknown": distinct from the 1 an
+          // ordinary restore failure exits with.
+          if (result.status === "unresolved") process.exit(3);
         } catch (err: any) {
           console.error(`Error: ${err.message}`);
           process.exit(1);

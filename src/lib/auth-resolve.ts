@@ -152,12 +152,12 @@ export class ApiHttpError extends Error {
 
 /**
  * The whole-request deadline `sendJsonRequest` enforces when
- * `FLAIR_REQUEST_TIMEOUT_MS` is unset. Five minutes is well above the longest
- * legitimate request measured for the CLI: the repo's responsiveness fixture
- * measured a maintenance/dedup pass at 23.07 s over 403 live vectors, and a
- * 3,065-row repro exceeded a 60 s client deadline (test/bench/rem-responsiveness.md).
- * A single memory write's server-side embedding provider bound is 20 s
- * (resources/memory-write-lock.ts).
+ * `FLAIR_REQUEST_TIMEOUT_MS` is unset. Five minutes is above every figure the
+ * repo's responsiveness fixture measured: a maintenance/dedup pass took 23.07 s
+ * over 403 live vectors, and a 3,065-row repro exceeded a 60 s client deadline
+ * (test/bench/rem-responsiveness.md); the repro's own duration was not
+ * measured. A single memory write's server-side embedding provider bound is
+ * 20 s (resources/memory-write-lock.ts).
  */
 export const DEFAULT_REQUEST_DEADLINE_MS = 300_000;
 
@@ -232,8 +232,9 @@ export class ApiRequestTimeout extends Error {
 
 /**
  * Thrown when a request on any other method crosses the whole-request deadline.
- * The request was sent, so the server may still apply it: the message says the
- * outcome is unknown, and no caller may retry the write blindly.
+ * Expiry cannot establish delivery: the request may not have reached the server,
+ * or it may have taken effect. The message says the outcome is unknown, and no
+ * caller may retry the write blindly.
  */
 export class ApiRequestOutcomeUnknown extends Error {
   readonly method: string;
@@ -248,7 +249,7 @@ export class ApiRequestOutcomeUnknown extends Error {
     super(
       `${method} ${path} may or may not have taken effect: no complete response within ${deadlineMs} ms` +
         (source === "env" ? ` (${REQUEST_DEADLINE_ENV})` : "") +
-        `${deadlineStatusClause(status)}. The request was sent, so the server may still apply it; do not retry it blindly. ${raise}`,
+        `${deadlineStatusClause(status)}. Expiry does not show whether the request was delivered or took effect; do not retry it blindly. ${raise}`,
     );
     this.name = "ApiRequestOutcomeUnknown";
     this.method = method;
