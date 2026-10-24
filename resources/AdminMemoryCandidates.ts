@@ -12,7 +12,10 @@
  * last one it carries, which the next page reads with `after` set to that id.
  * An empty or repeated `after` is refused (400, `invalid_after`). A row it
  * reads whose id is not a non-empty string fails the request (500,
- * `candidate_id_unusable`) instead of being left out.
+ * `candidate_id_unusable`) instead of being left out. A path agent id that
+ * Harper's path parsing changed before this route received it (`agent.json`
+ * reaches it as `agent`) is refused (400, `agent_id_rewritten`, naming both
+ * ids) instead of answered for the changed id (flair#2845).
  *
  * Admin-only: allowRead() is allowAdmin(), so a request with no Authorization
  * header is refused by the `/Admin*` path gate (401) and a verified non-admin
@@ -20,6 +23,7 @@
  */
 import { Resource, databases } from "harper";
 import { allowAdmin } from "./agent-auth.js";
+import { refuseRewrittenAgentId } from "./path-id-rewrite.js";
 
 export const ADMIN_MEMORY_CANDIDATES_DEFAULT_LIMIT = 200;
 export const ADMIN_MEMORY_CANDIDATES_MAX_LIMIT = 500;
@@ -77,6 +81,8 @@ export class AdminMemoryCandidates extends Resource {
     if (!agentId) {
       return badRequest("agentId required in path: GET /AdminMemoryCandidates/{agentId}");
     }
+    const rewritten = refuseRewrittenAgentId((this as any).getContext?.(), agentId);
+    if (rewritten) return rewritten;
 
     const params = requestUrl(this)?.searchParams;
     const rawLimit = params?.get("limit") ?? null;
