@@ -190,10 +190,10 @@ export function adminContext(agentId: string): CallContext {
  *
  * This exists for work that is genuinely infrastructure rather than an agent's:
  * provisioning a principal, a migration, a maintenance sweep. It is the same
- * verdict a context-less call outside a request scope falls into by accident.
- * Calling it names the intent: it sets the marker the admin-only gate admits
- * and an omission lacks, and `git grep internalContext` lists the callers of
- * this helper.
+ * verdict a context-less call with no ambient Harper context falls into by
+ * accident. Calling it names the intent: it sets the marker the admin-only
+ * gate admits and an omission lacks, and `git grep internalContext` lists the
+ * callers of this helper.
  *
  * There is no id to validate: the verdict comes precisely from the ABSENCE of
  * an identity annotation, so the returned object carries none. The admin-only
