@@ -60,15 +60,14 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Ops-API `search_by_conditions` helper (admin-authed). Harper's REST layer
- * maps `POST /<table>` to `resource.post()` and has no URL-suffix routing, so
- * candidate rows must be listed through the ops port with an
- * `{operation:"search_by_conditions"}` body. The CLI injects this when admin
- * credentials are available; when absent, candidate listing is best-effort
- * empty (mirrors runner.ts).
- */
-export type OpsSearch = (table: string, conditions: any[], getAttributes: string[]) => Promise<any[]>;
+/** The server release that first serves `GET /AdminMemoryCandidates/{agentId}`. */
+export const CANDIDATE_LIST_MIN_SERVER_VERSION = "0.63.0";
+
+/** The page size restore asks the admin-only candidate route for. */
+export const CANDIDATE_LIST_LIMIT = 500;
+
+/** The most candidate-listing pages one restore requests before it refuses. */
+export const CANDIDATE_LIST_MAX_PAGES = 2_000;
 
 export interface RestoreOpts {
   agentId: string;
@@ -76,11 +75,12 @@ export interface RestoreOpts {
   flairVersion: string;
   apiCall: ApiCall;
   /**
-   * Ops-API `search_by_conditions` helper (admin-authed). Injected by the CLI;
-   * candidates live on the ops port, which the agent-signed `apiCall` cannot
-   * reach. When absent, `listAgentCandidates` returns no rows.
+   * When false, the dry run does not list leftover candidates. The CLI sets
+   * this only for a dry run without a resolved admin password. A live restore
+   * always lists (the CLI requires the admin password); one given `false` is
+   * refused before any request.
    */
-  opsSearch?: OpsSearch;
+  listCandidates?: boolean;
   /**
    * Operator/internal caller for Soul DELETE/PUT. Required in production:
    * `apiCall` extracts `agentId` from snapshot rows and signs as that agent.
@@ -160,11 +160,97 @@ function soulWrite(opts: RestoreOpts): ApiCall {
   return opts.soulApiCall ?? opts.apiCall;
 }
 
-async function listAgentCandidates(opsSearch: OpsSearch | undefined, agentId: string): Promise<any[]> {
-  if (!opsSearch) return [];
-  return asArray(await opsSearch("MemoryCandidate", [
-    { search_attribute: "agentId", search_type: "equals", search_value: agentId },
-  ], ["id", "claim"]));
+function isCandidateRoute404(err: unknown): boolean {
+  return err instanceof ApiHttpError && err.status === 404;
+}
+
+/** The refusal for a candidate listing restore could not read completely. */
+function incompleteListing(agentId: string, state: string, remedy = ""): Error {
+  return new Error(
+    `the target's MemoryCandidate listing for agent ${agentId} could not be read completely: ${state}. `
+      + `No target rows were deleted or written.${remedy ? ` ${remedy}` : ""}`,
+  );
+}
+
+/**
+ * One agent's leftover candidates, read through the `apiCall` restore uses
+ * for its Memory reads, deletes and writes, its Soul reads and its
+ * MemoryCandidate deletes. Soul deletes and writes use `soulApiCall` when one
+ * is given; the CLI binds both calls to the same target. Each candidate object
+ * carries only an id; each reply also carries `hasMore`.
+ *
+ * Pages through the route with `after` set to the last id of the page before,
+ * until a page answers `hasMore: false`, and returns only that complete
+ * listing. A `hasMore: true` page with no candidates (the cursor cannot move),
+ * an id listed twice, or more than {@link CANDIDATE_LIST_MAX_PAGES} pages is
+ * refused.
+ */
+async function listAgentCandidates(apiCall: ApiCall, agentId: string): Promise<Array<{ id: string }>> {
+  const listed: Array<{ id: string }> = [];
+  const seen = new Set<string>();
+  let after: string | undefined;
+  for (let page = 1; page <= CANDIDATE_LIST_MAX_PAGES; page++) {
+    const query = `?limit=${CANDIDATE_LIST_LIMIT}${after === undefined ? "" : `&after=${encodeURIComponent(after)}`}`;
+    let body: any;
+    try {
+      body = await apiCall("GET", `/AdminMemoryCandidates/${encodeURIComponent(agentId)}${query}`);
+    } catch (err) {
+      // Only this GET's 404 gets the candidate-route 404 guidance.
+      if (isCandidateRoute404(err)) throw new Error(candidateRoute404Guidance(err as ApiHttpError));
+      if (err instanceof ApiHttpError && apiErrorCode(err) === "candidate_id_unusable") {
+        throw incompleteListing(
+          agentId,
+          "GET /AdminMemoryCandidates answered candidate_id_unusable (a row has no usable id)",
+          "Remove or repair that agent's MemoryCandidate row without a usable id on the target, then retry.",
+        );
+      }
+      throw incompleteListing(agentId, `GET /AdminMemoryCandidates failed: ${(err as any)?.message ?? String(err)}`);
+    }
+    const defect = candidateListDefect(body);
+    if (defect) {
+      throw incompleteListing(agentId, `GET /AdminMemoryCandidates returned an unexpected response shape: ${defect}`);
+    }
+    for (const entry of body.candidates as Array<{ id: string }>) {
+      if (seen.has(entry.id)) {
+        throw incompleteListing(agentId, `GET /AdminMemoryCandidates listed candidate id ${entry.id} twice (candidate_id_repeated)`);
+      }
+      seen.add(entry.id);
+      listed.push({ id: entry.id });
+    }
+    if (body.hasMore === false) return listed;
+    // A page that repeats the cursor's own id is refused above as a repeated id.
+    const last: string | undefined = body.candidates.at(-1)?.id;
+    if (last === undefined) {
+      throw incompleteListing(
+        agentId,
+        `page ${page} of GET /AdminMemoryCandidates answered hasMore: true with no candidates, so the cursor cannot move past ${after === undefined ? "the start" : after} (candidate_cursor_not_advancing)`,
+      );
+    }
+    after = last;
+  }
+  throw incompleteListing(
+    agentId,
+    `GET /AdminMemoryCandidates still answered hasMore: true after ${CANDIDATE_LIST_MAX_PAGES} pages of ${CANDIDATE_LIST_LIMIT}, the most restore requests (candidate_listing_page_limit)`,
+  );
+}
+
+/** The first required field a candidate-route body lacks or mistypes, or null when `candidates` and `hasMore` check out. */
+function candidateListDefect(body: any): string | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return "the body is not an object";
+  if (!Array.isArray(body.candidates)) return "candidates is not an array";
+  for (const [i, entry] of body.candidates.entries()) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return `candidates[${i}] is not an object`;
+    if (typeof entry.id !== "string" || entry.id.length === 0) return `candidates[${i}].id is not a non-empty string`;
+  }
+  if (typeof body.hasMore !== "boolean") return "hasMore is missing or not a boolean";
+  return null;
+}
+
+/** The candidate-route 404 guidance: the operator message when GET /AdminMemoryCandidates answers 404. */
+function candidateRoute404Guidance(err: ApiHttpError): string {
+  return `restore lists leftover MemoryCandidate rows through GET /AdminMemoryCandidates on the restore target, and the target answered HTTP ${err.status}. `
+    + `That route is part of Flair server ${CANDIDATE_LIST_MIN_SERVER_VERSION}; if the target runs an older server, upgrade it to ${CANDIDATE_LIST_MIN_SERVER_VERSION} or newer, then retry. `
+    + "No target rows were deleted or written.";
 }
 
 function parseJsonlSafe(text: string): any[] {
@@ -202,6 +288,15 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     retried: { memories: [] },
     errors,
   };
+
+  if (!opts.dryRun && opts.listCandidates === false) {
+    errors.push(
+      "listCandidates: false is accepted only with dryRun: a live restore lists leftover MemoryCandidate rows before any delete. "
+        + "No request was sent to the target.",
+    );
+    result.status = "failed";
+    return result;
+  }
 
   if (!existsSync(opts.snapshotPath)) {
     errors.push(`snapshot does not exist: ${opts.snapshotPath}`);
@@ -268,7 +363,9 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     try {
       const currentMem = asArray(await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`));
       const currentSouls = asArray(await opts.apiCall("GET", `/Soul?agentId=${encodeURIComponent(opts.agentId)}`));
-      const currentCandidates = await listAgentCandidates(opts.opsSearch, opts.agentId);
+      const currentCandidates = opts.listCandidates === false
+        ? []
+        : await listAgentCandidates(opts.apiCall, opts.agentId);
       result.deleted.memories = currentMem.length;
       result.deleted.souls = currentSouls.length;
       result.deleted.candidates = currentCandidates.length;
@@ -312,9 +409,9 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   // are not in the snapshot, but refuseLearnedSoulWrite matches claim text,
   // so a leftover row 403s Soul PUT after operator auth succeeds. A failed
   // candidate listing stops the restore before any delete.
-  let currentCandidates: any[] = [];
+  let currentCandidates: Array<{ id: string }>;
   try {
-    currentCandidates = await listAgentCandidates(opts.opsSearch, opts.agentId);
+    currentCandidates = await listAgentCandidates(opts.apiCall, opts.agentId);
   } catch (err: any) {
     errors.push(`fetch-candidates: ${err?.message ?? String(err)}`);
     result.status = "failed";
