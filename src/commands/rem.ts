@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 
 import { dirname, resolve } from "node:path";
 import * as render from "../render.js";
-import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, resolveAdminPassFromSources, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP, ADMIN_PASS_FLAG, ADMIN_PASS_HELP, apiErrorRawBody, boundErrorText } from "../lib/auth-resolve.js";
+import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, resolveAdminPassFromSources, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP, ADMIN_PASS_FLAG, ADMIN_PASS_HELP, ApiRequestOutcomeUnknown, apiErrorRawBody, boundErrorText } from "../lib/auth-resolve.js";
 import type { OpsSearch } from "../rem/runner.js";
 import {
   validatePromoteOpts,
@@ -520,7 +520,7 @@ export function summarizeNightlyOutcome(row: { errors: string[]; skips: string[]
   if (row.outcomeUnknown && row.outcomeUnknown.length > 0) {
     lines.push("Unknown outcome:");
     for (const u of row.outcomeUnknown) lines.push(`  - ${u}`);
-    lines.push("  These writes may or may not have taken effect. Re-run this cycle once the server has settled.");
+    lines.push("  These writes may or may not have taken effect. Inspect what was staged before re-running this cycle, once the server has settled.");
   }
   // Exit 3 for an unknown write outcome, as `flair memory verify` and
   // `memory compare-nodes` use 3 for "unknown": distinct from the 1 an
@@ -530,6 +530,17 @@ export function summarizeNightlyOutcome(row: { errors: string[]; skips: string[]
 }
 
 const REM_PAUSE_FLAG = resolve(resolveHome(), ".flair", "rem.paused");
+
+/**
+ * Print a write's unknown outcome and exit 3, the CLI's "unknown" code (as
+ * `flair memory verify` uses it), distinct from the 1 an ordinary failure
+ * exits with.
+ */
+function exitUnknownOutcome(err: ApiRequestOutcomeUnknown): never {
+  console.error(`Unknown outcome: ${err.message}`);
+  console.error(`The request may or may not have taken effect; inspect the target before re-running.`);
+  process.exit(3);
+}
 
 function writeRemPauseSentinel(): void {
   const dir = dirname(REM_PAUSE_FLAG);
@@ -616,6 +627,7 @@ export function register(program: Command): void {
 
         console.log(`\nDone.${dryRun ? " No changes applied (dry run)." : ""}`);
       } catch (err: any) {
+        if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
         console.error(`Error: ${err.message}`);
         process.exit(1);
       }
@@ -671,6 +683,7 @@ export function register(program: Command): void {
           console.log("Feed the prompt above to your LLM, then write insights back with:");
           console.log("  flair memory add --agent <id> --content <insight> --durability persistent --derived-from <source-ids>");
         } catch (err: any) {
+          if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
           console.error(`Error: ${err.message}`);
           process.exit(1);
         }
@@ -690,6 +703,7 @@ export function register(program: Command): void {
         }
         console.log(`\nreview: flair rem candidates / flair rem promote <id>`);
       } catch (err: any) {
+        if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
         const desc = describeReflectError(err);
         if (desc.kind === "no-backend") {
           console.error(`Reflection error: ${desc.text}`);
@@ -789,6 +803,7 @@ export function register(program: Command): void {
 
         console.log(`\nRestorative cycle complete.${dryRun ? " No changes applied (dry run)." : ""}`);
       } catch (err: any) {
+        if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
         console.error(`Error: ${err.message}`);
         process.exit(1);
       }
@@ -1230,7 +1245,7 @@ export function register(program: Command): void {
         console.error("Error: --agent or FLAIR_AGENT_ID env required");
         process.exit(1);
       }
-      const { runNightlyCycle, formatPendingCandidates, formatCount, formatAutoPromoted } = await import("../rem/runner.js");
+      const { runNightlyCycle, RunnerLogWriteError, formatPendingCandidates, formatCount, formatAutoPromoted } = await import("../rem/runner.js");
       // The runner is agent-authed and cannot reach the ops port itself. When
       // admin credentials are available, inject ops-API and admin-authed REST
       // helpers so the pending-candidate count and the admin-gated dedup step
@@ -1362,6 +1377,13 @@ export function register(program: Command): void {
           console.log(`Resume with: flair rem resume`);
         }
       } catch (err: any) {
+        if (err instanceof RunnerLogWriteError && (err.row.outcomeUnknown?.length ?? 0) > 0) {
+          console.log(`Status:     ${err.row.status}`);
+          const outcome = summarizeNightlyOutcome(err.row);
+          for (const line of outcome.lines) console.log(line);
+          console.error(`Log write failed: ${err.message}`);
+          process.exit(3);
+        }
         console.error(`Error: ${err.message}`);
         process.exit(1);
       }

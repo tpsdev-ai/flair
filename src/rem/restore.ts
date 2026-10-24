@@ -145,11 +145,12 @@ export interface RestoreResult {
     memories: string[];
   };
   /**
-   * Ids whose PUT or DELETE ended at the whole-request deadline without an
-   * answer, so whether it took effect is unknown. They are not in `errors` and
-   * are not counted restored or deleted; none is retried. An id whose DELETE
-   * outcome is unknown is not written again in this run — a late DELETE could
-   * land after the PUT and remove the restored row — and is listed in
+   * Ids whose PUT or DELETE ended at the whole-request deadline without a
+   * complete response, so whether it took effect is unknown. They are not in
+   * `errors` and are not counted restored or deleted; none is retried. Once
+   * any write to a table and record id has an unknown outcome, no later write
+   * to that same table and record id in this run is sent — a late write could
+   * change or remove the row — and the skipped snapshot id is listed in
    * `skippedAfterUnknownDelete`. Any entry here makes `status` `unresolved`.
    * Verification reports what an id-only read can tell about each memory and
    * soul id here.
@@ -160,8 +161,10 @@ export interface RestoreResult {
     candidates: string[];
   };
   /**
-   * Snapshot ids not written because their DELETE outcome is unknown (they are
-   * also in `unknown`). Listed only when the run reached their write.
+   * Snapshot ids not written because an earlier write (DELETE or PUT) to the
+   * same table and record id had an unknown outcome (they are also in
+   * `unknown`). Listed only when the run reached their write. The field name
+   * predates the rule covering PUTs as well as DELETEs.
    */
   skippedAfterUnknownDelete: {
     memories: string[];
@@ -471,21 +474,23 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     rmSync(tmp, { recursive: true, force: true });
     return result;
   }
-  // Ids whose DELETE outcome is unknown. A late DELETE could land after the
-  // PUT and remove the restored row, so no later write in this run touches
-  // them.
-  const unknownDeletedMemories = new Set<string>();
-  const unknownDeletedSouls = new Set<string>();
+  // Ids whose write outcome is unknown, per table. Once a table and record id
+  // appears here, no later write to that same table and record id in this run
+  // is sent: a late write could land after the restored row.
+  const unknownMemoryWrites = new Set<string>();
+  const unknownSoulWrites = new Set<string>();
+  const unknownCandidateWrites = new Set<string>();
   for (const m of currentMem) {
     if (!m?.id) continue;
     const id = String(m.id);
+    if (unknownMemoryWrites.has(id)) continue;
     try {
       await opts.apiCall("DELETE", `/Memory/${encodeRecordId(id)}`);
       result.deleted.memories++;
     } catch (err: any) {
       if (err instanceof ApiRequestOutcomeUnknown) {
         result.unknown.memories.push(id);
-        unknownDeletedMemories.add(id);
+        unknownMemoryWrites.add(id);
         continue;
       }
       errors.push(`delete-memory ${m.id}: ${err?.message ?? String(err)}`);
@@ -494,13 +499,14 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   for (const s of currentSouls) {
     if (!s?.id) continue;
     const id = String(s.id);
+    if (unknownSoulWrites.has(id)) continue;
     try {
       await soulWrite(opts)("DELETE", `/Soul/${encodeRecordId(id)}`);
       result.deleted.souls++;
     } catch (err: any) {
       if (err instanceof ApiRequestOutcomeUnknown) {
         result.unknown.souls.push(id);
-        unknownDeletedSouls.add(id);
+        unknownSoulWrites.add(id);
         continue;
       }
       errors.push(`delete-soul ${s.id}: ${err?.message ?? String(err)}`);
@@ -508,12 +514,15 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   }
   for (const c of currentCandidates) {
     if (!c?.id) continue;
+    const id = String(c.id);
+    if (unknownCandidateWrites.has(id)) continue;
     try {
-      await opts.apiCall("DELETE", `/MemoryCandidate/${encodeRecordId(String(c.id))}`);
+      await opts.apiCall("DELETE", `/MemoryCandidate/${encodeRecordId(id)}`);
       result.deleted.candidates++;
     } catch (err: any) {
       if (err instanceof ApiRequestOutcomeUnknown) {
-        result.unknown.candidates.push(String(c.id));
+        result.unknown.candidates.push(id);
+        unknownCandidateWrites.add(id);
         continue;
       }
       errors.push(`delete-candidate ${c.id}: ${err?.message ?? String(err)}`);
@@ -526,7 +535,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   for (const s of souls) {
     if (!s?.id) continue;
     const id = String(s.id);
-    if (unknownDeletedSouls.has(id)) {
+    if (unknownSoulWrites.has(id)) {
       result.skippedAfterUnknownDelete.souls.push(id);
       continue;
     }
@@ -536,6 +545,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     } catch (err: any) {
       if (err instanceof ApiRequestOutcomeUnknown) {
         result.unknown.souls.push(id);
+        unknownSoulWrites.add(id);
         continue;
       }
       errors.push(`put-soul ${s.id}: ${err?.message ?? String(err)}`);
@@ -544,7 +554,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   for (const m of memories) {
     if (!m?.id) continue;
     const id = String(m.id);
-    if (unknownDeletedMemories.has(id)) {
+    if (unknownMemoryWrites.has(id)) {
       result.skippedAfterUnknownDelete.memories.push(id);
       continue;
     }
@@ -570,6 +580,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     } catch (err: any) {
       if (err instanceof ApiRequestOutcomeUnknown) {
         result.unknown.memories.push(id);
+        unknownMemoryWrites.add(id);
         continue;
       }
       errors.push(`put-memory ${id}: ${err?.message ?? String(err)}`);

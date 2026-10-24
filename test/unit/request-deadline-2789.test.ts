@@ -212,6 +212,8 @@ describe("rem restore — an unknown write is recorded, never reported failed (f
   test("a write that commits only after the deadline is unknown, and the post-restore read runs before it", async () => {
     const rows = new Map<string, Record<string, unknown>>();
     let putReceived = 0;
+    let noteCommit: (() => void) | undefined;
+    const committed = new Promise<void>((resolve) => { noteCommit = resolve; });
     const server = await serve((req, res) => {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       if (req.method === "GET" && url.pathname === "/Memory") {
@@ -237,6 +239,7 @@ describe("rem restore — an unknown write is recorded, never reported failed (f
         // the row lands after the client gave up on the response.
         setTimeout(() => {
           rows.set(id, body);
+          noteCommit?.();
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify(body));
         }, 300);
@@ -284,6 +287,12 @@ describe("rem restore — an unknown write is recorded, never reported failed (f
       expect(line).toContain("absent from the target after restore");
       expect(line).toContain("unresolved and its state is unverified");
       expect(line).not.toContain("present on the target");
+
+      // The post-restore read ran first and saw no row. The write then
+      // commits, so the row IS present afterwards: the client's absence read
+      // is not evidence that the write did not land.
+      await committed;
+      expect(rows.has("m1"), "the delayed commit did not store the row").toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

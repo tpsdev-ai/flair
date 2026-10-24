@@ -371,7 +371,7 @@ export interface RunnerLogRow {
   errors: string[];
   /**
    * Stage calls (POST /MemoryMaintenance, POST /ReflectMemories) whose
-   * whole-request deadline expired without an answer: each may or may not have
+   * whole-request deadline expired without a complete response: each may or may not have
    * taken effect. They are not in `errors`. A non-empty list makes `status`
    * `unresolved`, never `failed` or `completed`.
    */
@@ -478,10 +478,28 @@ function readPauseSentinel(path: string): boolean {
   }
 }
 
+/**
+ * A failed append of the nightly audit row. The row is carried so the CLI can
+ * still report an unknown write outcome (exit 3) even though the log failed.
+ */
+export class RunnerLogWriteError extends Error {
+  readonly row: RunnerLogRow;
+
+  constructor(row: RunnerLogRow, cause: unknown) {
+    super(`could not append the nightly log row: ${(cause as { message?: unknown })?.message ?? String(cause)}`);
+    this.name = "RunnerLogWriteError";
+    this.row = row;
+  }
+}
+
 function appendLogRow(logPath: string, row: RunnerLogRow): void {
   const dir = dirname(logPath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  appendFileSync(logPath, JSON.stringify(row) + "\n", { mode: 0o600 });
+  try {
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    appendFileSync(logPath, JSON.stringify(row) + "\n", { mode: 0o600 });
+  } catch (err) {
+    throw new RunnerLogWriteError(row, err);
+  }
 }
 
 /**
@@ -1217,7 +1235,12 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           autoPromoted = { promoted: promotedCount, skipped: skippedCount, incomplete: incompleteCount, unconfirmed: unconfirmedCount };
         }
       } catch (err: any) {
-        errors.push(`auto-promote: ${describeApiError(err)}`);
+        if (err instanceof ApiRequestOutcomeUnknown) {
+          // The sweep may have promoted candidates; its outcome is unknown.
+          outcomeUnknown.push(`auto-promote: ${describeApiError(err)}`);
+        } else {
+          errors.push(`auto-promote: ${describeApiError(err)}`);
+        }
       }
     }
   }
@@ -1288,7 +1311,12 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         errors.push("dedup: unexpected /MemoryDedupStats response shape");
       }
     } catch (err: any) {
-      errors.push(`dedup: ${describeApiError(err)}`);
+      if (err instanceof ApiRequestOutcomeUnknown) {
+        // The stat write may have persisted; its outcome is unknown.
+        outcomeUnknown.push(`dedup: ${describeApiError(err)}`);
+      } else {
+        errors.push(`dedup: ${describeApiError(err)}`);
+      }
     }
   }
 
