@@ -267,9 +267,9 @@ test(
         npm_config_cache: join(scratch, "npm-cache-isolated"),
       };
       run("npm", ["init", "-y"], prefix, INIT_TIMEOUT_MS, env);
-      // An empty cache and the default registry: the install resolves every
-      // dependency over the network, so an inherited registry would show up as
-      // a connection failure to 127.0.0.1:1.
+      // A fresh cache and the default registry: the install resolves its
+      // registry dependencies over the network, so an inherited registry would
+      // show up as a connection failure to 127.0.0.1:1.
       run(
         "npm",
         [
