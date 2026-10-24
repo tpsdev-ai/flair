@@ -66,9 +66,8 @@ let cli: RemCli;
 
 /**
  * The whole-request deadline for the two REM routes that can legitimately run
- * longer: POST /MemoryMaintenance and POST /ReflectMemories. Every mode that
- * calls them passes it from here — light and nightly call maintenance; rapid
- * and nightly call reflection; restorative and nightly call both.
+ * longer: POST /MemoryMaintenance and POST /ReflectMemories. A REM command
+ * that calls either route passes it from here.
  */
 export const LONG_REM_REQUEST_DEADLINE_MS = 900_000;
 

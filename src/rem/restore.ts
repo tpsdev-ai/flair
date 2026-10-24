@@ -67,8 +67,8 @@ function delay(ms: number): Promise<void> {
  */
 export function formatUnknownState(state: { entity: "memory" | "soul"; id: string; present: boolean }): string {
   return state.present
-    ? `${state.entity} ${state.id}: present on the target after restore; an id-only check cannot tell whether this restore wrote the row or it was already present, so its state is unverified`
-    : `${state.entity} ${state.id}: absent from the target after restore; the deadline fired before a complete response, so whether the write landed is unresolved and its state is unverified`;
+    ? `${state.entity} ${state.id}: present in the verification read; an id-only check cannot tell whether this restore wrote the row or it was already present, so its state is unverified`
+    : `${state.entity} ${state.id}: absent from the verification read; the deadline fired before a complete response, so whether the write landed is unresolved and its state is unverified`;
 }
 
 /** The server release that first serves `GET /AdminMemoryCandidates/{agentId}`. */
@@ -104,9 +104,10 @@ export interface RestoreOpts {
   dryRun?: boolean;
   /**
    * After the PUT loop, GET back the agent's memories + souls and compare
-   * their ids with the snapshot's: snapshot ids that are missing and ids the
-   * snapshot does not hold are reported. It checks Memory and Soul ids, not
-   * candidates: candidate rows are not read back. Row content is not compared.
+   * their ids with the snapshot's: when both reads succeed, snapshot ids that
+   * are missing and ids the snapshot does not hold are reported. It checks
+   * Memory and Soul ids, not candidates: candidate rows are not read back. Row
+   * content is not compared.
    * Default true. Disable only for tests that intentionally simulate
    * inconsistent state.
    */
@@ -152,8 +153,8 @@ export interface RestoreResult {
    * to that same table and record id in this run is sent — a late write could
    * change or remove the row — and the skipped snapshot id is listed in
    * `skippedAfterUnknownDelete`. Any entry here makes `status` `unresolved`.
-   * Verification reports what an id-only read can tell about each memory and
-   * soul id here.
+   * When verification completes, `verified.unknownStates` reports what its
+   * id-only read shows for each memory and soul id here.
    */
   unknown: {
     memories: string[];
@@ -171,11 +172,13 @@ export interface RestoreResult {
     souls: string[];
   };
   /**
-   * Post-restore state verification. Populated when verifyPostRestore is on
-   * (default). It compares Memory and Soul ids only, not candidates: candidate
-   * rows are not read back. `missing*` IDs were in the snapshot but absent from Harper
-   * afterwards, excluding ids whose write outcome is unknown (those are
-   * reported in `unknownStates`). `extra*` IDs were present afterwards but not in the snapshot.
+   * Post-restore state verification. Set when verification runs
+   * (verifyPostRestore, default on) and its Memory and Soul reads both succeed.
+   * It compares Memory and Soul ids only, not candidates: candidate rows are
+   * not read back. `missing*` IDs were in the snapshot but absent from the
+   * verification read, excluding ids whose write outcome is unknown (those are
+   * reported in `unknownStates`). `extra*` IDs were present in the verification
+   * read but not in the snapshot.
    * Both fields being empty means every id whose write outcome is known matches
    * the snapshot's; ids with an unknown write outcome are reported in
    * `unknownStates` instead. Row content is not compared.
@@ -588,11 +591,11 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   }
 
   // 7. Verify post-restore state (default on; opt-out via verifyPostRestore=false).
-  //    Compares Memory and Soul ids only; candidates are not read back. It
-  //    reports snapshot ids missing from the agent's rows and ids present that
-  //    the snapshot does not hold; row content is not compared. Per-ID diff,
-  //    not just counts — count parity can hide simultaneous PUT+DELETE failures
-  //    that wash out numerically.
+  //    Compares Memory and Soul ids only; candidates are not read back. When
+  //    both reads succeed, it reports snapshot ids missing from the agent's rows
+  //    and ids present that the snapshot does not hold; row content is not
+  //    compared. Per-ID diff, not just counts — count parity can hide
+  //    simultaneous PUT+DELETE failures that wash out numerically.
   if (opts.verifyPostRestore !== false) {
     try {
       const verifyMem = asArray(await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`));

@@ -284,9 +284,9 @@ describe("rem restore — an unknown write is recorded, never reported failed (f
       const state = result.verified?.unknownStates.find((s) => s.id === "m1");
       expect(state).toEqual({ entity: "memory", id: "m1", present: false });
       const line = formatUnknownState(state!);
-      expect(line).toContain("absent from the target after restore");
+      expect(line).toContain("absent from the verification read");
       expect(line).toContain("unresolved and its state is unverified");
-      expect(line).not.toContain("present on the target");
+      expect(line).not.toContain("present in the verification read");
 
       // The post-restore read ran first and saw no row. The write then
       // commits, so the row IS present afterwards: the client's absence read

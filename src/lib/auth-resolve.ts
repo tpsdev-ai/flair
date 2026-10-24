@@ -152,12 +152,13 @@ export class ApiHttpError extends Error {
 
 /**
  * The whole-request deadline `sendJsonRequest` enforces when
- * `FLAIR_REQUEST_TIMEOUT_MS` is unset. Five minutes is above the figures the
- * repo's responsiveness fixture reports for the CLI: a maintenance/dedup pass
- * at 23.07 s over 403 live vectors, and a 3,065-row repro that exceeded a 60 s
- * client deadline (test/bench/rem-responsiveness.md); the repro's own duration
- * was not measured. A single memory write's server-side embedding provider
- * bound is 20 s (resources/memory-write-lock.ts).
+ * `FLAIR_REQUEST_TIMEOUT_MS` is unset and the caller passes no deadline. Five
+ * minutes is above the figures the repo's responsiveness fixture reports for
+ * the CLI: a maintenance/dedup pass at 23.07 s over 403 live vectors, and a
+ * 3,065-row repro that exceeded a 60 s client deadline
+ * (test/bench/rem-responsiveness.md); the repro's own duration was not
+ * measured. A single memory write's server-side embedding provider bound is
+ * 20 s (resources/memory-write-lock.ts).
  */
 export const DEFAULT_REQUEST_DEADLINE_MS = 300_000;
 
@@ -204,7 +205,10 @@ function deadlineStatusClause(status: number | undefined): string {
   return status === undefined ? "" : `; the instance answered HTTP ${status} but its response body did not complete`;
 }
 
-/** Where a deadline in force came from: the env var, or a caller's own override. */
+/**
+ * Where a deadline in force came from: `env` is FLAIR_REQUEST_TIMEOUT_MS, or
+ * the default when it is unset; `explicit` is a caller's own override.
+ */
 export type RequestDeadlineSource = "env" | "explicit";
 
 /**
@@ -1452,9 +1456,9 @@ export interface AuthedRequestOptions {
   refuseRedirects?: boolean;
   /**
    * Whole-request deadline in milliseconds, overriding
-   * FLAIR_REQUEST_TIMEOUT_MS. A caller whose request can legitimately run
-   * longer than the default passes its own value here, with a comment
-   * saying why.
+   * FLAIR_REQUEST_TIMEOUT_MS and the default. A caller whose request can
+   * legitimately run longer than the default passes its own value here, with a
+   * comment saying why.
    */
   deadlineMs?: number;
 }
