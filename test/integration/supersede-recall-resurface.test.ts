@@ -70,7 +70,7 @@ async function registerAgent(harper: HarperInstance, agent: TestAgent): Promise<
   expect(res.status, `Agent insert for ${agent.id} returned ${res.status}`).toBe(200);
 }
 
-/** Signed PUT to /Memory/<id> — the only HTTP-reachable create/update path. */
+/** Signed PUT to /Memory/<id> — the write path these tests use. */
 async function putMemory(harper: HarperInstance, agent: TestAgent, id: string, body: Record<string, any>): Promise<Response> {
   const path = `/Memory/${id}`;
   return fetch(`${harper.httpURL}${path}`, {
