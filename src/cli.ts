@@ -124,6 +124,7 @@ import {
 } from "./hook-install.js";
 import {
   ApiHttpError,
+  ApiRequestOutcomeUnknown,
   readSecretFileSecure,
   readAdminPassFileSecure,
   defaultAdminPassPath,
@@ -2834,7 +2835,7 @@ function b64url(bytes: Uint8Array): string {
  * / disabling authorizeLocal there) is tracked separately in flair#654 and is
  * out of scope for this HTTP/REST auth path.
  */
-async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string; signedOnly?: boolean; refuseRedirects?: boolean }): Promise<any> {
+async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string; signedOnly?: boolean; refuseRedirects?: boolean; deadlineMs?: number }): Promise<any> {
   // Resolve port via the canonical path (flair#1129): options.baseUrl > FLAIR_URL > resolveHttpPort.
   // api() callers mean the default install, so resolveHttpPort({}) with no --data-dir is correct.
   const hasExplicitBase = !!(options?.baseUrl || process.env.FLAIR_URL);
@@ -2867,11 +2868,15 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     agentIdSource: options?.agentIdSource,
     signedOnly: options?.signedOnly,
     refuseRedirects: options?.refuseRedirects,
+    deadlineMs: options?.deadlineMs,
   };
 
   try {
     return await authedRequest(method, path, body, requestOptions);
   } catch (err) {
+    // A write that reached its deadline may have committed. Never replay it
+    // against another port: that is a blind retry of an unknown outcome.
+    if (err instanceof ApiRequestOutcomeUnknown) throw err;
     // flair#1719: the resolved port came from Harper's boot record, which can
     // be stale for the default install. Before surfacing a connect failure,
     // try the port the operator actually wrote in ~/.flair/config.yaml.

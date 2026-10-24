@@ -1236,11 +1236,23 @@ export function register(program: Command): void {
       // signedOnly refuses FLAIR_TOKEN / FLAIR_ADMIN_PASS / the local
       // admin-pass file. A selected agent with no key is refused, not
       // silently replaced by an ambient credential.
+      //
+      // The two REM work calls can legitimately outrun the default deadline:
+      // maintenance scans up to the run's row cap (measured 23.07 s over 403
+      // live vectors, and a 3,065-row repro exceeded a 60 s client deadline —
+      // test/bench/rem-responsiveness.md), and reflection waits on a generative
+      // backend. They get a longer deadline explicitly; every other call keeps
+      // the default.
+      const LONG_REM_REQUEST_DEADLINE_MS = 900_000;
+      const remDeadline = (method: string, path: string) =>
+        method === "POST" && (path === "/MemoryMaintenance" || path === "/ReflectMemories")
+          ? { deadlineMs: LONG_REM_REQUEST_DEADLINE_MS }
+          : {};
       const agentApiCall = (method: string, path: string, body?: unknown) =>
-        api(method, path, body, { agentId, agentIdSource: "flag", signedOnly: true });
+        api(method, path, body, { agentId, agentIdSource: "flag", signedOnly: true, ...remDeadline(method, path) });
       const adminApiCall = adminPass
         ? (method: string, path: string, body?: unknown) =>
-            api(method, path, body, { explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null })
+            api(method, path, body, { explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null, ...remDeadline(method, path) })
         : undefined;
       const opsSearch = adminPass
         ? buildOpsSearch({ opsPort: resolveOpsPort(opts), adminUser: opts.adminUser, adminPass })
@@ -1423,7 +1435,7 @@ export function register(program: Command): void {
 
       // --apply path: live replay via src/rem/restore.ts
       if (opts.apply) {
-        const { applySnapshot } = await import("../rem/restore.js");
+        const { applySnapshot, formatUnknownState } = await import("../rem/restore.js");
         applyAdminPassFile(opts);
         let restoreTarget: RestoreTarget;
         try {
@@ -1500,6 +1512,20 @@ export function register(program: Command): void {
           console.log(`  Restored:     ${result.restored.memories} memories, ${result.restored.souls} souls`);
           if (result.retried.memories.length > 0) {
             console.log(`  Retried:      ${result.retried.memories.length} memories (${result.retried.memories.join(", ")})`);
+          }
+          const unknownCount =
+            result.unknown.memories.length + result.unknown.souls.length + result.unknown.candidates.length;
+          if (unknownCount > 0) {
+            console.log(`  Unknown:      ${unknownCount} writes ended at the request deadline; their outcome is unknown and they were not retried`);
+            for (const state of result.verified?.unknownStates ?? []) {
+              console.log(`    - ${formatUnknownState(state)}`);
+            }
+            for (const id of result.unknown.candidates) {
+              console.log(`    - MemoryCandidate ${id}: verification does not read candidates back; its state is unverified`);
+            }
+            if (!result.verified) {
+              console.log(`    - memory and soul state not checked: post-restore verification did not run`);
+            }
           }
           if (result.errors.length > 0) {
             console.log(`  Errors:`);
