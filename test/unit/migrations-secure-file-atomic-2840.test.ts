@@ -82,14 +82,14 @@ describe("writeSecureFile — atomic replacement (flair#2840)", () => {
     40_000,
   );
 
-  it("leaves the file at 0600 and no temporary file behind after a successful write", () => {
+  it("leaves the file at mode 0600 narrowed by the process umask, and no temporary file behind, after a successful write", () => {
     const dir = secureDir();
     const file = join(dir, "state.json");
     writeSecureFile(file, NEW, dir);
 
     // Read before stat: assert on what was read, then on the mode.
     expect(readFileSync(file, "utf8")).toBe(NEW);
-    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(statSync(file).mode & 0o777).toBe(0o600 & ~process.umask());
     expect(readdirSync(dir)).toEqual(["state.json"]);
   });
 
