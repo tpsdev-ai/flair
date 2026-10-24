@@ -178,7 +178,7 @@ Flair uses the raw table where it *wants* to bypass its own rules — the federa
 | `{ request: { tpsAnonymous: true } }` | `anonymous` | Denied everywhere |
 | `{ request: { tpsAgent: "mybot" } }` | `agent` | Scoped to that agent — **use this** |
 | `{ request: { tpsAgent: "mybot", tpsAgentIsAdmin: true } }` | admin | Unfiltered reads, cross-agent writes |
-| **Nothing**, or an empty/missing `tpsAgent` | `internal` | **Trusted. Unfiltered.** See the warning above. |
+| **Nothing**, or an empty/missing `tpsAgent` | `internal` | Unfiltered reads. The admin-only gate refuses it. See the warning above. |
 
 Build these with `agentContext(id)`, `adminContext(id)` and `internalContext()` rather than by hand — see [below](#the-api-is-built-so-omission-cannot-happen-quietly) for why the hand-written form is a trap.
 
@@ -198,7 +198,7 @@ There are exactly two ways to lose the model, from opposite ends. Both are pinne
 
 | | |
 |---|---|
-| **By omission** | No usable agent id ⇒ `internal` ⇒ admin-equivalent, unfiltered. |
+| **By omission** | No usable agent id ⇒ `internal` ⇒ unfiltered reads; the admin-only gate refuses it. |
 | **By assertion** | An attacker-influenced `agentId` is honoured verbatim. |
 
 ### The API is built so omission cannot happen quietly
@@ -207,7 +207,7 @@ There are exactly two ways to lose the model, from opposite ends. Both are pinne
 
 ```
 resolveAgentAuth({ request: { tpsAgent: undefined } })  ->  { kind: "internal" }
-allowAdmin({ request: { tpsAgent: undefined } })        ->  true
+allowAdmin({ request: { tpsAgent: undefined } })        ->  false
 ```
 
 That would turn the most ordinary bug there is — `agentContext(session.agentId)` where the field came back undefined — into silent administrator access. So the helpers refuse rather than default:
@@ -216,7 +216,7 @@ That would turn the most ordinary bug there is — `agentContext(session.agentId
 |---|---|
 | `agentContext(id)` | **Throws** `InProcessContextError` on a missing, empty or blank id. Takes **no options**, so no object spread into it can escalate. |
 | `adminContext(id)` | The *only* way to get admin authority. Same id guard. |
-| `internalContext()` | The *only* way to get the unfiltered verdict. |
+| `internalContext()` | The *only* way to get the unfiltered verdict, and the only internal call the admin-only gate admits. |
 | `collectionResource(Cls, context)` | Context is **required**; omitting it throws rather than granting `internal`. |
 
 The privileged paths are now the longest ones to type, and `git grep "adminContext\|internalContext"` enumerates every deliberate escalation in your codebase. These are runtime guards, not type annotations — a plain-JavaScript embedder gets exactly the same protection.

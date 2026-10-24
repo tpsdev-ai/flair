@@ -22,6 +22,7 @@ import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 import { agentRecordIsAdmin, configuredAdminAgentIds } from "./agent-admin.js";
 import { isPrincipalDeactivated } from "../src/lib/principal-status.js";
 import { isProtocolLayerContext } from "./protocol-context.js";
+import { isDeliberateInternalVerdict } from "./internal-authority.js";
 
 /**
  * Shared Harper user that verified Ed25519 agents resolve to (least-privilege
@@ -312,12 +313,18 @@ export async function allowVerified(context: any): Promise<boolean> {
 }
 
 /**
- * allow* for ADMIN-ONLY resources: permit admin agents + super_user + trusted
- * internal calls; deny non-admin agents and anonymous.
+ * allow* for ADMIN-ONLY resources: permit admin agents + super_user + a
+ * DELIBERATE internal call (flair#2837); deny non-admin agents and anonymous.
+ *
+ * An `internal` verdict reached by OMITTING the context does not pass this
+ * gate — the Soul/AgentSeed gate's rule, from
+ * resources/internal-authority.ts. The verdict itself is unchanged; only this
+ * gate's decision is.
  */
 export async function allowAdmin(context: any): Promise<boolean> {
   const a = await resolveAgentAuth(context);
-  return a.kind === "internal" || (a.kind === "agent" && a.isAdmin);
+  if (a.kind === "internal") return isDeliberateInternalVerdict(context, a);
+  return a.kind === "agent" && a.isAdmin;
 }
 
 /**

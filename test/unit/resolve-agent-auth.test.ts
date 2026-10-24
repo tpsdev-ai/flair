@@ -234,7 +234,8 @@ describe("resolveAgentAuth — resources/in-process.ts's agentContext()", () => 
 // guard can never be "simplified away" without its justification failing loudly
 // in the same run. `resolveAgentAuth` tests `tpsAgent` for TRUTHINESS, so an id
 // that came back undefined is indistinguishable from no identity at all — and
-// that is the trusted, unfiltered verdict. It even passes the ADMIN-only gate.
+// that is the trusted, unfiltered verdict. It still passes the agent-facing gate
+// (reads are unscoped); since flair#2837 it no longer passes the ADMIN-only gate.
 //
 // If any of these ever stop holding, resources/in-process.ts's runtime guards
 // have become unnecessary and should be revisited deliberately, not by accident.
@@ -247,10 +248,10 @@ describe("resolveAgentAuth — a missing/empty tpsAgent is INDISTINGUISHABLE fro
     });
   }
 
-  it("and that verdict PASSES the admin-only gate — a forgotten id is a superuser", async () => {
+  it("its verdict still passes the agent-facing gate, but the ADMIN-only gate refuses it (flair#2837)", async () => {
     const forgotten = { request: { tpsAgent: undefined, tpsAgentIsAdmin: false } };
     expect(await allowVerified(forgotten)).toBe(true);
-    expect(await allowAdmin(forgotten)).toBe(true);
+    expect(await allowAdmin(forgotten)).toBe(false);
   });
 
   it("POSITIVE CONTROL: a real id resolves to that agent, so the above is not a broken harness", async () => {
