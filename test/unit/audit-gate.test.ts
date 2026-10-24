@@ -887,6 +887,7 @@ describe("the committed allowlist", () => {
     const npmOnly = ALLOWLIST.entries.filter((e) => e.package === "fast-uri");
     // Exact IDs catch missing or substituted fast-uri advisories.
     expect(npmOnly.map((e) => e.ghsa).sort()).toEqual([
+      "GHSA-333x-w4r6-6crp",
       "GHSA-4c8g-83qw-93j6",
       "GHSA-7p8r-x3mc-p8w7",
       "GHSA-f65p-4m7j-42xc",
@@ -896,6 +897,9 @@ describe("the committed allowlist", () => {
       "GHSA-qw65-cvwx-89v3",
       "GHSA-v2hh-gcrm-f6hx",
       "GHSA-v39h-62p7-jpjc",
+      "GHSA-w74x-v6f9-j3xg",
+      "GHSA-wjr9-j795-jxcr",
+      "GHSA-xhq7-xmqj-769h",
     ]);
     for (const e of npmOnly) {
       expect(e.sources).toEqual(["npm-install"]);
