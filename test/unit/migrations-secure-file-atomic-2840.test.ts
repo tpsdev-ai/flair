@@ -100,4 +100,12 @@ describe("writeSecureFile — atomic replacement (flair#2840)", () => {
     expect(() => writeSecureFile(file, NEW, dir)).toThrow();
     expect(readdirSync(dir)).toEqual(["state.json"]);
   });
+
+  it("opens its temporary file exclusively at 0600, so a pre-existing path is never reused", () => {
+    // The temporary name carries 8 random bytes, so a test cannot predict the
+    // path to pre-create (2^64 candidates). Assert the open flag that makes a
+    // collision fail instead of reopening the existing file.
+    const source = readFileSync(join(import.meta.dirname, "..", "..", "resources", "migrations", "dir-safety.ts"), "utf8");
+    expect(source).toContain('writeFileSync(temp, contents, { mode: 0o600, flag: "wx" })');
+  });
 });

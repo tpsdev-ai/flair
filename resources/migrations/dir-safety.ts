@@ -86,7 +86,7 @@ export function writeSecureFile(path: string, contents: string, dir: string): vo
   const targetDir = dirname(path);
   const temp = join(targetDir, `.${basename(path)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
   try {
-    writeFileSync(temp, contents, { mode: 0o600 });
+    writeFileSync(temp, contents, { mode: 0o600, flag: "wx" });
     renameSync(temp, path);
   } catch (err) {
     try {
