@@ -152,7 +152,7 @@ function skipRegex(src, i) {
       j += 2;
       continue;
     }
-    if (c === "\n") return i; // never closed on this line — treat as division
+    if (LINE_BREAK_CHARS.has(c)) return i; // never closed on this line — treat as division
     if (c === "[") inClass = true;
     else if (c === "]") inClass = false;
     else if (c === "/" && !inClass) return j;
@@ -212,11 +212,27 @@ function isJsxFileName(fileName) {
 /**
  * Every character TypeScript's line map treats as a line break: `\n`, `\r`,
  * U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR). A `\r\n` pair is
- * two of these characters. Both maskers below keep exactly this set, so a
+ * two of these characters. The three maskers below keep exactly this set, so a
  * masked copy reports the same line and character for every position as the
- * original (flair#2808).
+ * original (flair#2808). The text walks end a line at any of them; a regex
+ * spells the set as `\n\r\u2028\u2029` inside a character class.
  */
 const LINE_BREAK_CHARS = new Set(["\n", "\r", "\u2028", "\u2029"]);
+
+/** Index of the first `LINE_BREAK_CHARS` character at or after `from`, or -1. */
+function indexOfLineBreak(src, from) {
+  for (let j = from; j < src.length; j++) if (LINE_BREAK_CHARS.has(src[j])) return j;
+  return -1;
+}
+
+/** The 1-based line of `index`, counted as TypeScript's line map counts it (a `\r\n` pair is one break). */
+function lineNumberAt(src, index) {
+  let line = 1;
+  for (let j = 0; j < index && j < src.length; j++) {
+    if (LINE_BREAK_CHARS.has(src[j]) && !(src[j] === "\r" && src[j + 1] === "\n")) line++;
+  }
+  return line;
+}
 
 /**
  * The source with every JSX TEXT node replaced by spaces, keeping its length and
@@ -328,7 +344,7 @@ function skipNonCode(src, i) {
     return src.length;
   }
   if (ch === "/" && src[i + 1] === "/") {
-    const nl = src.indexOf("\n", i);
+    const nl = indexOfLineBreak(src, i);
     return nl === -1 ? src.length : nl;
   }
   if (ch === "/" && src[i + 1] === "*") {
@@ -349,7 +365,7 @@ function skipNonCode(src, i) {
  * skip their contents via `skipNonCode`. A spawn's deadline is not read here:
  * it comes from the parsed options object literal (flair#2782).
  */
-function maskComments(src) {
+export function maskComments(src) {
   const out = src.split("");
   let i = 0;
   while (i < src.length) {
@@ -363,7 +379,7 @@ function maskComments(src) {
       continue;
     }
     if (ch === "/" && src[i + 1] === "/") {
-      while (i < src.length && src[i] !== "\n") {
+      while (i < src.length && !LINE_BREAK_CHARS.has(src[i])) {
         out[i] = " ";
         i++;
       }
@@ -371,7 +387,7 @@ function maskComments(src) {
     }
     if (ch === "/" && src[i + 1] === "*") {
       while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) {
-        if (src[i] !== "\n") out[i] = " ";
+        if (!LINE_BREAK_CHARS.has(src[i])) out[i] = " ";
         i++;
       }
       if (i < src.length) {
@@ -694,14 +710,14 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
   const ids = cliEntryIdentifiers(jsxSafe);
   const aliases = aliasedSpawnFns(jsxSafe);
   const constDecls = new Map();
-  for (const m of scan.matchAll(/(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g)) {
+  for (const m of scan.matchAll(/(?:^|[\n\r\u2028\u2029])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g)) {
     const after = m.index + m[0].length;
-    const lineEnd = source.indexOf("\n", after);
+    const lineEnd = indexOfLineBreak(source, after);
     constDecls.set(m[1], { start: after, end: lineEnd === -1 ? source.length : lineEnd });
   }
   const calls = [];
   const optionsArgOf = new Map();
-  const lineOf = (index) => source.slice(0, index).split("\n").length;
+  const lineOf = (index) => lineNumberAt(source, index);
   const textAt = (span) => (span ? source.slice(span.start, span.end) : "");
   // The options span itself, or the one-line initializer of the identifier it names.
   const resolveOptSpan = (optSpan) => {
@@ -777,7 +793,7 @@ function bodyBraceFrom(src, from) {
       continue;
     }
     if (src[i] === "{") {
-      const lineEnd = src.indexOf("\n", i);
+      const lineEnd = indexOfLineBreak(src, i);
       if (src.slice(i + 1, lineEnd === -1 ? src.length : lineEnd).trim() === "") return i;
     }
     i++;
@@ -789,7 +805,7 @@ function bodyBraceFrom(src, from) {
 export function functionBodies(source) {
   const src = maskComments(source);
   const bodies = [];
-  for (const m of src.matchAll(/(?:^|\n)\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
+  for (const m of src.matchAll(/(?:^|[\n\r\u2028\u2029])\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
     const open = src.indexOf("(", m.index);
     const bodyOpen = bodyBraceFrom(src, open);
     if (bodyOpen === -1) continue;
@@ -800,7 +816,7 @@ export function functionBodies(source) {
   // ONE-LINE function bodies (round 7 item 2): `function f(...) { … }` wholly on
   // one line — appended AFTER the existing detection so multiline bodies are
   // unchanged (no fingerprint ripple).
-  for (const m of src.matchAll(/(?:^|\n)[ \t]*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{([^}\n]*)\}/g)) {
+  for (const m of src.matchAll(/(?:^|[\n\r\u2028\u2029])[ \t]*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{([^}\n\r\u2028\u2029]*)\}/g)) {
     const open = src.indexOf("{", m.index);
     const close = src.indexOf("}", open);
     if (open !== -1 && close !== -1) {
@@ -813,7 +829,7 @@ export function functionBodies(source) {
     }
   }
   for (const m of src.matchAll(
-    /(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/g,
+    /(?:^|[\n\r\u2028\u2029])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/g,
   )) {
     const arrowEnd = m.index + m[0].length;
     const bodyOpen = bodyBraceFrom(src, arrowEnd);
@@ -822,7 +838,7 @@ export function functionBodies(source) {
       if (bodyClose === -1) continue;
       bodies.push({ name: m[1], start: bodyOpen, end: bodyClose });
     } else {
-      const lineEnd = src.indexOf("\n", arrowEnd);
+      const lineEnd = indexOfLineBreak(src, arrowEnd);
       bodies.push({ name: m[1], start: arrowEnd, end: lineEnd === -1 ? src.length : lineEnd });
     }
   }
@@ -979,7 +995,7 @@ function isMethodDefinition(body, fetchStart, close) {
   if (!["{", ",", ";"].includes(prevChar) && prevWord !== "async") return false;
   const rest = body.slice(close + 1);
   const braceAt = rest.search(/\S/);
-  return braceAt !== -1 && rest[braceAt] === "{" && !/\n/.test(rest.slice(0, braceAt));
+  return braceAt !== -1 && rest[braceAt] === "{" && !/[\n\r\u2028\u2029]/.test(rest.slice(0, braceAt));
 }
 
 export function firstUnboundedFetch(body, src = body) {
@@ -1039,7 +1055,7 @@ export function findCases(source, calls, helpers, bodies = []) {
     const budgetText = args.spans[2]?.text ?? "";
     cases.push({
       fn: m[2],
-      line: src.slice(0, m.index).split("\n").length,
+      line: lineNumberAt(src, m.index),
       name: (args.spans[0]?.text.trim() ?? "").replace(/^["'`]|["'`]$/g, ""),
       argCount: args.spans.length,
       reachesSpawn: reaches,

@@ -65,6 +65,8 @@ export function aliasedSpawnFns(source: string): Map<string, string>;
 export function maskJsxText(source: string, fileName?: string): string;
 /** The source with every comment and string/template/regex literal text masked by spaces, keeping length and every line break (flair#2774, flair#2808). */
 export function maskLiteralsAndComments(source: string, fileName?: string): string;
+/** The comment masker the case and helper walks read; it keeps the length and every line break (flair#2808). */
+export function maskComments(source: string): string;
 
 /** Throws, naming `fileName`, when TypeScript's parser reports a syntax error in `source` (flair#2774). */
 export function findSpawnCalls(source: string, fileName?: string): { calls: SpawnCall[]; ids: Set<string> };

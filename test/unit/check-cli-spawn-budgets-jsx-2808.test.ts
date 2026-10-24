@@ -13,7 +13,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
-import { findSpawnCalls, maskJsxText, maskLiteralsAndComments, scanTree } from "../../scripts/ci/check-cli-spawn-budgets.mjs";
+import {
+  findSpawnCalls,
+  maskComments,
+  maskJsxText,
+  maskLiteralsAndComments,
+  scanTree,
+  topLevelArgs,
+} from "../../scripts/ci/check-cli-spawn-budgets.mjs";
 
 let dirs: string[] = [];
 
@@ -157,7 +164,7 @@ describe("JSX text masks exactly its own span (flair#2808)", () => {
         expect(masked.length).toBe(src.length);
         const index = src.indexOf("after");
         const original = positionAt(src, fileName, index);
-        expect(original.line).toBeGreaterThan(positionAt(src, fileName, src.indexOf("alpha")).line);
+        expect(positionAt(src, fileName, src.indexOf("omega")).line).toBeGreaterThan(positionAt(src, fileName, src.indexOf("alpha")).line);
         expect(positionAt(masked, fileName, index)).toEqual(original);
       });
     }
@@ -173,8 +180,103 @@ describe("literal text keeps the U+2028 and U+2029 line breaks (flair#2808)", ()
       expect(masked.length).toBe(src.length);
       const index = src.indexOf("after");
       const original = positionAt(src, fileName, index);
-      expect(original.line).toBeGreaterThan(positionAt(src, fileName, src.indexOf("alpha")).line);
+      expect(positionAt(src, fileName, src.indexOf("omega")).line).toBeGreaterThan(positionAt(src, fileName, src.indexOf("alpha")).line);
       expect(positionAt(masked, fileName, index)).toEqual(original);
+    });
+  }
+});
+
+// The three line terminators besides \n, listed here rather than read from the gate.
+const TERMINATORS = ["\r", "\u2028", "\u2029"] as const;
+const TERMINATOR_NAMES: Record<string, string> = { "\r": "CR", "\u2028": "U+2028", "\u2029": "U+2029" };
+
+// A line comment, a const options object, a multi-line helper with an inner
+// `{}`, a one-line helper, an arrow helper, a division read as a possible regex
+// start, and a call followed by a block on the next line.
+const LINE_BREAK_FIXTURE = `import { test } from "bun:test";
+// a comment line
+const opts = { env: {} };
+function runCli() {
+  const o = {};
+  return Bun.spawn(["bun", "src/cli.ts"], opts);
+}
+function once() { return Bun.spawn(["bun", "src/cli.ts"], {}); }
+const viaArrow = () => void Bun.spawn(["bun", "src/cli.ts"], {});
+test("calls a helper", () => {
+  runCli();
+});
+test("calls a one-line helper", () => {
+  once();
+});
+test("calls an arrow helper", () => {
+  viaArrow();
+});
+test("divides before a call", () => {
+  let a = 1;
+  const n = a++ / 2;
+  void f(a / 2, n);
+  Bun.spawn(["bun", "src/cli.ts"], {});
+});
+test("calls fetch before a block", async () => {
+  Bun.spawn(["bun", "src/cli.ts"], { timeout: 1000 });
+  await 0;
+  fetch("http://127.0.0.1:1")
+  {
+  }
+}, 30_000);
+`;
+
+const LINE_BREAK_FIXTURE_OFFENDERS = {
+  spawn: [
+    ["spawn-no-timeout", "runCli"],
+    ["spawn-no-timeout", "once"],
+    ["spawn-no-timeout", "viaArrow"],
+    ["spawn-no-timeout", "divides before a call"],
+  ],
+  cases: [
+    ["case-no-budget", "calls a helper"],
+    ["case-no-budget", "calls a one-line helper"],
+    ["case-no-budget", "calls an arrow helper"],
+    ["case-no-budget", "divides before a call"],
+    ["case-unbounded-fetch", "calls fetch before a block"],
+  ],
+};
+
+function offenderSummary(result: ReturnType<typeof scanTree>) {
+  return {
+    spawn: result.spawnOffenders.map((o) => [o.kind, o.scope]),
+    cases: result.caseOffenders.map((o) => [o.kind, o.scope]),
+  };
+}
+
+describe("the comment masker and the line walks keep CR, U+2028 and U+2029 (flair#2808)", () => {
+  for (const t of TERMINATORS) {
+    it(`finds a case after a // comment ended by ${TERMINATOR_NAMES[t]}`, () => {
+      const src = `import { test } from "bun:test";\n// note${t}test("after the comment", () => {\n  Bun.spawn(["bun", "src/cli.ts"], {});\n});\n`;
+      const { caseOffenders } = scanFixture("line-comment.test.ts", src);
+      expect(caseOffenders.map((o) => [o.kind, o.scope])).toEqual([["case-no-budget", "after the comment"]]);
+    });
+
+    it(`keeps ${TERMINATOR_NAMES[t]} inside a block comment`, () => {
+      const src = `/* alpha${t}omega */\nconst p = Bun.spawn(["bun", "src/cli.ts"], {});\n`;
+      const fileName = "fixture.ts";
+      const masked = maskComments(src);
+      expect(masked.length).toBe(src.length);
+      expect(positionAt(src, fileName, src.indexOf("omega")).line).toBeGreaterThan(positionAt(src, fileName, src.indexOf("alpha")).line);
+      const index = src.indexOf("Bun.spawn");
+      expect(positionAt(masked, fileName, index)).toEqual(positionAt(src, fileName, index));
+    });
+
+    it(`ends a // comment at ${TERMINATOR_NAMES[t]} in an argument walk`, () => {
+      expect(topLevelArgs(`f(a, // note${t} b)`, 1)?.spans.length).toBe(2);
+    });
+
+    it(`scans a file whose line breaks are all ${TERMINATOR_NAMES[t]} as it scans the \\n file`, () => {
+      const lf = scanFixture("line-breaks.test.ts", LINE_BREAK_FIXTURE);
+      expect(offenderSummary(lf)).toEqual(LINE_BREAK_FIXTURE_OFFENDERS);
+      const other = scanFixture("line-breaks.test.ts", LINE_BREAK_FIXTURE.replaceAll("\n", t));
+      expect(other.spawnOffenders).toEqual(lf.spawnOffenders);
+      expect(other.caseOffenders).toEqual(lf.caseOffenders);
     });
   }
 });
