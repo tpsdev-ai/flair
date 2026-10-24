@@ -23,7 +23,7 @@
  * Cross-agent restore is a 1.1+ feature.
  */
 import { encodeRecordId } from "../lib/record-id-path.js";
-import { ApiHttpError, apiErrorRawBody } from "../lib/auth-resolve.js";
+import { ApiHttpError, ApiRequestOutcomeUnknown, apiErrorRawBody } from "../lib/auth-resolve.js";
 import { readFileSync, existsSync, rmSync, mkdtempSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -60,6 +60,17 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * One line about an unknown-outcome id, from the post-restore read. Present
+ * does NOT mean restored: comparing ids alone cannot tell a row this restore
+ * wrote from a pre-existing row that already had the id.
+ */
+export function formatUnknownState(state: { entity: "memory" | "soul"; id: string; present: boolean }): string {
+  return state.present
+    ? `${state.entity} ${state.id}: present in the verification read; an id-only check cannot tell whether this restore wrote the row or it was already present, so its state is unverified`
+    : `${state.entity} ${state.id}: absent from the verification read; the deadline fired before a complete response, so whether the write landed is unresolved and its state is unverified`;
+}
+
 /** The server release that first serves `GET /AdminMemoryCandidates/{agentId}`. */
 export const CANDIDATE_LIST_MIN_SERVER_VERSION = "0.63.0";
 
@@ -93,9 +104,12 @@ export interface RestoreOpts {
   dryRun?: boolean;
   /**
    * After the PUT loop, GET back the agent's memories + souls and compare
-   * their ids with the snapshot's: snapshot ids that are missing and ids the
-   * snapshot does not hold are reported. Row content is not compared. Default
-   * true. Disable only for tests that intentionally simulate inconsistent state.
+   * their ids with the snapshot's: when both reads succeed, snapshot ids that
+   * are missing and ids the snapshot does not hold are reported. It checks
+   * Memory and Soul ids, not candidates: candidate rows are not read back. Row
+   * content is not compared.
+   * Default true. Disable only for tests that intentionally simulate
+   * inconsistent state.
    */
   verifyPostRestore?: boolean;
   /** Override tmpdir for testing. */
@@ -105,7 +119,12 @@ export interface RestoreOpts {
 }
 
 export interface RestoreResult {
-  status: "completed" | "dry-run" | "failed";
+  /**
+   * `unresolved` means at least one write's outcome is unknown (see `unknown`);
+   * it is never reported as `completed`, and `errors` entries do not turn it
+   * into `failed`.
+   */
+  status: "completed" | "dry-run" | "unresolved" | "failed";
   agentId: string;
   snapshotPath: string;
   /** Path to the pre-restore-state snapshot (preserved on real restore + failures). */
@@ -127,11 +146,46 @@ export interface RestoreResult {
     memories: string[];
   };
   /**
-   * Post-restore state verification. Populated when verifyPostRestore is on
-   * (default). `missing*` IDs were in the snapshot but absent from Harper
-   * afterwards. `extra*` IDs were present afterwards but not in the snapshot.
-   * Both fields being empty means the agent's memory and soul ids match the
-   * snapshot's; row content is not compared.
+   * Ids whose PUT or DELETE ended at the whole-request deadline without a
+   * complete response, so whether it took effect is unknown. The unknown
+   * attempt adds no `errors` entry and no restored or deleted count; earlier
+   * known operations on the same id can remain in `errors`, `deleted` or
+   * `restored`. No further attempt is sent after an unknown outcome; an earlier
+   * provider-timeout refusal may already have triggered a retry (`retried`). Once
+   * any write to a table and record id has an unknown outcome, no later write
+   * to that same table and record id in this run is sent — a late write could
+   * change or remove the row — and the skipped snapshot id is listed in
+   * `skippedAfterUnknownDelete`. Any entry here makes `status` `unresolved`.
+   * When verification completes, `verified.unknownStates` reports what its
+   * id-only read shows for each memory and soul id here.
+   */
+  unknown: {
+    memories: string[];
+    souls: string[];
+    candidates: string[];
+  };
+  /**
+   * Snapshot ids not written because an earlier write (DELETE or PUT) to the
+   * same table and record id had an unknown outcome (they are also in
+   * `unknown`). Listed only when the run reached their write. The field name
+   * predates the rule covering PUTs as well as DELETEs.
+   */
+  skippedAfterUnknownDelete: {
+    memories: string[];
+    souls: string[];
+  };
+  /**
+   * Post-restore state verification. Set when verification runs
+   * (verifyPostRestore, default on) and its Memory and Soul reads both succeed.
+   * It compares Memory and Soul ids only, not candidates: candidate rows are
+   * not read back. `missing*` IDs were in the snapshot but absent from the
+   * verification read, excluding ids whose write outcome is unknown (those are
+   * reported in `unknownStates`). `extra*` IDs were present in the verification
+   * read but not in the snapshot.
+   * Both fields being empty means every id whose write outcome is known matches
+   * the snapshot's. Unknown Memory and Soul IDs are also reported in
+   * `unknownStates`; they are excluded from `missing*`, but may still appear in
+   * `extra*` and verification errors. Row content is not compared.
    */
   verified?: {
     expectedMemoryIds: string[];
@@ -142,6 +196,12 @@ export interface RestoreResult {
     missingSoulIds: string[];
     extraMemoryIds: string[];
     extraSoulIds: string[];
+    /**
+     * For each memory and soul id in `unknown`, whether the post-restore read
+     * shows it present. Present does not mean restored: an id-only check cannot
+     * tell a row this restore wrote from a pre-existing row with the same id.
+     */
+    unknownStates: Array<{ entity: "memory" | "soul"; id: string; present: boolean }>;
   };
   errors: string[];
 }
@@ -275,7 +335,8 @@ function parseJsonlSafe(text: string): any[] {
  *   7. Return counts.
  *
  * On any error after step 4: the result reports `status: "failed"` with
- * the pre-restore snapshot path included so the operator can roll back.
+ * the pre-restore snapshot path included so the operator can roll back. If any
+ * write's outcome is unknown, the status is `unresolved` instead.
  */
 export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   const errors: string[] = [];
@@ -286,6 +347,8 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     deleted: { memories: 0, souls: 0, candidates: 0 },
     restored: { memories: 0, souls: 0 },
     retried: { memories: [] },
+    unknown: { memories: [], souls: [], candidates: [] },
+    skippedAfterUnknownDelete: { memories: [], souls: [] },
     errors,
   };
 
@@ -418,30 +481,57 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     rmSync(tmp, { recursive: true, force: true });
     return result;
   }
+  // Ids whose write outcome is unknown, per table. Once a table and record id
+  // appears here, no later write to that same table and record id in this run
+  // is sent: a late write could land after the restored row.
+  const unknownMemoryWrites = new Set<string>();
+  const unknownSoulWrites = new Set<string>();
+  const unknownCandidateWrites = new Set<string>();
   for (const m of currentMem) {
     if (!m?.id) continue;
+    const id = String(m.id);
+    if (unknownMemoryWrites.has(id)) continue;
     try {
-      await opts.apiCall("DELETE", `/Memory/${encodeRecordId(String(m.id))}`);
+      await opts.apiCall("DELETE", `/Memory/${encodeRecordId(id)}`);
       result.deleted.memories++;
     } catch (err: any) {
+      if (err instanceof ApiRequestOutcomeUnknown) {
+        result.unknown.memories.push(id);
+        unknownMemoryWrites.add(id);
+        continue;
+      }
       errors.push(`delete-memory ${m.id}: ${err?.message ?? String(err)}`);
     }
   }
   for (const s of currentSouls) {
     if (!s?.id) continue;
+    const id = String(s.id);
+    if (unknownSoulWrites.has(id)) continue;
     try {
-      await soulWrite(opts)("DELETE", `/Soul/${encodeRecordId(String(s.id))}`);
+      await soulWrite(opts)("DELETE", `/Soul/${encodeRecordId(id)}`);
       result.deleted.souls++;
     } catch (err: any) {
+      if (err instanceof ApiRequestOutcomeUnknown) {
+        result.unknown.souls.push(id);
+        unknownSoulWrites.add(id);
+        continue;
+      }
       errors.push(`delete-soul ${s.id}: ${err?.message ?? String(err)}`);
     }
   }
   for (const c of currentCandidates) {
     if (!c?.id) continue;
+    const id = String(c.id);
+    if (unknownCandidateWrites.has(id)) continue;
     try {
-      await opts.apiCall("DELETE", `/MemoryCandidate/${encodeRecordId(String(c.id))}`);
+      await opts.apiCall("DELETE", `/MemoryCandidate/${encodeRecordId(id)}`);
       result.deleted.candidates++;
     } catch (err: any) {
+      if (err instanceof ApiRequestOutcomeUnknown) {
+        result.unknown.candidates.push(id);
+        unknownCandidateWrites.add(id);
+        continue;
+      }
       errors.push(`delete-candidate ${c.id}: ${err?.message ?? String(err)}`);
     }
   }
@@ -451,39 +541,64 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   // valid snapshot even with operator credentials.
   for (const s of souls) {
     if (!s?.id) continue;
+    const id = String(s.id);
+    if (unknownSoulWrites.has(id)) {
+      result.skippedAfterUnknownDelete.souls.push(id);
+      continue;
+    }
     try {
-      await soulWrite(opts)("PUT", `/Soul/${encodeRecordId(String(s.id))}`, s);
+      await soulWrite(opts)("PUT", `/Soul/${encodeRecordId(id)}`, s);
       result.restored.souls++;
     } catch (err: any) {
+      if (err instanceof ApiRequestOutcomeUnknown) {
+        result.unknown.souls.push(id);
+        unknownSoulWrites.add(id);
+        continue;
+      }
       errors.push(`put-soul ${s.id}: ${err?.message ?? String(err)}`);
     }
   }
   for (const m of memories) {
     if (!m?.id) continue;
     const id = String(m.id);
+    if (unknownMemoryWrites.has(id)) {
+      result.skippedAfterUnknownDelete.memories.push(id);
+      continue;
+    }
     try {
       try {
         await opts.apiCall("PUT", `/Memory/${encodeRecordId(id)}`, m);
       } catch (err: any) {
+        // A write whose outcome is unknown may have committed, so it is
+        // recorded as unknown by the outer catch and never replayed.
+        if (err instanceof ApiRequestOutcomeUnknown) throw err;
         // The write-lock contract states a provider-bound refusal wrote
         // nothing, so replaying this one PUT cannot double-write the row.
         if (!isProviderTimeoutRefusal(err)) throw err;
         result.retried.memories.push(id);
         await delay(RESTORE_PROVIDER_RETRY_DELAY_MS);
-        // No client-side timeout: a request abandoned at a client deadline
-        // could still commit after this row was recorded failed.
+        // No client-side timer here: a request abandoned at a client deadline
+        // could still commit after this row was recorded failed. The whole
+        // request now carries the shared deadline, and its expiry is an
+        // ApiRequestOutcomeUnknown recorded as unknown by the outer catch.
         await opts.apiCall("PUT", `/Memory/${encodeRecordId(id)}`, m);
       }
       result.restored.memories++;
     } catch (err: any) {
+      if (err instanceof ApiRequestOutcomeUnknown) {
+        result.unknown.memories.push(id);
+        unknownMemoryWrites.add(id);
+        continue;
+      }
       errors.push(`put-memory ${id}: ${err?.message ?? String(err)}`);
     }
   }
 
   // 7. Verify post-restore state (default on; opt-out via verifyPostRestore=false).
-  //    Compares ids only: it reports snapshot ids missing from the agent's
-  //    rows and ids present that the snapshot does not hold; row content is
-  //    not compared. Per-ID diff, not just counts — count parity can hide
+  //    Compares Memory and Soul ids only; candidates are not read back. When
+  //    both reads succeed, it reports snapshot ids missing from the agent's rows
+  //    and ids present that the snapshot does not hold; row content is not
+  //    compared. Per-ID diff, not just counts — count parity can hide
   //    simultaneous PUT+DELETE failures that wash out numerically.
   if (opts.verifyPostRestore !== false) {
     try {
@@ -500,10 +615,15 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
       const actMem = new Set(actualMemoryIds);
       const actSoul = new Set(actualSoulIds);
 
-      const missingMemoryIds = [...expMem].filter((id) => !actMem.has(id));
-      const missingSoulIds = [...expSoul].filter((id) => !actSoul.has(id));
+      const missingMemoryIds = [...expMem].filter((id) => !actMem.has(id) && !result.unknown.memories.includes(id));
+      const missingSoulIds = [...expSoul].filter((id) => !actSoul.has(id) && !result.unknown.souls.includes(id));
       const extraMemoryIds = [...actMem].filter((id) => !expMem.has(id));
       const extraSoulIds = [...actSoul].filter((id) => !expSoul.has(id));
+
+      const unknownStates: Array<{ entity: "memory" | "soul"; id: string; present: boolean }> = [
+        ...result.unknown.memories.map((id) => ({ entity: "memory" as const, id, present: actMem.has(id) })),
+        ...result.unknown.souls.map((id) => ({ entity: "soul" as const, id, present: actSoul.has(id) })),
+      ];
 
       result.verified = {
         expectedMemoryIds,
@@ -514,6 +634,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
         missingSoulIds,
         extraMemoryIds,
         extraSoulIds,
+        unknownStates,
       };
 
       if (missingMemoryIds.length > 0) {
@@ -537,6 +658,9 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
 
   if (errors.length > 0) {
     result.status = "failed";
+  }
+  if (result.unknown.memories.length > 0 || result.unknown.souls.length > 0 || result.unknown.candidates.length > 0) {
+    result.status = "unresolved";
   }
   return result;
 }

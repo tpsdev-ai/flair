@@ -20,6 +20,7 @@
  */
 
 import { encodeRecordId } from "./lib/record-id-path.js";
+import { ApiRequestOutcomeUnknown } from "./lib/auth-resolve.js";
 import { validatePeerEndpoint } from "./fleet-verify.js";
 import {
   DEFAULT_INTERVAL_SECONDS,
@@ -361,6 +362,10 @@ export async function runFederationVerify(
     }, apiOpts);
     log(`1. Wrote local memory: ${memId}`);
   } catch (e: unknown) {
+    // The canary write, archive or delete crossed its deadline: it may have
+    // taken effect. That is not a verdict of the check, so let the caller's
+    // top-level handler report the unknown outcome and exit 3.
+    if (e instanceof ApiRequestOutcomeUnknown) throw e;
     const message = e instanceof Error ? e.message : String(e);
     err(`1. Local write FAILED: ${message}`);
     return {
@@ -615,6 +620,7 @@ export async function runFederationVerify(
           log(`4. Cleanup: pushed archive of ${memId} (peers drop it from search)`);
         }
       } catch (e: unknown) {
+        if (e instanceof ApiRequestOutcomeUnknown) throw e;
         const message = e instanceof Error ? e.message : String(e);
         log(`4. Cleanup: could not archive canary for peer cleanup (${message})`);
       }
@@ -623,7 +629,8 @@ export async function runFederationVerify(
       await deps.api("DELETE", `/Memory/${encodeRecordId(memId)}`, undefined, apiOpts);
       cleanedUp = true;
       log(`4. Cleanup: deleted local memory ${memId}`);
-    } catch {
+    } catch (e: unknown) {
+      if (e instanceof ApiRequestOutcomeUnknown) throw e;
       log(`4. Cleanup: could NOT delete local memory ${memId} (manual cleanup needed)`);
     }
     result.cleanedUp = cleanedUp;

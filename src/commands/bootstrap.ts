@@ -7,7 +7,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { authedRequest } from "../lib/auth-resolve.js";
+import { ApiRequestOutcomeUnknown, authedRequest } from "../lib/auth-resolve.js";
 import * as render from "../render.js";
 
 export type BootstrapCli = {
@@ -110,6 +110,7 @@ program
         `${tokenIcon} budget ${tokensUsed}/${maxTokens} tokens (${tokenPct.toFixed(0)}%) ${render.icons.bullet} ${render.icons.ok} ${included} included ${render.icons.bullet} ${truncIcon} ${truncated} truncated`,
       );
     } catch (err: any) {
+      if (err instanceof ApiRequestOutcomeUnknown) throw err;
       console.error(`${render.icons.error} Bootstrap failed: ${err.message}`);
       process.exit(1);
     }

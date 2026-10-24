@@ -9,6 +9,7 @@
 import { Command } from "commander";
 import * as render from "../render.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { ApiRequestOutcomeUnknown } from "../lib/auth-resolve.js";
 
 export type TestCli = {
   api: (...args: any[]) => any;
@@ -67,6 +68,7 @@ program
           failed++;
         }
       } catch (e: unknown) {
+        if (e instanceof ApiRequestOutcomeUnknown) throw e;
         const message = e instanceof Error ? e.message : String(e);
         console.log(`  ${render.icons.error} ${render.wrap(render.c.red, "FAIL")} ${name}: ${render.wrap(render.c.dim, message?.slice(0, 120))}`);
         failed++;

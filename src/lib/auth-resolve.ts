@@ -151,6 +151,120 @@ export class ApiHttpError extends Error {
 }
 
 /**
+ * The whole-request deadline `sendJsonRequest` enforces when
+ * `FLAIR_REQUEST_TIMEOUT_MS` is unset and the caller passes no deadline. Five
+ * minutes is above the figures the repo's responsiveness fixture reports for
+ * the CLI: a maintenance/dedup pass at 23.07 s over 403 live vectors, and a
+ * 3,065-row repro that exceeded a 60 s client deadline
+ * (test/bench/rem-responsiveness.md); the repro's own duration was not
+ * measured. A single memory write's server-side embedding provider bound is
+ * 20 s (resources/memory-write-lock.ts).
+ */
+export const DEFAULT_REQUEST_DEADLINE_MS = 300_000;
+
+/** The env var that overrides {@link DEFAULT_REQUEST_DEADLINE_MS}. */
+export const REQUEST_DEADLINE_ENV = "FLAIR_REQUEST_TIMEOUT_MS";
+
+/** Bounds of {@link REQUEST_DEADLINE_ENV}: an integer from 1 ms to one hour. */
+export const REQUEST_DEADLINE_MIN_MS = 1;
+export const REQUEST_DEADLINE_MAX_MS = 3_600_000;
+
+/**
+ * The whole-request deadline in force: `explicit` when given, else the env
+ * override, else the default. An out-of-range or non-integer env value is
+ * refused here, before any request is sent, naming the variable and the range;
+ * it is never silently defaulted.
+ */
+export function resolveRequestDeadlineMs(
+  explicit: number | undefined = undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env[REQUEST_DEADLINE_ENV];
+  let envValue: number | undefined;
+  if (raw !== undefined) {
+    envValue = Number(raw);
+    if (!Number.isSafeInteger(envValue) || envValue < REQUEST_DEADLINE_MIN_MS || envValue > REQUEST_DEADLINE_MAX_MS) {
+      throw new Error(
+        `${REQUEST_DEADLINE_ENV} must be an integer from ${REQUEST_DEADLINE_MIN_MS} to ${REQUEST_DEADLINE_MAX_MS} (milliseconds)`,
+      );
+    }
+  }
+  if (explicit !== undefined) {
+    if (!Number.isSafeInteger(explicit) || explicit < REQUEST_DEADLINE_MIN_MS || explicit > REQUEST_DEADLINE_MAX_MS) {
+      throw new Error(
+        `request deadline must be an integer from ${REQUEST_DEADLINE_MIN_MS} to ${REQUEST_DEADLINE_MAX_MS} (milliseconds)`,
+      );
+    }
+    return explicit;
+  }
+  return envValue ?? DEFAULT_REQUEST_DEADLINE_MS;
+}
+
+/** The `HTTP <status>` clause for a deadline that fired after a status line. */
+function deadlineStatusClause(status: number | undefined): string {
+  return status === undefined ? "" : `; the instance answered HTTP ${status} but its response body did not complete`;
+}
+
+/**
+ * Where a deadline in force came from: `env` is FLAIR_REQUEST_TIMEOUT_MS, or
+ * the default when it is unset; `explicit` is a caller's own override.
+ */
+export type RequestDeadlineSource = "env" | "explicit";
+
+/**
+ * Thrown when a GET or HEAD crosses the whole-request deadline. This is an
+ * ordinary failure: a read has no effect to be unsure about.
+ */
+export class ApiRequestTimeout extends Error {
+  readonly method: string;
+  readonly path: string;
+  readonly deadlineMs: number;
+  /** The status line that arrived before the deadline fired, when one did. */
+  readonly status: number | undefined;
+  constructor(method: string, path: string, deadlineMs: number, status: number | undefined, source: RequestDeadlineSource) {
+    super(
+      `${method} ${path} did not complete within ${deadlineMs} ms` +
+        (source === "env" ? ` (${REQUEST_DEADLINE_ENV})` : "") +
+        deadlineStatusClause(status),
+    );
+    this.name = "ApiRequestTimeout";
+    this.method = method;
+    this.path = path;
+    this.deadlineMs = deadlineMs;
+    this.status = status;
+  }
+}
+
+/**
+ * Thrown when a request on any other method crosses the whole-request deadline.
+ * Expiry cannot establish delivery: the request may not have reached the server,
+ * or it may have taken effect. The message says the outcome is unknown, and no
+ * caller may retry the write blindly.
+ */
+export class ApiRequestOutcomeUnknown extends Error {
+  readonly method: string;
+  readonly path: string;
+  readonly deadlineMs: number;
+  /** The status line that arrived before the deadline fired, when one did. */
+  readonly status: number | undefined;
+  constructor(method: string, path: string, deadlineMs: number, status: number | undefined, source: RequestDeadlineSource) {
+    const raise = source === "env"
+      ? `Raise ${REQUEST_DEADLINE_ENV} (${REQUEST_DEADLINE_MIN_MS} to ${REQUEST_DEADLINE_MAX_MS}) if this request legitimately runs longer.`
+      : `This command sets its own deadline; raise it there if this request legitimately runs longer.`;
+    super(
+      `${method} ${path} may or may not have taken effect: no complete response within ${deadlineMs} ms` +
+        (source === "env" ? ` (${REQUEST_DEADLINE_ENV})` : "") +
+        `${deadlineStatusClause(status)}. Expiry does not show whether the request was delivered or took effect; do not retry it blindly. ${raise}`,
+    );
+    this.name = "ApiRequestOutcomeUnknown";
+    this.method = method;
+    this.path = path;
+    this.deadlineMs = deadlineMs;
+    this.status = status;
+  }
+}
+
+/**
  * An ApiHttpError's unredacted response text and the credential values its
  * request sent (flair#2764), kept for classification and redaction: only
  * apiErrorRawBody (the text) and boundErrorText (which uses the values to
@@ -1083,50 +1197,77 @@ export async function sendJsonRequest(
   body: unknown,
   authHeader: string | undefined,
   isLocal: boolean,
-  transport: { refuseRedirects?: boolean; signedOnly?: SignedOnlyHintContext } = {},
+  transport: { refuseRedirects?: boolean; signedOnly?: SignedOnlyHintContext; deadlineMs?: number } = {},
 ): Promise<any> {
-  const res = await fetch(url.href, {
-    method,
-    headers: {
-      "content-type": "application/json",
-      ...(authHeader ? { authorization: authHeader } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    // "manual" hands back the 3xx itself, so the refusal can name its status;
-    // the location it names is never requested.
-    ...(transport.refuseRedirects ? { redirect: "manual" as const } : {}),
-  });
-  if (transport.refuseRedirects && res.status >= 300 && res.status < 400) {
-    throw new ApiHttpError(res.status, `HTTP ${res.status}: the instance answered with a redirect, which this request does not follow`);
+  // The deadline covers the request AND the response body read: a server that
+  // sends headers and then stalls the body is bounded too. Resolved before the
+  // request, so an invalid FLAIR_REQUEST_TIMEOUT_MS sends nothing.
+  const deadlineSource: RequestDeadlineSource = transport.deadlineMs === undefined ? "env" : "explicit";
+  const deadlineMs = resolveRequestDeadlineMs(transport.deadlineMs);
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, deadlineMs);
+  const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
+  let res: Response | undefined;
+  try {
+    res = await fetch(url.href, {
+      method,
+      headers: {
+        "content-type": "application/json",
+        ...(authHeader ? { authorization: authHeader } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+      // "manual" hands back the 3xx itself, so the refusal can name its status;
+      // the location it names is never requested.
+      ...(transport.refuseRedirects ? { redirect: "manual" as const } : {}),
+    });
+    if (transport.refuseRedirects && res.status >= 300 && res.status < 400) {
+      throw new ApiHttpError(res.status, `HTTP ${res.status}: the instance answered with a redirect, which this request does not follow`);
+    }
+    // 403 with no credentials sent at all is the flair#634 case: a gated
+    // resource rejected a credential-less call. Name the fix instead of
+    // surfacing the raw "forbidden" body — never a stack trace. Classified
+    // before the empty-body shortcut below, so a zero-length 403 gets the same
+    // hint and noCredentials as one with a body (flair#2749).
+    if (res.status === 403 && !authHeader) {
+      await res.text();
+      const hint = noCredentialsHint(isLocal, transport.signedOnly);
+      throw new ApiHttpError(403, `HTTP 403: no credentials sent. ${hint}`, /* noCredentials */ true);
+    }
+    // Handle 204 No Content (e.g., PUT upsert returns empty body)
+    if (res.status === 204 || res.headers.get("content-length") === "0") {
+      if (!res.ok) throw ApiHttpError.fromResponse(res.status, "");
+      return { ok: true };
+    }
+    const text = await res.text();
+    if (!res.ok) {
+      // The FLAIR_DEBUG line's path and body, the message's reason and `body`
+      // are redacted with the credential values credentialsInHeader reads from
+      // this request's Authorization header, within the scope on ApiHttpError,
+      // and the server's text is withheld when it sets `withhold`; classifiers
+      // read the unredacted text through apiErrorRawBody.
+      const sent = credentialsInHeader(authHeader);
+      emitHttpErrorBodyDebug(method, url.pathname, res.status, text, sent.values, sent.withhold);
+      throw ApiHttpError.fromResponse(res.status, text, sent.values, sent.withhold);
+    }
+    if (!text) return { ok: true };
+    return JSON.parse(text);
+  } catch (err: unknown) {
+    // A fired deadline is reported by the deadline, not by the abort error
+    // fetch raised: a write may have committed, so it is an unknown outcome.
+    if (timedOut) {
+      const status = res?.status;
+      if (readOnly) throw new ApiRequestTimeout(method, url.pathname, deadlineMs, status, deadlineSource);
+      throw new ApiRequestOutcomeUnknown(method, url.pathname, deadlineMs, status, deadlineSource);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  // 403 with no credentials sent at all is the flair#634 case: a gated
-  // resource rejected a credential-less call. Name the fix instead of
-  // surfacing the raw "forbidden" body — never a stack trace. Classified
-  // before the empty-body shortcut below, so a zero-length 403 gets the same
-  // hint and noCredentials as one with a body (flair#2749).
-  if (res.status === 403 && !authHeader) {
-    await res.text();
-    const hint = noCredentialsHint(isLocal, transport.signedOnly);
-    throw new ApiHttpError(403, `HTTP 403: no credentials sent. ${hint}`, /* noCredentials */ true);
-  }
-  // Handle 204 No Content (e.g., PUT upsert returns empty body)
-  if (res.status === 204 || res.headers.get("content-length") === "0") {
-    if (!res.ok) throw ApiHttpError.fromResponse(res.status, "");
-    return { ok: true };
-  }
-  const text = await res.text();
-  if (!res.ok) {
-    // The FLAIR_DEBUG line's path and body, the message's reason and `body`
-    // are redacted with the credential values credentialsInHeader reads from
-    // this request's Authorization header, within the scope on ApiHttpError,
-    // and the server's text is withheld when it sets `withhold`; classifiers
-    // read the unredacted text through apiErrorRawBody.
-    const sent = credentialsInHeader(authHeader);
-    emitHttpErrorBodyDebug(method, url.pathname, res.status, text, sent.values, sent.withhold);
-    throw ApiHttpError.fromResponse(res.status, text, sent.values, sent.withhold);
-  }
-  if (!text) return { ok: true };
-  return JSON.parse(text);
 }
 
 /**
@@ -1142,7 +1283,7 @@ export async function tryAgentKeyFloor(
   method: string,
   body: unknown,
   keysDir: string,
-  transport: { refuseRedirects?: boolean } = {},
+  transport: { refuseRedirects?: boolean; deadlineMs?: number } = {},
 ): Promise<any> {
   let keyFiles: string[] = [];
   try {
@@ -1157,7 +1298,11 @@ export async function tryAgentKeyFloor(
     try {
       const authHeader = buildEd25519Auth(agentId, method, requestTarget(url), keyPath);
       return await sendJsonRequest(url, method, body, authHeader, isLocal, transport);
-    } catch {
+    } catch (err: unknown) {
+      // A write whose outcome is unknown stops the floor. Trying the next key
+      // would send the same write again — a blind replay of a request that may
+      // have committed.
+      if (err instanceof ApiRequestOutcomeUnknown) throw err;
       // This key didn't work (unregistered, bad signature, network blip on
       // this one attempt) — try the next one.
     }
@@ -1309,6 +1454,13 @@ export interface AuthedRequestOptions {
    * every caller that does not pass this.
    */
   refuseRedirects?: boolean;
+  /**
+   * Whole-request deadline in milliseconds, overriding
+   * FLAIR_REQUEST_TIMEOUT_MS and the default. A caller whose request can
+   * legitimately run longer than the default passes its own value here, with a
+   * comment saying why.
+   */
+  deadlineMs?: number;
 }
 
 /** The Authorization scheme of an Ed25519 agent signature (buildEd25519Auth). */
@@ -1448,6 +1600,7 @@ export async function authedRequest(
   try {
     return await sendJsonRequest(url, method, body, authHeader, isLocal, {
       refuseRedirects: opts.refuseRedirects,
+      deadlineMs: opts.deadlineMs,
       ...(opts.signedOnly ? { signedOnly: { agentId: opts.agentId, keysDir } } : {}),
     });
   } catch (err: unknown) {
@@ -1455,7 +1608,10 @@ export async function authedRequest(
     // anything sendable (see module header for why a rejected credential
     // does not retry here).
     if (err instanceof ApiHttpError && err.noCredentials) {
-      const floorResult = await tryAgentKeyFloor(url, method, body, keysDir, { refuseRedirects: opts.refuseRedirects });
+      const floorResult = await tryAgentKeyFloor(url, method, body, keysDir, {
+        refuseRedirects: opts.refuseRedirects,
+        deadlineMs: opts.deadlineMs,
+      });
       if (floorResult !== undefined) return floorResult;
     }
     throw err;
