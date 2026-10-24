@@ -209,7 +209,7 @@ describe("tryAgentKeyFloor — an unknown outcome stops the floor (flair#2789)",
 });
 
 describe("rem restore — an unknown write is recorded, never reported failed (flair#2789)", () => {
-  test("a write that commits only after the deadline is unknown, and the post-restore read cannot see the late commit", async () => {
+  test("a write that commits only after the deadline is unknown, and the post-restore read runs before it", async () => {
     const rows = new Map<string, Record<string, unknown>>();
     let putReceived = 0;
     const server = await serve((req, res) => {
