@@ -12,7 +12,12 @@
  * Real Harper. Each writer's test-only pause point (resources/txn-pause-point.ts,
  * armed through FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR) holds the
  * writer between its read and its write while this test commits a competitor:
- *   - a DELETE, and a PURGE — the row stays gone; the writer does not re-create it;
+ *   - a PURGE — refused busy while the writer holds the id, so the row survives the
+ *     writer's own write; once the writer commits, a purge removes it;
+ *   - an owner DELETE — holds the id itself, so the count bump skips its write; the
+ *     DELETE lands and the row stays gone;
+ *   - a raw operations DELETE, which takes no lock — the count bump's confirmation
+ *     sees the row gone and settles as a skip, not a count write;
  *   - a same-id REPLACE with a new token — the writer does not overwrite it.
  * Memory.put is also held AFTER its write is staged and before its commit
  * (`memory-put-staged`), and the same three competitors commit there: the
@@ -131,6 +136,30 @@ async function pointerRows(id: string): Promise<any[]> {
   });
   return Array.isArray(rows) ? rows : [];
 }
+/** Rows in MemoryUsage for one (agent, memory) contribution. */
+async function ledgerRow(agentId: string, memoryId: string): Promise<any> {
+  const rows = await ops({
+    operation: "search_by_id", database: "flair", table: "MemoryUsage",
+    ids: [`${agentId}:${memoryId}`], get_attributes: ["*"],
+  });
+  return Array.isArray(rows) ? (rows[0] ?? null) : null;
+}
+
+/** The last settled write-back outcome this run recorded for one row's write. */
+async function attemptOutcome(label: string, id: string): Promise<string | undefined> {
+  const path = join(pauseDir, "attempts.write-back");
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) {
+      const lines = readFileSync(path, "utf8").split("\n").filter((line) => line.startsWith(`${label}\t${id}\t`));
+      const fields = (lines.at(-1) ?? "").split("\t");
+      if (fields.length >= 4) return fields[3];
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return undefined;
+}
+
 async function insertPointer(id: string, token: string): Promise<void> {
   await ops({
     operation: "insert", database: "flair", table: "MemoryHostSource",
@@ -264,40 +293,68 @@ describe("flair#2441 — the usage-recording count bump confirms the stored row 
     insertRow({ id, agentId: owner.id, content: `usage ${id}`, contentHash: id, instanceToken: token, durability: "persistent" });
   const record = (id: string) => authSend(owner, "POST", "/RecordUsage", { memoryIds: [id] });
 
-  it("a DELETE by an earlier transaction, with the count bump paused after reading and before staging its write, leaves the row deleted", async () => {
+  // flair#2478 slice 1 part 2: the owner DELETE holds the id's write lock for
+  // the whole transaction, including at `memory-delete`. The count bump takes
+  // the same lock once, without waiting, so it writes nothing (no ledger row,
+  // no bump) and RecordUsage answers its invariant response.
+  it("an owner DELETE holding the id makes the count bump skip its write; the DELETE lands and the row stays deleted", async () => {
     const id = `csr-usage-del-${Date.now()}`;
     await seed(id, randomUUID());
     armPoint("memory-delete");
     const delPending = authSend(owner, "DELETE", `/Memory/${id}`);
     expect(await waitFor(join(pauseDir, "paused.memory-delete"), 15_000), "the owner delete was not paused").toBe(true);
-    armPoint("usage-count");
-    const recPending = record(id);
-    expect(await waitFor(join(pauseDir, "paused.usage-count"), 15_000), "the count bump was not paused").toBe(true);
+    // The DELETE holds the id here. The contribution cannot take the lock, so
+    // it skips the whole contribution rather than writing unserialized.
+    const rec = await record(id);
+    expect(rec.status, (await rec.clone().text()).slice(0, 200)).toBe(200);
+    expect(await rec.json()).toEqual({ recorded: true });
+    const held = await readRow(id);
+    expect(held?.usageCount ?? null, "the skipped contribution bumped the count").toBeNull();
+    expect(held?.writeBackWriteId ?? null, "the skipped contribution staged a bump").toBeNull();
+    expect(await ledgerRow(owner.id, id), "the skipped contribution wrote a ledger row").toBeNull();
     releasePoint("memory-delete");
     const del = await delPending;
     expect(del.status, (await del.clone().text()).slice(0, 200)).toBeLessThan(300);
-    const visibleBeforeRelease = await waitForRowGone(id, 15_000);
-    expect(visibleBeforeRelease, "the owner DELETE did not become visible before resuming the count bump").toBe(true);
-    releasePoint("usage-count");
-    const rec = await recPending;
-    expect(rec.status, (await rec.clone().text()).slice(0, 200)).toBe(200);
-    expect(
-      await waitForRowGone(id, 15_000),
-      "the count bump re-created the deleted row",
-    ).toBe(true);
+    expect(await waitForRowGone(id, 15_000), "the row survived the owner DELETE").toBe(true);
   }, 60_000);
 
-  it("a PURGE between the read and the write leaves the row purged", async () => {
-    const id = `csr-usage-purge-${Date.now()}`;
+  // The original flair#2441 property, with a delete the per-id lock does not
+  // serialize: the raw operations API takes no lock. The bump is held after its
+  // read; the row is deleted underneath it; its committed-row confirmation
+  // aborts the staged bump, and it settles as a skip instead of re-creating the
+  // row.
+  it("a raw DELETE between the count bump's read and its write leaves the row deleted", async () => {
+    const id = `csr-usage-raw-del-${Date.now()}`;
     await seed(id, randomUUID());
-    const { paused, released, observed } = await withPaused(
-      "usage-count", () => record(id), () => purgeRow(id),
+    const { response, paused, released, observed } = await withPaused(
+      "usage-count", () => record(id), () => deleteRow(id),
       () => waitForRowGone(id, 15_000),
     );
+    expect(paused, "the count bump was not paused").toBe(true);
+    expect(released).toBe("go");
+    expect(observed, "the raw DELETE did not become visible to a fresh read").toBe(true);
+    expect(response.status, (await response.clone().text()).slice(0, 200)).toBe(200);
+    expect(await response.json()).toEqual({ recorded: true });
+    expect(await readRow(id), "the count bump re-created the deleted row").toBeNull();
+    expect(await attemptOutcome("usage-recording", id), "the count bump did not settle as a skip").toBe("skipped");
+  }, 60_000);
+
+  // flair#2478 slice 3b: the count bump holds the id's per-id write lock and
+  // the purge takes it, so a purge that arrives while the bump holds the id is
+  // refused busy and deletes nothing; once the bump has committed, a purge
+  // removes the row.
+  it("a PURGE between the read and the write is refused busy and lands once the count bump commits", async () => {
+    const id = `csr-usage-purge-${Date.now()}`;
+    await seed(id, randomUUID());
+    const { response, paused, released, competed } = await withPaused("usage-count", () => record(id), () => purgeBusy(id));
     expect(paused, "the usage count bump was not paused").toBe(true);
     expect(released).toBe("go");
-    expect(observed, "the PURGE did not become visible to a fresh read").toBe(true);
-    expect(await readRow(id), "the count bump re-created the purged row").toBeNull();
+    expect(competed?.status).toBe(503);
+    expect(competed?.body).toEqual({ error: "memory_busy", caller: "admin" });
+    expect(response.status, (await response.clone().text()).slice(0, 200)).toBe(200);
+    expect((await readRow(id))?.usageCount, "the refused purge removed the row, or the count bump did not land").toBe(1);
+    await purgeRow(id);
+    expect(await readRow(id), "the purge did not remove the row the count bump committed").toBeNull();
   }, 60_000);
 
   it("a same-id REPLACE with a new token is not overwritten", async () => {
