@@ -461,7 +461,10 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
     await expectBoundTo(await h.readRow(c5), EDITED, ORIGINAL);
     await expectBoundTo(await h.readRow(c6), EDITED, ORIGINAL);
     await expectBoundTo(await h.readRow(c8), ORIGINAL);
-    expect(runs()[0]).toEqual({ processed: 3, touchedIds: [c1, c4, c9] });
+    // c3's row was deleted after its confirmation, and c7's post-commit read
+    // was unreadable: neither is counted as done, and both are reported by id
+    // (flair#2840).
+    expect(runs()[0]).toEqual({ processed: 3, touchedIds: [c1, c4, c9], unconfirmedIds: [c3, c7] });
     for (const id of [c5, c6, c8]) expect(touched(id), `${id} was not counted exactly once`).toBe(1);
     expect(touched(c7), "the unconfirmed row was counted").toBe(0);
     for (const id of [c1, c5, c6, c8, c9]) h.expectIncrementalWrites(id, SUFFIX_WRITER);

@@ -1,5 +1,5 @@
-- **Migrations count a row as done only when its committed write was verified,
-  and report the rows they could not verify.** `rowsDone` excludes any row whose
+- **A migration counts a row as done when its write is confirmed, and reports
+  the rows it could not confirm.** `rowsDone` excludes any row whose
   post-commit verification read did not show the write. Those rows are reported
   separately as `rowsUnconfirmed` (an exact count) and `unconfirmedIds` (up to
   100 ids) in `/HealthDetail` and in the migration state file, so a migration
