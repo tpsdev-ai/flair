@@ -178,7 +178,9 @@ Flair uses the raw table where it *wants* to bypass its own rules — the federa
 | `{ request: { tpsAnonymous: true } }` | `anonymous` | Denied everywhere |
 | `{ request: { tpsAgent: "mybot" } }` | `agent` | Scoped to that agent — **use this** |
 | `{ request: { tpsAgent: "mybot", tpsAgentIsAdmin: true } }` | admin | Unfiltered reads, cross-agent writes |
-| **Nothing** (with no ambient Harper context), or an in-process context with no `tpsAgent` and no credential or protocol markers | `internal` | Unfiltered `Memory` reads. An `allowAdmin` check admits it only when the context carries the marker that `internalContext()` sets and no request headers, and refuses it otherwise. See the warning below. |
+| **Nothing** (with no ambient Harper context), or an in-process `{ request: {} }` | `internal` | Unfiltered `Memory` reads. An `allowAdmin` check admits it only when the context carries the marker that `internalContext()` sets and no request headers, and refuses it otherwise. See the warning below. |
+
+A context with an anonymous marker or request headers can resolve differently.
 
 Build these with `agentContext(id)`, `adminContext(id)` and `internalContext()` rather than by hand — see [below](#the-api-is-built-so-omission-cannot-happen-quietly) for why the hand-written form is a trap.
 
@@ -198,7 +200,7 @@ There are exactly two ways to lose the model, from opposite ends. Both are pinne
 
 | | |
 |---|---|
-| **By omission** | No usable agent id and no credential or protocol markers ⇒ `internal` ⇒ unfiltered `Memory` reads. Without the marker that `internalContext()` sets, an `allowAdmin` check refuses it when Harper consults the gate. |
+| **By omission** | No context argument and no ambient Harper context, or an in-process `{ request: {} }` ⇒ `internal` ⇒ unfiltered `Memory` reads. Without the marker that `internalContext()` sets, an `allowAdmin` check refuses it when Harper consults the gate. |
 | **By assertion** | An attacker-influenced `agentId` is honoured verbatim. |
 
 ### The API is built so omission cannot happen quietly
