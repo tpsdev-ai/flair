@@ -22,8 +22,13 @@
  *     reflect-sources-commit: the last confirmation passed and the transaction
  *     has not committed;
  *   - feed-ingest-committed / feed-dedup-repair-committed /
- *     last-reflected-committed / reflect-sources-committed: the write committed
- *     and the lock is still held.
+ *     last-reflected-committed / reflect-sources-committed: the write's
+ *     transaction has settled and the lock is still held; a settled commit does
+ *     not by itself show the write. Of these, this file arms only
+ *     feed-dedup-repair-committed, and its cases there assert the feed
+ *     request's answer and the stored row they read afterwards;
+ *   - feed-ingest-verify: the feed write's transaction commit resolved and the
+ *     lock is still held, before its read-back.
  *
  * The real-Harper write trace (test/helpers/embedding-writer-race.ts) asserts
  * each automatic writer's update names only its own field, and that the feed
@@ -34,7 +39,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
@@ -201,6 +206,66 @@ describe("flair#2478 slice 3b — the feed ingest writer (real Harper)", () => {
     expect((await held).status).toBe(200);
     expect((await h.readRow(id))?.content).toBe("feed v2 held");
   }, 120_000);
+
+  it("an unconfirmed feed write marks the id outcome-unknown: a later owner PUT and a later feed write answer 503 write_outcome_unknown", async () => {
+    const id = "frl-feed-unconfirmed";
+    await seed(id);
+    h.arm("feed-ingest-verify");
+    const pending = feed(id, "feed v2 unconfirmed");
+    await h.assertPaused("feed-ingest-verify");
+    // A lock-bypassing write during the pause: the read-back sees a different row.
+    await h.rawUpdate(id, { content: "the ops write during the pause" });
+    await h.release("feed-ingest-verify");
+    const res = await pending;
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(409);
+    expect(body.error).toBe("feed_write_unconfirmed");
+    const stored = await h.readRow(id);
+    expect(stored?.content).toBe("the ops write during the pause");
+
+    await expectRefused(await put(owner, id, "owner put after the unknown outcome"), "write_outcome_unknown");
+    await expectRefused(await feed(id, "feed v3 after the unknown outcome"), "write_outcome_unknown");
+    expect(await h.readRow(id)).toEqual(stored);
+  }, 120_000);
+
+  it("a feed write whose read-back fails marks the id outcome-unknown: a later owner PUT answers 503 write_outcome_unknown", async () => {
+    const id = "frl-feed-read-fail";
+    await seed(id);
+    h.arm("feed-ingest-verify");
+    const pending = feed(id, "feed v2 read-back fails");
+    await h.assertPaused("feed-ingest-verify");
+    writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), "");
+    await h.release("feed-ingest-verify");
+    const res = await pending;
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(409);
+    expect(body.error).toBe("feed_write_unconfirmed");
+    expect(existsSync(join(pauseDir, `arm.memory-get-fail.${id}`)), "the read-back was not the read that failed").toBe(false);
+    const stored = await h.readRow(id);
+    expect(stored?.content).toBe("feed v2 read-back fails");
+
+    await expectRefused(await put(owner, id, "owner put after the failed read-back"), "write_outcome_unknown");
+    expect(await h.readRow(id)).toEqual(stored);
+  }, 120_000);
+
+  it("an id marked outcome-unknown by an owner write refuses POST /FeedMemories with 503 write_outcome_unknown and leaves the stored row unchanged", async () => {
+    const id = "frl-feed-marked";
+    await seed(id);
+    h.arm("memory-patch-verify");
+    const held = h.signed(owner, "PATCH", memPath(id), { embedding: null, embeddingModel: null });
+    await h.assertPaused("memory-patch-verify");
+    writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), "");
+    await h.release("memory-patch-verify");
+    const marked = await held;
+    const markedBody = await marked.json() as any;
+    expect(marked.status, JSON.stringify(markedBody)).toBe(503);
+    expect(markedBody.error).toBe("write_outcome_unknown");
+    const before = await h.readRow(id);
+
+    await expectRefused(await feed(id, "feed write to the marked id"), "write_outcome_unknown");
+    expect(await h.readRow(id)).toEqual(before);
+    expect(before?.content).toBe(`content of ${id}`);
+  }, 180_000);
 });
 
 describe("flair#2478 slice 3b — the feed dedup expiry repair (real Harper)", () => {
@@ -276,6 +341,46 @@ describe("flair#2478 slice 3b — the feed dedup expiry repair (real Harper)", (
     await held;
     expect(await h.waitForLog(`[MemoryFeed] dedup expiry repair skipped: busy (id ${id})`), "the skipped repair was not reported").toBe(true);
     expect(typeof (await h.readRow(id))?.expiresAt).toBe("string");
+  }, 120_000);
+
+  it("a repair whose confirmation read fails marks the id outcome-unknown: a later owner PUT answers 503 write_outcome_unknown", async () => {
+    const id = "frl-repair-read-fail";
+    const text = "the repair whose confirmation read fails";
+    await seedDedup(id, text);
+    h.arm("feed-dedup-repair-committed");
+    const pending = feed(id, text, owner.id, "private");
+    await h.assertPaused("feed-dedup-repair-committed");
+    writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), "");
+    await h.release("feed-dedup-repair-committed");
+    const res = await pending;
+    expect(res.status, (await res.clone().text()).slice(0, 300)).toBe(500);
+    expect(existsSync(join(pauseDir, `arm.memory-get-fail.${id}`)), "the confirmation read was not the read that failed").toBe(false);
+    const stored = await h.readRow(id);
+    expect(typeof stored?.expiresAt).toBe("string");
+
+    await expectRefused(await put(owner, id, "owner put after the failed confirmation read"), "write_outcome_unknown");
+    expect(await h.readRow(id)).toEqual(stored);
+  }, 120_000);
+
+  it("a repair whose confirmation read does not show it marks the id outcome-unknown: it answers 409 feed_dedup_target_changed and a later owner PUT answers 503 write_outcome_unknown", async () => {
+    const id = "frl-repair-unconfirmed";
+    const text = "the repair changed after its commit";
+    await seedDedup(id, text);
+    h.arm("feed-dedup-repair-committed");
+    const pending = feed(id, text, owner.id, "private");
+    await h.assertPaused("feed-dedup-repair-committed");
+    // A lock-bypassing write during the pause: the confirmation read no longer matches.
+    await h.rawUpdate(id, { contentHash: "changed after the repair commit" });
+    await h.release("feed-dedup-repair-committed");
+    const res = await pending;
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(409);
+    expect(body.error).toBe("feed_dedup_target_changed");
+    const stored = await h.readRow(id);
+    expect(stored?.contentHash).toBe("changed after the repair commit");
+
+    await expectRefused(await put(owner, id, "owner put after the unconfirmed repair"), "write_outcome_unknown");
+    expect(await h.readRow(id)).toEqual(stored);
   }, 120_000);
 });
 
