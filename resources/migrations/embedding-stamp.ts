@@ -626,6 +626,7 @@ export function createEmbeddingStampMigration(
       }
 
       const touchedIds: string[] = [];
+      const unconfirmedIds: string[] = [];
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
@@ -640,6 +641,10 @@ export function createEmbeddingStampMigration(
         }
 
         let ok: boolean;
+        // An attempt whose committed effect the post-commit verification read
+        // did not show (flair#2840). Such a row is never counted as done; when
+        // no later attempt verifies it, it is reported by id instead.
+        let unconfirmed = false;
         if (endsWithContentSelectorSuffix(id)) {
           // flair#2656: the commit is not proof the update landed. A newer write
           // committing after the confirm read can make the commit resolve while
@@ -647,7 +652,6 @@ export function createEmbeddingStampMigration(
           // bound; count the row touched only when the committed row shows the
           // staged fields and the text the vector was computed for.
           ok = false;
-          let unconfirmed = false;
           // The vector and text of this row's last unconfirmed attempt.
           let ownUnconfirmed: StagedVector | undefined;
           // One guard over the whole retry loop (flair#2478): when the loop ends
@@ -671,16 +675,7 @@ export function createEmbeddingStampMigration(
               // owner stores a null hash, which passes the hash comparison for any
               // text (flair#2478). Who stored a matching vector is not known.
               if (attempt > 1 && rowEmbeddingCurrent(rowNow as Record<string, unknown>, current) &&
-                  !holdsOwnStaleVector(rowNow as Record<string, unknown>, ownUnconfirmed)) {
-                // flair#2840: a current row counts as done only when this loop's
-                // own attempt on the row was unconfirmed and the row now holds
-                // the text that attempt embedded. The attempt outcome comes from
-                // the loop's own state, not from the row's value; a row another
-                // writer made current that does not hold the text this attempt
-                // embedded stays uncounted, as on main.
-                if (unconfirmed && ownUnconfirmed !== undefined && skillEmbedText(rowNow) === ownUnconfirmed.text) ok = true;
-                break;
-              }
+                  !holdsOwnStaleVector(rowNow as Record<string, unknown>, ownUnconfirmed)) break;
               const attemptResult = await regenContentSuffixRow(table, id, rowNow as Record<string, unknown>, current, contentSuffixRegen);
               if (attemptResult.kind === "lock") {
                 // This attempt wrote nothing. After an earlier unconfirmed attempt
@@ -717,6 +712,7 @@ export function createEmbeddingStampMigration(
           ok = await regen(id, existing);
         }
         if (ok) touchedIds.push(id);
+        else if (unconfirmed) unconfirmedIds.push(id);
         // A false result does not add the row to touchedIds. It does not prove
         // nothing was written (a loopback PATCH can commit before its response
         // fails); the next live scan decides, retrying the row only if it is
@@ -724,8 +720,11 @@ export function createEmbeddingStampMigration(
         // transaction is known to write nothing.
       }
 
-      noteTestMigrationRun({ processed: touchedIds.length, touchedIds });
-      return { processed: touchedIds.length, touchedIds };
+      const result: RunBatchResult = unconfirmedIds.length > 0
+        ? { processed: touchedIds.length, touchedIds, unconfirmedIds }
+        : { processed: touchedIds.length, touchedIds };
+      noteTestMigrationRun(result);
+      return result;
     },
   };
 }

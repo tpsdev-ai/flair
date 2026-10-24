@@ -44,6 +44,10 @@ export function getMigrationStatusSnapshot(dataDir: string): MigrationStatusSnap
         state: derivedState,
       };
       if (entry.reason) row.reason = entry.reason;
+      if (entry.rowsUnconfirmed) {
+        row.rowsUnconfirmed = entry.rowsUnconfirmed;
+        if (entry.unconfirmedIds?.length) row.unconfirmedIds = entry.unconfirmedIds;
+      }
       return row;
     });
   }

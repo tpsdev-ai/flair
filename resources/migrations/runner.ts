@@ -25,9 +25,10 @@ import { postureFor, type SnapshotScope } from "./risk-policy.js";
 import { readMigrationState, writeMigrationStateEntry, isShortCircuited, defaultStatePath, type MigrationStateEntry } from "./state.js";
 import { writeLedgerEvent, type LedgerDeps, type LedgerEvent } from "./ledger.js";
 import { setCyclePhase, setMigrationProgress, seedIdleProgress, noteStateWriteAttempt, noteStateWriteSuccess, noteStateWriteFailure } from "./progress.js";
+import type { MigrationProgress } from "./types.js";
 import { shouldRegisterSyntheticMigration } from "./synthetic-test-migration.js";
 import type { MigrationRegistry } from "./registry.js";
-import type { Migration, RiskClass, SourceTable } from "./types.js";
+import { UNCONFIRMED_IDS_LIMIT, type Migration, type RiskClass, type SourceTable } from "./types.js";
 import { join } from "node:path";
 
 /**
@@ -341,11 +342,22 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
 async function haltMigration(
   migration: Migration,
   reason: string,
-  ctx: { deps: ResolvedDeps; startedAt: string; rowsDone: number; rowsRemaining: number; hashEnvelopeMatch: boolean | null; state: ReturnType<typeof readMigrationState> },
+  ctx: {
+    deps: ResolvedDeps;
+    startedAt: string;
+    rowsDone: number;
+    rowsRemaining: number;
+    hashEnvelopeMatch: boolean | null;
+    state: ReturnType<typeof readMigrationState>;
+    unconfirmed?: string[];
+  },
 ): Promise<void> {
   const { deps, startedAt, rowsDone, rowsRemaining, hashEnvelopeMatch, state } = ctx;
   const endedAt = deps.now().toISOString();
-  setMigrationProgress({ id: migration.id, rowsDone, rowsRemaining, state: "halted", reason });
+  setMigrationProgress({
+    id: migration.id, rowsDone, rowsRemaining, state: "halted", reason,
+    ...unconfirmedProgress(ctx.unconfirmed),
+  });
 
   const fromVersion = state[migration.id]?.completedAtVersion ?? "unknown";
   const evt: LedgerEvent = {
@@ -379,7 +391,21 @@ async function haltMigration(
     reason,
     rowsProcessed: rowsDone,
     rowsRemaining,
+    ...unconfirmedState(ctx.unconfirmed),
   });
+}
+
+/** The progress fields for the ids a run could not confirm: an exact count and
+ *  a bounded id list (flair#2840). Empty when there are none. */
+function unconfirmedProgress(ids: readonly string[] | undefined): Pick<MigrationProgress, "rowsUnconfirmed" | "unconfirmedIds"> {
+  if (!ids || ids.length === 0) return {};
+  return { rowsUnconfirmed: ids.length, unconfirmedIds: ids.slice(0, UNCONFIRMED_IDS_LIMIT) };
+}
+
+/** The state-file fields, same shape as {@link unconfirmedProgress}. */
+function unconfirmedState(ids: readonly string[] | undefined): Pick<MigrationStateEntry, "rowsUnconfirmed" | "unconfirmedIds"> {
+  if (!ids || ids.length === 0) return {};
+  return { rowsUnconfirmed: ids.length, unconfirmedIds: ids.slice(0, UNCONFIRMED_IDS_LIMIT) };
 }
 
 /**
@@ -485,12 +511,19 @@ async function runOneMigration(
   // ── Execution: throttled batches, resumable via per-row markers ──
   setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: initialRemaining, state: "running" });
   let rowsDone = 0;
+  // flair#2840: rows a batch attempted whose committed effect its post-commit
+  // verification read did not show. They are NOT part of `rowsDone`. A later
+  // batch that verifies an id removes it here, so the final set is exactly the
+  // rows this run could not confirm.
+  const unconfirmed = new Set<string>();
   const oldRowHashes = new Map<string, string>();
   const newRowIds: string[] = [];
   try {
     for (;;) {
       const result = await migration.run(posture.batchSize);
       rowsDone += result.processed;
+      for (const id of result.touchedIds) unconfirmed.delete(id);
+      for (const id of result.unconfirmedIds ?? []) unconfirmed.add(id);
       if (result.oldRowSourceHashes) {
         for (const [k, v] of Object.entries(result.oldRowSourceHashes)) oldRowHashes.set(k, v);
       }
@@ -501,6 +534,7 @@ async function runOneMigration(
         rowsDone,
         rowsRemaining: Math.max(0, initialRemaining - rowsDone),
         state: "running",
+        ...unconfirmedProgress([...unconfirmed]),
       });
       lock.touch();
 
@@ -515,12 +549,16 @@ async function runOneMigration(
       rowsRemaining: Math.max(0, initialRemaining - rowsDone),
       hashEnvelopeMatch: null,
       state,
+      unconfirmed: [...unconfirmed],
     });
     return true; // conservative: a partial batch may have landed before the throw
   }
 
   // ── Completion gate — strictness per risk class ──
-  setMigrationProgress({ id: migration.id, rowsDone, rowsRemaining: 0, state: "completing" });
+  setMigrationProgress({
+    id: migration.id, rowsDone, rowsRemaining: 0, state: "completing",
+    ...unconfirmedProgress([...unconfirmed]),
+  });
   let finalRemaining: number;
   try {
     finalRemaining = await migration.countPending();
@@ -532,6 +570,7 @@ async function runOneMigration(
       rowsRemaining: 0,
       hashEnvelopeMatch: null,
       state,
+      unconfirmed: [...unconfirmed],
     });
     return rowsDone > 0;
   }
@@ -593,6 +632,7 @@ async function runOneMigration(
         rowsRemaining: finalRemaining,
         hashEnvelopeMatch,
         state,
+        unconfirmed: [...unconfirmed],
       });
       return rowsDone > 0;
     }
@@ -634,6 +674,7 @@ async function runOneMigration(
       rowsRemaining: finalRemaining,
       hashEnvelopeMatch,
       state,
+      unconfirmed: [...unconfirmed],
     });
     return rowsDone > 0;
   }
@@ -669,9 +710,17 @@ async function runOneMigration(
     lastOutcome: "success",
     rowsProcessed: rowsDone,
     rowsRemaining: 0,
+    ...unconfirmedState([...unconfirmed]),
   });
 
   pruneMigrationSnapshots(deps.snapshotRoot);
-  setMigrationProgress({ id: migration.id, rowsDone, rowsRemaining: 0, state: "completed" });
+  // State stays "completed": the migration reached its target state and its
+  // gate passed (flair#2840). `rowsUnconfirmed` and its ids say which rows this
+  // run did not verify, so a completion with unconfirmed rows is never read as
+  // "every row was confirmed done".
+  setMigrationProgress({
+    id: migration.id, rowsDone, rowsRemaining: 0, state: "completed",
+    ...unconfirmedProgress([...unconfirmed]),
+  });
   return rowsDone > 0;
 }

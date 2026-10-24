@@ -152,10 +152,6 @@ function defaultMemoryLockStore(): unknown {
 
 export const VISIBILITY_BACKFILL_ID = "visibility-backfill";
 
-/** The plan's reason for a row a retry of this run's own unconfirmed write
- *  finds already carrying a visibility this backfill stamps. */
-const ALREADY_SET = "already-set";
-
 /**
  * flair#509's rule, reused verbatim (see module doc for why this is a
  * deliberate duplicate of `resources/Memory.ts`'s
@@ -223,6 +219,7 @@ export function createVisibilityBackfillMigration(
       }
 
       const touchedIds: string[] = [];
+      const unconfirmedIds: string[] = [];
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
@@ -230,12 +227,9 @@ export function createVisibilityBackfillMigration(
         // (flair#2478 slice 2). One attempt: a held id is left for the next
         // cycle, never written unserialized and never waited on unboundedly.
         const outcome = await withMemoryWriteLockOnce(getLockStore(), [id], async () => {
-          // flair#2840: a plan skip that names a visibility this backfill stamps
-          // counts as done only when it follows this run's own attempt on this
-          // row whose committed outcome was unconfirmed. The fact comes from the
-          // write-back's own result, never from the row's value: a visibility
-          // another writer set with no unconfirmed attempt of this run on the row
-          // leaves it uncounted.
+          // flair#2840: the write-back reports an attempt whose committed effect
+          // its post-commit verification read did not show. Such a row is never
+          // counted as done; it is reported by id instead.
           let ownUnconfirmed = false;
           const result = await writeBackCommittedRow(
             table as unknown as Parameters<WriteBackFn>[0],
@@ -245,13 +239,7 @@ export function createVisibilityBackfillMigration(
 
               // Under the per-id Memory lock shared with owner PUT/PATCH,
               // fill only an absent visibility.
-              if (existing.visibility !== undefined && existing.visibility !== null) {
-                // A value this backfill stamps is the target state of this run's
-                // own unconfirmed attempt; a third-party value is not ours to
-                // count (or correct).
-                const present = existing.visibility === "private" || existing.visibility === "shared";
-                return present && ownUnconfirmed ? ({ skip: true, reason: ALREADY_SET } as const) : ({ skip: true } as const);
-              }
+              if (existing.visibility !== undefined && existing.visibility !== null) return { skip: true } as const;
 
               const derived = deriveVisibilityFromDurability(existing.durability);
               // Never-widen invariant, asserted, not just tested: the only two
@@ -276,12 +264,21 @@ export function createVisibilityBackfillMigration(
           // Test-only: the write-back committed and the lock is still held.
           const committed = txnPausePoint("visibility-backfill-committed");
           if (committed) await committed;
-          return result;
+          return { result, ownUnconfirmed };
         }, { phase: "visibility-backfill" });
-        if (outcome.kind === "done" && ("update" in outcome.value || ("skip" in outcome.value && outcome.value.reason === ALREADY_SET))) touchedIds.push(id);
+        if (outcome.kind !== "done") continue;
+        if ("skip" in outcome.value.result) {
+          // A skip is not a write this run verified. If it follows an attempt
+          // whose committed effect was unconfirmed, the row is reported as
+          // unconfirmed; otherwise another writer's work left it untouched
+          // (flair#2840).
+          if (outcome.value.ownUnconfirmed) unconfirmedIds.push(id);
+        } else if ("update" in outcome.value.result) touchedIds.push(id);
       }
 
-      return { processed: touchedIds.length, touchedIds };
+      return unconfirmedIds.length > 0
+        ? { processed: touchedIds.length, touchedIds, unconfirmedIds }
+        : { processed: touchedIds.length, touchedIds };
     },
   };
 }

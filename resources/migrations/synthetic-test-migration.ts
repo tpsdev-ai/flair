@@ -45,10 +45,6 @@ export const SYNTHETIC_TARGET_MARKER = `${SYNTHETIC_MIGRATION_ID}-done`;
 
 export const ENABLE_TEST_MIGRATIONS_ENV = "FLAIR_ENABLE_TEST_MIGRATIONS";
 
-/** The plan's reason for a row a retry of this run's own unconfirmed write
- *  finds already holding {@link SYNTHETIC_TARGET_MARKER}. */
-const ALREADY_STAMPED = "already-stamped";
-
 /**
  * Exact-match opt-in — see the module doc. Exported so both the registry
  * and a unit test can assert the exact condition, independent of the
@@ -109,6 +105,7 @@ export function createSyntheticTestMigration(
       }
 
       const touchedIds: string[] = [];
+      const unconfirmedIds: string[] = [];
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
@@ -119,20 +116,16 @@ export function createSyntheticTestMigration(
         // or a table with no lock writes nothing here and is reported; the row
         // stays pending for the next boot's scan.
         const locked = await withMemoryWriteLockOnce(table.primaryStore, [id], async () => {
-          // flair#2840: a plan skip that names the marker counts as done only
-          // when it follows this run's own attempt on this row whose committed
-          // outcome was unconfirmed. The fact comes from the write-back's own
-          // result, never from the row's value: a marker another writer set
-          // with no unconfirmed attempt of this run on the row leaves it uncounted.
+          // flair#2840: the write-back reports an attempt whose committed effect
+          // its post-commit verification read did not show. Such a row is never
+          // counted as done; it is reported by id instead.
           let ownUnconfirmed = false;
           const result = await writeBackCommittedRow(
             table as unknown as Parameters<WriteBackFn>[0],
             id,
             (existing: any) => {
               if (!existing || existing.agentId !== RESERVED_TEST_AGENT_ID) return { skip: true } as const;
-              if (existing.source === SYNTHETIC_TARGET_MARKER) {
-                return ownUnconfirmed ? { skip: true, reason: ALREADY_STAMPED } : { skip: true };
-              }
+              if (existing.source === SYNTHETIC_TARGET_MARKER) return { skip: true }; // already stamped — idempotent skip
 
               // Only `source`: an incremental update, never a
               // full-row put of the row read above (flair#2470).
@@ -151,7 +144,7 @@ export function createSyntheticTestMigration(
           // Test-only: the write-back committed and the lock is still held.
           const committed = txnPausePoint("synthetic-test-committed");
           if (committed) await committed;
-          return result;
+          return { result, ownUnconfirmed };
         }, { phase: "synthetic-test-migration" });
         if (locked.kind !== "done") {
           console.warn(
@@ -160,14 +153,18 @@ export function createSyntheticTestMigration(
           );
           continue;
         }
-        if ("skip" in locked.value) {
-          // Count only the skip this run's own unconfirmed attempt produced, so
-          // rowsDone agrees with the rows this run stamped (flair#2840).
-          if (locked.value.reason === ALREADY_STAMPED) touchedIds.push(id);
+        if ("skip" in locked.value.result) {
+          // A skip is not a write this run verified. If it follows an attempt
+          // whose committed effect was unconfirmed, the row is reported as
+          // unconfirmed; otherwise another writer's work left it untouched
+          // (flair#2840).
+          if (locked.value.ownUnconfirmed) unconfirmedIds.push(id);
         } else touchedIds.push(id);
       }
 
-      return { processed: touchedIds.length, touchedIds };
+      return unconfirmedIds.length > 0
+        ? { processed: touchedIds.length, touchedIds, unconfirmedIds }
+        : { processed: touchedIds.length, touchedIds };
     },
   };
 }

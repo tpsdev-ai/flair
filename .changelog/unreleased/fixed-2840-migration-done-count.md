@@ -1,10 +1,8 @@
-- **Migrations report a row as done when the retry of their own unconfirmed
-  write finds it at the target.** On main, a `skip` for a row already at the
-  migration's target was not counted, so after a commit whose confirming read
-  missed it the retry saw the target and the batch reported one fewer row done
-  than it stamped (flair#2840). A skip that names the target now counts only
-  when it follows the same run's own attempt on the row whose committed outcome
-  was unconfirmed; a row another writer brought to the target, with no attempt of
-  this run on it, stays uncounted.
+- **Migrations count a row as done only when its committed write was verified,
+  and report the rows they could not verify.** `rowsDone` excludes any row whose
+  post-commit verification read did not show the write. Those rows are reported
+  separately as `rowsUnconfirmed` (an exact count) and `unconfirmedIds` (up to
+  100 ids) in `/HealthDetail` and in the migration state file, so a migration
+  that completes with unconfirmed rows says so instead of counting them as done.
   Applies to the synthetic CI migration, the visibility backfill and the
-  embedding stamp.
+  embedding stamp's `.content`-suffix re-embed. (#2840)

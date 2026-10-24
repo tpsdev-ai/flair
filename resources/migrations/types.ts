@@ -42,7 +42,24 @@ export interface MigrationProgress {
   state: MigrationState;
   /** Present when state is "halted" or "failed" — the exact, actionable reason. */
   reason?: string;
+  /**
+   * Rows this run attempted whose committed effect it could not verify
+   * (flair#2840). NEVER included in `rowsDone`. The count is exact; the ids in
+   * {@link unconfirmedIds} are bounded by {@link UNCONFIRMED_IDS_LIMIT}.
+   */
+  rowsUnconfirmed?: number;
+  /** The first {@link UNCONFIRMED_IDS_LIMIT} unconfirmed row ids, in the order
+   *  they were reported. Absent when nothing was unconfirmed. */
+  unconfirmedIds?: string[];
 }
+
+/**
+ * How many unconfirmed row ids a migration reports. `rowsUnconfirmed` stays an
+ * exact count; the list is bounded so a failed batch over a large corpus cannot
+ * grow the in-process record or the on-disk state file without limit
+ * (flair#2840).
+ */
+export const UNCONFIRMED_IDS_LIMIT = 100;
 
 /** Table(s) a migration's source-field envelope hash is computed over. */
 export type SourceTable = "Memory" | "Relationship";
@@ -52,6 +69,13 @@ export interface RunBatchResult {
   processed: number;
   /** IDs touched this batch — used by the content-transform gate (old-row envelope + new-row presence). */
   touchedIds: string[];
+  /**
+   * IDs this batch attempted whose committed effect the batch could not verify
+   * (flair#2840). Disjoint from `touchedIds`: a row whose write a later attempt
+   * in the same batch verified belongs in `touchedIds`, not here. The runner
+   * unions these across batches into the progress record.
+   */
+  unconfirmedIds?: string[];
   /**
    * content-transform ONLY: `${table}:${id}` -> hash of that row's
    * SOURCE_FIELDS as they were immediately before this batch superseded it.

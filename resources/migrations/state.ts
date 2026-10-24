@@ -32,6 +32,11 @@ export interface MigrationStateEntry {
   reason?: string;
   rowsProcessed?: number;
   rowsRemaining?: number;
+  /** Rows attempted whose committed effect could not be verified; never part of
+   *  `rowsProcessed` (flair#2840). */
+  rowsUnconfirmed?: number;
+  /** The bounded list of those row ids (see UNCONFIRMED_IDS_LIMIT). */
+  unconfirmedIds?: string[];
 }
 
 export type MigrationStateFile = Record<string, MigrationStateEntry>;
