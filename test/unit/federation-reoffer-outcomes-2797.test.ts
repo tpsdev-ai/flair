@@ -53,8 +53,12 @@ function install(fake: Fake, hubResponse: (records: any[]) => any, opts: { pendi
       return res(opts.pending ? [...fake.retryRows.values()] : []);
     }
     if (body?.operation === "search_by_conditions" && body.table === "Memory") {
-      const isCursor = body.conditions?.[0]?.search_type === "greater_than";
-      return res(isCursor && opts.cursorRow ? [{ id: ROW, agentId: "agent-a", content: "x", contentHash: "h", visibility: "shared", archived: false, createdAt: SINCE, updatedAt: SINCE }] : []);
+      const condition = body.conditions?.[0];
+      const isCursor = condition?.search_type === "greater_than";
+      const isRetryRead = condition?.search_attribute === "id";
+      return res((isCursor && opts.cursorRow) || isRetryRead
+        ? [{ id: ROW, agentId: "agent-a", content: "x", contentHash: "h", visibility: "shared", archived: false, createdAt: SINCE, updatedAt: SINCE }]
+        : []);
     }
     if (body?.operation === "search_by_conditions") return res([]);
     if (body?.operation === "search_by_hash" && body.table === "FederationRetry") {
