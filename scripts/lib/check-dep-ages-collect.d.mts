@@ -108,9 +108,8 @@ export function classifyOverrides(overrides: unknown): OverrideRule[];
  * that "" and "*" are ranges (as overrides they override nothing); only an
  * exact version is collected here (collectRangedDeps collects ranges).
  *
- * `peerDependencies` are NOT checked: peers are resolved from a range by the
- * consumer's install, so an exact-pin check of our declaration does not
- * describe what actually gets installed.
+ * `peerDependencies` are NOT checked (see the module comment in
+ * check-dep-ages-collect.mjs).
  *
  * @param pkgs — package objects with paths
  * @param keepCurrent — the keep-current allow-list

@@ -9,8 +9,10 @@
  * 0.8.0 / 0.8.1 patch sequence already shipped same-day.
  *
  * This gate checks external entries in `dependencies`, `devDependencies`,
- * `optionalDependencies` AND `overrides` (root and every workspace
- * package.json): ranges in all four, exact pins in all but `devDependencies`.
+ * `optionalDependencies` AND `overrides` (the root package.json and each
+ * packages/<name>/package.json, the manifests the CLI reads; the CLI fails on a
+ * bun.lock workspace outside those): ranges in all four, exact pins in all but
+ * `devDependencies`.
  * - `dependencies` / `optionalDependencies`: npm and bun install
  *   optionalDependencies by default (a failed install is non-fatal, not
  *   skipped), so they install just like any other dep and represent the same
@@ -34,9 +36,11 @@
  * target, never its key), and `workspace:`, `file:`/`link:`, `git+`/`github:`
  * specifiers.
  *
- * `peerDependencies` are NOT checked: peers are resolved from a range by the
- * consumer's install, so an exact-pin check of our declaration does not
- * describe what actually gets installed.
+ * `peerDependencies` are NOT checked: a peer declaration states what a
+ * consumer's project must provide, and the consumer's own install picks that
+ * version. This repository's frozen install does install a required peer, at
+ * the version bun.lock records, and the gate does not age-check that version
+ * on account of the peer declaration (a stated limit).
  *
  * Trust boundary: the gate reads bun.lock as written and age-checks the
  * versions it records. The same CI job then runs `bun install
@@ -222,9 +226,7 @@ function formatOverridePath(path) {
  * that "" and "*" are ranges); only an exact version is collected here
  * (collectRangedDeps collects ranges).
  *
- * `peerDependencies` are NOT checked: peers are resolved from a range by the
- * consumer's install, so an exact-pin check of our declaration does not
- * describe what actually gets installed.
+ * `peerDependencies` are NOT checked (see the module comment).
  *
  * @param pkgs — package objects with paths
  * @param keepCurrent — the keep-current allow-list

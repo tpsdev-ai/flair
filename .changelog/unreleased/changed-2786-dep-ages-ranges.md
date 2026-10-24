@@ -8,6 +8,9 @@
   below its enclosing packages; an override range with no installed copy in
   that scope is listed, with nothing to check. A range the gate cannot resolve
   fails the gate; a fresh resolved version is reported with its publish date.
+  The gate reads the root package.json and each `packages/<name>/package.json`;
+  a `bun.lock` workspace outside those fails the gate, as does a missing
+  `bun.lock` when the root package.json declares `workspaces`.
   A `devDependencies` entry the gate refuses (a dist-tag such as `latest`, a
   `v`-prefixed version, surrounding whitespace), a non-string specifier or a
   non-object `devDependencies` value fails the gate, naming the manifest and

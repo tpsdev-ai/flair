@@ -888,6 +888,114 @@ describe("CLI — a real bun.lock: aliases, nested overrides and declaration lin
   }, 60_000);
 });
 
+/*
+ * A workspace `web` declaring `fixture-dep ^1.0.0`, under `<dir>/web`, with the
+ * root's `"workspaces": ["<dir>/*"]` and a real bun.lock. The root declares no
+ * dependency, so the workspace's range is the only one.
+ */
+async function writeWebWorkspaceRepo(label: string, dir: string) {
+  const root = join(scratch, label);
+  mkdirSync(join(root, dir, "web"), { recursive: true });
+  writeFileSync(join(root, dir, "web", "package.json"), JSON.stringify({
+    name: "web",
+    version: "0.0.0",
+    dependencies: { [FIXTURE_DEP]: "^1.0.0" },
+  }));
+  const lock = await bunGeneratedLock(root, {
+    name: "dep-ages-web-workspace-fixture",
+    version: "0.0.0",
+    workspaces: [`${dir}/*`],
+  }, { [FIXTURE_DEP]: { "1.0.0": {} } });
+  expect(Object.keys(lock.workspaces ?? {}).sort()).toEqual(["", `${dir}/web`]);
+  return root;
+}
+
+describe("CLI — the workspaces bun.lock records, and a lock it cannot read", () => {
+  it("exits 2 naming a bun.lock workspace outside packages/, before any registry request", async () => {
+    const root = await writeWebWorkspaceRepo("lock-workspace-apps", "apps");
+    const registry = registryWithTimes({ "1.0.0": FRESH_TIME });
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(output).toContain("bun.lock workspaces the gate does not scan:");
+      expect(output).toContain("\n    apps/web\n");
+      expect(registry.requests).toEqual([]);
+      expect(exitCode).toBe(2);
+    } finally {
+      registry.stop();
+    }
+  }, 60_000);
+
+  it("checks the same workspace under packages/ and fails on its fresh range", async () => {
+    const root = await writeWebWorkspaceRepo("lock-workspace-packages", "packages");
+    const registry = registryWithTimes({ "1.0.0": FRESH_TIME });
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(output).not.toContain("does not scan");
+      expect(output).toContain(`${FIXTURE_DEP}@1.0.0    — published ${FRESH_DATE}`);
+      expect(output).toContain(`declared in packages/web/package.json dependencies["${FIXTURE_DEP}"] (range "^1.0.0")`);
+      expect(exitCode).toBe(1);
+    } finally {
+      registry.stop();
+    }
+  }, 60_000);
+
+  it("reads an existing bun.lock with no ranged declaration and no root workspaces, and exits 2 on its unscanned workspace", async () => {
+    const root = await writeWebWorkspaceRepo("lock-workspace-apps-root-undeclared", "apps");
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "dep-ages-web-workspace-fixture", version: "0.0.0" }));
+    const { exitCode, output } = await runGate(CLI_SCRIPT, {
+      FLAIR_CHECK_DEP_AGES_ROOT: root,
+      FLAIR_NPM_REGISTRY: "http://127.0.0.1:1",
+    });
+    expect(output).toContain("bun.lock workspaces the gate does not scan:");
+    expect(output).toContain("\n    apps/web\n");
+    expect(exitCode).toBe(2);
+  }, 60_000);
+
+  it("exits 2 when the root declares workspaces and there is no bun.lock, with no ranged declaration", async () => {
+    const root = writeManifestRepo(join(scratch, "workspaces-no-lock"), {
+      name: "dep-ages-workspaces-fixture",
+      version: "0.0.0",
+      workspaces: ["packages/*"],
+    });
+    const { exitCode, output } = await runGate(CLI_SCRIPT, {
+      FLAIR_CHECK_DEP_AGES_ROOT: root,
+      FLAIR_NPM_REGISTRY: "http://127.0.0.1:1",
+    });
+    expect(output).toContain("Cannot read bun.lock:");
+    expect(output).toContain("ENOENT");
+    expect(exitCode).toBe(2);
+  }, 30_000);
+
+  it("exits 2 on an unparsable bun.lock with a formatted message naming the file and the parse error", async () => {
+    const root = writeManifestRepo(join(scratch, "unparsable-lock"), {
+      name: "dep-ages-range-fixture",
+      version: "0.0.0",
+      dependencies: { [FIXTURE_DEP]: "^1.0.0" },
+    });
+    writeFileSync(join(root, "bun.lock"), "{ not json");
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(output).toContain(`Cannot parse ${join(root, "bun.lock")}:`);
+      expect(output).toContain("bun.lock is not parsable: ");
+      expect(output).not.toMatch(/^\s+at /m);
+      expect(registry.requests).toEqual([]);
+      expect(exitCode).toBe(2);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+});
+
 /** A gzipped tar holding `files` under `package/`, the shape an npm tarball has. */
 function npmTarball(files: Record<string, string>): Uint8Array {
   const encoder = new TextEncoder();

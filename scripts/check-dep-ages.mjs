@@ -3,8 +3,9 @@
  * check-dep-ages.mjs — supply-chain bake-time gate.
  *
  * The checked fields are `dependencies`, `devDependencies`,
- * `optionalDependencies` and `overrides` (root and every workspace
- * package.json). An exact pin is checked at its declared version, except in
+ * `optionalDependencies` and `overrides` (the root package.json and each
+ * packages/<name>/package.json; a bun.lock workspace outside those fails the
+ * gate). An exact pin is checked at its declared version, except in
  * `devDependencies`, where exact pins are not checked. A range is checked at
  * the version bun.lock resolves it to (resolveRangedDeps in the collector); a
  * range the gate cannot resolve fails it, and an override range with no
@@ -47,6 +48,7 @@ import {
   collectRangedDeps,
   collectUnsupportedDeps,
   collectUnsupportedOverrides,
+  lockWorkspaces,
   parseBunLockText,
   resolveRangedDeps,
 } from "./lib/check-dep-ages-collect.mjs";
@@ -277,25 +279,59 @@ async function main() {
 
   const toCheck = collectDeps(allPkgs, KEEP_CURRENT);
 
-  // Ranges are checked at the versions resolveRangedDeps finds in bun.lock.
-  // The lock is read only when a ranged declaration exists, so a repo with
-  // exact pins only needs no lockfile.
+  // Ranges are checked at the versions resolveRangedDeps finds in bun.lock, and
+  // each workspace the lock records must be a manifest scanned above. The lock
+  // is read when it exists, and is required when a checked ranged declaration
+  // exists or the root package.json declares "workspaces", so a repo with exact
+  // pins only and no workspaces needs no lockfile.
   const ranged = collectRangedDeps(allPkgs, KEEP_CURRENT);
-  if (ranged.length > 0) {
-    let lockText;
-    try {
-      lockText = readFileSync(join(REPO_ROOT, "bun.lock"), "utf8");
-    } catch (err) {
-      console.error("Cannot read bun.lock, which ranged declarations are age-checked against:");
-      console.error("");
-      for (const r of ranged) {
-        console.error(`    ${r.declaredIn} ${r.at} "${r.spec}"`);
+  const lockRequired = ranged.length > 0 || allPkgs[0].pkg.workspaces !== undefined;
+  const lockPath = join(REPO_ROOT, "bun.lock");
+  let lockText;
+  try {
+    lockText = readFileSync(lockPath, "utf8");
+  } catch (err) {
+    if (lockRequired || err?.code !== "ENOENT") {
+      if (ranged.length > 0) {
+        console.error("Cannot read bun.lock, which ranged declarations are age-checked against:");
+        console.error("");
+        for (const r of ranged) {
+          console.error(`    ${r.declaredIn} ${r.at} "${r.spec}"`);
+        }
+      } else {
+        console.error("Cannot read bun.lock:");
       }
       console.error("");
       console.error(`${err?.message ?? err}`);
       process.exit(2);
     }
-    const { resolved, unresolved, uninstalled } = resolveRangedDeps(ranged, parseBunLockText(lockText));
+  }
+  if (lockText !== undefined) {
+    let lock;
+    try {
+      lock = parseBunLockText(lockText);
+    } catch (err) {
+      console.error(`Cannot parse ${lockPath}:`);
+      console.error("");
+      console.error(`${err?.message ?? err}`);
+      process.exit(2);
+    }
+    // Each workspace the lock records must be a manifest the scan above read.
+    const scannedDirs = new Set(allPkgs.map(({ path }) => (dirname(path) === "." ? "" : dirname(path))));
+    const unscanned = Object.keys(lockWorkspaces(lock)).filter((key) => key !== "" && !scannedDirs.has(key));
+    if (unscanned.length > 0) {
+      console.error("bun.lock workspaces the gate does not scan:");
+      console.error("");
+      for (const key of unscanned) {
+        console.error(`    ${key}`);
+      }
+      console.error("");
+      console.error("The gate reads the root package.json and packages/<name>/package.json. Move each");
+      console.error("workspace listed to packages/<name>, or extend the manifest scan in");
+      console.error("scripts/check-dep-ages.mjs to read it.");
+      process.exit(2);
+    }
+    const { resolved, unresolved, uninstalled } = resolveRangedDeps(ranged, lock);
     // An overrides rule with no installed copy in its scope has no version to
     // check; name it in the output, before any fail-closed exit below. A range
     // the gate cannot resolve has no version it can check: fail closed.
