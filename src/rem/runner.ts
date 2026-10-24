@@ -59,6 +59,7 @@ import { dirname, resolve } from "node:path";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { createSnapshot } from "./snapshot.js";
 import { resolveHome } from "../lib/home.js";
+import { apiErrorRawBody, boundErrorText } from "../lib/auth-resolve.js";
 
 export const REM_PAUSE_FLAG = resolve(resolveHome(), ".flair", "rem.paused");
 export const REM_NIGHTLY_LOG = resolve(resolveHome(), ".flair", "logs", "rem-nightly.jsonl");
@@ -507,20 +508,32 @@ function rowsFromRead(raw: unknown, label: string): any[] {
 
 /**
  * Best-effort extraction of a readable message out of a thrown API error.
- * `apiCall` implementations (see `api()` in src/cli.ts) throw
- * `Error(responseBodyText)` for non-2xx HTTP responses — /ReflectMemories's
- * 503 (no backend configured) and 502 (distillation_failed) bodies are JSON
- * `{ error: string, detail?: string }`. Unwraps that shape into a single
- * string so distinct failure modes read distinctly in the audit log instead
- * of as a raw JSON blob; falls back to the raw input for network errors or
- * any other shape.
+ * `api()` (src/cli.ts) throws an ApiHttpError for a non-2xx HTTP response
+ * (flair#2764). When that error was built from a non-empty response body
+ * (ApiHttpError.fromResponse), its unredacted text is parsed here
+ * (apiErrorRawBody); otherwise (the credential-less 403 and a refused redirect
+ * carry only a message, as does any other error) the message is parsed
+ * instead. /ReflectMemories's 503 (no backend configured) and 502
+ * (distillation_failed) bodies are JSON `{ error: string, detail?: string }`.
+ * A JSON object with a string `error` becomes one bounded line through
+ * boundErrorText, which redacts the credential values read from the request's
+ * Authorization header (credentialsInHeader) from the server's text within the
+ * scope stated on ApiHttpError, or withholds that text when the header's
+ * credential could not be read and the response text was non-empty, even when
+ * the text derived from it is empty (a prefix added when the line is written
+ * is outside the scope):
+ * `error: detail` when `detail` is a non-empty string and `error` alone
+ * otherwise, so distinct failure modes read distinctly in the audit log
+ * instead of as a raw JSON blob. Text that is not JSON, or JSON without a
+ * string `error`, falls back to the error's message.
  */
 function describeApiError(err: unknown): string {
   const message = typeof err === "string" ? err : (err as any)?.message ?? String(err);
   try {
-    const parsed = JSON.parse(message);
+    const parsed = JSON.parse(apiErrorRawBody(err) || message);
     if (parsed && typeof parsed === "object" && typeof parsed.error === "string") {
-      return parsed.detail ? `${parsed.error}: ${parsed.detail}` : parsed.error;
+      const detail = typeof parsed.detail === "string" ? parsed.detail : "";
+      return boundErrorText(err, detail ? `${parsed.error}: ${detail}` : parsed.error);
     }
   } catch {
     // Not a JSON error body — network error, plain string, etc.
@@ -529,7 +542,7 @@ function describeApiError(err: unknown): string {
 }
 
 function structuredApiError(err: unknown): string | null {
-  const message = typeof err === "string" ? err : (err as { message?: unknown })?.message;
+  const message = apiErrorRawBody(err) || (typeof err === "string" ? err : (err as { message?: unknown })?.message);
   if (typeof message !== "string") return null;
   try {
     const body = JSON.parse(message);
@@ -1008,7 +1021,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
             distillAborted = true;
             break;
           }
-          errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
+          errors.push(`distillation[${tag}]: ${describeApiError(err)}`);
         }
       }
       // `candidates` is defined (even if empty) whenever distillation was
@@ -1052,7 +1065,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           if (isRemAbortedFailure(err)) {
             pushSkipOnce("distillation: aborted by operator (rem_aborted)");
             distillAborted = true;
-          } else errors.push(`distillation: ${describeApiError(err?.message ?? err)}`);
+          } else errors.push(`distillation: ${describeApiError(err)}`);
         }
       }
     }
@@ -1123,7 +1136,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
             distillAborted = true;
             break;
           }
-          errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
+          errors.push(`distillation[${tag}]: ${describeApiError(err)}`);
         }
       }
       continuitySessions = distilled;
@@ -1162,7 +1175,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           autoPromoted = { promoted: promotedCount, skipped: skippedCount, incomplete: incompleteCount, unconfirmed: unconfirmedCount };
         }
       } catch (err: any) {
-        errors.push(`auto-promote: ${describeApiError(err?.message ?? err)}`);
+        errors.push(`auto-promote: ${describeApiError(err)}`);
       }
     }
   }
@@ -1233,7 +1246,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         errors.push("dedup: unexpected /MemoryDedupStats response shape");
       }
     } catch (err: any) {
-      errors.push(`dedup: ${describeApiError(err?.message ?? err)}`);
+      errors.push(`dedup: ${describeApiError(err)}`);
     }
   }
 
