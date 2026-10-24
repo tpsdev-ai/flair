@@ -24,8 +24,9 @@
  *   - feed-ingest-committed / feed-dedup-repair-committed /
  *     last-reflected-committed / reflect-sources-committed: the write's
  *     transaction has settled and the lock is still held; a settled commit does
- *     not by itself show the write, and the cases at these points assert the
- *     feed request's answer and the stored row they read afterwards;
+ *     not by itself show the write. Of these, this file arms only
+ *     feed-dedup-repair-committed, and its cases there assert the feed
+ *     request's answer and the stored row they read afterwards;
  *   - feed-ingest-verify: the feed write's transaction commit resolved and the
  *     lock is still held, before its read-back.
  *
