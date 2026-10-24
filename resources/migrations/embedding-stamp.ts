@@ -632,11 +632,10 @@ export function createEmbeddingStampMigration(
         const existing = await table.get(id);
         if (!existing) continue; // deleted since the search above — nothing to fix
         if (rowEmbeddingCurrent(existing, current)) {
-          // Current now although the scan above selected it: a write this
-          // migration's earlier regen committed while its response failed, or
-          // one another writer made. The row is at the target stamp, so count
-          // it — rowsDone must agree with the rows at that stamp (flair#2840).
-          touchedIds.push(id);
+          // Current now although the scan above selected it: another writer's
+          // change between the scan and this read. This run has not attempted
+          // the row, so it is not this migration's work and stays uncounted
+          // (flair#2840).
           continue;
         }
 
@@ -673,11 +672,12 @@ export function createEmbeddingStampMigration(
               // text (flair#2478). Who stored a matching vector is not known.
               if (attempt > 1 && rowEmbeddingCurrent(rowNow as Record<string, unknown>, current) &&
                   !holdsOwnStaleVector(rowNow as Record<string, unknown>, ownUnconfirmed)) {
-                // flair#2840: with an unconfirmed attempt of this loop, a current
-                // row is the state that attempt's write was meant to produce;
-                // count it so rowsDone agrees with the rows at the target stamp.
-                // Without one it is another writer's write and stays uncounted.
-                if (unconfirmed) ok = true;
+                // flair#2840: a current row counts as done only when this loop's
+                // own attempt on the row was unconfirmed and the row now holds
+                // the text that attempt embedded. The attempt outcome comes from
+                // the loop's own state, not from the row's value; a row another
+                // writer made current stays uncounted, as on main.
+                if (unconfirmed && ownUnconfirmed !== undefined && skillEmbedText(rowNow) === ownUnconfirmed.text) ok = true;
                 break;
               }
               const attemptResult = await regenContentSuffixRow(table, id, rowNow as Record<string, unknown>, current, contentSuffixRegen);

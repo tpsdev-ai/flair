@@ -152,7 +152,8 @@ function defaultMemoryLockStore(): unknown {
 
 export const VISIBILITY_BACKFILL_ID = "visibility-backfill";
 
-/** The plan's reason for a row that already carries a visibility. */
+/** The plan's reason for a row a retry of this run's own unconfirmed write
+ *  finds already carrying a visibility this backfill stamps. */
 const ALREADY_SET = "already-set";
 
 /**
@@ -229,6 +230,13 @@ export function createVisibilityBackfillMigration(
         // (flair#2478 slice 2). One attempt: a held id is left for the next
         // cycle, never written unserialized and never waited on unboundedly.
         const outcome = await withMemoryWriteLockOnce(getLockStore(), [id], async () => {
+          // flair#2840: a plan skip that names a visibility this backfill stamps
+          // counts as done only when it follows this run's own attempt on this
+          // row whose committed outcome was unconfirmed. The fact comes from the
+          // write-back's own result, never from the row's value: a visibility
+          // another writer set between the scan and the read leaves the row
+          // uncounted.
+          let ownUnconfirmed = false;
           const result = await writeBackCommittedRow(
             table as unknown as Parameters<WriteBackFn>[0],
             id,
@@ -238,11 +246,11 @@ export function createVisibilityBackfillMigration(
               // Under the per-id Memory lock shared with owner PUT/PATCH,
               // fill only an absent visibility.
               if (existing.visibility !== undefined && existing.visibility !== null) {
-                // A row already holding one of the values this backfill stamps is
-                // at the target state; a third-party value is not ours to count
-                // (or correct).
+                // A value this backfill stamps is the target state of this run's
+                // own unconfirmed attempt; a third-party value is not ours to
+                // count (or correct).
                 const present = existing.visibility === "private" || existing.visibility === "shared";
-                return present ? ({ skip: true, reason: ALREADY_SET } as const) : ({ skip: true } as const);
+                return present && ownUnconfirmed ? ({ skip: true, reason: ALREADY_SET } as const) : ({ skip: true } as const);
               }
 
               const derived = deriveVisibilityFromDurability(existing.durability);
@@ -263,7 +271,7 @@ export function createVisibilityBackfillMigration(
               // present and skips, so re-applying leaves the same committed row.
               return { idempotent: true, update: { visibility: derived } } as const;
             },
-            { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), confirmPoint: () => txnPausePoint("visibility-backfill-confirmed"), expectedRow: row },
+            { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), confirmPoint: () => txnPausePoint("visibility-backfill-confirmed"), expectedRow: row, onUnconfirmed: () => { ownUnconfirmed = true; } },
           );
           // Test-only: the write-back committed and the lock is still held.
           const committed = txnPausePoint("visibility-backfill-committed");

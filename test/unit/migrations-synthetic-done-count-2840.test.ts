@@ -3,11 +3,11 @@
  * done agree with the rows it stamped (flair#2840).
  *
  * The synthetic migration's plan returns a skip when it finds the row already
- * at its marker. That skip is the target state, not lost work: the path that
- * produces it is a write this call committed whose confirming read missed the
- * commit, so the retry's fresh plan sees the marker. The batch must count that
- * row, or a completed migration reports one fewer row done than it stamped
- * while `rowsRemaining` is 0.
+ * at its marker. When that skip follows this run's own write whose confirming
+ * read missed the commit, it is the target state, not lost work, and the batch
+ * must count the row, or a completed migration reports one fewer row done than
+ * it stamped while `rowsRemaining` is 0. A marker another writer set, with no
+ * attempt of this run's own on the row, stays uncounted.
  *
  * This uses the REAL write-back helper (not the unit-test simulation) against
  * a table whose committed read returns the pre-write row twice: the
@@ -103,5 +103,32 @@ describe("synthetic migration — rowsDone agrees with the rows it stamped (flai
     expect(result.processed).toBe(1);
     expect(result.touchedIds).toEqual(["synthetic-seed-0"]);
     expect(await migration.countPending()).toBe(0);
+  });
+
+  it("does not count a row another writer stamped between the scan and the read", async () => {
+    // The scan still sees the pending row; by the time the plan reads it,
+    // another writer has stamped the marker. This run never attempted the row.
+    const pending: Row = { id: "synthetic-seed-1", agentId: RESERVED_TEST_AGENT_ID, content: "x", source: "not-yet" };
+    const stamped: Row = { ...pending, source: SYNTHETIC_TARGET_MARKER };
+    const table = {
+      primaryStore: memoryLockDouble(),
+      async get(_id: string) {
+        return { ...stamped };
+      },
+      async put() {
+        throw new Error("the migration must not write a row another writer stamped");
+      },
+      async update() {
+        throw new Error("the migration must not write a row another writer stamped");
+      },
+      search() {
+        return (async function* () {
+          yield { ...pending };
+        })();
+      },
+    };
+    const migration = createSyntheticTestMigration(() => table as any, writeBackCommittedRow);
+
+    expect(await migration.run(50)).toEqual({ processed: 0, touchedIds: [] });
   });
 });

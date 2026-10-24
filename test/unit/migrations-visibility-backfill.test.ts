@@ -22,6 +22,7 @@ mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => nu
 const { createVisibilityBackfillMigration, deriveVisibilityFromDurability, VISIBILITY_BACKFILL_ID } = await import(
   "../../resources/migrations/visibility-backfill.ts"
 );
+const { writeBackCommittedRow } = await import("../../resources/write-back.ts");
 
 /** Every call site below injects the fake write-back (flair#2354); the real
  *  helper is exercised in the contention test. */
@@ -308,6 +309,17 @@ describe("visibility-backfill migration — NEVER overwrites an existing visibil
     expect(store.get("m1")!.visibility).toBe("office"); // unchanged — never "corrected" to a derived value
   });
 
+  it("does not count a row another writer set to 'private' between the scan and the read", async () => {
+    // The scan still sees the row pending; by the time the plan reads it,
+    // another writer has set a visibility this backfill stamps. This run never
+    // attempted the row, so the skip is not this migration's work.
+    const { table } = makeFakeMemoryTable([{ id: "m1", content: "a", durability: "standard" }]);
+    (table as any).get = async () => ({ id: "m1", content: "a", durability: "standard", visibility: "private" });
+    const m = makeMigration(() => table);
+
+    expect(await m.run(50)).toEqual({ processed: 0, touchedIds: [] });
+  });
+
   it("a mixed batch only touches the genuinely-pending rows, never the already-set ones", async () => {
     const { table, store } = makeFakeMemoryTable([
       { id: "m1", content: "a", durability: "standard" }, // pending -> private
@@ -423,3 +435,48 @@ describe("visibility-backfill migration — simulated write-back retry (flair#23
     expect(store.get("m1")?.agentId).toBe("replacement-owner");
     expect(store.get("m1")?.visibility).toBeUndefined();
   });
+
+describe("visibility-backfill — rowsDone agrees with the rows it stamped (flair#2840)", () => {
+  it("counts a row whose write committed but whose confirming read missed it", async () => {
+    // A table whose committed reads (the explicit empty context the real
+    // write-back uses) return the pre-write row twice after an update: the
+    // in-transaction confirmation and the post-commit verification. Both pass
+    // the in-transaction check (it compares against the row the transaction
+    // read); the second is the unconfirmed outcome that drives the retry.
+    const store = new Map<string, Row>([["v1", { id: "v1", content: "a", durability: "standard" }]]);
+    let staleRow: Row | null = null;
+    let staleReads = 0;
+    const table = {
+      async get(id: string, ctx?: unknown) {
+        const fresh = ctx !== null && typeof ctx === "object" && Object.keys(ctx as object).length === 0;
+        if (fresh && staleRow && staleReads > 0) {
+          staleReads--;
+          return { ...staleRow };
+        }
+        const row = store.get(id);
+        return row ? { ...row } : null;
+      },
+      async update(id: string, patch: Record<string, unknown>) {
+        staleRow = store.has(id) ? { ...store.get(id)! } : null;
+        staleReads = 2;
+        store.set(id, { ...(store.get(id) ?? { id }), ...patch } as Row);
+        return store.get(id);
+      },
+      search(): AsyncIterable<Row> {
+        return (async function* () {
+          for (const r of Array.from(store.values())) yield { ...r };
+        })();
+      },
+    };
+    const originalTransaction = (globalThis as any).transaction;
+    (globalThis as any).transaction = async (ctx: any, fn: (txn: any) => Promise<unknown>) => fn(ctx);
+    try {
+      const m = createVisibilityBackfillMigration(() => table as any, writeBackCommittedRow, makeLockStore);
+      const result = await m.run(50);
+      expect(store.get("v1")!.visibility).toBe("private");
+      expect(result).toEqual({ processed: 1, touchedIds: ["v1"] });
+    } finally {
+      (globalThis as any).transaction = originalTransaction;
+    }
+  });
+});

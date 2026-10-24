@@ -75,6 +75,8 @@ let writeCalls: { method: "put" | "update"; id: string; fields: string[] }[];
 let afterStage: (() => void) | null = null;
 /** Runs after the transaction commits, before the migration reads the row back. */
 let afterCommit: (() => void) | null = null;
+/** Arm the next committed re-read (an explicit empty context) to return a stale row once. */
+let staleVerifyReadOnce: ((row: Row) => Row | null) | null = null;
 
 function commitPatch(id: string, patch: Row): void {
   const merged = { ...(store.get(id) ?? {}), ...structuredClone(patch), id };
@@ -93,8 +95,13 @@ function matches(row: Row, cond: any): boolean {
 }
 
 const table = {
-  async get(id: string) {
+  async get(id: string, ctx?: any) {
     const row = store.get(id);
+    if (row && staleVerifyReadOnce && ctx !== null && typeof ctx === "object" && Object.keys(ctx).length === 0) {
+      const stale = staleVerifyReadOnce;
+      staleVerifyReadOnce = null;
+      return stale(structuredClone(row));
+    }
     return row ? structuredClone(row) : null;
   },
   async put(row: Row, ctx?: any) {
@@ -143,6 +150,7 @@ beforeEach(() => {
   embedImpl = async () => [0.5, 0.25, 0.125];
   afterStage = null;
   afterCommit = null;
+  staleVerifyReadOnce = null;
 });
 
 describe("flair#2307 — the content-suffix re-embed validates the vector and committed re-read", () => {
@@ -269,6 +277,43 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
     expect(result).toEqual({ processed: 1, touchedIds: [LEGACY_ID] });
     expect(store.get(LEGACY_ID)).toMatchObject({ content: "edited after the commit", embeddingModel: CURRENT });
     expect(store.get(LEGACY_ID)!.embeddedContentHash).toBe(hashEmbeddedText("a", "edited after the commit"));
+  });
+
+  it("counts a row its own unconfirmed attempt stamped once the retry reads it current", async () => {
+    // This attempt's committed re-read misses the commit once, so its outcome is
+    // unconfirmed while the store holds the write. The retry reads the committed
+    // row: current, and holding the text that attempt embedded.
+    afterCommit = () => {
+      afterCommit = null;
+      staleVerifyReadOnce = (row) => ({ ...row, ...STALE });
+    };
+    const result = await migration().run(10);
+    expect(result).toEqual({ processed: 1, touchedIds: [LEGACY_ID] });
+    expect(store.get(LEGACY_ID)).toMatchObject({ embedding: [0.5, 0.25, 0.125], embeddingModel: CURRENT });
+  });
+
+  it("does not count a row another writer made current between the scan and the read", async () => {
+    // The scan still yields the stale row; the read that follows finds another
+    // writer's current row. This run never attempted the row.
+    const originalGet = table.get.bind(table);
+    let reads = 0;
+    (table as any).get = async (id: string, ctx?: any) => {
+      if (reads++ === 0) {
+        store.set(id, {
+          ...store.get(id)!,
+          embedding: [0.9, 0.8, 0.7],
+          embeddingModel: CURRENT,
+          embeddedContentHash: hashEmbeddedText("a", "legacy body"),
+        });
+      }
+      return originalGet(id, ctx);
+    };
+    try {
+      expect(await migration().run(10)).toEqual({ processed: 0, touchedIds: [] });
+      expect(writeCalls).toEqual([]);
+    } finally {
+      (table as any).get = originalGet;
+    }
   });
 
   it("a row another writer made current after the commit is not counted", async () => {

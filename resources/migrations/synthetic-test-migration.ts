@@ -45,7 +45,8 @@ export const SYNTHETIC_TARGET_MARKER = `${SYNTHETIC_MIGRATION_ID}-done`;
 
 export const ENABLE_TEST_MIGRATIONS_ENV = "FLAIR_ENABLE_TEST_MIGRATIONS";
 
-/** The plan's reason for a row that already holds {@link SYNTHETIC_TARGET_MARKER}. */
+/** The plan's reason for a row a retry of this run's own unconfirmed write
+ *  finds already holding {@link SYNTHETIC_TARGET_MARKER}. */
 const ALREADY_STAMPED = "already-stamped";
 
 /**
@@ -118,12 +119,20 @@ export function createSyntheticTestMigration(
         // or a table with no lock writes nothing here and is reported; the row
         // stays pending for the next boot's scan.
         const locked = await withMemoryWriteLockOnce(table.primaryStore, [id], async () => {
+          // flair#2840: a plan skip that names the marker counts as done only
+          // when it follows this run's own attempt on this row whose committed
+          // outcome was unconfirmed. The fact comes from the write-back's own
+          // result, never from the row's value: a marker another writer set
+          // between the scan and the read leaves the row uncounted.
+          let ownUnconfirmed = false;
           const result = await writeBackCommittedRow(
             table as unknown as Parameters<WriteBackFn>[0],
             id,
             (existing: any) => {
               if (!existing || existing.agentId !== RESERVED_TEST_AGENT_ID) return { skip: true } as const;
-              if (existing.source === SYNTHETIC_TARGET_MARKER) return { skip: true, reason: ALREADY_STAMPED } as const; // already stamped — the target state, not lost work
+              if (existing.source === SYNTHETIC_TARGET_MARKER) {
+                return ownUnconfirmed ? { skip: true, reason: ALREADY_STAMPED } : { skip: true };
+              }
 
               // Only `source`: an incremental update, never a
               // full-row put of the row read above (flair#2470).
@@ -136,6 +145,7 @@ export function createSyntheticTestMigration(
               pauseAfterStage: () => txnPausePoint("synthetic-test-staged"),
               confirmPoint: () => txnPausePoint("synthetic-test-confirm"),
               expectedRow: row,
+              onUnconfirmed: () => { ownUnconfirmed = true; },
             },
           );
           // Test-only: the write-back committed and the lock is still held.
@@ -151,11 +161,8 @@ export function createSyntheticTestMigration(
           continue;
         }
         if ("skip" in locked.value) {
-          // A row already at the marker is stamped: count it, so rowsDone
-          // agrees with the rows the migration stamped (flair#2840). This is
-          // the row a retry finds after this call's own attempt committed but
-          // its confirming read missed, and it is also a marker an earlier
-          // boot set.
+          // Count only the skip this run's own unconfirmed attempt produced, so
+          // rowsDone agrees with the rows this run stamped (flair#2840).
           if (locked.value.reason === ALREADY_STAMPED) touchedIds.push(id);
         } else touchedIds.push(id);
       }
