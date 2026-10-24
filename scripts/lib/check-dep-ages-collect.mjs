@@ -42,8 +42,9 @@
  * the version bun.lock records, and the gate does not age-check that version
  * on account of the peer declaration (a stated limit).
  *
- * Trust boundary: the gate reads bun.lock as written and age-checks the
- * versions it records. The same CI job then runs `bun install
+ * Trust boundary: the gate reads bun.lock as written. For checked ranged
+ * declarations, the gate age-checks the versions selected from bun.lock. The
+ * same CI job then runs `bun install
  * --frozen-lockfile`, which with bun 1.3.10 refused a `workspaces` array, a
  * workspace entry with no `name`, a missing workspace entry and a wrong
  * workspace `name` (exit 1), and, for a lock recording a workspace's range at

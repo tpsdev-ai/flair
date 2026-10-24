@@ -99,7 +99,8 @@ export function classifyOverrides(overrides: unknown): OverrideRule[];
 /**
  * Collect external, exact-pinned dep pairs to age-check from a list of
  * package objects. Checks `dependencies`, `optionalDependencies` and
- * `overrides` (root and every workspace package.json), nested override rules
+ * `overrides` (the root package.json and each `packages/<name>/package.json`),
+ * nested override rules
  * included; refused override forms are not collected here.
  *
  * Exemptions: `@tpsdev-ai/*`, keep-current list, `workspace:`, `file:`/`link:`,
