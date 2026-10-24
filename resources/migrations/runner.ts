@@ -666,9 +666,11 @@ async function runOneMigration(
       await deps.sleep(deps.batchDelayMs);
     }
   } catch (err) {
-    // flair#2840: a batch that throws after recording rows carries those
-    // outcomes on the error, because there is no RunBatchResult to read. Merge
-    // them before the halt persists the record.
+    // flair#2840: a batch that throws from the synthetic write-back, the
+    // visibility backfill or embedding-stamp's `.content`-suffix retry read
+    // carries those outcomes on the error, because there is no RunBatchResult
+    // to read. Merge them before the halt persists the record; a throw from a
+    // path that does not wrap its batch carries nothing.
     if (err instanceof BatchOutcomeError) {
       for (const id of err.touchedIds) unconfirmed.delete(id);
       for (const id of err.unconfirmedIds) unconfirmed.add(id);

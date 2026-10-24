@@ -650,8 +650,10 @@ export function createEmbeddingStampMigration(
 
         let ok: boolean;
         // An attempt whose committed effect the post-commit verification read
-        // did not show (flair#2840). Such a row is never counted as done; when
-        // no later attempt verifies it, it is reported by id instead.
+        // did not show (flair#2840). Such a row is never counted as done. When
+        // this loop's batch returns, or its retry read throws (the
+        // BatchOutcomeError below), the row is reported by id; a throw elsewhere
+        // in the batch that does not wrap its outcome loses the id.
         let unconfirmed = false;
         if (endsWithContentSelectorSuffix(id)) {
           // flair#2656: the commit is not proof the update landed. A newer write

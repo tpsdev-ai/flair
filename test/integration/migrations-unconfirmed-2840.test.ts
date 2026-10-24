@@ -244,7 +244,10 @@ describe("flair#2840 — an unconfirmed write is reported by id, never counted a
     expect(mig?.state, JSON.stringify(mig)).toBe("halted");
     expect(String(mig.reason)).toContain("hash envelope mismatch");
 
-    // The three rows the confirmed write did not cover reached the target …
+    // The confirmed row and the two rows outside its write all reached the
+    // target: ROW_CONFIRMED through its confirmed write, ROW_MISS through the
+    // migration's own unconfirmed write, ROW_COMPETING through the competing
+    // writer.
     for (const id of [ROW_CONFIRMED, ROW_MISS, ROW_COMPETING]) {
       expect((await readRow(id)).source).toBe(SYNTHETIC_TARGET_MARKER);
     }
@@ -252,7 +255,7 @@ describe("flair#2840 — an unconfirmed write is reported by id, never counted a
     expect((await readRow(ROW_AWAY)).source).toBe("not-yet");
     // … the confirmed write alone is counted …
     expect(mig.rowsDone).toBe(1);
-    // … and the reported relation accounts for every seeded row.
+    // … and the reported relation accounts for every seeded synthetic row.
     expect(mig.rowsDone + mig.rowsUnconfirmed).toBe(4);
     expect(new Set(mig.unconfirmedIds)).toEqual(new Set([ROW_MISS, ROW_COMPETING, ROW_AWAY]));
     expect(mig.rowsRemaining).toBe(0);
@@ -290,8 +293,9 @@ describe("flair#2840 — an unconfirmed write is reported by id, never counted a
   }, 150_000);
 
   it("the record survives a no-pending cycle and a restart, and an id clears once its row is at the target", async () => {
-    // (a) The boot's follow-up cycle finds nothing pending. The two ids the
-    // competing writer brought to the target are cleared; the away row, still
+    // (a) The boot's follow-up cycle finds nothing pending. The two ids that
+    // reached the target are cleared (ROW_MISS through the migration's own
+    // write, ROW_COMPETING through the competing writer); the away row, still
     // short of it, stays recorded with the halted status.
     const statePath = join(dataDir, ".migrations", "state.json");
     const deadline = Date.now() + 90_000;

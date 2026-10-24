@@ -43,11 +43,12 @@ export interface MigrationProgress {
   /** Present when state is "halted" or "failed" — the exact, actionable reason. */
   reason?: string;
   /**
-   * Rows recorded as unconfirmed that a later cycle has not cleared
+   * Rows recorded as unconfirmed that a later batch or read has not cleared
    * (flair#2840): an attempt whose committed effect its post-commit read did
-   * not show, and no later read has since found the row at the target or gone.
-   * NEVER included in `rowsDone`. `unconfirmedIds` carries at most
-   * {@link UNCONFIRMED_IDS_LIMIT} of them; this count is not capped.
+   * not show, and no later batch has verified the row's write, nor any later
+   * read found the row at the target or gone. NEVER included in `rowsDone`.
+   * `unconfirmedIds` carries at most {@link UNCONFIRMED_IDS_LIMIT} of them;
+   * this count is not capped.
    */
   rowsUnconfirmed?: number;
   /** Up to {@link UNCONFIRMED_IDS_LIMIT} unconfirmed row ids, in the order they
@@ -75,7 +76,8 @@ export interface RunBatchResult {
    * IDs this batch attempted whose committed effect the batch could not verify
    * (flair#2840). Disjoint from `touchedIds`: a row whose write a later attempt
    * in the same batch verified belongs in `touchedIds`, not here. The runner
-   * unions these across batches into the progress record.
+   * unions these across batches, removing the ids a later batch verifies, into
+   * the progress record.
    */
   unconfirmedIds?: string[];
   /**
@@ -99,10 +101,13 @@ export interface RunBatchResult {
 }
 
 /**
- * Thrown by a migration's run() when the failure that ends a batch escapes it
- * (flair#2840). It carries that batch's outcomes so far — the rows it touched
- * and the rows it recorded as unconfirmed — so the runner can merge them into
- * the unconfirmed record even though no {@link RunBatchResult} is returned.
+ * Thrown by a migration's run() on the paths that wrap the failure ending a
+ * batch (flair#2840): the synthetic write-back, the visibility backfill and
+ * embedding-stamp's `.content`-suffix retry read. It carries that batch's
+ * outcomes so far — the rows it touched and the rows it recorded as
+ * unconfirmed — so the runner can merge them into the unconfirmed record even
+ * though no {@link RunBatchResult} is returned. A throw from a path that does
+ * not wrap its batch carries no outcomes.
  */
 export class BatchOutcomeError extends Error {
   readonly touchedIds: readonly string[];

@@ -72,10 +72,11 @@ export function ensureSecureDir(dir: string): void {
  *
  * The write is ATOMIC: the contents go to a fresh temporary file beside the
  * target (same directory, so the rename stays on one filesystem), created at
- * 0600, which is then renamed over the target. A concurrent reader therefore
- * observes either the old file or the new file — never a truncated or
- * half-written one (a plain writeFileSync truncates first and fills second,
- * so a reader can land in between and see an empty or partial file).
+ * 0600, which is then renamed over the target. Once the target exists, a
+ * concurrent reader observes either the old file or the new file — never a
+ * truncated or half-written one (a plain writeFileSync truncates first and
+ * fills second, so a reader can land in between and see an empty or partial
+ * file); before the first rename there is no file to read.
  *
  * What this does NOT solve: two concurrent WRITERS still race on their
  * read-modify-write cycles (last rename wins, the other writer's entry is
