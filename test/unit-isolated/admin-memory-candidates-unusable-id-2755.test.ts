@@ -3,8 +3,9 @@
  * a listing that would leave out a row without a usable id.
  *
  * Drives the REAL `AdminMemoryCandidates.get()` against a mocked `harper` whose
- * MemoryCandidate search yields scripted rows, so id shapes Harper's primary
- * key refuses (a number, a missing id) reach the handler too. The real-Harper
+ * MemoryCandidate search yields scripted rows, so a numeric id (which Harper's
+ * primary key refuses) and a missing id (for which Harper generates one) reach
+ * the handler too. The real-Harper
  * cases, an empty string and an array id, are in
  * test/integration/admin-memory-candidates-2755.test.ts.
  *
