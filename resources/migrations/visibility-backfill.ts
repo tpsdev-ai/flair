@@ -234,8 +234,8 @@ export function createVisibilityBackfillMigration(
           // counts as done only when it follows this run's own attempt on this
           // row whose committed outcome was unconfirmed. The fact comes from the
           // write-back's own result, never from the row's value: a visibility
-          // another writer set between the scan and the read leaves the row
-          // uncounted.
+          // another writer set with no unconfirmed attempt of this run on the row
+          // leaves it uncounted.
           let ownUnconfirmed = false;
           const result = await writeBackCommittedRow(
             table as unknown as Parameters<WriteBackFn>[0],
