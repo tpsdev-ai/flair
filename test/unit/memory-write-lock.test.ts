@@ -21,6 +21,7 @@ import {
   memoryLockHoldWatchdogMs,
   memoryLockedProviderTimeoutMs,
   memoryProviderTimeoutResponse,
+  memoryWriteLockTokenIds,
   memoryWriteOutcomeUnknown,
   resetMemoryWriteOutcomeUnknownForTest,
   withMemoryWriteLock,
@@ -98,15 +99,13 @@ describe("withMemoryWriteLock (flair#2478 slice 1)", () => {
   test("two ids acquired in one call: sorted, deduplicated, and both handed to the callback", async () => {
     const store = fakeStore();
     let seen: readonly string[] = [];
-    let keys: readonly (readonly string[])[] = [];
-    const run = await withMemoryWriteLock(store, ["b", "a", "b"], async (locked) => {
-      seen = locked.ids;
-      keys = locked.keys;
+    const run = await withMemoryWriteLock(store, ["b", "a", "b"], async (held) => {
+      seen = memoryWriteLockTokenIds(held);
       return null;
     });
     expect(run.kind).toBe("done");
     expect(seen).toEqual(["a", "b"]);
-    expect(keys).toEqual([memoryLockKey("a"), memoryLockKey("b")]);
+    expect(store.events.filter((e) => e.startsWith("try:"))).toEqual([`try:${KEY_A}`, `try:${KEY_B}`]);
     // "b" was acquired once, not twice.
     expect(store.events.filter((e) => e === `try:${KEY_B}`).length).toBe(1);
     expect(store.held.size).toBe(0);
