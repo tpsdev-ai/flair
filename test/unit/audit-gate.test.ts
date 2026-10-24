@@ -23,7 +23,7 @@ const ALLOWLIST = JSON.parse(
 );
 const TEST_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8");
 /**
- * The six consumer-install inputs: the flag, the allowlist source, the package
+ * The seven consumer-install inputs: the flag, the allowlist source, the package
  * the flag's prefix must hold, and the workspace directory the job packs it
  * from. Listed here, not imported from the gate, so dropping an input from the
  * gate fails a case below.
@@ -35,6 +35,7 @@ const CONSUMER_INPUTS = [
   { flag: "--openclaw-npm-install-prefix", source: "npm-install-openclaw", pkg: "@tpsdev-ai/openclaw-flair", dir: "packages/openclaw-flair" },
   { flag: "--pi-npm-install-prefix", source: "npm-install-pi", pkg: "@tpsdev-ai/pi-flair", dir: "packages/pi-flair" },
   { flag: "--n8n-npm-install-prefix", source: "npm-install-n8n", pkg: "@tpsdev-ai/n8n-nodes-flair", dir: "packages/n8n-nodes-flair" },
+  { flag: "--bench-npm-install-prefix", source: "npm-install-bench", pkg: "@tpsdev-ai/flair-bench", dir: "packages/flair-bench" },
 ];
 /** The version every fixture workspace manifest and install record carries. */
 const FIXTURE_VERSION = "1.0.0";
@@ -183,9 +184,9 @@ describe("the gate refuses to run bun-only", () => {
   }, 6_000);
 });
 
-// ─── The four added consumer-install inputs (flair#2757) ─────────────────────
+// ─── The added consumer-install inputs (flair#2757, flair#2817) ──────────────
 
-describe("the four added consumer-install inputs, stand-in tools (flair#2757)", () => {
+describe("the added consumer-install inputs, stand-in tools (flair#2757, flair#2817)", () => {
   const INPUTS = CONSUMER_INPUTS.slice(2);
   const GHSA = "GHSA-0000-0000-2757";
   const report = (nodes = ["node_modules/hono"]) => ({
