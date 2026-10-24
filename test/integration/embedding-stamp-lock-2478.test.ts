@@ -105,7 +105,7 @@ function suffixWrite(verb: "PUT" | "PATCH", id: string): Promise<Response> {
 }
 
 /** Every run result the migration logged (test-only instrumentation). */
-function runs(): { processed: number; touchedIds: string[] }[] {
+function runs(): { processed: number; touchedIds: string[]; unconfirmedIds?: string[] }[] {
   const path = join(pauseDir, "embedding-stamp-runs.jsonl");
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
@@ -156,7 +156,7 @@ async function waitForHalt(reason: string, timeoutMs: number): Promise<boolean> 
   }
   return false;
 }
-async function waitForRun(predicate: (run: { processed: number; touchedIds: string[] }) => boolean, timeoutMs = 60_000): Promise<boolean> {
+async function waitForRun(predicate: (run: { processed: number; touchedIds: string[]; unconfirmedIds?: string[] }) => boolean, timeoutMs = 60_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (runs().some(predicate)) return true;

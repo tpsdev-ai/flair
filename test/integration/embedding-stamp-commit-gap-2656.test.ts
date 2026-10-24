@@ -71,7 +71,7 @@ async function readWhenPresent(path: string, timeoutMs: number): Promise<string 
 }
 
 /** Every run result the migration logged (test-only instrumentation). */
-function migrationRuns(): { processed: number; touchedIds: string[] }[] {
+function migrationRuns(): { processed: number; touchedIds: string[]; unconfirmedIds?: string[] }[] {
   try {
     return readFileSync(join(pauseDir, "embedding-stamp-runs.jsonl"), "utf8")
       .split("\n")
