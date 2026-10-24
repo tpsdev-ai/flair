@@ -391,7 +391,7 @@ Reads of the `/Admin*` routes below are admin-only: **Admin Basic**, or a `TPS-E
 | `/AdminConnectors` | OAuth clients and sessions |
 | `/AdminIdp` | IdP configuration |
 | `/AdminMemory` | Browse / search memory as operator |
-| `/AdminMemoryCandidates/{agentId}` | JSON: one agent's MemoryCandidate ids (`limit`, default 200, max 500), used by `flair rem restore` |
+| `/AdminMemoryCandidates/{agentId}` | JSON: one agent's MemoryCandidate ids in id order (`limit`, default 200, max 500; `after=<id>` for the ids after that one), used by `flair rem restore` |
 | `/AdminInstance` | Federation status, peers, instance |
 
 ---

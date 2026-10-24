@@ -17,10 +17,13 @@
  * exists, and must end with exactly the snapshot's rows. A candidate search
  * that returned nothing would leave the candidate in place and fail the Soul
  * write. That restore uses only --admin-pass-file; a second one, from a newly
- * drifted state, uses only --admin-pass.
+ * drifted state, uses only --admin-pass. A third holds one candidate more than
+ * restore's page size (CANDIDATE_LIST_LIMIT, the route's maximum `limit`), so
+ * the listing takes two pages; the candidate on the second page carries the
+ * snapshot Soul's value as its claim.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +31,7 @@ import { pathToFileURL } from "node:url";
 import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { nodeBin } from "../helpers/node-runtime";
 import { createSnapshot } from "../../src/rem/snapshot.ts";
+import { CANDIDATE_LIST_LIMIT } from "../../src/rem/restore.ts";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 /**
@@ -238,6 +242,35 @@ describe("flair#2708 — rem restore on a real instance", () => {
     expect(result.code, restoreFailure(result)).toBe(0);
     expect(result.stdout).toContain("Status:       completed");
     expect(result.stdout).toMatch(/Deleted: +\d+ memories, 1 souls, \d+ candidates/);
+    expect(await agentRows(a, "Memory", ["id", "content"])).toEqual([{ id: MEMORY_ID, content: "restored memory" }]);
+    expect(await agentRows(a, "Soul", ["id", "key", "value"])).toEqual([{ id: SOUL_ID, key: "identity", value: SNAPSHOT_SOUL_VALUE }]);
+  }, 120_000);
+
+  test("lists every candidate of an agent holding more than one page and restores completely", async () => {
+    const ids = Array.from({ length: CANDIDATE_LIST_LIMIT + 1 }, (_, i) => `c-page-${String(i).padStart(4, "0")}`);
+    const last = ids[ids.length - 1];
+    await ops(a, {
+      operation: "insert",
+      table: "MemoryCandidate",
+      records: ids.map((id) => candidateRow(id, id === last ? SNAPSHOT_SOUL_VALUE : `filler candidate ${id}`)),
+    });
+    await ops(a, { operation: "upsert", table: "Soul", records: [{ ...snapshotSoul, value: "drifted for paging" }] });
+    expect(await agentRows(a, "MemoryCandidate", ["id"])).toEqual(ids.map((id) => ({ id })));
+    const fetchLog = join(home, "paged-fetch-log.jsonl");
+
+    const result = await runRestore(
+      { FLAIR_URL: a.httpURL, FLAIR_OPS_PORT: new URL(a.opsURL).port },
+      ["--admin-pass", a.admin.password],
+      snapshotStem,
+      fetchLog,
+    );
+
+    expect(result.code, restoreFailure(result)).toBe(0);
+    expect(result.stdout).toContain("Status:       completed");
+    expect(result.stdout).toMatch(new RegExp(`Deleted: +\\d+ memories, 1 souls, ${ids.length} candidates`));
+    const requests = readFileSync(fetchLog, "utf-8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(requests.filter((r) => r.method === "GET" && r.path === `/AdminMemoryCandidates/${AGENT_ID}`)).toHaveLength(2);
+    expect(await agentRows(a, "MemoryCandidate", ["id"])).toEqual([]);
     expect(await agentRows(a, "Memory", ["id", "content"])).toEqual([{ id: MEMORY_ID, content: "restored memory" }]);
     expect(await agentRows(a, "Soul", ["id", "key", "value"])).toEqual([{ id: SOUL_ID, key: "identity", value: SNAPSHOT_SOUL_VALUE }]);
   }, 120_000);

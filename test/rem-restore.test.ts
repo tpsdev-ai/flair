@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach, jest } from "bun:test";
 import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { applySnapshot, type ApiCall } from "../src/rem/restore.ts";
+import { applySnapshot, CANDIDATE_LIST_LIMIT, CANDIDATE_LIST_MAX_PAGES, type ApiCall } from "../src/rem/restore.ts";
 import { ApiHttpError } from "../src/lib/auth-resolve.ts";
 import { buildOpsSearch } from "../src/commands/rem.ts";
 import { createSnapshot } from "../src/rem/snapshot.ts";
@@ -179,7 +179,7 @@ describe("applySnapshot — dry-run", () => {
     });
     expect(r.status).toBe("failed");
     expect(r.errors).toEqual([
-      "fetch-current: GET /AdminMemoryCandidates returned an unexpected response shape: candidates is not an array. No target rows were deleted or written.",
+      "fetch-current: the target's MemoryCandidate listing for agent test-agent could not be read completely: GET /AdminMemoryCandidates returned an unexpected response shape: candidates is not an array. No target rows were deleted or written.",
     ]);
   });
 
@@ -429,7 +429,9 @@ describe("applySnapshot — real restore", () => {
     const writes = calls.filter((c) => ["DELETE", "PUT", "POST", "PATCH"].includes(c.method));
     expect(writes).toEqual([]);
     expect(r.deleted).toEqual({ memories: 0, souls: 0, candidates: 0 });
-    expect(r.errors).toEqual(["fetch-candidates: route down"]);
+    expect(r.errors).toEqual([
+      "fetch-candidates: the target's MemoryCandidate listing for agent test-agent could not be read completely: GET /AdminMemoryCandidates failed: route down. No target rows were deleted or written.",
+    ]);
   });
 
   it("lists through the target's apiCall, never an injected operations search", async () => {
@@ -553,7 +555,6 @@ describe("applySnapshot — real restore", () => {
     ["a non-boolean hasMore", { candidates: [{ id: "cand-1" }], hasMore: "false" }, "unexpected response shape: hasMore is missing or not a boolean"],
     ["an entry without an id", { candidates: [{ id: "cand-1" }, {}], hasMore: false }, "unexpected response shape: candidates[1].id is not a non-empty string"],
     ["a non-string id", { candidates: [{ id: 7 }], hasMore: false }, "unexpected response shape: candidates[0].id is not a non-empty string"],
-    ["hasMore true (the route has no paging)", { candidates: [{ id: "cand-1" }], hasMore: true }, "reported hasMore: true for agent test-agent at limit 500"],
   ];
   for (const [name, body, message] of malformedListings) {
     it(`refuses a candidate listing with ${name} before any delete or write`, async () => {
@@ -585,6 +586,103 @@ describe("applySnapshot — real restore", () => {
       expect(r.deleted).toEqual({ memories: 0, souls: 0, candidates: 0 });
     });
   }
+});
+
+describe("applySnapshot — paged candidate listing", () => {
+  /** A listing route over `ids` in id order that pages by `limit` and `after`, as the real route does. */
+  function pagedListing(ids: string[]) {
+    const sorted = [...ids].sort();
+    return (path: string) => {
+      const url = new URL(path, "http://target.test");
+      const limit = Number(url.searchParams.get("limit"));
+      const after = url.searchParams.get("after");
+      const rest = sorted.filter((id) => after === null || id > after);
+      return { candidates: rest.slice(0, limit).map((id) => ({ id })), hasMore: rest.length > limit };
+    };
+  }
+
+  async function restoreWith(listing: (path: string) => unknown) {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = recordingApi({
+      "GET:/Memory": () => [{ id: "mem-1", agentId: "test-agent" }],
+      "GET:/Soul": () => [{ id: "soul-1", agentId: "test-agent" }],
+      "GET:/AdminMemoryCandidates": listing,
+    });
+    const soul = recordingApi();
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      soulApiCall: soul.api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+      verifyPostRestore: false,
+    });
+    const listings = calls.filter((c) => c.method === "GET" && c.path.startsWith("/AdminMemoryCandidates/"));
+    const writes = [...calls, ...soul.calls].filter((c) => ["DELETE", "PUT", "POST", "PATCH"].includes(c.method));
+    return { r, listings, writes };
+  }
+
+  it("requests pages with after set to the last id of the page before, and deletes every listed candidate", async () => {
+    const ids = Array.from({ length: CANDIDATE_LIST_LIMIT * 2 + 1 }, (_, i) => `cand-${String(i).padStart(4, "0")}`);
+    const { r, listings, writes } = await restoreWith(pagedListing(ids));
+
+    expect(r.errors).toEqual([]);
+    expect(r.status).toBe("completed");
+    expect(listings.map((c) => c.path)).toEqual([
+      `/AdminMemoryCandidates/test-agent?limit=${CANDIDATE_LIST_LIMIT}`,
+      `/AdminMemoryCandidates/test-agent?limit=${CANDIDATE_LIST_LIMIT}&after=${ids[CANDIDATE_LIST_LIMIT - 1]}`,
+      `/AdminMemoryCandidates/test-agent?limit=${CANDIDATE_LIST_LIMIT}&after=${ids[CANDIDATE_LIST_LIMIT * 2 - 1]}`,
+    ]);
+    expect(r.deleted.candidates).toBe(ids.length);
+    expect(writes.filter((c) => c.path.startsWith("/MemoryCandidate/")).map((c) => c.path)).toEqual(ids.map((id) => `/MemoryCandidate/${id}`));
+  });
+
+  it("refuses a hasMore: true page with no candidates (candidate_cursor_not_advancing) before any delete or write", async () => {
+    let page = 0;
+    const { r, listings, writes } = await restoreWith(async () => {
+      await new Promise((resolve) => setImmediate(resolve));
+      page++;
+      return page === 1 ? { candidates: [{ id: "cand-1" }], hasMore: true } : { candidates: [], hasMore: true };
+    });
+
+    expect(r.status).toBe("failed");
+    expect(r.errors).toEqual([
+      "fetch-candidates: the target's MemoryCandidate listing for agent test-agent could not be read completely: page 2 of GET /AdminMemoryCandidates answered hasMore: true with no candidates, so the cursor cannot move past cand-1 (candidate_cursor_not_advancing). No target rows were deleted or written.",
+    ]);
+    expect(listings).toHaveLength(2);
+    expect(writes).toEqual([]);
+    expect(r.deleted).toEqual({ memories: 0, souls: 0, candidates: 0 });
+  }, 20_000);
+
+  it("refuses a page that lists an id again (candidate_id_repeated) before any delete or write", async () => {
+    const { r, listings, writes } = await restoreWith(() => ({ candidates: [{ id: "cand-1" }, { id: "cand-2" }], hasMore: true }));
+
+    expect(r.status).toBe("failed");
+    expect(r.errors).toEqual([
+      "fetch-candidates: the target's MemoryCandidate listing for agent test-agent could not be read completely: GET /AdminMemoryCandidates listed candidate id cand-1 twice (candidate_id_repeated). No target rows were deleted or written.",
+    ]);
+    expect(listings).toHaveLength(2);
+    expect(listings[1].path).toBe(`/AdminMemoryCandidates/test-agent?limit=${CANDIDATE_LIST_LIMIT}&after=cand-2`);
+    expect(writes).toEqual([]);
+  }, 20_000);
+
+  it("stops after CANDIDATE_LIST_MAX_PAGES pages that each answer hasMore: true (candidate_listing_page_limit) before any delete or write", async () => {
+    let page = 0;
+    const { r, listings, writes } = await restoreWith(async () => {
+      await new Promise((resolve) => setImmediate(resolve));
+      page++;
+      return { candidates: [{ id: `cand-${String(page).padStart(6, "0")}` }], hasMore: true };
+    });
+
+    expect(r.status).toBe("failed");
+    expect(r.errors).toEqual([
+      `fetch-candidates: the target's MemoryCandidate listing for agent test-agent could not be read completely: GET /AdminMemoryCandidates still answered hasMore: true after ${CANDIDATE_LIST_MAX_PAGES} pages of ${CANDIDATE_LIST_LIMIT}, the most restore requests (candidate_listing_page_limit). No target rows were deleted or written.`,
+    ]);
+    expect(listings).toHaveLength(CANDIDATE_LIST_MAX_PAGES);
+    expect(writes).toEqual([]);
+  }, 20_000);
 });
 
 describe("applySnapshot — post-restore verification (detects silent write drift)", () => {

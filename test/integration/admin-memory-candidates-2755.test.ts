@@ -5,7 +5,8 @@
  * The route is `GET /AdminMemoryCandidates/{agentId}`. It returns the named
  * agent's candidate ids, refuses a request with no Authorization header (the
  * `/Admin*` path gate's 401) and a verified non-admin agent (AccessViolation
- * 403), honours its `limit`, and never returns another agent's rows.
+ * 403), honours its `limit`, pages in id order with `after`, and never returns
+ * another agent's rows.
  *
  * The restore test starts two instances that hold the same `flair.Instance`
  * row and different MemoryCandidate rows. The restore is aimed at one, with
@@ -190,6 +191,27 @@ describe("flair#2755 — admin-only candidate listing", () => {
     expect(page.candidates).toHaveLength(2);
     expect(page.hasMore).toBe(true);
     expect(page.candidates.every((c: any) => c.id.startsWith("c-a-"))).toBe(true);
+  });
+
+  test("pages one agent's ids in id order with after, each id exactly once, and refuses a malformed after with 400", async () => {
+    const pagedAgent = "agent-paged";
+    // Inserted out of id order, so the order the pages return is the route's.
+    for (const id of ["p-3", "p-1", "p-5", "p-2", "p-4"]) await seedCandidate(adminHarper, id, pagedAgent, `paged ${id}`);
+    const page = async (query: string) => {
+      const res = await fetch(`${adminHarper.httpURL}${path(pagedAgent, query)}`, { headers: { Authorization: adminAuth(adminHarper) } });
+      expect(res.status).toBe(200);
+      return await res.json() as any;
+    };
+
+    expect(await page("?limit=2")).toEqual({ candidates: [{ id: "p-1" }, { id: "p-2" }], hasMore: true });
+    expect(await page("?limit=2&after=p-2")).toEqual({ candidates: [{ id: "p-3" }, { id: "p-4" }], hasMore: true });
+    expect(await page("?limit=2&after=p-4")).toEqual({ candidates: [{ id: "p-5" }], hasMore: false });
+
+    for (const query of ["?limit=2&after=", "?limit=2&after=p-1&after=p-2"]) {
+      const res = await fetch(`${adminHarper.httpURL}${path(pagedAgent, query)}`, { headers: { Authorization: adminAuth(adminHarper) } });
+      expect(res.status).toBe(400);
+      expect((await res.json() as any).error).toBe("invalid_after");
+    }
   });
 
   test("refuses a request with no Authorization header with the admin path gate's 401", async () => {

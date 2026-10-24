@@ -11,7 +11,8 @@
  * The operations port answers `get_configuration` with the process's own two
  * ports and `search_by_conditions` on MemoryCandidate from the seeded rows.
  * The HTTP port serves GET/PUT/DELETE on Memory, Soul and MemoryCandidate, the
- * admin-only `/AdminMemoryCandidates/{agentId}` listing, or answers an
+ * admin-only `/AdminMemoryCandidates/{agentId}` listing (in id order, after
+ * the `after` id when one is given), or answers an
  * authorized DELETE, and an authorized PUT with a JSON body, with a 307 when
  * `redirectWritesTo` is seeded.
  *
@@ -155,7 +156,10 @@ async function httpFetch(req) {
     const agent = decodeURIComponent(rawId ?? "");
     const requested = Number(url.searchParams.get("limit") ?? 200);
     const limit = Number.isInteger(requested) && requested > 0 ? Math.min(requested, 500) : 200;
-    const matching = [...tables.MemoryCandidate.values()].filter((r) => r.agentId === agent);
+    const after = url.searchParams.get("after");
+    const matching = [...tables.MemoryCandidate.values()]
+      .filter((r) => r.agentId === agent && (after === null || r.id > after))
+      .sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
     const page = matching.slice(0, limit);
     return Response.json({ candidates: page.map((r) => ({ id: r.id })), hasMore: matching.length > page.length });
   }

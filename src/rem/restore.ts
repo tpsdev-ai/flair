@@ -64,6 +64,9 @@ export const CANDIDATE_LIST_MIN_SERVER_VERSION = "0.63.0";
 /** The page size restore asks the admin-only candidate route for. */
 export const CANDIDATE_LIST_LIMIT = 500;
 
+/** The most candidate-listing pages one restore requests before it refuses. */
+export const CANDIDATE_LIST_MAX_PAGES = 2_000;
+
 export interface RestoreOpts {
   agentId: string;
   snapshotPath: string;
@@ -159,42 +162,74 @@ function isCandidateRoute404(err: unknown): boolean {
   return err instanceof ApiHttpError && err.status === 404;
 }
 
+/** The refusal for a candidate listing restore could not read completely. */
+function incompleteListing(agentId: string, state: string, remedy = ""): Error {
+  return new Error(
+    `the target's MemoryCandidate listing for agent ${agentId} could not be read completely: ${state}. `
+      + `No target rows were deleted or written.${remedy ? ` ${remedy}` : ""}`,
+  );
+}
+
 /**
  * One agent's leftover candidates, read through the `apiCall` restore uses
  * for its Memory reads, deletes and writes, its Soul reads and its
  * MemoryCandidate deletes. Soul deletes and writes use `soulApiCall` when one
  * is given; the CLI binds both calls to the same target. Each candidate object
- * carries only an id; the reply also carries `hasMore`.
+ * carries only an id; each reply also carries `hasMore`.
+ *
+ * Pages through the route with `after` set to the last id of the page before,
+ * until a page answers `hasMore: false`, and returns only that complete
+ * listing. A `hasMore: true` page with no candidates (the cursor cannot move),
+ * an id listed twice, or more than {@link CANDIDATE_LIST_MAX_PAGES} pages is
+ * refused.
  */
 async function listAgentCandidates(apiCall: ApiCall, agentId: string): Promise<Array<{ id: string }>> {
-  let body: any;
-  try {
-    body = await apiCall(
-      "GET",
-      `/AdminMemoryCandidates/${encodeURIComponent(agentId)}?limit=${CANDIDATE_LIST_LIMIT}`,
-    );
-  } catch (err) {
-    // Only this GET's 404 gets the candidate-route 404 guidance.
-    if (isCandidateRoute404(err)) throw new Error(candidateRoute404Guidance(err as ApiHttpError));
-    if (err instanceof ApiHttpError && apiErrorCode(err) === "candidate_id_unusable") {
-      throw new Error(
-        `the target's MemoryCandidate listing for agent ${agentId} could not be read completely: GET /AdminMemoryCandidates answered candidate_id_unusable (a row has no usable id). `
-          + "No target rows were deleted or written. Remove or repair that agent's MemoryCandidate row without a usable id on the target, then retry.",
+  const listed: Array<{ id: string }> = [];
+  const seen = new Set<string>();
+  let after: string | undefined;
+  for (let page = 1; page <= CANDIDATE_LIST_MAX_PAGES; page++) {
+    const query = `?limit=${CANDIDATE_LIST_LIMIT}${after === undefined ? "" : `&after=${encodeURIComponent(after)}`}`;
+    let body: any;
+    try {
+      body = await apiCall("GET", `/AdminMemoryCandidates/${encodeURIComponent(agentId)}${query}`);
+    } catch (err) {
+      // Only this GET's 404 gets the candidate-route 404 guidance.
+      if (isCandidateRoute404(err)) throw new Error(candidateRoute404Guidance(err as ApiHttpError));
+      if (err instanceof ApiHttpError && apiErrorCode(err) === "candidate_id_unusable") {
+        throw incompleteListing(
+          agentId,
+          "GET /AdminMemoryCandidates answered candidate_id_unusable (a row has no usable id)",
+          "Remove or repair that agent's MemoryCandidate row without a usable id on the target, then retry.",
+        );
+      }
+      throw incompleteListing(agentId, `GET /AdminMemoryCandidates failed: ${(err as any)?.message ?? String(err)}`);
+    }
+    const defect = candidateListDefect(body);
+    if (defect) {
+      throw incompleteListing(agentId, `GET /AdminMemoryCandidates returned an unexpected response shape: ${defect}`);
+    }
+    for (const entry of body.candidates as Array<{ id: string }>) {
+      if (seen.has(entry.id)) {
+        throw incompleteListing(agentId, `GET /AdminMemoryCandidates listed candidate id ${entry.id} twice (candidate_id_repeated)`);
+      }
+      seen.add(entry.id);
+      listed.push({ id: entry.id });
+    }
+    if (body.hasMore === false) return listed;
+    // A page that repeats the cursor's own id is refused above as a repeated id.
+    const last: string | undefined = body.candidates.at(-1)?.id;
+    if (last === undefined) {
+      throw incompleteListing(
+        agentId,
+        `page ${page} of GET /AdminMemoryCandidates answered hasMore: true with no candidates, so the cursor cannot move past ${after === undefined ? "the start" : after} (candidate_cursor_not_advancing)`,
       );
     }
-    throw err;
+    after = last;
   }
-  const defect = candidateListDefect(body);
-  if (defect) {
-    throw new Error(`GET /AdminMemoryCandidates returned an unexpected response shape: ${defect}. No target rows were deleted or written.`);
-  }
-  // The route has no paging parameter, so a partial listing is refused.
-  if (body.hasMore === true) {
-    throw new Error(
-      `GET /AdminMemoryCandidates reported hasMore: true for agent ${agentId} at limit ${CANDIDATE_LIST_LIMIT}, and restore does not page that listing; no target rows were deleted or written`,
-    );
-  }
-  return body.candidates;
+  throw incompleteListing(
+    agentId,
+    `GET /AdminMemoryCandidates still answered hasMore: true after ${CANDIDATE_LIST_MAX_PAGES} pages of ${CANDIDATE_LIST_LIMIT}, the most restore requests (candidate_listing_page_limit)`,
+  );
 }
 
 /** The first required field a candidate-route body lacks or mistypes, or null when `candidates` and `hasMore` check out. */
