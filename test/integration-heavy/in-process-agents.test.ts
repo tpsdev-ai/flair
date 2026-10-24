@@ -397,11 +397,11 @@ describe("SECURITY BOUNDARY — in-process identity is asserted, not verified", 
   // `resolveAgentAuth` tests `tpsAgent` for TRUTHINESS, so a missing or empty id
   // is indistinguishable from "no identity supplied" — which is the trusted,
   // unfiltered `internal` verdict. That turns the most ordinary application bug
-  // there is (a field that came back undefined) into silent administrator
-  // access. The API refuses instead. These tests pin the refusal AND the hazard
+  // there is (a field that came back undefined) into unfiltered access across
+  // every agent. The API refuses instead. These tests pin the refusal AND the hazard
   // it exists for, so nobody can "simplify" the guard away without the reason
   // failing loudly alongside it.
-  test("GUARD: agentContext(undefined) and agentContext('') THROW rather than returning an admin context", async () => {
+  test("GUARD: agentContext(undefined) and agentContext('') THROW rather than returning a context", async () => {
     for (const bad of [undefined, null, "", "   "]) {
       const r = await fleet("buildContextWith", { agentId: bad });
       expect(r.ok, `agentContext(${JSON.stringify(bad)}) must not return a context`).toBe(false);
@@ -453,7 +453,7 @@ describe("SECURITY BOUNDARY — in-process identity is asserted, not verified", 
     expect(owners.size).toBeGreaterThan(1);
   }, 120_000);
 
-  test("BY OMISSION: a context-LESS call is ADMIN-EQUIVALENT — it reads every agent's private records", async () => {
+  test("BY OMISSION: a context-LESS call reads every agent's private records", async () => {
     // The same escalation from the other end. If Flair's `internal` verdict ever
     // stops being unfiltered, this test fails and the guidance changes with it;
     // while it passes, it is the reason an embedding app must never let an agent

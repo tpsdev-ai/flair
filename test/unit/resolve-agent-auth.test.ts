@@ -222,7 +222,7 @@ describe("resolveAgentAuth — resources/in-process.ts's agentContext()", () => 
     expect(await resolveAgentAuth(internalContext())).toEqual({ kind: "internal" });
   });
 
-  it("NO context → internal, which is ADMIN-EQUIVALENT (the embedding hazard)", async () => {
+  it("NO context → internal, the unfiltered verdict (the embedding hazard)", async () => {
     // Not a weaker call — an unfiltered one.
     expect(await resolveAgentAuth(undefined)).toEqual({ kind: "internal" });
   });

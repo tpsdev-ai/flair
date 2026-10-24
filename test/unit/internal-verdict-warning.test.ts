@@ -2,7 +2,7 @@
 //
 // A resource invoked with no caller context resolves to flair's trusted
 // `internal` verdict: reads unfiltered across every agent, writes unattributed,
-// and the admin-only gate passes. That is correct for flair's own maintenance
+// and the admin-only gate refuses it (flair#2837). That is correct for flair's own maintenance
 // work and a silent, invisible mistake in an embedding application — both spell
 // it `new Memory()`, and neither produces an error.
 //
@@ -62,6 +62,7 @@ describe("flair#936 — a deliberate elevated call is distinguishable from a for
     // An error must enable a response: say what happened and what to do next.
     expect(INTERNAL_BY_OMISSION_WARNING).toContain("[flair-auth]");
     expect(INTERNAL_BY_OMISSION_WARNING).toContain("UNFILTERED");
+    expect(INTERNAL_BY_OMISSION_WARNING).toContain("the admin-only gate (allowAdmin) refuses it");
     expect(INTERNAL_BY_OMISSION_WARNING).toContain("agentContext");
     expect(INTERNAL_BY_OMISSION_WARNING).toContain("internalContext");
   });

@@ -210,7 +210,7 @@ resolveAgentAuth({ request: { tpsAgent: undefined } })  ->  { kind: "internal" }
 allowAdmin({ request: { tpsAgent: undefined } })        ->  false
 ```
 
-That would turn the most ordinary bug there is — `agentContext(session.agentId)` where the field came back undefined — into silent administrator access. So the helpers refuse rather than default:
+That would turn the most ordinary bug there is — `agentContext(session.agentId)` where the field came back undefined — into unfiltered reads across every agent. The admin-only gate refuses it: `allowAdmin` admits the `internal` verdict only for a call that carries `internalContext()`'s marker and no request headers. So the helpers refuse rather than default:
 
 | | |
 |---|---|
@@ -348,7 +348,7 @@ export async function remember(agentId, content, opts = {}) {
 >
 > They do still need the **context**. Only the collection binding is unnecessary for a read, never the identity — `Cls.search(query)` with the second argument left off resolves to the trusted `internal` verdict when it runs outside a request scope (a boot hook, a timer, a queue worker, a detached promise) and returns every agent's private records. On that path the resource's `allow*` gate is not consulted at all. Pass the context to every call, read and write.
 
-> ### ⚠️ A resource with no context is an administrator
+> ### ⚠️ A resource with no context runs unfiltered
 >
 > A resource built without a context resolves to Flair's trusted `internal` verdict and runs **unfiltered** — every read unscoped, every write unowned. Silently. No error, no warning, no trace.
 >

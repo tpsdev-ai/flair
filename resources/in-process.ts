@@ -44,15 +44,17 @@
  *
  *   resolveAgentAuth({ request: { tpsAgent: undefined } })  ->  { kind: "internal" }
  *   resolveAgentAuth({ request: { tpsAgent: ""        } })  ->  { kind: "internal" }
- *   allowAdmin({ request: { tpsAgent: undefined } })        ->  true
+ *   allowAdmin({ request: { tpsAgent: undefined } })        ->  false
  *
  * `resolveAgentAuth` tests `tpsAgent` for TRUTHINESS, so a missing or empty id
  * is indistinguishable from "no identity was supplied at all" — and that is the
  * trusted verdict. The consequence is that the most ordinary application bug
  * there is — `agentContext(session.agentId)` where the field is undefined, a
  * typo'd property, a lookup that found nothing — would not fail closed. It
- * would silently grant unfiltered cross-agent reads and writes, and pass the
- * admin-only gate on admin-only resources. No error, no 403, no log line.
+ * would silently grant unfiltered cross-agent reads and writes. No error, no
+ * 403, no log line. The admin-only gate refuses it: `allowAdmin` admits the
+ * `internal` verdict only for a call that carries `internalContext()`'s marker
+ * and no request headers.
  *
  * That is the same defect class as a check that cannot fail: **the failure mode
  * of "I forgot the id" must never be "you are now an administrator."** So:
@@ -114,8 +116,8 @@ function requireAgentId(agentId: unknown, fnName: string): string {
       `${fnName}() requires a non-empty agent id, but received ${got}. ` +
       "This is refused rather than defaulted because flair resolves a missing or empty " +
       "tpsAgent to its trusted `internal` verdict, which reads and writes UNFILTERED across " +
-      "every agent and passes the admin-only gate — so returning a context here would have " +
-      "turned a missing id into silent administrator access. Resolve the agent id from your " +
+      "every agent — so returning a context here would have turned a missing id into " +
+      "unfiltered access. Resolve the agent id from your " +
       "own server-side state before calling, and never from request data.",
     );
   }
@@ -195,9 +197,9 @@ export function adminContext(agentId: string): CallContext {
  * that authority deliberately.
  *
  * There is no id to validate: the verdict comes precisely from the ABSENCE of
- * an identity annotation, so the returned object carries none. The marker field
- * is inert — it documents intent at a debugger breakpoint and is read by
- * nothing.
+ * an identity annotation, so the returned object carries none. The admin-only
+ * gate reads its marker: `allowAdmin` admits the `internal` verdict only for a
+ * call that carries it and no request headers.
  *
  * ```ts
  * // Registering a principal — infrastructure, not an agent's own write.
