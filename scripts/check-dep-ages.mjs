@@ -19,8 +19,8 @@
  *
  * `--ci` marks THIS invocation as the CI gate (the workflow passes it). The CI
  * gate scans the checked-out repository whatever the environment says, so it
- * REFUSES to run (exit 2, naming FLAIR_CHECK_DEP_AGES_ROOT) when that override
- * is PRESENT (even empty) alongside `--ci`.
+ * refuses FLAIR_CHECK_DEP_AGES_ROOT, FLAIR_DEP_MIN_AGE_DAYS and
+ * FLAIR_DEP_KEEP_CURRENT when present (even empty) alongside `--ci`.
  *
  * The gate accepts ONLY no arguments or exactly `--ci`; any other argument
  * exits 2, so a typo cannot silently run WITHOUT the CI guard.
@@ -34,7 +34,7 @@
  *   0 — all checked deps older than the threshold (or nothing to check)
  *   1 — at least one dep too fresh
  *   2 — registry fetch failure (treated as fail, not warn — better safe), a
- *       REFUSED CI run (the fixture-root override present together with `--ci`),
+ *       refused CI environment, non-empty or malformed `resolutions`,
  *       an unexpected argument, an unsupported dependency or `overrides` form, or an invalid
  *       or expired exemption allowlist entry
  */
@@ -175,22 +175,28 @@ function declarationLines(entry) {
 }
 
 async function main() {
-  // The CI gate scans the CHECKED-OUT repository, whatever the environment
-  // says. FLAIR_CHECK_DEP_AGES_ROOT exists so tests can point the gate at a
-  // fixture repository; honouring it on a CI run would let a stray variable
-  // divert the gate away from the tree under review. The workflow declares
-  // itself with an explicit --ci flag, and we refuse when the override is
-  // PRESENT (even empty) before scanning or fetching. A PRESENCE test, not a
-  // truthiness test: an empty value would otherwise slip through and resolve
-  // the root to "".
-  if (IS_CI_GATE && process.env.FLAIR_CHECK_DEP_AGES_ROOT !== undefined) {
-    console.error(
-      "FLAIR_CHECK_DEP_AGES_ROOT is present, but the CI gate must scan the checked-out repository.",
-    );
-    console.error(
-      "Refusing to run. Unset FLAIR_CHECK_DEP_AGES_ROOT: it is for tests, which point the gate at a fixture repository and do not pass --ci.",
-    );
-    process.exit(2);
+  if (IS_CI_GATE) {
+    for (const variable of ["FLAIR_CHECK_DEP_AGES_ROOT", "FLAIR_DEP_MIN_AGE_DAYS", "FLAIR_DEP_KEEP_CURRENT"]) {
+      if (process.env[variable] !== undefined) {
+        console.error(`${variable} is present. Refusing to run: --ci requires the checked-out repository and committed policy defaults.`);
+        process.exit(2);
+      }
+    }
+    // A registry override decides where publish dates come from. Under --ci it is accepted only
+    // when it names a loopback host (the tests serve a fixture registry there; the gate does not
+    // check what serves it); any other host is refused.
+    const registryOverride = process.env.FLAIR_NPM_REGISTRY;
+    if (registryOverride !== undefined) {
+      let host = "";
+      try {
+        const url = new URL(registryOverride);
+        if (url.protocol === "http:" || url.protocol === "https:") host = url.hostname;
+      } catch {}
+      if (!["127.0.0.1", "localhost", "[::1]"].includes(host)) {
+        console.error(`FLAIR_NPM_REGISTRY is ${JSON.stringify(registryOverride)}. Refusing to run: under --ci a registry override is accepted only when it names a loopback host (127.0.0.1, localhost or [::1]).`);
+        process.exit(2);
+      }
+    }
   }
 
   const MIN_AGE_DAYS = Number(process.env.FLAIR_DEP_MIN_AGE_DAYS ?? "7");
@@ -231,6 +237,21 @@ async function main() {
       allPkgs.push({ pkg: readPkg(p), path: `packages/${entry}/package.json` });
     } catch (err) {
       throw new Error(`Cannot read or parse ${p}: ${err?.message ?? err}`);
+    }
+  }
+
+  for (const { pkg, path } of allPkgs) {
+    if (pkg.resolutions === undefined) continue;
+    if (pkg.resolutions === null || typeof pkg.resolutions !== "object" || Array.isArray(pkg.resolutions)) {
+      console.error(`${path} resolutions must be an empty object.`);
+      process.exit(2);
+    }
+    const names = Object.keys(pkg.resolutions);
+    if (names.length > 0) {
+      for (const name of names) {
+        console.error(`${path} resolutions[${JSON.stringify(name)}] is unsupported.`);
+      }
+      process.exit(2);
     }
   }
 

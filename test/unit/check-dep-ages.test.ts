@@ -28,7 +28,7 @@ import {
   parseBunLockText,
   resolveRangedDeps,
 } from "../../scripts/lib/check-dep-ages-collect.mjs";
-import { checkCoverageGate, parseWorkflows, type Gate, type WorkflowDoc } from "../helpers/workflow-gate";
+import { checkCoverageGate, gateCases, parseWorkflows, type Gate, type WorkflowDoc } from "../helpers/workflow-gate";
 
 /* ─────────────────────────── Unit tests ───────────────────────────── */
 
@@ -496,7 +496,7 @@ async function runGate(script: string, extraEnv: Record<string, string>, extraAr
   if (!existsSync(script)) setupFailure(`gate script not found at ${script}`);
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "",
-    FLAIR_DEP_MIN_AGE_DAYS: MIN_AGE_DAYS,
+    ...(extraArgs.includes("--ci") ? {} : { FLAIR_DEP_MIN_AGE_DAYS: MIN_AGE_DAYS }),
     ...extraEnv,
   };
   const proc = Bun.spawn(["node", script, ...extraArgs], {
@@ -1773,6 +1773,122 @@ describe("CLI — a malformed exemption date fails the gate", () => {
   }, 30_000);
 });
 
+function recordingRegistry(root: string) {
+  const requests = join(root, "registry-requests.jsonl");
+  const preload = join(root, "registry.mjs");
+  writeFileSync(requests, "");
+  writeFileSync(preload, `
+    import { appendFileSync } from "node:fs";
+    globalThis.fetch = async (url) => {
+      appendFileSync(${JSON.stringify(requests)}, JSON.stringify(String(url)) + "\\n");
+      return Response.json({ time: { ${JSON.stringify(FIXTURE_VERSION)}: ${JSON.stringify(FRESH_TIME)} } });
+    };
+  `);
+  return {
+    env: { NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`, FLAIR_NPM_REGISTRY: "https://fixture.invalid" },
+    requests: () => readFileSync(requests, "utf8").trim().split("\n").filter(Boolean),
+  };
+}
+
+describe("CLI — resolutions", () => {
+  for (const workspace of [false, true]) {
+    const where = workspace ? "workspace" : "root";
+    it(`refuses non-empty ${where} resolutions before a registry request`, async () => {
+      const root = writeManifestRepo(join(scratch, `resolutions-${where}`), { name: "dep-ages-fixture" });
+      const manifest = { name: "dep-ages-fixture", resolutions: { [FIXTURE_DEP]: "^1.0.0" } };
+      const declaredIn = workspace ? "packages/example/package.json" : "package.json";
+      if (workspace) mkdirSync(join(root, "packages/example"));
+      writeFileSync(join(root, declaredIn), JSON.stringify(manifest));
+      writeLock(root, lockWithPackages({ [FIXTURE_DEP]: "1.2.0" }));
+      const registry = recordingRegistry(root);
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root, ...registry.env,
+      });
+      expect(exitCode).toBe(2);
+      expect(output).toContain(`${declaredIn} resolutions["${FIXTURE_DEP}"]`);
+      expect(registry.requests()).toEqual([]);
+    }, 30_000);
+
+    it(`accepts empty ${where} resolutions and checks a dependency`, async () => {
+      const root = writeFixtureRepo(join(scratch, `empty-resolutions-${where}`));
+      const declaredIn = workspace ? "packages/example/package.json" : "package.json";
+      if (workspace) mkdirSync(join(root, "packages/example"));
+      writeFileSync(join(root, declaredIn), JSON.stringify({
+        name: "dep-ages-fixture", resolutions: {}, dependencies: { [FIXTURE_DEP]: FIXTURE_VERSION },
+      }));
+      const registry = recordingRegistry(root);
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root, FLAIR_DEP_MIN_AGE_DAYS: "0", ...registry.env,
+      });
+      expect(exitCode).toBe(0);
+      expect(output).toContain("external dependency versions are at least 0 days old");
+      expect(registry.requests()).toHaveLength(1);
+    }, 30_000);
+  }
+
+  it("refuses resolutions before fetching a declared dependency", async () => {
+    const root = writeManifestRepo(join(scratch, "resolutions-before-fetch"), {
+      dependencies: { [FIXTURE_DEP]: FIXTURE_VERSION }, resolutions: { [FIXTURE_DEP]: "^1.0.0" },
+    });
+    const registry = recordingRegistry(root);
+    const { exitCode, output } = await runGate(CLI_SCRIPT, { FLAIR_CHECK_DEP_AGES_ROOT: root, ...registry.env });
+    expect(exitCode).toBe(2);
+    expect(output).toContain(`resolutions["${FIXTURE_DEP}"]`);
+    expect(registry.requests()).toEqual([]);
+  }, 30_000);
+
+  for (const value of [null, [], "^1.0.0"]) {
+    it(`refuses malformed resolutions ${JSON.stringify(value)}`, async () => {
+      const root = writeManifestRepo(join(scratch, `malformed-resolutions-${JSON.stringify(value)}`), { resolutions: value });
+      const registry = recordingRegistry(root);
+      const { exitCode, output } = await runGate(CLI_SCRIPT, { FLAIR_CHECK_DEP_AGES_ROOT: root, ...registry.env });
+      expect(exitCode).toBe(2);
+      expect(output).toContain("resolutions must be an empty object");
+      expect(registry.requests()).toEqual([]);
+    }, 30_000);
+  }
+});
+
+describe("CLI — policy environment", () => {
+  for (const registryUrl of ["https://registry.example.invalid", "http://10.0.0.1:4873", "not a url"]) {
+    it(`--ci refuses FLAIR_NPM_REGISTRY=${JSON.stringify(registryUrl)} (not a loopback registry) before scanning`, async () => {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, { FLAIR_NPM_REGISTRY: registryUrl }, ["--ci"]);
+      expect(exitCode).toBe(2);
+      expect(output).toContain("FLAIR_NPM_REGISTRY");
+      expect(output).toContain("Refusing to run");
+      expect(output).not.toContain("Checking");
+    }, 30_000);
+  }
+
+  for (const [variable, value] of [["FLAIR_DEP_MIN_AGE_DAYS", "0"], ["FLAIR_DEP_KEEP_CURRENT", FIXTURE_DEP]]) {
+    for (const ciValue of [value, ""]) {
+      it(`--ci refuses ${variable}=${JSON.stringify(ciValue)} before a registry request`, async () => {
+        const root = writeFixtureRepo(join(scratch, `ci-policy-${variable}-${ciValue || "empty"}`));
+        const registry = recordingRegistry(root);
+        const { exitCode, output } = await runGate(CLI_SCRIPT, { [variable]: ciValue, ...registry.env }, ["--ci"]);
+        expect(exitCode).toBe(2);
+        expect(output).toContain(variable);
+        expect(output).toContain("Refusing to run");
+        expect(output).not.toContain("Checking");
+        expect(registry.requests()).toEqual([]);
+      }, 30_000);
+    }
+
+    it(`local runs apply ${variable}`, async () => {
+      const root = writeFixtureRepo(join(scratch, `local-policy-${variable}`));
+      const registry = recordingRegistry(root);
+      const env = { FLAIR_CHECK_DEP_AGES_ROOT: root, ...registry.env };
+      const defaults = await runGate(CLI_SCRIPT, env);
+      expect(defaults.exitCode).toBe(1);
+      expect(defaults.output).toContain(`${FIXTURE_DEP}@${FIXTURE_VERSION}`);
+      expect(registry.requests()).toHaveLength(1);
+      const configured = await runGate(CLI_SCRIPT, { ...env, [variable]: value });
+      expect(configured.exitCode).toBe(0);
+      expect(registry.requests()).toHaveLength(variable === "FLAIR_DEP_MIN_AGE_DAYS" ? 2 : 1);
+    }, 30_000);
+  }
+});
+
 describe("CLI fail-closed exit — the CI gate refuses the fixture-root override", () => {
   it("exits 2, naming the variable, when the CI invocation has the override set", async () => {
     const root = writeFixtureRepo(join(scratch, "ci-override"));
@@ -1905,6 +2021,12 @@ function checkBakeTimeBeforeFrozenInstall(docs: WorkflowDoc[]): void {
 }
 
 describe("CI wiring — the bake-time gate in the real workflow", () => {
+  for (const [label, build, error] of gateCases(WORKFLOW_DIR, DEP_AGES_GATE).filter(([label]) => label.includes(" env "))) {
+    it(`refuses ${label}`, () => {
+      expect(() => checkCoverageGate(build(), DEP_AGES_GATE)).toThrow(error);
+    });
+  }
+
   it("runs the gate with --ci in the required test-unit job, without skip controls, before the frozen install", () => {
     const docs = parseWorkflows(WORKFLOW_DIR);
     expect(() => checkCoverageGate(docs, DEP_AGES_GATE)).not.toThrow();

@@ -14,3 +14,6 @@
   the field, as in `dependencies` and `optionalDependencies`.
   Exact pins are checked as before; exact `devDependencies` pins are still not
   checked.
+  Non-empty or malformed `resolutions` in root or workspace manifests are refused.
+  `--ci` refuses `FLAIR_DEP_MIN_AGE_DAYS` and `FLAIR_DEP_KEEP_CURRENT` when set;
+  local runs without `--ci` retain both knobs.

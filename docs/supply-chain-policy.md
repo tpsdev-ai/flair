@@ -15,7 +15,6 @@ We don't pull in any newly-published dep version for **at least 7 days** after i
 - The most-attacked window is "compromise published, defenders haven't yet noticed." Most malicious packages get flagged by Socket.dev, npm advisory, GitHub security advisory, or human reports within 1-7 days. Our delay puts us behind that detection front.
 - pnpm 11 shipped this as a default at 1 day (May 4 2026). We chose 7 as a more conservative posture for a security-adjacent project.
 - Workspace-internal `@tpsdev-ai/*` deps are exempt. We publish ourselves; we have direct visibility into our own changes; our 0.8.0 → 0.8.1 patch turnaround was same-day and we want to keep that latitude.
-- Tunable via `FLAIR_DEP_MIN_AGE_DAYS` env var if a specific run needs a different threshold. Don't bypass; document the exception.
 
 #### 1a. Keep-current allow-list
 
@@ -34,7 +33,7 @@ Adding to this list is a deliberate decision. The bar:
 
 Document any addition here, in this section, alongside the package name. The doc is the audit trail.
 
-Override per-run via `FLAIR_DEP_KEEP_CURRENT="pkg1,pkg2,@scope/pkg3"` env (additive — adds to the default allow-list, doesn't replace it).
+Local runs without `--ci` can add to the default allow-list via `FLAIR_DEP_KEEP_CURRENT="pkg1,pkg2,@scope/pkg3"`.
 
 #### 1b. Dated exemptions for security pins
 
@@ -44,7 +43,7 @@ A security patch can be newer than the bake window, and pinning it is the right 
 - An **expired** entry fails the gate before any registry request; removing it lets an otherwise checked version be age-checked. Re-read the `reason` before re-dating; removing the entry once the version has aged past the window is the normal outcome.
 - A fresh checked version with no matching entry fails; keep-current packages are skipped. A malformed entry also fails.
 
-`FLAIR_DEP_MIN_AGE_DAYS` remains a threshold control: it moves the bar for every checked pin at once and leaves no record. A per-pin exemption belongs in this allowlist.
+A per-pin exemption belongs in this allowlist.
 
 ### 2. Exact-version pinning for production deps
 
@@ -131,7 +130,9 @@ Fails any PR where a workspace package declares an internal `@tpsdev-ai/*` dep a
 
 ### `scripts/check-dep-ages.mjs` (this PR)
 
-Fails when a checked external dependency version was published less than `FLAIR_DEP_MIN_AGE_DAYS` ago (default 7) without a matching unexpired exemption; keep-current packages are skipped, matched on the package a declaration installs (an `npm:` alias's target). Queries the npm registry's `time` map. Checks `dependencies`, `devDependencies`, `optionalDependencies` and `overrides` (root and every workspace package.json) — npm and bun install optionalDependencies by default. An exact pin outside `devDependencies` is checked at its declared version; a range at the version bun.lock resolves it to, with an override range checked at the installed copies in its scope (§2). A range the gate cannot resolve fails the gate, and an override range with no installed copy in its scope is named in the output, with nothing to check. Workspace-internal deps and checked versions with a matching unexpired exemption in `.github/dep-age-allowlist.json` (§1b) are exempt; a refused `dependencies`, `devDependencies`, `optionalDependencies` or `overrides` form fails the gate. Wired into the `test-unit` job. Its limits, stated: it does not check `peerDependencies` (resolved from a range by the consumer's install) nor exact `devDependencies` pins (don't ship in our tarballs) — it reads the same registry publish timestamp Renovate does, so it is a second line against the cooldown being removed from the config — not against a release whose publish date lies.
+Fails when a checked external dependency version is younger than the bake-time threshold without a matching unexpired exemption; keep-current packages are skipped, matched on the package a declaration installs (an `npm:` alias's target). Queries the configured registry's `time` map (the npm registry by default). Checks `dependencies`, `devDependencies`, `optionalDependencies` and `overrides` (root and every workspace package.json) — npm and bun install optionalDependencies by default. An exact pin outside `devDependencies` is checked at its declared version; a range at the version bun.lock resolves it to, with an override range checked at the installed copies in its scope (§2). A range the gate cannot resolve fails the gate, and an override range with no installed copy in its scope is named in the output, with nothing to check. Workspace-internal deps and checked versions with a matching unexpired exemption in `.github/dep-age-allowlist.json` (§1b) are exempt; a refused `dependencies`, `devDependencies`, `optionalDependencies` or `overrides` form fails the gate. Wired into the `test-unit` job. Its limits, stated: non-empty or malformed `resolutions` in root or workspace manifests are refused; it does not check `peerDependencies` (resolved from a range by the consumer's install) nor exact `devDependencies` pins (don't ship in our tarballs) — it reads the same registry publish timestamp Renovate does, so it is a second line against the cooldown being removed from the config — not against a release whose publish date lies.
+
+Local runs without `--ci` can set `FLAIR_DEP_MIN_AGE_DAYS`, `FLAIR_DEP_KEEP_CURRENT` and `FLAIR_NPM_REGISTRY`; `--ci` refuses the first two when set and uses the committed defaults, and accepts `FLAIR_NPM_REGISTRY` only when it names a loopback host (the tests serve their fixture registry there; the gate does not check what serves it). The workflow check rejects any of these variables, and `FLAIR_CHECK_DEP_AGES_ROOT`, in the gate step's, its job's or the workflow's `env`. Not covered: an earlier step in the same job that starts its own registry on loopback and exports the variable through `$GITHUB_ENV`. That is a code change to the workflow, and review is what catches it.
 
 Configurable:
 
@@ -165,7 +166,7 @@ Runs three checks before each commit:
 - `check-dep-ages.mjs` — supply-chain bake-time (≥7 days for the external dependency versions §2 describes)
 - `check-impl-term-leaks.sh` — no Bead refs / impl labels in user-facing docs, `CHANGELOG.md`, or `.changelog/`
 
-Each check matches a CI gate exactly so the local and remote outcomes can't drift. Bypass with `git commit --no-verify` when warranted (rare; CI will still catch you). Skip just the dep-ages check (the slowest one, ~2-5s of registry fetches) with `FLAIR_PRECOMMIT_SKIP_DEP_AGES=1 git commit`.
+Bypass with `git commit --no-verify` when warranted (rare; CI will still catch you). Skip just the dep-ages check (the slowest one, ~2-5s of registry fetches) with `FLAIR_PRECOMMIT_SKIP_DEP_AGES=1 git commit`.
 
 ---
 
