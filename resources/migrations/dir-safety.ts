@@ -19,7 +19,7 @@
  * creation.") — a directory can be re-permissioned by something else on the
  * host between creation and a later write in a long-running batch loop.
  */
-import { chmodSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 
@@ -65,18 +65,22 @@ export function ensureSecureDir(dir: string): void {
   }
 }
 
+/** Test seam: the random part of {@link writeSecureFile}'s temporary file name. */
+export const secureFileTempSuffix = { next: (): string => randomBytes(8).toString("hex") };
+
 /**
  * Writes `contents` to `path` at 0600, re-verifying the CONTAINING
  * directory is still 0700 immediately before the write (per Kern's
  * write-time re-verification requirement above).
  *
  * The write is ATOMIC: the contents go to a fresh temporary file beside the
- * target (same directory, so the rename stays on one filesystem), created at
- * 0600, which is then renamed over the target. Once the target exists, a
- * concurrent reader observes either the old file or the new file — never a
- * truncated or half-written one (a plain writeFileSync truncates first and
- * fills second, so a reader can land in between and see an empty or partial
- * file); before the first rename there is no file to read.
+ * target (same directory, so the rename stays on one filesystem), created with
+ * mode 0600 (the process umask can only remove bits from it), which is then
+ * renamed over the target. Once the target exists, a concurrent reader
+ * observes either the old file or the new file — never a truncated or
+ * half-written one (a plain writeFileSync truncates first and fills second, so
+ * a reader can land in between and see an empty or partial file); before the
+ * first rename there is no file to read.
  *
  * What this does NOT solve: two concurrent WRITERS still race on their
  * read-modify-write cycles (last rename wins, the other writer's entry is
@@ -85,16 +89,27 @@ export function ensureSecureDir(dir: string): void {
 export function writeSecureFile(path: string, contents: string, dir: string): void {
   verifySecureDir(dir);
   const targetDir = dirname(path);
-  const temp = join(targetDir, `.${basename(path)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
+  const temp = join(targetDir, `.${basename(path)}.${process.pid}.${secureFileTempSuffix.next()}.tmp`);
+  // Set once the exclusive create succeeds. The catch unlinks the temporary
+  // path only when it is set, so a pre-existing file at that path is left in
+  // place when the create fails on it.
+  let created = false;
   try {
-    writeFileSync(temp, contents, { mode: 0o600, flag: "wx" });
+    const fd = openSync(temp, "wx", 0o600);
+    created = true;
+    try {
+      writeFileSync(fd, contents);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(temp, path);
   } catch (err) {
-    try {
-      unlinkSync(temp);
-    } catch {
-      // The temporary file may never have been created; the original error is
-      // the one worth surfacing.
+    if (created) {
+      try {
+        unlinkSync(temp);
+      } catch {
+        // The original error is the one worth surfacing.
+      }
     }
     throw err;
   }

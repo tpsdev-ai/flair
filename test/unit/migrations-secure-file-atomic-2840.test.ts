@@ -16,7 +16,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wr
 import { Worker } from "node:worker_threads";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { ensureSecureDir, writeSecureFile } from "../../resources/migrations/dir-safety.ts";
+import { ensureSecureDir, secureFileTempSuffix, writeSecureFile } from "../../resources/migrations/dir-safety.ts";
 
 const WORKER = join(import.meta.dirname, "..", "helpers", "migrations-secure-file-reader-2840.ts");
 
@@ -101,11 +101,22 @@ describe("writeSecureFile — atomic replacement (flair#2840)", () => {
     expect(readdirSync(dir)).toEqual(["state.json"]);
   });
 
-  it("opens its temporary file exclusively at 0600, so a pre-existing path is never reused", () => {
-    // The temporary name carries 8 random bytes, so a test cannot predict the
-    // path to pre-create (2^64 candidates). Assert the open flag that makes a
-    // collision fail instead of reopening the existing file.
-    const source = readFileSync(join(import.meta.dirname, "..", "..", "resources", "migrations", "dir-safety.ts"), "utf8");
-    expect(source).toContain('writeFileSync(temp, contents, { mode: 0o600, flag: "wx" })');
+  it("throws on a file already at its temporary path and leaves that file and its contents in place", () => {
+    const dir = secureDir();
+    const file = join(dir, "state.json");
+    writeSecureFile(file, OLD, dir);
+    // The seam fixes the temporary name, so this pre-creates the exact path the
+    // next call opens.
+    const temp = join(dir, `.state.json.${process.pid}.collision-2840.tmp`);
+    writeFileSync(temp, "another writer's file");
+    const realNext = secureFileTempSuffix.next;
+    secureFileTempSuffix.next = () => "collision-2840";
+    try {
+      expect(() => writeSecureFile(file, NEW, dir)).toThrow(/EEXIST/);
+    } finally {
+      secureFileTempSuffix.next = realNext;
+    }
+    expect(readFileSync(temp, "utf8")).toBe("another writer's file");
+    expect(readFileSync(file, "utf8")).toBe(OLD);
   });
 });
