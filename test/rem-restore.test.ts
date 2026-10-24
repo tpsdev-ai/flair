@@ -526,7 +526,7 @@ describe("applySnapshot — real restore", () => {
       "GET:/Memory": () => [{ id: "mem-1", agentId: "test-agent" }],
       "GET:/Soul": () => [{ id: "soul-1", agentId: "test-agent" }],
       "GET:/AdminMemoryCandidates": () => {
-        throw new ApiHttpError(500, JSON.stringify({ error: "candidate_id_unusable", message: "fixture" }));
+        throw ApiHttpError.fromResponse(500, JSON.stringify({ error: "candidate_id_unusable", message: "fixture" }));
       },
     });
     const soul = recordingApi();
@@ -827,9 +827,9 @@ describe("applySnapshot — failure modes", () => {
 });
 
 
-/** The server's provider-bound refusal, as `sendJsonRequest` surfaces it: 503 with the body in the message. */
+/** The server's provider-bound refusal, as `sendJsonRequest` surfaces it: 503 with the body on the error. */
 function providerTimeout(): ApiHttpError {
-  return new ApiHttpError(
+  return ApiHttpError.fromResponse(
     503,
     JSON.stringify({
       error: "memory_provider_timeout",
@@ -979,7 +979,7 @@ describe("applySnapshot — provider-timeout retry (flair#2769)", () => {
   it("does not retry a 503 with a different error code", async () => {
     const snapshotPath = await makeTestSnapshot();
     const { api, calls } = retryingTarget([
-      new ApiHttpError(503, JSON.stringify({ error: "memory_busy", caller: "agent-a" })),
+      ApiHttpError.fromResponse(503, JSON.stringify({ error: "memory_busy", caller: "agent-a" })),
     ]);
 
     const r = await applySnapshot({
@@ -1000,7 +1000,7 @@ describe("applySnapshot — provider-timeout retry (flair#2769)", () => {
   it("does not retry a 503 whose message text names the code but whose error field does not", async () => {
     const snapshotPath = await makeTestSnapshot();
     const { api, calls } = retryingTarget([
-      new ApiHttpError(503, JSON.stringify({ error: "memory_busy", message: "memory_provider_timeout would be retried" })),
+      ApiHttpError.fromResponse(503, JSON.stringify({ error: "memory_busy", message: "memory_provider_timeout would be retried" })),
     ]);
 
     const r = await applySnapshot({

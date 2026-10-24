@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 
 import { dirname, resolve } from "node:path";
 import * as render from "../render.js";
-import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, resolveAdminPassFromSources, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP, ADMIN_PASS_FLAG, ADMIN_PASS_HELP } from "../lib/auth-resolve.js";
+import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, resolveAdminPassFromSources, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP, ADMIN_PASS_FLAG, ADMIN_PASS_HELP, apiErrorRawBody, boundErrorText } from "../lib/auth-resolve.js";
 import type { OpsSearch } from "../rem/runner.js";
 import {
   validatePromoteOpts,
@@ -444,26 +444,42 @@ export function candidateIncompleteFlag(claim: unknown): string | null {
 
 /**
  * Classifies a thrown /ReflectMemories execute-mode error for CLI display.
- * `api()` throws `Error(responseBodyText)` for non-2xx responses (see api()
- * above) — the two execute-mode failure bodies are:
+ * `api()` throws an ApiHttpError for a non-2xx response (flair#2764). The kind
+ * is read from its unredacted text (apiErrorRawBody) when the error was built
+ * from a non-empty response body (ApiHttpError.fromResponse), and from the
+ * message otherwise (the credential-less 403 and a refused redirect carry only
+ * a message, as does any other error); for a JSON error read either way, the
+ * text shown is derived from that text through boundErrorText, which
+ * redacts the credential values read from the request's Authorization header
+ * (credentialsInHeader) from the server's text within the scope stated on
+ * ApiHttpError, or withholds that text when the header's credential could not
+ * be read and the response text was non-empty, even when the text derived
+ * from it is empty (the prefix the caller prints is outside the scope). The two
+ * classified distillation failures are:
  *   503 no-backend:        { error: "No generative backend configured..." }
  *   502 distillation_failed: { error: "distillation_failed", detail: "..." }
+ * The 503 pause refusal ({ error: "rem_aborted", detail: "..." }, sent while the
+ * pause sentinel or FLAIR_REM_PAUSE=1 is set) has no kind of its own: it reads
+ * as "other" with the text `rem_aborted`.
  * Any other shape (network errors, the 400/403 actor-resolution errors
  * prompt mode shares) falls back to "other" — printed as a plain message,
- * no docs pointer or retry hint attached since neither applies.
+ * no docs pointer or retry hint attached since neither applies. Accepts the
+ * thrown error or its message string.
  */
-export function describeReflectError(message: string): { kind: "no-backend" | "distillation-failed" | "other"; text: string } {
+export function describeReflectError(err: unknown): { kind: "no-backend" | "distillation-failed" | "other"; text: string } {
+  const message = typeof err === "string" ? err : String((err as { message?: unknown })?.message ?? err);
   try {
-    const parsed = JSON.parse(message);
+    const parsed = JSON.parse(apiErrorRawBody(err) || message);
     if (parsed && typeof parsed === "object") {
       if (parsed.error === "distillation_failed") {
-        return { kind: "distillation-failed", text: String(parsed.detail ?? parsed.error) };
+        const detail = typeof parsed.detail === "string" ? parsed.detail : "";
+        return { kind: "distillation-failed", text: boundErrorText(err, detail || parsed.error) };
       }
       if (typeof parsed.error === "string" && parsed.error.startsWith("No generative backend configured")) {
-        return { kind: "no-backend", text: parsed.error };
+        return { kind: "no-backend", text: boundErrorText(err, parsed.error) };
       }
       if (typeof parsed.error === "string") {
-        return { kind: "other", text: parsed.error };
+        return { kind: "other", text: boundErrorText(err, parsed.error) };
       }
     }
   } catch {
@@ -650,7 +666,7 @@ export function register(program: Command): void {
         }
         console.log(`\nreview: flair rem candidates / flair rem promote <id>`);
       } catch (err: any) {
-        const desc = describeReflectError(err.message ?? String(err));
+        const desc = describeReflectError(err);
         if (desc.kind === "no-backend") {
           console.error(`Reflection error: ${desc.text}`);
           console.error(`See docs/rem.md#configuration for how to point Flair at a models: backend.`);
