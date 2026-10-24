@@ -9,8 +9,9 @@
   published 2026-10-19, inside the 7-day bake window; the exemption expires
   2026-10-27, after 4.2.3 reaches the bake age. An npm install of the
   `@tpsdev-ai/flair` package still resolves the fast-uri 3.1.0 and 4.2.1 that
-  harper 5.3.1's npm-shrinkwrap pins, so the four fast-uri advisories remain for
-  those copies: four new `vendor-pinned` audit entries cover them and expire
+  harper 5.3.1's npm-shrinkwrap pins, so the fast-uri advisories remain for those
+  copies (GHSA-wjr9-j795-jxcr only for 4.2.1: its 3.x range starts at 3.1.3): four
+  new `vendor-pinned` audit entries cover them and expire
   2026-11-02, and an entry is retired earlier when flair moves to a harper release
   whose installed tree resolves fast-uri at least 3.1.9 on 3.x and at least 4.2.3
   on 4.x.
