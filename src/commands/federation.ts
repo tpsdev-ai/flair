@@ -42,7 +42,7 @@ import {
 } from "../lib/auth-resolve.js";
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "../federation/scheduler.js";
 import { FEDERATION_MEMORY_SELECT } from "../lib/federation-memory-attributes.js";
-import { retryEntryKey } from "../lib/federation-retry-key.js";
+import { retryEntryKey } from "../lib/federation-retry-row.js";
 import {
   MEMORY_RETRY_REASONS,
   dueRetryRows,

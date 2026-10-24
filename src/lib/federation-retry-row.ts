@@ -1,14 +1,112 @@
 /**
- * federation-retry-row.ts — the sender-convention check for a retry row.
+ * federation-retry-row.ts — a federation retry row's key, outcome vocabulary
+ * and sender-convention check, in one module.
  *
- * Pure and DB-free. The receiver's admin/read resources and the generic-Memory
- * sender both classify rows with this function, so a row the reader calls
- * malformed is never offered. The reason vocabulary differs: the caller passes
- * the predicate its own path uses (`isSkipReason` plus local reasons for a
- * Harper resource; the sender's stricter pending-row list).
+ * Pure, DB-free and dependency-free: a resource imports it directly
+ * (resources/federation-retry-lib.ts re-exports it), and a src module that a
+ * resource imports must load no other module (test/unit/resource-src-purity-
+ * 1775.test.ts). The CLI build (src/) and the Harper resources share this one
+ * copy. The receiver's admin/read resources and the generic-Memory sender both
+ * classify rows with retryRowProblem, so a row the reader calls malformed is
+ * never offered. The reason vocabulary differs: the caller passes the predicate
+ * its own path uses (`isSkipReason` plus local reasons for a Harper resource;
+ * the sender's stricter pending-row list).
  */
-import { retryEntryKey } from "./federation-retry-key.js";
-import { isRetryBound, isRetryResolution } from "./federation-retry-vocab.js";
+
+// ─── Key ───
+
+/**
+ * Encode the (peerId, table, recordId) tuple as the row's primary key.
+ *
+ * A JSON array join, never a bare concatenation: a naive `${peerId}${table}
+ * ${recordId}` collides (peer `a` + table `bc` is peer `ab` + table `c`), and
+ * peer and record ids are arbitrary strings off the wire, including legacy
+ * `.content`-suffixed ids. JSON quotes and escapes each component, so distinct
+ * tuples encode to distinct strings and the components round-trip exactly.
+ *
+ * Every component must be a non-empty string; a missing component is a caller
+ * bug, not a row to write, so this THROWS rather than mint a malformed key.
+ */
+export function retryEntryKey(peerId: string, table: string, recordId: string): string {
+  for (const [name, value] of [
+    ["peerId", peerId],
+    ["table", table],
+    ["recordId", recordId],
+  ] as const) {
+    if (typeof value !== "string" || value.length === 0) {
+      throw new Error(`federation retry: ${name} must be a non-empty string`);
+    }
+  }
+  return JSON.stringify([peerId, table, recordId]);
+}
+
+/** Decode {@link retryEntryKey}'s output, or null when `id` is not a retry key. */
+export function parseRetryEntryKey(id: string): { peerId: string; table: string; recordId: string } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(id);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length !== 3) return null;
+  const [peerId, table, recordId] = parsed;
+  if (typeof peerId !== "string" || typeof table !== "string" || typeof recordId !== "string") return null;
+  if (peerId.length === 0 || table.length === 0 || recordId.length === 0) return null;
+  return { peerId, table, recordId };
+}
+
+// ─── Outcome vocabulary ───
+
+/**
+ * Why a terminal row stopped being offered, using the names the design gives
+ * (rev 2 K2/S5 plus rev 2.1 N1's rename of `no_retry_required` to `merged`).
+ *
+ * - `merged` — a validated response that carries a per-key refusal list omitted
+ *   the offered key: the receiver acknowledged it. The configured hub is
+ *   trusted for that acknowledgement; it is not proof of delivery (design rev
+ *   2.1 N4).
+ * - `refused_terminal` — the receiver listed the key with a non-retryable reason.
+ * - `source_deleted` — the source row is gone.
+ * - `source_ineligible` — the source row is no longer eligible to send (e.g. private).
+ * - `peer_unavailable` — the sender's own peer listing shows the hub absent or revoked.
+ * - `retry_exhausted` — an N/T bound fired before the record was confirmed:
+ *   either the receiver still refused it, or the last send was unconfirmed (a
+ *   transport failure or an invalid response, `lastReason` says which). An
+ *   unconfirmed send means the sender stopped offering, NOT that the record is
+ *   missing: the receiver may already hold it. `bound` names the bound that
+ *   fired, and is set for this resolution only.
+ */
+export type RetryResolution =
+  | "merged"
+  | "refused_terminal"
+  | "source_deleted"
+  | "source_ineligible"
+  | "peer_unavailable"
+  | "retry_exhausted";
+
+export const RETRY_RESOLUTIONS: ReadonlySet<RetryResolution> = new Set<RetryResolution>([
+  "merged",
+  "refused_terminal",
+  "source_deleted",
+  "source_ineligible",
+  "peer_unavailable",
+  "retry_exhausted",
+]);
+
+/** Which bound ended a `retry_exhausted` obligation; null for every other row. */
+export type RetryBound = "attempts" | "age" | "both";
+
+export const RETRY_BOUNDS: ReadonlySet<RetryBound> = new Set<RetryBound>(["attempts", "age", "both"]);
+
+export function isRetryResolution(value: unknown): value is RetryResolution {
+  return typeof value === "string" && RETRY_RESOLUTIONS.has(value as RetryResolution);
+}
+
+export function isRetryBound(value: unknown): value is RetryBound {
+  return typeof value === "string" && RETRY_BOUNDS.has(value as RetryBound);
+}
+
+// ─── Sender-convention check ───
 
 /**
  * Why a stored row breaks a sender convention, or null when it keeps them all.

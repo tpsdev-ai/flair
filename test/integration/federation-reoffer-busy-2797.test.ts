@@ -26,7 +26,7 @@ import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { keystore } from "../../src/keystore";
 import { FEDERATION_MEMORY_ATTRIBUTES } from "../../src/lib/federation-memory-attributes";
-import { retryEntryKey } from "../../src/lib/federation-retry-key";
+import { retryEntryKey } from "../../src/lib/federation-retry-row";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
 const SENDER_ID = "flair_spoke_a";

@@ -8,16 +8,18 @@
  * in resources/FederationRetry.ts.
  */
 import { isSkipReason, type SkipReason } from "./federation-classify.js";
-import { parseRetryEntryKey, retryEntryKey } from "../src/lib/federation-retry-key.js";
 import {
   RETRY_BOUNDS,
   RETRY_RESOLUTIONS,
   isRetryBound,
   isRetryResolution,
+  parseRetryEntryKey,
+  retryEntryKey,
+  retryRowProblem as retryRowProblemShared,
   type RetryBound,
   type RetryResolution,
-} from "../src/lib/federation-retry-vocab.js";
-import { retryRowProblem as retryRowProblemShared, type RetryRowProblem } from "../src/lib/federation-retry-row.js";
+  type RetryRowProblem,
+} from "../src/lib/federation-retry-row.js";
 
 export { parseRetryEntryKey, retryEntryKey };
 export { RETRY_BOUNDS, RETRY_RESOLUTIONS, isRetryBound, isRetryResolution };

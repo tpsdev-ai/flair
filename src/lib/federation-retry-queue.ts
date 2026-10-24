@@ -16,8 +16,7 @@
  * `refused_terminal`, and the retry path does not select a terminal row again
  * (a later row update can still select it through the ordinary cursor).
  */
-import { retryEntryKey } from "./federation-retry-key.js";
-import { retryRowProblem } from "./federation-retry-row.js";
+import { retryEntryKey, retryRowProblem } from "./federation-retry-row.js";
 
 /**
  * The retryable SkipReason names a generic Memory record can be refused with.

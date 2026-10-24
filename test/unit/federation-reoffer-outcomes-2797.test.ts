@@ -9,7 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import nacl from "tweetnacl";
-import { retryEntryKey } from "../../src/lib/federation-retry-key.js";
+import { retryEntryKey } from "../../src/lib/federation-retry-row.js";
 
 const origFetch = globalThis.fetch;
 const HUB = "hub-a";

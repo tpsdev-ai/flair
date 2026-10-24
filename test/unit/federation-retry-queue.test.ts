@@ -19,7 +19,7 @@ import {
   terminalRetryRow,
   type RetryQueueRow,
 } from "../../src/lib/federation-retry-queue.js";
-import { retryEntryKey } from "../../src/lib/federation-retry-key.js";
+import { retryEntryKey } from "../../src/lib/federation-retry-row.js";
 import { RETRYABLE_SKIP_REASONS } from "../../resources/federation-classify.js";
 
 const PEER = "peer-a";
