@@ -13,16 +13,19 @@
  * due and the source row is still eligible, independent of its own cursor. A
  * pending row can become private, disappear or fail validation before it is
  * offered again. Any other reason is final: an existing pending row becomes
- * `refused_terminal`, and the retry path does not select a terminal row again
- * (a later row update can still select it through the ordinary cursor).
+ * `refused_terminal`, and the retry path in one sender run does not select a
+ * terminal row again (a later row update can still select it through the
+ * ordinary cursor; concurrent sender runs for one peer are not serialized — a
+ * separate issue).
  */
 import { retryEntryKey, retryRowProblem } from "./federation-retry-row.js";
 
 /**
- * The retryable SkipReason names a generic Memory record can be refused with.
- * Mirrors the `retryable` entries of SKIP_REASON_CLASS in
- * resources/federation-classify.ts; test/unit/federation-retry-queue.test.ts
- * fails when the two lists differ.
+ * The global retryable names the sender recognizes. Mirrors the
+ * `retryable` entries of SKIP_REASON_CLASS in resources/federation-classify.ts;
+ * not every name is raised by the generic Memory path
+ * (`presence_agent_not_replicated` comes from the Presence receipt path).
+ * test/unit/federation-retry-queue.test.ts fails when the two lists differ.
  */
 export const MEMORY_RETRY_REASONS: ReadonlySet<string> = new Set([
   "future_timestamp",
@@ -115,7 +118,7 @@ export function retryOfferProblem(row: RetryQueueRow, table = "Memory"): RetryOf
   return null;
 }
 
-/** The pending rows whose backoff has elapsed at `nowMs`. A malformed row is never offered. */
+/** The pending rows whose backoff has elapsed at `nowMs`. A malformed row is excluded by this retry selector. */
 export function dueRetryRows(rows: readonly RetryQueueRow[], nowMs: number, table = "Memory"): RetryQueueRow[] {
   return rows.filter((row) => {
     const problem = retryOfferProblem(row, table);
@@ -146,8 +149,9 @@ export interface RefusalRowInput {
  * The row to write for a retryable refusal. A first refusal creates a pending
  * row with `attempts: 1`; a later one keeps `firstRefusedAt` and `createdAt`,
  * increments `attempts` and moves `lastAttemptAt`, unless that offer already
- * reserved its attempt before sending. `attempts` counts reserved attempts, not
- * wire sends.
+ * reserved its attempt before sending. `attempts` counts reserved attempts
+ * within one sender run per peer at a time, not wire sends; concurrent sender
+ * runs for one peer are not serialized (a separate issue).
  */
 export function retryRowForRefusal(input: RefusalRowInput): Record<string, unknown> {
   const id = retryEntryKey(input.peerId, "Memory", input.recordId);

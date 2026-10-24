@@ -847,8 +847,9 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     // that also has a pending row gets the same treatment: a valid row's
     // attempt is reserved before the send and the outcome updates or resolves
     // it; a malformed row is reported and left as stored. A non-retryable
-    // refusal ends the obligation; the retry path does not select a terminal
-    // row again.
+    // refusal ends the obligation; the retry path in one sender run does not
+    // select a terminal row again, and concurrent sender runs for one peer are
+    // not serialized (a separate issue).
     const retryHeaders = { "Content-Type": "application/json", Authorization: auth };
     // One projection for every Memory read: the cursor query and the retry
     // re-read must not differ in what a row exposes to the signed batch.

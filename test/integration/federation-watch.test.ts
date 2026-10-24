@@ -180,7 +180,8 @@ describe("federation watch", () => {
     // In this no-retry fixture each sync run issues 9 search_by_conditions
     // POSTs: 2 per table for Memory, Soul, Agent and Relationship (one for
     // updatedAt > since, one for updatedAt IS NULL), plus 1 read of the pending
-    // FederationRetry rows. A due retry row adds one Memory read. The
+    // FederationRetry rows. A due row selected only through the retry path
+    // adds one Memory read. The
     // Peer.update for cursor advancement is NOT counted (filtered above) —
     // orthogonal concern.
     expect(syncCalls).toBe(9);

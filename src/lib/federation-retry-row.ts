@@ -7,8 +7,10 @@
  * resource imports must load no other module (test/unit/resource-src-purity-
  * 1775.test.ts). The CLI build (src/) and the Harper resources share this one
  * copy. The receiver's admin/read resources and the generic-Memory sender both
- * classify rows with retryRowProblem, so a row the reader calls malformed is
- * never offered. The reason vocabulary differs: the caller passes the predicate
+ * classify rows with retryRowProblem: the retry selector excludes a malformed
+ * row, while an eligible cursor-selected source is still sent and its
+ * malformed retry row is left as stored. The reason vocabulary differs: the
+ * caller passes the predicate
  * its own path uses (`isSkipReason` plus local reasons for a Harper resource;
  * the sender's stricter pending-row list).
  */

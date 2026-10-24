@@ -5,8 +5,9 @@
  * lock was held) is kept in the sender's FederationRetry table and offered
  * again on a later cycle, even though the sender's cursor has already advanced
  * past the row's own `updatedAt`. A first non-retryable refusal creates no
- * retry row; an existing pending row becomes terminal and the retry path does
- * not select it again.
+ * retry row; an existing pending row becomes terminal, and the retry path in
+ * one sender run does not select it again (concurrent sender runs for one peer
+ * are not serialized — a separate issue).
  *
  * The receiver holds the id's lock through the merge's existing pause point
  * (`federation-merge`): a second signed push from the same peer pauses there,
@@ -175,8 +176,9 @@ function memoryRow(id: string, content: string, updatedAt: string): Record<strin
     visibility: "shared",
     archived: false,
     // The sender signs v2 records and includes principalId only for a row that
-    // carries a verified provenance stamp; the receiver requires the two to
-    // agree on a Memory row.
+    // carries a provenance stamp with a `verified.agentId` field (the sender
+    // parses that field; it does not verify the stamp); the receiver requires
+    // the two to agree on a Memory row.
     provenance: JSON.stringify({ verified: { agentId: AGENT } }),
     createdAt: updatedAt,
     updatedAt,

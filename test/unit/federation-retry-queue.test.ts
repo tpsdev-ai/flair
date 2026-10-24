@@ -2,9 +2,10 @@
  * federation-retry-queue.test.ts — the sender's generic-Memory retry decisions
  * (flair#2797). Pure: no Harper, no filesystem.
  *
- * The retryable-name list is compared against the receiver's own classification
- * (RETRYABLE_SKIP_REASONS), so the sender cannot start (or stop) treating a
- * reason as retryable without this test failing.
+ * The list contents are compared with the receiver's own classification
+ * (RETRYABLE_SKIP_REASONS): the test fails when the two name sets differ. The
+ * comparison does not exercise the sender's branch, so a change there that
+ * leaves the list intact passes.
  */
 import { describe, expect, test } from "bun:test";
 import {
