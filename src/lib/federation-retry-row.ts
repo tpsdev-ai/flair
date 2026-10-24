@@ -61,20 +61,23 @@ export function parseRetryEntryKey(id: string): { peerId: string; table: string;
  * Why a terminal row stopped being offered, using the names the design gives
  * (rev 2 K2/S5 plus rev 2.1 N1's rename of `no_retry_required` to `merged`).
  *
- * - `merged` — a validated response that carries a per-key refusal list omitted
- *   the offered key: the receiver acknowledged it. The configured hub is
+ * - `merged` — a validated response did not list the offered key as refused
+ *   or indeterminate (a counts-only response that reports every offered record
+ *   merged counts it here): the receiver acknowledged it. The configured hub is
  *   trusted for that acknowledgement; it is not proof of delivery (design rev
  *   2.1 N4).
  * - `refused_terminal` — the receiver listed the key with a non-retryable reason.
  * - `source_deleted` — the source row is gone.
  * - `source_ineligible` — the source row is no longer eligible to send (e.g. private).
- * - `peer_unavailable` — the sender's own peer listing shows the hub absent or revoked.
- * - `retry_exhausted` — an N/T bound fired before the record was confirmed:
- *   either the receiver still refused it, or the last send was unconfirmed (a
- *   transport failure or an invalid response, `lastReason` says which). An
- *   unconfirmed send means the sender stopped offering, NOT that the record is
- *   missing: the receiver may already hold it. `bound` names the bound that
- *   fired, and is set for this resolution only.
+ * - `peer_unavailable` — RESERVED, not yet written by any sender: intended for
+ *   a sender whose own peer listing shows the hub absent or revoked.
+ * - `retry_exhausted` — RESERVED, not yet written by any sender: intended for
+ *   an N/T bound firing before the record was confirmed — either the receiver
+ *   still refused it, or the last send was unconfirmed (a transport failure or
+ *   an invalid response, `lastReason` says which). An unconfirmed send means
+ *   the sender stopped offering, NOT that the record is missing: the receiver
+ *   may already hold it. `bound` names the bound that fired, and is set for
+ *   this resolution only.
  */
 export type RetryResolution =
   | "merged"
@@ -114,8 +117,8 @@ export function isRetryBound(value: unknown): value is RetryBound {
  * The schema does not enforce these rules: `@sealed` refuses undeclared field
  * NAMES only, and every declared field is a plain ID, String or Int. They are
  * the conventions the sender writes by, so the reader and the transition check
- * them and treat a row that breaks one as malformed: never pending, never
- * transitioned.
+ * them and treat a row that breaks one as malformed: the retry path never
+ * offers it, and the outcome never transitions it.
  *
  * - `id_mismatch` — `id` is not retryEntryKey(peerId, table, recordId).
  * - `unknown_state` — `state` is neither `pending` nor `terminal`.

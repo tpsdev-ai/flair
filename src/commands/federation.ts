@@ -841,10 +841,14 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
 
     // ── federation retry bookkeeping (flair#2797) ─────────────────────────
     // An eligible generic Memory row the hub refused for a retryable reason is
-    // kept in FederationRetry and offered again on a later cycle while that
-    // pending obligation exists, independent of the since cursor. A
-    // non-retryable refusal ends the obligation; the retry path does not select
-    // a terminal row again.
+    // kept in FederationRetry and offered again on a later cycle while its
+    // pending row is valid, its backoff is due and the source row is still
+    // eligible, independent of the since cursor. A source the cursor selects
+    // that also has a pending row gets the same treatment: a valid row's
+    // attempt is reserved before the send and the outcome updates or resolves
+    // it; a malformed row is reported and left as stored. A non-retryable
+    // refusal ends the obligation; the retry path does not select a terminal
+    // row again.
     const retryHeaders = { "Content-Type": "application/json", Authorization: auth };
     // One projection for every Memory read: the cursor query and the retry
     // re-read must not differ in what a row exposes to the signed batch.

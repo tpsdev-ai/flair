@@ -64,16 +64,16 @@ type FederationRetry @table(database: "flair") @sealed @export {
   table: String!                   # the source table name
   recordId: String!                # the source row id
   state: String! @indexed          # "pending" | "terminal"
-  firstRefusedAt: String! @indexed # age is measured from here (the T bound)
-  attempts: Int! @indexed          # reserved and persisted before each send (the N bound)
-  episodeId: String                # RESERVED for sender activation (flair#2455 slice 3): the obligation's generation, for rejecting stale completions; nothing sets or checks it yet
+  firstRefusedAt: String! @indexed # when the first refusal was recorded; the sender enforces no age bound yet
+  attempts: Int! @indexed          # incremented and persisted before each send; the sender enforces no attempt bound yet
+  episodeId: String                # RESERVED: no sender writes it yet — intended as the obligation's generation, for rejecting stale completions
   recordFingerprint: String        # content fingerprint, for exhausted-row suppression
   lastReason: String               # the closed SkipReason, or a local reason
   lastAttemptSyncId: String        # the sync that last reserved an attempt
   lastAttemptAt: String
   completedAt: String              # when the row became terminal
   resolution: String               # which terminal outcome ended it
-  bound: String                    # "attempts" | "age" | "both" for retry_exhausted; null otherwise
+  bound: String                    # RESERVED: no sender writes it yet — "attempts" | "age" | "both" for retry_exhausted; null otherwise
   createdAt: String!
   updatedAt: String
 }

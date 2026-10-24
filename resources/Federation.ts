@@ -1731,8 +1731,9 @@ export class FederationSync extends Resource {
     await (databases as any).flair.Peer.put(peerUpdate);
 
     // Log sync operation with skip-reason breakdown so the partial state
-    // is debuggable instead of a black box. The response says whether the row
-    // was written: a failed write is reported, never assumed.
+    // is debuggable instead of a black box. The response reports what the put
+    // did: true when it returned; false when it threw, so the row's state is
+    // unconfirmed (there is no confirmation read).
     let syncLogWritten = false;
     try {
       if (txnFault("federation-synclog")) throw new Error("injected SyncLog write failure");

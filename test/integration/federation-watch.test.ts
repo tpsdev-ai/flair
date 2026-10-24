@@ -177,11 +177,12 @@ describe("federation watch", () => {
     const elapsed = Date.now() - start;
 
     // With interval clamped to 5s, we should only see 1 sync run in 500ms.
-    // Each sync run issues 9 search_by_conditions POSTs: 2 per table for
-    // Memory, Soul, Agent and Relationship (one for updatedAt > since, one
-    // for updatedAt IS NULL), plus 1 read of the pending FederationRetry
-    // rows. The Peer.update for cursor advancement is NOT counted (filtered
-    // above) — orthogonal concern.
+    // In this no-retry fixture each sync run issues 9 search_by_conditions
+    // POSTs: 2 per table for Memory, Soul, Agent and Relationship (one for
+    // updatedAt > since, one for updatedAt IS NULL), plus 1 read of the pending
+    // FederationRetry rows. A due retry row adds one Memory read. The
+    // Peer.update for cursor advancement is NOT counted (filtered above) —
+    // orthogonal concern.
     expect(syncCalls).toBe(9);
     expect(elapsed).toBeLessThan(1000);
   });
