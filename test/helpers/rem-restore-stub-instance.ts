@@ -6,13 +6,15 @@
  * port-1 convention restore derives an operations port by). The script is
  * written to `<tmp>/node_modules/harper/dist/bin/harper.js` and run as
  * `bun <that path>`, so the OS listener table shows one process with a
- * Harper-shaped command line on both ports, as for a real instance; restore's
- * loopback pair check (src/lib/local-instance-pair.ts) reads exactly that.
+ * Harper-shaped command line on both ports, as for a real instance.
  *
  * The operations port answers `get_configuration` with the process's own two
  * ports and `search_by_conditions` on MemoryCandidate from the seeded rows.
- * The HTTP port serves GET/PUT/DELETE on Memory, Soul and MemoryCandidate, or
- * answers every PUT and DELETE with a 307 when `redirectWritesTo` is seeded.
+ * The HTTP port serves GET/PUT/DELETE on Memory, Soul and MemoryCandidate, the
+ * admin-only `/AdminMemoryCandidates/{agentId}` listing (in id order, after
+ * the `after` id when one is given), or answers an
+ * authorized DELETE, and an authorized PUT with a JSON body, with a 307 when
+ * `redirectWritesTo` is seeded.
  *
  * Every request either port receives is appended to a log file that
  * `requests()` reads: each handler first reads the body as text (the
@@ -23,7 +25,12 @@
  * admin:<adminPass>`, default {@link STUB_ADMIN_PASS}) and answers 401 to any
  * other request. `signed` also accepts an `Authorization` header that starts
  * with `TPS-Ed25519 `, answers 403 to a request with no `Authorization`
- * header, and 401 to any other request.
+ * header, and 401 to any other request. The admin-only
+ * `/AdminMemoryCandidates` route serves only the admin credential: in `signed`
+ * mode it answers a request with a `TPS-Ed25519 ` header 403, and any other
+ * request without the admin credential 401.
+ * That 403 is synthetic: the stub checks no signature, and any such header
+ * stands in for a verified non-admin agent.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -58,6 +65,7 @@ export interface StubSeed {
    * also accepts a `TPS-Ed25519 ` signature, and answers a request with no
    * `Authorization` header at all with 403, as a gated resource does: that is
    * the answer the shared resolver's agent-key fallback engages on.
+   * `/AdminMemoryCandidates` is the exception (see the module comment).
    */
   auth?: "admin-basic" | "signed";
 }
@@ -94,13 +102,23 @@ const authKind = (req) => {
   if (h.startsWith("Basic ")) return "basic";
   return h.startsWith("TPS-Ed25519 ") ? "signature" : "other";
 };
-// The status a request gets: 403 only for a credential-less request to a
-// signed-accepting instance, which is what the resolver's fallback reads.
+// The status a request outside the admin route gets: 403 only for a
+// credential-less request to a signed-accepting instance, which is what the
+// resolver's fallback reads.
 const refusal = (req) => {
   const h = req.headers.get("authorization");
   if (h === expectedAuth) return 0;
   if (seed.auth === "signed" && h?.startsWith("TPS-Ed25519 ")) return 0;
   if (seed.auth === "signed" && !h) return 403;
+  return 401;
+};
+// The admin route's status. Synthetic: in signed mode any "TPS-Ed25519 "
+// header stands in for a verified non-admin agent and is answered 403; no
+// signature is checked.
+const adminRouteRefusal = (req) => {
+  const h = req.headers.get("authorization");
+  if (h === expectedAuth) return 0;
+  if (seed.auth === "signed" && h?.startsWith("TPS-Ed25519 ")) return 403;
   return 401;
 };
 // Neither step can throw, so every request reaches its log line.
@@ -126,14 +144,25 @@ async function httpFetch(req) {
   const url = new URL(req.url);
   const text = await readText(req);
   log({ endpoint: "http", method: req.method, path: url.pathname, auth: authKind(req) });
-  const refused = refusal(req);
+  const [table, rawId] = url.pathname.split("/").filter(Boolean);
+  const refused = table === "AdminMemoryCandidates" ? adminRouteRefusal(req) : refusal(req);
   if (refused) return new Response(refused === 403 ? "forbidden" : "unauthorized", { status: refused });
   const body = parseJson(text);
   if (req.method === "PUT" && body === undefined) return new Response("malformed body", { status: 400 });
   if (seed.redirectWritesTo && (req.method === "PUT" || req.method === "DELETE")) {
     return new Response(null, { status: 307, headers: { location: seed.redirectWritesTo + url.pathname } });
   }
-  const [table, rawId] = url.pathname.split("/").filter(Boolean);
+  if (table === "AdminMemoryCandidates") {
+    const agent = decodeURIComponent(rawId ?? "");
+    const requested = Number(url.searchParams.get("limit") ?? 200);
+    const limit = Number.isInteger(requested) && requested > 0 ? Math.min(requested, 500) : 200;
+    const after = url.searchParams.get("after");
+    const matching = [...tables.MemoryCandidate.values()]
+      .filter((r) => r.agentId === agent && (after === null || r.id > after))
+      .sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+    const page = matching.slice(0, limit);
+    return Response.json({ candidates: page.map((r) => ({ id: r.id })), hasMore: matching.length > page.length });
+  }
   const rows = tables[table];
   const id = rawId ? decodeURIComponent(rawId) : "";
   if (!rows) return new Response("not found", { status: 404 });

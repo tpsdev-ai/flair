@@ -129,6 +129,14 @@ export class BaseMemory {
    *  in-process call, where the body id IS the write key. See
    *  resources/originator-instance.ts. */
   getId() { return (this as any)._targetId; }
+  /** flair#2478 part 3a: real Harper's `Table.getResource` returns a resource
+   *  bound to its target and context; the checked Memory writes use it. */
+  static getResource(target: any, ctx: any) {
+    const resource: any = new this();
+    resource._targetId = target?.id;
+    resource.getContext = () => ctx;
+    return resource;
+  }
   async get(target?: any) {
     harnessState.lastBaseGetTarget = target;
     const id = typeof target === "string" ? target : target?.id;
