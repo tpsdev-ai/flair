@@ -16,10 +16,13 @@
  *     suspension, so the scope knows of it even if `work` does not await it.
  *     A write settles as `staged` once its row is staged; its body then waits.
  *  2. When `work` settles, admission closes and every admitted write is
- *     drained. Before the commit, a rejection of `work` or of an admitted
- *     write, a refusal returned by `work` (a `Response`), a refused write, or
- *     a checked-write admission capability refusal inside the scope aborts the
- *     transaction; nothing is committed, and a waiting body ends.
+ *     drained. Before the commit, a rejection of `work`, an admitted write's
+ *     rejection before it stages, a refusal returned by `work` (a `Response`),
+ *     a refused write, or a checked-write admission capability refusal inside
+ *     the scope aborts the transaction; nothing is committed, and a waiting
+ *     body ends. A write that has staged stays `staged`: a later rejection of
+ *     its body does not abort the scope and is reported after the commit, as
+ *     that write's confirmed answer.
  *  3. The transaction commits.
  *  4. Each staged write's body resumes, in admission order, for its
  *     post-commit confirmation, while the lock is still held (the acquisition
@@ -199,7 +202,10 @@ export interface LockedWriteAdmission {
    * returns is the write's confirmed answer) or false when the scope does not
    * commit. A `run` that returns a `Response` without staging settles the
    * write as refused with that `Response`; one that returns anything else
-   * without staging, or throws, settles the write as rejected.
+   * without staging, or throws before staging, settles the write as rejected.
+   * Once `run` has staged, the write stays `staged`; a later rejection of
+   * `run` does not abort the scope and is what the write's confirmation
+   * answers after the commit.
    */
   track(id: string, run: (stage: () => Promise<boolean>) => Promise<unknown>): Promise<MemoryWriteReceipt>;
 }
