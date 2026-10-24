@@ -16,7 +16,7 @@ mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => nu
 
 const { runMigrationCycle } = await import("../../resources/migrations/runner.ts");
 const { MigrationRegistry } = await import("../../resources/migrations/registry.ts");
-const { readMigrationState, defaultStatePath } = await import("../../resources/migrations/state.ts");
+const { readMigrationState, writeMigrationStateEntry, defaultStatePath } = await import("../../resources/migrations/state.ts");
 const { listMigrationProgress, _resetProgressForTests, getCycleStatus } = await import("../../resources/migrations/progress.ts");
 const { getMigrationStatusSnapshot } = await import("../../resources/migrations/status.ts");
 const { _resetInProcessLockForTests } = await import("../../resources/migrations/lock.ts");
@@ -426,6 +426,136 @@ describe("runMigrationCycle — unconfirmed rows (flair#2840)", () => {
     expect(progress?.rowsUnconfirmed).toBe(105);
     expect(progress?.unconfirmedIds).toHaveLength(100);
     expect(progress?.unconfirmedIds?.[0]).toBe("u0");
+  });
+});
+
+describe("runMigrationCycle — the unconfirmed record survives no-pending cycles and restarts (flair#2840)", () => {
+  function makeTargetMigration(id: string, memory: ReturnType<typeof makeStore>, calls: { detect: number }) {
+    return {
+      id,
+      riskClass: "derived-only" as const,
+      affectsTables: ["Memory" as const],
+      async detect() {
+        calls.detect++;
+        return false;
+      },
+      async countPending() {
+        return 0;
+      },
+      async run(): Promise<RunBatchResult> {
+        throw new Error("run() must not be called: nothing is pending");
+      },
+      async checkUnconfirmed(rowId: string) {
+        const row = await memory.accessor.get(rowId);
+        if (!row) return "no-row" as const;
+        return row.stamp === "done" ? "at-target" as const : "pending" as const;
+      },
+    } satisfies Migration;
+  }
+
+  it("a no-pending cycle keeps the count, the ids and the halted status", async () => {
+    const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", stamp: "not-yet" }]);
+    const relationship = makeStore([]);
+    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-record", {
+      lastOutcome: "halted",
+      reason: "completion gate failed: rowsRemaining=0, hash envelope mismatch",
+      rowsProcessed: 1,
+      rowsRemaining: 0,
+      rowsUnconfirmed: 1,
+      unconfirmedIds: ["m2"],
+    });
+    const calls = { detect: 0 };
+    const migration = makeTargetMigration("fake-record", memory, calls);
+
+    const result = await runMigrationCycle({
+      registry: buildRegistryWith(migration),
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: fastSleep,
+    });
+
+    expect(result).toEqual({ ran: false, reason: "nothing pending" });
+    expect(calls.detect).toBe(1);
+    const progress = listMigrationProgress().find((p) => p.id === "fake-record");
+    expect(progress?.state).toBe("halted");
+    expect(progress?.rowsUnconfirmed).toBe(1);
+    expect(progress?.unconfirmedIds).toEqual(["m2"]);
+    expect(progress?.rowsDone).toBe(1);
+
+    const state = readMigrationState(defaultStatePath(dataDir));
+    expect(state["fake-record"].lastOutcome).toBe("halted");
+    expect(state["fake-record"].unconfirmedIds).toEqual(["m2"]);
+  });
+
+  it("clears an id only once a later cycle reads the row at the target, then reports completed", async () => {
+    const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", stamp: "not-yet" }]);
+    const relationship = makeStore([]);
+    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-clears", {
+      lastOutcome: "halted",
+      reason: "completion gate failed: rowsRemaining=0",
+      rowsProcessed: 1,
+      rowsRemaining: 0,
+      rowsUnconfirmed: 1,
+      unconfirmedIds: ["m2"],
+    });
+    const calls = { detect: 0 };
+    const migration = makeTargetMigration("fake-clears", memory, calls);
+    const deps = {
+      registry: buildRegistryWith(migration),
+      getTable: (t: "Memory" | "Relationship") => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: fastSleep,
+    };
+
+    await runMigrationCycle(deps);
+    expect(listMigrationProgress().find((p) => p.id === "fake-clears")?.rowsUnconfirmed).toBe(1);
+
+    memory.map.set("m2", { id: "m2", content: "a", agentId: "a1", stamp: "done" });
+    await runMigrationCycle(deps);
+
+    const progress = listMigrationProgress().find((p) => p.id === "fake-clears");
+    expect(progress?.state).toBe("completed");
+    expect(progress?.rowsUnconfirmed).toBeUndefined();
+    expect(progress?.unconfirmedIds).toBeUndefined();
+    const state = readMigrationState(defaultStatePath(dataDir));
+    expect(state["fake-clears"].lastOutcome).toBe("success");
+    expect(state["fake-clears"].rowsUnconfirmed).toBeUndefined();
+    expect(state["fake-clears"].unconfirmedIds).toBeUndefined();
+  });
+
+  it("a failed re-read keeps the id: unknown evidence never clears the record", async () => {
+    const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", stamp: "not-yet" }]);
+    const relationship = makeStore([]);
+    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-unknown", {
+      lastOutcome: "halted",
+      reason: "completion gate failed: rowsRemaining=0",
+      rowsProcessed: 1,
+      rowsRemaining: 0,
+      rowsUnconfirmed: 1,
+      unconfirmedIds: ["m2"],
+    });
+    const calls = { detect: 0 };
+    const migration = {
+      ...makeTargetMigration("fake-unknown", memory, calls),
+      async checkUnconfirmed() {
+        throw new Error("read failed");
+      },
+    } satisfies Migration;
+
+    await runMigrationCycle({
+      registry: buildRegistryWith(migration),
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: fastSleep,
+    });
+
+    const progress = listMigrationProgress().find((p) => p.id === "fake-unknown");
+    expect(progress?.state).toBe("halted");
+    expect(progress?.rowsUnconfirmed).toBe(1);
+    expect(progress?.unconfirmedIds).toEqual(["m2"]);
   });
 });
 

@@ -615,6 +615,14 @@ export function createEmbeddingStampMigration(
       return n;
     },
 
+    async checkUnconfirmed(id: string) {
+      const row = await getTable().get(id);
+      if (!row) return "no-row" as const;
+      return rowEmbeddingCurrent(row as Record<string, unknown>, getCurrentModelId())
+        ? "at-target" as const
+        : "pending" as const;
+    },
+
     async run(batchSize: number): Promise<RunBatchResult> {
       const table = getTable();
       const current = getCurrentModelId();

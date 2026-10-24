@@ -18,11 +18,17 @@
  *                             commit another writer's change to <id>: a new
  *                             owner and `shared`. The row is at the migration's
  *                             target, but not because this run verified it.
+ *   arm.competing-away.<id>   the same miss, and the same instant is used to
+ *                             commit another writer's change to <id>: a new
+ *                             owner, `shared`, and the row's source is left
+ *                             off the target. The row is no longer this
+ *                             migration's work, and it is not at the target.
  *
- * Both paths that write through the raw table are covered: the synthetic
- * migration's write-back, and embedding-stamp's `.content`-suffix re-embed.
- * The assertions are made through the runner's progress record as
- * HealthDetail serves it, and through the durable state file.
+ * The raw-table paths covered here are the synthetic migration's write-back
+ * and embedding-stamp's `.content`-suffix re-embed (the visibility backfill is
+ * not exercised). The synthetic path's assertions are made through the
+ * runner's progress record as HealthDetail serves it, and through the durable
+ * state file; the `.content`-suffix case asserts HealthDetail only.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -41,6 +47,7 @@ const FAULT_MODULE_REL = join("dist", "resources", "zz-test-verification-miss-28
 const ROW_CONFIRMED = "unconfirmed-2840-confirmed";
 const ROW_MISS = "unconfirmed-2840-miss";
 const ROW_COMPETING = "unconfirmed-2840-competing";
+const ROW_AWAY = "unconfirmed-2840-away";
 const ROW_CONTENT = "unconfirmed-2840-legacy.content";
 
 const FAULT_MODULE_SRC = `import { existsSync, writeFileSync } from "node:fs";
@@ -58,11 +65,12 @@ const isEmbeddingWrite = (patch) => !!patch && Array.isArray(patch.embedding);
 memory.update = async function (id, patch, ctx) {
   const capture = typeof id === "string" && (
     (armed("verify-miss", id) && (isSyntheticWrite(patch) || isEmbeddingWrite(patch))) ||
-    (armed("competing-write", id) && isSyntheticWrite(patch))
+    (armed("competing-write", id) && isSyntheticWrite(patch)) ||
+    (armed("competing-away", id) && isSyntheticWrite(patch))
   );
   const prior = capture ? await realGet.call(this, id, {}) : null;
   const result = await realUpdate.call(this, id, patch, ctx);
-  if (capture) seen.set(id, { prior, reads: 0, competing: armed("competing-write", id) });
+  if (capture) seen.set(id, { prior, reads: 0, competing: armed("competing-write", id), away: armed("competing-away", id) });
   return result;
 };
 memory.get = async function (id, ctx, ...rest) {
@@ -78,6 +86,11 @@ memory.get = async function (id, ctx, ...rest) {
         // owner, the target value, and a visibility this run never derived.
         await realUpdate.call(this, id, { agentId: "unconfirmed-2840-other-writer", source: ${JSON.stringify(SYNTHETIC_TARGET_MARKER)}, visibility: "shared" });
         note("competing-write", id);
+      } else if (state.away && row) {
+        // Another writer takes the row over during the gap without bringing it
+        // to the target: it leaves the migration's scope, still not done.
+        await realUpdate.call(this, id, { agentId: "unconfirmed-2840-other-writer", source: "not-yet", visibility: "shared" });
+        note("competing-away", id);
       } else {
         note("verify-miss", id);
       }
@@ -94,6 +107,7 @@ let homeDir: string;
 let faultDir: string;
 let dataDir: string;
 let authHeader: string;
+let serverEnv: Record<string, string>;
 
 async function opsCall(body: Record<string, unknown>): Promise<any> {
   const res = await fetch(harper.opsURL, {
@@ -115,6 +129,24 @@ async function readRow(id: string): Promise<any> {
     get_attributes: ["*"],
   });
   return Array.isArray(rows) ? rows[0] : rows;
+}
+
+/** A boot from the same install dir and HOME, so the state file is reused. */
+async function restartHarper(): Promise<void> {
+  await stopHarper(harper, { keepInstallDir: true });
+  harper = await startHarper({ cwd: appDir, harperBinDir: process.cwd(), installDir: harper.installDir, homeDir, serverEnv });
+}
+
+/** The synthetic migration's progress row as HealthDetail serves it. */
+async function syntheticProgress(): Promise<any> {
+  const deadline = Date.now() + 120_000;
+  let mig: any = null;
+  while (Date.now() < deadline) {
+    mig = migration(await healthDetail(), SYNTHETIC_ID);
+    if (mig && mig.state !== "idle" && mig.state !== "checking") return mig;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return mig;
 }
 
 async function healthDetail(): Promise<any> {
@@ -141,7 +173,7 @@ describe("flair#2840 — an unconfirmed write is reported by id, never counted a
     writeFileSync(join(appDir, FAULT_MODULE_REL), FAULT_MODULE_SRC);
     symlinkSync(resolve("node_modules"), join(appDir, "node_modules"), "dir");
 
-    const serverEnv = { FLAIR_ENABLE_TEST_MIGRATIONS: "1", FLAIR_TEST_PAUSE_DIR: faultDir, FLAIR_ENABLE_TEST_FAULT_INJECTION: "1" };
+    serverEnv = { FLAIR_ENABLE_TEST_MIGRATIONS: "1", FLAIR_TEST_PAUSE_DIR: faultDir, FLAIR_ENABLE_TEST_FAULT_INJECTION: "1" };
     const first = await startHarper({ cwd: appDir, harperBinDir: process.cwd(), homeDir, serverEnv });
     dataDir = first.installDir;
     authHeader = "Basic " + Buffer.from(`${first.admin.username}:${first.admin.password}`).toString("base64");
@@ -162,6 +194,7 @@ describe("flair#2840 — an unconfirmed write is reported by id, never counted a
         syntheticRow(ROW_CONFIRMED),
         syntheticRow(ROW_MISS),
         syntheticRow(ROW_COMPETING),
+        syntheticRow(ROW_AWAY),
         {
           id: ROW_CONTENT,
           agentId: "unconfirmed-2840-agent",
@@ -173,9 +206,10 @@ describe("flair#2840 — an unconfirmed write is reported by id, never counted a
       ],
     });
 
-    // One-shot marker files consumed by the fault module. The content row's
-    // arm stays for all its attempts, so every attempt's verification misses.
-    for (const [kind, id] of [["verify-miss", ROW_MISS], ["competing-write", ROW_COMPETING], ["verify-miss", ROW_CONTENT]] as const) {
+    // Arm marker files. The fault module checks each for existence; it does
+    // not remove or consume one. The content row's arm stays for all its
+    // attempts, so every attempt's verification misses.
+    for (const [kind, id] of [["verify-miss", ROW_MISS], ["competing-write", ROW_COMPETING], ["competing-away", ROW_AWAY], ["verify-miss", ROW_CONTENT]] as const) {
       writeFileSync(join(faultDir, `arm.${kind}.${id}`), "");
     }
 
@@ -194,7 +228,7 @@ describe("flair#2840 — an unconfirmed write is reported by id, never counted a
     }
   }, HARPER_STOP_BUDGET_MS);
 
-  it("the raw-table path: rowsDone counts only the confirmed write; the other two are named unconfirmed", async () => {
+  it("the raw-table path: rowsDone counts only the confirmed write; the others are named unconfirmed", async () => {
     const deadline = Date.now() + 120_000;
     let detail: any = null;
     let mig: any = null;
@@ -210,26 +244,29 @@ describe("flair#2840 — an unconfirmed write is reported by id, never counted a
     expect(mig?.state, JSON.stringify(mig)).toBe("halted");
     expect(String(mig.reason)).toContain("hash envelope mismatch");
 
-    // Every seeded synthetic row reached the target …
+    // The three rows the confirmed write did not cover reached the target …
     for (const id of [ROW_CONFIRMED, ROW_MISS, ROW_COMPETING]) {
       expect((await readRow(id)).source).toBe(SYNTHETIC_TARGET_MARKER);
     }
+    // … the away row did not: another writer took it over, short of the target.
+    expect((await readRow(ROW_AWAY)).source).toBe("not-yet");
     // … the confirmed write alone is counted …
     expect(mig.rowsDone).toBe(1);
-    // … and the relation accounts for every seeded row.
-    expect(mig.rowsDone + mig.rowsUnconfirmed).toBe(3);
-    expect(new Set(mig.unconfirmedIds)).toEqual(new Set([ROW_MISS, ROW_COMPETING]));
+    // … and the reported relation accounts for every seeded row.
+    expect(mig.rowsDone + mig.rowsUnconfirmed).toBe(4);
+    expect(new Set(mig.unconfirmedIds)).toEqual(new Set([ROW_MISS, ROW_COMPETING, ROW_AWAY]));
     expect(mig.rowsRemaining).toBe(0);
 
     expect(existsSync(join(faultDir, `fired.verify-miss.${ROW_MISS}`))).toBe(true);
     expect(existsSync(join(faultDir, `fired.competing-write.${ROW_COMPETING}`))).toBe(true);
+    expect(existsSync(join(faultDir, `fired.competing-away.${ROW_AWAY}`))).toBe(true);
 
     // The durable record carries the same count and ids.
     const state = JSON.parse(readFileSync(join(dataDir, ".migrations", "state.json"), "utf-8"));
     expect(state[SYNTHETIC_ID].lastOutcome).toBe("halted");
     expect(state[SYNTHETIC_ID].rowsProcessed).toBe(1);
-    expect(state[SYNTHETIC_ID].rowsUnconfirmed).toBe(2);
-    expect(new Set(state[SYNTHETIC_ID].unconfirmedIds)).toEqual(new Set([ROW_MISS, ROW_COMPETING]));
+    expect(state[SYNTHETIC_ID].rowsUnconfirmed).toBe(3);
+    expect(new Set(state[SYNTHETIC_ID].unconfirmedIds)).toEqual(new Set([ROW_MISS, ROW_COMPETING, ROW_AWAY]));
   }, 150_000);
 
   it("the content-suffix path: the row is stamped, not counted, and named unconfirmed", async () => {
@@ -251,4 +288,58 @@ describe("flair#2840 — an unconfirmed write is reported by id, never counted a
     expect(mig.unconfirmedIds).toEqual([ROW_CONTENT]);
     expect(existsSync(join(faultDir, `fired.verify-miss.${ROW_CONTENT}`))).toBe(true);
   }, 150_000);
+
+  it("the record survives a no-pending cycle and a restart, and an id clears only at the target", async () => {
+    // (a) The boot's follow-up cycle finds nothing pending. The two ids the
+    // competing writer brought to the target are cleared; the away row, still
+    // short of it, stays recorded with the halted status.
+    const statePath = join(dataDir, ".migrations", "state.json");
+    const deadline = Date.now() + 90_000;
+    let entry: any = null;
+    while (Date.now() < deadline) {
+      entry = JSON.parse(readFileSync(statePath, "utf-8"))[SYNTHETIC_ID];
+      if (entry?.rowsUnconfirmed === 1) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(entry?.lastOutcome).toBe("halted");
+    expect(entry?.rowsUnconfirmed).toBe(1);
+    expect(entry?.unconfirmedIds).toEqual([ROW_AWAY]);
+
+    let mig = migration(await healthDetail(), SYNTHETIC_ID);
+    expect(mig?.state).toBe("halted");
+    expect(mig?.rowsUnconfirmed).toBe(1);
+    expect(mig?.unconfirmedIds).toEqual([ROW_AWAY]);
+
+    // (b) A second boot from the same state file seeds the record from it, and
+    // the boot cycle re-reads the row, still short of the target.
+    await restartHarper();
+    mig = await syntheticProgress();
+    expect(mig?.state).toBe("halted");
+    expect(mig?.rowsUnconfirmed).toBe(1);
+    expect(mig?.unconfirmedIds).toEqual([ROW_AWAY]);
+
+    // (c) Bring the row to the target; a cycle that reads it there clears the
+    // last recorded id.
+    await opsCall({
+      operation: "update",
+      database: "flair",
+      table: "Memory",
+      records: [{ id: ROW_AWAY, source: SYNTHETIC_TARGET_MARKER }],
+    });
+    const clearedDeadline = Date.now() + 90_000;
+    let cleared: any = null;
+    while (Date.now() < clearedDeadline) {
+      cleared = JSON.parse(readFileSync(statePath, "utf-8"))[SYNTHETIC_ID];
+      if (cleared?.lastOutcome === "success" && !cleared.rowsUnconfirmed) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(cleared?.lastOutcome, JSON.stringify(cleared)).toBe("success");
+    expect(cleared?.rowsUnconfirmed).toBeUndefined();
+    expect(cleared?.unconfirmedIds).toBeUndefined();
+    expect((await readRow(ROW_AWAY)).source).toBe(SYNTHETIC_TARGET_MARKER);
+
+    const finalMig = await syntheticProgress();
+    expect(finalMig?.state).toBe("completed");
+    expect(finalMig?.rowsUnconfirmed).toBeUndefined();
+  }, 300_000);
 });
