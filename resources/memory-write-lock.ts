@@ -64,8 +64,10 @@
  *    records the marker; until a process restart clears it (the fencing step),
  *    PUT/PATCH check the addressed id; DELETE also checks the resolved skill
  *    head. An automatic writer that takes the lock through
- *    {@link withMemoryWriteLockOnce} writes nothing to a marked id; it does not
- *    set the marker for its own unconfirmed write, which it reports or logs.
+ *    {@link withMemoryWriteLockOnce} writes nothing to a marked id; the feed
+ *    dedup repair records the marker when its committed update's confirmation
+ *    read fails or does not show the update, and the other automatic writers
+ *    do not set it for their own unconfirmed write, which they report or log.
  *    A POST that takes the lock checks the ids it locks; a POST that takes
  *    none, and the writers that take no per-id lock, do not check the marker.
  *

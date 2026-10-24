@@ -8,6 +8,7 @@ import { hashEmbeddedText, holdsOwnStaleVector, type StagedVector } from "./memo
 import { MEMORY_EMBEDDING_INPUT_FIELDS, skillEmbedText } from "./skill-write.js";
 import { agentIsAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME, readCredentialedPrincipal, AGENT_LOOKUP_FAILED } from "./agent-auth.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
+import { BASIC_AUTH_HEADER_RE, parseBasicAuthHeader } from "./basic-auth-header.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord, resolveGuardedRecordById } from "./record-owner-guard.js";
 import { routeWithHarper, type HarperRoute } from "./harper-routing.js";
@@ -568,7 +569,7 @@ server.http(async (request: any, nextLayer: any) => {
   // Scheme names are case-insensitive (RFC 9110): "basic"/"BASIC"/"Basic" all
   // select the Basic branch below, exactly as "Basic" does. Used for both the
   // /FederationPair public-bypass test and the Basic branch itself.
-  const isBasic = /^Basic /i.test(header);
+  const isBasic = BASIC_AUTH_HEADER_RE.test(header);
   const isA2APath = routedDecisionPath === "/a2a" || routedDecisionPath === "/A2AAdapter" || routedDecisionPath.startsWith("/A2AAdapter/");
   if (!isTpsEd25519 && (
     routedDecisionPath === "/health" ||
@@ -651,10 +652,7 @@ server.http(async (request: any, nextLayer: any) => {
   // Checked BEFORE Ed25519 so admin tools can use simple auth.
   if (isBasic) {
     try {
-      const decoded = Buffer.from(header.slice(6), "base64").toString("utf-8");
-      const colonIdx = decoded.indexOf(":");
-      const user = colonIdx >= 0 ? decoded.slice(0, colonIdx) : decoded;
-      const pass = colonIdx >= 0 ? decoded.slice(colonIdx + 1) : "";
+      const { user, pass } = parseBasicAuthHeader(header)!;
 
       // Path 1: Env-var fast-path (back-compat). Only matches user==="admin"
       // with exact HDB_ADMIN_PASSWORD. Non-match falls through to Path 2.
