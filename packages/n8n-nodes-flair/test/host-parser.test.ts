@@ -38,9 +38,18 @@ const CORE_VERSIONS = (
   .map((version) => version.trim())
   .filter(Boolean);
 
-const BUILD_TIMEOUT_MS = 180_000;
-const INSTALL_TIMEOUT_MS = 180_000;
+// Bounds each child process this file starts: the node build and each npm pack
+// at 20 s, npm init at 10 s, each registry install at 30 s, each driver run at
+// 30 s. Measured 2026-10-24: build 1.3 s, packs 0.7-0.9 s, init 0.2 s, installs
+// 2.2-5.6 s, driver 0.4-0.5 s; 30 s is 5.4x the slowest measured install.
+const BUILD_TIMEOUT_MS = 20_000;
+const INIT_TIMEOUT_MS = 10_000;
+const INSTALL_TIMEOUT_MS = 30_000;
 const INVOKE_TIMEOUT_MS = 30_000;
+// Bounds the beforeAll hook that runs every child above (260 s at their
+// bounds): the test-level limit for this file.
+const TEST_TIMEOUT_MS = 300_000;
+setDefaultTimeout(TEST_TIMEOUT_MS);
 
 let scratch = "";
 let clientTarball = "";
@@ -64,6 +73,8 @@ function run(command: string, args: string[], cwd: string, timeout: number): str
     env: hostEnv(),
     encoding: "utf8",
     timeout,
+    // SIGKILL, not the default SIGTERM: spawnSync waits for the child to exit.
+    killSignal: "SIGKILL",
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -171,7 +182,7 @@ beforeAll(() => {
   for (const version of CORE_VERSIONS) {
     const prefix = join(scratch, `host-${version}`);
     mkdirSync(prefix);
-    run("npm", ["init", "-y"], prefix, INSTALL_TIMEOUT_MS);
+    run("npm", ["init", "-y"], prefix, INIT_TIMEOUT_MS);
     run(
       "npm",
       [
