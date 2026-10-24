@@ -1496,6 +1496,13 @@ jobs:
           restore-keys: |
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
+      - name: Harper's bundled copies are readable (flair#2781)
+        # harper 5.3.3 bundles some of its production dependencies under its
+        # own node_modules; this step measures that bundled tree. This runs on the frozen install the install checks in
+        # this job use, lists every copy, and exits nonzero for a declared entry
+        # with no directory or a copy whose manifest is missing, unreadable or
+        # malformed — a list that skipped a copy is not a measurement.
+        run: node scripts/ci/list-harper-bundled.mjs
       - run: bun run build && bun run build:cli
       # flair-mcp ships as its own package and is NOT built by the root scripts,
       # so its vendored + compiled descriptor module does not exist yet. Build it

@@ -41,16 +41,20 @@ describe("ordinary DELETE pointer compensation commit guard", () => {
     });
     expect(guard).toBeDefined();
     guard.saved = true;
-    const txn = { open: 1, timestamp: 1, retries: 0 };
+    // A real DatabaseTransaction, not a hand-built `this`: Harper 5.3.3's save() calls
+    // getHandleStagedTxnTime(), which only the class provides.
+    const txn = new DatabaseTransaction();
+    txn.timestamp = 1;
+    txn.retries = 0;
     const save = DatabaseTransaction.prototype.save as any;
     const reads = spyOn(guard.store, "getEntry");
     try {
-      save.call(txn, guard, {}, false);
+      save.call(txn, guard, txn, false);
       expect(reads).not.toHaveBeenCalled();
       const replacement = { ...pointer, memoryInstanceToken: "replacement-token" };
       harnessState.pointerStore.set(pointer.memoryId, replacement);
       txn.retries = 1;
-      expect(() => save.call(txn, guard, {}, true)).toThrow(PointerAlreadyStoredError);
+      expect(() => save.call(txn, guard, txn, true)).toThrow(PointerAlreadyStoredError);
       expect(harnessState.pointerStore.get(pointer.memoryId)).toEqual(replacement);
     } finally {
       reads.mockRestore();

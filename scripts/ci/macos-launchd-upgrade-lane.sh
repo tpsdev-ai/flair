@@ -515,13 +515,18 @@ INSTALLED_VERSION="$(flair --version 2>&1 | tail -n1 | tr -d '[:space:]')"
 echo "flair --version: ${INSTALLED_VERSION} (expected ${PR_VERSION})"
 
 PKG_FLOOR="$(node -p "require('${WORKSPACE}/.github/install-weight-budget.json').minPackages")"
-# Tolerate a non-zero npm ls (it can fail on a partially-installed global
-# tree) without tripping the ERR trap — same reason as the adopt step above:
-# `set +e` alone does not stop the ERR trap. The count still comes from the
-# pipeline's own output.
+# The count comes from the same measured definition the PR lane and the canary
+# enforce (scripts/check-global-install-lockfile.mjs → countFlairTree): the
+# resolved dependency graph from the installed @tpsdev-ai/flair package through
+# the dependencies its manifests declare. Packages in the prefix that nothing
+# in the graph depends on are never counted; bundled copies are reached through
+# the package that declares them.
 PKG_COUNT=0
-PKG_COUNT="$(npm ls -g --all --parseable 2>/dev/null | wc -l | tr -d ' ')" || true
-echo "global tree packages (npm ls -g --all --parseable): ${PKG_COUNT} (floor ${PKG_FLOOR})"
+PKG_COUNT="$(node "$WORKSPACE/scripts/check-global-install-lockfile.mjs" --count-root "$GLOBAL_ROOT")" || {
+  echo "could not measure the global package tree at $GLOBAL_ROOT (an unmeasurable tree is not an empty one)" >&2
+  exit 1
+}
+echo "global tree packages (resolved graph from @tpsdev-ai/flair): ${PKG_COUNT} (floor ${PKG_FLOOR})"
 
 find "$NPM_LOG_DIR" -maxdepth 1 -name '*.log' -print > "$DIAG_DIR/npm-logs-after.txt" 2>/dev/null || true
 LOCKFILE_WARNINGS=0

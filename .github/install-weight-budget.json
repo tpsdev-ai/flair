@@ -2,8 +2,8 @@
   "_comment": "Ratchet on the installed tree of `npm i -g` of the packed tarball (apparent bytes, linux CI). NOT the tarball — that is a few MB and would hide a 400 MB tree (flair#1004). Bytes are what the gate compares. The report prints MB as bytes/1024/1024 — do not divide bytes by 1e6 and compare that to the printed MB figure. Linux CI on e1a3e71 measured 309004489 bytes / 542 packages (prints as 294.7 MB). Set slightly above that; lower on purpose when weight drops. Do not disable the gate.",
   "maxBytes": 330000000,
   "maxPackages": 570,
-  "_minPackagesComment": "Floor for the flair#1683 global-install check's added-N-packages line — a count below it flags a possible incomplete install for investigation. Reviewed here, with the rest of the ratchet, rather than as a literal in the script.",
-  "minPackages": 490,
+  "_minPackagesComment": "Floor for the flair#1683 global-install check's MEASURED package count: starting at the installed @tpsdev-ai/flair package, each dependency a package declares (dependencies/optionalDependencies) is resolved by Node's search from that package's real directory and each resolved package directory is counted once, bundled node_modules included (scripts/check-global-install-lockfile.mjs → countFlairTree). Packages in the prefix that nothing in the graph depends on are not counted. npm's 'added N packages' line is printed as information only — harper 5.3.3 bundles some of its dependencies and npm's summary does not count bundled copies. Measured with the graph rule on 2026-10-23 at 67591356: npm 11.19.1 = 492, npm 10.9.4 = 492 (origin/main 0c24e5ce under the prefix walk measured 520 on 11.19.1 and 492 on 10.9.4). The floor is 32 (6.5%) below the measured count; a 10% collapse (443) still trips it. Reviewed here, with the rest of the ratchet, rather than as a literal in the script.",
+  "minPackages": 460,
   "baseline": {
     "bytes": 309004489,
     "packages": 542,
