@@ -1,7 +1,7 @@
 - **The bake-time dependency gate checks a range at the version bun.lock
   resolves it to.** `node scripts/check-dep-ages.mjs` age-checks ranged entries
   in `dependencies`, `devDependencies`, `optionalDependencies` and `overrides`
-  — root and every workspace package.json — against the same minimum release
+  — the root package.json and each `packages/<name>/package.json` — against the same minimum release
   age and keep-current list as exact pins. An `npm:` alias range is checked at
   the version installed under the alias. A top-level override range is checked
   at every installed copy of its package, a nested one at the copies installed
