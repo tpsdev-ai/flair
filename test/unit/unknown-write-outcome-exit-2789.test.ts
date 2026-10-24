@@ -1,5 +1,5 @@
 /**
- * unknown-write-outcome-exit-2789.test.ts — every write that crosses its
+ * unknown-write-outcome-exit-2789.test.ts — a write that crosses its
  * whole-request deadline reports an unknown outcome and exits 3 (flair#2789).
  *
  * Two paths are driven through the built CLI against a local HTTP listener
