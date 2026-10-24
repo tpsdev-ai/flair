@@ -68,7 +68,7 @@ function delay(ms: number): Promise<void> {
 export function formatUnknownState(state: { entity: "memory" | "soul"; id: string; present: boolean }): string {
   return state.present
     ? `${state.entity} ${state.id}: present on the target after restore; an id-only check cannot tell whether this restore wrote the row or it was already present, so its state is unverified`
-    : `${state.entity} ${state.id}: absent from the target after restore; the deadline fired before an answer, so whether the write landed is unresolved and its state is unverified`;
+    : `${state.entity} ${state.id}: absent from the target after restore; the deadline fired before a complete response, so whether the write landed is unresolved and its state is unverified`;
 }
 
 /** The server release that first serves `GET /AdminMemoryCandidates/{agentId}`. */

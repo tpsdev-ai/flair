@@ -370,10 +370,11 @@ export interface RunnerLogRow {
   durationMs: number;
   errors: string[];
   /**
-   * Stage calls (POST /MemoryMaintenance, POST /ReflectMemories) whose
-   * whole-request deadline expired without a complete response: each may or may not have
-   * taken effect. They are not in `errors`. A non-empty list makes `status`
-   * `unresolved`, never `failed` or `completed`.
+   * Writes on the nightly path (the two long-route stage calls and the
+   * auto-promote and dedup writes) whose whole-request deadline expired
+   * without a complete response: each may or may not have taken effect. They
+   * are not in `errors`. A non-empty list makes `status` `unresolved`, never
+   * `failed` or `completed`.
    */
   outcomeUnknown?: string[];
   /** Deliberate stage skips; errors alone fail the run. */
