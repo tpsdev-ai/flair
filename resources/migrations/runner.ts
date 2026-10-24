@@ -252,7 +252,7 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
       }
       continue;
     }
-    setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "checking" });
+    setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "checking", ...unconfirmedProgress(survived) });
     let pending: boolean;
     try {
       pending = await migration.detect();
@@ -269,6 +269,7 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
         rowsRemaining: 0,
         state: "failed",
         reason,
+        ...unconfirmedProgress(survived),
       });
       continue;
     }
@@ -330,7 +331,10 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
   } catch (err) {
     const reason = `pre-flight integrity check failed: ${(err as Error)?.message ?? String(err)}`;
     for (const migration of candidates) {
-      setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "halted", reason });
+      setMigrationProgress({
+        id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "halted", reason,
+        ...unconfirmedProgress(records.get(migration.id) ?? null),
+      });
     }
     setCyclePhase("done", reason);
     return { ran: false, reason };
@@ -372,6 +376,7 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
           rowsRemaining: 0,
           state: "halted",
           reason: `pre-flight integrity check failed: ${(err as Error)?.message ?? String(err)}`,
+          ...unconfirmedProgress(records.get(migration.id) ?? null),
         });
         continue;
       }
@@ -540,7 +545,7 @@ async function runOneMigration(
   const state = readMigrationState(deps.statePath);
   const posture = postureFor(migration.riskClass);
 
-  setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "preflight" });
+  setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "preflight", ...unconfirmedProgress(carried) });
 
   // ── Ladder step 1: space check (with HNSW/working-set overhead) ──
   let initialRemaining: number;
@@ -554,6 +559,7 @@ async function runOneMigration(
       rowsRemaining: 0,
       hashEnvelopeMatch: null,
       state,
+      unconfirmed: carried ?? undefined,
     });
     return false; // halted before any write
   }
@@ -583,13 +589,14 @@ async function runOneMigration(
       rowsRemaining: initialRemaining,
       hashEnvelopeMatch: null,
       state,
+      unconfirmed: carried ?? undefined,
     });
     return false; // halted before any write
   }
 
   // ── Ladder step 3 (+ step 4 fallback): risk-scoped snapshot, or a
   // content-only export if the snapshot mechanism itself fails. ──
-  setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: initialRemaining, state: "snapshotting" });
+  setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: initialRemaining, state: "snapshotting", ...unconfirmedProgress(carried) });
   try {
     createMigrationSnapshot(
       {
@@ -615,14 +622,14 @@ async function runOneMigration(
       await haltMigration(
         migration,
         `snapshot failed (${(snapErr as Error)?.message ?? String(snapErr)}) and the content-only export fallback also failed (${(expErr as Error)?.message ?? String(expErr)})`,
-        { deps, startedAt, rowsDone: 0, rowsRemaining: initialRemaining, hashEnvelopeMatch: null, state },
+        { deps, startedAt, rowsDone: 0, rowsRemaining: initialRemaining, hashEnvelopeMatch: null, state, unconfirmed: carried ?? undefined },
       );
       return false; // halted before any write
     }
   }
 
   // ── Execution: throttled batches, resumable via per-row markers ──
-  setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: initialRemaining, state: "running" });
+  setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: initialRemaining, state: "running", ...unconfirmedProgress(carried) });
   let rowsDone = 0;
   // flair#2840: rows recorded as unconfirmed — this run's attempts whose
   // post-commit verification read did not show the write, plus the ids an
