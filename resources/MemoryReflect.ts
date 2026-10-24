@@ -318,11 +318,12 @@ export class ReflectMemories extends Resource {
         // Write-window atomicity (#1263): generate has already succeeded.
         // Each MemoryCandidate.put is its own short commit. A throw mid-loop
         // leaves earlier puts durable and skips lastReflected (never reached).
-        // The stamp runs patchRecord under withMemoryWriteLockOnce and reads
-        // its committed row back. A held lock or a failed stamp is logged; a
-        // read-back that cannot confirm the stamp is logged as unconfirmed,
-        // and the commit may already have landed. A stamp failure does not
-        // fail the request.
+        // The stamp runs patchRecord under withMemoryWriteLockOnce. A held lock
+        // is logged. After patchRecord returns, the explicit verification logs
+        // an unreadable or mismatching row as unconfirmed; an error from
+        // patchRecord's helper is logged as a write-back refusal. Either failure
+        // may follow a committed write. A stamp failure does not fail the
+        // request.
         // 502/503 stay generate-only (no_backend / distillation_failed).
         const staged: any[] = [];
         for (const c of toStage) {

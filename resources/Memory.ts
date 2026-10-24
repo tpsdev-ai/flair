@@ -3574,8 +3574,9 @@ export class Memory extends (databases as any).flair.Memory {
         // replaces. Validates shape + cross-agent-write authorization (shared
         // with post() — see validateAndAuthorizeSupersedes doc for why PUT needs
         // this too: HTTP POST /Memory reaches Memory.post(), and flair-client's
-        // write() and update() both use PUT — update() overwrites the existing
-        // record by id; only its preserveHistory option creates a successor).
+        // write() and update() both send PUT: default update() addresses the
+        // existing id, while its preserveHistory option supplies a new id and
+        // `supersedes`).
         const supersede = await validateAndAuthorizeSupersedes(content, auth, ctx, preExisting, requestedVisibility);
         if (supersede.denial) return supersede.denial;
         if (content.supersedes && !content.validFrom) {
