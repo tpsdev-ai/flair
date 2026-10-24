@@ -335,12 +335,11 @@ export async function allowAdmin(context: any): Promise<boolean> {
  * succeed, and both return plausible data. It surfaces months later as memories
  * that were never scoped.
  *
- * This does not change the verdict — every authorization outcome is byte-
- * identical — it ends the SILENCE. A deliberate elevated call says so with
- * `internalContext()` (resources/in-process.ts), whose `__flairInternal` marker
- * is read here and nowhere else; anything else that lands on `internal` gets one
- * warning per process, with the stack, so the condition is observable where it
- * was previously invisible.
+ * This does not change the verdict; it ends the SILENCE. A deliberate elevated
+ * call says so with `internalContext()` (resources/in-process.ts), whose
+ * `__flairInternal` marker is read here; anything else that lands on `internal`
+ * gets one warning per process, with the stack, so the condition is observable
+ * where it was previously invisible.
  *
  * MEASURED, and the reason this is worth having: flair itself has NO in-process
  * caller that relies on the omission — every maintenance, migration, federation
@@ -367,8 +366,11 @@ let warnedInternalByOmission = false;
  * first consumes the latch and every later assertion silently passes). Pinning
  * the predicate instead is deterministic.
  *
- * Grants nothing and is never consulted for an authorization decision — the
- * verdict is identical either way.
+ * This function feeds the warning, and the verdict is identical either way.
+ * The marker it reads also decides the admin-only gate: `allowAdmin` admits
+ * the `internal` verdict only for a call that carries it and no request
+ * headers (isDeliberateInternalVerdict in resources/internal-authority.ts,
+ * shared with the Soul and skill write-source rules).
  */
 export function isDeliberateInternalCall(context: any): boolean {
   return context?.__flairInternal === true;

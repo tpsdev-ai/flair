@@ -50,11 +50,11 @@
  * is indistinguishable from "no identity was supplied at all" — and that is the
  * trusted verdict. The consequence is that the most ordinary application bug
  * there is — `agentContext(session.agentId)` where the field is undefined, a
- * typo'd property, a lookup that found nothing — would not fail closed. It
- * would silently grant unfiltered cross-agent reads and writes. No error, no
- * 403, no log line. The admin-only gate refuses it: `allowAdmin` admits the
- * `internal` verdict only for a call that carries `internalContext()`'s marker
- * and no request headers.
+ * typo'd property, a lookup that found nothing — would not fail closed. The
+ * call can keep unfiltered access on agent-facing paths, with no error and no
+ * 403; the resolver warns once per process. The admin-only gate refuses it:
+ * `allowAdmin` admits the `internal` verdict only for a call that carries
+ * `internalContext()`'s marker and no request headers.
  *
  * That is the same defect class as a check that cannot fail: **the failure mode
  * of "I forgot the id" must never be "you are now an administrator."** So:
@@ -115,9 +115,8 @@ function requireAgentId(agentId: unknown, fnName: string): string {
     throw new InProcessContextError(
       `${fnName}() requires a non-empty agent id, but received ${got}. ` +
       "This is refused rather than defaulted because flair resolves a missing or empty " +
-      "tpsAgent to its trusted `internal` verdict, which reads and writes UNFILTERED across " +
-      "every agent — so returning a context here would have turned a missing id into " +
-      "unfiltered access. Resolve the agent id from your " +
+      "tpsAgent to its trusted `internal` verdict, which can keep UNFILTERED access on " +
+      "agent-facing paths. Resolve the agent id from your " +
       "own server-side state before calling, and never from request data.",
     );
   }

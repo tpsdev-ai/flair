@@ -178,7 +178,7 @@ Flair uses the raw table where it *wants* to bypass its own rules — the federa
 | `{ request: { tpsAnonymous: true } }` | `anonymous` | Denied everywhere |
 | `{ request: { tpsAgent: "mybot" } }` | `agent` | Scoped to that agent — **use this** |
 | `{ request: { tpsAgent: "mybot", tpsAgentIsAdmin: true } }` | admin | Unfiltered reads, cross-agent writes |
-| **Nothing**, or an empty/missing `tpsAgent` | `internal` | Unfiltered reads. The admin-only gate refuses it. See the warning above. |
+| **Nothing**, or an empty/missing `tpsAgent` | `internal` | Unfiltered `Memory` reads. An `allowAdmin` check refuses it when Harper consults the gate. See the warning above. |
 
 Build these with `agentContext(id)`, `adminContext(id)` and `internalContext()` rather than by hand — see [below](#the-api-is-built-so-omission-cannot-happen-quietly) for why the hand-written form is a trap.
 
@@ -198,7 +198,7 @@ There are exactly two ways to lose the model, from opposite ends. Both are pinne
 
 | | |
 |---|---|
-| **By omission** | No usable agent id ⇒ `internal` ⇒ unfiltered reads; the admin-only gate refuses it. |
+| **By omission** | No usable agent id ⇒ `internal` ⇒ unfiltered `Memory` reads; an `allowAdmin` check refuses it when Harper consults the gate. |
 | **By assertion** | An attacker-influenced `agentId` is honoured verbatim. |
 
 ### The API is built so omission cannot happen quietly
@@ -210,7 +210,7 @@ resolveAgentAuth({ request: { tpsAgent: undefined } })  ->  { kind: "internal" }
 allowAdmin({ request: { tpsAgent: undefined } })        ->  false
 ```
 
-That would turn the most ordinary bug there is — `agentContext(session.agentId)` where the field came back undefined — into unfiltered reads across every agent. The admin-only gate refuses it: `allowAdmin` admits the `internal` verdict only for a call that carries `internalContext()`'s marker and no request headers. So the helpers refuse rather than default:
+That would turn the most ordinary bug there is — `agentContext(session.agentId)` where the field came back undefined — into unfiltered `Memory` reads across every agent. The admin-only gate refuses it: `allowAdmin` admits the `internal` verdict only for a call that carries `internalContext()`'s marker and no request headers. So the helpers refuse rather than default:
 
 | | |
 |---|---|
@@ -348,9 +348,9 @@ export async function remember(agentId, content, opts = {}) {
 >
 > They do still need the **context**. Only the collection binding is unnecessary for a read, never the identity — `Cls.search(query)` with the second argument left off resolves to the trusted `internal` verdict when it runs outside a request scope (a boot hook, a timer, a queue worker, a detached promise) and returns every agent's private records. On that path the resource's `allow*` gate is not consulted at all. Pass the context to every call, read and write.
 
-> ### ⚠️ A resource with no context runs unfiltered
+> ### ⚠️ A `Memory` read with no context runs unfiltered
 >
-> A resource built without a context resolves to Flair's trusted `internal` verdict and runs **unfiltered** — every read unscoped, every write unowned. Silently. No error, no warning, no trace.
+> A resource built without a context resolves to Flair's trusted `internal` verdict. A `Memory` read then runs **unfiltered** across every agent, with no error; the resolver logs one warning per process. An `allowAdmin` check refuses the same verdict when Harper consults the gate.
 >
 > Measured, not inferred: a context-less `Memory.search()` returns every agent's `private` records, and so does a context-less `SemanticSearch`.
 >

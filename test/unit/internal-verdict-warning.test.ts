@@ -3,8 +3,9 @@
 // A resource invoked with no caller context resolves to flair's trusted
 // `internal` verdict: reads unfiltered across every agent, writes unattributed,
 // and the admin-only gate refuses it (flair#2837). That is correct for flair's own maintenance
-// work and a silent, invisible mistake in an embedding application — both spell
-// it `new Memory()`, and neither produces an error.
+// work and, in an embedding application, a mistake that can keep unfiltered
+// access on agent-facing paths — both spell it `new Memory()`, and neither
+// produces an error. The resolver warns once per process.
 //
 // The verdict is deliberately UNCHANGED here; ~40 assertions across the suite
 // pin it, and altering it is a breaking change to every internal call site.

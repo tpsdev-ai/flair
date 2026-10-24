@@ -397,8 +397,8 @@ describe("SECURITY BOUNDARY — in-process identity is asserted, not verified", 
   // `resolveAgentAuth` tests `tpsAgent` for TRUTHINESS, so a missing or empty id
   // is indistinguishable from "no identity supplied" — which is the trusted,
   // unfiltered `internal` verdict. That turns the most ordinary application bug
-  // there is (a field that came back undefined) into unfiltered access across
-  // every agent. The API refuses instead. These tests pin the refusal AND the hazard
+  // there is (a field that came back undefined) into unfiltered access on
+  // agent-facing paths. The API refuses instead. These tests pin the refusal AND the hazard
   // it exists for, so nobody can "simplify" the guard away without the reason
   // failing loudly alongside it.
   test("GUARD: agentContext(undefined) and agentContext('') THROW rather than returning a context", async () => {
