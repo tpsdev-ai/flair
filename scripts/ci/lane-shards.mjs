@@ -30,7 +30,7 @@ export const ROOT_STEP_TIMEOUT_MS = 450_000;
 /**
  * `n8n-nodes-flair unit tests`' own per-step limit: 360 s. The host-parser
  * test's setup hook is bounded at 300 s; at the DEFAULT matrix its child bounds
- * sum to 260 s, and more versions through the override add more. This 360 s
+ * sum to 260 s; more versions add more when the file is run directly. This 360 s
  * limit is the step's aggregate cap and may cut off cases that are each within
  * their own limits. The package's other tests measured 1.3 s. The step measured
  * 24 s in CI on ae93d9a1 (2026-10-24). If it hangs, the slowest lane shard's

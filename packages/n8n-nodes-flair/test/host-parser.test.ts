@@ -29,7 +29,12 @@ const PACKAGE_DIR = join(import.meta.dir, "..");
 const WORKSPACE_ROOT = join(PACKAGE_DIR, "..", "..");
 const CLIENT_DIR = join(WORKSPACE_ROOT, "packages", "flair-client");
 const N8N_WORKFLOW_VERSION = "1.119.0";
-/** The host parser versions this release was measured against. */
+/**
+ * The host parser versions this release was measured against.
+ * `FLAIR_N8N_HOST_CORE_VERSIONS` selects the set when this file is run
+ * directly; the shared unit lane strips `FLAIR_*` variables before it spawns a
+ * step, so the lane runs this default matrix.
+ */
 const CORE_VERSIONS = (
   process.env.FLAIR_N8N_HOST_CORE_VERSIONS ?? "0.3.0,0.3.57,0.3.68,1.1.0,1.3.0"
 )
@@ -47,9 +52,9 @@ const INSTALL_TIMEOUT_MS = 30_000;
 const INVOKE_TIMEOUT_MS = 30_000;
 // Bounds the setup hook, which runs every child above. At the DEFAULT matrix
 // those child bounds sum to 260 s (build 20, two packs at 20, then five x
-// (init 10 + install 30)); more versions through the override add more. The
-// 360 s step cap (N8N_STEP_TIMEOUT_MS) is the whole step's aggregate and may
-// cut off cases that are each within their own limits.
+// (init 10 + install 30)); more versions through the override add more when the
+// file is run directly. The 360 s step cap (N8N_STEP_TIMEOUT_MS) is the whole
+// step's aggregate and may cut off cases that are each within their own limits.
 const SETUP_TIMEOUT_MS = 300_000;
 setDefaultTimeout(SETUP_TIMEOUT_MS);
 
