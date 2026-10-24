@@ -1,15 +1,15 @@
 # Releasing Flair
 
-Flair publishes nine workspace packages to npm under `@tpsdev-ai/*`. Releases are
-**tokenless** and **staged**: CI authenticates to npm with a short-lived OIDC token
-(no `NPM_TOKEN` lives anywhere) and submits each package to npm's **staging** area
+Flair publishes nine workspace packages to npm under `@tpsdev-ai/*`. On the normal
+staged-release path, CI authenticates to npm with a short-lived OIDC token and
+submits each package to npm's **staging** area
 **under the `staged` tag** (never straight to `latest`). A maintainer then approves
 the staged tarballs on npmjs.com with 2FA. Approval makes the version public, but
 **not `latest`** — a credential-less post-publish canary installs that exact version
 from the registry and boots it on Linux and macOS. Only a canary PASS prints the
-sha256-bound promote commands that move `latest` — one per lockstep package, all
-or none; the canary runs on the same definition of "it boots" the rockit ritual
-uses (`scripts/ci/check-instance-boot.sh`).
+sha256-bound promote commands that move `latest` — one per lockstep package,
+sequentially, stopping on failure; the canary runs on the same definition of
+"it boots" that the maintainers' boot check uses (`scripts/ci/check-instance-boot.sh`).
 
 The staging tag is an **immutable property of the staged package** (`npm help stage`):
 re-staging the same version under a different tag requires `npm stage reject` first.
@@ -221,15 +221,33 @@ The staging tag is immutable — if a staged package is wrong, **reject** it
 (`npm stage reject <stage-id>` on npmjs.com) and cut the next patch. The same version
 cannot be re-staged under a different tag.
 
-### Phase 4 — run the post-publish canary
+### Phase 4 — the post-publish canary
 
-The moment the staged packages are approved, dispatch the
-[`post-publish canary`](../.github/workflows/canary.yml) (Actions → "Post-publish canary
-— install + boot a published version") with three inputs:
+Once [the promote boundary](#the-promote-boundary-flair1928) is in place (the tag
+rulesets and the `release-promote` environment with its `NPM_TOKEN`), this phase runs
+for you. The unprivileged
+[`release-promote-poll`](../.github/workflows/release-promote-poll.yml) poll requires
+a valid `release-attempt` marker, public tarballs for every lockstep package matching
+the certified package-set digest, no visible non-dry-run attempt for the version, and
+passing [settings checks](#the-promote-boundary-flair1928) before dispatching the privileged
+[`release-promote`](../.github/workflows/release-promote.yml) workflow on the version's
+tag ref, and that workflow calls the
+[`post-publish canary`](../.github/workflows/canary.yml) — the same one below; its
+definition resolves at the tag and its workspace runs the default branch's scripts at a
+pinned commit — before it promotes anything. The poll ignores dry runs and dispatches
+each version at most once per poll. A visible non-dry-run attempt prevents redispatch;
+a failed attempt logs that a human must inspect it. Re-running it is an operator step
+(replace `v1.2.3` with the release tag):
+
+```bash
+gh workflow run release-promote.yml --ref v1.2.3 -f dry_run=false
+```
+
+To run the canary alone by hand (it moves nothing), dispatch it with three inputs:
 
 | Input | Value |
 | ----- | ----- |
-| `version` | the version just approved, exact (e.g. `vX.Y.Z` without the `v`) |
+| `version` | the public version, exact (e.g. `vX.Y.Z` without the `v`) |
 | `expected_sha256` | the published tarball's sha256 (64 hex). The canary computes it from the registry with `node scripts/ci/registry-tarball-sha256.mjs <ver>`. |
 | `package_set_digest` | the certified package-set digest (64 lowercase hex), printed as `package-set-digest=<digest>` in the log of the release run's "Pack publishable packages and write the release manifest" step. It can also be recomputed from that step's lines (`<name>@<version>  <sha256>  <basename>`) by feeding `<name>=<sha256>` lines to `node scripts/ci/package-set-digest.mjs --version <ver>`. The canary re-derives the digest from the tarballs it verified and refuses a mismatch before any verdict. |
 
@@ -258,43 +276,33 @@ not run must not read as a pass.
 
 ### Phase 5 — promote `latest` (or deprecate)
 
-The promote is **lockstep**: every package the release staged moves together, or
-none does. `flair` at `latest` 0.55.1 while `flair-client` / `flair-mcp` / the
+The promote is **lockstep**: a successful promote moves every package the release
+staged to the same version. npm has no atomic multi-package move, so the block moves
+them one at a time (`@tpsdev-ai/flair` last) and stops at the first failure with
+RESTORE lines. `flair` at `latest` 0.55.1 while `flair-client` / `flair-mcp` / the
 plugins sit at 0.54.2 is exactly the mismatch `flair#1383` detects at runtime —
 and 0.55.1's promote had to be assembled by hand, line by line, for this reason.
 
-- **On PASS**, the canary emits the complete, sha256-bound promote block as ONE
-  snippet to paste once, from a repo checkout on a machine logged into npm. It
-  runs in two phases: it verifies EVERY package's published-tarball sha256 first
-  (so a registry hiccup mid-paste touches no tag), then runs the `npm dist-tag
-  add` lines — `@tpsdev-ai/flair` LAST, so a partial paste never leaves the CLI
-  ahead of its client library — then the skew check. Under 2FA each `dist-tag add`
-  may prompt for an OTP separately, so capture one code and pass it to all of them
-  with `--otp`:
+With the tag rulesets configured as above, a successful `release-promote` run with `dry_run=false` does this phase
+too: it re-reads and validates the version (from the tag ref),
+the tag's ancestry, the release-attempt marker (from the deployments API) and the
+certified package-set digest (from the registry bytes), runs the canary above, and —
+on PASS — runs the promote block below, which it obtains as executable text from
+`scripts/ci/canary-verdict.sh` (`--emit bash`, the same block a human would paste). A
+manual dispatch of `release-promote` defaults `dry_run` to `true`: it validates through
+block generation and prints the block, but does not test the move (the block's
+current-`latest` reads, refusals and moves run only under the token). Its title ends
+with `(dry run)` and it does not suppress the poll's real promotion. The manual path
+below stays as the fallback; a failed run's recovery is
+[described below](#slice-2-flair1928--the-privileged-promote).
 
-  ```bash
-  set -e
-  OTP=123456   # fresh from your authenticator; valid for a short window
-
-  # 1. Preflight — every published tarball must hash to its recorded sha256.
-  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver> @tpsdev-ai/flair-client)" = "<sha>"
-  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver> @tpsdev-ai/flair-mcp)"    = "<sha>"
-  # … one line per lockstep package; @tpsdev-ai/flair last …
-  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver> @tpsdev-ai/flair)"        = "<sha>"
-
-  # 2. Promote every lockstep package (`@tpsdev-ai/flair` LAST).
-  npm dist-tag add @tpsdev-ai/flair-client@<ver> latest --otp "$OTP"
-  npm dist-tag add @tpsdev-ai/flair-mcp@<ver> latest --otp "$OTP"
-  # … one line per lockstep package …
-  npm dist-tag add @tpsdev-ai/flair@<ver> latest --otp "$OTP"
-
-  # 3. Confirm the set converged.
-  node scripts/ci/registry-latest-skew.mjs <ver>
-  ```
-
-  The preflight `test` guards integrity: a stale PASS, a re-cut version, or a
-  paste from a failed run aborts before `latest` moves. Paste **all** of the block
-  or **none** — a partial paste is the skew this phase exists to prevent.
+- **On PASS**, paste the complete block emitted by `scripts/ci/canary-verdict.sh`
+  in **Canary verdict — emit the promote or deprecate command**, from a repo
+  checkout on a machine logged into npm. Its package-set digest comparison and
+  current-`latest` reads finish before any move. A preflight failure moves no tags.
+  A failure after earlier moves can leave some tags moved. Re-runs repeat the
+  digest comparison and pre-move reads; equal versions are allowed, newer versions
+  are refused. The block attempts each move in order and stops on failure.
 
   The block runs under bash; `scripts/ci/canary-verdict.sh` is bash **3.2**-safe,
   so stock macOS `/bin/bash` runs it (and the emitted block) locally — no newer
@@ -386,6 +394,58 @@ review. Because the release is triggered by a tag push, its deployment policy mu
 **`v*` tags** (Settings → Environments → `release` → Deployment branches and tags →
 Selected branches and tags → add tag rule `v*`).
 
+### The promote boundary (flair#1928)
+
+GitHub resolves a dispatched workflow and its local reusable canary at the tag ref.
+The boundary is these two repository settings. The default-branch poll checks the
+properties listed below through the API. A failed settings check records a warning
+and prevents dispatch; the poll fails when a ready version reaches the dispatch
+(a poll with nothing ready still succeeds).
+
+**1. The `v*` tag rulesets** (Settings → Rules → Rulesets). Both must stay **Active**:
+
+- **`release-tags-create`** (id `24044017`): target tags, include `refs/tags/v*`, no
+  exclusions, rule **Restrict creations**. Only its configured creation actors may create a `v*` tag:
+  repository admins, plus the release-tag App only if the auto-tagger is to create tags.
+- **`release-tags-immutable`** (id `23944797`): target tags, include `refs/tags/v*`
+  and `refs/tags/adk-flair-v*`, no exclusions, rules **Restrict updates**,
+  **Restrict deletions** and **Block force pushes**.
+
+The poll checks both pinned tag rulesets are active, target tags, have no exclusions
+and carry the expected rule types and patterns, and requires
+`current_user_can_bypass=never` for its own token on the immutable ruleset.
+Other actors' rule exceptions are not visible to the poll.
+A ruleset recreated under a new id requires updated pins in `release-promote-poll.yml`.
+
+**2. The GitHub `release-promote` environment** (Settings → Environments), created once
+by a repository admin before the first automated promote:
+
+- Environment name: **`release-promote`**.
+- **Deployment branches and tags:** Selected branches and tags, with exactly one rule:
+  the **tag** pattern **`v*`**. The secret is available only to runs on a `v*` tag.
+- **Required reviewers:** optional. On the normal staged-release path, npm 2FA
+  approval is the human action when no environment reviewers are configured.
+  The poll checks no npm approval record. If reviewers are added, each promote
+  waits for their approval after its canary.
+- Secret: **`NPM_TOKEN`**, a granular npm access token with **read and write on the
+  lockstep packages** (`node scripts/ci/lockstep-packages.mjs` prints the list), automation access, expiry ≤ 90 days with a rotation reminder. It needs exactly the scope to
+  move a dist-tag on those packages.
+
+Before adding `NPM_TOKEN`, audit the creation actors, other actors' rule exceptions,
+and existing `v*` tags: every existing tag that carries a `release-promote.yml` must carry
+a copy reviewed on main. Older tags that predate the workflow need nothing.
+
+The checks inside `release-promote.yml` and `canary.yml` are **defence in depth**, not
+the boundary. They compare the executed files with `origin/main`, run repository scripts
+only from a pinned `origin/main` tree, and refuse on any unverifiable input. They fire
+only for a tag whose copy of the workflow is the reviewed one.
+
+Until the environment exists, the poll dispatches nothing; if it exists without its
+`NPM_TOKEN`, the token step refuses with a named message and moves nothing. A manual
+run of `release-promote` with `dry_run` left at its default (`true`) needs no token: it
+validates through block generation without testing the move or suppressing automatic
+promotion.
+
 ### GitHub `adk-flair-publish` environment
 
 Repository admin: add the tag rule `v*` under Settings → Environments →
@@ -423,11 +483,10 @@ The maintainer who approves staged packages must have 2FA enabled on their npm a
 - Node **≥ 22.14**.
 - Trusted publishing runs on GitHub-hosted runners only (no self-hosted support yet).
 
-## Automated promote — slice 1 (flair#1928)
+## Automated promote (flair#1928)
 
-After the npm approval, a maintainer today pastes the promote block from a
-checkout. Slice 1 lands the four pieces the privileged promote job (slice 2) will
-stand on; it holds no npm credential (the poll runs on the automatic
+On the normal staged-release path, npm approval precedes promotion. Slice 1 landed
+the four pieces the privileged promote job (slice 2) stands on; it holds no npm credential (the poll runs on the automatic
 `GITHUB_TOKEN` with `actions: write`, `contents: read` and `deployments: read`).
 
 - **The certified digest travels with the release attempt.** The `release-attempt`
@@ -453,9 +512,9 @@ stand on; it holds no npm credential (the poll runs on the automatic
   never the ref alone — the ref must equal `v<payload.version>` or the marker is
   refused). It requires EVERY lockstep package `<name>@<version>` to be public and
   to re-derive the certified package-set digest (ALL-form: one missing/odd package
-  is NOT READY, exit 0, the package named), and on READY dispatches
-  `release-promote.yml --ref v<version>`, gated behind that workflow existing
-  (slice 2). Every run is a schedule run of the default branch's copy of the file, so
+  is NOT READY, exit 0, the package named). Dispatch also requires the workflow
+  to exist, no visible non-dry-run attempt for the version, and passing settings checks.
+  Every run is a schedule run of the default branch's copy of the file, so
   `github.sha` is always a main sha. **The poll's outputs are
   never an input to what gets promoted** — the privileged job re-derives everything
   it acts on. (`test/unit/release-promote-poll-workflow.test.ts`.)
@@ -467,6 +526,63 @@ stand on; it holds no npm credential (the poll runs on the automatic
   matching rule wins) for each protected path.
   (`test/unit/release-auto-tag-workflow.test.ts`.)
 
-Not in this slice: the privileged `release-promote.yml`, the `release-promote`
-environment, `NPM_TOKEN`, the machinery-recency guard, and the refusal issue with
-restore lines — all slice 2.
+### Slice 2 (flair#1928) — the privileged promote
+
+`release-promote.yml` (`workflow_dispatch` on the tag ref, `environment:
+release-promote`) is the only job that can see `NPM_TOKEN`. It takes nothing from the
+poll but "run now on this ref". The poll requires the
+[settings checks](#the-promote-boundary-flair1928) to pass before dispatching;
+the controls below are defence in depth
+inside the workflow, each a test in `test/unit/release-promote-workflow.test.ts`:
+
+- **No repository script from the tag's checkout** (defence in depth). GitHub runs the tag's copy of
+  `release-promote.yml` and of the `canary.yml` it calls. `prepare` pins `origin/main`
+  and moves its workspace there; the canary moves its workspace to that same commit
+  before any repository script runs (its install, boot and plugin checks included), and
+  if that move fails no later step runs a repository script: an inline step emits the
+  FAIL verdict. The promote job materialises a SEPARATE tree from its own pinned
+  `origin/main`. (The canary does run the PUBLISHED Flair and plugin packages it
+  installs: that is its test.) The promote job's first act requires both workflow files
+  and every executed repository script (the canary's script closure included) to be
+  byte-identical between the tag and `origin/main`. `.github/CODEOWNERS` names the
+  release trust root as their reviewer; that is enforced as far as the repository's
+  rules require code-owner review.
+- **Re-read and validated, fail-closed.** The version is `github.ref_name` matching
+  `v<major>.<minor>.<patch>` exactly (a prerelease is refused); the tag commit is an
+  ancestor of `origin/main`; the `release-attempt` marker exists with that version and a
+  64-hex digest; and the registry package set re-derives to exactly that digest. An
+  unmeasurable input is a refusal, never a pass.
+- **Token hygiene.** `NPM_TOKEN` appears in ONE step's `env`, reaches npm only through a
+  throwaway `.npmrc` indirection, and is never a command argument or echoed. npm is
+  pinned to the canary's exact version (11.19.1), installed from a job directory and
+  verified with `npm --version` before the registry reads and tag moves that follow;
+  another version is a refusal.
+- **Non-dry-run attempts; at most once per poll.** Across all run-list pages, the
+  poll matches the title `release-promote v<version>`, without the `(dry run)` suffix.
+  Queued, in-progress or successfully completed runs prevent dispatch. Other matching
+  runs require human review without automatic redispatch. Within one poll it
+  dispatches each version at most once, whatever the number of marker rows. A failed
+  or uninterpretable run-list read is an error. This is a list-then-dispatch check,
+  not a reservation.
+
+**When the promote block fails.** Nothing is restored automatically (a restore cannot
+be told apart from clobbering a newer legitimate `latest`); the job fails and the run
+log carries the commands for a human:
+
+- **Superseded or unreadable, before any move.** A package whose current `latest`
+  cannot be read, or is already a NEWER version, stops the block before the first
+  `dist-tag add`. Nothing moved.
+- **A `dist-tag add` fails.** The block stops at that package, prints a RESTORE line for
+  every package it attempted (the failed one included: npm can apply a tag and still
+  exit non-zero) and lists the packages never attempted. The convergence check does not
+  run on this path.
+- **Every add succeeds, the convergence check does not.** Exit 1 (skew) or 2 (the
+  check could not read the state) prints the same RESTORE lines; exit 3 (the registry
+  still served a previous `latest` when the wait ended) prints the check's re-run command
+  first and the RESTORE lines as the fallback.
+
+**Re-running the same version's promote.** The block re-derives the certified digest
+and permits equal versions. A newer `latest` at the pre-move read stops the run
+before any move. Not covered: two
+versions' promotes running at the same moment, or a move made by hand between the
+block's read and its moves; the read precedes the moves, it is not a lock.

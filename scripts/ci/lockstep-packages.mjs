@@ -106,6 +106,13 @@ if (invokedDirectly) {
     console.error("lockstep-packages: DID NOT RUN — no publishable package manifests found");
     process.exit(2);
   }
+  if (process.argv.includes("--validate-names")) {
+    const shellSafeName = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
+    if (packages.some(name => name.length > 214 || !shellSafeName.test(name))) {
+      console.error("lockstep-packages: DID NOT RUN — package name must match the shell-safe name allowlist and be at most 214 characters");
+      process.exit(2);
+    }
+  }
   if (process.argv.includes("--json")) {
     process.stdout.write(JSON.stringify(packages, null, 2) + "\n");
   } else {

@@ -1,9 +1,5 @@
 name: Release promote poll
-# flair#1928 slice 1 — the UNPRIVILEGED poll. It answers ONE question per pending
-# release: does the `release-attempt` marker for `v<version>` exist, and is every
-# lockstep package `<name>@<version>` public (ALL-form: one not-yet-approved
-# package means NOT READY)? On READY it DISPATCHES `release-promote.yml` on the tag
-# ref; on NOT READY it exits 0 and logs the pending package.
+# flair#1928 slice 1 — the UNPRIVILEGED poll of pending releases.
 #
 # It holds NO NPM CREDENTIAL: no environment, no repo secret. It runs on the
 # automatic GITHUB_TOKEN with `actions: write`, `contents: read` and
@@ -23,9 +19,25 @@ name: Release promote poll
 # checkout brings exactly those, and the derivation FAILS CLOSED — a non-zero exit
 # or an empty list is an error exit that names the cause, never a silent "ready".
 #
-# Slice 2 (`release-promote.yml`) is not merged yet: until it exists the poll logs
-# "would dispatch" and exits 0 (the dispatch is gated behind the workflow file's
-# existence).
+# The dispatch stays gated on `release-promote.yml` existing on the default
+# branch (slice 2 lands it); without the file the poll logs "would dispatch" and
+# exits 0.
+#
+# PROMOTE SETTINGS (flair#1928). Before dispatch, this default-branch poll checks:
+#   - both pinned tag rulesets are active, target tags, have no exclusions and
+#     carry the expected rule types and patterns: creation on refs/tags/v*;
+#     update, non-fast-forward and deletion on refs/tags/v* and refs/tags/adk-flair-v*;
+#   - the poll's own token reports current_user_can_bypass=never on the immutable ruleset;
+#   - the release-promote environment has exactly the tag deployment pattern v*.
+# Other actors' rule exceptions are not visible to the poll.
+# Before the npm credential is added to the release environment, Nathan audits the
+# creation actors and other actors' rule exceptions (docs/releasing.md, "The promote
+# boundary"). Required reviewers are optional.
+# On the normal staged-release path, npm approval is the human action when no
+# environment reviewers are configured; the poll checks public tarballs matching
+# the certified package-set digest, not an approval record.
+# A failed settings check records a warning and prevents dispatch; the poll fails
+# when a ready version reaches that check. A poll with nothing ready still succeeds.
 
 on:
   # SCHEDULE ONLY. A schedule run always executes the DEFAULT BRANCH's copy of this file.
@@ -53,6 +65,13 @@ jobs:
       actions: write
       contents: read
       deployments: read
+    env:
+      # The settings the dispatch checks (docs/releasing.md, "The promote
+      # boundary"). A ruleset recreated under a new id fails closed until these
+      # pins are updated.
+      PROMOTE_ENV: release-promote
+      TAG_CREATE_RULESET: "24044017"   # release-tags-create
+      TAG_IMMUTABLE_RULESET: "23944797"   # release-tags-immutable
     steps:
       - name: Check out the DEFAULT BRANCH at this run's sha, with what the derivation needs
         # NOT a tag ref: a tag can carry a tampered `scripts/ci/`. `github.sha` is
@@ -69,10 +88,73 @@ jobs:
             packages/*/package.json
           sparse-checkout-cone-mode: false
 
+      - name: Verify the promote boundary settings (environment + tag rulesets)
+        # Records WHETHER a dispatch is allowed and, if not, why; it never fails
+        # the poll by itself (nothing may be pending). The dispatch below refuses,
+        # as an error exit that dispatches nothing, unless `ok` is `true`. Every
+        # read is fail-closed: an unreadable setting is a missing one.
+        id: boundary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          REASONS="$(mktemp)"
+          : > "${REASONS}"
+          ENV_JSON="$(mktemp)"
+          if ! gh api "repos/${REPO}/environments/${PROMOTE_ENV}" > "${ENV_JSON}" 2>/dev/null; then
+            echo "environment '${PROMOTE_ENV}' is missing or unreadable" >> "${REASONS}"
+          else
+            POLICIES="$(mktemp)"
+            if ! jq -e '.deployment_branch_policy.protected_branches == false and .deployment_branch_policy.custom_branch_policies == true' "${ENV_JSON}" >/dev/null; then
+              echo "environment '${PROMOTE_ENV}' does not limit deployments to selected tags (deployment_branch_policy)" >> "${REASONS}"
+            elif ! gh api --paginate "repos/${REPO}/environments/${PROMOTE_ENV}/deployment-branch-policies?per_page=100" > "${POLICIES}" 2>/dev/null; then
+              echo "could not read the deployment policies of environment '${PROMOTE_ENV}'" >> "${REASONS}"
+            elif ! jq -s -e '[.[].branch_policies[]? | {name, type}] == [{"name": "v*", "type": "tag"}]' "${POLICIES}" >/dev/null; then
+              echo "environment '${PROMOTE_ENV}' deployment policy is not exactly the tag pattern v*" >> "${REASONS}"
+            fi
+          fi
+          # check_ruleset <id> <name> <required rule types, as a JSON array>
+          check_ruleset() {
+            local rs
+            rs="$(mktemp)"
+            if ! gh api "repos/${REPO}/rulesets/$1" > "${rs}" 2>/dev/null; then
+              echo "tag ruleset $1 ($2) is missing or unreadable" >> "${REASONS}"
+              return 0
+            fi
+            if ! jq -e '.enforcement == "active"' "${rs}" >/dev/null; then
+              echo "tag ruleset $1 ($2) is not active (enforcement '$(jq -r '.enforcement // "none"' "${rs}")')" >> "${REASONS}"
+            fi
+            if ! jq -e --argjson need "$3" '.target == "tag" and (.conditions.ref_name.include // [] | index("refs/tags/v*") != null) and (.conditions.ref_name.exclude // [] | length == 0) and ([.rules[]?.type] as $have | all($need[]; . as $t | $have | index($t) != null))' "${rs}" >/dev/null; then
+              echo "tag ruleset $1 ($2) does not apply $3 to refs/tags/v*" >> "${REASONS}"
+            fi
+            if [ "$1" = "${TAG_IMMUTABLE_RULESET}" ]; then
+              if ! jq -e '.conditions.ref_name.include // [] | index("refs/tags/adk-flair-v*") != null' "${rs}" >/dev/null; then
+                echo "tag ruleset $1 ($2) does not cover refs/tags/adk-flair-v*" >> "${REASONS}"
+              fi
+              if ! jq -e '.current_user_can_bypass == "never"' "${rs}" >/dev/null; then
+                echo "tag ruleset $1 ($2) must report current_user_can_bypass=never for the poll token" >> "${REASONS}"
+              fi
+            fi
+          }
+          check_ruleset "${TAG_CREATE_RULESET}" release-tags-create '["creation"]'
+          check_ruleset "${TAG_IMMUTABLE_RULESET}" release-tags-immutable '["deletion","update","non_fast_forward"]'
+          if [ -s "${REASONS}" ]; then
+            REASON="$(paste -sd ';' "${REASONS}" | sed 's/;/; /g')"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "reason=${REASON}" >> "$GITHUB_OUTPUT"
+            echo "::warning::promote boundary not in place (a ready version will be refused at dispatch): ${REASON}"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "  tag rulesets match the expected settings; environment ${PROMOTE_ENV} has the v*-only tag policy"
+          fi
+
       - name: Poll and dispatch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          BOUNDARY_OK: ${{ steps.boundary.outputs.ok }}
+          BOUNDARY_REASON: ${{ steps.boundary.outputs.reason }}
         run: |
           set -euo pipefail
 
@@ -107,6 +189,11 @@ jobs:
 
           TSV="$(mktemp)"
           jq -r '.[] | [.ref, (.payload.version // ""), (.payload.package_set_digest // "")] | @tsv' "${DEPLOYMENTS}.valid" > "${TSV}"
+          # Versions that reached a dispatch decision in THIS poll: a duplicate
+          # marker row for one of them is skipped, so a version is dispatched at
+          # most once per poll.
+          HANDLED="$(mktemp)"
+          : > "${HANDLED}"
 
           while IFS=$'\t' read -r ref payload_version psd; do
             [ -n "${ref}" ] || continue
@@ -122,6 +209,10 @@ jobs:
               continue
             fi
             version="${payload_version}"
+            if grep -Fxq "${version}" "${HANDLED}"; then
+              echo "v${version}: duplicate marker row — already handled in this poll, skipping"
+              continue
+            fi
             if jq -e --arg r "${ref}" 'index($r)' "${PROMOTED}.refs" >/dev/null 2>&1; then
               echo "v${version}: already promoted — skipping"
               continue
@@ -155,9 +246,39 @@ jobs:
             fi
             echo "v${version}: READY"
             if gh api "repos/${REPO}/actions/workflows/release-promote.yml" >/dev/null 2>&1; then
-              gh workflow run release-promote.yml --ref "${ref}"
+              # Match only the non-dry-run title across all pages. This is a
+              # list-then-dispatch check, not a reservation.
+              RUNS="$(mktemp)"
+              if ! gh api --paginate "repos/${REPO}/actions/workflows/release-promote.yml/runs?per_page=100" > "${RUNS}"; then
+                echo "release-promote-poll: ERROR — could not list runs of release-promote.yml; refusing to dispatch for v${version} (unknown is not 'no run')" >&2
+                exit 1
+              fi
+              ALREADY="$(jq -s -r --arg t "release-promote v${version}" 'if length > 0 and all(.[]; (.workflow_runs | type) == "array") then [.[].workflow_runs[]] | any(.display_title == $t and (.status == "queued" or .status == "in_progress" or (.status == "completed" and .conclusion == "success"))) else "invalid" end' "${RUNS}")"
+              if [ "${ALREADY}" != "true" ] && [ "${ALREADY}" != "false" ]; then
+                echo "release-promote-poll: ERROR — could not interpret the release-promote.yml run list for v${version}; refusing to dispatch" >&2
+                exit 1
+              fi
+              if [ "${ALREADY}" = "true" ]; then
+                echo "${version}" >> "${HANDLED}"
+                echo "  v${version}: a non-dry-run promotion is queued, in progress or successful — not dispatching again"
+                continue
+              fi
+              NEEDS_REVIEW="$(jq -s -r --arg t "release-promote v${version}" '[.[].workflow_runs[]] | any(.display_title == $t)' "${RUNS}")"
+              if [ "${NEEDS_REVIEW}" = "true" ]; then
+                echo "${version}" >> "${HANDLED}"
+                echo "::warning::v${version}: a non-dry-run promotion requires human review — not dispatching again; a human must inspect the run before retrying"
+                continue
+              fi
+              # Require the settings check above to pass before dispatch.
+              if [ "${BOUNDARY_OK:-}" != "true" ]; then
+                echo "release-promote-poll: ERROR — refusing to dispatch release-promote for v${version}: the promote boundary is not in place: ${BOUNDARY_REASON:-not verified}. Nothing was dispatched (docs/releasing.md, 'The promote boundary')." >&2
+                exit 1
+              fi
+              echo "${version}" >> "${HANDLED}"
+              gh workflow run release-promote.yml --ref "${ref}" -f dry_run=false
               echo "  dispatched release-promote.yml --ref ${ref}"
             else
-              echo "  would dispatch release-promote.yml --ref ${ref} (slice 2 not merged yet)"
+              echo "${version}" >> "${HANDLED}"
+              echo "  would dispatch release-promote.yml --ref ${ref} (release-promote.yml is not on the default branch)"
             fi
           done < "${TSV}"
