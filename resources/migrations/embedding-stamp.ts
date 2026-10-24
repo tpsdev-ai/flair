@@ -213,7 +213,7 @@ import { txnPausePoint } from "../txn-pause-point.js";
 import { harperPortValue } from "../../src/lib/harper-port-value.js";
 import { DEFAULT_HTTP_PORT } from "../a2a-url.js";
 import { currentSpaceRawForms, isCurrentSpaceStamp } from "../embedding-space-guard.js";
-import type { Migration, RunBatchResult } from "./types.js";
+import { BatchOutcomeError, type Migration, type RunBatchResult } from "./types.js";
 import { EMBEDDING_STAMP_ID } from "./stamp-outstanding.js";
 import { endsWithContentSelectorSuffix } from "../../src/lib/memory-id-policy.js";
 import { skillEmbedText } from "../skill-write.js";
@@ -667,9 +667,10 @@ export function createEmbeddingStampMigration(
           // unconfirmed, by a break, a refusal or a thrown error, the unconfirmed
           // outcome is logged exactly once. A later verified attempt sets `ok`,
           // and nothing is logged. An error the loop itself throws (a retry's
-          // fresh read of the row) propagates to the runner after the line is
-          // logged; an error inside an attempt is caught by regenContentSuffixRow
-          // and ends the loop as a skipped attempt.
+          // fresh read of the row) leaves as a BatchOutcomeError carrying this
+          // row and the batch's earlier outcomes, after the line is logged; an
+          // error inside an attempt is caught by regenContentSuffixRow and ends
+          // the loop as a skipped attempt.
           try {
             for (let attempt = 1; attempt <= CONTENT_SUFFIX_REGEN_ATTEMPTS; attempt++) {
               const rowNow = attempt === 1 ? existing : await table.get(id);
@@ -708,6 +709,11 @@ export function createEmbeddingStampMigration(
               ownUnconfirmed = attemptResult.staged;
               if (attemptResult.verdict === "unreadable") break;
             }
+          } catch (err) {
+            // flair#2840: carry this batch's outcomes on the error — the runner
+            // has no RunBatchResult to read when run() throws.
+            if (unconfirmed) unconfirmedIds.push(id);
+            throw new BatchOutcomeError({ touchedIds, unconfirmedIds }, err);
           } finally {
             if (!ok && unconfirmed) {
               console.warn("[embedding-stamp] %s: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed, the row is uncounted and a later scan decides pending state", id);
