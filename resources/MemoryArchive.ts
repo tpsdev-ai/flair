@@ -4,7 +4,8 @@
  * POST /MemoryArchive — sets or clears the `archived` visibility flag on a
  * memory by id:
  *   - `action: "basement"` sets `archived: true` and `archivedBy` to the
- *     caller; Memory.put() supplies `archivedAt` when it is absent or falsy.
+ *     caller; Memory's shared locked PUT body (putLocked) supplies `archivedAt`
+ *     when it is absent or falsy.
  *   - `action: "restore"`  → archived=false + clears archivedAt/archivedBy
  *
  * `archived` is a VISIBILITY flag, not a deletion. Basementing retains the row
@@ -119,10 +120,11 @@ async function rereadAndMerge(
     updatedAt: new Date().toISOString(),
   };
   if (archived) {
-    // archivedBy is set by the caller (Memory.put() stamps archivedAt when
-    // archived===true). The archive request retains the existing embedding
-    // and delegates text redaction and embedding handling to Memory.put() —
-    // do NOT clear it (clearing would force a needless re-embed and, if the
+    // archivedBy is set by the caller. Memory's shared locked PUT body
+    // (putLocked, which putMemoryWithLock enters for this non-skill row)
+    // handles text redaction and embedding, and the archivedAt stamp the file
+    // header describes. The archive request retains the existing embedding — do NOT
+    // clear it (clearing would force a needless re-embed and, if the
     // embedding engine is unavailable, silently drop the vector).
     merged.archivedBy = callerId;
   } else {

@@ -24,7 +24,7 @@
  *     its body does not abort the scope and is reported after the commit, as
  *     that write's confirmed answer.
  *  3. The transaction commits.
- *  4. Each staged write's body resumes, in admission order, for its
+ *  4. Each staged write's body resumes, in staging order, for its
  *     post-commit confirmation, while the lock is still held (the acquisition
  *     waits for this scope to settle before it revokes the token and releases
  *     the keys).
