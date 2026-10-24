@@ -32,10 +32,12 @@ export interface MigrationStateEntry {
   reason?: string;
   rowsProcessed?: number;
   rowsRemaining?: number;
-  /** Rows attempted whose committed effect could not be verified; never part of
-   *  `rowsProcessed` (flair#2840). */
+  /** Rows recorded as unconfirmed and not since cleared: an attempt whose
+   *  committed effect its post-commit read did not show, whose row a later cycle
+   *  has not found at the target or gone. Never part of `rowsProcessed`
+   *  (flair#2840). */
   rowsUnconfirmed?: number;
-  /** The bounded list of those row ids (see UNCONFIRMED_IDS_LIMIT). */
+  /** Up to `UNCONFIRMED_IDS_LIMIT` of those row ids. */
   unconfirmedIds?: string[];
 }
 

@@ -216,7 +216,8 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
   for (const migration of deps.registry.list()) {
     const entry = state[migration.id];
     // flair#2840: re-read the ids a previous run recorded as unconfirmed on
-    // EVERY cycle, pending or not. This is the only place an id is cleared.
+    // EVERY cycle, pending or not. A recorded id is cleared here only when the
+    // re-read finds its row at this migration's target or finds no row.
     const record = await reverifyUnconfirmed(migration, entry);
     records.set(migration.id, record);
     const survived = record && record.count > 0 ? record : null;
@@ -623,10 +624,10 @@ async function runOneMigration(
   // ── Execution: throttled batches, resumable via per-row markers ──
   setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: initialRemaining, state: "running" });
   let rowsDone = 0;
-  // flair#2840: rows a batch attempted whose committed effect its post-commit
-  // verification read did not show. They are NOT part of `rowsDone`. A later
-  // batch that verifies an id removes it here, so the final set is exactly the
-  // rows this run could not confirm.
+  // flair#2840: rows recorded as unconfirmed — this run's attempts whose
+  // post-commit verification read did not show the write, plus the ids an
+  // earlier cycle recorded and no later read has cleared. They are NOT part of
+  // `rowsDone`. A batch that verifies an id removes it here.
   const unconfirmed = new Set<string>(carried?.ids ?? []);
   // Ids the durable record counted but never listed cannot be re-read; carry
   // their number (flair#2840).
@@ -837,10 +838,9 @@ async function runOneMigration(
   });
 
   pruneMigrationSnapshots(deps.snapshotRoot);
-  // State stays "completed": the migration reached its target state and its
-  // gate passed (flair#2840). `rowsUnconfirmed` and its ids say which rows this
-  // run did not verify, so a completion with unconfirmed rows is never read as
-  // "every row was confirmed done".
+  // State stays "completed" when the gate passes, even with a non-empty
+  // unconfirmed record (flair#2840): the record, not the state, carries the
+  // rows this run did not verify.
   setMigrationProgress({
     id: migration.id, rowsDone, rowsRemaining: 0, state: "completed",
     ...unconfirmedProgress(unconfirmedRecord()),
