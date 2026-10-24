@@ -1,7 +1,7 @@
 // flair#2824 — a readiness timeout names the embedding engine's Metal library
-// compile when the captured Harper log shows one.
+// load when the captured Harper log shows one.
 //
-// On a fresh CI macOS runner ggml's Metal library compile ran inside the first
+// On a fresh CI macOS runner ggml's Metal library load ran inside the first
 // test Harper's readiness wait, which then ran out. The log lines below are ggml's own
 // (as harper-fabric-embeddings 0.5.0's addon prints them). The parser cases need
 // no Harper; the startHarper cases boot a stub `harper.js` that installs, logs
@@ -10,7 +10,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { metalLibraryCompileNote, startHarper } from "../helpers/harper-lifecycle.js";
+import { metalLibraryLoadNote, startHarper } from "../helpers/harper-lifecycle.js";
 
 const STARTED = "ggml_metal_library_init: using embedded metal library";
 const LOADED = (sec: string) => `ggml_metal_library_init: loaded in ${sec} sec`;
@@ -48,41 +48,41 @@ async function readinessFailure(lines: string[]): Promise<string> {
   throw new Error("startHarper resolved against a stub that never answers /health");
 }
 
-describe("flair#2824: the Metal library compile note", () => {
-  test("a finished compile reports the duration from the last 'loaded in' line", () => {
-    expect(metalLibraryCompileNote(`x\n${STARTED}\n${LOADED("39.981")}\ny`)).toBe(
-      "the embedding engine's Metal library compile (ggml_metal_library_init) took 39.981 s",
+describe("flair#2824: the Metal library load note", () => {
+  test("a finished load reports the duration from the last 'loaded in' line", () => {
+    expect(metalLibraryLoadNote(`x\n${STARTED}\n${LOADED("39.981")}\ny`)).toBe(
+      "the embedding engine's Metal library load (ggml_metal_library_init) took 39.981 s",
     );
-    expect(metalLibraryCompileNote(`${STARTED}\n${LOADED("0.025")}\n${STARTED}\n${LOADED("12.5")}`)).toContain("took 12.5 s");
+    expect(metalLibraryLoadNote(`${STARTED}\n${LOADED("0.025")}\n${STARTED}\n${LOADED("12.5")}`)).toContain("took 12.5 s");
   });
 
-  test("a compile that started and logged no 'loaded in' line says so", () => {
-    expect(metalLibraryCompileNote(`[http/1] [info]: Loading application\n${STARTED}\n`)).toBe(
-      `the embedding engine's Metal library compile (ggml_metal_library_init) started and logged no "loaded in" line`,
+  test("a load that started and logged no 'loaded in' line says so", () => {
+    expect(metalLibraryLoadNote(`[http/1] [info]: Loading application\n${STARTED}\n`)).toBe(
+      `the embedding engine's Metal library load (ggml_metal_library_init) started and logged no "loaded in" line`,
     );
   });
 
   test("a log with no ggml_metal_library_init line yields no note", () => {
-    expect(metalLibraryCompileNote("")).toBeNull();
-    expect(metalLibraryCompileNote("ggml_metal_device_init: GPU name:   MTL0\nloaded in 3 sec")).toBeNull();
+    expect(metalLibraryLoadNote("")).toBeNull();
+    expect(metalLibraryLoadNote("ggml_metal_device_init: GPU name:   MTL0\nloaded in 3 sec")).toBeNull();
   });
 });
 
 describe("flair#2824: the readiness timeout carries the note", () => {
-  test("an unfinished compile is named after the process state, before the Harper log", async () => {
+  test("an unfinished load is named after the process state, before the Harper log", async () => {
     const message = await readinessFailure([STARTED]);
     expect(message).toMatch(/^Harper at http:\/\/127\.0\.0\.1:\d+ did not respond within 1000ms \(/);
     expect(message).toContain(
-      `Process still alive. Captured log: the embedding engine's Metal library compile (ggml_metal_library_init) started and logged no "loaded in" line. Harper log:\n`,
+      `Process still alive. Captured log: the embedding engine's Metal library load (ggml_metal_library_init) started and logged no "loaded in" line. Harper log:\n`,
     );
   }, 15_000);
 
-  test("a finished compile is named with its duration", async () => {
+  test("a finished load is named with its duration", async () => {
     const message = await readinessFailure([STARTED, LOADED("39.981")]);
-    expect(message).toContain("Captured log: the embedding engine's Metal library compile (ggml_metal_library_init) took 39.981 s. Harper log:\n");
+    expect(message).toContain("Captured log: the embedding engine's Metal library load (ggml_metal_library_init) took 39.981 s. Harper log:\n");
   }, 15_000);
 
-  test("a log without the compile lines keeps the message without a note", async () => {
+  test("a log without the load lines keeps the message without a note", async () => {
     const message = await readinessFailure([]);
     expect(message).toContain("Process still alive. Harper log:\n");
     expect(message).not.toContain("Captured log:");

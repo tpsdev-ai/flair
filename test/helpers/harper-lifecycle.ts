@@ -319,25 +319,25 @@ export function harperStartupPhase(log: string): string | null {
 }
 
 // ggml's Metal backend logs `ggml_metal_library_init: using embedded metal
-// library` when it starts compiling its Metal library and `ggml_metal_library_init:
-// loaded in <N> sec` when the compile ends. On a fresh CI macOS runner that
-// compile took 40 s inside the readiness window once and had not finished when
+// library` when it starts loading its Metal library and `ggml_metal_library_init:
+// loaded in <N> sec` when the load ends. On a fresh CI macOS runner that
+// load took 40 s inside the readiness window once and had not finished when
 // the window closed another time (flair#2824).
 const METAL_LIBRARY_LOADED_RE = /ggml_metal_library_init: loaded in ([0-9.]+) sec/g;
 
 /**
  * What the captured log says about the embedding engine's Metal library
- * compile, for the readiness timeout: its duration from the LAST "loaded in"
+ * load, for the readiness timeout: its duration from the LAST "loaded in"
  * line, that it started with no "loaded in" line, or null when the log has no
  * `ggml_metal_library_init:` line.
  */
-export function metalLibraryCompileNote(log: string): string | null {
+export function metalLibraryLoadNote(log: string): string | null {
   const text = String(log);
   let seconds: string | null = null;
   for (const m of text.matchAll(METAL_LIBRARY_LOADED_RE)) seconds = m[1];
-  if (seconds !== null) return `the embedding engine's Metal library compile (ggml_metal_library_init) took ${seconds} s`;
+  if (seconds !== null) return `the embedding engine's Metal library load (ggml_metal_library_init) took ${seconds} s`;
   if (text.includes("ggml_metal_library_init:")) {
-    return `the embedding engine's Metal library compile (ggml_metal_library_init) started and logged no "loaded in" line`;
+    return `the embedding engine's Metal library load (ggml_metal_library_init) started and logged no "loaded in" line`;
   }
   return null;
 }
@@ -812,7 +812,7 @@ async function waitForHealth(
   const exit = getExited?.();
   const captured = getLog?.() ?? "";
   const stoppedIn = harperStartupPhase(captured) ?? phase;
-  const metalNote = metalLibraryCompileNote(captured);
+  const metalNote = metalLibraryLoadNote(captured);
   throw new Error(
     `Harper at ${httpURL} did not respond within ${timeoutMs}ms ` +
     `(${attempt} attempts, ${Date.now() - startedAt}ms elapsed, stopped in phase: ${stoppedIn}). ` +
