@@ -438,6 +438,82 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
     expect((await readRow(receiver, "Memory", id)).content).toBe("failed-reoffer");
   }, 240_000);
 
+  it("a cursor-selected source with a valid pending row reserves the attempt before a failed send", async () => {
+    await clearRetries();
+    await setCursorNow();
+    const id = "memory-cursor-failed";
+    // Past the cursor, inside the receiver's future allowance.
+    const updatedAt = new Date(Date.now() + 5_000).toISOString();
+    await insertRow(sender, "Memory", memoryRow(id, "cursor-failed", updatedAt));
+    await insertRow(sender, "FederationRetry", retryRow(id, "merge_target_busy", { attempts: 1 }));
+    const before = await readRow(sender, "FederationRetry", retryKey(id));
+
+    await ops(sender, { operation: "update", table: "Peer", records: [{ id: HUB_ID, endpoint: `${receiver.httpURL}/bad`, updatedAt: new Date().toISOString() }] });
+    try {
+      const failed = await sync();
+      expect(failed.error, "the send to a 404 endpoint did not fail").toBeDefined();
+    } finally {
+      await ops(sender, { operation: "update", table: "Peer", records: [{ id: HUB_ID, endpoint: receiver.httpURL, updatedAt: new Date().toISOString() }] });
+    }
+
+    const stored = await readRow(sender, "FederationRetry", retryKey(id));
+    expect(stored.state, JSON.stringify(stored)).toBe("pending");
+    expect(stored.attempts, "the cursor-selected offer did not reserve an attempt").toBe(2);
+    expect(stored.lastReason).toBe("merge_target_busy");
+    expect(Date.parse(stored.lastAttemptAt)).toBeGreaterThan(Date.parse(before.lastAttemptAt));
+    expect(await readRow(receiver, "Memory", id)).toBeNull();
+    // Age the source behind the cursor so no later case selects it.
+    await ops(sender, { operation: "update", table: "Memory", records: [{ id, updatedAt: new Date(Date.now() - 600_000).toISOString() }] });
+  }, 240_000);
+
+  it("a cursor-selected source with a valid pending row resolves that row when merged", async () => {
+    await clearRetries();
+    await setCursorNow();
+    const id = "memory-cursor-merged";
+    const updatedAt = new Date(Date.now() + 5_000).toISOString();
+    await insertRow(sender, "Memory", memoryRow(id, "cursor-merged", updatedAt));
+    await insertRow(sender, "FederationRetry", retryRow(id, "merge_target_busy", { attempts: 1 }));
+
+    const result = await sync();
+    expect(result.error, String(result.error)).toBeUndefined();
+    expect(result.pushed, JSON.stringify(result)).toBe(1);
+    expect((await readRow(receiver, "Memory", id)).content).toBe("cursor-merged");
+    const done = await readRow(sender, "FederationRetry", retryKey(id));
+    expect(done.state, JSON.stringify(done)).toBe("terminal");
+    expect(done.resolution).toBe("merged");
+    expect(done.attempts, "the cursor-selected offer did not reserve its attempt").toBe(2);
+    await ops(sender, { operation: "update", table: "Memory", records: [{ id, updatedAt: new Date(Date.now() - 600_000).toISOString() }] });
+  }, 240_000);
+
+  it("a cursor-selected source with a malformed pending row is offered and the row is left as stored", async () => {
+    await clearRetries();
+    await setCursorNow();
+    const id = "memory-cursor-malformed";
+    const updatedAt = new Date(Date.now() + 5_000).toISOString();
+    await insertRow(sender, "Memory", memoryRow(id, "cursor-malformed", updatedAt));
+    await insertRow(sender, "FederationRetry", retryRow(id, "not_a_reason", { attempts: 1 }));
+
+    const warn = mock((...args: any[]) => {
+      void args;
+    });
+    const original = console.warn;
+    console.warn = warn as any;
+    try {
+      const result = await sync();
+      expect(result.error, String(result.error)).toBeUndefined();
+      expect(result.pushed, JSON.stringify(result)).toBe(1);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes(retryKey(id)) && String(call[0]).includes("unknown_reason"))).toBe(true);
+    } finally {
+      console.warn = original;
+    }
+    expect((await readRow(receiver, "Memory", id)).content).toBe("cursor-malformed");
+    const stored = await readRow(sender, "FederationRetry", retryKey(id));
+    expect(stored.state, JSON.stringify(stored)).toBe("pending");
+    expect(stored.attempts).toBe(1);
+    expect(stored.lastReason).toBe("not_a_reason");
+    await ops(sender, { operation: "update", table: "Memory", records: [{ id, updatedAt: new Date(Date.now() - 600_000).toISOString() }] });
+  }, 240_000);
+
   it("a pending row with an unknown lastReason is not offered and is reported", async () => {
     await clearRetries();
     await setCursorNow();

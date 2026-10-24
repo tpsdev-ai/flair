@@ -952,8 +952,11 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       for (const record of batch) {
         if (record.table !== "Memory") continue;
         const key = retryEntryKey(hub.id, "Memory", record.id);
-        const prior = pendingRetries.get(key) ?? null;
         const attemptReserved = reservedOffers.delete(key);
+        const prior = pendingRetries.get(key) ?? null;
+        // A row the shared validator names malformed is reported before the
+        // offer and left as stored: the outcome does not transition it.
+        if (prior !== null && retryOfferProblem(prior) !== null) continue;
         if (undecided.has(keyOf(record.table, record.id))) {
           // The receiver did not decide this record. Offering it again is safe
           // (the merge is idempotent); `retry_unknown` is the sender's own name.
@@ -1148,8 +1151,20 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         for (const pending of pendingRetries.values()) {
           const problem = retryOfferProblem(pending);
           if (problem !== null) {
-            console.warn(`⚠️  FederationRetry row ${pending.id} is not offered: ${problem}.`);
+            console.warn(`⚠️  FederationRetry row ${pending.id} is malformed (${problem}); left as stored.`);
           }
+        }
+        // A source the cursor selects that also has a valid pending row is
+        // offered now — a new change is not a retry, so the backoff does not
+        // hold it back — and its attempt is reserved before the send, exactly
+        // as on the re-offer path. A malformed row reserves nothing.
+        for (const row of rows) {
+          const pending = pendingRetries.get(retryEntryKey(hub.id, "Memory", row.id));
+          if (!pending || retryOfferProblem(pending) !== null) continue;
+          const reserved = retryRowForAttempt(pending, new Date().toISOString());
+          await writeRetryRow("upsert", reserved);
+          pendingRetries.set(String(reserved.id), reserved as unknown as RetryQueueRow);
+          reservedOffers.add(String(reserved.id));
         }
         for (const pending of dueRetryRows([...pendingRetries.values()], Date.now())) {
           if (seen.has(pending.recordId)) continue;
