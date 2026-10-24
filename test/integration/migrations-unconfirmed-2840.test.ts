@@ -1,19 +1,24 @@
 /**
  * migrations-unconfirmed-2840.test.ts — real Harper: a write whose post-commit
- * verification read misses the commit is not counted as done, and is named in
- * HealthDetail (flair#2840).
+ * verification read misses the commit, and that no later attempt verifies, is
+ * not counted as done, and is named in HealthDetail (flair#2840).
  *
  * The fault is a TEST-ONLY module installed into a private copy of the built
  * component (the auto-promote-incomplete-2714 pattern), not part of the
- * package. It wraps the Memory table for one id at a time, selected by a marker
- * file in FLAIR_TEST_PAUSE_DIR:
+ * package. It wraps the Memory table's get and update; each marker file in
+ * FLAIR_TEST_PAUSE_DIR arms one id. This file arms four: verify-miss for
+ * ROW_MISS (the synthetic write-back) and ROW_CONTENT (the `.content`-suffix
+ * re-embed), competing-write for ROW_COMPETING and competing-away for ROW_AWAY
+ * (both the synthetic write-back):
  *
  *   arm.verify-miss.<id>      after an update of <id> commits, the second
  *                             committed read (the write's post-commit
  *                             verification) is answered with the pre-write row.
- *                             The first committed read is the write-back's
- *                             pre-commit confirmation; it sees the pre-write
- *                             row for real, so it passes as it does on Harper.
+ *                             The first committed read is the pre-commit
+ *                             confirmation (the write-back's, or the
+ *                             `.content`-suffix re-embed's); it sees the
+ *                             pre-write row for real, so it passes as it does
+ *                             on Harper.
  *   arm.competing-write.<id>  the same miss, and the same instant is used to
  *                             commit another writer's change to <id>: a new
  *                             owner and `shared`. The row is at the migration's
@@ -28,7 +33,8 @@
  * and embedding-stamp's `.content`-suffix re-embed (the visibility backfill is
  * not exercised). The synthetic path's assertions are made through the
  * runner's progress record as HealthDetail serves it, and through the durable
- * state file; the `.content`-suffix case asserts HealthDetail only.
+ * state file; the `.content`-suffix case asserts the record through
+ * HealthDetail, not the state file.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -159,7 +165,7 @@ function migration(detail: any, id: string): any {
   return detail?.migrations?.migrations?.find((m: any) => m.id === id);
 }
 
-describe("flair#2840 — an unconfirmed write is reported by id, never counted as done (real Harper)", () => {
+describe("flair#2840 — an unconfirmed write is reported by id and not counted as done (real Harper)", () => {
   beforeAll(async () => {
     faultDir = mkdtempSync(join(tmpdir(), "flair-unconfirmed-2840-fault-"));
     appDir = mkdtempSync(join(tmpdir(), "flair-unconfirmed-2840-app-"));
@@ -207,8 +213,7 @@ describe("flair#2840 — an unconfirmed write is reported by id, never counted a
     });
 
     // Arm marker files. The fault module checks each for existence; it does
-    // not remove or consume one. The content row's arm stays for all its
-    // attempts, so every attempt's verification misses.
+    // not remove or consume one.
     for (const [kind, id] of [["verify-miss", ROW_MISS], ["competing-write", ROW_COMPETING], ["competing-away", ROW_AWAY], ["verify-miss", ROW_CONTENT]] as const) {
       writeFileSync(join(faultDir, `arm.${kind}.${id}`), "");
     }

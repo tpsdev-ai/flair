@@ -1,14 +1,13 @@
 /**
  * migrations-synthetic-done-count-2840.test.ts — rowsDone counts only writes
- * whose committed effect was verified, and an unconfirmed attempt is reported
- * by id (flair#2840).
+ * whose committed effect was verified, and a row whose attempt no retry
+ * verified is reported by id (flair#2840).
  *
  * The synthetic migration's write-back helper re-reads the committed row after
- * its commit. When that post-commit verification read does not show the write,
- * the row is unconfirmed: the batch must not count it as done, and the
- * returning batch reports its id in `unconfirmedIds`. The retry this drives
- * re-reads the committed row
- * inside its own transaction; finding this migration's marker there, it skips.
+ * its commit. In the first test that post-commit verification read does not
+ * show the write; the retry it drives re-reads the committed row inside its own
+ * transaction, finds this migration's marker there and skips, so the batch does
+ * not count the row as done and reports its id in `unconfirmedIds`.
  * A marker another writer set, with no attempt of this run on the row, is not
  * this migration's work and is neither counted nor reported as unconfirmed.
  *

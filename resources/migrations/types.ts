@@ -43,12 +43,13 @@ export interface MigrationProgress {
   /** Present when state is "halted" or "failed" — the exact, actionable reason. */
   reason?: string;
   /**
-   * Rows recorded as unconfirmed that a later batch or read has not cleared
-   * (flair#2840): an attempt whose committed effect its post-commit read did
-   * not show, and no later batch has verified the row's write, nor any later
-   * read found the row at the target or gone. NEVER included in `rowsDone`.
-   * `unconfirmedIds` carries at most {@link UNCONFIRMED_IDS_LIMIT} of them;
-   * this count is not capped.
+   * Rows recorded as unconfirmed (flair#2840): an attempt whose committed
+   * effect its post-commit read did not show. A listed id leaves the count when
+   * a later batch verifies its write or a later read finds the row at the
+   * target or gone. A later cycle starts from the state file's capped list, so
+   * the ids beyond it stay in the count as a number that no later batch or read
+   * reduces. `unconfirmedIds` carries at most {@link UNCONFIRMED_IDS_LIMIT} of
+   * them; this count is not capped.
    */
   rowsUnconfirmed?: number;
   /** Up to {@link UNCONFIRMED_IDS_LIMIT} unconfirmed row ids, in the order they
@@ -57,10 +58,10 @@ export interface MigrationProgress {
 }
 
 /**
- * How many of a run's unconfirmed row ids are reported. The runner keeps every
- * id in a Set while the run is in progress; only the list written to the
- * progress record and the state file is capped at this many. The count is not
- * capped (flair#2840).
+ * How many of a run's unconfirmed row ids are reported. During a run the
+ * runner holds the ids recorded in this run, and the listed ids it carried in,
+ * in a Set; the list written to the progress record and the state file is
+ * capped at this many. The count is not capped (flair#2840).
  */
 export const UNCONFIRMED_IDS_LIMIT = 100;
 
@@ -183,12 +184,12 @@ export interface Migration {
   recheckPending?(limit: number): Promise<{ sampled: number; falsePositives: number }>;
   /**
    * OPTIONAL (flair#2840). The runner calls this for each row id a state-file
-   * record lists as unconfirmed, on every cycle (including a cycle with no
-   * pending work), to decide whether the id can be cleared: `at-target` when
-   * this read found the row at this migration's target for that id, `no-row`
-   * when it found no row, `pending` to keep the id. A read that throws is
-   * treated as unknown and also keeps the id. Omitted by migrations that never
-   * report unconfirmed ids.
+   * record lists as unconfirmed, on each cycle that acquires the migration lock
+   * (including one with no pending work), to decide whether the id can be
+   * cleared: `at-target` when this read found the row at this migration's
+   * target for that id, `no-row` when it found no row, `pending` to keep the
+   * id. A read that throws is treated as unknown and also keeps the id. Omitted
+   * by migrations that never report unconfirmed ids.
    */
   checkUnconfirmed?(id: string): Promise<UnconfirmedVerdict>;
 }

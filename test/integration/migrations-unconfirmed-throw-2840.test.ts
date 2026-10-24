@@ -1,10 +1,14 @@
 /**
- * migrations-unconfirmed-throw-2840.test.ts — real Harper: a batch that throws
- * after recording a row as unconfirmed still reports that row (flair#2840).
+ * migrations-unconfirmed-throw-2840.test.ts — real Harper: on the two paths
+ * armed here, a batch that throws after recording a row as unconfirmed still
+ * reports that row (flair#2840).
  *
  * The fault is a TEST-ONLY module installed into a private copy of the built
  * component (the same pattern as migrations-unconfirmed-2840.test.ts). It wraps
- * the Memory table for one id, selected by a marker file in FLAIR_TEST_PAUSE_DIR:
+ * the Memory table's get and update; each marker file in FLAIR_TEST_PAUSE_DIR
+ * arms one id. This file arms two: read-throws for ROW_THROWS (the synthetic
+ * write-back) and retry-throws for ROW_RETRY_THROWS (the `.content`-suffix
+ * re-embed):
  *
  *   arm.read-throws.<id>  after an update of <id> commits, the second committed
  *                         read (the write's post-commit verification) throws.
@@ -17,11 +21,12 @@
  *                         then throws. The attempt is unconfirmed, and the
  *                         migration has no batch result to return.
  *
- * Each id's fault is exercised once per attempt; a later cycle replays it.
- * The write-back records the attempt as unconfirmed and rethrows. The migration's
- * batch ends on that throw, so it has no batch result to return; the id must
- * still reach the runner's record (carried on the thrown error), which this test
- * asserts through HealthDetail and the state file.
+ * ROW_THROWS: the synthetic write-back records the attempt as unconfirmed and
+ * rethrows the read's error. ROW_RETRY_THROWS: the `.content`-suffix loop marks
+ * the attempt unconfirmed after the verification miss, and its retry read
+ * throws. Each batch ends on its throw, so it has no batch result to return;
+ * each id must still reach the runner's record (carried on the thrown error),
+ * which this test asserts through HealthDetail and the state file.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -159,12 +164,12 @@ describe("flair#2840 — a thrown batch keeps its unconfirmed ids (real Harper)"
         createdAt: new Date().toISOString(),
       }],
     });
-    // Checked for existence, never removed: the id's one write is all this run needs.
+    // Checked for existence, not removed: each id's one write is all this run needs.
     writeFileSync(join(faultDir, `arm.read-throws.${ROW_THROWS}`), "");
     writeFileSync(join(faultDir, `arm.retry-throws.${ROW_RETRY_THROWS}`), "");
 
     // Boot-keyed: the first boot's cycle saw an empty corpus. Restart so a
-    // fresh boot's cycle discovers the seeded row and attempts it.
+    // fresh boot's cycle discovers the seeded rows and attempts them.
     await stopHarper(first, { keepInstallDir: true });
     harper = await startHarper({ cwd: appDir, harperBinDir: process.cwd(), installDir: first.installDir, homeDir, serverEnv });
   }, 240_000);

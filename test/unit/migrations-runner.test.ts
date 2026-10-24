@@ -351,7 +351,7 @@ describe("runMigrationCycle — unconfirmed rows (flair#2840)", () => {
     };
   }
 
-  it("carries a batch's unconfirmed ids into progress and the state file, never into rowsDone", async () => {
+  it("carries a batch's unconfirmed ids into progress and the state file, not into rowsDone", async () => {
     const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
     const relationship = makeStore([]);
     const migration = makeScriptedMigration("fake-unconfirmed", [
@@ -384,7 +384,7 @@ describe("runMigrationCycle — unconfirmed rows (flair#2840)", () => {
     expect(row?.unconfirmedIds).toEqual(["m2"]);
   });
 
-  it("removes an id a later batch verified, so the final set is exactly the rows left unconfirmed", async () => {
+  it("removes an id a later batch verified from the record", async () => {
     const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
     const relationship = makeStore([]);
     const migration = makeScriptedMigration("fake-later-verified", [
@@ -406,7 +406,7 @@ describe("runMigrationCycle — unconfirmed rows (flair#2840)", () => {
     expect(progress?.unconfirmedIds).toBeUndefined();
   });
 
-  it("keeps an exact count while bounding the reported id list", async () => {
+  it("reports a count of 105 while capping the id list at 100", async () => {
     const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
     const relationship = makeStore([]);
     const ids = Array.from({ length: 105 }, (_, i) => `u${i}`);
@@ -429,7 +429,7 @@ describe("runMigrationCycle — unconfirmed rows (flair#2840)", () => {
   });
 });
 
-describe("runMigrationCycle — the unconfirmed record survives no-pending cycles and restarts (flair#2840)", () => {
+describe("runMigrationCycle — a state-file unconfirmed record on a no-pending cycle (flair#2840)", () => {
   function makeTargetMigration(id: string, memory: ReturnType<typeof makeStore>, calls: { detect: number }) {
     return {
       id,
@@ -559,8 +559,8 @@ describe("runMigrationCycle — the unconfirmed record survives no-pending cycle
   });
 });
 
-describe("runMigrationCycle — a recorded unconfirmed row survives every halt branch (flair#2840)", () => {
-  it("keeps the record in HealthDetail and the state file when countPending throws", async () => {
+describe("runMigrationCycle — a recorded unconfirmed row survives a countPending throw and a detect() throw (flair#2840)", () => {
+  it("keeps the record in progress, the status snapshot and the state file when countPending throws", async () => {
     const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
     const relationship = makeStore([]);
     writeMigrationStateEntry(defaultStatePath(dataDir), "fake-preflight-record", {
@@ -612,7 +612,7 @@ describe("runMigrationCycle — a recorded unconfirmed row survives every halt b
     expect(state["fake-preflight-record"].unconfirmedIds).toEqual(["m1", "m2"]);
   });
 
-  it("keeps the record in HealthDetail when detect() throws", async () => {
+  it("keeps the record in progress when detect() throws", async () => {
     const memory = makeStore([{ id: "m9", content: "a", agentId: "a1" }]);
     const relationship = makeStore([]);
     writeMigrationStateEntry(defaultStatePath(dataDir), "fake-detect-record", {

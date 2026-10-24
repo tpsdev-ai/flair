@@ -486,9 +486,9 @@ describe("visibility-backfill — rowsDone counts verified writes only (flair#28
  * pre-commit confirmation read passes and the post-commit verification read
  * sees the commit unless it is armed to return the pre-write row.
  *
- * `searchSnapshots` is what a stale scan returns; when omitted, `search` reads
- * the backing store. The competing-writer tests seed the store with another
- * writer's row and pass the pre-write pending row as the snapshot.
+ * `firstSearchSnapshot` is what the first scan returns; when omitted, `search`
+ * reads the backing store. The competing-writer test seeds the store with
+ * another writer's row and passes the pre-write pending row as the snapshot.
  */
 function makeStagedTable(seed: Row[], firstSearchSnapshot?: Row[]) {
   const store = new Map<string, Row>(seed.map((r) => [r.id, { ...r }]));

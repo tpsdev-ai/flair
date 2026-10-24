@@ -1,12 +1,16 @@
 - **A migration reports the rows whose write it could not confirm instead of
   counting them as done.** A row whose post-commit verification read did not
-  show the write is excluded from `rowsDone`. The synthetic CI migration, the
-  visibility backfill and the embedding stamp's `.content`-suffix re-embed
-  record such a row as `rowsUnconfirmed` (a count) and `unconfirmedIds` (up to
-  100 ids) in `/HealthDetail` and in the migration state file — when the batch
-  returns, and for those paths when it throws. The embedding stamp's loopback
-  PATCH path logs a 503 `write_outcome_unknown` and leaves the row uncounted
-  without naming it. The record survives a no-pending cycle, a restart, a
-  `detect()` failure and every halt branch, and an id is cleared once a later
-  batch verifies its write or a later read finds its row at the migration's
-  target or finds no row. (#2840)
+  show the write is left out of `rowsDone` unless a later attempt's write is
+  verified. The synthetic CI migration, the visibility backfill and the
+  embedding stamp's `.content`-suffix re-embed report such a row, from a
+  returned batch and from a throw in the synthetic or visibility batch or the
+  `.content`-suffix retry read, as `rowsUnconfirmed` (a count) and
+  `unconfirmedIds` (up to 100 ids, shown to admin callers) in `/HealthDetail`,
+  and write them to the migration state file when the run halts or completes.
+  The embedding stamp's loopback PATCH path logs a 503 `write_outcome_unknown`
+  and leaves the row uncounted without naming it. The record is kept through
+  cycles with no pending work, `detect()` failures and halts, and across a
+  restart as the last successful state-file write recorded it. A listed id is
+  cleared once a later batch verifies its write or a later read finds its row
+  at the migration's target or finds no row; a later cycle starts from the
+  state file's list, so ids beyond the 100 listed stay in the count. (#2840)

@@ -137,9 +137,9 @@ export function progressFromStateEntry(id: string, entry: MigrationStateEntry): 
 /**
  * Seeds the in-process progress store from the state file at boot, before
  * `/HealthDetail` can be read (flair#2840). A migration the state file records
- * keeps that record — including unconfirmed ids, their count and a `halted`
- * status — instead of being replaced by `idle`; one with no entry starts
- * `idle`. An existing entry is never overwritten.
+ * keeps that record — including unconfirmed ids, their count and the status
+ * its last outcome maps to — instead of being replaced by `idle`; one with no
+ * entry starts `idle`. An existing entry is never overwritten.
  */
 export function seedProgressFromState(statePath: string, ids: readonly string[]): void {
   const state = readMigrationState(statePath);

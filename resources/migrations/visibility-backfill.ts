@@ -231,8 +231,9 @@ export function createVisibilityBackfillMigration(
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
         // flair#2840: the write-back reports an attempt whose committed effect
-        // its post-commit verification read did not show. Such a row is never
-        // counted as done; it is reported by id instead.
+        // its post-commit verification read did not show. The row is counted as
+        // done only if a later attempt's write is verified; otherwise it is
+        // reported by id.
         let ownUnconfirmed = false;
         try {
           // The decision and the write run under the per-id memory write lock

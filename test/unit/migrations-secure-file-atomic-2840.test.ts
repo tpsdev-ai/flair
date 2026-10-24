@@ -5,8 +5,9 @@
 // reader landing between those two steps sees an empty or partial file. The
 // migration state file is read on boot seeding and by HealthDetail, and the
 // parse error is swallowed as `{}`, so that window loses the unconfirmed record
-// this PR keeps across a restart. Writers are also read-modify-write, so a
-// truncated read makes one writer drop every other migration's entry.
+// a restart would otherwise seed from the file. Writers are also
+// read-modify-write, so a truncated read makes one writer drop every other
+// migration's entry.
 //
 // The witness here is a READER in another realm (worker_threads) hammering the
 // same path while the parent writes a large payload repeatedly: zero read or

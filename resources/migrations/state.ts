@@ -33,9 +33,10 @@ export interface MigrationStateEntry {
   rowsProcessed?: number;
   rowsRemaining?: number;
   /** Rows recorded as unconfirmed and not since cleared: an attempt whose
-   *  committed effect its post-commit read did not show, whose row no later
-   *  batch has verified and no later read has found at the target or gone.
-   *  Never part of `rowsProcessed` (flair#2840). */
+   *  committed effect its post-commit read did not show. A listed id clears
+   *  when a later batch verifies its write or a later read finds the row at
+   *  the target or gone; the ids beyond `unconfirmedIds` are carried as a
+   *  number that no later batch or read reduces (flair#2840). */
   rowsUnconfirmed?: number;
   /** Up to `UNCONFIRMED_IDS_LIMIT` of those row ids. */
   unconfirmedIds?: string[];

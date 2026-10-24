@@ -216,9 +216,10 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
   for (const migration of deps.registry.list()) {
     const entry = state[migration.id];
     // flair#2840: re-read the ids a previous run recorded as unconfirmed on
-    // EVERY cycle, pending or not. A recorded id is cleared here when the
-    // re-read finds its row at this migration's target or finds no row; a later
-    // batch that verifies the row's write clears it too.
+    // each cycle that acquires the lock (this function), pending or not. A
+    // listed id is cleared here when the re-read finds its row at this
+    // migration's target or finds no row; a later batch that verifies the row's
+    // write clears it too.
     const record = await reverifyUnconfirmed(migration, entry);
     records.set(migration.id, record);
     const survived = record && record.count > 0 ? record : null;
@@ -294,8 +295,8 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
       }
       setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "completed" });
       if (entry && record) {
-        // The last recorded id cleared and no work is pending: the record can
-        // now say this migration completed.
+        // The record's count reached zero and no work is pending: the record
+        // can now say this migration completed.
         recordMigrationStateEntry(deps.statePath, migration.id, {
           completedAtVersion: deps.runningVersion,
           completedAt: deps.now().toISOString(),
@@ -446,10 +447,9 @@ async function haltMigration(
   });
 }
 
-/** Unconfirmed row ids carried in the durable record: at most
- *  {@link UNCONFIRMED_IDS_LIMIT} ids, plus the recorded count they belong to. A
- *  count above the id-list length means some ids were never persisted and
- *  cannot be re-read. */
+/** Unconfirmed row ids plus the count they belong to. A state entry the runner
+ *  wrote lists at most {@link UNCONFIRMED_IDS_LIMIT} ids; a count above the
+ *  id-list length means some ids were never persisted and cannot be re-read. */
 interface UnconfirmedRecord {
   ids: string[];
   count: number;
@@ -633,9 +633,9 @@ async function runOneMigration(
   setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: initialRemaining, state: "running", ...unconfirmedProgress(carried) });
   let rowsDone = 0;
   // flair#2840: rows recorded as unconfirmed — this run's attempts whose
-  // post-commit verification read did not show the write, plus the ids an
-  // earlier cycle recorded and no later read has cleared. They are NOT part of
-  // `rowsDone`. A batch that verifies an id removes it here.
+  // post-commit verification read did not show the write, plus the listed ids
+  // an earlier cycle recorded and no later read has cleared. A batch that
+  // verifies an id removes it here.
   const unconfirmed = new Set<string>(carried?.ids ?? []);
   // Ids the durable record counted but never listed cannot be re-read; carry
   // their number (flair#2840).
@@ -670,7 +670,7 @@ async function runOneMigration(
     // flair#2840: a batch that throws from the synthetic write-back, the
     // visibility backfill or embedding-stamp's `.content`-suffix retry read
     // carries those outcomes on the error, because there is no RunBatchResult
-    // to read. Merge them before the halt persists the record; a throw from a
+    // to read. Merge them before the halt writes the record; a throw from a
     // path that does not wrap its batch carries nothing.
     if (err instanceof BatchOutcomeError) {
       for (const id of err.touchedIds) unconfirmed.delete(id);
@@ -850,7 +850,7 @@ async function runOneMigration(
   pruneMigrationSnapshots(deps.snapshotRoot);
   // State stays "completed" when the gate passes, even with a non-empty
   // unconfirmed record (flair#2840): the record, not the state, carries the
-  // rows this run did not verify.
+  // unconfirmed rows.
   setMigrationProgress({
     id: migration.id, rowsDone, rowsRemaining: 0, state: "completed",
     ...unconfirmedProgress(unconfirmedRecord()),

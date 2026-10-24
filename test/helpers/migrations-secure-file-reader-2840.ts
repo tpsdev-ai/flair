@@ -1,10 +1,11 @@
 // migrations-secure-file-reader-2840.ts — a worker_threads READER for the
 // atomic-write witness (flair#2840 round 4b). It reads one file in a tight
 // loop IN ITS OWN REALM, next to the writer, and reports what it saw: how many
-// reads it made, how many threw, how many parsed but were neither of the two
-// expected payloads, and a few samples of each. The parent stops it by creating
-// `stopFile` (a filesystem flag, not a message: the loop is synchronous, so the
-// worker's own event loop cannot deliver a message while it spins).
+// reads it made, how many threw, how many failed to parse, how many were neither
+// of the two expected payloads, and up to five samples across them. The parent
+// stops it by creating `stopFile` (a filesystem flag, not a message: the loop
+// is synchronous, so the worker's own event loop cannot deliver a message while
+// it spins).
 //
 // The loop is bounded twice — wall-clock deadline AND read count — so a parent
 // that never writes `stopFile` still ends it.

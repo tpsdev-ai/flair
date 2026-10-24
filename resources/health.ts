@@ -851,7 +851,7 @@ export class HealthDetail extends Resource {
         } else if (m.state === "completed" && (m.rowsUnconfirmed ?? 0) > 0) {
           warnings.push({
             level: "warn",
-            message: `migration '${m.id}' completed with ${m.rowsUnconfirmed} row(s) it could not confirm; they are not counted as done`,
+            message: `migration '${m.id}' completed with ${m.rowsUnconfirmed} row(s) it could not confirm`,
           });
         }
       }

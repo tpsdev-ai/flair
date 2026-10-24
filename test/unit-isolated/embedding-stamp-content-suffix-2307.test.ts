@@ -287,9 +287,9 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
     // The write commits. The pre-commit confirmation read sees the pre-write
     // row (it is a committed read, and the write is still staged), so it
     // passes; the post-commit verification read is answered with that same
-    // pre-write row, so every attempt's outcome is unconfirmed. The retry
-    // re-reads the current row, stages again and verifies again, and never
-    // shows its own write, so the row is reported by id rather than counted.
+    // pre-write row, so the attempt is unconfirmed. The retry's fresh read
+    // finds the row current and the loop stops without a second write, so the
+    // row is reported by id rather than counted.
     const before = store.get(LEGACY_ID)!;
     afterCommit = () => {
       afterCommit = null;

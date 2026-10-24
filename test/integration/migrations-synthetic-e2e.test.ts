@@ -133,10 +133,9 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
     expect(lastMig).toBeTruthy();
     expect(lastMig.state).toBe("completed");
     expect(lastMig.rowsRemaining).toBe(0);
-    // flair#2840: rowsDone counts only writes whose committed effect was
-    // verified, and rowsUnconfirmed accounts for the rest. On a healthy store
-    // every seeded row is confirmed, so the two together are the seeds and no
-    // id is named unconfirmed.
+    // flair#2840: rowsDone counts writes whose committed effect was verified.
+    // This test expects every seeded row to be verified, so rowsDone is the
+    // seed count and no id is named unconfirmed.
     expect(lastMig.rowsDone).toBe(SEED_IDS.length);
     expect((lastMig.rowsUnconfirmed ?? 0) + lastMig.rowsDone).toBe(SEED_IDS.length);
     expect(lastMig.unconfirmedIds ?? []).toEqual([]);

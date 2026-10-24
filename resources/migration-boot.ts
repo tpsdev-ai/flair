@@ -209,10 +209,11 @@ export function scheduleMigrationBoot(): void {
 
   const registry = buildRegistry();
   // flair#2840: seed from the durable record, not blindly `idle`. A migration
-  // whose last run halted with unconfirmed rows must still show that record and
-  // its halted status from the first `/HealthDetail` read after a restart; the
-  // cycle below then re-verifies the recorded ids. The read-only resolver is
-  // the same one /HealthDetail uses, so the seeded row and its fallback agree.
+  // whose state entry records a halt with unconfirmed rows shows that record
+  // and its halted status from the first `/HealthDetail` read after a restart;
+  // the cycle below re-reads the listed ids when it acquires the lock. The
+  // read-only resolver is the same one /HealthDetail uses, so the seeded row
+  // and its fallback agree.
   seedProgressFromState(defaultStatePath(resolveMigrationDataDirForRead()), registry.list().map((m) => m.id));
   // Proof-of-life, set SYNCHRONOUSLY at module load: from here on,
   // `cyclePhase === "idle"` means this module never loaded at all — the
