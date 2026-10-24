@@ -1,8 +1,7 @@
 /**
  * The ONE rule for admitting the trusted `internal` verdict to an elevated gate:
- * the caller said so with `internalContext()`'s marker, and the call is not an
- * HTTP request. A context that resolved to `internal` by being omitted is
- * refused.
+ * the context carries `internalContext()`'s marker and no request headers. A
+ * context that resolved to `internal` by being omitted is refused.
  *
  * Shared by the admin-only gate (resources/agent-auth.ts) and the Soul/AgentSeed
  * and skill-write source classification, so those three cannot drift apart.

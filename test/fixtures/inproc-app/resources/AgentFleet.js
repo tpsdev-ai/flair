@@ -17,6 +17,7 @@
  * Kept as plain JS (no build step) so it loads through the `jsResource` glob
  * exactly as a hand-written application component would.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Resource, server, transaction } from "harper";
 // The in-process call seam. Deep-imported from the installed package the same
 // way an application would — Flair ships `dist/`, and this module has no
@@ -393,6 +394,40 @@ async function maintainAsAdmin(agentId, body, undefinedKeys) {
   return { sent, reply: await run(() => h.post(request)) };
 }
 
+// ─── flair#2837 — the admin-only gate through Harper's resource lifecycle ────
+//
+// A static get() whose target sets `checkPermission` makes Harper call the
+// resource's allowRead() with the context the call carries; Flair's Admin
+// resource answers allowRead with allowAdmin. Each call runs in the async
+// context captured when this module loaded, outside any request, so a call
+// with no context argument finds no request context in Harper's async storage
+// either. The marker-with-headers context carries a plain-object `headers`,
+// which the resolver still reads as `internal`, so its refusal is the
+// deliberate-internal check's.
+const outsideAnyRequest = AsyncLocalStorage.snapshot();
+
+const ADMIN_GATE_CONTEXTS = {
+  none: () => undefined,
+  internalContext: () => internalContext(),
+  markerWithHeaders: () => ({ ...internalContext(), request: { headers: { "x-probe": "2837" } } }),
+};
+
+async function adminGate(contextKind) {
+  const make = ADMIN_GATE_CONTEXTS[contextKind];
+  if (!make) throw new Error(`no such admin-gate context '${contextKind}'`);
+  return outsideAnyRequest(async () => {
+    const context = make();
+    try {
+      const reply = context === undefined
+        ? await flair("Admin").get({ checkPermission: true })
+        : await flair("Admin").get({ checkPermission: true }, context);
+      return { admitted: true, status: reply instanceof Response ? reply.status : null };
+    } catch (err) {
+      return { admitted: false, statusCode: err?.statusCode ?? null, error: String(err?.message ?? err) };
+    }
+  });
+}
+
 const summarise = (r) => ({ id: r?.id, agentId: r?.agentId, visibility: r?.visibility, content: r?.content });
 
 async function collect(rows) {
@@ -495,6 +530,8 @@ export class AgentFleet extends Resource {
         return run(() => recallWithRawMissingId());
       case "maintainAsAdmin":
         return run(() => maintainAsAdmin(body.agentId, body.body, body.undefinedKeys));
+      case "adminGate":
+        return run(() => adminGate(body.context));
       default:
         return new Response(JSON.stringify({ error: `unknown op '${op}'` }), { status: 400 });
     }

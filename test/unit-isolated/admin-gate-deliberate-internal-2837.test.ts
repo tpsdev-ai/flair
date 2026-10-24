@@ -3,10 +3,11 @@
  * agent, or a DELIBERATE internal call. A missing context resolves to `internal`
  * by omission and is refused.
  *
- * Every resource class that gates on `allowAdmin` is enumerated LITERALLY below,
- * and a guard reads `git grep -l "allowAdmin("` in resources/ and fails when a
- * gated class is not named here — so adding an admin-gated resource without a
- * case fails this file.
+ * Every resource class that gates on `allowAdmin` is enumerated LITERALLY below.
+ * A guard parses each tracked resources/ TypeScript source with the TypeScript
+ * parser and fails when a class that calls allowAdmin, or an allow* method of
+ * one that calls it, is not listed here, or when it finds a reference to
+ * allowAdmin it cannot attribute to a class member.
  *
  * Harper is mocked (a Resource base + a table-class proxy) because these modules
  * extend Harper's runtime globals and cannot be imported outside a Harper
@@ -16,6 +17,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, mock } from "bun:test";
+import ts from "typescript";
 
 class NoopBase {
   constructor(_id?: any, _ctx?: any) {}
@@ -99,35 +101,89 @@ describe("flair#2837 — the admin gate admits only a deliberate internal call",
 
 // ─── Enumeration guard ───────────────────────────────────────────────────────
 
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+const unwrap = (node: ts.Expression): ts.Expression => {
+  let current = node;
+  while (ts.isParenthesizedExpression(current) || ts.isAsExpression(current) || ts.isNonNullExpression(current) ||
+    ts.isTypeAssertionExpression(current) || ts.isSatisfiesExpression(current)) current = current.expression;
+  return current;
+};
+
+/** `<expr>.allowAdmin` or `<expr>["allowAdmin"]`: a namespace or module-object member. */
+const isAllowAdminMember = (node: ts.Expression): boolean =>
+  (ts.isPropertyAccessExpression(node) && node.name.text === "allowAdmin") ||
+  (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression) && node.argumentExpression.text === "allowAdmin");
+
+/**
+ * Every call of allowAdmin in one source, parsed with the TypeScript parser, as
+ * `{ cls, member }`: through its own name, an import alias, a namespace or
+ * module-object member, or a local alias initialised with one of those, however
+ * it is formatted. Names are matched by name, not scope. Any other reference it
+ * finds (a re-export, a value passed elsewhere, a call outside a class body)
+ * throws.
+ */
+function allowAdminCallSites(file: string, source: string): Array<{ cls: string; member: string }> {
+  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+  const unresolved = (node: ts.Node, what: string): never => {
+    throw new Error(`unresolved allowAdmin reference (${what}): ${file}:${ast.getLineAndCharacterOfPosition(node.getStart(ast)).line + 1}`);
+  };
+  const names = new Set(["allowAdmin"]);
+  const isReference = (node: ts.Expression) => (ts.isIdentifier(node) && names.has(node.text)) || isAllowAdminMember(node);
+  for (let changed = true; changed;) {
+    changed = false;
+    const visit = (node: ts.Node): void => {
+      const alias =
+        (ts.isImportSpecifier(node) && !node.isTypeOnly && (node.propertyName ?? node.name).text === "allowAdmin") ||
+        (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && !!node.initializer && isReference(unwrap(node.initializer)));
+      if (alias && !names.has((node as ts.ImportSpecifier | ts.VariableDeclaration).name.getText(ast))) {
+        names.add((node as ts.ImportSpecifier | ts.VariableDeclaration).name.getText(ast));
+        changed = true;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(ast);
+  }
+  const sites: Array<{ cls: string; member: string }> = [];
+  const visit = (node: ts.Node): void => {
+    const isName = ts.isIdentifier(node) && names.has(node.text) && !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node);
+    if (isName || (ts.isExpression(node) && isAllowAdminMember(node))) {
+      const parent = node.parent;
+      const declares = ts.isImportSpecifier(parent) ||
+        ((ts.isVariableDeclaration(parent) || ts.isFunctionDeclaration(parent)) && parent.name === node);
+      let use: ts.Node = node;
+      while (ts.isParenthesizedExpression(use.parent) || ts.isAsExpression(use.parent) || ts.isNonNullExpression(use.parent) ||
+        ts.isTypeAssertionExpression(use.parent) || ts.isSatisfiesExpression(use.parent)) use = use.parent;
+      const aliases = ts.isVariableDeclaration(use.parent) && use.parent.initializer === use;
+      if (!declares && !aliases) {
+        if (!(ts.isCallExpression(use.parent) && use.parent.expression === use)) unresolved(node, "not a call");
+        let member: ts.Node = use.parent;
+        while (member.parent && !ts.isClassLike(member.parent)) member = member.parent;
+        const owner = member.parent;
+        if (!owner || !ts.isClassLike(owner)) unresolved(node, "call outside a class body");
+        const cls = (owner as ts.ClassLikeDeclaration).name?.text ??
+          (ts.isVariableDeclaration(owner.parent) && ts.isIdentifier(owner.parent.name) ? owner.parent.name.text : unresolved(node, "anonymous class"));
+        const name = (member as ts.ClassElement).name;
+        sites.push({ cls, member: name && !ts.isComputedPropertyName(name) ? name.getText(ast) : unresolved(node, "computed member name") });
+      }
+      if (!isName) return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  return sites;
 }
 
-/** Every class whose own body calls allowAdmin, parsed from the resource sources. */
-function classesCallingAllowAdmin(): Set<string> {
-  const files = execFileSync("git", ["grep", "-l", "allowAdmin(", "--", "resources"], {
-    cwd: join(import.meta.dir, "..", ".."),
-    encoding: "utf8",
-    timeout: 10_000,
-  })
-    .trim()
-    .split("\n")
+/** class name → the members that call allowAdmin, over every tracked resources/ TypeScript source. */
+function gatedMembersBySource(): Map<string, Set<string>> {
+  const root = join(import.meta.dir, "..", "..");
+  const files = execFileSync("git", ["ls-files", "-z", "--", "resources/*.ts"], { cwd: root, encoding: "utf8", timeout: 10_000 })
+    .split("\0")
     .filter(Boolean);
-  const found = new Set<string>();
+  expect(files.length, "git ls-files found no resources/*.ts sources").toBeGreaterThan(0);
+  const found = new Map<string, Set<string>>();
   for (const file of files) {
-    const src = stripComments(readFileSync(join(import.meta.dir, "..", "..", file), "utf8"));
-    const headerRe = /\bclass\s+(\w+)[^{]*\{/g;
-    let m: RegExpExecArray | null;
-    while ((m = headerRe.exec(src))) {
-      const start = m.index + m[0].length;
-      let depth = 1;
-      let i = start;
-      while (i < src.length && depth > 0) {
-        if (src[i] === "{") depth++;
-        else if (src[i] === "}") depth--;
-        i++;
-      }
-      if (src.slice(start, i).includes("allowAdmin(")) found.add(m[1]);
+    for (const { cls, member } of allowAdminCallSites(file, readFileSync(join(root, file), "utf8"))) {
+      if (!found.has(cls)) found.set(cls, new Set());
+      found.get(cls)!.add(member);
     }
   }
   return found;
@@ -136,23 +192,38 @@ function classesCallingAllowAdmin(): Set<string> {
 describe("flair#2837 — every class that gates on allowAdmin has a case here", () => {
   const named = new Set(ADMIN_GATED.map((c) => c.cls));
 
+  it("the scan finds a reformatted, an aliased and a namespace call, and refuses a reference it cannot follow", () => {
+    const source = [
+      'import { allowAdmin as gate } from "./agent-auth.js";',
+      'import * as auth from "./agent-auth.js";',
+      "const again = gate;",
+      "export class A { allowRead() { return allowAdmin\n  (ctx); } }",
+      "export class B { allowCreate() { return gate(ctx); } allowDelete() { return again(ctx); } }",
+      "export class C { allowUpdate() { return (auth).allowAdmin(ctx); } }",
+    ].join("\n");
+    expect(allowAdminCallSites("resources/__synthetic__.ts", source)).toEqual([
+      { cls: "A", member: "allowRead" },
+      { cls: "B", member: "allowCreate" },
+      { cls: "B", member: "allowDelete" },
+      { cls: "C", member: "allowUpdate" },
+    ]);
+    expect(() => allowAdminCallSites("resources/__escape__.ts", 'export { allowAdmin as g } from "./agent-auth.js";')).toThrow(/unresolved/);
+    expect(() => allowAdminCallSites("resources/__escape__.ts", "export const g = (c) => allowAdmin(c);")).toThrow(/unresolved/);
+  });
+
   it("the guard sees the same set of gated classes as the literal list", () => {
-    const found = classesCallingAllowAdmin();
-    const missing = [...found].filter((c) => !named.has(c)).sort();
+    const found = gatedMembersBySource();
+    const missing = [...found.keys()].filter((c) => !named.has(c)).sort();
     const stale = [...named].filter((c) => !found.has(c)).sort();
     expect(missing, `admin-gated classes with no case: ${missing.join(", ")}`).toEqual([]);
     expect(stale, `listed classes that no longer gate on allowAdmin: ${stale.join(", ")}`).toEqual([]);
   }, 10_000);
 
-  it("each listed class's gated methods are all in the case list", async () => {
-    for (const { cls, module, methods } of ADMIN_GATED) {
-      const mod: any = await import(`../../resources/${module}`);
-      const proto = mod[cls]?.prototype ?? {};
-      const present = Object.getOwnPropertyNames(proto)
-        .filter((name) => /^allow(Read|Create|Update|Delete|Upsert|Connect)$/.test(name))
-        .filter((name) => stripComments(Function.prototype.toString.call(proto[name])).includes("allowAdmin("))
-        .sort();
-      expect(present, `${cls}: gated methods on the prototype differ from the case list`).toEqual([...methods].sort());
+  it("each listed class's gated methods are all in the case list", () => {
+    const found = gatedMembersBySource();
+    for (const { cls, methods } of ADMIN_GATED) {
+      const present = [...(found.get(cls) ?? [])].filter((name) => /^allow[A-Z]\w*$/.test(name)).sort();
+      expect(present, `${cls}: the allow* methods that call allowAdmin differ from the case list`).toEqual([...methods].sort());
     }
   }, 10_000);
 });
