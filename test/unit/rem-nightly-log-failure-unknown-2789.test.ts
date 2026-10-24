@@ -36,7 +36,9 @@ function runCli(args: string[], env: Record<string, string>): Promise<{ stdout: 
       cwd: env.HOME,
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: CHILD_DEADLINE_MS,
+      // Literal so the spawn-budget gate sees a deadline (flair#1807); same value as CHILD_DEADLINE_MS, which the
+      // overrun message names. The request deadline is 100 ms, so 25 s is start-up headroom inside the 35 s case budget.
+      timeout: 25_000,
     });
     let stdout = "";
     let stderr = "";
