@@ -19,7 +19,9 @@
  * creation.") — a directory can be re-permissioned by something else on the
  * host between creation and a later write in a long-running batch loop.
  */
-import { existsSync, mkdirSync, chmodSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { basename, dirname, join } from "node:path";
 
 export class UnsafeDirectoryError extends Error {
   constructor(
@@ -67,8 +69,32 @@ export function ensureSecureDir(dir: string): void {
  * Writes `contents` to `path` at 0600, re-verifying the CONTAINING
  * directory is still 0700 immediately before the write (per Kern's
  * write-time re-verification requirement above).
+ *
+ * The write is ATOMIC: the contents go to a fresh temporary file beside the
+ * target (same directory, so the rename stays on one filesystem), created at
+ * 0600, which is then renamed over the target. A concurrent reader therefore
+ * observes either the old file or the new file — never a truncated or
+ * half-written one (a plain writeFileSync truncates first and fills second,
+ * so a reader can land in between and see an empty or partial file).
+ *
+ * What this does NOT solve: two concurrent WRITERS still race on their
+ * read-modify-write cycles (last rename wins, the other writer's entry is
+ * lost). Serializing writers is a separate follow-up, not done here.
  */
 export function writeSecureFile(path: string, contents: string, dir: string): void {
   verifySecureDir(dir);
-  writeFileSync(path, contents, { mode: 0o600 });
+  const targetDir = dirname(path);
+  const temp = join(targetDir, `.${basename(path)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
+  try {
+    writeFileSync(temp, contents, { mode: 0o600 });
+    renameSync(temp, path);
+  } catch (err) {
+    try {
+      unlinkSync(temp);
+    } catch {
+      // The temporary file may never have been created; the original error is
+      // the one worth surfacing.
+    }
+    throw err;
+  }
 }
