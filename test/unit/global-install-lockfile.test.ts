@@ -439,7 +439,15 @@ describe("resolveFromLoggingDir requires the hit to be inside the tree", () => {
   });
 });
 
-const REAL_NPM_TIMEOUT_MS = 120_000;
+// The real-npm test below runs five child processes (three `npm pack`, one
+// `npm install`, and the gate script, which installs again). Each direct
+// child is sent SIGKILL at REAL_NPM_TIMEOUT_MS (SIGKILL, not the default
+// SIGTERM: the sync spawn waits for the child to exit), and the test declares
+// its own timeout covering all five plus margin, so Bun's 5 s default does
+// not cut it short. This bounds the test, not the shared unit step.
+const REAL_NPM_TIMEOUT_MS = 60_000;
+const REAL_NPM_CHILDREN = 5;
+const REAL_NPM_TEST_TIMEOUT_MS = REAL_NPM_CHILDREN * REAL_NPM_TIMEOUT_MS + 30_000;
 
 /** Pack a tiny package directory into `dest` with the real npm, returning the tarball path. */
 function packFixturePackage(dir: string, manifest: Record<string, unknown>, dest: string): string {
@@ -448,6 +456,7 @@ function packFixturePackage(dir: string, manifest: Record<string, unknown>, dest
     cwd: dir,
     encoding: "utf8",
     timeout: REAL_NPM_TIMEOUT_MS,
+    killSignal: "SIGKILL",
   });
   const name = packed
     .trim()
@@ -474,6 +483,7 @@ describe("check-global-install-lockfile — real npm", () => {
     const first = spawnSync("npm", ["install", "-g", "--prefix", prefix, good], {
       encoding: "utf8",
       timeout: REAL_NPM_TIMEOUT_MS,
+      killSignal: "SIGKILL",
     });
     expect(first.status).toBe(0);
     expect(existsSync(join(treePaths(prefix).flair, "package.json"))).toBe(true);
@@ -492,10 +502,10 @@ describe("check-global-install-lockfile — real npm", () => {
     const run = spawnSync(
       nodeBin(),
       [join(REPO, "scripts/check-global-install-lockfile.mjs"), "--package", bad, "--prefix", prefix],
-      { encoding: "utf8", timeout: REAL_NPM_TIMEOUT_MS },
+      { encoding: "utf8", timeout: REAL_NPM_TIMEOUT_MS, killSignal: "SIGKILL" },
     );
     expect(run.status).toBe(1);
     expect(run.stderr).toContain("exited with status");
     expect(run.stderr).toMatch(/exited with status [1-9]/);
-  });
+  }, REAL_NPM_TEST_TIMEOUT_MS);
 });
