@@ -164,7 +164,7 @@ describe("JSX text masks exactly its own span (flair#2808)", () => {
   }
 });
 
-describe("literal text keeps every line break TypeScript counts (flair#2808)", () => {
+describe("literal text keeps the U+2028 and U+2029 line breaks (flair#2808)", () => {
   for (const sep of SEPARATORS) {
     it(`keeps ${SEPARATOR_NAMES[sep]} inside a string literal (.ts)`, () => {
       const src = `const label = "alpha${sep}omega";\nconst after = 1;\n`;
