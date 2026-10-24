@@ -71,5 +71,11 @@ test("federation verify and REM restore use the shared id helper", () => {
   const federation = readFileSync(new URL("../../src/federation-verify.ts", import.meta.url), "utf8");
   const restore = readFileSync(new URL("../../src/rem/restore.ts", import.meta.url), "utf8");
   expect(federation).toContain("encodeRecordId(memId)");
-  for (const id of ["m.id", "s.id", "c.id"]) expect(restore).toContain(`encodeRecordId(String(${id}))`);
+  // Every record path restore builds for these tables interpolates its id through encodeRecordId,
+  // whatever local name the id has; a path that interpolates a raw id fails here.
+  const recordPaths = [...restore.matchAll(/`\/(Memory|Soul|MemoryCandidate)\/\$\{([^}]*)\}/g)];
+  for (const table of ["Memory", "Soul", "MemoryCandidate"]) {
+    expect(recordPaths.some((m) => m[1] === table)).toBe(true);
+  }
+  for (const m of recordPaths) expect(m[2].startsWith("encodeRecordId(")).toBe(true);
 });
