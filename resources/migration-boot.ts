@@ -59,11 +59,13 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildRegistry, type MigrationRegistry } from "./migrations/registry.js";
 import { runMigrationCycle } from "./migrations/runner.js";
-import { markIdleMigrationsFailed, seedIdleProgress, setCyclePhase } from "./migrations/progress.js";
+import { markIdleMigrationsFailed, seedProgressFromState, setCyclePhase } from "./migrations/progress.js";
 import {
   describeUnresolvableDataDir,
+  resolveMigrationDataDirForRead,
   resolveWritableMigrationDataDir,
 } from "./migrations/data-dir.js";
+import { defaultStatePath } from "./migrations/state.js";
 import { scheduleFollowUpCycles, type FollowUpScheduler } from "./migrations/recheck.js";
 import type { SourceTable } from "./migrations/types.js";
 import { getMode } from "./embeddings-provider.js";
@@ -206,7 +208,12 @@ export function scheduleMigrationBoot(): void {
   scheduled = true;
 
   const registry = buildRegistry();
-  seedIdleProgress(registry.list().map((m) => m.id));
+  // flair#2840: seed from the durable record, not blindly `idle`. A migration
+  // whose last run halted with unconfirmed rows must still show that record and
+  // its halted status from the first `/HealthDetail` read after a restart; the
+  // cycle below then re-verifies the recorded ids. The read-only resolver is
+  // the same one /HealthDetail uses, so the seeded row and its fallback agree.
+  seedProgressFromState(defaultStatePath(resolveMigrationDataDirForRead()), registry.list().map((m) => m.id));
   // Proof-of-life, set SYNCHRONOUSLY at module load: from here on,
   // `cyclePhase === "idle"` means this module never loaded at all — the
   // one hypothesis flair#812 could not otherwise rule out from the outside.

@@ -32,6 +32,13 @@ export interface MigrationStateEntry {
   reason?: string;
   rowsProcessed?: number;
   rowsRemaining?: number;
+  /** Rows recorded as unconfirmed and not since cleared: an attempt whose
+   *  committed effect its post-commit read did not show, whose row no later
+   *  batch has verified and no later read has found at the target or gone.
+   *  Never part of `rowsProcessed` (flair#2840). */
+  rowsUnconfirmed?: number;
+  /** Up to `UNCONFIRMED_IDS_LIMIT` of those row ids. */
+  unconfirmedIds?: string[];
 }
 
 export type MigrationStateFile = Record<string, MigrationStateEntry>;

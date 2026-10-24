@@ -11,7 +11,8 @@
  * migration already complete" is the on-disk state file (state.ts), which
  * the runner re-derives progress from before its next cycle either way.
  */
-import type { MigrationProgress } from "./types.js";
+import type { MigrationProgress, MigrationState } from "./types.js";
+import { readMigrationState, type MigrationStateEntry } from "./state.js";
 
 /**
  * `scheduled` (flair#812) is set SYNCHRONOUSLY by
@@ -111,6 +112,41 @@ export function seedIdleProgress(ids: readonly string[]): void {
     if (!progressById.has(id)) {
       progressById.set(id, { id, rowsDone: 0, rowsRemaining: 0, state: "idle" });
     }
+  }
+}
+
+/** The progress row for one durable state entry. Shared with status.ts's
+ *  fallback so a boot-seeded row and a fallback row read the same. */
+export function progressFromStateEntry(id: string, entry: MigrationStateEntry): MigrationProgress {
+  const derivedState: MigrationState =
+    entry.lastOutcome === "success" ? "completed" : entry.lastOutcome === "halted" ? "halted" : "failed";
+  const row: MigrationProgress = {
+    id,
+    rowsDone: entry.rowsProcessed ?? 0,
+    rowsRemaining: entry.rowsRemaining ?? 0,
+    state: derivedState,
+  };
+  if (entry.reason) row.reason = entry.reason;
+  if (entry.rowsUnconfirmed) {
+    row.rowsUnconfirmed = entry.rowsUnconfirmed;
+    if (entry.unconfirmedIds?.length) row.unconfirmedIds = entry.unconfirmedIds;
+  }
+  return row;
+}
+
+/**
+ * Seeds the in-process progress store from the state file at boot, before
+ * `/HealthDetail` can be read (flair#2840). A migration the state file records
+ * keeps that record — including unconfirmed ids, their count and a `halted`
+ * status — instead of being replaced by `idle`; one with no entry starts
+ * `idle`. An existing entry is never overwritten.
+ */
+export function seedProgressFromState(statePath: string, ids: readonly string[]): void {
+  const state = readMigrationState(statePath);
+  for (const id of ids) {
+    if (progressById.has(id)) continue;
+    const entry = state[id];
+    progressById.set(id, entry ? progressFromStateEntry(id, entry) : { id, rowsDone: 0, rowsRemaining: 0, state: "idle" });
   }
 }
 

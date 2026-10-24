@@ -25,9 +25,10 @@ import { postureFor, type SnapshotScope } from "./risk-policy.js";
 import { readMigrationState, writeMigrationStateEntry, isShortCircuited, defaultStatePath, type MigrationStateEntry } from "./state.js";
 import { writeLedgerEvent, type LedgerDeps, type LedgerEvent } from "./ledger.js";
 import { setCyclePhase, setMigrationProgress, seedIdleProgress, noteStateWriteAttempt, noteStateWriteSuccess, noteStateWriteFailure } from "./progress.js";
+import type { MigrationProgress } from "./types.js";
 import { shouldRegisterSyntheticMigration } from "./synthetic-test-migration.js";
 import type { MigrationRegistry } from "./registry.js";
-import type { Migration, RiskClass, SourceTable } from "./types.js";
+import { UNCONFIRMED_IDS_LIMIT, BatchOutcomeError, type Migration, type RiskClass, type SourceTable } from "./types.js";
 import { join } from "node:path";
 
 /**
@@ -209,8 +210,22 @@ export async function runMigrationCycle(rawDeps: RunnerDeps): Promise<CycleResul
 async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, { acquired: true }>): Promise<CycleResult> {
   const state = readMigrationState(deps.statePath);
   const candidates: Migration[] = [];
+  /** The re-verified unconfirmed record per migration, carried into its run. */
+  const records = new Map<string, UnconfirmedRecord | null>();
 
   for (const migration of deps.registry.list()) {
+    const entry = state[migration.id];
+    // flair#2840: re-read the ids a previous run recorded as unconfirmed on
+    // EVERY cycle, pending or not. A recorded id is cleared here when the
+    // re-read finds its row at this migration's target or finds no row; a later
+    // batch that verifies the row's write clears it too.
+    const record = await reverifyUnconfirmed(migration, entry);
+    records.set(migration.id, record);
+    const survived = record && record.count > 0 ? record : null;
+    const recordChanged = !!entry && !!record && (
+      (survived?.count ?? 0) !== (entry.rowsUnconfirmed ?? entry.unconfirmedIds?.length ?? 0) ||
+      (survived?.ids.length ?? 0) !== (entry.unconfirmedIds?.length ?? 0)
+    );
     if (isShortCircuited(state, migration.id, deps.runningVersion) && !migration.alwaysDetect) {
       // flair#812: a short-circuit is an ASSERTION READ OFF A FILE, not an
       // observation of the corpus — and that file is hand-editable (the
@@ -231,10 +246,14 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
         rowsRemaining: 0,
         state: "completed",
         reason: `recorded complete at ${deps.runningVersion} in ${deps.statePath} — not re-verified this boot`,
+        ...unconfirmedProgress(survived),
       });
+      if (entry && record && recordChanged) {
+        recordMigrationStateEntry(deps.statePath, migration.id, withUnconfirmedRecord(entry, record));
+      }
       continue;
     }
-    setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "checking" });
+    setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "checking", ...unconfirmedProgress(survived) });
     let pending: boolean;
     try {
       pending = await migration.detect();
@@ -251,11 +270,40 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
         rowsRemaining: 0,
         state: "failed",
         reason,
+        ...unconfirmedProgress(survived),
       });
       continue;
     }
     if (!pending) {
+      if (survived) {
+        // No pending work, but the record is not empty: keep it — with its
+        // count, its ids and the last outcome's status — instead of replacing
+        // it with a clean `completed` (flair#2840).
+        setMigrationProgress({
+          id: migration.id,
+          rowsDone: entry?.rowsProcessed ?? 0,
+          rowsRemaining: 0,
+          state: stateFromOutcome(entry),
+          ...(entry?.reason ? { reason: entry.reason } : {}),
+          ...unconfirmedProgress(survived),
+        });
+        if (entry && recordChanged) {
+          recordMigrationStateEntry(deps.statePath, migration.id, withUnconfirmedRecord(entry, survived));
+        }
+        continue;
+      }
       setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "completed" });
+      if (entry && record) {
+        // The last recorded id cleared and no work is pending: the record can
+        // now say this migration completed.
+        recordMigrationStateEntry(deps.statePath, migration.id, {
+          completedAtVersion: deps.runningVersion,
+          completedAt: deps.now().toISOString(),
+          lastOutcome: "success",
+          rowsProcessed: entry.rowsProcessed ?? 0,
+          rowsRemaining: 0,
+        });
+      }
       continue;
     }
     candidates.push(migration);
@@ -284,7 +332,10 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
   } catch (err) {
     const reason = `pre-flight integrity check failed: ${(err as Error)?.message ?? String(err)}`;
     for (const migration of candidates) {
-      setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "halted", reason });
+      setMigrationProgress({
+        id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "halted", reason,
+        ...unconfirmedProgress(records.get(migration.id) ?? null),
+      });
     }
     setCyclePhase("done", reason);
     return { ran: false, reason };
@@ -326,11 +377,12 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
           rowsRemaining: 0,
           state: "halted",
           reason: `pre-flight integrity check failed: ${(err as Error)?.message ?? String(err)}`,
+          ...unconfirmedProgress(records.get(migration.id) ?? null),
         });
         continue;
       }
     }
-    const wroteRows = await runOneMigration(migration, envelope, deps, lock);
+    const wroteRows = await runOneMigration(migration, envelope, deps, lock, records.get(migration.id) ?? null);
     if (wroteRows) envelopeStale = true;
   }
 
@@ -341,11 +393,22 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
 async function haltMigration(
   migration: Migration,
   reason: string,
-  ctx: { deps: ResolvedDeps; startedAt: string; rowsDone: number; rowsRemaining: number; hashEnvelopeMatch: boolean | null; state: ReturnType<typeof readMigrationState> },
+  ctx: {
+    deps: ResolvedDeps;
+    startedAt: string;
+    rowsDone: number;
+    rowsRemaining: number;
+    hashEnvelopeMatch: boolean | null;
+    state: ReturnType<typeof readMigrationState>;
+    unconfirmed?: UnconfirmedRecord;
+  },
 ): Promise<void> {
   const { deps, startedAt, rowsDone, rowsRemaining, hashEnvelopeMatch, state } = ctx;
   const endedAt = deps.now().toISOString();
-  setMigrationProgress({ id: migration.id, rowsDone, rowsRemaining, state: "halted", reason });
+  setMigrationProgress({
+    id: migration.id, rowsDone, rowsRemaining, state: "halted", reason,
+    ...unconfirmedProgress(ctx.unconfirmed),
+  });
 
   const fromVersion = state[migration.id]?.completedAtVersion ?? "unknown";
   const evt: LedgerEvent = {
@@ -379,7 +442,88 @@ async function haltMigration(
     reason,
     rowsProcessed: rowsDone,
     rowsRemaining,
+    ...unconfirmedState(ctx.unconfirmed),
   });
+}
+
+/** Unconfirmed row ids carried in the durable record: at most
+ *  {@link UNCONFIRMED_IDS_LIMIT} ids, plus the recorded count they belong to. A
+ *  count above the id-list length means some ids were never persisted and
+ *  cannot be re-read. */
+interface UnconfirmedRecord {
+  ids: string[];
+  count: number;
+}
+
+/** The progress fields for a run's unconfirmed record (flair#2840). Empty when
+ *  the record counts nothing. */
+function unconfirmedProgress(record: UnconfirmedRecord | null | undefined): Pick<MigrationProgress, "rowsUnconfirmed" | "unconfirmedIds"> {
+  if (!record || record.count <= 0) return {};
+  return {
+    rowsUnconfirmed: record.count,
+    ...(record.ids.length > 0 ? { unconfirmedIds: record.ids.slice(0, UNCONFIRMED_IDS_LIMIT) } : {}),
+  };
+}
+
+/** The state-file fields, same shape as {@link unconfirmedProgress}. */
+function unconfirmedState(record: UnconfirmedRecord | null | undefined): Pick<MigrationStateEntry, "rowsUnconfirmed" | "unconfirmedIds"> {
+  if (!record || record.count <= 0) return {};
+  return {
+    rowsUnconfirmed: record.count,
+    ...(record.ids.length > 0 ? { unconfirmedIds: record.ids.slice(0, UNCONFIRMED_IDS_LIMIT) } : {}),
+  };
+}
+
+/** The record a state entry carries, or null when it carries none. */
+function recordedUnconfirmed(entry: MigrationStateEntry | undefined): UnconfirmedRecord | null {
+  const ids = entry?.unconfirmedIds ?? [];
+  if (ids.length === 0 && !entry?.rowsUnconfirmed) return null;
+  return { ids: [...ids], count: entry?.rowsUnconfirmed ?? ids.length };
+}
+
+/** `halted`/`completed`/`failed` as status.ts derives it from an outcome. */
+function stateFromOutcome(entry: MigrationStateEntry | undefined): MigrationProgress["state"] {
+  if (entry?.lastOutcome === "success") return "completed";
+  if (entry?.lastOutcome === "failed") return "failed";
+  return "halted";
+}
+
+/**
+ * Re-reads the ids a state entry records as unconfirmed (flair#2840) and
+ * returns the record that survives: an id is cleared when `checkUnconfirmed`
+ * finds its row at this migration's target, or finds no row.
+ *
+ * Conservative by construction: a `pending` verdict keeps the id, a read that
+ * throws keeps it (unknown never clears a record), and a record whose count is
+ * larger than its id list keeps the unlisted remainder as a count with no ids —
+ * those rows were never named, so no read can clear them.
+ */
+async function reverifyUnconfirmed(
+  migration: Migration,
+  entry: MigrationStateEntry | undefined,
+): Promise<UnconfirmedRecord | null> {
+  const recorded = recordedUnconfirmed(entry);
+  if (!recorded) return null;
+  if (typeof migration.checkUnconfirmed !== "function") return recorded;
+  const kept: string[] = [];
+  for (const id of recorded.ids) {
+    try {
+      if ((await migration.checkUnconfirmed(id)) === "pending") kept.push(id);
+    } catch {
+      kept.push(id);
+    }
+  }
+  const unlisted = Math.max(0, recorded.count - recorded.ids.length);
+  return { ids: kept, count: kept.length + unlisted };
+}
+
+/** The entry with its unconfirmed fields replaced by `record` (or dropped when
+ *  the record counts nothing). */
+function withUnconfirmedRecord(entry: MigrationStateEntry, record: UnconfirmedRecord): MigrationStateEntry {
+  const next = { ...entry };
+  delete next.rowsUnconfirmed;
+  delete next.unconfirmedIds;
+  return { ...next, ...unconfirmedState(record) };
 }
 
 /**
@@ -396,12 +540,13 @@ async function runOneMigration(
   envelope: CorpusEnvelope,
   deps: ResolvedDeps,
   lock: Extract<AcquireResult, { acquired: true }>,
+  carried: UnconfirmedRecord | null,
 ): Promise<boolean> {
   const startedAt = deps.now().toISOString();
   const state = readMigrationState(deps.statePath);
   const posture = postureFor(migration.riskClass);
 
-  setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "preflight" });
+  setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "preflight", ...unconfirmedProgress(carried) });
 
   // ── Ladder step 1: space check (with HNSW/working-set overhead) ──
   let initialRemaining: number;
@@ -415,6 +560,7 @@ async function runOneMigration(
       rowsRemaining: 0,
       hashEnvelopeMatch: null,
       state,
+      unconfirmed: carried ?? undefined,
     });
     return false; // halted before any write
   }
@@ -444,13 +590,14 @@ async function runOneMigration(
       rowsRemaining: initialRemaining,
       hashEnvelopeMatch: null,
       state,
+      unconfirmed: carried ?? undefined,
     });
     return false; // halted before any write
   }
 
   // ── Ladder step 3 (+ step 4 fallback): risk-scoped snapshot, or a
   // content-only export if the snapshot mechanism itself fails. ──
-  setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: initialRemaining, state: "snapshotting" });
+  setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: initialRemaining, state: "snapshotting", ...unconfirmedProgress(carried) });
   try {
     createMigrationSnapshot(
       {
@@ -476,21 +623,32 @@ async function runOneMigration(
       await haltMigration(
         migration,
         `snapshot failed (${(snapErr as Error)?.message ?? String(snapErr)}) and the content-only export fallback also failed (${(expErr as Error)?.message ?? String(expErr)})`,
-        { deps, startedAt, rowsDone: 0, rowsRemaining: initialRemaining, hashEnvelopeMatch: null, state },
+        { deps, startedAt, rowsDone: 0, rowsRemaining: initialRemaining, hashEnvelopeMatch: null, state, unconfirmed: carried ?? undefined },
       );
       return false; // halted before any write
     }
   }
 
   // ── Execution: throttled batches, resumable via per-row markers ──
-  setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: initialRemaining, state: "running" });
+  setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: initialRemaining, state: "running", ...unconfirmedProgress(carried) });
   let rowsDone = 0;
+  // flair#2840: rows recorded as unconfirmed — this run's attempts whose
+  // post-commit verification read did not show the write, plus the ids an
+  // earlier cycle recorded and no later read has cleared. They are NOT part of
+  // `rowsDone`. A batch that verifies an id removes it here.
+  const unconfirmed = new Set<string>(carried?.ids ?? []);
+  // Ids the durable record counted but never listed cannot be re-read; carry
+  // their number (flair#2840).
+  const unconfirmedUnlisted = carried ? Math.max(0, carried.count - carried.ids.length) : 0;
+  const unconfirmedRecord = (): UnconfirmedRecord => ({ ids: [...unconfirmed], count: unconfirmed.size + unconfirmedUnlisted });
   const oldRowHashes = new Map<string, string>();
   const newRowIds: string[] = [];
   try {
     for (;;) {
       const result = await migration.run(posture.batchSize);
       rowsDone += result.processed;
+      for (const id of result.touchedIds) unconfirmed.delete(id);
+      for (const id of result.unconfirmedIds ?? []) unconfirmed.add(id);
       if (result.oldRowSourceHashes) {
         for (const [k, v] of Object.entries(result.oldRowSourceHashes)) oldRowHashes.set(k, v);
       }
@@ -501,6 +659,7 @@ async function runOneMigration(
         rowsDone,
         rowsRemaining: Math.max(0, initialRemaining - rowsDone),
         state: "running",
+        ...unconfirmedProgress(unconfirmedRecord()),
       });
       lock.touch();
 
@@ -508,6 +667,15 @@ async function runOneMigration(
       await deps.sleep(deps.batchDelayMs);
     }
   } catch (err) {
+    // flair#2840: a batch that throws from the synthetic write-back, the
+    // visibility backfill or embedding-stamp's `.content`-suffix retry read
+    // carries those outcomes on the error, because there is no RunBatchResult
+    // to read. Merge them before the halt persists the record; a throw from a
+    // path that does not wrap its batch carries nothing.
+    if (err instanceof BatchOutcomeError) {
+      for (const id of err.touchedIds) unconfirmed.delete(id);
+      for (const id of err.unconfirmedIds) unconfirmed.add(id);
+    }
     await haltMigration(migration, `run() threw mid-batch: ${(err as Error)?.message ?? String(err)}`, {
       deps,
       startedAt,
@@ -515,12 +683,16 @@ async function runOneMigration(
       rowsRemaining: Math.max(0, initialRemaining - rowsDone),
       hashEnvelopeMatch: null,
       state,
+      unconfirmed: unconfirmedRecord(),
     });
     return true; // conservative: a partial batch may have landed before the throw
   }
 
   // ── Completion gate — strictness per risk class ──
-  setMigrationProgress({ id: migration.id, rowsDone, rowsRemaining: 0, state: "completing" });
+  setMigrationProgress({
+    id: migration.id, rowsDone, rowsRemaining: 0, state: "completing",
+    ...unconfirmedProgress(unconfirmedRecord()),
+  });
   let finalRemaining: number;
   try {
     finalRemaining = await migration.countPending();
@@ -532,6 +704,7 @@ async function runOneMigration(
       rowsRemaining: 0,
       hashEnvelopeMatch: null,
       state,
+      unconfirmed: unconfirmedRecord(),
     });
     return rowsDone > 0;
   }
@@ -593,6 +766,7 @@ async function runOneMigration(
         rowsRemaining: finalRemaining,
         hashEnvelopeMatch,
         state,
+        unconfirmed: unconfirmedRecord(),
       });
       return rowsDone > 0;
     }
@@ -634,6 +808,7 @@ async function runOneMigration(
       rowsRemaining: finalRemaining,
       hashEnvelopeMatch,
       state,
+      unconfirmed: unconfirmedRecord(),
     });
     return rowsDone > 0;
   }
@@ -669,9 +844,16 @@ async function runOneMigration(
     lastOutcome: "success",
     rowsProcessed: rowsDone,
     rowsRemaining: 0,
+    ...unconfirmedState(unconfirmedRecord()),
   });
 
   pruneMigrationSnapshots(deps.snapshotRoot);
-  setMigrationProgress({ id: migration.id, rowsDone, rowsRemaining: 0, state: "completed" });
+  // State stays "completed" when the gate passes, even with a non-empty
+  // unconfirmed record (flair#2840): the record, not the state, carries the
+  // rows this run did not verify.
+  setMigrationProgress({
+    id: migration.id, rowsDone, rowsRemaining: 0, state: "completed",
+    ...unconfirmedProgress(unconfirmedRecord()),
+  });
   return rowsDone > 0;
 }

@@ -42,7 +42,27 @@ export interface MigrationProgress {
   state: MigrationState;
   /** Present when state is "halted" or "failed" — the exact, actionable reason. */
   reason?: string;
+  /**
+   * Rows recorded as unconfirmed that a later batch or read has not cleared
+   * (flair#2840): an attempt whose committed effect its post-commit read did
+   * not show, and no later batch has verified the row's write, nor any later
+   * read found the row at the target or gone. NEVER included in `rowsDone`.
+   * `unconfirmedIds` carries at most {@link UNCONFIRMED_IDS_LIMIT} of them;
+   * this count is not capped.
+   */
+  rowsUnconfirmed?: number;
+  /** Up to {@link UNCONFIRMED_IDS_LIMIT} unconfirmed row ids, in the order they
+   *  were recorded. Absent when the record names none. */
+  unconfirmedIds?: string[];
 }
+
+/**
+ * How many of a run's unconfirmed row ids are reported. The runner keeps every
+ * id in a Set while the run is in progress; only the list written to the
+ * progress record and the state file is capped at this many. The count is not
+ * capped (flair#2840).
+ */
+export const UNCONFIRMED_IDS_LIMIT = 100;
 
 /** Table(s) a migration's source-field envelope hash is computed over. */
 export type SourceTable = "Memory" | "Relationship";
@@ -52,6 +72,14 @@ export interface RunBatchResult {
   processed: number;
   /** IDs touched this batch — used by the content-transform gate (old-row envelope + new-row presence). */
   touchedIds: string[];
+  /**
+   * IDs this batch attempted whose committed effect the batch could not verify
+   * (flair#2840). Disjoint from `touchedIds`: a row whose write a later attempt
+   * in the same batch verified belongs in `touchedIds`, not here. The runner
+   * unions these across batches, removing the ids a later batch verifies, into
+   * the progress record.
+   */
+  unconfirmedIds?: string[];
   /**
    * content-transform ONLY: `${table}:${id}` -> hash of that row's
    * SOURCE_FIELDS as they were immediately before this batch superseded it.
@@ -71,6 +99,30 @@ export interface RunBatchResult {
    */
   newRowIds?: string[];
 }
+
+/**
+ * Thrown by a migration's run() on the paths that wrap the failure ending a
+ * batch (flair#2840): the synthetic write-back, the visibility backfill and
+ * embedding-stamp's `.content`-suffix retry read. It carries that batch's
+ * outcomes so far — the rows it touched and the rows it recorded as
+ * unconfirmed — so the runner can merge them into the unconfirmed record even
+ * though no {@link RunBatchResult} is returned. A throw from a path that does
+ * not wrap its batch carries no outcomes.
+ */
+export class BatchOutcomeError extends Error {
+  readonly touchedIds: readonly string[];
+  readonly unconfirmedIds: readonly string[];
+
+  constructor(outcome: { touchedIds: readonly string[]; unconfirmedIds: readonly string[] }, cause: unknown) {
+    super((cause as Error)?.message ?? String(cause), { cause });
+    this.name = "BatchOutcomeError";
+    this.touchedIds = [...outcome.touchedIds];
+    this.unconfirmedIds = [...outcome.unconfirmedIds];
+  }
+}
+
+/** What a re-read of a recorded unconfirmed row shows (flair#2840). */
+export type UnconfirmedVerdict = "at-target" | "no-row" | "pending";
 
 export interface Migration {
   /** Stable, unique identifier — used as the state-file key, lock scope note, and ledger refId. */
@@ -129,4 +181,14 @@ export interface Migration {
    * additive opt-in, never required for correctness of the base gate.
    */
   recheckPending?(limit: number): Promise<{ sampled: number; falsePositives: number }>;
+  /**
+   * OPTIONAL (flair#2840). The runner calls this for each row id a state-file
+   * record lists as unconfirmed, on every cycle (including a cycle with no
+   * pending work), to decide whether the id can be cleared: `at-target` when
+   * this read found the row at this migration's target for that id, `no-row`
+   * when it found no row, `pending` to keep the id. A read that throws is
+   * treated as unknown and also keeps the id. Omitted by migrations that never
+   * report unconfirmed ids.
+   */
+  checkUnconfirmed?(id: string): Promise<UnconfirmedVerdict>;
 }

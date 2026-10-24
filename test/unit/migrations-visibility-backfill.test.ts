@@ -9,7 +9,7 @@
  * existing visibility value is NEVER overwritten (including a garbage
  * third value), idempotency, and the exact query-condition shape.
  */
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, mock, afterEach } from "bun:test";
 import { makeFakeWriteBack } from "../helpers/fake-write-back";
 
 // visibility-backfill.ts imports `{ databases } from "harper"`
@@ -22,6 +22,7 @@ mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => nu
 const { createVisibilityBackfillMigration, deriveVisibilityFromDurability, VISIBILITY_BACKFILL_ID } = await import(
   "../../resources/migrations/visibility-backfill.ts"
 );
+const { writeBackCommittedRow } = await import("../../resources/write-back.ts");
 
 /** Every call site below injects the fake write-back (flair#2354); the real
  *  helper is exercised in the contention test. */
@@ -308,6 +309,19 @@ describe("visibility-backfill migration — NEVER overwrites an existing visibil
     expect(store.get("m1")!.visibility).toBe("office"); // unchanged — never "corrected" to a derived value
   });
 
+  it("does not count or report a row another writer set to 'private' between the scan and the read", async () => {
+    // The scan snapshot still shows the row pending; the backing store already
+    // holds the row another writer set. This run never attempted the row.
+    const pending: Row = { id: "m1", content: "a", durability: "standard" };
+    const set: Row = { ...pending, visibility: "private" };
+    const { table, writes } = makeStagedTable([set], [pending]);
+    const m = makeMigration(() => table, writeBackCommittedRow);
+
+    expect(await m.run(50)).toEqual({ processed: 0, touchedIds: [] });
+    expect(writes).toEqual([]);
+    expect(table.store.get("m1")!.visibility).toBe("private");
+  });
+
   it("a mixed batch only touches the genuinely-pending rows, never the already-set ones", async () => {
     const { table, store } = makeFakeMemoryTable([
       { id: "m1", content: "a", durability: "standard" }, // pending -> private
@@ -423,3 +437,148 @@ describe("visibility-backfill migration — simulated write-back retry (flair#23
     expect(store.get("m1")?.agentId).toBe("replacement-owner");
     expect(store.get("m1")?.visibility).toBeUndefined();
   });
+
+describe("visibility-backfill — rowsDone counts verified writes only (flair#2840)", () => {
+  let restoreTransaction: (() => void) | null = null;
+
+  afterEach(() => {
+    restoreTransaction?.();
+    restoreTransaction = null;
+  });
+
+  it("does not count an attempt whose post-commit verification read missed it, and reports its id", async () => {
+    const { table, restore } = makeStagedTable(
+      [{ id: "v1", content: "a", durability: "standard" }],
+      [{ id: "v1", content: "a", durability: "standard" }],
+    );
+    restoreTransaction = restore;
+    // The pre-commit confirmation read sees the pre-write row (it is a
+    // committed read) and passes; the post-commit verification read is
+    // answered with that same pre-write row, so the attempt is unconfirmed.
+    table.onCommit((prior) => table.armStaleVerification(prior ?? { id: "v1" }));
+    const m = createVisibilityBackfillMigration(() => table as any, writeBackCommittedRow, makeLockStore);
+
+    const result = await m.run(50);
+
+    expect(table.store.get("v1")!.visibility).toBe("private");
+    expect(result).toEqual({ processed: 0, touchedIds: [], unconfirmedIds: ["v1"] });
+    expect(await m.countPending()).toBe(0);
+  });
+
+  it("counts a verified write and reports no unconfirmed row", async () => {
+    const { table, restore } = makeStagedTable(
+      [{ id: "v1", content: "a", durability: "standard" }],
+      [{ id: "v1", content: "a", durability: "standard" }],
+    );
+    restoreTransaction = restore;
+    const m = createVisibilityBackfillMigration(() => table as any, writeBackCommittedRow, makeLockStore);
+
+    expect(await m.run(50)).toEqual({ processed: 1, touchedIds: ["v1"] });
+    expect(table.store.get("v1")!.visibility).toBe("private");
+  });
+});
+
+/**
+ * A Memory-table fake that behaves like Harper's own write transaction: an
+ * `update` through a transaction's context is STAGED and applies only when the
+ * callback settles; a read with the explicit empty context the write-back
+ * helper uses reads the committed store and never the staged state, so the
+ * pre-commit confirmation read passes and the post-commit verification read
+ * sees the commit unless it is armed to return the pre-write row.
+ *
+ * `searchSnapshots` is what a stale scan returns; when omitted, `search` reads
+ * the backing store. The competing-writer tests seed the store with another
+ * writer's row and pass the pre-write pending row as the snapshot.
+ */
+function makeStagedTable(seed: Row[], firstSearchSnapshot?: Row[]) {
+  const store = new Map<string, Row>(seed.map((r) => [r.id, { ...r }]));
+  let searchSnapshot = firstSearchSnapshot ?? null;
+  const writes: { method: "put" | "update"; id: string; fields: string[] }[] = [];
+  let staleReads = 0;
+  let staleRow: Row | null = null;
+  let afterCommit: ((prior: Row | null) => void) | null = null;
+
+  function apply(id: string, patch: Row): void {
+    const prior = store.get(id);
+    store.set(id, { ...(prior ?? { id }), ...structuredClone(patch), id });
+  }
+
+  const table = {
+    store,
+    writes,
+    armStaleVerification(row: Row, times = 1): void {
+      staleRow = { ...row };
+      staleReads = times;
+    },
+    onCommit(fn: ((prior: Row | null) => void) | null): void {
+      afterCommit = fn;
+    },
+    async get(id: string, ctx?: any) {
+      const base = store.get(id);
+      let row: Row | null = base ? { ...base } : null;
+      const staged = ctx?.transaction?.staged;
+      if (Array.isArray(staged)) {
+        for (const entry of staged) {
+          if (entry.id === id) row = { ...(row ?? { id }), ...structuredClone(entry.patch) };
+        }
+      }
+      const committedRead = ctx !== null && typeof ctx === "object" && Object.keys(ctx).length === 0;
+      if (row && committedRead && staleReads > 0 && staleRow) {
+        staleReads--;
+        return { ...staleRow };
+      }
+      return row;
+    },
+    async put(record: Row, ctx?: any) {
+      writes.push({ method: "put", id: record.id, fields: Object.keys(record).sort() });
+      const staged = ctx?.transaction?.staged;
+      if (Array.isArray(staged)) staged.push({ id: record.id, patch: structuredClone(record) });
+      else apply(record.id, record);
+      return record;
+    },
+    async update(id: string, patch: Row, ctx?: any) {
+      writes.push({ method: "update", id, fields: Object.keys(patch).sort() });
+      const staged = ctx?.transaction?.staged;
+      if (Array.isArray(staged)) staged.push({ id, patch: structuredClone(patch) });
+      else apply(id, patch);
+      return store.get(id);
+    },
+    search(query: any): AsyncIterable<Row> {
+      const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
+      // A supplied snapshot models a scan that ran before a competing write;
+      // it is consumed by the first search, so later counts read the store.
+      let rows = searchSnapshot ? [...searchSnapshot] : Array.from(store.values());
+      searchSnapshot = null;
+      rows = rows.filter((r) => matchesAll(r, conditions));
+      rows = rows.slice(0, typeof query?.limit === "number" ? query.limit : Infinity);
+      return (async function* () {
+        for (const r of rows) yield { ...r };
+      })();
+    },
+  };
+
+  const originalTransaction = (globalThis as any).transaction;
+  (globalThis as any).transaction = async (ctx: any, fn: (txn: any) => Promise<unknown>) => {
+    const staged: { id: string; patch: Row }[] = [];
+    ctx.transaction = { staged };
+    const result = await fn(ctx);
+    let prior: Row | null = null;
+    for (const entry of staged) {
+      const before = store.get(entry.id);
+      if (before) prior = { ...before };
+      apply(entry.id, entry.patch);
+    }
+    const hook = afterCommit;
+    afterCommit = null;
+    hook?.(prior);
+    return result;
+  };
+  return {
+    table,
+    store,
+    writes,
+    restore: () => {
+      (globalThis as any).transaction = originalTransaction;
+    },
+  };
+}

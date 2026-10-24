@@ -213,7 +213,7 @@ import { txnPausePoint } from "../txn-pause-point.js";
 import { harperPortValue } from "../../src/lib/harper-port-value.js";
 import { DEFAULT_HTTP_PORT } from "../a2a-url.js";
 import { currentSpaceRawForms, isCurrentSpaceStamp } from "../embedding-space-guard.js";
-import type { Migration, RunBatchResult } from "./types.js";
+import { BatchOutcomeError, type Migration, type RunBatchResult } from "./types.js";
 import { EMBEDDING_STAMP_ID } from "./stamp-outstanding.js";
 import { endsWithContentSelectorSuffix } from "../../src/lib/memory-id-policy.js";
 import { skillEmbedText } from "../skill-write.js";
@@ -615,6 +615,14 @@ export function createEmbeddingStampMigration(
       return n;
     },
 
+    async checkUnconfirmed(id: string) {
+      const row = await getTable().get(id);
+      if (!row) return "no-row" as const;
+      return rowEmbeddingCurrent(row as Record<string, unknown>, getCurrentModelId())
+        ? "at-target" as const
+        : "pending" as const;
+    },
+
     async run(batchSize: number): Promise<RunBatchResult> {
       const table = getTable();
       const current = getCurrentModelId();
@@ -626,14 +634,27 @@ export function createEmbeddingStampMigration(
       }
 
       const touchedIds: string[] = [];
+      const unconfirmedIds: string[] = [];
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
         const existing = await table.get(id);
         if (!existing) continue; // deleted since the search above — nothing to fix
-        if (rowEmbeddingCurrent(existing, current)) continue; // already current (stamp and hash) — idempotent skip
+        if (rowEmbeddingCurrent(existing, current)) {
+          // Current now although the scan above selected it: another writer's
+          // change between the scan and this read. This run has not attempted
+          // the row, so it is not this migration's work and stays uncounted
+          // (flair#2840).
+          continue;
+        }
 
         let ok: boolean;
+        // An attempt whose committed effect the post-commit verification read
+        // did not show (flair#2840). Such a row is never counted as done. When
+        // this loop's batch returns, or its retry read throws (the
+        // BatchOutcomeError below), the row is reported by id; a throw elsewhere
+        // in the batch that does not wrap its outcome loses the id.
+        let unconfirmed = false;
         if (endsWithContentSelectorSuffix(id)) {
           // flair#2656: the commit is not proof the update landed. A newer write
           // committing after the confirm read can make the commit resolve while
@@ -641,7 +662,6 @@ export function createEmbeddingStampMigration(
           // bound; count the row touched only when the committed row shows the
           // staged fields and the text the vector was computed for.
           ok = false;
-          let unconfirmed = false;
           // The vector and text of this row's last unconfirmed attempt.
           let ownUnconfirmed: StagedVector | undefined;
           // One guard over the whole retry loop (flair#2478): when the loop ends
@@ -649,9 +669,10 @@ export function createEmbeddingStampMigration(
           // unconfirmed, by a break, a refusal or a thrown error, the unconfirmed
           // outcome is logged exactly once. A later verified attempt sets `ok`,
           // and nothing is logged. An error the loop itself throws (a retry's
-          // fresh read of the row) propagates to the runner after the line is
-          // logged; an error inside an attempt is caught by regenContentSuffixRow
-          // and ends the loop as a skipped attempt.
+          // fresh read of the row) leaves as a BatchOutcomeError carrying this
+          // row and the batch's earlier outcomes, after the line is logged; an
+          // error inside an attempt is caught by regenContentSuffixRow and ends
+          // the loop as a skipped attempt.
           try {
             for (let attempt = 1; attempt <= CONTENT_SUFFIX_REGEN_ATTEMPTS; attempt++) {
               const rowNow = attempt === 1 ? existing : await table.get(id);
@@ -690,6 +711,11 @@ export function createEmbeddingStampMigration(
               ownUnconfirmed = attemptResult.staged;
               if (attemptResult.verdict === "unreadable") break;
             }
+          } catch (err) {
+            // flair#2840: carry this batch's outcomes on the error — the runner
+            // has no RunBatchResult to read when run() throws.
+            if (unconfirmed) unconfirmedIds.push(id);
+            throw new BatchOutcomeError({ touchedIds, unconfirmedIds }, err);
           } finally {
             if (!ok && unconfirmed) {
               console.warn("[embedding-stamp] %s: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed, the row is uncounted and a later scan decides pending state", id);
@@ -702,6 +728,7 @@ export function createEmbeddingStampMigration(
           ok = await regen(id, existing);
         }
         if (ok) touchedIds.push(id);
+        else if (unconfirmed) unconfirmedIds.push(id);
         // A false result does not add the row to touchedIds. It does not prove
         // nothing was written (a loopback PATCH can commit before its response
         // fails); the next live scan decides, retrying the row only if it is
@@ -709,8 +736,11 @@ export function createEmbeddingStampMigration(
         // transaction is known to write nothing.
       }
 
-      noteTestMigrationRun({ processed: touchedIds.length, touchedIds });
-      return { processed: touchedIds.length, touchedIds };
+      const result: RunBatchResult = unconfirmedIds.length > 0
+        ? { processed: touchedIds.length, touchedIds, unconfirmedIds }
+        : { processed: touchedIds.length, touchedIds };
+      noteTestMigrationRun(result);
+      return result;
     },
   };
 }

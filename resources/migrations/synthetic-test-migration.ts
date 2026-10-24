@@ -37,7 +37,7 @@ import { databases } from "harper";
 import { writeBackCommittedRow as writeBackCommittedRowImpl, type WriteBackFn } from "../write-back.js";
 import { txnPausePoint } from "../txn-pause-point.js";
 import { withMemoryWriteLockOnce } from "../memory-write-lock.js";
-import type { Migration, RunBatchResult } from "./types.js";
+import { BatchOutcomeError, type Migration, type RunBatchResult } from "./types.js";
 
 export const SYNTHETIC_MIGRATION_ID = "synthetic-ci-schema-stamp";
 export const RESERVED_TEST_AGENT_ID = "__flair_migration_synthetic_test_agent__";
@@ -97,6 +97,12 @@ export function createSyntheticTestMigration(
       return n;
     },
 
+    async checkUnconfirmed(id: string) {
+      const row = await getTable().get(id);
+      if (!row) return "no-row" as const;
+      return row.source === SYNTHETIC_TARGET_MARKER ? "at-target" as const : "pending" as const;
+    },
+
     async run(batchSize: number): Promise<RunBatchResult> {
       const table = getTable();
       const candidates: Record<string, unknown>[] = [];
@@ -105,52 +111,73 @@ export function createSyntheticTestMigration(
       }
 
       const touchedIds: string[] = [];
+      const unconfirmedIds: string[] = [];
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
-        // flair#2478 slice 3b: an automatic writer. It takes the id's per-id
-        // Memory write lock with one non-waiting acquisition, so its read,
-        // decision, write and commit sit on one committed basis while an owner
-        // write holds the id. A held id, an id with an unresolved write outcome
-        // or a table with no lock writes nothing here and is reported; the row
-        // stays pending for the next boot's scan.
-        const locked = await withMemoryWriteLockOnce(table.primaryStore, [id], async () => {
-          const result = await writeBackCommittedRow(
-            table as unknown as Parameters<WriteBackFn>[0],
-            id,
-            (existing: any) => {
-              if (!existing || existing.agentId !== RESERVED_TEST_AGENT_ID) return { skip: true } as const;
-              if (existing.source === SYNTHETIC_TARGET_MARKER) return { skip: true } as const; // already stamped — idempotent skip
+        // flair#2840: the write-back reports an attempt whose committed effect
+        // its post-commit verification read did not show. Such a row is never
+        // counted as done; it is reported by id instead.
+        let ownUnconfirmed = false;
+        try {
+          // flair#2478 slice 3b: an automatic writer. It takes the id's per-id
+          // Memory write lock with one non-waiting acquisition, so its read,
+          // decision, write and commit sit on one committed basis while an owner
+          // write holds the id. A held id, an id with an unresolved write outcome
+          // or a table with no lock writes nothing here and is reported; the row
+          // stays pending for the next boot's scan.
+          const locked = await withMemoryWriteLockOnce(table.primaryStore, [id], async () => {
+            const result = await writeBackCommittedRow(
+              table as unknown as Parameters<WriteBackFn>[0],
+              id,
+              (existing: any) => {
+                if (!existing || existing.agentId !== RESERVED_TEST_AGENT_ID) return { skip: true } as const;
+                if (existing.source === SYNTHETIC_TARGET_MARKER) return { skip: true }; // already stamped — idempotent skip
 
-              // Only `source`: an incremental update, never a
-              // full-row put of the row read above (flair#2470).
-              return { idempotent: true, update: { source: SYNTHETIC_TARGET_MARKER } };
-            },
-            {
-              label: "synthetic-test-migration",
-              pausePre: () => txnPausePoint("synthetic-test-pre"),
-              pausePoint: () => txnPausePoint("synthetic-test"),
-              pauseAfterStage: () => txnPausePoint("synthetic-test-staged"),
-              confirmPoint: () => txnPausePoint("synthetic-test-confirm"),
-              expectedRow: row,
-            },
-          );
-          // Test-only: the write-back committed and the lock is still held.
-          const committed = txnPausePoint("synthetic-test-committed");
-          if (committed) await committed;
-          return result;
-        }, { phase: "synthetic-test-migration" });
-        if (locked.kind !== "done") {
-          console.warn(
-            "[synthetic-test-migration] %s: the per-id write lock answered %s; the row is left for the next scan",
-            id, locked.kind,
-          );
-          continue;
+                // Only `source`: an incremental update, never a
+                // full-row put of the row read above (flair#2470).
+                return { idempotent: true, update: { source: SYNTHETIC_TARGET_MARKER } };
+              },
+              {
+                label: "synthetic-test-migration",
+                pausePre: () => txnPausePoint("synthetic-test-pre"),
+                pausePoint: () => txnPausePoint("synthetic-test"),
+                pauseAfterStage: () => txnPausePoint("synthetic-test-staged"),
+                confirmPoint: () => txnPausePoint("synthetic-test-confirm"),
+                expectedRow: row,
+                onUnconfirmed: () => { ownUnconfirmed = true; },
+              },
+            );
+            // Test-only: the write-back committed and the lock is still held.
+            const committed = txnPausePoint("synthetic-test-committed");
+            if (committed) await committed;
+            return result;
+          }, { phase: "synthetic-test-migration" });
+          if (locked.kind !== "done") {
+            console.warn(
+              "[synthetic-test-migration] %s: the per-id write lock answered %s; the row is left for the next scan",
+              id, locked.kind,
+            );
+            continue;
+          }
+          if ("skip" in locked.value) {
+            // A skip is not a write this run verified. If it follows an attempt
+            // whose committed effect was unconfirmed, the row is reported as
+            // unconfirmed; otherwise this run wrote nothing to the row
+            // (flair#2840).
+            if (ownUnconfirmed) unconfirmedIds.push(id);
+          } else touchedIds.push(id);
+        } catch (err) {
+          // flair#2840: carry this batch's outcomes on the error — the runner
+          // has no RunBatchResult to read when run() throws.
+          if (ownUnconfirmed) unconfirmedIds.push(id);
+          throw new BatchOutcomeError({ touchedIds, unconfirmedIds }, err);
         }
-        if (!("skip" in locked.value)) touchedIds.push(id);
       }
 
-      return { processed: touchedIds.length, touchedIds };
+      return unconfirmedIds.length > 0
+        ? { processed: touchedIds.length, touchedIds, unconfirmedIds }
+        : { processed: touchedIds.length, touchedIds };
     },
   };
 }
