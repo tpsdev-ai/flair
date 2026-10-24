@@ -95,23 +95,21 @@ describe("AttentionQuery e2e (real Harper)", () => {
     // ── Seed one matching record per source, authored by the TEAMMATE ──────
     // (the caller queries; every hit below is cross-agent unless noted).
     //
-    // NOTE (measured, not assumed): table-backed resources (WorkspaceState/
-    // Memory/OrgEvent/Relationship — every class shaped `extends
-    // (databases as any).flair.X`) only expose PUT over real HTTP, WITH the
-    // id in the URL path — the same restriction resources/Memory.ts's own
-    // comment documents ("the Memory schema only exposes PUT over HTTP...
-    // Memory.post() IS reachable, but only via an in-process resource
-    // instantiation"). A bare `POST /WorkspaceState` (what the shipped
-    // `flair workspace set` CLI command sent) was probed against this same
-    // real Harper and returned 405 "does not have a post method implemented
-    // to handle HTTP method POST" — a PRE-EXISTING gap in that CLI command,
-    // filed as flair#679 and FIXED there: `flair workspace set` and `flair
-    // orgevent` now both write via PUT /<Table>/{id} (src/cli.ts), verified
-    // end-to-end against a real spawned Harper in
-    // test/integration/workspace-orgevent-cli-e2e.test.ts. (`flair orgevent`'s
-    // bare POST turned out NOT to 405, measured directly in that file — its
-    // switch to PUT is for consistency/future-proofing, not a 405 fix — see
-    // that file's module doc for the full correction.)
+    // NOTE (measured, not assumed): WorkspaceState, Memory, OrgEvent and
+    // Relationship (each shaped `extends (databases as any).flair.X`) accept
+    // authorized writes at PUT /<Table>/<id>; HTTP POST /Memory additionally
+    // reaches Memory.post(), and flair-client's write()/update() use PUT. A
+    // bare `POST /WorkspaceState` (what the shipped `flair workspace set` CLI
+    // command sent) returned 405 "does not have a post method implemented to
+    // handle HTTP method POST" on Harper through 5.1.x, where it was first
+    // probed (filed as flair#679); the Harper this repo now pins accepts it (201,
+    // asserted in test/integration/workspace-orgevent-cli-e2e.test.ts,
+    // harper#1956). `flair workspace set` and `flair orgevent` now both write
+    // via PUT /<Table>/{id} (src/commands/workspace.ts, src/commands/orgevent.ts),
+    // which works on both, verified
+    // end-to-end against a real spawned Harper in that file. (`flair orgevent`'s
+    // bare POST did not 405 even then; its switch to PUT is for consistency,
+    // not a 405 fix: see that file's module doc.)
     // AttentionQuery.ts itself `extends Resource` (the generic base, like
     // SemanticSearch.ts), not a table class, so POST /AttentionQuery is NOT
     // affected — see the actual query test below, which does use POST.
