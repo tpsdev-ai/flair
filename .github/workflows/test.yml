@@ -1497,8 +1497,8 @@ jobs:
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
       - name: Harper's bundled copies are readable (flair#2781)
-        # harper 5.3.3 ships its production dependencies under its own
-        # node_modules. This runs on the frozen install the install checks in
+        # harper 5.3.3 bundles some of its production dependencies under its
+        # own node_modules; this step measures that bundled tree. This runs on the frozen install the install checks in
         # this job use, lists every copy, and exits nonzero for a declared entry
         # with no directory or a copy whose manifest is missing, unreadable or
         # malformed — a list that skipped a copy is not a measurement.

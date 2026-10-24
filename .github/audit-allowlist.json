@@ -404,7 +404,7 @@
       "severity": "moderate",
       "class": "vendor-pinned",
       "introducedBy": "harper -> stream-json",
-      "reason": "O(depth-squared) event-loop DoS in stream-json's pick/ignore/filter/replace filters on crafted nested JSON. stream-json@1.9.1 is a bundled copy inside harper (@harperfast/harper; harper 5.3.3); it cannot be overridden from this repo (harper ships the copy in its installed tree, where a root override does not reach in npm or bun installs, flair#1498/#1510). flair does not import stream-json directly - reachability is only via harper's internal streaming parser, not flair code.",
+      "reason": "O(depth-squared) event-loop DoS in stream-json's pick/ignore/filter/replace filters on crafted nested JSON. stream-json@1.9.1 is a bundled copy inside harper@5.3.3; it cannot be overridden from this repo (harper ships the copy in its installed tree, where a root override does not reach in npm or bun installs, flair#1498/#1510). flair does not import stream-json directly - reachability is only via harper's internal streaming parser, not flair code.",
       "sources": [
         "bun",
         "npm-install"
