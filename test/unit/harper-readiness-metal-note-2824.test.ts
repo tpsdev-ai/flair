@@ -56,6 +56,17 @@ describe("flair#2824: the Metal library load note", () => {
     expect(metalLibraryLoadNote(`${STARTED}\n${LOADED("0.025")}\n${STARTED}\n${LOADED("12.5")}`)).toContain("took 12.5 s");
   });
 
+  test("a newer load that logged no 'loaded in' line is not reported as finished", () => {
+    // A finished load followed by a new start.
+    expect(metalLibraryLoadNote(`${STARTED}\n${LOADED("0.025")}\n${STARTED}\n`)).toBe(
+      `1 of the embedding engine's 2 Metal library loads (ggml_metal_library_init) logged no "loaded in" line; the last logged load took 0.025 s`,
+    );
+    // Two interleaved loads, one finished.
+    expect(metalLibraryLoadNote(`${STARTED}\n${STARTED}\n${LOADED("3.2")}\n`)).toBe(
+      `1 of the embedding engine's 2 Metal library loads (ggml_metal_library_init) logged no "loaded in" line; the last logged load took 3.2 s`,
+    );
+  });
+
   test("a load that started and logged no 'loaded in' line says so", () => {
     expect(metalLibraryLoadNote(`[http/1] [info]: Loading application\n${STARTED}\n`)).toBe(
       `the embedding engine's Metal library load (ggml_metal_library_init) started and logged no "loaded in" line`,

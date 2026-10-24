@@ -322,19 +322,38 @@ export function harperStartupPhase(log: string): string | null {
 // library` when it starts loading its Metal library and `ggml_metal_library_init:
 // loaded in <N> sec` when the load ends. On a fresh CI macOS runner that
 // load took 40 s inside the readiness window once and had not finished when
-// the window closed another time (flair#2824).
-const METAL_LIBRARY_LOADED_RE = /ggml_metal_library_init: loaded in ([0-9.]+) sec/g;
+// the window closed another time (flair#2824). Both texts are ggml's format
+// strings ("%s: using embedded metal library", "%s: loaded in %.3f sec").
+const METAL_LIBRARY_EVENT_RE = /ggml_metal_library_init: (?:loaded in ([0-9.]+) sec|using embedded metal library)/g;
 
 /**
  * What the captured log says about the embedding engine's Metal library
- * load, for the readiness timeout: its duration from the LAST "loaded in"
- * line, that it started with no "loaded in" line, or null when the log has no
- * `ggml_metal_library_init:` line.
+ * loads, for the readiness timeout. It counts start lines and "loaded in"
+ * lines: when more loads started than logged "loaded in", it says how many,
+ * with the last logged duration if there is one (a finished load followed by
+ * a new start, or two interleaved loads, leaves the newer one unfinished);
+ * otherwise the duration from the LAST "loaded in" line. A
+ * `ggml_metal_library_init:` line of neither form says a load started with no
+ * "loaded in" line; a log with none yields null.
  */
 export function metalLibraryLoadNote(log: string): string | null {
   const text = String(log);
+  let started = 0;
+  let loaded = 0;
   let seconds: string | null = null;
-  for (const m of text.matchAll(METAL_LIBRARY_LOADED_RE)) seconds = m[1];
+  for (const m of text.matchAll(METAL_LIBRARY_EVENT_RE)) {
+    if (m[1] === undefined) started += 1;
+    else {
+      loaded += 1;
+      seconds = m[1];
+    }
+  }
+  if (started > loaded && seconds !== null) {
+    return `${started - loaded} of the embedding engine's ${started} Metal library loads (ggml_metal_library_init) logged no "loaded in" line; the last logged load took ${seconds} s`;
+  }
+  if (started > loaded) {
+    return `the embedding engine's Metal library load (ggml_metal_library_init) started and logged no "loaded in" line`;
+  }
   if (seconds !== null) return `the embedding engine's Metal library load (ggml_metal_library_init) took ${seconds} s`;
   if (text.includes("ggml_metal_library_init:")) {
     return `the embedding engine's Metal library load (ggml_metal_library_init) started and logged no "loaded in" line`;
