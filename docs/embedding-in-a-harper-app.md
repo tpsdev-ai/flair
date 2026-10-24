@@ -178,7 +178,8 @@ Flair uses the raw table where it *wants* to bypass its own rules — the federa
 | `{ request: { tpsAnonymous: true } }` | `anonymous` | Denied everywhere |
 | `{ request: { tpsAgent: "mybot" } }` | `agent` | Scoped to that agent — **use this** |
 | `{ request: { tpsAgent: "mybot", tpsAgentIsAdmin: true } }` | admin | Unfiltered reads, cross-agent writes |
-| **Nothing**, or an empty/missing `tpsAgent` | `internal` | Unfiltered `Memory` reads. An `allowAdmin` check refuses it when Harper consults the gate. See the warning above. |
+| **Nothing** (outside a request scope), or a context with an empty/missing `tpsAgent` that is not `internalContext()` | `internal` | Unfiltered `Memory` reads. An `allowAdmin` check refuses it when Harper consults the gate. See the warning below. |
+| `internalContext()` | `internal` | Unfiltered `Memory` reads. An `allowAdmin` check admits it: its marker makes the call deliberate. |
 
 Build these with `agentContext(id)`, `adminContext(id)` and `internalContext()` rather than by hand — see [below](#the-api-is-built-so-omission-cannot-happen-quietly) for why the hand-written form is a trap.
 
@@ -198,7 +199,7 @@ There are exactly two ways to lose the model, from opposite ends. Both are pinne
 
 | | |
 |---|---|
-| **By omission** | No usable agent id ⇒ `internal` ⇒ unfiltered `Memory` reads; an `allowAdmin` check refuses it when Harper consults the gate. |
+| **By omission** | No usable agent id, and not `internalContext()` ⇒ `internal` ⇒ unfiltered `Memory` reads; an `allowAdmin` check refuses it when Harper consults the gate. |
 | **By assertion** | An attacker-influenced `agentId` is honoured verbatim. |
 
 ### The API is built so omission cannot happen quietly
@@ -215,7 +216,7 @@ That would turn the most ordinary bug there is — `agentContext(session.agentId
 | | |
 |---|---|
 | `agentContext(id)` | **Throws** `InProcessContextError` on a missing, empty or blank id. Takes **no options**, so no object spread into it can escalate. |
-| `adminContext(id)` | The *only* way to get admin authority. Same id guard. |
+| `adminContext(id)` | Builds the `admin` verdict for an agent id. Same id guard. |
 | `internalContext()` | The named way to get the unfiltered verdict; the admin-only gate admits the internal verdict only for a call that carries its marker. |
 | `collectionResource(Cls, context)` | Context is **required**; omitting it throws rather than granting `internal`. |
 
@@ -348,9 +349,9 @@ export async function remember(agentId, content, opts = {}) {
 >
 > They do still need the **context**. Only the collection binding is unnecessary for a read, never the identity — `Cls.search(query)` with the second argument left off resolves to the trusted `internal` verdict when it runs outside a request scope (a boot hook, a timer, a queue worker, a detached promise) and returns every agent's private records. On that path the resource's `allow*` gate is not consulted at all. Pass the context to every call, read and write.
 
-> ### ⚠️ A `Memory` read with no context runs unfiltered
+> ### ⚠️ A `Memory` read with no context, outside a request scope, runs unfiltered
 >
-> A resource built without a context resolves to Flair's trusted `internal` verdict. A `Memory` read then runs **unfiltered** across every agent, with no error; the resolver logs one warning per process. An `allowAdmin` check refuses the same verdict when Harper consults the gate.
+> Outside a request scope (a boot hook, a timer, a queue worker, a detached promise), a resource given no context resolves to Flair's trusted `internal` verdict. A `Memory` read then runs **unfiltered** across every agent, with no error; the resolver logs one warning per process. An `allowAdmin` check refuses the same verdict when Harper consults the gate.
 >
 > Measured, not inferred: a context-less `Memory.search()` returns every agent's `private` records, and so does a context-less `SemanticSearch`.
 >

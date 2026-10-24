@@ -190,8 +190,9 @@ export function adminContext(agentId: string): CallContext {
  *
  * This exists for work that is genuinely infrastructure rather than an agent's:
  * provisioning a principal, a migration, a maintenance sweep. It is the same
- * verdict a context-less call used to fall into by accident; naming it means an
- * application can no longer reach it by forgetting an argument, and means
+ * verdict a context-less call outside a request scope falls into by accident;
+ * naming it gives the deliberate use one spelling, which the admin-only gate
+ * admits and an omission does not, and means
  * `git grep internalContext` enumerates every place flair or an embedder took
  * that authority deliberately.
  *
