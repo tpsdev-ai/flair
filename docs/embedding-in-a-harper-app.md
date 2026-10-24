@@ -178,8 +178,7 @@ Flair uses the raw table where it *wants* to bypass its own rules — the federa
 | `{ request: { tpsAnonymous: true } }` | `anonymous` | Denied everywhere |
 | `{ request: { tpsAgent: "mybot" } }` | `agent` | Scoped to that agent — **use this** |
 | `{ request: { tpsAgent: "mybot", tpsAgentIsAdmin: true } }` | admin | Unfiltered reads, cross-agent writes |
-| **Nothing** (outside a request scope), or a context with an empty/missing `tpsAgent` that is not `internalContext()` | `internal` | Unfiltered `Memory` reads. An `allowAdmin` check refuses it when Harper consults the gate. See the warning below. |
-| `internalContext()` | `internal` | Unfiltered `Memory` reads. An `allowAdmin` check admits it: its marker makes the call deliberate. |
+| **Nothing** (outside a request scope), or an in-process context with no `tpsAgent` and no credential or protocol markers | `internal` | Unfiltered `Memory` reads. An `allowAdmin` check admits it only when the context carries the marker that `internalContext()` sets and no request headers, and refuses it otherwise. See the warning below. |
 
 Build these with `agentContext(id)`, `adminContext(id)` and `internalContext()` rather than by hand — see [below](#the-api-is-built-so-omission-cannot-happen-quietly) for why the hand-written form is a trap.
 
@@ -199,7 +198,7 @@ There are exactly two ways to lose the model, from opposite ends. Both are pinne
 
 | | |
 |---|---|
-| **By omission** | No usable agent id, and not `internalContext()` ⇒ `internal` ⇒ unfiltered `Memory` reads; an `allowAdmin` check refuses it when Harper consults the gate. |
+| **By omission** | No usable agent id and no credential or protocol markers ⇒ `internal` ⇒ unfiltered `Memory` reads. Without the marker that `internalContext()` sets, an `allowAdmin` check refuses it when Harper consults the gate. |
 | **By assertion** | An attacker-influenced `agentId` is honoured verbatim. |
 
 ### The API is built so omission cannot happen quietly
@@ -347,11 +346,11 @@ export async function remember(agentId, content, opts = {}) {
 >
 > `collectionResource(Cls, context)` is a two-line wrapper over the supported call — `Cls.getResource({}, context, { isCollection: true })` — and exists so this is written once. **Reads do not need it:** `Cls.get(id, context)` and `Cls.search(query, context)` thread the context themselves.
 >
-> They do still need the **context**. Only the collection binding is unnecessary for a read, never the identity — `Cls.search(query)` with the second argument left off resolves to the trusted `internal` verdict when it runs outside a request scope (a boot hook, a timer, a queue worker, a detached promise) and returns every agent's private records. On that path the resource's `allow*` gate is not consulted at all. Pass the context to every call, read and write.
+> They do still need the **context**. Only the collection binding is unnecessary for a read, never the identity — `Cls.search(query)` with the second argument left off resolves to the trusted `internal` verdict when it runs outside a request scope and returns every agent's private records. On that path the resource's `allow*` gate is not consulted at all. Pass the context to every call, read and write.
 
 > ### ⚠️ A `Memory` read with no context, outside a request scope, runs unfiltered
 >
-> Outside a request scope (a boot hook, a timer, a queue worker, a detached promise), a resource given no context resolves to Flair's trusted `internal` verdict. A `Memory` read then runs **unfiltered** across every agent, with no error; the resolver logs one warning per process. An `allowAdmin` check refuses the same verdict when Harper consults the gate.
+> Outside a request scope, a resource given no context resolves to Flair's trusted `internal` verdict. Work started inside a request, such as a timer or a promise it creates, can carry that request's context. A `Memory` read then runs **unfiltered** across every agent, with no error; the resolver logs one warning per process. An `allowAdmin` check refuses the same verdict when Harper consults the gate.
 >
 > Measured, not inferred: a context-less `Memory.search()` returns every agent's `private` records, and so does a context-less `SemanticSearch`.
 >

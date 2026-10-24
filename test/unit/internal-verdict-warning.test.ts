@@ -10,7 +10,8 @@
 // The verdict is deliberately UNCHANGED here; ~40 assertions across the suite
 // pin it, and altering it is a breaking change to every internal call site.
 // What changes is that it is no longer silent: a call that MEANS to take that
-// authority says so with internalContext(), and anything else warns once.
+// authority carries the marker internalContext() sets, and an internal verdict
+// reached without the marker warns at most once per process.
 //
 // ── Why this pins the PREDICATE and not the console output ──────────────────
 // The warning is latched once per process. bun shares one module registry

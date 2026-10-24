@@ -336,10 +336,10 @@ export async function allowAdmin(context: any): Promise<boolean> {
  * that were never scoped.
  *
  * This does not change the verdict; it ends the SILENCE. A deliberate elevated
- * call says so with `internalContext()` (resources/in-process.ts), whose
- * `__flairInternal` marker is read here; anything else that lands on `internal`
- * gets one warning per process, with the stack, so the condition is observable
- * where it was previously invisible.
+ * call carries the `__flairInternal` marker, which `internalContext()`
+ * (resources/in-process.ts) sets and which is read here; an `internal` verdict
+ * reached without the marker warns at most once per process, with the stack,
+ * so the condition is observable where it was previously invisible.
  *
  * MEASURED, and the reason this is worth having: flair itself has NO in-process
  * caller that relies on the omission — every maintenance, migration, federation
@@ -356,8 +356,9 @@ export async function allowAdmin(context: any): Promise<boolean> {
 let warnedInternalByOmission = false;
 
 /**
- * Was this elevated call DELIBERATE — i.e. did the caller name the authority
- * with `internalContext()` rather than land on it by leaving a context off?
+ * Was this elevated call DELIBERATE — i.e. does its context carry the marker
+ * (which `internalContext()` sets) rather than land on `internal` by leaving a
+ * context off?
  *
  * Exported because it is the whole decision, and a decision worth testing is
  * worth testing directly: the warning itself is latched once per process, which
