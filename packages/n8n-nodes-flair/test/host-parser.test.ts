@@ -11,20 +11,19 @@
  * `.github/workflows/test.yml`: `npm pack` the workspace tarballs, `npm init`
  * in a mktemp prefix, then `npm install --ignore-scripts --omit=dev
  * --legacy-peer-deps`. The runner has registry access, as that job does, so no
- * fixture registry is involved; the node is installed as a host would install
- * it, and the parser is the host's.
+ * fixture registry is involved; the install is a consumer install of the packed
+ * node, and the parser is the host's.
  *
  * The driver loads `dist/nodes/FlairSearch/FlairSearch.node.js` from the
- * installed tarball, calls `supplyData`, then `tool.invoke(input)` — the path
- * an agent run takes. A local HTTP stub records whether the node's `func` ran.
+ * installed tarball, calls `supplyData`, then `tool.invoke(input)` — a real
+ * LangChain parser invocation of its tool. A local HTTP stub records whether
+ * the node's `func` ran.
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-setDefaultTimeout(300_000);
 
 const PACKAGE_DIR = join(import.meta.dir, "..");
 const WORKSPACE_ROOT = join(PACKAGE_DIR, "..", "..");
@@ -46,31 +45,47 @@ const BUILD_TIMEOUT_MS = 20_000;
 const INIT_TIMEOUT_MS = 10_000;
 const INSTALL_TIMEOUT_MS = 30_000;
 const INVOKE_TIMEOUT_MS = 30_000;
-// Bounds the beforeAll hook that runs every child above (260 s at their
-// bounds): the test-level limit for this file.
-const TEST_TIMEOUT_MS = 300_000;
-setDefaultTimeout(TEST_TIMEOUT_MS);
+// Bounds the setup hook, which runs every child above. At the DEFAULT matrix
+// those child bounds sum to 260 s (build 20, two packs at 20, then five x
+// (init 10 + install 30)); more versions through the override add more. The
+// 360 s step cap (N8N_STEP_TIMEOUT_MS) is the whole step's aggregate and may
+// cut off cases that are each within their own limits.
+const SETUP_TIMEOUT_MS = 300_000;
+setDefaultTimeout(SETUP_TIMEOUT_MS);
 
 let scratch = "";
 let clientTarball = "";
 let nodeTarball = "";
 const hostPrefixes = new Map<string, string>();
 
-/** A host prefix's npm must not inherit the workspace's npm state. */
-function hostEnv(): NodeJS.ProcessEnv {
+/**
+ * A host prefix's npm must not inherit the workspace's npm state: remove every
+ * inherited `npm_config_*` (and `NPM_CONFIG_*`) variable, then set only the ones
+ * this file means to set.
+ */
+function hostEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (/^npm_config_/i.test(name)) delete env[name];
+  }
   env.HOME = join(scratch, "home");
   env.npm_config_cache = join(scratch, "npm-cache");
   env.npm_config_userconfig = join(scratch, "npmrc");
   env.npm_config_audit = "false";
   env.npm_config_fund = "false";
-  return env;
+  return { ...env, ...overrides };
 }
 
-function run(command: string, args: string[], cwd: string, timeout: number): string {
+function run(
+  command: string,
+  args: string[],
+  cwd: string,
+  timeout: number,
+  env: NodeJS.ProcessEnv = hostEnv(),
+): string {
   const result = spawnSync(command, args, {
     cwd,
-    env: hostEnv(),
+    env,
     encoding: "utf8",
     timeout,
     // SIGKILL, not the default SIGTERM: spawnSync waits for the child to exit.
@@ -201,7 +216,7 @@ beforeAll(() => {
     writeFileSync(join(prefix, "driver.cjs"), DRIVER);
     hostPrefixes.set(version, prefix);
   }
-});
+}, 300_000);
 
 afterAll(() => {
   if (scratch) rmSync(scratch, { recursive: true, force: true });
@@ -236,3 +251,45 @@ describe("the built FlairSearch tool through a real host @langchain/core parser"
     );
   }
 });
+
+test(
+  "an inherited npm_config_registry does not reach the scratch install",
+  () => {
+    const prefix = join(scratch, "host-isolated");
+    mkdirSync(prefix);
+    mkdirSync(join(scratch, "home-isolated"));
+    const previous = process.env.npm_config_registry;
+    process.env.npm_config_registry = "http://127.0.0.1:1/";
+    try {
+      const env = {
+        ...hostEnv(),
+        HOME: join(scratch, "home-isolated"),
+        npm_config_cache: join(scratch, "npm-cache-isolated"),
+      };
+      run("npm", ["init", "-y"], prefix, INIT_TIMEOUT_MS, env);
+      // An empty cache and the default registry: the install resolves every
+      // dependency over the network, so an inherited registry would show up as
+      // a connection failure to 127.0.0.1:1.
+      run(
+        "npm",
+        [
+          "install",
+          "--ignore-scripts",
+          "--omit=dev",
+          "--legacy-peer-deps",
+          clientTarball,
+          nodeTarball,
+          `@langchain/core@${CORE_VERSIONS[0] ?? "0.3.0"}`,
+          `n8n-workflow@${N8N_WORKFLOW_VERSION}`,
+        ],
+        prefix,
+        INSTALL_TIMEOUT_MS,
+        env,
+      );
+    } finally {
+      if (previous === undefined) delete process.env.npm_config_registry;
+      else process.env.npm_config_registry = previous;
+    }
+  },
+  60_000,
+);
