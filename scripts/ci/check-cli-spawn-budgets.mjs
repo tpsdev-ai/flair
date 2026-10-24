@@ -242,8 +242,7 @@ function lineNumberAt(src, index) {
  * it. Each `JsxText` node is masked from `pos` to `end`, replacing every
  * character except the four in `LINE_BREAK_CHARS` with a space, so lengths and
  * line/column positions stay aligned. A JSX attribute's string value is a
- * TypeScript string literal, which the literal masker already blanks (and
- * `skipNonCode` already skips).
+ * TypeScript string literal, which the literal masker already blanks.
  */
 export function maskJsxText(src, fileName = UNNAMED_SOURCE) {
   if (!isJsxFileName(fileName)) return src;

@@ -1,7 +1,9 @@
 // check-cli-spawn-budgets-jsx-2808.test.ts — JSX text is masked before the gate
-// matches spawns and reads deadlines (flair#2808). Each fixture is written to a
-// real `test/` tree and scanned through `scanTree`, so the gate sees the same
-// file name (and therefore the same TypeScript script kind) as a test file. The
+// matches spawns and reads deadlines (flair#2808). Each `scanFixture` case writes
+// its fixture to a real `test/` tree and scans it through `scanTree`, so the gate
+// sees the same file name (and therefore the same TypeScript script kind) as a
+// test file; the position and argument-walk tests call the maskers and walkers
+// directly on source text. The
 // gate masks JSX text in every file kind TypeScript parses JSX in and that it
 // scans: .tsx and .jsx (ScriptKind.TSX / JSX) plus .js, .mjs and .cjs
 // (ScriptKind.JS). Each JsxText node is masked from pos to end, every character
