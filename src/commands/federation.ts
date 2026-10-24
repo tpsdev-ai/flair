@@ -1071,7 +1071,8 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       const indeterminate = parseSyncBatchIndeterminate(body);
       // A Memory batch changes the sender's retry state and advances its
       // cursor, so its response must account for every offered record. Presence
-      // already requires the same. Other generic tables only carry counts.
+      // already requires the same. Other generic tables are checked on their
+      // counts.
       if (validatePresence || batch[0]?.table === "Memory") {
         const outcomeBody = body as { refused?: unknown; indeterminate?: unknown };
         const validList = (raw: unknown, parsed: readonly unknown[]) =>
