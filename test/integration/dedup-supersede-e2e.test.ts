@@ -353,8 +353,8 @@ describe("dedup / supersede / memory_update e2e (real Harper)", () => {
   // reimplements memoryUpdate()'s exact default-mode logic over the real
   // signed-HTTP surface (memoryUpdate() itself calls the Memory resource
   // in-process, not over HTTP — HTTP PUT is the real-world equivalent entry
-  // point flair-client's MemoryApi.update() actually uses, and per Memory.ts
-  // put()'s own doc comments, PUT is the only HTTP-reachable write route).
+  // point flair-client's MemoryApi.update() actually uses; HTTP POST /Memory
+  // also reaches Memory.post(), and MemoryApi.update() itself sends PUT).
   // ═══════════════════════════════════════════════════════════════════════
   test("Scenario 3 (#548): memory_update same-id overwrite reflects NEW content — no stale read of the pre-update content", async () => {
     const agent = mkAgent(`memupdate-${randomUUID()}`);
