@@ -631,7 +631,14 @@ export function createEmbeddingStampMigration(
         if (!id) continue;
         const existing = await table.get(id);
         if (!existing) continue; // deleted since the search above — nothing to fix
-        if (rowEmbeddingCurrent(existing, current)) continue; // already current (stamp and hash) — idempotent skip
+        if (rowEmbeddingCurrent(existing, current)) {
+          // Current now although the scan above selected it: a write this
+          // migration's earlier regen committed while its response failed, or
+          // one another writer made. The row is at the target stamp, so count
+          // it — rowsDone must agree with the rows at that stamp (flair#2840).
+          touchedIds.push(id);
+          continue;
+        }
 
         let ok: boolean;
         if (endsWithContentSelectorSuffix(id)) {
@@ -665,7 +672,14 @@ export function createEmbeddingStampMigration(
               // owner stores a null hash, which passes the hash comparison for any
               // text (flair#2478). Who stored a matching vector is not known.
               if (attempt > 1 && rowEmbeddingCurrent(rowNow as Record<string, unknown>, current) &&
-                  !holdsOwnStaleVector(rowNow as Record<string, unknown>, ownUnconfirmed)) break;
+                  !holdsOwnStaleVector(rowNow as Record<string, unknown>, ownUnconfirmed)) {
+                // flair#2840: with an unconfirmed attempt of this loop, a current
+                // row is the state that attempt's write was meant to produce;
+                // count it so rowsDone agrees with the rows at the target stamp.
+                // Without one it is another writer's write and stays uncounted.
+                if (unconfirmed) ok = true;
+                break;
+              }
               const attemptResult = await regenContentSuffixRow(table, id, rowNow as Record<string, unknown>, current, contentSuffixRegen);
               if (attemptResult.kind === "lock") {
                 // This attempt wrote nothing. After an earlier unconfirmed attempt

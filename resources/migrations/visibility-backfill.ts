@@ -152,6 +152,9 @@ function defaultMemoryLockStore(): unknown {
 
 export const VISIBILITY_BACKFILL_ID = "visibility-backfill";
 
+/** The plan's reason for a row that already carries a visibility. */
+const ALREADY_SET = "already-set";
+
 /**
  * flair#509's rule, reused verbatim (see module doc for why this is a
  * deliberate duplicate of `resources/Memory.ts`'s
@@ -234,7 +237,13 @@ export function createVisibilityBackfillMigration(
 
               // Under the per-id Memory lock shared with owner PUT/PATCH,
               // fill only an absent visibility.
-              if (existing.visibility !== undefined && existing.visibility !== null) return { skip: true } as const;
+              if (existing.visibility !== undefined && existing.visibility !== null) {
+                // A row already holding one of the values this backfill stamps is
+                // at the target state; a third-party value is not ours to count
+                // (or correct).
+                const present = existing.visibility === "private" || existing.visibility === "shared";
+                return present ? ({ skip: true, reason: ALREADY_SET } as const) : ({ skip: true } as const);
+              }
 
               const derived = deriveVisibilityFromDurability(existing.durability);
               // Never-widen invariant, asserted, not just tested: the only two
@@ -261,7 +270,7 @@ export function createVisibilityBackfillMigration(
           if (committed) await committed;
           return result;
         }, { phase: "visibility-backfill" });
-        if (outcome.kind === "done" && "update" in outcome.value) touchedIds.push(id);
+        if (outcome.kind === "done" && ("update" in outcome.value || ("skip" in outcome.value && outcome.value.reason === ALREADY_SET))) touchedIds.push(id);
       }
 
       return { processed: touchedIds.length, touchedIds };

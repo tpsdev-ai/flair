@@ -45,6 +45,9 @@ export const SYNTHETIC_TARGET_MARKER = `${SYNTHETIC_MIGRATION_ID}-done`;
 
 export const ENABLE_TEST_MIGRATIONS_ENV = "FLAIR_ENABLE_TEST_MIGRATIONS";
 
+/** The plan's reason for a row that already holds {@link SYNTHETIC_TARGET_MARKER}. */
+const ALREADY_STAMPED = "already-stamped";
+
 /**
  * Exact-match opt-in — see the module doc. Exported so both the registry
  * and a unit test can assert the exact condition, independent of the
@@ -120,7 +123,7 @@ export function createSyntheticTestMigration(
             id,
             (existing: any) => {
               if (!existing || existing.agentId !== RESERVED_TEST_AGENT_ID) return { skip: true } as const;
-              if (existing.source === SYNTHETIC_TARGET_MARKER) return { skip: true } as const; // already stamped — idempotent skip
+              if (existing.source === SYNTHETIC_TARGET_MARKER) return { skip: true, reason: ALREADY_STAMPED } as const; // already stamped — the target state, not lost work
 
               // Only `source`: an incremental update, never a
               // full-row put of the row read above (flair#2470).
@@ -147,7 +150,14 @@ export function createSyntheticTestMigration(
           );
           continue;
         }
-        if (!("skip" in locked.value)) touchedIds.push(id);
+        if ("skip" in locked.value) {
+          // A row already at the marker is stamped: count it, so rowsDone
+          // agrees with the rows the migration stamped (flair#2840). This is
+          // the row a retry finds after this call's own attempt committed but
+          // its confirming read missed, and it is also a marker an earlier
+          // boot set.
+          if (locked.value.reason === ALREADY_STAMPED) touchedIds.push(id);
+        } else touchedIds.push(id);
       }
 
       return { processed: touchedIds.length, touchedIds };
