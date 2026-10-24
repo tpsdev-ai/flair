@@ -1,0 +1,1 @@
+- **The preset assigns CodeQL Action major updates (`github-actions` manager) the group name `github/codeql-action`.**

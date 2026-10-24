@@ -182,8 +182,10 @@ jobs:
         # that workspace package ships. Local dev hides it (bun symlinks);
         # only consumers of the published tarball see the staleness.
         run: node scripts/check-workspace-deps.mjs
-      - name: "Check declared direct override keys matching workspace dependencies"
-        run: node scripts/check-exact-overrides.mjs
+      - name: "Check declared direct overrides and Renovate preset rules"
+        run: |
+          node scripts/check-exact-overrides.mjs
+          node scripts/check-renovate-preset-rules.mjs
       - name: "Check version declarations in sync"
         # The release version is declared outside package.json too (e.g.
         # flair-bench's TOOL_VERSION constant). release.sh preflights this, but
