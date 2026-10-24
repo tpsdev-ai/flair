@@ -40,6 +40,7 @@ import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { waitForBusySkipInterval } from "../helpers/busy-skip-log";
 
 /** A bare current stamp: the boot embedding-stamp migration treats a seeded row
  *  as current-space and never re-embeds it, so a case that does not mean to
@@ -204,19 +205,6 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
 function serverLog(): string {
   return harper.getLog?.() ?? "";
 }
-/** Wait for text appended since `from` to satisfy `matches`; the child flushes
- *  its console output slightly after the request returns. */
-async function waitForLogSince(from: number, matches: (appended: string) => boolean, timeoutMs: number): Promise<string | null> {
-  const deadline = Date.now() + timeoutMs;
-  let appended = serverLog().slice(from);
-  while (Date.now() < deadline) {
-    if (matches(appended)) return appended;
-    await new Promise((r) => setTimeout(r, 25));
-    appended = serverLog().slice(from);
-  }
-  return matches(appended) ? appended : null;
-}
-
 /**
  * Arm `point`, start `trigger`, run `compete` once the trigger is paused inside
  * that point, release, and await the trigger. Returns the trigger's response
@@ -272,7 +260,15 @@ async function waitForCommitted(id: string, matches: (row: any) => boolean, time
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2441-pause-"));
-  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
+  // http.logging puts each request's completion line in the captured log, so
+  // a marker request can close the interval the busy-skip case checks.
+  harper = await startHarper({
+    serverEnv: {
+      FLAIR_ENABLE_TEST_FAULT_INJECTION: "1",
+      FLAIR_TEST_PAUSE_DIR: pauseDir,
+      HARPER_SET_CONFIG: JSON.stringify({ http: { logging: { timing: true } } }),
+    },
+  });
   assertOwnInstance(harper);
   await ops({
     operation: "insert", database: "flair", table: "Agent",
@@ -326,18 +322,34 @@ describe("flair#2441 — the usage-recording count bump confirms the stored row 
     // this case reads the server log the skip itself emits: the busy-lock
     // branch warns "contribution skipped: busy for memory <id>", while a
     // thrown per-id failure is logged by RecordUsage.post's catch instead.
+    // A 404 marker request closes the interval: its completion line is logged
+    // after the contribution's request has returned, and on the same captured
+    // stream, so a catch line that reached the capture late is still inside
+    // the interval checked.
     const logFrom = serverLog().length;
     const rec = await record(id);
     expect(rec.status, (await rec.clone().text()).slice(0, 200)).toBe(200);
     expect(await rec.json()).toEqual({ recorded: true });
+    const markerPath = `/csr-log-boundary-${randomUUID()}`;
+    const marker = await fetch(`${harper.httpURL}${markerPath}`, { signal: AbortSignal.timeout(15_000) });
+    expect(marker.status, "the log-boundary request did not reach this instance's 404").toBe(404);
+    await marker.text();
     const held = await readRow(id);
     expect(held?.usageCount ?? null, "the skipped contribution bumped the count").toBeNull();
     expect(held?.writeBackWriteId ?? null, "the skipped contribution staged a bump").toBeNull();
     expect(await ledgerRow(owner.id, id), "the skipped contribution wrote a ledger row").toBeNull();
     const skipLine = `[usage-recording] contribution skipped: busy for memory ${id}`;
-    const appended = await waitForLogSince(logFrom, (text) => text.includes(skipLine), 10_000);
-    expect(appended, "the contribution did not report the busy skip server-side").not.toBeNull();
-    expect(appended, "the busy skip was reported as a caught per-id exception").not.toContain("RecordUsage.post:");
+    const checked = await waitForBusySkipInterval(
+      serverLog,
+      logFrom,
+      `GET ${markerPath} HTTP/1.1 404`,
+      skipLine,
+      "RecordUsage.post:",
+      10_000,
+    );
+    expect(checked, "the request-completion boundary did not reach the captured log").not.toBeNull();
+    expect(checked?.skip, "the contribution did not report the busy skip server-side").toBe(true);
+    expect(checked?.caught, "the busy skip was reported as a caught per-id exception").toBe(false);
     releasePoint("memory-delete");
     const del = await delPending;
     expect(del.status, (await del.clone().text()).slice(0, 200)).toBeLessThan(300);
