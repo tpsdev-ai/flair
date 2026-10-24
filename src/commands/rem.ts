@@ -1068,6 +1068,7 @@ export function register(program: Command): void {
         }
         console.log(`✅ Candidate ${candidateId} marked promoted → ${opts.to}, reviewer=${reviewerId}`);
       } catch (err: any) {
+        if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
         console.error(`Error: ${err.message}`);
         process.exit(1);
       }
@@ -1122,6 +1123,7 @@ export function register(program: Command): void {
         console.log(`✅ Candidate ${candidateId} rejected by ${reviewerId}`);
         console.log(`   Reason: ${opts.reason}`);
       } catch (err: any) {
+        if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
         console.error(`Error: ${err.message}`);
         process.exit(1);
       }
