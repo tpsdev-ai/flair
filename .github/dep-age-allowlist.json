@@ -4,13 +4,22 @@
     "(scripts/check-dep-ages.mjs, run by the `Check production dep bake time` step in",
     ".github/workflows/test.yml). Policy narrative: docs/supply-chain-policy.md.",
     "",
-    "An entry lets one otherwise checked exact-pinned version — in `dependencies`, `optionalDependencies`",
-    "or `overrides` — stay on a release published less than FLAIR_DEP_MIN_AGE_DAYS ago.",
+    "An entry lets one otherwise checked exact-pinned version \u2014 in `dependencies`, `optionalDependencies`",
+    "or `overrides` \u2014 stay on a release published less than FLAIR_DEP_MIN_AGE_DAYS ago.",
     "The author supplies a GHSA-formatted id; review verifies the version fixes it.",
     "Every entry carries a hard expiry. An",
     "expired entry FAILS the gate before any registry request; removing it lets an",
     "otherwise checked pin be age-checked. Re-read the reason before re-dating; removing the entry",
     "once the version has aged past the window is the normal outcome."
   ],
-  "entries": []
+  "entries": [
+    {
+      "package": "body-parser",
+      "version": "2.4.0",
+      "ghsa": "GHSA-27r3-jxmh-p828",
+      "added": "2026-10-23",
+      "expires": "2026-10-30",
+      "reason": "Root overrides pin body-parser 2.4.0, the first 2.x release that fixes GHSA-27r3-jxmh-p828 (HIGH, entered GitHub's database 2026-10-23). It was published 2026-10-22, inside the 7-day bake window, and the advisory blocks the Dependency Audit job. Its only consumer in the lockfile is express 5.2.1 (body-parser ^2.2.1), which the pin satisfies. 2.4.0 reaches the bake age on 2026-10-29; remove this entry then."
+    }
+  ]
 }

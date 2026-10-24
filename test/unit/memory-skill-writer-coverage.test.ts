@@ -88,7 +88,7 @@ add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#2", "alias-sour
   "Read-only: the table handle is handed to subscribeInProcess (resources/table-subscription-policy.ts), which calls only the table's subscribe() to read its changes.");
 add("bm25-index-service", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only: the table handle is handed to subscribeInProcess (resources/table-subscription-policy.ts), which calls only the table's subscribe() to read its changes.");
-add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
+add("MemoryMaintenance", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
   "Maintenance (archive/expiry) — non-skill.");
 add("MemoryMaintenance", ["writer:table.delete#1"],
   "A1': MemoryHostSource pointer cascade — a different table, never skill content.");
@@ -113,8 +113,8 @@ add("hit-tracking", [
 ], "MemoryHitStat ledger and in-memory maps — not a Memory/skill writer.");
 add("auth-middleware", ["writer:writeBackCommittedRow#1"],
   "Auth bookkeeping (embedding backfill) — non-skill, through the shared write-back helper (flair#2354), under the id's per-id Memory write lock (flair#2478).");
-add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
-  "usageCount increment and commit marker through the shared write-back helper (flair#2441) — non-skill.");
+add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:writeBackCommittedRow#1"],
+  "usageCount increment and commit marker through the shared write-back helper (flair#2441), under the id's per-id Memory write lock (flair#2478 slice 3b) — non-skill.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"],
   "Promotion status stamp — non-skill, through the shared write-back helper (flair#2354).");
 add("promotion-stamp", ["writer:table.update#1"],
