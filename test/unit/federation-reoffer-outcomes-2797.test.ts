@@ -128,7 +128,7 @@ describe("flair#2797 — a Memory response must account for every offered record
 
   it("a skip reported without a refused list leaves an existing pending row pending, not merged", async () => {
     fake.retryRows.set(retryEntryKey(HUB, "Memory", ROW), pendingRow());
-    install(fake, () => ({ merged: 0, skipped: 0 }), { pending: true });
+    install(fake, () => ({ merged: 0, skipped: 1 }), { pending: true });
     const result = await run();
     expect(result.error?.message).toContain("outcomes do not account");
     const stored = fake.retryRows.get(retryEntryKey(HUB, "Memory", ROW));
