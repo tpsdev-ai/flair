@@ -471,7 +471,7 @@ export class FeedMemories extends Resource {
    * Two layers decide what a non-admin subscriber receives:
    *
    * 1. Harper's synchronous `SubscriptionRequest.rowFilter`, set to the
-   *    predicate. In the pinned Harper (5.2.8) the filter is evaluated on the
+   *    predicate. In Harper 5.2.8 the filter is evaluated on the
    *    full stored row for the rows replayed when the subscription opens, for
    *    every live change (an update is re-read from the primary store and
    *    delivered as a full-row `put`) and for reload re-deliveries; a history

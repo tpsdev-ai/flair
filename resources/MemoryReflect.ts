@@ -308,11 +308,10 @@ export class ReflectMemories extends Resource {
         }
         const toStage = dedupeCandidates(staleIntentResult.kept, existingPendingClaims);
 
-        // generatedBy: GenerateResult in the pinned harper 5.1.17 has
-        // no model/backend-id field (content/finishReason/usage/toolCalls/trace
-        // only) — the "from the generate result if available" branch is
-        // unreachable in this version, so this always falls back to the
-        // configured logical name, matching Harper's own default routing name.
+        // generatedBy: Harper's GenerateResult carries no model or backend id
+        // (content, toolCalls, finishReason, usage and trace only; re-checked
+        // against harper 5.3.1's types), so this uses the configured logical
+        // name, matching Harper's own default routing name.
         const resolvedModel = configuredModel ?? "default";
         const generatedAt = new Date().toISOString();
         // Write-window atomicity (#1263): generate has already succeeded.
