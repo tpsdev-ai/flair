@@ -178,7 +178,9 @@ Flair uses the raw table where it *wants* to bypass its own rules — the federa
 | `{ request: { tpsAnonymous: true } }` | `anonymous` | Denied everywhere |
 | `{ request: { tpsAgent: "mybot" } }` | `agent` | Scoped to that agent — **use this** |
 | `{ request: { tpsAgent: "mybot", tpsAgentIsAdmin: true } }` | admin | Unfiltered reads, cross-agent writes |
-| **Nothing**, or an empty/missing `tpsAgent` | `internal` | **Trusted. Unfiltered.** See the warning above. |
+| **Nothing** (with no ambient Harper context), or an in-process `{ request: {} }` | `internal` | Unfiltered `Memory` reads. An `allowAdmin` check admits it only when the context carries the marker that `internalContext()` sets and no request headers, and refuses it otherwise. See the warning below. |
+
+A context with an anonymous marker or request headers can resolve differently.
 
 Build these with `agentContext(id)`, `adminContext(id)` and `internalContext()` rather than by hand — see [below](#the-api-is-built-so-omission-cannot-happen-quietly) for why the hand-written form is a trap.
 
@@ -198,7 +200,7 @@ There are exactly two ways to lose the model, from opposite ends. Both are pinne
 
 | | |
 |---|---|
-| **By omission** | No usable agent id ⇒ `internal` ⇒ admin-equivalent, unfiltered. |
+| **By omission** | No context argument and no ambient Harper context, or an in-process `{ request: {} }` ⇒ `internal` ⇒ unfiltered `Memory` reads. Without the marker that `internalContext()` sets, an `allowAdmin` check refuses it when Harper consults the gate. |
 | **By assertion** | An attacker-influenced `agentId` is honoured verbatim. |
 
 ### The API is built so omission cannot happen quietly
@@ -207,19 +209,19 @@ There are exactly two ways to lose the model, from opposite ends. Both are pinne
 
 ```
 resolveAgentAuth({ request: { tpsAgent: undefined } })  ->  { kind: "internal" }
-allowAdmin({ request: { tpsAgent: undefined } })        ->  true
+allowAdmin({ request: { tpsAgent: undefined } })        ->  false
 ```
 
-That would turn the most ordinary bug there is — `agentContext(session.agentId)` where the field came back undefined — into silent administrator access. So the helpers refuse rather than default:
+That would turn `agentContext(session.agentId)`, where the field came back undefined, into unfiltered `Memory` reads across every agent. The admin-only gate refuses it: `allowAdmin` admits the `internal` verdict only for a call that carries `internalContext()`'s marker and no request headers. So the helpers refuse rather than default:
 
 | | |
 |---|---|
 | `agentContext(id)` | **Throws** `InProcessContextError` on a missing, empty or blank id. Takes **no options**, so no object spread into it can escalate. |
-| `adminContext(id)` | The *only* way to get admin authority. Same id guard. |
-| `internalContext()` | The *only* way to get the unfiltered verdict. |
+| `adminContext(id)` | Builds `{ request: { tpsAgent: id, tpsAgentIsAdmin: true } }`. Same id guard. |
+| `internalContext()` | Builds `{ request: {}, __flairInternal: true }`, which resolves to `internal` and carries the marker that `allowAdmin` checks. |
 | `collectionResource(Cls, context)` | Context is **required**; omitting it throws rather than granting `internal`. |
 
-The privileged paths are now the longest ones to type, and `git grep "adminContext\|internalContext"` enumerates every deliberate escalation in your codebase. These are runtime guards, not type annotations — a plain-JavaScript embedder gets exactly the same protection.
+Elevated calls have named helpers, and `git grep "adminContext\|internalContext"` finds textual references to those helper names in tracked files. These are runtime guards, not type annotations.
 
 ### Individual identities, not one app identity
 
@@ -346,11 +348,11 @@ export async function remember(agentId, content, opts = {}) {
 >
 > `collectionResource(Cls, context)` is a two-line wrapper over the supported call — `Cls.getResource({}, context, { isCollection: true })` — and exists so this is written once. **Reads do not need it:** `Cls.get(id, context)` and `Cls.search(query, context)` thread the context themselves.
 >
-> They do still need the **context**. Only the collection binding is unnecessary for a read, never the identity — `Cls.search(query)` with the second argument left off resolves to the trusted `internal` verdict when it runs outside a request scope (a boot hook, a timer, a queue worker, a detached promise) and returns every agent's private records. On that path the resource's `allow*` gate is not consulted at all. Pass the context to every call, read and write.
+> They do still need the **context**. Pass the context to every call, read and write; the warning below covers what omitting it does.
 
-> ### ⚠️ A resource with no context is an administrator
+> ### ⚠️ A `Memory` read with no context can run unfiltered
 >
-> A resource built without a context resolves to Flair's trusted `internal` verdict and runs **unfiltered** — every read unscoped, every write unowned. Silently. No error, no warning, no trace.
+> A resource given no context, when no ambient Harper context is present, resolves to Flair's trusted `internal` verdict. A `Memory` read then runs **unfiltered** across every agent, and the omission raises no error. An `allowAdmin` check refuses the same verdict when Harper consults the gate.
 >
 > Measured, not inferred: a context-less `Memory.search()` returns every agent's `private` records, and so does a context-less `SemanticSearch`.
 >

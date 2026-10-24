@@ -32,7 +32,7 @@ import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServe
 import { composesCallerWrite, isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { PredecessorVisibilityChanged, applyGrantedVisibility, committedVisibilityDiffers, predecessorVisibilityChangedRefusal } from "./grant-visibility.js";
 import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, grantedCloseRevokedRefusal, sameStoredRow, storedRowChangedRefusal, verifyCommittedFields, withoutHarperManagedFields, writeGrantHeld } from "./write-back.js";
-import { PAUSE_LIMIT_MS, txnPausePoint } from "./txn-pause-point.js";
+import { PAUSE_LIMIT_MS, txnFault, txnPausePoint } from "./txn-pause-point.js";
 import {
   markMemoryWriteOutcomeUnknown,
   memoryWriteOutcomeUnknown,
@@ -3422,8 +3422,13 @@ export class Memory extends (databases as any).flair.Memory {
       // transaction here. For a re-PUT that owns its transaction, an
       // unreadable or mismatching committed row is never reported as success.
       if (!reindexJoinsRequestTxn) {
+        // Test-only: a fault-injection switch makes this confirmation read
+        // throw.
+        const verifyTable = txnFault("memory-reindex-verify")
+          ? { get: async (): Promise<any> => { throw new Error("injected post-commit read failure"); } }
+          : (databases as any).flair.Memory;
         const committedVerdict = await verifyCommittedFields(
-          (databases as any).flair.Memory,
+          verifyTable,
           reindexRow.id,
           reindexRow,
           withoutHarperManagedFields(reindexRow),

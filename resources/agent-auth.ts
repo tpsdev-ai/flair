@@ -22,6 +22,7 @@ import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 import { agentRecordIsAdmin, configuredAdminAgentIds } from "./agent-admin.js";
 import { isPrincipalDeactivated } from "../src/lib/principal-status.js";
 import { isProtocolLayerContext } from "./protocol-context.js";
+import { isDeliberateInternalVerdict } from "./internal-authority.js";
 
 /**
  * Shared Harper user that verified Ed25519 agents resolve to (least-privilege
@@ -312,12 +313,16 @@ export async function allowVerified(context: any): Promise<boolean> {
 }
 
 /**
- * allow* for ADMIN-ONLY resources: permit admin agents + super_user + trusted
- * internal calls; deny non-admin agents and anonymous.
+ * allow* for ADMIN-ONLY resources: permit admin agents + super_user, and the
+ * `internal` verdict only when isDeliberateInternalVerdict
+ * (resources/internal-authority.ts) holds: the context carries the
+ * `__flairInternal` marker and no request headers (flair#2837). Deny non-admin
+ * agents and anonymous.
  */
 export async function allowAdmin(context: any): Promise<boolean> {
   const a = await resolveAgentAuth(context);
-  return a.kind === "internal" || (a.kind === "agent" && a.isAdmin);
+  if (a.kind === "internal") return isDeliberateInternalVerdict(context, a);
+  return a.kind === "agent" && a.isAdmin;
 }
 
 /**
@@ -328,12 +333,11 @@ export async function allowAdmin(context: any): Promise<boolean> {
  * succeed, and both return plausible data. It surfaces months later as memories
  * that were never scoped.
  *
- * This does not change the verdict — every authorization outcome is byte-
- * identical — it ends the SILENCE. A deliberate elevated call says so with
- * `internalContext()` (resources/in-process.ts), whose `__flairInternal` marker
- * is read here and nowhere else; anything else that lands on `internal` gets one
- * warning per process, with the stack, so the condition is observable where it
- * was previously invisible.
+ * This does not change the verdict. noteInternalVerdict skips a context that
+ * carries the `__flairInternal` marker, which `internalContext()`
+ * (resources/in-process.ts) sets; for an `internal` verdict without the marker
+ * it logs the warning with the stack, and the module-level latch below stops
+ * later warnings.
  *
  * MEASURED, and the reason this is worth having: flair itself has NO in-process
  * caller that relies on the omission — every maintenance, migration, federation
@@ -350,8 +354,8 @@ export async function allowAdmin(context: any): Promise<boolean> {
 let warnedInternalByOmission = false;
 
 /**
- * Was this elevated call DELIBERATE — i.e. did the caller name the authority
- * with `internalContext()` rather than land on it by leaving a context off?
+ * Does this context carry the `__flairInternal` marker (which
+ * `internalContext()` sets)?
  *
  * Exported because it is the whole decision, and a decision worth testing is
  * worth testing directly: the warning itself is latched once per process, which
@@ -360,8 +364,11 @@ let warnedInternalByOmission = false;
  * first consumes the latch and every later assertion silently passes). Pinning
  * the predicate instead is deterministic.
  *
- * Grants nothing and is never consulted for an authorization decision — the
- * verdict is identical either way.
+ * This function feeds the warning, and the verdict is identical either way.
+ * The admin-only gate reads the same marker: `allowAdmin` admits
+ * the `internal` verdict only for a call that carries it and no request
+ * headers (isDeliberateInternalVerdict in resources/internal-authority.ts,
+ * shared with the Soul and skill write-source rules).
  */
 export function isDeliberateInternalCall(context: any): boolean {
   return context?.__flairInternal === true;
@@ -371,7 +378,7 @@ export function isDeliberateInternalCall(context: any): boolean {
 export const INTERNAL_BY_OMISSION_WARNING =
   "[flair-auth] a resource was invoked with NO caller context and resolved to the trusted " +
   "`internal` verdict: reads are UNFILTERED across every agent, writes are unattributed, and " +
-  "the admin-only gate passes. If this is your application's code, pass agentContext(<id>) from " +
+  "the admin-only gate (allowAdmin) refuses it. If this is your application's code, pass agentContext(<id>) from " +
   "@tpsdev-ai/flair's in-process seam so the call is scoped and attributed. If the elevated " +
   "authority is genuinely intended, say so with internalContext() and this warning will stop. " +
   "Fires once per process.";

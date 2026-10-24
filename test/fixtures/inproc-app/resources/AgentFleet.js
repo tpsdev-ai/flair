@@ -17,6 +17,7 @@
  * Kept as plain JS (no build step) so it loads through the `jsResource` glob
  * exactly as a hand-written application component would.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Resource, server, transaction } from "harper";
 // The in-process call seam. Deep-imported from the installed package the same
 // way an application would — Flair ships `dist/`, and this module has no
@@ -193,7 +194,7 @@ async function semanticRecall(agentId, q, limit = 20) {
   return Array.isArray(list) ? list.map(summarise) : list;
 }
 
-/** The same semantic read with NO context — see `recallUnscoped`. */
+/** A SemanticSearch read with `internalContext()`. */
 async function semanticRecallUnscoped(q, limit = 20) {
   const h = await collectionResource(flair("SemanticSearch"), internalContext());
   const r = await h.post({ q, limit });
@@ -340,8 +341,7 @@ async function mcpRpc(sub, rpc, clientId) {
 /**
  * The DELIBERATELY unfiltered read — every agent's private records, by name.
  * `internalContext()` is what an infrastructure sweep asks for on purpose; an
- * application must never reach this verdict, and since it now has to type this
- * function to get there, it cannot reach it by accident.
+ * agent-facing application operation must not reach this verdict.
  */
 async function recallUnscoped() {
   return collect(await flair("Memory").search({ conditions: [] }, internalContext()));
@@ -391,6 +391,40 @@ async function maintainAsAdmin(agentId, body, undefinedKeys) {
   };
   const h = await collectionResource(flair("MemoryMaintenance"), adminContext(agentId));
   return { sent, reply: await run(() => h.post(request)) };
+}
+
+// ─── flair#2837 — the admin-only gate through Harper's resource lifecycle ────
+//
+// A static get() whose target sets `checkPermission` makes Harper call the
+// resource's allowRead() with the context the call carries; Flair's Admin
+// resource answers allowRead with allowAdmin. Each call runs in the async
+// context captured when this module loaded, outside any request, so a call
+// with no context argument finds no request context in Harper's async storage
+// either. The marker-with-headers context carries a plain-object `headers`,
+// which the resolver still reads as `internal`, so its refusal is the
+// deliberate-internal check's.
+const outsideAnyRequest = AsyncLocalStorage.snapshot();
+
+const ADMIN_GATE_CONTEXTS = {
+  none: () => undefined,
+  internalContext: () => internalContext(),
+  markerWithHeaders: () => ({ ...internalContext(), request: { headers: { "x-probe": "2837" } } }),
+};
+
+async function adminGate(contextKind) {
+  const make = ADMIN_GATE_CONTEXTS[contextKind];
+  if (!make) throw new Error(`no such admin-gate context '${contextKind}'`);
+  return outsideAnyRequest(async () => {
+    const context = make();
+    try {
+      const reply = context === undefined
+        ? await flair("Admin").get({ checkPermission: true })
+        : await flair("Admin").get({ checkPermission: true }, context);
+      return { admitted: true, status: reply instanceof Response ? reply.status : null };
+    } catch (err) {
+      return { admitted: false, statusCode: err?.statusCode ?? null, error: String(err?.message ?? err) };
+    }
+  });
 }
 
 const summarise = (r) => ({ id: r?.id, agentId: r?.agentId, visibility: r?.visibility, content: r?.content });
@@ -495,6 +529,8 @@ export class AgentFleet extends Resource {
         return run(() => recallWithRawMissingId());
       case "maintainAsAdmin":
         return run(() => maintainAsAdmin(body.agentId, body.body, body.undefinedKeys));
+      case "adminGate":
+        return run(() => adminGate(body.context));
       default:
         return new Response(JSON.stringify({ error: `unknown op '${op}'` }), { status: 400 });
     }

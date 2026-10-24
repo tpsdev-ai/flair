@@ -4,8 +4,8 @@
  *
  * The table is shaped for one row per (peerId, table, recordId) the receiver
  * refused for a reason a later re-offer could clear, plus locally observed
- * unconfirmed sends. No production sender path creates rows yet (a later slice
- * activates the sender); rows an admin writes are readable now. See
+ * unconfirmed sends. The sync sender writes these rows; an admin can also
+ * write them directly. See
  * resources/federation-retry-lib.ts for the key/state/outcome vocabulary and
  * schemas/federation.graphql for the table.
  *
@@ -21,8 +21,8 @@
  * FederationSync's receive `tableMap` (resources/Federation.ts), so no inbound
  * sync record can write the table, even though receive `allowCreate` is public
  * (a record that passes the receiver's earlier payload-id check skips as
- * `unknown_table`). It is also not a sending table. Nothing in
- * this slice sends a retry; the sender is activated in a later slice.
+ * `unknown_table`). It is also not a sending table: the sync sender reads and
+ * writes retry rows through its local operations endpoint.
  *
  * ACCESS (design rev 2.1). Admin-only on read, create,
  * update AND delete — the FederationPeers/Peer pattern (resources/Peer.ts,

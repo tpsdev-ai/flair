@@ -1,5 +1,6 @@
 import { Resource, databases } from "harper";
 import { type SoulLike, selectPublicDescription, selectPublicSkills } from "./agentcard-fields.js";
+import { refuseRewrittenAgentId } from "./path-id-rewrite.js";
 
 export class AgentCard extends Resource {
   // Public discovery metadata (per A2A spec, agent cards are intentionally
@@ -21,6 +22,8 @@ export class AgentCard extends Resource {
         { status: 400, headers: { "Content-Type": "application/json" } },
       );
     }
+    const rewritten = refuseRewrittenAgentId((this as any).getContext?.(), agentId);
+    if (rewritten) return rewritten;
 
     const agent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
     if (!agent) {

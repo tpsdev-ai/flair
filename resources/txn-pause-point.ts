@@ -51,6 +51,47 @@ function logRefusal(): void {
   console.warn("txn-pause-point: filesystem check failed; hook inert");
 }
 
+/**
+ * A test-only failure switch, gated and path-checked like {@link txnPausePoint}:
+ * true when the caller armed `fail.<point>`. The caller turns it into the
+ * failure its branch handles (a thrown read, a skipped write). Inert unless
+ * the fault-injection opt-in is set.
+ */
+export function txnFault(
+  point: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (!PAUSE_POINT_PATTERN.test(point)) throw new InvalidPausePointError(point);
+  if (env[TEST_FAULT_INJECTION_ENV] !== "1") return false;
+  let armPath: string;
+  try {
+    const configured = env[TEST_PAUSE_DIR_ENV];
+    if (!configured || !isAbsolute(configured) || !process.getuid || !constants.O_NOFOLLOW) throw new Error();
+    const dir = realpathSync(configured);
+    const info = statSync(dir);
+    if (lstatSync(configured).isSymbolicLink() || !isInside(realpathSync(tmpdir()), dir) ||
+      !info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o022) !== 0) throw new Error();
+    armPath = join(dir, `fail.${point}`);
+  } catch {
+    logRefusal();
+    return false;
+  }
+  try {
+    const fd = openSync(armPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    if (!fstatSync(fd).isFile()) {
+      closeSync(fd);
+      return false;
+    }
+    closeSync(fd);
+    unlinkSync(armPath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    logRefusal();
+    return false;
+  }
+}
+
 export function txnPausePoint(
   point: string,
   env: NodeJS.ProcessEnv = process.env,
