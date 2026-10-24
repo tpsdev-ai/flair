@@ -516,15 +516,17 @@ echo "flair --version: ${INSTALLED_VERSION} (expected ${PR_VERSION})"
 
 PKG_FLOOR="$(node -p "require('${WORKSPACE}/.github/install-weight-budget.json').minPackages")"
 # The count comes from the same measured definition the PR lane and the canary
-# enforce (scripts/check-global-install-lockfile.mjs → countInstalledPackages):
-# every package directory (a package.json with a name and version) under
-# lib/node_modules, bundled copies included. npm's own summary line omits bundled copies.
+# enforce (scripts/check-global-install-lockfile.mjs → countFlairTree): the
+# resolved dependency graph from the installed @tpsdev-ai/flair package through
+# the dependencies its manifests declare. Packages in the prefix that nothing
+# in the graph depends on are never counted; bundled copies are reached through
+# the package that declares them.
 PKG_COUNT=0
 PKG_COUNT="$(node "$WORKSPACE/scripts/check-global-install-lockfile.mjs" --count-root "$GLOBAL_ROOT")" || {
   echo "could not measure the global package tree at $GLOBAL_ROOT (an unmeasurable tree is not an empty one)" >&2
   exit 1
 }
-echo "global tree packages (measured package.json entries): ${PKG_COUNT} (floor ${PKG_FLOOR})"
+echo "global tree packages (resolved graph from @tpsdev-ai/flair): ${PKG_COUNT} (floor ${PKG_FLOOR})"
 
 find "$NPM_LOG_DIR" -maxdepth 1 -name '*.log' -print > "$DIAG_DIR/npm-logs-after.txt" 2>/dev/null || true
 LOCKFILE_WARNINGS=0

@@ -7,7 +7,8 @@
  * under `node_modules/harper/node_modules`, where they resolve ahead of the
  * root tree: root overrides do not replace them in a bun install either, and
  * `bun audit` reads only `bun.lock`, so it does not report them. This prints
- * the installed copies so a reviewer can see what harper's runtime loads.
+ * the copies installed in harper's tree and available for harper to resolve,
+ * so a reviewer can see them.
  *
  * Usage:
  *   node scripts/ci/list-harper-bundled.mjs [node_modules dir]

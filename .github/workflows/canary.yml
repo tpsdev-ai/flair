@@ -106,11 +106,12 @@ jobs:
 
       - name: Pin npm
         # flair#1686 A4d: the install-tree floor is a measured package count —
-        # package directories (a package.json with a name and version) under
-        # lib/node_modules. npm's tree layout depends on its major (origin/main
-        # measured 520 on npm 11.19.1 and 492 on npm 10.9.4 on 2026-10-23). A
-        # PASS must mean the tree it counted, so the runner's npm is pinned to
-        # one exact version. Never `@latest`.
+        # the resolved dependency graph from the installed @tpsdev-ai/flair
+        # package through the dependencies its manifests declare
+        # (scripts/check-global-install-lockfile.mjs, countFlairTree); packages
+        # in the prefix that nothing in the graph depends on are not counted.
+        # npm's tree layout depends on its major, so the runner's npm is pinned
+        # to one exact version. Never `@latest`.
         run: |
           set -euo pipefail
           npm install -g npm@11.19.1
