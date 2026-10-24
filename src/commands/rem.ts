@@ -1568,7 +1568,7 @@ export function register(program: Command): void {
             }
             if (result.skippedAfterUnknownDelete.memories.length + result.skippedAfterUnknownDelete.souls.length > 0) {
               const ids = [...result.skippedAfterUnknownDelete.memories, ...result.skippedAfterUnknownDelete.souls];
-              console.log(`    - not written again after an unknown DELETE: ${ids.join(", ")} (a late DELETE could remove a restored row)`);
+              console.log(`    - not written again after an unknown write to the same table and record id: ${ids.join(", ")} (a late write could still change the row)`);
             }
             if (!result.verified) {
               console.log(`    - memory and soul state not checked: post-restore verification did not run`);
