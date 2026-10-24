@@ -17,8 +17,9 @@
  * (resources/Memory.ts's derivedFrom sources and resources/MemoryReflect.ts's
  * gathered sources) (slice 3b part 2); and the federation merge of an
  * incoming Memory row (resources/Federation.ts) and the batch reindex writer
- * (resources/MemoryReindex.ts) (slice 3c). The other Memory writers convert
- * in later parts.
+ * (resources/MemoryReindex.ts) (slice 3c); and basement/restore of a
+ * non-skill row (resources/MemoryArchive.ts, through the checked write below)
+ * (slice 1 part 3a). The other Memory writers convert in later parts.
  *
  * A writer that must make its read, decision and write on one committed basis
  * runs under one key per ID of `Memory.primaryStore`'s lock: `["memory", fullStoredId]`.
@@ -101,6 +102,17 @@
  * Acquisition is sorted and deduplicated, so two writers that share ids take
  * them in the same order. A partial acquisition is released before the wait, so
  * a writer never blocks on the next key while holding one.
+ *
+ * The lock token (flair#2478 part 3a). The callback receives a
+ * {@link MemoryWriteLockToken}, minted after every key of the call is held. Its
+ * state lives in a registry private to this module: the store it was acquired
+ * on, the sorted ids, the acquisition and whether it is live. A copied or
+ * fabricated object is not in the registry, so it is refused. A checked Memory
+ * write (resources/Memory.ts `putMemoryWithLock` / `patchMemoryWithLock`)
+ * requires a live token for the store and every id it writes, and runs inside
+ * the locked transaction scope of resources/memory-write-transaction.ts. When
+ * the callback settles, the acquisition closes to new scopes, waits for a scope
+ * still open to settle, revokes the token, and only then releases the keys.
  */
 
 import { TEST_FAULT_INJECTION_ENV } from "./txn-pause-point.js";
@@ -217,11 +229,142 @@ export function resetMemoryWriteOutcomeUnknownForTest(id: string | number): void
   outcomeUnknown.delete(String(id));
 }
 
-/** The keys a locked call holds, in acquisition order, and the stored ids they
- *  name. Passed to the lock callback (flair#2478 build spec). */
-export interface MemoryLockedScope {
-  readonly keys: readonly (readonly string[])[];
+declare const MEMORY_WRITE_LOCK_TOKEN: unique symbol;
+/** The capability the lock callback receives (flair#2478 part 3a). Opaque: an
+ *  empty frozen object whose state is in this module's private registry. */
+export type MemoryWriteLockToken = { readonly [MEMORY_WRITE_LOCK_TOKEN]: true };
+
+/** Why a token or a locked transaction was refused. */
+export type MemoryWriteCapabilityRefusal =
+  | "not_a_token"
+  | "revoked"
+  | "wrong_store"
+  | "id_not_covered"
+  | "scope_open"
+  | "not_a_transaction"
+  | "transaction_mismatch"
+  | "transaction_closed";
+
+/** A checked write or a locked transaction scope was refused its capability. */
+export class MemoryWriteCapabilityError extends Error {
+  constructor(readonly reason: MemoryWriteCapabilityRefusal, message: string) {
+    super(`memory write capability refused (${reason}): ${message}`);
+    this.name = "MemoryWriteCapabilityError";
+  }
+}
+
+/** How a locked transaction scope settled: a rejection carries its error. */
+type ScopeSettlement = { ok: true } | { ok: false; error: unknown };
+
+interface TokenState {
+  readonly store: KeyLockStore;
   readonly ids: readonly string[];
+  readonly idSet: ReadonlySet<string>;
+  /** This acquisition's identity: a new object per acquisition. */
+  readonly acquisition: object;
+  live: boolean;
+  /** False once the callback has settled: no new scope is admitted. */
+  admitting: boolean;
+  /** The locked transaction scope open on this acquisition, if any. */
+  open: Promise<ScopeSettlement> | null;
+}
+
+/** The registry: the authoritative state of every token this module minted. */
+const tokens = new WeakMap<object, TokenState>();
+
+function mintToken(store: KeyLockStore, ids: readonly string[]): MemoryWriteLockToken {
+  const token = Object.freeze(Object.create(null)) as MemoryWriteLockToken;
+  const frozen = Object.freeze([...ids]);
+  tokens.set(token, {
+    store, ids: frozen, idSet: new Set(frozen), acquisition: Object.freeze({}), live: true, admitting: true, open: null,
+  });
+  return token;
+}
+
+function tokenState(held: unknown): TokenState {
+  const state = held !== null && typeof held === "object" ? tokens.get(held) : undefined;
+  if (!state) throw new MemoryWriteCapabilityError("not_a_token", "not a lock token issued by this registry");
+  return state;
+}
+
+/**
+ * Refuse `held` unless it is a live token from this registry, acquired on
+ * `expected.store` (when given) and covering every id in `expected.ids` (when
+ * given). Throws {@link MemoryWriteCapabilityError}.
+ */
+export function assertMemoryWriteLockToken(
+  held: unknown,
+  expected: { store?: unknown; ids?: readonly (string | number)[] } = {},
+): void {
+  const state = tokenState(held);
+  if (!state.live) throw new MemoryWriteCapabilityError("revoked", "the lock token's acquisition has been released");
+  if ("store" in expected && expected.store !== state.store) {
+    throw new MemoryWriteCapabilityError("wrong_store", "the lock token was acquired on another store");
+  }
+  for (const id of expected.ids ?? []) {
+    if (!state.idSet.has(String(id))) {
+      throw new MemoryWriteCapabilityError("id_not_covered", "the write names an id the lock token does not hold");
+    }
+  }
+}
+
+/** The sorted ids a token holds (read from the registry). Throws for a non-token. */
+export function memoryWriteLockTokenIds(held: unknown): readonly string[] {
+  return tokenState(held).ids;
+}
+
+/** The identity of the acquisition a token belongs to (read from the registry). */
+export function memoryWriteLockAcquisition(held: unknown): object {
+  return tokenState(held).acquisition;
+}
+
+/**
+ * Admit one locked transaction scope on a live token's acquisition
+ * (resources/memory-write-transaction.ts). Synchronous, so the acquisition
+ * knows about the scope before the scope's first suspension. One scope is open
+ * at a time; none is admitted after the callback has settled. The returned
+ * `settle` reports how the scope ended.
+ */
+export function admitLockedScope(held: unknown): { settle(failure?: { error: unknown }): void } {
+  assertMemoryWriteLockToken(held);
+  const state = tokenState(held);
+  if (!state.admitting) throw new MemoryWriteCapabilityError("revoked", "the lock callback has settled");
+  if (state.open) throw new MemoryWriteCapabilityError("scope_open", "a locked transaction is already open on this acquisition");
+  let settle!: (value: ScopeSettlement) => void;
+  const open = new Promise<ScopeSettlement>((resolve) => { settle = resolve; });
+  state.open = open;
+  let settled = false;
+  return {
+    settle(failure?: { error: unknown }) {
+      if (settled) return;
+      settled = true;
+      if (state.open === open) state.open = null;
+      settle(failure ? { ok: false, error: failure.error } : { ok: true });
+    },
+  };
+}
+
+/**
+ * Close the acquisition to new scopes, wait for a scope still open to settle,
+ * then revoke the token. With `propagate`, a failure or refusal of a scope
+ * that was still open when the callback settled is thrown (the callback did
+ * not await it); a refusal arrives as a `LockedScopeRefusedError`.
+ */
+async function settleAcquisition(held: MemoryWriteLockToken, propagate: boolean): Promise<void> {
+  const state = tokens.get(held)!;
+  state.admitting = false;
+  const open = state.open;
+  const settlement = open ? await open : { ok: true as const };
+  state.live = false;
+  if (propagate && !settlement.ok) throw settlement.error;
+}
+
+function revokeToken(held: MemoryWriteLockToken): void {
+  const state = tokens.get(held);
+  if (state) {
+    state.admitting = false;
+    state.live = false;
+  }
 }
 
 /** The optional per-call context: the phase the hold warning names. */
@@ -273,7 +416,7 @@ function releaseAll(lock: KeyLockStore, acquired: string[][]): void {
 export async function withMemoryWriteLock<T>(
   store: unknown,
   ids: readonly (string | number)[],
-  fn: (locked: MemoryLockedScope) => Promise<T>,
+  fn: (held: MemoryWriteLockToken) => Promise<T>,
   options: MemoryWriteLockOptions = {},
 ): Promise<MemoryLockOutcome<T>> {
   return acquire(lockStore(store), normalizeIds(ids), MEMORY_LOCK_ATTEMPTS, MEMORY_LOCK_WAIT_MS, fn, options);
@@ -298,7 +441,7 @@ export async function withMemoryWriteLock<T>(
 export async function withMemoryWriteLockOnce<T>(
   store: unknown,
   ids: readonly (string | number)[],
-  fn: (locked: MemoryLockedScope) => Promise<T>,
+  fn: (held: MemoryWriteLockToken) => Promise<T>,
   options: MemoryWriteLockOptions = {},
 ): Promise<MemoryLockOutcome<T>> {
   return acquire(lockStore(store), normalizeIds(ids), 1, 0, fn, options);
@@ -327,11 +470,10 @@ async function acquire<T>(
   normalized: { ids: string[]; keys: string[][] },
   attempts: number,
   waitMs: number,
-  fn: (locked: MemoryLockedScope) => Promise<T>,
+  fn: (held: MemoryWriteLockToken) => Promise<T>,
   options: MemoryWriteLockOptions = {},
 ): Promise<MemoryLockOutcome<T>> {
   if (!lock || normalized.keys.length === 0) return { kind: "unavailable" };
-  const scope: MemoryLockedScope = { keys: normalized.keys, ids: normalized.ids };
   const acquired: string[][] = [];
   for (let attempt = 0; attempt < attempts; attempt++) {
     const marked = normalized.ids.find((id) => memoryWriteOutcomeUnknown(id));
@@ -346,14 +488,23 @@ async function acquire<T>(
     }
     if (gotAll) {
       const watchdog = startHoldWatchdog(normalized.keys, options.phase ?? "unknown");
+      // The token is minted only now, with every key of the call held.
+      const scope = mintToken(lock, normalized.ids);
+      let settled = false;
       try {
         lock.resetReadTxn?.();
         // The marker was checked at the top of this attempt; nothing between
         // that check and here yields, so it cannot have changed.
-        return { kind: "done", value: await fn(scope) };
+        const outcome: MemoryLockOutcome<T> = { kind: "done", value: await fn(scope) };
+        settled = true;
+        await settleAcquisition(scope, true);
+        return outcome;
       } finally {
+        if (!settled) await settleAcquisition(scope, false);
+        revokeToken(scope);
         watchdog();
-        // Release only after `fn` returns. A callback that owns its transaction
+        // Release only after `fn` returns and any locked transaction scope on
+        // this acquisition has settled. A callback that owns its transaction
         // has settled it by then, so the lock spans that commit; a transaction
         // the callback only joined commits later, after this release.
         releaseAll(lock, acquired);
