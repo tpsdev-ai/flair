@@ -74,7 +74,7 @@ describe("allowVerified — agent-facing gate (deny anonymous, permit verified/a
 });
 
 describe("allowAdmin — admin-only gate (deny anonymous AND non-admin agents)", () => {
-  it("permits a DELIBERATE internal call", async () => {
+  it("permits an internalContext() call", async () => {
     expect(await allowAdmin(CONTEXTS.deliberateInternal)).toBe(true);
   });
   it("DENIES an internal verdict reached by OMISSION (no context)", async () => {

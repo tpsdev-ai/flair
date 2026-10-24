@@ -74,7 +74,7 @@ describe("flair#2837 — allowAdmin through Harper's resource lifecycle, called 
     expect(result.statusCode, JSON.stringify(result)).toBe(401);
   }, 60_000);
 
-  test("(b) a deliberate internalContext() call is admitted", async () => {
+  test("(b) an internalContext() call is admitted", async () => {
     const result = await gateInProcess("internalContext");
     expect(result.admitted, `internalContext() was refused: ${JSON.stringify(result)}`).toBe(true);
     expect(result.status, "Admin.get()'s redirect").toBe(302);

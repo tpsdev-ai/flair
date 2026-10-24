@@ -234,8 +234,8 @@ describe("resolveAgentAuth — resources/in-process.ts's agentContext()", () => 
 // guard can never be "simplified away" without its justification failing loudly
 // in the same run. `resolveAgentAuth` tests `tpsAgent` for TRUTHINESS, so an id
 // that came back undefined is indistinguishable from no identity at all — and
-// that is the trusted, unfiltered verdict. It still passes the agent-facing gate
-// (reads are unscoped); since flair#2837 it no longer passes the ADMIN-only gate.
+// that is the trusted, unfiltered verdict. It passes the agent-facing gate
+// (allowVerified) and is refused by the ADMIN-only gate (allowAdmin, flair#2837).
 //
 // If any of these ever stop holding, resources/in-process.ts's runtime guards
 // have become unnecessary and should be revisited deliberately, not by accident.

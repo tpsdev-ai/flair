@@ -44,13 +44,11 @@ function presenceDelegationContext(auth: AgentAuthVerdict): any {
   const agentAuth = auth.kind === "agent"
     ? { agentId: auth.agentId, isAdmin: auth.isAdmin }
     : { agentId: "internal", isAdmin: true };
-  // `__flairInternal` marks the `internal` branch as DELIBERATE (flair#936) —
-  // an "internal" verdict relayed here is a trusted in-process call this file
-  // has already established, not a caller who forgot to pass a context.
-  // resources/agent-auth.ts's accidental-omission warning reads it, and so does
-  // the shared rule in resources/internal-authority.ts (isDeliberateInternalVerdict)
-  // that admits the `internal` verdict to the admin-only gate and the Soul and
-  // skill write-source rules.
+  // `__flairInternal` belongs to the context of this synthetic Presence read.
+  // isDeliberateInternalCall (resources/agent-auth.ts, the omission warning)
+  // reads it, and so does isDeliberateInternalVerdict
+  // (resources/internal-authority.ts), which allowAdmin, soulWriteSource and
+  // skillWriteSource call.
   return { request: { _flairAgentAuth: agentAuth }, __flairInternal: true };
 }
 

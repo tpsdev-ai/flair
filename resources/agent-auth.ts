@@ -313,13 +313,11 @@ export async function allowVerified(context: any): Promise<boolean> {
 }
 
 /**
- * allow* for ADMIN-ONLY resources: permit admin agents + super_user + a
- * DELIBERATE internal call (flair#2837); deny non-admin agents and anonymous.
- *
- * An `internal` verdict reached by OMITTING the context does not pass this
- * gate — the Soul/AgentSeed gate's rule, from
- * resources/internal-authority.ts. The verdict itself is unchanged; only this
- * gate's decision is.
+ * allow* for ADMIN-ONLY resources: permit admin agents + super_user, and the
+ * `internal` verdict only when isDeliberateInternalVerdict
+ * (resources/internal-authority.ts) holds: the context carries the
+ * `__flairInternal` marker and no request headers (flair#2837). Deny non-admin
+ * agents and anonymous.
  */
 export async function allowAdmin(context: any): Promise<boolean> {
   const a = await resolveAgentAuth(context);
@@ -335,11 +333,11 @@ export async function allowAdmin(context: any): Promise<boolean> {
  * succeed, and both return plausible data. It surfaces months later as memories
  * that were never scoped.
  *
- * This does not change the verdict; it ends the SILENCE. A deliberate elevated
- * call carries the `__flairInternal` marker, which `internalContext()`
- * (resources/in-process.ts) sets and which is read here; an `internal` verdict
- * reached without the marker warns at most once per process, with the stack,
- * so the condition is observable where it was previously invisible.
+ * This does not change the verdict. noteInternalVerdict skips a context that
+ * carries the `__flairInternal` marker, which `internalContext()`
+ * (resources/in-process.ts) sets; for an `internal` verdict without the marker
+ * it logs the warning with the stack, and the module-level latch below stops
+ * later warnings.
  *
  * MEASURED, and the reason this is worth having: flair itself has NO in-process
  * caller that relies on the omission — every maintenance, migration, federation
@@ -356,9 +354,8 @@ export async function allowAdmin(context: any): Promise<boolean> {
 let warnedInternalByOmission = false;
 
 /**
- * Was this elevated call DELIBERATE — i.e. does its context carry the marker
- * (which `internalContext()` sets) rather than land on `internal` by leaving a
- * context off?
+ * Does this context carry the `__flairInternal` marker (which
+ * `internalContext()` sets)?
  *
  * Exported because it is the whole decision, and a decision worth testing is
  * worth testing directly: the warning itself is latched once per process, which
@@ -368,7 +365,7 @@ let warnedInternalByOmission = false;
  * the predicate instead is deterministic.
  *
  * This function feeds the warning, and the verdict is identical either way.
- * The marker it reads also decides the admin-only gate: `allowAdmin` admits
+ * The admin-only gate reads the same marker: `allowAdmin` admits
  * the `internal` verdict only for a call that carries it and no request
  * headers (isDeliberateInternalVerdict in resources/internal-authority.ts,
  * shared with the Soul and skill write-source rules).

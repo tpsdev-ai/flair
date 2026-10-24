@@ -50,9 +50,9 @@
  * is indistinguishable from "no identity was supplied at all" — and that is the
  * trusted verdict. The consequence is that the most ordinary application bug
  * there is — `agentContext(session.agentId)` where the field is undefined, a
- * typo'd property, a lookup that found nothing — would not fail closed. The
- * call can keep unfiltered access on agent-facing paths, with no error and no
- * 403; the resolver warns once per process. The admin-only gate refuses it:
+ * typo'd property, a lookup that found nothing — would not fail closed: the
+ * agent-facing gate (`allowVerified`) admits the `internal` verdict, and a
+ * `Memory` read with it is unfiltered. The admin-only gate refuses it:
  * `allowAdmin` admits the `internal` verdict only for a call that carries
  * `internalContext()`'s marker and no request headers.
  *
@@ -190,10 +190,9 @@ export function adminContext(agentId: string): CallContext {
  *
  * This exists for work that is genuinely infrastructure rather than an agent's:
  * provisioning a principal, a migration, a maintenance sweep. It is the same
- * verdict a context-less call with no ambient Harper context falls into by
- * accident. Calling it names the intent: it sets the marker the admin-only
- * gate admits and an omission lacks, and `git grep internalContext` lists the
- * callers of this helper.
+ * `internal` verdict that `resolveAgentAuth(undefined)` returns, and
+ * `git grep internalContext` finds textual references to this helper's name in
+ * tracked files.
  *
  * There is no id to validate: the verdict comes precisely from the ABSENCE of
  * an identity annotation, so the returned object carries none. The admin-only

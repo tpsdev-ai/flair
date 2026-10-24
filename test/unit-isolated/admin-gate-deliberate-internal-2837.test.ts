@@ -1,17 +1,16 @@
 /**
- * flair#2837 — the admin-only gate admits an administrator credential, an admin
- * agent, or a DELIBERATE internal call. A missing context resolves to `internal`
- * by omission and is refused.
+ * flair#2837 — the admin-only gate (`allowAdmin`) on each class in ADMIN_GATED:
+ * no context is refused, `internalContext()` and `adminContext(id)` are
+ * admitted, and `agentContext(id)` is refused.
  *
- * Every resource class that gates on `allowAdmin` is enumerated LITERALLY below.
+ * The resource classes this file checks are listed literally below.
  * A guard parses each tracked resources/ TypeScript source with the TypeScript
- * parser and fails when a class that calls allowAdmin, or an allow* method of
- * one that calls it, is not listed here, or when it finds a reference to
+ * parser and fails when a class it finds calling allowAdmin, or an allow*
+ * method of one that calls it, is not listed here, or when it finds a reference to
  * allowAdmin it cannot attribute to a class member.
  *
- * Harper is mocked (a Resource base + a table-class proxy) because these modules
- * extend Harper's runtime globals and cannot be imported outside a Harper
- * process. The gate decision itself is the real `allowAdmin`.
+ * Harper is mocked (a Resource base + a table-class proxy). The gate decision
+ * itself is the real `allowAdmin`.
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -35,11 +34,7 @@ const { agentContext, adminContext, internalContext } = await import("../../reso
 
 const RESOURCES_DIR = join(import.meta.dir, "..", "..", "resources");
 
-/**
- * class name → module that exports it → the allow* methods that call allowAdmin.
- * Written by hand from the resource sources, never derived from this test's own
- * expectations of the gate.
- */
+/** class name → module that exports it → the allow* methods that call allowAdmin. */
 const ADMIN_GATED: Array<{ cls: string; module: string; methods: string[] }> = [
   { cls: "Admin", module: "Admin.ts", methods: ["allowRead"] },
   { cls: "AdminConnectors", module: "AdminConnectors.ts", methods: ["allowRead"] },
@@ -77,7 +72,7 @@ async function gate(cls: string, module: string, method: string, context: unknow
   return await instance[method]();
 }
 
-describe("flair#2837 — the admin gate admits only a deliberate internal call", () => {
+describe("flair#2837 — allowAdmin on each class in ADMIN_GATED", () => {
   for (const { cls, module, methods } of ADMIN_GATED) {
     for (const method of methods) {
       it(`${cls}.${method}: no context is refused`, async () => {
@@ -114,7 +109,7 @@ const isAllowAdminMember = (node: ts.Expression): boolean =>
   (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression) && node.argumentExpression.text === "allowAdmin");
 
 /**
- * Every call of allowAdmin in one source, parsed with the TypeScript parser, as
+ * The allowAdmin calls the TypeScript parser finds in one source, as
  * `{ cls, member }`: through its own name, an import alias, a namespace or
  * module-object member, or a local alias initialised with one of those, however
  * it is formatted. Names are matched by name, not scope. Any other reference it
@@ -172,7 +167,7 @@ function allowAdminCallSites(file: string, source: string): Array<{ cls: string;
   return sites;
 }
 
-/** class name → the members that call allowAdmin, over every tracked resources/ TypeScript source. */
+/** class name → the members allowAdminCallSites finds, over every tracked resources/ TypeScript source. */
 function gatedMembersBySource(): Map<string, Set<string>> {
   const root = join(import.meta.dir, "..", "..");
   const files = execFileSync("git", ["ls-files", "-z", "--", "resources/*.ts"], { cwd: root, encoding: "utf8", timeout: 10_000 })
@@ -189,7 +184,7 @@ function gatedMembersBySource(): Map<string, Set<string>> {
   return found;
 }
 
-describe("flair#2837 — every class that gates on allowAdmin has a case here", () => {
+describe("flair#2837 — ADMIN_GATED matches the allowAdmin calls the parser finds", () => {
   const named = new Set(ADMIN_GATED.map((c) => c.cls));
 
   it("the scan finds a reformatted, an aliased and a namespace call, and refuses a reference it cannot follow", () => {

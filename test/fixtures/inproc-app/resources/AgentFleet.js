@@ -194,7 +194,7 @@ async function semanticRecall(agentId, q, limit = 20) {
   return Array.isArray(list) ? list.map(summarise) : list;
 }
 
-/** The same unfiltered read through SemanticSearch, with `internalContext()` — see `recallUnscoped`. */
+/** A SemanticSearch read with `internalContext()`. */
 async function semanticRecallUnscoped(q, limit = 20) {
   const h = await collectionResource(flair("SemanticSearch"), internalContext());
   const r = await h.post({ q, limit });
@@ -341,7 +341,7 @@ async function mcpRpc(sub, rpc, clientId) {
 /**
  * The DELIBERATELY unfiltered read — every agent's private records, by name.
  * `internalContext()` is what an infrastructure sweep asks for on purpose; an
- * application must never reach this verdict.
+ * agent-facing application operation must not reach this verdict.
  */
 async function recallUnscoped() {
   return collect(await flair("Memory").search({ conditions: [] }, internalContext()));

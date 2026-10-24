@@ -501,7 +501,7 @@ export async function handleJwtBearerGrant(data: any, ctx?: any): Promise<Respon
 export class IdpConfig extends (databases as any).flair.IdpConfig {
   // Admin-only on every path (the "Admin-only" comment was previously unenforced —
   // a pure put() override with no auth check, so the non-rejecting gate let
-  // anonymous through to Harper's handler). allowAdmin permits admin agents and a deliberate internal call.
+  // anonymous through to Harper's handler).
   allowRead()   { return allowAdmin((this as any).getContext?.()); }
   allowCreate() { return allowAdmin((this as any).getContext?.()); }
   allowUpdate() { return allowAdmin((this as any).getContext?.()); }

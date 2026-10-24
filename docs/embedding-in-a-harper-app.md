@@ -212,16 +212,16 @@ resolveAgentAuth({ request: { tpsAgent: undefined } })  ->  { kind: "internal" }
 allowAdmin({ request: { tpsAgent: undefined } })        ->  false
 ```
 
-That would turn the most ordinary bug there is — `agentContext(session.agentId)` where the field came back undefined — into unfiltered `Memory` reads across every agent. The admin-only gate refuses it: `allowAdmin` admits the `internal` verdict only for a call that carries `internalContext()`'s marker and no request headers. So the helpers refuse rather than default:
+That would turn `agentContext(session.agentId)`, where the field came back undefined, into unfiltered `Memory` reads across every agent. The admin-only gate refuses it: `allowAdmin` admits the `internal` verdict only for a call that carries `internalContext()`'s marker and no request headers. So the helpers refuse rather than default:
 
 | | |
 |---|---|
 | `agentContext(id)` | **Throws** `InProcessContextError` on a missing, empty or blank id. Takes **no options**, so no object spread into it can escalate. |
-| `adminContext(id)` | Builds the `admin` verdict for an agent id. Same id guard. |
-| `internalContext()` | The named way to get the unfiltered verdict; the admin-only gate admits the internal verdict only for a call that carries its marker. |
+| `adminContext(id)` | Builds `{ request: { tpsAgent: id, tpsAgentIsAdmin: true } }`. Same id guard. |
+| `internalContext()` | Builds `{ request: {}, __flairInternal: true }`, which resolves to `internal` and carries the marker that `allowAdmin` checks. |
 | `collectionResource(Cls, context)` | Context is **required**; omitting it throws rather than granting `internal`. |
 
-The privileged paths are now the longest ones to type, and `git grep "adminContext\|internalContext"` lists every call of those two helpers in your codebase. These are runtime guards, not type annotations — a plain-JavaScript embedder gets exactly the same protection.
+Elevated calls have named helpers, and `git grep "adminContext\|internalContext"` finds textual references to those helper names in tracked files. These are runtime guards, not type annotations.
 
 ### Individual identities, not one app identity
 
@@ -348,11 +348,11 @@ export async function remember(agentId, content, opts = {}) {
 >
 > `collectionResource(Cls, context)` is a two-line wrapper over the supported call — `Cls.getResource({}, context, { isCollection: true })` — and exists so this is written once. **Reads do not need it:** `Cls.get(id, context)` and `Cls.search(query, context)` thread the context themselves.
 >
-> They do still need the **context**. Only the collection binding is unnecessary for a read, never the identity. Pass the context to every call, read and write; the warning below covers what omitting it does.
+> They do still need the **context**. Pass the context to every call, read and write; the warning below covers what omitting it does.
 
 > ### ⚠️ A `Memory` read with no context can run unfiltered
 >
-> A resource given no context, when no ambient Harper context is present, resolves to Flair's trusted `internal` verdict. A `Memory` read then runs **unfiltered** across every agent; the omission raises no error, and the resolver logs at most one warning per process. An `allowAdmin` check refuses the same verdict when Harper consults the gate.
+> A resource given no context, when no ambient Harper context is present, resolves to Flair's trusted `internal` verdict. A `Memory` read then runs **unfiltered** across every agent, and the omission raises no error. An `allowAdmin` check refuses the same verdict when Harper consults the gate.
 >
 > Measured, not inferred: a context-less `Memory.search()` returns every agent's `private` records, and so does a context-less `SemanticSearch`.
 >
