@@ -12,5 +12,14 @@
     "otherwise checked version be age-checked. Re-read the reason before re-dating; removing the entry",
     "once the version has aged past the window is the normal outcome."
   ],
-  "entries": []
+  "entries": [
+    {
+      "package": "body-parser",
+      "version": "2.4.0",
+      "ghsa": "GHSA-27r3-jxmh-p828",
+      "added": "2026-10-23",
+      "expires": "2026-10-30",
+      "reason": "Root overrides pin body-parser 2.4.0, the first 2.x release that fixes GHSA-27r3-jxmh-p828 (HIGH, entered GitHub's database 2026-10-23). It was published 2026-10-22, inside the 7-day bake window, and the advisory blocks the Dependency Audit job. Its only consumer in the lockfile is express 5.2.1 (body-parser ^2.2.1), which the pin satisfies. 2.4.0 reaches the bake age on 2026-10-29; remove this entry then."
+    }
+  ]
 }
