@@ -289,9 +289,11 @@ describe("flair#2845 — raw request targets, sent byte for byte", () => {
       }
       for (const id of ids) expect(await rowById("AgentReadPosition", `${id}:org-event`), `${route} ${id}`).toEqual(before.get(id));
 
-      const kept = await sendRaw(`/${route}/agent.json#x`, { method: "POST", body: { stream: "org-event", position: "pos-zz-advanced" } });
+      const keptPosition = `pos-zz-kept-${route}`;
+      const kept = await sendRaw(`/${route}/agent.json#x`, { method: "POST", body: { stream: "org-event", position: keptPosition } });
       expect(kept.status, `${route} agent.json#x: ${kept.text.slice(0, 300)}`).toBe(200);
-      expect((await rowById("AgentReadPosition", "agent.json#x:org-event"))?.position, route).toBe("pos-zz-advanced");
+      expect(JSON.parse(kept.text).advanced, route).toBe(true);
+      expect((await rowById("AgentReadPosition", "agent.json#x:org-event"))?.position, route).toBe(keptPosition);
     }, 60_000);
   }
 });
