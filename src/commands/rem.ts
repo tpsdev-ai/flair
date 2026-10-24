@@ -1278,13 +1278,13 @@ export function register(program: Command): void {
       // admin-pass file. A selected agent with no key is refused, not
       // silently replaced by an ambient credential.
       //
-      // The two REM work calls can legitimately outrun the default deadline:
+      // The REM work calls can legitimately outrun the default deadline:
       // maintenance scans up to the run's row cap (measured 23.07 s over 403
       // live vectors, and a 3,065-row repro exceeded a 60 s client deadline —
       // test/bench/rem-responsiveness.md), and reflection waits on a generative
       // backend. They get the shared 900 s deadline from
-      // longRemRequestDeadline; every other call resolves
-      // FLAIR_REQUEST_TIMEOUT_MS when it is set, else the default.
+      // longRemRequestDeadline; every other call through the shared REST sender
+      // resolves FLAIR_REQUEST_TIMEOUT_MS when it is set, else the default.
       const remDeadline = longRemRequestDeadline;
       const agentApiCall = (method: string, path: string, body?: unknown) =>
         api(method, path, body, { agentId, agentIdSource: "flag", signedOnly: true, ...remDeadline(method, path) });
@@ -1573,7 +1573,7 @@ export function register(program: Command): void {
               console.log(`    - not written again after an unknown write to the same table and record id: ${ids.join(", ")} (a late write could still change the row)`);
             }
             if (!result.verified) {
-              console.log(`    - memory and soul state not checked: post-restore verification did not run`);
+              console.log(`    - memory and soul state not checked: post-restore verification did not complete`);
             }
             console.log(`  Re-run once the server has settled: \`flair rem restore ${date} --agent ${agentId} --apply\` (restore is re-runnable).`);
           }

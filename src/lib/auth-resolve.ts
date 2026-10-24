@@ -169,9 +169,10 @@ export const REQUEST_DEADLINE_MIN_MS = 1;
 export const REQUEST_DEADLINE_MAX_MS = 3_600_000;
 
 /**
- * The whole-request deadline in force: the env override, else the default. An
- * out-of-range or non-integer value is refused here, before any request is
- * sent, naming the variable and the range; it is never silently defaulted.
+ * The whole-request deadline in force: `explicit` when given, else the env
+ * override, else the default. An out-of-range or non-integer env value is
+ * refused here, before any request is sent, naming the variable and the range;
+ * it is never silently defaulted.
  */
 export function resolveRequestDeadlineMs(
   explicit: number | undefined = undefined,

@@ -190,9 +190,9 @@ export interface RestoreResult {
     extraMemoryIds: string[];
     extraSoulIds: string[];
     /**
-     * For each id in `unknown`, whether the post-restore read shows it present.
-     * Present does not mean restored: an id-only check cannot tell a row this
-     * restore wrote from a pre-existing row with the same id.
+     * For each memory and soul id in `unknown`, whether the post-restore read
+     * shows it present. Present does not mean restored: an id-only check cannot
+     * tell a row this restore wrote from a pre-existing row with the same id.
      */
     unknownStates: Array<{ entity: "memory" | "soul"; id: string; present: boolean }>;
   };
