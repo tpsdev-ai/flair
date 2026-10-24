@@ -21,7 +21,8 @@
  * package directory is counted once. Bundled copies under a package's own
  * node_modules are reached that way; unrelated packages in the prefix are not.
  * npm's "added N packages" summary is printed for information only: harper
- * >5.3.1 ships its dependencies as bundleDependencies, and npm's summary line
+ * 5.3.3 (the version flair pins) ships its dependencies as bundleDependencies,
+ * and npm's summary line
  * does not count bundled copies, so the summary understates a healthy tree.
  *
  * Cause: 0.54.1's `bundleDependencies: ["@tpsdev-ai/flair-tool-descriptors"]`

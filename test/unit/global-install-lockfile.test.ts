@@ -126,8 +126,8 @@ function addPackages(prefix: string, count: number, namePrefix = "pkg") {
 
 /**
  * A prefix shaped like harper 5.3.3's: harper's dependencies live in its own
- * bundled `node_modules`, so npm's summary line counts one package where the
- * disk holds five beneath harper.
+ * bundled `node_modules`, so an npm summary line can count one package where
+ * the disk holds four beneath harper (six in the graph with flair and harper).
  */
 function bundledPrefix() {
   const prefix = mkdtempSync(join(tmpdir(), "flair-gi-bundled-"));
@@ -241,7 +241,7 @@ describe("the count follows Flair's dependency graph, not the prefix", () => {
     // Flair + harper + 3 bundled + @scope/bundled-scoped.
     expect(countFlairTree(paths.flair, paths.globalNodeModules)).toBe(6);
 
-    // npm's summary counts one; the graph holds six. The floor must read the graph.
+    // The synthetic npm summary below counts one; the graph holds six. The floor must read the graph.
     const result = evaluateInstall({ status: 0, log: "added 1 package in 2s", paths, minPackages: 6 });
     expect(result.added).toBe(1);
     expect(result.measured).toBe(6);
