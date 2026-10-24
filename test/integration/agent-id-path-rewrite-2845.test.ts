@@ -4,13 +4,15 @@
  * (flair#2845).
  *
  * Harper reads `/<Route>/agent.json` (raw or with the dot encoded) as id
- * `agent`. Rows are seeded through the operations API for agent `agent` and
- * for a legacy agent id outside the agent-id rule, `agent.json`. A request
+ * `agent`. Rows are seeded through the operations API for agent `agent`, for
+ * a legacy agent id outside the agent-id rule, `agent.json`, and for the ids
+ * the raw-target cases name (`agent#x`, `agent.json#x`, `#x`). A request
  * naming `agent.json` gets the named 400 `agent_id_rewritten`, naming both ids,
  * and none of `agent`'s rows; a request naming `agent` still gets them.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import nacl from "tweetnacl";
 import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
@@ -25,6 +27,8 @@ let h: HarperInstance;
 const adminAuth = () => "Basic " + btoa(`${h.admin.username}:${h.admin.password}`);
 const encodeDots = (id: string) => encodeURIComponent(id).replace(/\./g, "%2E");
 const FORMS = [["unencoded", LEGACY], ["encoded", encodeDots(LEGACY)]] as const;
+// Ids seeded for the raw-target cases: a raw `#` stays in the id Harper passes.
+const RAW_IDS = ["agent#x", "agent.json#x", "#x"];
 
 function assertOwnInstance(inst: HarperInstance): void {
   for (const raw of [inst.httpURL, inst.opsURL]) {
@@ -70,6 +74,57 @@ async function send(path: string, opts: { method?: string; body?: unknown; anony
   return { status: res.status, text: await res.text() };
 }
 
+/** Undo HTTP/1.1 chunked transfer encoding. */
+function dechunk(raw: Buffer): Buffer {
+  const out: Buffer[] = [];
+  let at = 0;
+  for (;;) {
+    const lineEnd = raw.indexOf("\r\n", at);
+    if (lineEnd < 0) break;
+    const size = parseInt(raw.subarray(at, lineEnd).toString("latin1").split(";")[0]!.trim(), 16);
+    if (!Number.isFinite(size) || size === 0) break;
+    out.push(raw.subarray(lineEnd + 2, lineEnd + 2 + size));
+    at = lineEnd + 2 + size + 2;
+  }
+  return Buffer.concat(out);
+}
+
+/**
+ * Send one request (as admin unless `anonymous`) over a raw socket with
+ * `target` as the request target, byte for byte (fetch() and Bun's node:http
+ * client can drop a raw `#` and the text after it before sending), and read
+ * the whole response.
+ */
+function sendRaw(target: string, opts: { method?: string; body?: unknown; anonymous?: boolean } = {}): Promise<{ status: number; text: string }> {
+  const { hostname, port } = new URL(h.httpURL);
+  const method = opts.method ?? "GET";
+  const body = opts.body === undefined ? undefined : JSON.stringify(opts.body);
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    const socket = net.connect(Number(port), hostname);
+    socket.setTimeout(15_000, () => socket.destroy(new Error(`raw ${method} ${target}: no response in 15 s`)));
+    socket.on("connect", () => {
+      const lines = [`${method} ${target} HTTP/1.1`, `Host: ${hostname}:${port}`, "Connection: close"];
+      if (!opts.anonymous) lines.push(`Authorization: ${adminAuth()}`);
+      if (body !== undefined) lines.push("Content-Type: application/json", `Content-Length: ${Buffer.byteLength(body)}`);
+      socket.write(`${lines.join("\r\n")}\r\n\r\n${body ?? ""}`);
+    });
+    socket.on("data", (d: Buffer) => chunks.push(d));
+    socket.on("error", reject);
+    socket.on("close", () => {
+      const all = Buffer.concat(chunks);
+      const split = all.indexOf("\r\n\r\n");
+      if (split < 0) return reject(new Error(`raw ${method} ${target}: no complete response (${all.length} bytes)`));
+      const head = all.subarray(0, split).toString("latin1").split("\r\n");
+      let rest: Buffer = all.subarray(split + 4);
+      const length = head.find((l) => /^content-length:/i.test(l));
+      if (head.some((l) => /^transfer-encoding:.*chunked/i.test(l))) rest = dechunk(rest);
+      else if (length) rest = rest.subarray(0, Number(length.split(":")[1]!.trim()));
+      resolve({ status: Number(head[0]!.split(" ")[1]), text: rest.toString("utf8") });
+    });
+  });
+}
+
 function expectRewrittenRefusal(res: { status: number; text: string }, label: string, requested = LEGACY): void {
   expect(res.status, `${label}: ${res.text.slice(0, 300)}`).toBe(400);
   const body = JSON.parse(res.text);
@@ -81,7 +136,7 @@ function expectRewrittenRefusal(res: { status: number; text: string }, label: st
 beforeAll(async () => {
   h = await startHarper({ serverEnv: { FLAIR_MCP_ISSUER: ISSUER, FLAIR_PUBLIC_URL: undefined } });
   assertOwnInstance(h);
-  for (const id of [AGENT, LEGACY]) {
+  for (const id of [AGENT, LEGACY, ...RAW_IDS]) {
     const publicKey = Buffer.from(nacl.sign.keyPair().publicKey).toString("base64");
     await insert("Agent", { id, name: `name-of-${id}`, role: "agent", publicKey, createdAt: NOW });
     await insert("WorkspaceState", { id: `ws-${id}`, agentId: id, ref: `ref-of-${id}`, provider: "git", timestamp: NOW, createdAt: NOW });
@@ -94,6 +149,9 @@ beforeAll(async () => {
   }
   await insert("MemoryCandidate", { id: "cand-legacy-1", agentId: LEGACY, claim: "legacy candidate", generatedAt: NOW, status: "pending" });
   await insert("MemoryCandidate", { id: "cand-dotted-1", agentId: "agent.a", claim: "dotted candidate", generatedAt: NOW, status: "pending" });
+  for (const [n, id] of RAW_IDS.entries()) {
+    await insert("MemoryCandidate", { id: `cand-raw-${n}`, agentId: id, claim: `candidate of ${id}`, generatedAt: NOW, status: "pending" });
+  }
 }, 300_000);
 
 afterAll(async () => {
@@ -166,6 +224,74 @@ describe("flair#2845 — the other routes that take an agent id from their path"
       }
       expect(await rowById("AgentReadPosition", `${AGENT}:org-event`)).toEqual(before);
       expect((await rowById("AgentReadPosition", `${LEGACY}:org-event`))?.position).toBe("pos-of-agent.json");
+    }, 60_000);
+  }
+});
+
+describe("flair#2845 — raw request targets, sent byte for byte", () => {
+  // What Harper 5.3.1 passes the route for each raw segment (see the unit file):
+  // a raw `#` does not end Harper's path, so the text after the first dot is
+  // `json#x` for `agent.json#x` (not a content type: kept whole) and `json` for
+  // `agent#x.json` (removed). Harper's extension lookup also matches names
+  // inherited from Object.prototype, so `agent.constructor` reaches the route
+  // as `agent`.
+  const KEPT = ["agent#x", "agent.json#x"];
+  const REWRITTEN: Array<[segment: string, received: string]> = [
+    ["#x.json", "#x"],
+    ["agent#x.json", "agent#x"],
+    ["agent.constructor", AGENT],
+    ["agent.toString", AGENT],
+  ];
+  const routes: Array<{ route: string; marker: (id: string) => string; anonymous?: boolean }> = [
+    { route: "AdminMemoryCandidates", marker: (id) => (id === AGENT ? "cand-agent-1" : `cand-raw-${RAW_IDS.indexOf(id)}`) },
+    { route: "WorkspaceLatest", marker: (id) => `ref-of-${id}` },
+    { route: "AgentReadPosition", marker: (id) => `pos-of-${id}` },
+    { route: "OrgEventCatchup", marker: (id) => `pos-of-${id}` },
+    { route: "MessageInbox", marker: (id) => `msg-to-${id}` },
+    { route: "MessageDeadLetter", marker: (id) => `dead-from-${id}` },
+    { route: "AgentCard", marker: (id) => `name-of-${id}`, anonymous: true },
+    { route: "MCPClientMetadata", marker: (id) => `${ISSUER}/MCPClientMetadata/${id}`, anonymous: true },
+  ];
+
+  for (const { route, marker, anonymous } of routes) {
+    test(`GET /${route}: a raw # Harper keeps in the id is answered as for the encoded id`, async () => {
+      for (const id of KEPT) {
+        const raw = await sendRaw(`/${route}/${id}`, { anonymous });
+        const encoded = await send(`/${route}/${encodeURIComponent(id)}`, { anonymous });
+        expect(raw.status, `${route} ${id}: ${raw.text.slice(0, 300)}`).toBe(200);
+        expect(raw.text, `${route} ${id}`).toContain(marker(id));
+        expect(raw, `${route} ${id}`).toEqual(encoded);
+      }
+    }, 60_000);
+
+    test(`GET /${route}: a raw target Harper rewrites is refused with agent_id_rewritten`, async () => {
+      for (const [segment, received] of REWRITTEN) {
+        const res = await sendRaw(`/${route}/${segment}`, { anonymous });
+        expect(res.status, `${route} ${segment}: ${res.text.slice(0, 300)}`).toBe(400);
+        const body = JSON.parse(res.text);
+        expect(body.error, `${route} ${segment}`).toBe("agent_id_rewritten");
+        expect(body.requestedAgentId, `${route} ${segment}`).toBe(segment);
+        expect(body.receivedAgentId, `${route} ${segment}`).toBe(received);
+        expect(res.text, `${route} ${segment}`).not.toContain(marker(received));
+      }
+    }, 60_000);
+  }
+
+  for (const route of ["AgentReadPosition", "OrgEventCatchup"]) {
+    test(`POST /${route}: a raw rewritten target advances no position; a kept one advances its own`, async () => {
+      const ids = [AGENT, "agent#x", "#x"];
+      const before = new Map<string, any>();
+      for (const id of ids) before.set(id, await rowById("AgentReadPosition", `${id}:org-event`));
+      for (const [segment, received] of REWRITTEN) {
+        const res = await sendRaw(`/${route}/${segment}`, { method: "POST", body: { stream: "org-event", position: "pos-zz-advanced" } });
+        expect(res.status, `${route} ${segment}: ${res.text.slice(0, 300)}`).toBe(400);
+        expect(JSON.parse(res.text), `${route} ${segment}`).toMatchObject({ error: "agent_id_rewritten", requestedAgentId: segment, receivedAgentId: received });
+      }
+      for (const id of ids) expect(await rowById("AgentReadPosition", `${id}:org-event`), `${route} ${id}`).toEqual(before.get(id));
+
+      const kept = await sendRaw(`/${route}/agent.json#x`, { method: "POST", body: { stream: "org-event", position: "pos-zz-advanced" } });
+      expect(kept.status, `${route} agent.json#x: ${kept.text.slice(0, 300)}`).toBe(200);
+      expect((await rowById("AgentReadPosition", "agent.json#x:org-event"))?.position, route).toBe("pos-zz-advanced");
     }, 60_000);
   }
 });

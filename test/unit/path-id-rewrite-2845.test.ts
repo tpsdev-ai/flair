@@ -47,10 +47,30 @@ describe("rewrittenPathId against Harper's parser", () => {
     expect(rewrittenPathId("/Route/agent%2Fx.json", received)).toEqual({ requested: "agent/x.json", received: "agent/x" });
   });
 
-  for (const segment of ["agent", "agent.a", encodeDots("agent.a"), "agent.a.json", "a/b", "x%20y"]) {
+  // A raw `#` does not end the path Harper reads, so it stays in the id and in
+  // the text after the id's first dot.
+  for (const [segment, expected] of [["agent#x.json", "agent#x"], ["#x.json", "#x"], ["agent%23x.json", "agent#x"]]) {
+    test(`/Route/${segment}: Harper passes ${JSON.stringify(expected)}, and both ids are reported`, () => {
+      const received = receivedByRoute(segment);
+      expect(received).toBe(expected);
+      expect(rewrittenPathId(`/Route/${segment}?limit=2`, received)).toEqual({ requested: decodeURIComponent(segment), received: expected });
+    });
+  }
+
+  // Harper looks the text after the first dot up in a plain object, so a name
+  // inherited from Object.prototype counts as a content-type extension.
+  for (const name of Object.getOwnPropertyNames(Object.prototype)) {
+    test(`/Route/agent.${name}: Harper passes "agent", and both ids are reported`, () => {
+      const received = receivedByRoute(`agent.${name}`);
+      expect(received).toBe("agent");
+      expect(rewrittenPathId(`/Route/agent.${name}`, received)).toEqual({ requested: `agent.${name}`, received: "agent" });
+    });
+  }
+
+  for (const segment of ["agent", "agent.a", encodeDots("agent.a"), "agent.a.json", "a/b", "x%20y", "agent#x", "agent.json#x", "agent#x?limit=2"]) {
     test(`/Route/${segment}: the id Harper passes is the path's own, so nothing is reported`, () => {
       const received = receivedByRoute(segment);
-      expect(received).toBe(decodeURIComponent(segment));
+      expect(received).toBe(decodeURIComponent(segment.split("?")[0]!));
       expect(rewrittenPathId(`/Route/${segment}`, received)).toBeNull();
     });
   }
@@ -72,13 +92,13 @@ describe("rewrittenPathId edge cases", () => {
     expect(rewrittenPathId("/Route/agent?after=agent.json", "agent")).toBeNull();
   });
 
-  test("an absolute URL is compared on its path", () => {
+  test("an absolute URL is compared on its path, cut the way Harper's BunRequest cuts it", () => {
     expect(rewrittenPathId("http://localhost/Route/agent?limit=2", "agent")).toBeNull();
     expect(rewrittenPathId("http://localhost/Route/agent%2Ejson", "agent")).toEqual({ requested: "agent.json", received: "agent" });
-  });
-
-  test("a URL that does not parse is reported whole", () => {
-    expect(rewrittenPathId("http://[/Route/agent", "agent")).toEqual({ requested: "http://[/Route/agent", received: "agent" });
+    expect(rewrittenPathId("http://localhost/Route/agent#x", "agent#x")).toBeNull();
+    expect(rewrittenPathId("http://localhost/Route/#x.json", "#x")).toEqual({ requested: "#x.json", received: "#x" });
+    expect(rewrittenPathId("http://[/Route/agent", "agent")).toBeNull();
+    expect(rewrittenPathId("http://localhost", "agent")).toBeNull();
   });
 
   test("a remainder that is not valid percent-encoding is reported undecoded", () => {

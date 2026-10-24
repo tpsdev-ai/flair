@@ -12,7 +12,7 @@
  *
  * Imports only the pure path helpers in request-target.js.
  */
-import { routedResourceAndRemainder } from "./request-target.js";
+import { requestPath, routedResourceAndRemainder } from "./request-target.js";
 
 /** The named error a rewritten path agent id is refused with. */
 export const AGENT_ID_REWRITTEN_ERROR = "agent_id_rewritten";
@@ -25,25 +25,34 @@ export interface RewrittenPathId {
 }
 
 /**
- * Compare the id a route received with the id its request URL's path names:
- * the path after its first segment, percent-decoded the way Harper's
- * RequestTarget decodes it. `rawUrl` is a path (with any query) or an absolute
- * URL. Returns both ids when they differ. A remainder that is not valid
- * percent-encoding is returned undecoded as the requested id, and a URL that
- * does not parse is returned whole. Returns null when the ids are equal, when
- * `rawUrl` is not a non-empty string (no request path was parsed), or when the
- * path has nothing after its first segment (the received id did not come from
- * the path).
+ * The origin-form path and query of a raw request target. A target that starts
+ * with `/` is returned as is. Any other target (such as an absolute URL) is cut
+ * the way Harper's `BunRequest` cuts its full URL (harper
+ * `dist/server/serverHelpers/Request.js`): from the first `/` found two
+ * characters past the first `//` (from index 1 when there is no `//`), or to
+ * `/` when no `/` is found.
+ */
+function originFormTarget(rawUrl: string): string {
+  if (rawUrl.startsWith("/")) return rawUrl;
+  const pathStart = rawUrl.indexOf("/", rawUrl.indexOf("//") + 2);
+  return pathStart >= 0 ? rawUrl.slice(pathStart) : "/";
+}
+
+/**
+ * Compare the id a route received with the id its raw request target names,
+ * read the way Harper reads it: the path ends at the first `?` (a raw `#` and
+ * the text after it stay in the path), and the text after its first segment is
+ * decoded with decodeURIComponent, as Harper's RequestTarget decodes it.
+ * `rawUrl` is the request's `url`: a path (with any query) or an absolute URL
+ * (see originFormTarget). Returns both ids when they differ. A remainder that
+ * is not valid percent-encoding is returned undecoded as the requested id.
+ * Returns null when the ids are equal, when `rawUrl` is not a non-empty string
+ * (no request path was parsed), or when the path has nothing after its first
+ * segment (the received id did not come from the path).
  */
 export function rewrittenPathId(rawUrl: unknown, received: string): RewrittenPathId | null {
   if (typeof rawUrl !== "string" || rawUrl === "") return null;
-  let pathname: string;
-  try {
-    pathname = new URL(rawUrl, "http://localhost").pathname;
-  } catch {
-    return { requested: rawUrl, received };
-  }
-  const { remainder } = routedResourceAndRemainder(pathname);
+  const { remainder } = routedResourceAndRemainder(requestPath(originFormTarget(rawUrl)));
   if (remainder === "") return null;
   let requested: string;
   try {
