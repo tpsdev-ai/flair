@@ -105,16 +105,16 @@ describe("flair#2684 — built CLI run-once with one failed read", () => {
     {
       name: "a failed Memory read prints unknown, the Soul read prints its count",
       reads: { memory: fail("memory store unavailable"), soul: ok([{ id: `${AGENT_ID}:style`, key: "style" }]) },
-      memoriesLine: "Memories:   unknown (memory store unavailable)",
+      memoriesLine: "Memories:   unknown (HTTP 503: memory store unavailable)",
       soulsLine: "Souls:      1",
-      error: "  - memory-count: memory store unavailable",
+      error: "  - memory-count: HTTP 503: memory store unavailable",
     },
     {
       name: "a failed Soul read prints unknown, the Memory read prints its count",
       reads: { memory: ok([{ id: "m1" }, { id: "m2" }]), soul: fail("soul store unavailable") },
       memoriesLine: "Memories:   2",
-      soulsLine: "Souls:      unknown (soul store unavailable)",
-      error: "  - soul-count: soul store unavailable",
+      soulsLine: "Souls:      unknown (HTTP 503: soul store unavailable)",
+      error: "  - soul-count: HTTP 503: soul store unavailable",
     },
   ];
 
