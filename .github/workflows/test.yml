@@ -406,8 +406,9 @@ jobs:
           import { init, dispose } from "harper-fabric-embeddings";
           const started = Date.now();
           await init({ modelPath: `${process.env.GITHUB_WORKSPACE}/models/nomic-embed-text-v1.5.Q4_K_M.gguf`, gpuLayers: 99 });
+          const loadedMs = Date.now() - started;
           await dispose();
-          console.log(`Metal warm-up: the embedding engine loaded in ${Date.now() - started}ms`);
+          console.log(`Metal warm-up: the embedding engine loaded in ${loadedMs}ms`);
           JS
       - name: using-flair seed acceptance (flair#2141)
         run: bun test test/integration/using-flair-seed-2141.test.ts test/integration/using-flair-seed-reserved-2141.test.ts
