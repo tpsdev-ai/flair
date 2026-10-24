@@ -216,8 +216,9 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
   for (const migration of deps.registry.list()) {
     const entry = state[migration.id];
     // flair#2840: re-read the ids a previous run recorded as unconfirmed on
-    // EVERY cycle, pending or not. A recorded id is cleared here only when the
-    // re-read finds its row at this migration's target or finds no row.
+    // EVERY cycle, pending or not. A recorded id is cleared here when the
+    // re-read finds its row at this migration's target or finds no row; a later
+    // batch that verifies the row's write clears it too.
     const record = await reverifyUnconfirmed(migration, entry);
     records.set(migration.id, record);
     const survived = record && record.count > 0 ? record : null;

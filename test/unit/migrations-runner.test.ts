@@ -488,7 +488,7 @@ describe("runMigrationCycle — the unconfirmed record survives no-pending cycle
     expect(state["fake-record"].unconfirmedIds).toEqual(["m2"]);
   });
 
-  it("clears an id only once a later cycle reads the row at the target, then reports completed", async () => {
+  it("clears an id once a later cycle reads the row at the target, then reports completed", async () => {
     const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", stamp: "not-yet" }]);
     const relationship = makeStore([]);
     writeMigrationStateEntry(defaultStatePath(dataDir), "fake-clears", {

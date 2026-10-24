@@ -163,7 +163,7 @@ export function createSyntheticTestMigration(
           if ("skip" in locked.value) {
             // A skip is not a write this run verified. If it follows an attempt
             // whose committed effect was unconfirmed, the row is reported as
-            // unconfirmed; otherwise another writer's work left it untouched
+            // unconfirmed; otherwise this run wrote nothing to the row
             // (flair#2840).
             if (ownUnconfirmed) unconfirmedIds.push(id);
           } else touchedIds.push(id);

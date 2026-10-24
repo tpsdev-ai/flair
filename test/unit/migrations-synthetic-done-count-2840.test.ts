@@ -5,8 +5,9 @@
  *
  * The synthetic migration's write-back helper re-reads the committed row after
  * its commit. When that post-commit verification read does not show the write,
- * the row is unconfirmed: the batch must not count it as done, and must report
- * its id in `unconfirmedIds`. The retry this drives re-reads the committed row
+ * the row is unconfirmed: the batch must not count it as done, and the
+ * returning batch reports its id in `unconfirmedIds`. The retry this drives
+ * re-reads the committed row
  * inside its own transaction; finding this migration's marker there, it skips.
  * A marker another writer set, with no attempt of this run on the row, is not
  * this migration's work and is neither counted nor reported as unconfirmed.
