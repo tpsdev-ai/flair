@@ -92,7 +92,7 @@ describe("harper's bundled copies", () => {
       "harper/package.json": harper({ bundleDependencies: ["fastify"] }),
       "harper/node_modules/fastify/package.json": { name: "fastify" },
     });
-    expect(() => listBundledCopies(join(root, "node_modules"))).toThrow(/no string name and version/);
+    expect(() => listBundledCopies(join(root, "node_modules"))).toThrow(/no non-empty string name and version/);
   });
 
   test("a declared bundle entry with no directory exits 2, naming it", () => {
@@ -141,4 +141,64 @@ describe("harper's bundled copies", () => {
     }
     expect(errors.join("\n")).toContain("stray");
   });
+
+  // Each case below is a manifest the lister cannot measure: it must exit 2 and
+  // name the defect, never filter it out and report the rest.
+  const exitsTwoNaming = (root: string, pattern: RegExp) => {
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (message: string) => errors.push(String(message));
+    try {
+      expect(main([join(root, "node_modules")])).toBe(2);
+    } finally {
+      console.error = original;
+    }
+    expect(errors.join("\n")).toMatch(pattern);
+  };
+
+  for (const [label, entry] of [
+    ["null", null],
+    ["an empty string", ""],
+    ["a blank string", "  "],
+    ["a number", 7],
+    ["an object", { name: "fastify" }],
+  ] as const) {
+    test(`a bundleDependencies entry that is ${label} exits 2, naming it`, () => {
+      const root = fixture({
+        "harper/package.json": harper({ bundleDependencies: ["fastify", entry] }),
+        "harper/node_modules/fastify/package.json": { name: "fastify", version: "5.12.5" },
+      });
+      exitsTwoNaming(root, /entries that are not package names: \[1\]/);
+    });
+  }
+
+  test("an empty bundleDependencies array exits 2 even with a package directory present", () => {
+    const root = fixture({
+      "harper/package.json": harper({ bundleDependencies: [] }),
+      "harper/node_modules/unrelated/package.json": { name: "unrelated", version: "1.0.0" },
+    });
+    exitsTwoNaming(root, /declares an empty bundle/);
+  });
+
+  test("bundleDependencies true with no dependencies exits 2", () => {
+    const root = fixture({
+      "harper/package.json": harper({ bundleDependencies: true }),
+      "harper/node_modules/unrelated/package.json": { name: "unrelated", version: "1.0.0" },
+    });
+    exitsTwoNaming(root, /declares an empty bundle/);
+  });
+
+  for (const [label, manifest] of [
+    ["an empty name", { name: "", version: "5.12.5" }],
+    ["an empty version", { name: "fastify", version: "" }],
+    ["a blank version", { name: "fastify", version: " " }],
+  ] as const) {
+    test(`an installed copy with ${label} exits 2, naming its manifest`, () => {
+      const root = fixture({
+        "harper/package.json": harper({ bundleDependencies: ["fastify"] }),
+        "harper/node_modules/fastify/package.json": manifest,
+      });
+      exitsTwoNaming(root, /fastify[\\/]package\.json has no non-empty string name and version/);
+    });
+  }
 });

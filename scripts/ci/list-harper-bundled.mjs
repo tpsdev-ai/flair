@@ -19,9 +19,10 @@
  * Exit codes:
  *   0 — harper is installed, declares a bundle, and every declared copy was read.
  *   2 — DID NOT RUN: harper or its manifest is unreadable, it declares no
- *       bundleDependencies, a declared entry has no directory, or an installed
- *       package's manifest is missing, unreadable or malformed. Every defect is
- *       named on stderr. Never 0 for a tree this script could not measure.
+ *       bundleDependencies or an empty bundle, a declared entry is not a
+ *       non-empty package name or has no directory, or an installed package's
+ *       manifest is missing, unreadable or malformed (including an empty name
+ *       or version). Every defect is named on stderr.
  */
 
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
@@ -29,6 +30,10 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.trim() !== "";
+}
 
 function readManifest(file) {
   let text;
@@ -43,8 +48,8 @@ function readManifest(file) {
   } catch (e) {
     throw new Error(`cannot parse ${file}: ${e.message}`);
   }
-  if (typeof manifest?.name !== "string" || typeof manifest?.version !== "string") {
-    throw new Error(`${file} has no string name and version`);
+  if (!isNonEmptyString(manifest?.name) || !isNonEmptyString(manifest?.version)) {
+    throw new Error(`${file} has no non-empty string name and version`);
   }
   return manifest;
 }
@@ -123,9 +128,23 @@ export function listBundledCopies(nodeModulesDir) {
   if (declared === true) {
     declaredNames = Object.keys(manifest.dependencies ?? {});
   } else if (Array.isArray(declared)) {
-    declaredNames = declared.filter((name) => typeof name === "string" && name);
+    // Every entry must be a package name: an entry this script cannot read is
+    // a copy it cannot measure, so it is refused, never filtered out.
+    const invalid = declared
+      .map((name, index) => ({ name, index }))
+      .filter(({ name }) => !isNonEmptyString(name));
+    if (invalid.length > 0) {
+      throw new Error(
+        `harper ${manifest.version} declares bundleDependencies entries that are not package names: ` +
+          invalid.map(({ name, index }) => `[${index}] ${JSON.stringify(name)}`).join(", "),
+      );
+    }
+    declaredNames = declared;
   } else {
     throw new Error(`harper ${manifest.version} declares no bundleDependencies`);
+  }
+  if (declaredNames.length === 0) {
+    throw new Error(`harper ${manifest.version} declares an empty bundle (no bundled package names)`);
   }
   const bundledDir = join(harperDir, "node_modules");
   let hasBundledDir = false;
