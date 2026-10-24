@@ -394,6 +394,22 @@ jobs:
         # Bounded so a stalled download cannot spend the case budgets above.
         timeout-minutes: 3
         run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+      # flair#2824: the first Metal use on a fresh macOS runner compiles ggml's
+      # Metal library (40 s on one failed run). A test Harper's 60 s readiness
+      # wait spans its embedding engine's boot, so the first test Harper paid
+      # that compile inside the wait. Load the engine once here, before the
+      # steps below start their test Harpers; macOS keeps compiled Metal
+      # libraries in a per-user cache that later processes read.
+      - name: Warm the macOS Metal library cache (flair#2824)
+        timeout-minutes: 5
+        run: |
+          node --input-type=module <<'JS'
+          import { init, dispose } from "harper-fabric-embeddings";
+          const started = Date.now();
+          await init({ modelPath: `${process.env.GITHUB_WORKSPACE}/models/nomic-embed-text-v1.5.Q4_K_M.gguf`, gpuLayers: 99 });
+          await dispose();
+          console.log(`Metal warm-up: the embedding engine loaded in ${Date.now() - started}ms`);
+          JS
       - name: using-flair seed acceptance (flair#2141)
         run: bun test test/integration/using-flair-seed-2141.test.ts test/integration/using-flair-seed-reserved-2141.test.ts
       - name: Real-launchd doctor --fix integration (flair#1581)
