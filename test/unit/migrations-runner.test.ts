@@ -329,6 +329,106 @@ describe("runMigrationCycle — derived-only happy path (count+marker gate, no h
   });
 });
 
+describe("runMigrationCycle — unconfirmed rows (flair#2840)", () => {
+  /** A derived-only migration whose batch results are scripted; countPending
+   *  reports the pending count once, then zero (the batches are the subject). */
+  function makeScriptedMigration(id: string, batches: RunBatchResult[]): Migration {
+    let counts = 0;
+    let call = 0;
+    return {
+      id,
+      riskClass: "derived-only",
+      affectsTables: ["Memory"],
+      async detect() {
+        return true;
+      },
+      async countPending() {
+        return counts++ === 0 ? 1 : 0;
+      },
+      async run(): Promise<RunBatchResult> {
+        return batches[Math.min(call++, batches.length - 1)];
+      },
+    };
+  }
+
+  it("carries a batch's unconfirmed ids into progress and the state file, never into rowsDone", async () => {
+    const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
+    const relationship = makeStore([]);
+    const migration = makeScriptedMigration("fake-unconfirmed", [
+      { processed: 1, touchedIds: ["m1"], unconfirmedIds: ["m2"] },
+      { processed: 0, touchedIds: [] },
+    ]);
+    await runMigrationCycle({
+      registry: buildRegistryWith(migration),
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: fastSleep,
+    });
+
+    const progress = listMigrationProgress().find((p) => p.id === "fake-unconfirmed");
+    expect(progress?.state).toBe("completed");
+    expect(progress?.rowsDone).toBe(1);
+    expect(progress?.rowsUnconfirmed).toBe(1);
+    expect(progress?.unconfirmedIds).toEqual(["m2"]);
+
+    const state = readMigrationState(defaultStatePath(dataDir));
+    expect(state["fake-unconfirmed"].rowsProcessed).toBe(1);
+    expect(state["fake-unconfirmed"].rowsUnconfirmed).toBe(1);
+    expect(state["fake-unconfirmed"].unconfirmedIds).toEqual(["m2"]);
+
+    // The snapshot HealthDetail composes carries the same record.
+    const snapshot = getMigrationStatusSnapshot(dataDir);
+    const row = snapshot.migrations.find((m) => m.id === "fake-unconfirmed");
+    expect(row?.rowsUnconfirmed).toBe(1);
+    expect(row?.unconfirmedIds).toEqual(["m2"]);
+  });
+
+  it("removes an id a later batch verified, so the final set is exactly the rows left unconfirmed", async () => {
+    const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
+    const relationship = makeStore([]);
+    const migration = makeScriptedMigration("fake-later-verified", [
+      { processed: 1, touchedIds: ["m1"], unconfirmedIds: ["m2"] },
+      { processed: 1, touchedIds: ["m2"] },
+      { processed: 0, touchedIds: [] },
+    ]);
+    await runMigrationCycle({
+      registry: buildRegistryWith(migration),
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: fastSleep,
+    });
+
+    const progress = listMigrationProgress().find((p) => p.id === "fake-later-verified");
+    expect(progress?.rowsDone).toBe(2);
+    expect(progress?.rowsUnconfirmed).toBeUndefined();
+    expect(progress?.unconfirmedIds).toBeUndefined();
+  });
+
+  it("keeps an exact count while bounding the reported id list", async () => {
+    const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
+    const relationship = makeStore([]);
+    const ids = Array.from({ length: 105 }, (_, i) => `u${i}`);
+    const migration = makeScriptedMigration("fake-bounded", [
+      { processed: 1, touchedIds: ["m1"], unconfirmedIds: ids },
+      { processed: 0, touchedIds: [] },
+    ]);
+    await runMigrationCycle({
+      registry: buildRegistryWith(migration),
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: fastSleep,
+    });
+
+    const progress = listMigrationProgress().find((p) => p.id === "fake-bounded");
+    expect(progress?.rowsUnconfirmed).toBe(105);
+    expect(progress?.unconfirmedIds).toHaveLength(100);
+    expect(progress?.unconfirmedIds?.[0]).toBe("u0");
+  });
+});
+
 describe("runMigrationCycle — schema-additive happy path (count+full-envelope gate)", () => {
   it("gate PASSES when nothing else mutates the corpus during the migration — hashEnvelopeMatch: true", async () => {
     const memory = makeStore([{ id: "m1", content: "a", agentId: "a1", newField: false }]);

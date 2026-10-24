@@ -1,22 +1,25 @@
 /**
- * migrations-synthetic-done-count-2840.test.ts — the rows a migration reports
- * done agree with the rows it stamped (flair#2840).
+ * migrations-synthetic-done-count-2840.test.ts — rowsDone counts only writes
+ * whose committed effect was verified, and an unconfirmed attempt is reported
+ * by id (flair#2840).
  *
- * The synthetic migration's plan returns a skip when it finds the row already
- * at its marker. When that skip follows this run's own write whose confirming
- * read missed the commit, it is the target state, not lost work, and the batch
- * must count the row, or a completed migration reports one fewer row done than
- * it stamped while `rowsRemaining` is 0. A marker another writer set, with no
- * attempt of this run's own on the row, stays uncounted.
+ * The synthetic migration's write-back helper re-reads the committed row after
+ * its commit. When that post-commit verification read does not show the write,
+ * the row is unconfirmed: the batch must not count it as done, and must report
+ * its id in `unconfirmedIds`. The retry this drives re-reads the committed row
+ * inside its own transaction; finding this migration's marker there, it skips.
+ * A marker another writer set, with no attempt of this run on the row, is not
+ * this migration's work and is neither counted nor reported as unconfirmed.
  *
- * This uses the REAL write-back helper (not the unit-test simulation) against
- * a table whose committed read returns the pre-write row twice: the
- * in-transaction confirmation the write-back runs before commit, and the
- * post-commit verification. Both reads pass the in-transaction check (it
- * compares against the row the transaction read) and the second one is the
- * unconfirmed outcome that drives the retry.
+ * The fake table below behaves like Harper's own write transaction: an
+ * `update` made through a transaction's context is STAGED and applies only
+ * when the callback settles, and a read inside the same transaction sees the
+ * staged value. Reads with the explicit empty context the write-back helper
+ * uses never see staged state, so the pre-commit confirmation read sees the
+ * pre-write row (and passes the in-transaction check), while the post-commit
+ * read sees the committed write unless it is armed to return the pre-write row.
  */
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, mock, afterEach } from "bun:test";
 
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
@@ -30,105 +33,159 @@ const { memoryLockDouble } = await import("../helpers/memory-lock-double");
 
 type Row = Record<string, unknown> & { id: string };
 
-/**
- * A table whose FRESH reads (the `{}` context the helper's confirmation and
- * verification use) return the pre-write row for the first two reads after an
- * update. The in-transaction read happens before the write and is live.
- */
-function makeStaleConfirmationTable(seed: Row[]) {
+function makeTable(seed: Row[]) {
   const store = new Map<string, Row>(seed.map((r) => [r.id, { ...r }]));
-  let staleSnapshot: Row | null = null;
-  let readsAfterUpdate = 0;
-  return {
+  const writes: { method: "put" | "update"; id: string; fields: string[] }[] = [];
+  /** Answer this many post-commit verification reads with `staleRow`. */
+  let staleReads = 0;
+  let staleRow: Row | null = null;
+  /** Runs after a transaction commits, before the post-commit verification read. */
+  let afterCommit: ((prior: Row | null) => void) | null = null;
+
+  function apply(id: string, patch: Row): void {
+    const prior = store.get(id);
+    store.set(id, { ...(prior ?? { id }), ...structuredClone(patch), id });
+  }
+
+  const table = {
+    primaryStore: memoryLockDouble(),
+    writes,
     store,
-    table: {
-      primaryStore: memoryLockDouble(),
-      async get(id: string, ctx?: unknown) {
-        const isFresh = ctx !== null && typeof ctx === "object" && Object.keys(ctx as object).length === 0;
-        if (isFresh && staleSnapshot && readsAfterUpdate < 2) {
-          readsAfterUpdate++;
-          return { ...staleSnapshot };
+    armStaleVerification(row: Row, times = 1): void {
+      staleRow = { ...row };
+      staleReads = times;
+    },
+    onCommit(fn: ((prior: Row | null) => void) | null): void {
+      afterCommit = fn;
+    },
+    async get(id: string, ctx?: any) {
+      const base = store.get(id);
+      let row: Row | null = base ? { ...base } : null;
+      // A read inside an OPEN transaction sees that transaction's staged writes.
+      const staged = ctx?.transaction?.staged;
+      if (Array.isArray(staged)) {
+        for (const entry of staged) {
+          if (entry.id === id) row = { ...(row ?? { id }), ...structuredClone(entry.patch) };
         }
-        const row = store.get(id);
-        return row ? { ...row } : null;
-      },
-      async update(id: string, patch: Record<string, unknown>) {
-        const prior = store.get(id);
-        staleSnapshot = prior ? { ...prior } : null;
-        readsAfterUpdate = 0;
-        store.set(id, { ...(prior ?? { id }), ...patch } as Row);
-        return store.get(id);
-      },
-      search(query: any): AsyncIterable<Row> {
-        const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
-        const limit = typeof query?.limit === "number" ? query.limit : Infinity;
-        let rows = Array.from(store.values());
-        for (const c of conditions) {
-          if (c.comparator === "not_equal" || c.comparator === "not_equals") rows = rows.filter((r) => r[c.attribute] !== c.value);
-          else if (c.comparator === "equals") rows = rows.filter((r) => r[c.attribute] === c.value);
-        }
-        rows = rows.slice(0, limit);
-        async function* gen() {
-          for (const r of rows) yield { ...r };
-        }
-        return gen();
-      },
+      }
+      // An explicit empty context reads the committed store, never staged state.
+      const committedRead = ctx !== null && typeof ctx === "object" && Object.keys(ctx).length === 0;
+      if (row && committedRead && staleReads > 0 && staleRow) {
+        staleReads--;
+        return { ...staleRow };
+      }
+      return row;
+    },
+    async put(record: Row, ctx?: any) {
+      writes.push({ method: "put", id: record.id, fields: Object.keys(record).sort() });
+      const staged = ctx?.transaction?.staged;
+      if (Array.isArray(staged)) staged.push({ id: record.id, patch: structuredClone(record) });
+      else apply(record.id, record);
+      return record;
+    },
+    async update(id: string, patch: Row, ctx?: any) {
+      writes.push({ method: "update", id, fields: Object.keys(patch).sort() });
+      const staged = ctx?.transaction?.staged;
+      if (Array.isArray(staged)) staged.push({ id, patch: structuredClone(patch) });
+      else apply(id, patch);
+      return store.get(id);
+    },
+    search(query: any): AsyncIterable<Row> {
+      const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
+      const limit = typeof query?.limit === "number" ? query.limit : Infinity;
+      let rows = Array.from(store.values());
+      for (const c of conditions) {
+        if (c.comparator === "not_equal" || c.comparator === "not_equals") rows = rows.filter((r) => r[c.attribute] !== c.value);
+        else if (c.comparator === "equals") rows = rows.filter((r) => r[c.attribute] === c.value);
+      }
+      rows = rows.slice(0, limit);
+      async function* gen() {
+        for (const r of rows) yield { ...r };
+      }
+      return gen();
     },
   };
+
+  const originalTransaction = (globalThis as any).transaction;
+  (globalThis as any).transaction = async (ctx: any, fn: (txn: any) => Promise<unknown>) => {
+    const staged: { id: string; patch: Row }[] = [];
+    ctx.transaction = { staged };
+    const result = await fn(ctx);
+    let prior: Row | null = null;
+    for (const entry of staged) {
+      const before = store.get(entry.id);
+      if (before) prior = { ...before };
+      apply(entry.id, entry.patch);
+    }
+    const hook = afterCommit;
+    afterCommit = null;
+    hook?.(prior);
+    return result;
+  };
+  const restore = () => {
+    (globalThis as any).transaction = originalTransaction;
+  };
+  return { table, restore };
 }
 
-const originalTransaction = (globalThis as any).transaction;
-
-describe("synthetic migration — rowsDone agrees with the rows it stamped (flair#2840)", () => {
-  beforeEach(() => {
-    // Model Harper's owned transaction: commit when the callback settles.
-    (globalThis as any).transaction = async (ctx: any, fn: (txn: any) => Promise<unknown>) => fn(ctx);
-  });
+describe("synthetic migration — rowsDone counts verified writes only (flair#2840)", () => {
+  let restoreTransaction: (() => void) | null = null;
 
   afterEach(() => {
-    (globalThis as any).transaction = originalTransaction;
+    restoreTransaction?.();
+    restoreTransaction = null;
   });
 
-  it("counts a row whose write committed but whose confirming read missed it", async () => {
-    const { table, store } = makeStaleConfirmationTable([
+  it("does not count an attempt whose post-commit verification read missed it, and reports its id", async () => {
+    const { table, restore } = makeTable([
       { id: "synthetic-seed-0", agentId: RESERVED_TEST_AGENT_ID, content: "x", source: "not-yet" },
     ]);
+    restoreTransaction = restore;
+    // The write commits. The pre-commit confirmation read sees the pre-write
+    // row (it is a committed read) and passes; the post-commit verification
+    // read is answered with that same pre-write row, so the attempt is
+    // unconfirmed.
+    table.onCommit((prior) => table.armStaleVerification(prior ?? { id: "synthetic-seed-0" }));
     const migration = createSyntheticTestMigration(() => table as any, writeBackCommittedRow);
 
     const result = await migration.run(50);
 
-    // The write landed and the migration's own marker is on the row …
-    expect(store.get("synthetic-seed-0")!.source).toBe(SYNTHETIC_TARGET_MARKER);
-    // … so the batch's count must include it, not report it as skipped work.
-    expect(result.processed).toBe(1);
-    expect(result.touchedIds).toEqual(["synthetic-seed-0"]);
+    expect(table.store.get("synthetic-seed-0")!.source).toBe(SYNTHETIC_TARGET_MARKER);
+    expect(result).toEqual({ processed: 0, touchedIds: [], unconfirmedIds: ["synthetic-seed-0"] });
     expect(await migration.countPending()).toBe(0);
   });
 
-  it("does not count a row another writer stamped between the scan and the read", async () => {
-    // The scan still sees the pending row; by the time the plan reads it,
-    // another writer has stamped the marker. This run never attempted the row.
-    const pending: Row = { id: "synthetic-seed-1", agentId: RESERVED_TEST_AGENT_ID, content: "x", source: "not-yet" };
+  it("counts a verified write and reports no unconfirmed row", async () => {
+    const { table, restore } = makeTable([
+      { id: "synthetic-seed-1", agentId: RESERVED_TEST_AGENT_ID, content: "x", source: "not-yet" },
+    ]);
+    restoreTransaction = restore;
+    const migration = createSyntheticTestMigration(() => table as any, writeBackCommittedRow);
+
+    const result = await migration.run(50);
+
+    expect(table.store.get("synthetic-seed-1")!.source).toBe(SYNTHETIC_TARGET_MARKER);
+    expect(result).toEqual({ processed: 1, touchedIds: ["synthetic-seed-1"] });
+  });
+
+  it("does not count or report a row another writer stamped between the scan and the read", async () => {
+    // The scan snapshot still shows the pending row; the committed store holds
+    // the row another writer stamped. The plan reads the store and skips; this
+    // run never attempted the row.
+    const pending: Row = { id: "synthetic-seed-2", agentId: RESERVED_TEST_AGENT_ID, content: "x", source: "not-yet" };
     const stamped: Row = { ...pending, source: SYNTHETIC_TARGET_MARKER };
-    const table = {
-      primaryStore: memoryLockDouble(),
-      async get(_id: string) {
-        return { ...stamped };
-      },
-      async put() {
-        throw new Error("the migration must not write a row another writer stamped");
-      },
-      async update() {
-        throw new Error("the migration must not write a row another writer stamped");
-      },
-      search() {
-        return (async function* () {
-          yield { ...pending };
-        })();
-      },
+    const { table, restore } = makeTable([stamped]);
+    restoreTransaction = restore;
+    const search = table.search.bind(table);
+    (table as any).search = (query: any) => {
+      if (query?.conditions?.some((c: any) => c.attribute === "source")) {
+        return (async function* () { yield { ...pending }; })();
+      }
+      return search(query);
     };
     const migration = createSyntheticTestMigration(() => table as any, writeBackCommittedRow);
 
     expect(await migration.run(50)).toEqual({ processed: 0, touchedIds: [] });
+    expect(table.writes).toEqual([]);
   });
 });
