@@ -147,8 +147,11 @@ export interface RestoreResult {
   };
   /**
    * Ids whose PUT or DELETE ended at the whole-request deadline without a
-   * complete response, so whether it took effect is unknown. They are not in
-   * `errors` and are not counted restored or deleted; none is retried. Once
+   * complete response, so whether it took effect is unknown. The unknown
+   * attempt adds no `errors` entry and no restored or deleted count; earlier
+   * known operations on the same id can remain in `errors`, `deleted` or
+   * `restored`. No further attempt is sent after an unknown outcome; an earlier
+   * provider-timeout refusal may already have triggered a retry (`retried`). Once
    * any write to a table and record id has an unknown outcome, no later write
    * to that same table and record id in this run is sent — a late write could
    * change or remove the row — and the skipped snapshot id is listed in

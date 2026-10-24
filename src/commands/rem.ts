@@ -1560,7 +1560,7 @@ export function register(program: Command): void {
           const unknownCount =
             result.unknown.memories.length + result.unknown.souls.length + result.unknown.candidates.length;
           if (unknownCount > 0) {
-            console.log(`  Unknown:      ${unknownCount} ids ended at the request deadline; their write may or may not have taken effect and was not retried`);
+            console.log(`  Unknown:      ${unknownCount} ids ended at the request deadline; their write may or may not have taken effect, and no further attempt was sent after it`);
             for (const state of result.verified?.unknownStates ?? []) {
               console.log(`    - ${formatUnknownState(state)}`);
             }
