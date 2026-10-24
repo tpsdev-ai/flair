@@ -79,6 +79,29 @@ describe("flair#2797 — retry backoff and due selection", () => {
     expect(retryOfferProblem(pending({ lastReason: "retry_unknown" }))).toBeNull();
     expect(dueRetryRows([pending({ lastReason: "retry_unknown" })], Date.parse(NOW))).toHaveLength(1);
   });
+
+  test("every pending-row outcome mismatch the shared validator knows is not offered", () => {
+    const at = Date.parse(NOW) + 60_000;
+    // The validator's pending `outcome_mismatch` branches: a resolution, and a bound.
+    for (const malformed of [
+      pending({ resolution: "merged" }),
+      pending({ resolution: "refused_terminal" }),
+      pending({ bound: "attempts" }),
+    ]) {
+      expect(retryOfferProblem(malformed)).toBe("outcome_mismatch");
+      expect(dueRetryRows([malformed], at)).toEqual([]);
+    }
+    // Its other problem kinds: wrong key, unknown state and unknown reason.
+    const otherKinds: Array<[RetryQueueRow, "id_mismatch" | "wrong_state" | "unknown_reason"]> = [
+      [pending({ id: retryEntryKey(PEER, "Memory", "another") }), "id_mismatch"],
+      [pending({ state: "half-open" }), "wrong_state"],
+      [pending({ lastReason: "not_a_reason" }), "unknown_reason"],
+    ];
+    for (const [malformed, problem] of otherKinds) {
+      expect(retryOfferProblem(malformed)).toBe(problem);
+      expect(dueRetryRows([malformed], at)).toEqual([]);
+    }
+  });
 });
 
 describe("flair#2797 — retry row transitions", () => {

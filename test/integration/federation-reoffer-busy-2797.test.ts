@@ -4,8 +4,9 @@
  * A generic Memory row the receiver refused `merge_target_busy` (its id's write
  * lock was held) is kept in the sender's FederationRetry table and offered
  * again on a later cycle, even though the sender's cursor has already advanced
- * past the row's own `updatedAt`. A non-retryable refusal leaves a terminal row
- * that the retry path does not select again.
+ * past the row's own `updatedAt`. A first non-retryable refusal creates no
+ * retry row; an existing pending row becomes terminal and the retry path does
+ * not select it again.
  *
  * The receiver holds the id's lock through the merge's existing pause point
  * (`federation-merge`): a second signed push from the same peer pauses there,
@@ -457,6 +458,58 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
       expect(warn.mock.calls.some((call) => String(call[0]).includes(retryKey(id)) && String(call[0]).includes("unknown_reason"))).toBe(true);
     } finally {
       console.warn = original;
+    }
+    expect(await readRow(receiver, "Memory", id)).toBeNull();
+    const stored = await readRow(sender, "FederationRetry", retryKey(id));
+    expect(stored.state).toBe("pending");
+    expect(stored.attempts).toBe(1);
+  }, 180_000);
+
+  it("a pending row carrying an outcome is not offered and no batch reaches the receiver", async () => {
+    await clearRetries();
+    await setCursorNow();
+    const id = "memory-bad-outcome";
+    const at = new Date(Date.now() - 600_000).toISOString();
+    await insertRow(sender, "Memory", memoryRow(id, "bad-outcome", at));
+    await insertRow(sender, "FederationRetry", retryRow(id, "merge_target_busy", { resolution: "merged" }));
+
+    capturedSyncBodies = [];
+    proxy = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname !== "/FederationSync" || req.method !== "POST") return new Response("not found", { status: 404 });
+        const text = await req.text();
+        const body = JSON.parse(text);
+        if (Array.isArray(body.records) && body.records.length > 0) capturedSyncBodies.push(body);
+        return fetch(`${receiver.httpURL}/FederationSync`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: text,
+        });
+      },
+    });
+    expect(proxy.port).not.toBe(9925);
+    expect(proxy.port).not.toBe(9926);
+    await ops(sender, { operation: "update", table: "Peer", records: [{ id: HUB_ID, endpoint: `http://127.0.0.1:${proxy.port}`, updatedAt: new Date().toISOString() }] });
+
+    const warn = mock((...args: any[]) => {
+      void args;
+    });
+    const original = console.warn;
+    console.warn = warn as any;
+    try {
+      const result = await sync();
+      expect(result.error, String(result.error)).toBeUndefined();
+      expect(result.pushed, JSON.stringify(result)).toBe(0);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes(retryKey(id)) && String(call[0]).includes("outcome_mismatch"))).toBe(true);
+      expect(capturedSyncBodies, "a retry batch reached the receiver").toEqual([]);
+    } finally {
+      console.warn = original;
+      await ops(sender, { operation: "update", table: "Peer", records: [{ id: HUB_ID, endpoint: receiver.httpURL, updatedAt: new Date().toISOString() }] });
+      proxy.stop(true);
+      proxy = null;
     }
     expect(await readRow(receiver, "Memory", id)).toBeNull();
     const stored = await readRow(sender, "FederationRetry", retryKey(id));

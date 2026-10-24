@@ -9,13 +9,15 @@
  * The receiver's response names each refused record and its reason
  * (`refused`). A reason in {@link MEMORY_RETRY_REASONS} may clear on a later
  * offer, so the sender keeps one pending row for that (hub, Memory, record)
- * tuple and offers the record again on a later cycle while that pending row
- * exists, independent of its own cursor. Any other reason is final: an
- * existing pending row becomes `refused_terminal`, and the retry path does not
- * select a terminal row again (a later row update can still select it through
- * the ordinary cursor).
+ * tuple and offers the record again on a later cycle while that pending row is
+ * due and the source row is still eligible, independent of its own cursor. A
+ * pending row can become private, disappear or fail validation before it is
+ * offered again. Any other reason is final: an existing pending row becomes
+ * `refused_terminal`, and the retry path does not select a terminal row again
+ * (a later row update can still select it through the ordinary cursor).
  */
 import { retryEntryKey } from "./federation-retry-key.js";
+import { retryRowProblem } from "../../resources/federation-retry-lib.js";
 
 /**
  * The retryable SkipReason names a generic Memory record can be refused with.
@@ -61,8 +63,8 @@ export const RETRY_ROW_FIELDS = [
 ] as const;
 
 /**
- * Wait before offering a pending row again, by the number of refusals it has
- * collected. The first re-offer is immediate (the lock or change that refused
+ * Wait before offering a pending row again, by the number of attempts it has
+ * reserved. The first re-offer is immediate (the lock or change that refused
  * it may already be gone); later ones back off. The last entry repeats.
  */
 export const MEMORY_RETRY_BACKOFF_MS = [0, 30_000, 300_000, 1_800_000] as const;
@@ -87,7 +89,7 @@ export interface RetryQueueRow {
 }
 
 /** Why a row must not be offered, or null when it keeps the sender's pending-row conventions. */
-export type RetryOfferProblem = "wrong_state" | "wrong_table" | "id_mismatch" | "unknown_reason";
+export type RetryOfferProblem = "wrong_state" | "wrong_table" | "id_mismatch" | "unknown_reason" | "outcome_mismatch";
 
 export function retryOfferProblem(row: RetryQueueRow, table = "Memory"): RetryOfferProblem | null {
   if (row.state !== "pending") return "wrong_state";
@@ -98,6 +100,15 @@ export function retryOfferProblem(row: RetryQueueRow, table = "Memory"): RetryOf
   } catch {
     return "id_mismatch";
   }
+  // The reader and the transition call a pending row carrying an outcome
+  // malformed; the sender selects rows from the same table, so it applies
+  // that shared rule rather than deciding on its own fields alone.
+  const sharedProblem = retryRowProblem(row as Record<string, unknown>);
+  if (sharedProblem === "outcome_mismatch") return "outcome_mismatch";
+  if (sharedProblem === "id_mismatch") return "id_mismatch";
+  if (sharedProblem === "unknown_state") return "wrong_state";
+  // `retry_unknown` is legitimate here and is not a SkipReason, so the sender
+  // keeps its own stricter pending-reason list.
   if (typeof row.lastReason !== "string" || !MEMORY_PENDING_REASONS.has(row.lastReason)) return "unknown_reason";
   return null;
 }
@@ -133,7 +144,8 @@ export interface RefusalRowInput {
  * The row to write for a retryable refusal. A first refusal creates a pending
  * row with `attempts: 1`; a later one keeps `firstRefusedAt` and `createdAt`,
  * increments `attempts` and moves `lastAttemptAt`, unless that offer already
- * reserved its attempt before sending. `attempts` counts offers.
+ * reserved its attempt before sending. `attempts` counts reserved attempts, not
+ * wire sends.
  */
 export function retryRowForRefusal(input: RefusalRowInput): Record<string, unknown> {
   const id = retryEntryKey(input.peerId, "Memory", input.recordId);
