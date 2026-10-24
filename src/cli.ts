@@ -307,6 +307,7 @@ import {
 } from "./commands/soul.js";
 import {
   bindCli as bindRemCli,
+  exitUnknownOutcome,
   register as registerRem,
 } from "./commands/rem.js";
 import {
@@ -9249,6 +9250,10 @@ async function runCli(): Promise<void> {
   try {
     await program.parseAsync();
   } catch (err: any) {
+    // A write that crossed its whole-request deadline may have committed.
+    // Report it exactly as `flair rem` does and exit 3 ("unknown"), so every
+    // command that lets the error propagate gives the same answer.
+    if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
     // Errors the API layer already translated (flair#1719) carry a sentence
     // naming the actor, state and remedy; print it without the undici stack.
     if (err && typeof err === "object" && err.flairFriendly === true) {

@@ -535,7 +535,7 @@ const REM_PAUSE_FLAG = resolve(resolveHome(), ".flair", "rem.paused");
  * `flair memory verify` uses it), distinct from the 1 an ordinary failure
  * exits with.
  */
-function exitUnknownOutcome(err: ApiRequestOutcomeUnknown): never {
+export function exitUnknownOutcome(err: ApiRequestOutcomeUnknown): never {
   console.error(`Unknown outcome: ${err.message}`);
   console.error(`The request may or may not have taken effect; inspect the target before re-running.`);
   process.exit(3);

@@ -10,7 +10,7 @@ import { applyOrReportClaudeMdBootstrap } from "../doctor-client.js";
 import { applyOrRepinSessionStartHook } from "../lib/owned-pins.js";
 import { hookSettingsPath } from "../hook-install.js";
 import { ClientId, claudeCodeMcpEntry, detectClients, renderWiringSummary, wireAntigravity, wireClaudeCodeJson, wireCodex, wireCursor, wireGemini, wirePi } from "../install/clients.js";
-import { DEFAULT_ADMIN_USER, authFetch, defaultAdminPassPath, defaultKeysDir, readAdminPassFileSecure, resolveAdminUser } from "../lib/auth-resolve.js";
+import { DEFAULT_ADMIN_USER, ApiRequestOutcomeUnknown, authFetch, defaultAdminPassPath, defaultKeysDir, readAdminPassFileSecure, resolveAdminUser } from "../lib/auth-resolve.js";
 import {
   INIT_RESET_ADMIN_PASS_COMMAND,
   detectPersistedAdminUser,
@@ -1493,6 +1493,7 @@ program
                 { baseUrl: httpUrl, explicitAdminPass: adminPass, adminUser });
               console.log(`   ✓ soul:${key} set`);
             } catch (err: unknown) {
+              if (err instanceof ApiRequestOutcomeUnknown) throw err;
               const message = err instanceof Error ? err.message : String(err);
               console.warn(`   ⚠ soul:${key} failed: ${message}`);
             }
