@@ -2,14 +2,12 @@
 //
 // A resource invoked with no caller context resolves to flair's trusted
 // `internal` verdict: reads unfiltered across every agent, writes unattributed,
-// and the admin-only gate passes. That is correct for flair's own maintenance
-// work and a silent, invisible mistake in an embedding application — both spell
-// it `new Memory()`, and neither produces an error.
+// and the admin-only gate refuses it (flair#2837).
 //
 // The verdict is deliberately UNCHANGED here; ~40 assertions across the suite
 // pin it, and altering it is a breaking change to every internal call site.
-// What changes is that it is no longer silent: a call that MEANS to take that
-// authority says so with internalContext(), and anything else warns once.
+// The resolver logs a warning for an `internal` verdict whose context lacks the
+// marker internalContext() sets, and a module-level latch stops later ones.
 //
 // ── Why this pins the PREDICATE and not the console output ──────────────────
 // The warning is latched once per process. bun shares one module registry
@@ -62,6 +60,7 @@ describe("flair#936 — a deliberate elevated call is distinguishable from a for
     // An error must enable a response: say what happened and what to do next.
     expect(INTERNAL_BY_OMISSION_WARNING).toContain("[flair-auth]");
     expect(INTERNAL_BY_OMISSION_WARNING).toContain("UNFILTERED");
+    expect(INTERNAL_BY_OMISSION_WARNING).toContain("the admin-only gate (allowAdmin) refuses it");
     expect(INTERNAL_BY_OMISSION_WARNING).toContain("agentContext");
     expect(INTERNAL_BY_OMISSION_WARNING).toContain("internalContext");
   });
