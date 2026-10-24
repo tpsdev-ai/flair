@@ -33,6 +33,9 @@
 //   (i) the update throws after a different status was committed: the read
 //       finds that status, so the promotion is `unconfirmed` with the status in
 //       `readBack`.
+//   (j) the stamp's post-commit confirmation read fails though the stamp
+//       committed: the candidate stays pending and the next sweep adopts the
+//       committed row.
 //
 // Two separate test seams, both off unless the test turns them on:
 //
@@ -51,6 +54,10 @@
 //       arm.candidate-update-commit-other-throw.<id>
 //                                                 commit the record with status
 //                                                 "rejected" instead, then throw.
+//     It also wraps Memory.update and Memory.get for the stamp's confirmation
+//     read of a promoted row (see STAMP_CONFIRM_FAIL):
+//       arm.stamp-confirm-fail.<agentId>          the stamp's post-commit
+//                                                 confirmation read throws.
 //   - Two txn pause points this change adds to the resource itself
 //     (`auto-promote-adopt-selected`, `auto-promote-adopt-locked`, through
 //     resources/txn-pause-point.ts), used by (g) and (h). They are inert
@@ -70,7 +77,8 @@ import { promotionContentHash } from "../../resources/promotion-binding.ts";
 const FAULT_MODULE_REL = join("dist", "resources", "zz-test-failing-candidate-update-2714.js");
 const FAULT_MESSAGE = "test component: forced candidate update failure (flair#2714)";
 const READ_FAULT_MESSAGE = "test component: forced candidate read failure (flair#2714)";
-const FAULT_MODULE_SRC = `import { unlinkSync, writeFileSync } from "node:fs";
+const STAMP_CONFIRM_MESSAGE = "test component: forced stamp confirmation read failure (flair#2694)";
+const FAULT_MODULE_SRC = `import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { databases } from "harper";
 const table = databases.flair.MemoryCandidate;
@@ -111,6 +119,46 @@ table.put = async function (record, ...rest) {
 table.get = function (id, ...rest) {
   if (typeof id === "string" && readFailNext.delete(id)) throw new Error(${JSON.stringify(READ_FAULT_MESSAGE)});
   return get.call(this, id, ...rest);
+};
+
+// flair#2694 item 3: the stamp's post-commit confirmation read fails while the
+// stamp itself commits. The write is staged with Memory.update; the reads that
+// follow with an explicit empty context are the stamp's pre-commit confirmation
+// (the committed row does not show the stamp yet) and, after the commit, the
+// write-back's verification read (the committed row shows it); the arm fires on
+// the read that shows the stamp, after the commit.
+const memory = databases.flair.Memory;
+const memoryGet = memory.get;
+const memoryUpdate = memory.update;
+const stampVerifyPending = new Set();
+function promotedOwner(id) {
+  const at = id.indexOf("-promoted-");
+  const owner = at > 0 ? id.slice(0, at) : "";
+  return /^[a-z0-9-]{1,80}$/.test(owner) ? owner : "";
+}
+memory.update = async function (id, patch, ...rest) {
+  const result = await memoryUpdate.call(this, id, patch, ...rest);
+  const dir = process.env.FLAIR_TEST_PAUSE_DIR;
+  if (dir && patch && patch.promotionStatus === "approved" && typeof id === "string") {
+    const owner = promotedOwner(id);
+    if (owner && existsSync(join(dir, "arm.stamp-confirm-fail." + owner))) stampVerifyPending.add(id);
+  }
+  return result;
+};
+memory.get = async function (id, ctx, ...rest) {
+  const dir = process.env.FLAIR_TEST_PAUSE_DIR;
+  const committedRead = ctx && typeof ctx === "object" && Object.keys(ctx).length === 0;
+  if (dir && committedRead && typeof id === "string" && stampVerifyPending.has(id)) {
+    const stored = await memoryGet.call(this, id, ctx, ...rest);
+    if (stored && stored.promotionStatus === "approved") {
+      const owner = promotedOwner(id);
+      const armedNow = owner ? consume(dir, "stamp-confirm-fail", owner) : false;
+      stampVerifyPending.delete(id);
+      if (armedNow) throw new Error(${JSON.stringify(STAMP_CONFIRM_MESSAGE)});
+    }
+    return stored;
+  }
+  return memoryGet.call(this, id, ctx, ...rest);
 };
 `;
 
@@ -250,6 +298,7 @@ const UPDATE_FAIL = "candidate-update-fail";
 const UPDATE_FAIL_UNREADABLE = "candidate-update-fail-unreadable";
 const COMMIT_THROW = "candidate-update-commit-throw";
 const COMMIT_OTHER_THROW = "candidate-update-commit-other-throw";
+const STAMP_CONFIRM_FAIL = "stamp-confirm-fail";
 
 /**
  * Arm the pause point `point`, start `trigger`, run `compete` once the trigger
@@ -682,5 +731,54 @@ describe("flair#2714 — a thrown candidate update is reported from the candidat
     expect(rows.map((r) => r.id)).toEqual([entry.memoryId]);
     expect(entry.readBack).toBe(`status rejected, promotedRowId ${entry.memoryId}, reviewerId ${MACHINE_REVIEWER_ADK_AUTO_PROMOTE}`);
     expect((await readCandidate(harper, cid)).status).toBe("rejected");
+  }, 120_000);
+
+  it("(j) the stamp's confirmation read fails though the stamp committed: the candidate stays pending and the next sweep adopts the row", async () => {
+    const stampAgent = mkAgent("ap2714-agent-stamp-unconfirmed");
+    const cid = "ap2714-stamp-unconfirmed";
+    const text = "Access reviews are completed before the quarter closes.";
+    await seedAgent(harper, stampAgent);
+    await seedCandidate(harper, stampAgent.id, cid, text);
+    arm(STAMP_CONFIRM_FAIL, stampAgent.id);
+
+    const first = await sweep(harper, stampAgent);
+
+    expect(fired(STAMP_CONFIRM_FAIL, stampAgent.id), "the forced confirmation-read failure fired").toBe(true);
+    expect(first.promoted, "an unconfirmed stamp is not reported promoted").toEqual([]);
+    expect(first.count).toBe(0);
+    expect(first.considered).toBe(1);
+    expect(first.incomplete).toEqual([]);
+    expect(first.unconfirmed).toEqual([]);
+    expect(first.skipped).toEqual([{ id: cid, reason: "stamp_refused" }]);
+    const rows = await rowsWithClaim(harper, stampAgent.id, text);
+    expect(rows.length, "the stamp committed on one Memory row").toBe(1);
+    const memoryId = rows[0].id as string;
+    expect(rows[0].promotionStatus, "the stamp landed although its read back failed").toBe("approved");
+    expect(rows[0].promotedBy).toBe(MACHINE_REVIEWER_ADK_AUTO_PROMOTE);
+    expect(rows[0].promotionContentHash).toBe(promotionContentHash(text));
+
+    const pending = await readCandidate(harper, cid);
+    expect(pending.status, "the candidate is left pending").toBe("pending");
+    expect(pending.promotedRowId).toBe(memoryId);
+    expect(pending.promotedRowInstanceToken).toBe(rows[0].instanceToken);
+
+    const next = await sweep(harper, stampAgent);
+
+    expect(next.skipped).toEqual([]);
+    expect(next.incomplete).toEqual([]);
+    expect(next.unconfirmed).toEqual([]);
+    expect(next.promoted, "the next sweep adopts the committed stamped row").toEqual([memoryId]);
+    expect(next.count).toBe(1);
+    const after = await rowsWithClaim(harper, stampAgent.id, text);
+    expect(after.map((r) => r.id), "no second Memory row was written").toEqual([memoryId]);
+    const cand = await readCandidate(harper, cid);
+    expect(cand.status).toBe("promoted");
+    expect(cand.reviewerId).toBe(MACHINE_REVIEWER_ADK_AUTO_PROMOTE);
+    expect(cand.promotedRowId).toBe(memoryId);
+    expect(cand.decidedAt, "the candidate records the row's promotedAt").toBe(after[0].promotedAt);
+
+    const again = await sweep(harper, stampAgent);
+    expect(again.considered).toBe(0);
+    expect((await rowsWithClaim(harper, stampAgent.id, text)).length).toBe(1);
   }, 120_000);
 });
