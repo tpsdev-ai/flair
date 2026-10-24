@@ -676,7 +676,8 @@ export function createEmbeddingStampMigration(
                 // own attempt on the row was unconfirmed and the row now holds
                 // the text that attempt embedded. The attempt outcome comes from
                 // the loop's own state, not from the row's value; a row another
-                // writer made current stays uncounted, as on main.
+                // writer made current that does not hold the text this attempt
+                // embedded stays uncounted, as on main.
                 if (unconfirmed && ownUnconfirmed !== undefined && skillEmbedText(rowNow) === ownUnconfirmed.text) ok = true;
                 break;
               }
