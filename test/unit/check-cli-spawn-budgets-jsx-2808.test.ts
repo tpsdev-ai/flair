@@ -5,15 +5,15 @@
 // gate masks JSX text in every file kind TypeScript parses JSX in and that it
 // scans: .tsx and .jsx (ScriptKind.TSX / JSX) plus .js, .mjs and .cjs
 // (ScriptKind.JS). Each JsxText node is masked from pos to end, every character
-// except \n, \r and \r\n replaced by a space, so length and line/column
-// positions stay aligned.
+// except \n, \r, U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR)
+// replaced by a space, so length and line/column positions stay aligned.
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
-import { findSpawnCalls, maskJsxText, scanTree } from "../../scripts/ci/check-cli-spawn-budgets.mjs";
+import { findSpawnCalls, maskJsxText, maskLiteralsAndComments, scanTree } from "../../scripts/ci/check-cli-spawn-budgets.mjs";
 
 let dirs: string[] = [];
 
@@ -45,6 +45,16 @@ function expectParses(source: string, fileName: string): void {
   const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, scriptKindFor(fileName));
   expect((sf as any).parseDiagnostics.length).toBe(0);
 }
+
+/** TypeScript's line and character for `index`, parsed the way the gate parses `fileName`. */
+function positionAt(source: string, fileName: string, index: number): ts.LineAndCharacter {
+  const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, scriptKindFor(fileName));
+  return sf.getLineAndCharacterOfPosition(index);
+}
+
+// The two separators TypeScript's line map counts as a line break besides \n and \r.
+const SEPARATORS = ["\u2028", "\u2029"] as const;
+const SEPARATOR_NAMES: Record<string, string> = { "\u2028": "U+2028", "\u2029": "U+2029" };
 
 /** Write one fixture under a fresh tree's `test/` and scan the tree. */
 function scanFixture(fileName: string, source: string) {
@@ -137,4 +147,34 @@ describe("JSX text masks exactly its own span (flair#2808)", () => {
     expect(masked.length).toBe(src.length);
     expect(masked.replace(/[^\r\n]/g, "")).toBe(src.replace(/[^\r\n]/g, ""));
   });
+
+  for (const ext of ["tsx", "js"] as const) {
+    for (const sep of SEPARATORS) {
+      it(`keeps ${SEPARATOR_NAMES[sep]} inside JSX text (.${ext})`, () => {
+        const src = `const el = <p>alpha${sep}omega</p>;\nconst after = 1;\n`;
+        const fileName = `fixture.${ext}`;
+        const masked = maskJsxText(src, fileName);
+        expect(masked.length).toBe(src.length);
+        const index = src.indexOf("after");
+        const original = positionAt(src, fileName, index);
+        expect(original.line).toBeGreaterThan(positionAt(src, fileName, src.indexOf("alpha")).line);
+        expect(positionAt(masked, fileName, index)).toEqual(original);
+      });
+    }
+  }
+});
+
+describe("literal text keeps every line break TypeScript counts (flair#2808)", () => {
+  for (const sep of SEPARATORS) {
+    it(`keeps ${SEPARATOR_NAMES[sep]} inside a string literal (.ts)`, () => {
+      const src = `const label = "alpha${sep}omega";\nconst after = 1;\n`;
+      const fileName = "fixture.ts";
+      const masked = maskLiteralsAndComments(src, fileName);
+      expect(masked.length).toBe(src.length);
+      const index = src.indexOf("after");
+      const original = positionAt(src, fileName, index);
+      expect(original.line).toBeGreaterThan(positionAt(src, fileName, src.indexOf("alpha")).line);
+      expect(positionAt(masked, fileName, index)).toEqual(original);
+    });
+  }
 });

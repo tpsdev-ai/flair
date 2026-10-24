@@ -210,13 +210,22 @@ function isJsxFileName(fileName) {
 }
 
 /**
+ * Every character TypeScript's line map treats as a line break: `\n`, `\r`,
+ * U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR). A `\r\n` pair is
+ * two of these characters. Both maskers below keep exactly this set, so a
+ * masked copy reports the same line and character for every position as the
+ * original (flair#2808).
+ */
+const LINE_BREAK_CHARS = new Set(["\n", "\r", "\u2028", "\u2029"]);
+
+/**
  * The source with every JSX TEXT node replaced by spaces, keeping its length and
  * its line breaks (flair#2808). JSX text is prose to the parser, not code: an
  * apostrophe, quote or `//` in it otherwise opens a string or a comment in the
  * text-based walks and swallows the closing paren of the call or case around
  * it. Each `JsxText` node is masked from `pos` to `end`, replacing every
- * character except `\n`, `\r` and the pair `\r\n` with a space, so lengths
- * and line/column positions stay aligned. A JSX attribute's string value is a
+ * character except the four in `LINE_BREAK_CHARS` with a space, so lengths and
+ * line/column positions stay aligned. A JSX attribute's string value is a
  * TypeScript string literal, which the literal masker already blanks (and
  * `skipNonCode` already skips).
  */
@@ -229,7 +238,7 @@ export function maskJsxText(src, fileName = UNNAMED_SOURCE) {
     if (node.kind === ts.SyntaxKind.JsxText) {
       masked = true;
       for (let j = node.pos; j < node.end && j < src.length; j++) {
-        if (src[j] !== "\n" && src[j] !== "\r") out[j] = " ";
+        if (!LINE_BREAK_CHARS.has(src[j])) out[j] = " ";
       }
       return;
     }
@@ -242,18 +251,19 @@ export function maskJsxText(src, fileName = UNNAMED_SOURCE) {
 /**
  * The source as TypeScript's parser reads it, with every comment and the text of
  * every string literal, template literal and regex literal replaced by spaces
- * (flair#2774). Newlines and length are kept, so every index still points at the
- * same character. A template's `${` and `}` and the expressions between them
+ * (flair#2774). Line breaks (the four in `LINE_BREAK_CHARS`) and length are
+ * kept, so every index and every line/column position still points at the same
+ * character. A template's `${` and `}` and the expressions between them
  * stay as code: a `Bun.spawn(...)` of the CLI entry there IS a real call
  * (flair#1825). Used for spawn-CALL matching, so a `Bun.spawn(...)` mentioned in
  * a string or comment is not mistaken for a call. The argv/options TEXT a call
  * reports is sliced from the ORIGINAL source, so the CLI-entry check still reads
  * real literal text.
  */
-function maskLiteralsAndComments(src, fileName = UNNAMED_SOURCE, sf = parseSourceFile(src, fileName)) {
+export function maskLiteralsAndComments(src, fileName = UNNAMED_SOURCE, sf = parseSourceFile(src, fileName)) {
   const out = src.split("");
   const blank = (from, to) => {
-    for (let j = from; j < to && j < src.length; j++) if (src[j] !== "\n") out[j] = " ";
+    for (let j = from; j < to && j < src.length; j++) if (!LINE_BREAK_CHARS.has(src[j])) out[j] = " ";
   };
   // Every comment sits in the trivia between two tokens, and TypeScript reports
   // it as a TRAILING comment range of the earlier token or a LEADING range of
