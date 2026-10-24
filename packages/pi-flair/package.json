@@ -23,11 +23,11 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=18"
+    "node": "v26.12.1"
   },
   "dependencies": {
     "@tpsdev-ai/flair-client": "0.62.0",
-    "@sinclair/typebox": "0.34.48"
+    "@sinclair/typebox": "0.34.52"
   },
   "license": "Apache-2.0",
   "repository": {
@@ -47,8 +47,8 @@
     "agent"
   ],
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.2",
-    "@types/node": "24.11.0",
+    "@earendil-works/pi-coding-agent": "0.99.2",
+    "@types/node": "24.19.2",
     "typescript": "5.9.3"
   }
 }
