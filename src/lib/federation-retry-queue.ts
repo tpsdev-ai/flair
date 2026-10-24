@@ -17,7 +17,7 @@
  * (a later row update can still select it through the ordinary cursor).
  */
 import { retryEntryKey } from "./federation-retry-key.js";
-import { retryRowProblem } from "../../resources/federation-retry-lib.js";
+import { retryRowProblem } from "./federation-retry-row.js";
 
 /**
  * The retryable SkipReason names a generic Memory record can be refused with.
@@ -103,7 +103,10 @@ export function retryOfferProblem(row: RetryQueueRow, table = "Memory"): RetryOf
   // The reader and the transition call a pending row carrying an outcome
   // malformed; the sender selects rows from the same table, so it applies
   // that shared rule rather than deciding on its own fields alone.
-  const sharedProblem = retryRowProblem(row as Record<string, unknown>);
+  const sharedProblem = retryRowProblem(
+    row as Record<string, unknown>,
+    (value) => typeof value === "string" && MEMORY_PENDING_REASONS.has(value),
+  );
   if (sharedProblem === "outcome_mismatch") return "outcome_mismatch";
   if (sharedProblem === "id_mismatch") return "id_mismatch";
   if (sharedProblem === "unknown_state") return "wrong_state";
