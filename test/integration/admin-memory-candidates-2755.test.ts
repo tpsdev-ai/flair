@@ -18,6 +18,18 @@
  * strings as given. A row with such an id that the route reads fails its
  * agent's listing with `candidate_id_unusable`, and a restore that gets that
  * answer writes no target row.
+ *
+ * Agent ids holding `.`, `_`, a non-ASCII letter, `?`, `/`, `%`, `#`, `&` or
+ * `+`, sent with encodeURIComponent as restore sends them, list and page to
+ * that agent's rows. With a snapshot root present, `rem restore --agent`
+ * refuses each of them except `agent-a_b` by the snapshot id rule
+ * (`^[a-zA-Z0-9_-]+$`, listSnapshots in src/rem/snapshot.ts) before it sends a
+ * request.
+ *
+ * An unusable id that sorts after the first pages fails the listing on the
+ * first page that reads it (a page reads one row past its limit), after the
+ * earlier pages were returned; a restore refused that way on its second page
+ * sends no write.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -29,6 +41,7 @@ import { pathToFileURL } from "node:url";
 import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { nodeBin } from "../helpers/node-runtime";
 import { createSnapshot } from "../../src/rem/snapshot.ts";
+import { CANDIDATE_LIST_LIMIT } from "../../src/rem/restore.ts";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const FETCH_LOG_PRELOAD = join(import.meta.dirname, "..", "helpers", "fetch-request-log-preload.ts");
@@ -37,6 +50,8 @@ const OTHER_AGENT_ID = "agent-b";
 const MEMORY_ID = "m-restored";
 const SOUL_ID = `soul-${AGENT_ID}`;
 const createdAt = new Date().toISOString();
+/** Agent ids holding `.`, `_`, a non-ASCII letter, or a character encodeURIComponent escapes. */
+const ENCODED_AGENT_IDS = ["agent.a", "agent-a_b", "agent-ä", "agent?a", "agent/a", "agent%a", "agent#a", "agent&a+b"];
 
 let adminHarper: HarperInstance;
 let other: HarperInstance;
@@ -97,6 +112,22 @@ async function candidateIds(h: HarperInstance, agentId: string): Promise<string[
   return rows.map((r) => String(r.id)).sort();
 }
 
+/** One agent's Memory, Soul and MemoryCandidate rows, each table's rows serialized and sorted. */
+async function agentRows(h: HarperInstance, agentId: string): Promise<Record<string, string[]>> {
+  const out: Record<string, string[]> = {};
+  for (const table of ["Memory", "Soul", "MemoryCandidate"]) {
+    const rows = await ops(h, {
+      operation: "search_by_conditions",
+      table,
+      operator: "and",
+      conditions: [{ search_attribute: "agentId", search_type: "equals", search_value: agentId }],
+      get_attributes: ["*"],
+    });
+    out[table] = rows.map((r) => JSON.stringify(r)).sort();
+  }
+  return out;
+}
+
 async function seedAgent(h: HarperInstance, agent: TestAgent, role: "admin" | "agent"): Promise<void> {
   const res = await fetch(h.opsURL, {
     method: "POST",
@@ -120,7 +151,7 @@ async function seedCandidate(h: HarperInstance, id: string, agentId: string, cla
 }
 
 /** With `fetchLog`, the CLI loads the request-log preload, which appends each `fetch` it sends to that file. */
-function runRestore(h: HarperInstance, opsSide: HarperInstance, date: string, fetchLog?: string): Promise<{ code: number; stdout: string; stderr: string }> {
+function runRestore(h: HarperInstance, opsSide: HarperInstance, date: string, fetchLog?: string, agentId = AGENT_ID): Promise<{ code: number; stdout: string; stderr: string }> {
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
     HOME: home,
@@ -139,7 +170,7 @@ function runRestore(h: HarperInstance, opsSide: HarperInstance, date: string, fe
   for (const [key, value] of Object.entries(childEnv)) if (value === undefined) delete childEnv[key];
   const preload = fetchLog ? ["--import", pathToFileURL(FETCH_LOG_PRELOAD).href] : [];
   const child = Bun.spawn(
-    [nodeBin({ env: childEnv as Record<string, string> }), ...preload, CLI, "rem", "restore", date, "--agent", AGENT_ID, "--apply", "--admin-pass", h.admin.password],
+    [nodeBin({ env: childEnv as Record<string, string> }), ...preload, CLI, "rem", "restore", date, "--agent", agentId, "--apply", "--admin-pass", h.admin.password],
     { env: childEnv as Record<string, string>, timeout: 90_000, stdout: "pipe", stderr: "pipe" },
   );
   return (async () => {
@@ -148,6 +179,30 @@ function runRestore(h: HarperInstance, opsSide: HarperInstance, date: string, fe
     const code = await child.exited;
     return { code, stdout, stderr };
   })();
+}
+
+/** The requests a `runRestore` fetch log holds; a run that sent none leaves no file. */
+function requestsIn(fetchLog: string): Array<{ method: string; host: string; path: string }> {
+  let text: string;
+  try {
+    text = readFileSync(fetchLog, "utf-8");
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return [];
+    throw err;
+  }
+  return text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+async function restoreSnapshotStem(agentId: string, memoryId: string): Promise<string> {
+  const created = await createSnapshot({
+    agentId,
+    flairVersion: "0.0.0-test",
+    memories: [{ id: memoryId, agentId, content: "restored memory", durability: "persistent", createdAt }],
+    soul: { id: `soul-${agentId}`, agentId, key: "identity", value: "restored soul", createdAt },
+    pendingCandidateCount: null,
+    rootOverride: join(home, ".flair", "snapshots"),
+  });
+  return basename(created.path).replace(/\.tar\.gz$/, "");
 }
 
 beforeAll(async () => {
@@ -159,6 +214,17 @@ beforeAll(async () => {
   await seedCandidate(adminHarper, "c-a-2", AGENT_ID, "second candidate");
   await seedCandidate(adminHarper, "c-a-3", AGENT_ID, "third candidate");
   await seedCandidate(adminHarper, "c-b-1", OTHER_AGENT_ID, "another agent's candidate");
+  await ops(adminHarper, {
+    operation: "insert",
+    table: "MemoryCandidate",
+    records: [
+      // Each candidate id carries its agent id, so the after cursor holds the same characters.
+      ...ENCODED_AGENT_IDS.flatMap((agentId) =>
+        [3, 5, 1, 4, 2].map((n) => ({ id: `c-${agentId}-${n}`, agentId, claim: `candidate ${n}`, generatedAt: createdAt, status: "pending" }))),
+      // The agent an unencoded agent?a path names.
+      { id: "c-agent-1", agentId: "agent", claim: "prefix agent candidate", generatedAt: createdAt, status: "pending" },
+    ],
+  });
   home = mkdtempSync(join(tmpdir(), "flair-2755-real-"));
   mkdirSync(join(home, ".flair"), { recursive: true });
 }, 300_000);
@@ -388,5 +454,115 @@ describe("flair#2755 — admin-only candidate listing", () => {
     expect(result.stdout).toContain(`the target's MemoryCandidate listing for agent ${AGENT_ID} could not be read completely`);
     expect(result.stdout).toContain("No target rows were deleted or written.");
     expect(await agentState()).toEqual(before);
+  }, 300_000);
+
+  test("encoded agent ids page their own candidates completely, in id order", async () => {
+    for (const agentId of ENCODED_AGENT_IDS) {
+      const listed: string[] = [];
+      const hasMore: boolean[] = [];
+      let after: string | undefined;
+      for (let page = 1; page <= 3; page++) {
+        const query = `?limit=2${after === undefined ? "" : `&after=${encodeURIComponent(after)}`}`;
+        const res = await fetch(`${adminHarper.httpURL}${path(encodeURIComponent(agentId), query)}`, { headers: { Authorization: adminAuth(adminHarper) } });
+        expect(res.status, `${agentId} page ${page}`).toBe(200);
+        const body = await res.json() as any;
+        listed.push(...body.candidates.map((c: any) => c.id));
+        hasMore.push(body.hasMore);
+        after = body.candidates.at(-1)?.id;
+      }
+      expect(listed, agentId).toEqual([1, 2, 3, 4, 5].map((n) => `c-${agentId}-${n}`));
+      expect(hasMore, agentId).toEqual([true, true, false]);
+    }
+  }, 60_000);
+
+  test("rem restore admits agent-a_b and refuses the other encoded ids by the snapshot id rule before any request", async () => {
+    const acceptedLog = join(home, "agent-a_b-fetch-log.jsonl");
+    const accepted = await runRestore(adminHarper, adminHarper, await restoreSnapshotStem("agent-a_b", "m-restored-a_b"), acceptedLog, "agent-a_b");
+    expect(accepted.code, `stdout:\n${accepted.stdout}\nstderr:\n${accepted.stderr}`).toBe(0);
+    expect(accepted.stdout).toContain("Status:       completed");
+    const sent = requestsIn(acceptedLog).map((r) => `${r.method} ${r.path}`);
+    expect(sent.filter((r) => r.includes(" /AdminMemoryCandidates/"))).toEqual(["GET /AdminMemoryCandidates/agent-a_b"]);
+    expect(sent.filter((r) => r.includes(" /MemoryCandidate/")).sort()).toEqual([1, 2, 3, 4, 5].map((n) => `DELETE /MemoryCandidate/c-agent-a_b-${n}`));
+    expect(await candidateIds(adminHarper, "agent-a_b")).toEqual([]);
+    for (const agentId of ENCODED_AGENT_IDS.filter((id) => id !== "agent-a_b")) {
+      expect(await candidateIds(adminHarper, agentId)).toEqual([1, 2, 3, 4, 5].map((n) => `c-${agentId}-${n}`));
+    }
+    expect(await candidateIds(adminHarper, "agent")).toEqual(["c-agent-1"]);
+
+    // The snapshot root exists here, so listSnapshots (src/rem/snapshot.ts) refuses an id outside
+    // ^[a-zA-Z0-9_-]+$ before restore resolves its target.
+    for (const [i, agentId] of ENCODED_AGENT_IDS.filter((id) => id !== "agent-a_b").entries()) {
+      const fetchLog = join(home, `refused-agent-${i}-fetch-log.jsonl`);
+      const refused = await runRestore(adminHarper, adminHarper, "2026", fetchLog, agentId);
+      expect(refused.code, `${agentId}\nstdout:\n${refused.stdout}\nstderr:\n${refused.stderr}`).toBe(1);
+      expect(refused.stderr).toContain(`Error: invalid agent id: ${agentId}`);
+      expect(requestsIn(fetchLog)).toEqual([]);
+    }
+  }, 300_000);
+
+  test("an unusable id read on the third page fails that page, after the first two were returned", async () => {
+    const agentId = "agent-later-route";
+    await ops(adminHarper, {
+      operation: "insert",
+      table: "MemoryCandidate",
+      records: [
+        ...[1, 2, 3, 4, 5, 6].map((n) => ({ id: `later-r-${n}`, agentId, claim: `later ${n}`, generatedAt: createdAt, status: "pending" })),
+        // An array id; its first element sorts after every later-r-* id.
+        { id: ["later-s", "2836"], agentId, claim: "unusable id", generatedAt: createdAt, status: "pending" },
+      ],
+    });
+    const page = (query: string) => fetch(`${adminHarper.httpURL}${path(agentId, query)}`, { headers: { Authorization: adminAuth(adminHarper) } });
+
+    const first = await page("?limit=2");
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({ candidates: [{ id: "later-r-1" }, { id: "later-r-2" }], hasMore: true });
+    const second = await page("?limit=2&after=later-r-2");
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({ candidates: [{ id: "later-r-3" }, { id: "later-r-4" }], hasMore: true });
+    const third = await page("?limit=2&after=later-r-4");
+    expect(third.status).toBe(500);
+    expect((await third.json() as any).error).toBe("candidate_id_unusable");
+  }, 60_000);
+
+  test("a restore whose second candidate page answers candidate_id_unusable sends no delete or write", async () => {
+    const agentId = "agent-later-restore";
+    const usable = Array.from({ length: CANDIDATE_LIST_LIMIT + 20 }, (_, i) => `later-p-${String(i + 1).padStart(4, "0")}`);
+    await ops(adminHarper, {
+      operation: "insert",
+      table: "MemoryCandidate",
+      records: [
+        ...usable.map((id) => ({ id, agentId, claim: `later ${id}`, generatedAt: createdAt, status: "pending" })),
+        // An array id; its first element sorts after every later-p-* id.
+        { id: ["later-q", "2836"], agentId, claim: "unusable id", generatedAt: createdAt, status: "pending" },
+      ],
+    });
+    await ops(adminHarper, {
+      operation: "upsert",
+      table: "Memory",
+      records: [{ id: "m-drift-later", agentId, content: "drifted", durability: "persistent", createdAt }],
+    });
+
+    // At restore's page size, the first page answers and the second is refused.
+    const listPage = (query: string) =>
+      fetch(`${adminHarper.httpURL}${path(agentId, query)}`, { headers: { Authorization: adminAuth(adminHarper) }, signal: AbortSignal.timeout(15_000) });
+    const first = await listPage(`?limit=${CANDIDATE_LIST_LIMIT}`);
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({ candidates: usable.slice(0, CANDIDATE_LIST_LIMIT).map((id) => ({ id })), hasMore: true });
+    const second = await listPage(`?limit=${CANDIDATE_LIST_LIMIT}&after=${usable[CANDIDATE_LIST_LIMIT - 1]}`);
+    expect(second.status).toBe(500);
+    expect((await second.json() as any).error).toBe("candidate_id_unusable");
+
+    const before = await agentRows(adminHarper, agentId);
+    expect(before.MemoryCandidate).toHaveLength(usable.length + 1);
+    const fetchLog = join(home, "later-page-fetch-log.jsonl");
+    const result = await runRestore(adminHarper, adminHarper, await restoreSnapshotStem(agentId, "m-restored-later"), fetchLog, agentId);
+
+    const requests = requestsIn(fetchLog);
+    expect(requests.filter((r) => r.method !== "GET")).toEqual([]);
+    expect(requests.filter((r) => r.path === `/AdminMemoryCandidates/${agentId}`)).toHaveLength(2);
+    expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).not.toBe(0);
+    expect(result.stdout).toContain(`the target's MemoryCandidate listing for agent ${agentId} could not be read completely: GET /AdminMemoryCandidates answered candidate_id_unusable`);
+    expect(result.stdout).toContain("No target rows were deleted or written.");
+    expect(await agentRows(adminHarper, agentId)).toEqual(before);
   }, 300_000);
 });
