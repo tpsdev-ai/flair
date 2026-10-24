@@ -444,8 +444,8 @@ describe("SECURITY BOUNDARY — in-process identity is asserted, not verified", 
     expect(value.some((r: any) => r.agentId === BRAVO && r.visibility === "private")).toBe(true);
   });
 
-  test("BY OMISSION: a context-LESS SEMANTIC search is unfiltered too", async () => {
-    // The scary box in the guide claims this. It is true on both read paths.
+  test("A deliberate internalContext() SEMANTIC search is unfiltered too", async () => {
+    // The same internal verdict, read through SemanticSearch.
     const { ok, value } = await fleet("semanticRecallUnscoped", { q: "quarterly billing reconciliation ledger" });
     expect(ok).toBe(true);
     const owners = new Set(value.map((r: any) => r.agentId));
@@ -453,7 +453,7 @@ describe("SECURITY BOUNDARY — in-process identity is asserted, not verified", 
     expect(owners.size).toBeGreaterThan(1);
   }, 120_000);
 
-  test("BY OMISSION: a context-LESS call reads every agent's private records", async () => {
+  test("A deliberate internalContext() Memory read returns both agents' private records", async () => {
     // The same escalation from the other end. If Flair's `internal` verdict ever
     // stops being unfiltered, this test fails and the guidance changes with it;
     // while it passes, it is the reason an embedding app must never let an agent

@@ -221,7 +221,7 @@ That would turn the most ordinary bug there is — `agentContext(session.agentId
 | `internalContext()` | The named way to get the unfiltered verdict; the admin-only gate admits the internal verdict only for a call that carries its marker. |
 | `collectionResource(Cls, context)` | Context is **required**; omitting it throws rather than granting `internal`. |
 
-The privileged paths are now the longest ones to type, and `git grep "adminContext\|internalContext"` enumerates every deliberate escalation in your codebase. These are runtime guards, not type annotations — a plain-JavaScript embedder gets exactly the same protection.
+The privileged paths are now the longest ones to type, and `git grep "adminContext\|internalContext"` lists every call of those two helpers in your codebase. These are runtime guards, not type annotations — a plain-JavaScript embedder gets exactly the same protection.
 
 ### Individual identities, not one app identity
 
