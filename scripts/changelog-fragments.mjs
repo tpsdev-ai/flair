@@ -370,13 +370,14 @@ export function fixedForBunOnlyGhsas(allowlist) {
   );
 }
 
-// Fragments whose body uses the word "fixed" for a pinned GHSA. The word check is
-// case-insensitive and word-bounded, so "fixed" in prose counts.
+// Fragments whose body claims a pinned GHSA is fixed. The claim counts in the
+// forms fix, fixes, fixed and fixing. The check is case-insensitive and
+// word-bounded, so "prefix", "suffix" and "fixture" do not count.
 export function fixedFragmentsClaimingPinned(fragments, pinnedGhsas) {
   const offenders = [];
   for (const f of fragments) {
     const body = f.body.toUpperCase();
-    if (!/\bFIXED\b/.test(body)) continue;
+    if (!/\bFIX(?:E[SD]|ING)?\b/.test(body)) continue;
     for (const ghsa of pinnedGhsas) {
       if (body.includes(ghsa)) {
         offenders.push({ name: f.name, ghsa });

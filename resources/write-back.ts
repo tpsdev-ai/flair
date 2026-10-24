@@ -468,9 +468,10 @@ export function withoutHarperManagedFields(row: Record<string, unknown>): Record
 
 /**
  * Does the committed row show this attempt's write? Its identity is the row
- * this attempt wrote (an update keeps the basis's identity); each field the
- * plan wrote holds its staged value, and a non-idempotent plan is confirmed by
- * this attempt's commit marker (`writeId`), not by value equality.
+ * this attempt wrote — for an update, the basis with every identity field the
+ * update itself stages replaced by the staged value; each field the plan wrote
+ * holds its staged value, and a non-idempotent plan is confirmed by this
+ * attempt's commit marker (`writeId`), not by value equality.
  */
 function committedShowsWrite(committed: any, basis: any, decision: WriteBackPlan, writeId?: string): boolean {
   if ("skip" in decision) return true;

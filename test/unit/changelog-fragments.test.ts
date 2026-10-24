@@ -405,6 +405,34 @@ describe("fixedFragmentsClaimingPinned", () => {
     expect(offenders).toEqual([{ name: "fixed-fastify.md", ghsa: "GHSA-W2QP-RPH6-63G4" }]);
   });
 
+  test("flags the forms fix, fixes, fixed and fixing", () => {
+    for (const verb of ["fix", "fixes", "fixed", "fixing"]) {
+      const offenders = fixedFragmentsClaimingPinned(
+        [{ name: `changed-${verb}.md`, body: `- **Changed.** The gate is ${verb} GHSA-w2qp-rph6-63g4 in fastify.\n` }],
+        pinned,
+      );
+      expect(offenders).toEqual([{ name: `changed-${verb}.md`, ghsa: "GHSA-W2QP-RPH6-63G4" }]);
+    }
+  });
+
+  test("ignores ordinary words that contain the letters: prefix, suffix, fixture, fixtures", () => {
+    for (const word of ["prefix", "suffix", "fixture", "fixtures"]) {
+      const offenders = fixedFragmentsClaimingPinned(
+        [{ name: `changed-${word}.md`, body: `- **Changed.** The ${word} mentions GHSA-w2qp-rph6-63g4.\n` }],
+        pinned,
+      );
+      expect(offenders).toEqual([]);
+    }
+  });
+
+  test("ignores 'fixed' for a GHSA outside the pinned set", () => {
+    const offenders = fixedFragmentsClaimingPinned(
+      [{ name: "fixed-other-ghsa.md", body: "- **Fixed** GHSA-3m5p-2c4r-xxw2 in fastify.\n" }],
+      pinned,
+    );
+    expect(offenders).toEqual([]);
+  });
+
   test("ignores the gate's own NOT-REPORTED-BY-BUN label", () => {
     // Quoting the gate's label is not a "fixed" claim, so it must not be flagged.
     const offenders = fixedFragmentsClaimingPinned(

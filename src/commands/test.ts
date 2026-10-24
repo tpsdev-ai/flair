@@ -74,7 +74,7 @@ program
     };
 
     // 1. Write a test memory via PUT /Memory/<id>.
-    // Schema only exposes PUT — POST returns 'Memory does not have a post method implemented'.
+    // The CLI writes through PUT /Memory/<id>; a bare POST /Memory reaches Memory.post() too.
     await check("Write test memory (PUT /Memory/<id>)", async () => {
       const id = `flair-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const body: Record<string, any> = {

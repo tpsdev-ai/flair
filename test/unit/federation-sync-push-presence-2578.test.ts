@@ -164,7 +164,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(presenceUpdates()).toEqual([]);
   });
 
-  for (const table of ["Memory", "Soul", "Agent", "Relationship"]) {
+  for (const table of ["Soul", "Agent", "Relationship"]) {
     it(`flag OFF: accepts legacy merged/skipped counts without refusal lists for ${table}`, async () => {
       installMock();
       genericRows = [{ id: "legacy-a", updatedAt: new Date().toISOString() }];
@@ -185,6 +185,28 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
       expect(captured.some((call) => call.body?.operation === "sql")).toBe(false);
     });
   }
+
+  it("flag OFF: a Memory counts-only response is rejected and does not advance its cursor", async () => {
+    installMock();
+    genericRows = [{ id: "legacy-a", updatedAt: new Date().toISOString() }];
+    syncResponse = { merged: 0, skipped: 1 };
+    const fetchMock = globalThis.fetch;
+    globalThis.fetch = mock(async (url: any, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      if (body?.operation === "search_by_conditions" && body.table !== "Memory") return res(true, 200, []);
+      return fetchMock(url, init);
+    }) as any;
+    const result = await run();
+    expect(result.error?.message).toContain("outcomes do not account");
+    expect(result.pushed).toBe(0);
+    expect(result.skipped).toBe(0);
+    expect(pushed().map((record) => record.table)).toEqual(["Memory"]);
+    expect(captured.filter((call) =>
+      ["update", "upsert"].includes(call.body?.operation) &&
+      call.body?.table === "Peer" &&
+      call.body?.records?.some((record: any) => record.lastSyncAt !== undefined),
+    )).toEqual([]);
+  });
 
   it("flag ON: a home row is pushed as a signed v:2 Presence record keyed on agentId", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";

@@ -195,7 +195,7 @@ export function resolveCandidateVisibilityRuling(candidate: {
 //
 // Passed as `responseFormat: { schema: CANDIDATES_SCHEMA }` to models.generate()
 // so backends that honor structured output (Ollama, OpenAI — verified against
-// the pinned harper 5.1.17's bundled backends) return conformant
+// harper 5.1.17's bundled backends) return conformant
 // JSON directly. Not every backend enforces it (Anthropic's Messages API has
 // no equivalent and Harper documents that it silently ignores the option) —
 // this module never trusts the backend to have enforced the schema; every

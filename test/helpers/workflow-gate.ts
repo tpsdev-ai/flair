@@ -10,9 +10,9 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { load as loadYaml } from "js-yaml";
 
-export type WorkflowStep = { name?: unknown; run?: unknown; if?: unknown; "continue-on-error"?: unknown; shell?: unknown };
-export type WorkflowJob = { name?: unknown; needs?: unknown; if?: unknown; "continue-on-error"?: unknown; shell?: unknown; defaults?: { run?: { shell?: unknown } }; steps?: WorkflowStep[] };
-export type WorkflowDoc = { on?: unknown; defaults?: { run?: { shell?: unknown } }; jobs?: Record<string, WorkflowJob> };
+export type WorkflowStep = { env?: unknown; name?: unknown; run?: unknown; if?: unknown; "continue-on-error"?: unknown; shell?: unknown };
+export type WorkflowJob = { env?: unknown; name?: unknown; needs?: unknown; if?: unknown; "continue-on-error"?: unknown; shell?: unknown; defaults?: { run?: { shell?: unknown } }; steps?: WorkflowStep[] };
+export type WorkflowDoc = { env?: unknown; on?: unknown; defaults?: { run?: { shell?: unknown } }; jobs?: Record<string, WorkflowJob> };
 
 export type Gate = {
   /** The `name:` of the step that runs the gate. */
@@ -132,6 +132,13 @@ export function checkCoverageGate(docs: WorkflowDoc[], gate: Gate): void {
       adapter.name === REQUIRED_UNIT_CHECK && (Array.isArray(adapter.needs) ? adapter.needs : [adapter.needs]).includes(id),
     );
     if (!RESULT_CHECKED_JOBS.has(id) || !checked) throw new Error(`the gate job "${id}" must be directly result-checked by the required "${REQUIRED_UNIT_CHECK}" adapter`);
+    for (const [scope, env] of [["gate step", step.env], ["gate job", job.env], ["workflow", doc.env]] as const) {
+      for (const variable of ["FLAIR_DEP_MIN_AGE_DAYS", "FLAIR_DEP_KEEP_CURRENT", "FLAIR_NPM_REGISTRY", "FLAIR_CHECK_DEP_AGES_ROOT"]) {
+        if (env !== null && typeof env === "object" && variable in env) {
+          throw new Error(`the ${scope} env sets ${variable}; it must be absent`);
+        }
+      }
+    }
     if ("if" in step) throw new Error(`"${gate.step}" has if; it must be absent`);
     if ("continue-on-error" in step) throw new Error(`"${gate.step}" has continue-on-error; it must be absent`);
     if ("shell" in step) throw new Error(`"${gate.step}" has shell; it must run under the default shell`);
@@ -214,6 +221,12 @@ export function gateCases(dir: string, gate: Gate): GateCase[] {
   const adapterJobShellError = `${adapter} has shell; it must run under the default shell`;
   const adapterJobDefaultsShellError = `${adapter} sets defaults.run.shell; it must run under the default shell`;
   return [
+    // Listed here, not shared with the check above, so dropping a variable from the check fails its cases.
+    ...["FLAIR_DEP_MIN_AGE_DAYS", "FLAIR_DEP_KEEP_CURRENT", "FLAIR_NPM_REGISTRY", "FLAIR_CHECK_DEP_AGES_ROOT"].flatMap((variable): GateCase[] => [
+      [`gate step env ${variable}`, mutate((_doc, _job, step) => { step.env = { [variable]: "" }; }), `the gate step env sets ${variable}; it must be absent`],
+      [`gate job env ${variable}`, mutate((_doc, job) => { job.env = { [variable]: "" }; }), `the gate job env sets ${variable}; it must be absent`],
+      [`workflow env ${variable}`, mutate((doc) => { doc.env = { [variable]: "" }; }), `the workflow env sets ${variable}; it must be absent`],
+    ]),
     ["gate step shell override", mutate((_doc, _job, step) => { step.shell = "bash"; }), stepShellError],
     ["gate job shell override", mutate((_doc, job) => { job.shell = "bash"; }), jobShellError],
     ["gate job defaults.run.shell override", mutate((_doc, job) => { job.defaults = { run: { shell: "bash" } }; }), jobDefaultsShellError],

@@ -714,18 +714,30 @@ describe("item 9 — archiving a row does not write the projected pointer back",
     pointerStore.set("mem-ar1", { memoryId: "mem-ar1", hostSource: JSON.stringify(fullUrlPointer), scopeAtWrite: "shared", authorId: "agent-a", memoryInstanceToken: memoryStore.get("mem-ar1")?.instanceToken });
     const before = pointerStore.get("mem-ar1")?.hostSource;
 
-    // Capture the payload the archive hands to the write.
+    // Capture the payload the archive hands to the write: the checked PUT's
+    // write body (flair#2478 part 3a), on the resource it builds for the id.
     let captured: any = null;
-    const realPut = (Memory as any).put;
-    (Memory as any).put = async (content: any, ctx: any) => { captured = content; return realPut.call(Memory, content, ctx); };
+    const realGetResource = (Memory as any).getResource;
+    (Memory as any).getResource = function (this: any, ...args: any[]) {
+      const resource = realGetResource.apply(this, args);
+      const realPutLocked = resource.putLocked;
+      resource.putLocked = function (this: any, content: any, ...rest: any[]) {
+        captured = { ...content };
+        return realPutLocked.call(this, content, ...rest);
+      };
+      return resource;
+    };
     try {
       const arch: any = new (MemoryArchive as any)();
       arch.getContext = () => ({ request: agentCtx("agent-a") });
       const res: any = await arch.post({ id: "mem-ar1", action: "basement" });
-      expect(res?.archived).toBe(true); // assertion: the archive landed
+      expect(res?.written).toBe(true);
+      expect(memoryStore.get("mem-ar1")?.archived).toBe(true); // assertion: the archive landed
     } finally {
-      (Memory as any).put = realPut;
+      delete (Memory as any).getResource;
     }
+
+    expect(captured, "the archive's write body was not entered").not.toBeNull();
 
     expect(captured?.hostSource).toBeUndefined(); // assertion: the write-back omits the inline pointer
     expect(captured?.hostSourceScope).toBeUndefined(); // assertion: and the scope
