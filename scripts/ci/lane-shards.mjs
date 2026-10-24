@@ -29,10 +29,11 @@ export const ROOT_STEP_TIMEOUT_MS = 450_000;
 
 /**
  * `n8n-nodes-flair unit tests`' own per-step limit: 360 s. The host-parser
- * test installs five registry host prefixes and is itself bounded at 300 s;
- * the package's other tests measured 1.3 s. The step measured 24 s in CI on
- * ae93d9a1 (2026-10-24). If it hangs, the slowest lane shard's other steps
- * still fit (793 - 24 + 360 = 1129 s ≤ 1166 s).
+ * test installs a registry host prefix per tested core version (five by
+ * default) and is itself bounded at 300 s; the package's other tests measured
+ * 1.3 s. The step measured 24 s in CI on ae93d9a1 (2026-10-24). If it hangs,
+ * the slowest lane shard's other steps still fit (793 - 24 + 360 = 1129 s ≤
+ * 1166 s).
  */
 export const N8N_STEP_TIMEOUT_MS = 360_000;
 
