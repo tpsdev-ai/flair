@@ -50,8 +50,10 @@ const BUILD_TIMEOUT_MS = 20_000;
 const INIT_TIMEOUT_MS = 10_000;
 const INSTALL_TIMEOUT_MS = 30_000;
 const INVOKE_TIMEOUT_MS = 30_000;
-// Bounds the setup hook, which runs every child above. At the DEFAULT matrix
-// those child bounds sum to 260 s (build 20, two packs at 20, then five x
+// This file's default test timeout; the setup hook passes the same 300 s to
+// beforeAll. The hook runs the build, pack, init and install children above;
+// the driver processes run in the test bodies. At the DEFAULT matrix the
+// hook's child bounds sum to 260 s (build 20, two packs at 20, then five x
 // (init 10 + install 30)); more versions through the override add more when the
 // file is run directly. The 360 s step cap (N8N_STEP_TIMEOUT_MS) is the whole
 // step's aggregate and may cut off cases that are each within their own limits.
