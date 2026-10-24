@@ -28,6 +28,17 @@ export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 export const ROOT_STEP_TIMEOUT_MS = 450_000;
 
 /**
+ * `n8n-nodes-flair unit tests`' own per-step limit: 360 s. The host-parser
+ * test's setup hook is bounded at 300 s; at the DEFAULT matrix its child bounds
+ * sum to 260 s; more versions add more when the file is run directly. This 360 s
+ * limit is the step's aggregate cap and may cut off cases that are each within
+ * their own limits. The package's other tests measured 1.3 s. The step measured
+ * 24 s in CI on ae93d9a1 (2026-10-24). If it hangs, the slowest lane shard's
+ * other steps still fit (793 - 24 + 360 = 1129 s ≤ 1166 s).
+ */
+export const N8N_STEP_TIMEOUT_MS = 360_000;
+
+/**
  * How many shards the shared unit lane is split across (flair#2311). Chosen from
  * the lane budget: with the 1200 s budget (flair#2614) the slowest lane shard
  * measured at least 781 s across the last 45 runs' completed legs (a lower bound:
@@ -118,7 +129,14 @@ export function unitPlan(root = ROOT) {
   for (const pkg of WORKSPACE_PACKAGES) {
     const dir = pkg === "adk-flair-js" ? "test/unit" : "test";
     const cwd = join(root, "packages", pkg);
-    steps.push({ name: `${pkg} unit tests`, cwd, args: ["test", `./${dir}/`], files: requiredFiles(`packages/${pkg}/${dir}`) });
+    const timeoutMs = pkg === "n8n-nodes-flair" ? N8N_STEP_TIMEOUT_MS : undefined;
+    steps.push({
+      name: `${pkg} unit tests`,
+      cwd,
+      args: ["test", `./${dir}/`],
+      files: requiredFiles(`packages/${pkg}/${dir}`),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    });
   }
   return [...sharedSteps(steps), ...shardedSteps(steps)];
 }

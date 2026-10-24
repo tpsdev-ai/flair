@@ -20,6 +20,24 @@ Then restart your n8n instance. The Flair API credential will appear under **Cre
 
 Full setup walkthrough, subject/sessionId patterns, and security guidance are in [`docs/n8n.md`](https://github.com/tpsdev-ai/flair/blob/main/docs/n8n.md) in the Flair repo.
 
+## Host compatibility
+
+The tool schema is built with zod 4 and parsed by the host's `@langchain/core`. The declared `@langchain/core` peer range is `>=0.3.0 <2`, the range across which the search tool's schema passed the host's parser (table below). The chat-memory node also needs the host's `@langchain/classic`, which this test does not install.
+
+Measured in this release by packing the built node, installing it with `@langchain/core` and `n8n-workflow` in a scratch prefix (no workspace overrides), and invoking the tool through the installed parser:
+
+| `@langchain/core` | Valid `{ query }` | Non-string `query` |
+| --- | --- | --- |
+| 0.3.0 | accepted | rejected |
+| 0.3.57 | accepted | rejected |
+| 0.3.68 | accepted | rejected |
+| 1.1.0 | accepted | rejected |
+| 1.3.0 | accepted | rejected |
+
+`@langchain/core` resolved by n8n releases measured: 1.119.0, 1.120.0, 1.121.0 and 1.122.0 resolve 0.3.68; 1.123.0 and 2.0.0 resolve 1.1.0; 2.16.0 resolves 1.1.34.
+
+`FLAIR_N8N_HOST_CORE_VERSIONS` selects the version set when the test file is run directly; the shared unit lane strips `FLAIR_*` variables before it spawns a step, so the lane runs the default matrix.
+
 ## Credential setup
 
 1. **Base URL** — your Flair instance, e.g. `http://localhost:19926`

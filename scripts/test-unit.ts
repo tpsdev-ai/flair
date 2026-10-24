@@ -22,6 +22,7 @@ import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isola
 // `unitPlan` and `ROOT_STEP_TIMEOUT_MS` from this module.
 import {
   LANE_SHARDS,
+  N8N_STEP_TIMEOUT_MS,
   ROOT_STEP_TIMEOUT_MS,
   laneShardPlans,
   unitPlan,
@@ -104,8 +105,10 @@ export function laneBudgetMsFromJobStart(env: NodeJS.ProcessEnv, nowMs: number):
 }
 /**
  * The default per-step limit: 150 s, at least 3× the slowest ordinary step (43 s). One
- * hung step costs at most that, so the rest of the slowest lane still runs
- * inside the worst derived budget (793 + 150 = 943 s ≤ 1166 s).
+ * hung default step costs at most that, so the rest of the slowest lane still runs
+ * inside the worst derived budget (793 + 150 = 943 s ≤ 1166 s). A step with its
+ * own limit costs at most that limit instead (ROOT_STEP_TIMEOUT_MS for the root
+ * unit shards, N8N_STEP_TIMEOUT_MS for the n8n package).
  */
 export const STEP_TIMEOUT_MS = 150_000;
 // `root unit tests`' own limit is 450 s, 1.69× its slowest measured root shard
@@ -304,7 +307,7 @@ export function laneRunSetup(
     ? "remaining lane budget below the start floor"
     : `lane deadline: ${seconds(derivedLaneBudgetMs)}`;
   const mode = invocation.keepGoing
-    ? `keep-going: attempts later steps while budget remains; failures are summed at the end; per-step caps: ${seconds(STEP_TIMEOUT_MS)} (root unit tests: ${seconds(ROOT_STEP_TIMEOUT_MS)}), pre-empted by an earlier lane deadline; ${laneLimit}`
+    ? `keep-going: attempts later steps while budget remains; failures are summed at the end; per-step caps: ${seconds(STEP_TIMEOUT_MS)} (root unit tests: ${seconds(ROOT_STEP_TIMEOUT_MS)}; n8n-nodes-flair unit tests: ${seconds(N8N_STEP_TIMEOUT_MS)}), pre-empted by an earlier lane deadline; ${laneLimit}`
     : "fail-fast: stops at the first failing step; steps are not time-limited";
   return { limits, mode };
 }
