@@ -183,8 +183,9 @@ export interface RestoreResult {
    * reported in `unknownStates`). `extra*` IDs were present in the verification
    * read but not in the snapshot.
    * Both fields being empty means every id whose write outcome is known matches
-   * the snapshot's; ids with an unknown write outcome are reported in
-   * `unknownStates` instead. Row content is not compared.
+   * the snapshot's. Unknown Memory and Soul IDs are also reported in
+   * `unknownStates`; they are excluded from `missing*`, but may still appear in
+   * `extra*` and verification errors. Row content is not compared.
    */
   verified?: {
     expectedMemoryIds: string[];
