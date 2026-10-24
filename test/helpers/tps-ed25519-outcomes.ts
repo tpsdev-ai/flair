@@ -16,6 +16,7 @@ export const TPS_GET_ROUTE_STATUS: Record<string, number | readonly number[]> = 
   AdminIdp: 403,
   AdminInstance: 403,
   AdminMemory: 403,
+  AdminMemoryCandidates: 403,
   AdminPrincipals: 403,
   Agent: 200,
   AgentCard: 400,
