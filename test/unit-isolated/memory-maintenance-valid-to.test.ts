@@ -77,6 +77,20 @@ mock.module("harper", () => ({
     get: async (id: string) => rows.get(id),
     update,
     delete: remove,
+    // Fake per-key lock for the per-id Memory write lock (flair#2478).
+    primaryStore: (() => {
+      const held = new Set<string>();
+      return {
+        tryLock: (key: unknown) => {
+          const k = JSON.stringify(key);
+          if (held.has(k)) return false;
+          held.add(k);
+          return true;
+        },
+        unlock: (key: unknown) => { held.delete(JSON.stringify(key)); },
+        resetReadTxn: () => {},
+      };
+    })(),
   }, MemoryHostSource: {
     search: async function* () { yield* [...pointers.values()]; },
     delete: deletePointer,

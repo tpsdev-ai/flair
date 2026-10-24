@@ -32,7 +32,8 @@
  *
  * The real-Harper write trace (test/helpers/embedding-writer-race.ts) asserts
  * the synthetic migration's update names only `source`, and that the purge
- * makes no field write on the row (its Memory write is the row delete).
+ * makes no field write on the row: its one Memory write on the row is the row
+ * delete.
  *
  * Seeded rows carry an explicit visibility and a current embedding stamp so the
  * boot visibility backfill and the embedding-stamp migration leave them alone.
@@ -317,8 +318,11 @@ describe("flair#2478 slice 3b — the purge writer (real Harper)", () => {
     expect(purge.status, await purge.clone().text()).toBe(200);
     expect(await purge.json()).toEqual({ removed: 1, removedIds: ["pmp-a1"] });
     expect(await h.readRow("pmp-a1")).toBeNull();
-    // The purge's Memory write is the row delete; it stages no field update.
-    expect(h.writesBy("pmp-a1", PURGE_WRITER), "the purge wrote fields").toEqual([]);
+    // The purge's one Memory write on the row is the row delete; it stages no
+    // field update.
+    expect(h.writesBy("pmp-a1", PURGE_WRITER), "the purge wrote fields, or did not delete the row exactly once").toEqual([
+      { writer: PURGE_WRITER, method: "delete", id: "pmp-a1", fields: [] },
+    ]);
     expect((await h.readRow("pmp-a2")).content).toBe("content of pmp-a2");
   }, 300_000);
 

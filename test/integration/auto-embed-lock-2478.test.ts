@@ -26,8 +26,10 @@
  * `503 memory_busy`; after release the owner's content and visibility are
  * stored); owner first (PUT and PATCH hold the id: the backfill is skipped; an
  * owner write committed while the vector was computed: the backfill writes
- * nothing over it); an owner DELETE at each held point and a DELETE that read
- * the row first (no row remains); text drift before the lock, after staging and
+ * nothing over it); an owner DELETE at each held point (refused `503
+ * memory_busy`, the row unchanged; after the release a DELETE leaves no row)
+ * and a DELETE that read the row first (it holds the id: the backfill is
+ * skipped and no row remains); text drift before the lock, after staging and
  * in the confirmation-to-commit window (only the current text's vector is
  * stored); an uncontended control; an unreadable read-back (logged; the id is
  * not fenced); an id fenced by an owner write's unknown outcome (skipped); an
@@ -332,27 +334,29 @@ describe("flair#2478 — owner writes that hold or change the id first (real Har
 
 describe("flair#2478 — an owner DELETE racing the backfill never leaves a row (real Harper)", () => {
   for (const [point, label] of HELD_POINTS) {
-    it(`a DELETE while the backfill is held ${label} leaves no row`, async () => {
+    it(`a DELETE while the backfill is held ${label} is refused memory_busy; after the release a DELETE leaves no row`, async () => {
       const id = `ael-delete-${point}`;
       await seed(id);
       h.arm(point);
       await trigger(id);
       try {
         await h.assertPaused(point);
-        const del = await h.signed(owner, "DELETE", memPath(id));
-        expect(del.status, await del.clone().text()).toBe(200);
-        expect(await h.readRow(id)).toBeNull();
+        // The backfill holds the id past the DELETE's wait budget.
+        const before = await h.readRow(id);
+        const body = await expectRefused(await h.signed(owner, "DELETE", memPath(id)), "memory_busy");
+        expect(body).toEqual({ error: "memory_busy", caller: owner.id });
+        expect(await h.readRow(id), "the refused DELETE changed the row").toEqual(before);
         await h.release(point);
-        if (point !== COMMITTED) {
-          // The attempt that reaches the lock again finds no row and skips;
-          // it never reaches the after-commit point.
-          expect(await waitForAttemptLine(attemptOutcome(id, "skipped")), "the backfill did not finish after the DELETE").toBe(true);
-          expect(await h.readRow(id), "the backfill wrote a row after the DELETE").toBeNull();
-        }
       } finally {
         h.letGo(point);
         h.clearMarkers(point);
       }
+      // The backfill commits and releases the id, then logs its write.
+      expect(await h.waitForLogMatch(new RegExp(`\\[auto-embed\\] ${id}: \\d+d`)), "the backfill did not finish").toBe(true);
+      await expectBoundTo(await h.readRow(id), ORIGINAL);
+      const del = await h.signed(owner, "DELETE", memPath(id));
+      expect(del.status, await del.clone().text()).toBe(200);
+      expect(await h.readRow(id)).toBeNull();
       await Bun.sleep(250);
       expect(await h.readRow(id), "a row exists after the DELETE answered success").toBeNull();
     }, 120_000);
@@ -361,25 +365,29 @@ describe("flair#2478 — an owner DELETE racing the backfill never leaves a row 
   it("a DELETE that read the row before the backfill committed still leaves no row", async () => {
     const id = "ael-delete-first";
     await seed(id);
+    // The backfill has its vector and has not yet tried the id's lock.
+    h.arm(ENTRY);
+    await trigger(id);
     h.arm("memory-delete");
-    const pendingDelete = h.signed(owner, "DELETE", memPath(id));
+    let pendingDelete: Promise<Response> | undefined;
     try {
+      await h.assertPaused(ENTRY);
+      pendingDelete = h.signed(owner, "DELETE", memPath(id));
+      // The DELETE holds the id: the backfill is skipped.
       await h.assertPaused("memory-delete");
-      // The DELETE holds no per-id lock: the backfill runs to its commit.
-      h.arm(COMMITTED);
-      await trigger(id);
-      await h.assertPaused(COMMITTED);
-      await expectBoundTo(await h.readRow(id), ORIGINAL);
-      await h.release(COMMITTED);
+      await h.release(ENTRY);
+      expect(await h.waitForLog(`[auto-embed] ${id}: skipped; the per-id write lock answered busy`), "the backfill did not report the held id").toBe(true);
+      expect(h.writesBy(id, WRITER), "the backfill wrote a held id").toEqual([]);
       await h.release("memory-delete");
     } finally {
-      h.letGo(COMMITTED);
+      h.letGo(ENTRY);
       h.letGo("memory-delete");
     }
-    const del = await pendingDelete;
+    const del = await pendingDelete!;
     expect(del.status, await del.clone().text()).toBe(200);
     await Bun.sleep(250);
     expect(await h.readRow(id), "a row exists after the DELETE answered success").toBeNull();
+    expect(h.writesBy(id, WRITER), "the backfill wrote the deleted id").toEqual([]);
   }, 120_000);
 });
 

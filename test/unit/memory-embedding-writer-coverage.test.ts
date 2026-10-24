@@ -290,11 +290,11 @@ test("an uncalled nested function does not trip the named body's latch", () => {
 // flair#2488: the file-level check above passes while ONE writer's own
 // `noteWriteStamp` call is removed, as long as any other call in the same file
 // remains — its check is file-scoped. Pin the write bodies the GATED/LATCH
-// entries actually rely on: Memory.ts's three GATED write methods (post, put,
-// patch) and the federation merge helper the Federation LATCH entry trips
-// through. Each named body must trip the latch itself.
+// entries actually rely on: Memory.ts's three GATED write bodies (postLocked,
+// putLocked, patchLocked) and the federation merge helper the Federation LATCH
+// entry trips through. Each named body must trip the latch itself.
 const TRIPPING_WRITE_BODIES: ReadonlyArray<readonly [file: string, fn: string]> = [
-  ["resources/Memory.ts", "post"],
+  ["resources/Memory.ts", "postLocked"],
   ["resources/Memory.ts", "putLocked"],
   ["resources/Memory.ts", "patchLocked"],
   ["resources/Federation.ts", "noteFederationMergedMemory"],

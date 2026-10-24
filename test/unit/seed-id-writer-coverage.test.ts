@@ -80,8 +80,8 @@ add("MemoryPurge", ["writer:memory.delete#1"],
 // ── BOOKKEEPING (deliberately open; see the distinctions above) ──
 add("Memory", ["writer:patchRecord#1"],
   "BOOKKEEPING: lastReflected on each derivedFrom source of a new row.");
-add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
-  "BOOKKEEPING: usageCount + 1 and commit marker on a row the caller can read, through the shared write-back helper (flair#2441); the rest of the row is the stored row.");
+add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:writeBackCommittedRow#1"],
+  "BOOKKEEPING: usageCount + 1 and commit marker on a row the caller can read, through the shared write-back helper (flair#2441), under the id's per-id Memory write lock (flair#2478 slice 3b); the rest of the row is the stored row.");
 add("auth-middleware", ["writer:writeBackCommittedRow#1"],
   "BOOKKEEPING: the embedding backfill for the id of a Memory write that already succeeded (and so passed the decision), through the shared helper (flair#2354), under the id's per-id Memory write lock (flair#2478).");
 add("MemoryReflect", ["writer:patchRecord#1"],
@@ -90,7 +90,7 @@ add("MemoryReflect", ["alias-source:(databases as any)?.flair?.Memory#1"],
   "The per-id Memory write-lock handle for the lastReflected stamp; it performs no Memory row write (flair#2478).");
 
 // ── SERVER ──
-add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
+add("MemoryMaintenance", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
   "SERVER: the sweep selects rows by state (expired ephemeral, closed, old session notes). The seed row is persistent and closing it by supersede requires the operator-source decision.");
 add("MemoryMaintenance", ["writer:table.delete#1"], "SERVER: MemoryHostSource pointer rows, another table.");
 add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "SERVER: admin-only re-PUT of each stored row with its own stored fields, through the shared helper (flair#2354).");

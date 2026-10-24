@@ -1,13 +1,17 @@
 /**
  * memory-write-lock.ts — the per-memory-id write serialization protocol
  * (flair#2478 slice 1). The ordinary owner PUT and PATCH (resources/Memory.ts,
- * the HTTP re-embed PATCH included) run under it, and so do the automatic
+ * the HTTP re-embed PATCH included), the owner DELETE (with a skill row's live
+ * head) and an untagged owner POST naming an id or a `supersedes` target
+ * (slice 1 part 2) run under it, and so do the automatic
  * writers converted so far: the visibility backfill and the promotion stamps
  * (slice 2), the embedding backfill that follows a Memory write signed by a
  * verified Ed25519 agent (resources/auth-middleware.ts), the embedding-stamp
  * migration's `.content`-suffix fallback (slice 3), the synthetic CI
  * migration's re-stamp of its own rows, and the operator purge
- * (resources/MemoryPurge.ts, whole target set) (slice 3b); the ordinary
+ * (resources/MemoryPurge.ts, whole target set) (slice 3b); the maintenance
+ * archive/expiry action (resources/MemoryMaintenance.ts) and the usage-count
+ * writer (resources/usage-recording.ts) (slice 3b part 1); the ordinary
  * (non-skill) feed write-back and the feed dedup repair
  * (resources/MemoryFeed.ts) and both `lastReflected` stamps
  * (resources/Memory.ts's derivedFrom sources and resources/MemoryReflect.ts's
@@ -61,7 +65,8 @@
  *    head. An automatic writer that takes the lock through
  *    {@link withMemoryWriteLockOnce} writes nothing to a marked id; it does not
  *    set the marker for its own unconfirmed write, which it reports or logs.
- *    POST and the writers that take no per-id lock do not check the marker.
+ *    A POST that takes the lock checks the ids it locks; a POST that takes
+ *    none, and the writers that take no per-id lock, do not check the marker.
  *
  * The marker is module state, so it is per Harper worker thread. That covers
  * the whole instance only in the supported single-worker mode: flair refuses to
@@ -72,8 +77,9 @@
  * worker is not seen by another.
  *
  * The critical section contains the write paths' embedding calls — the ordinary
- * PUT's regen (and its create-path dedup probe), the re-embed PATCH's compute
- * and its recompute, and the PATCH embedding refresh — and each is bounded by
+ * PUT's regen (and its create-path dedup probe), a locked POST's dedup probe
+ * and embedding, the re-embed PATCH's compute and its recompute, and the PATCH
+ * embedding refresh — and each is bounded by
  * {@link MEMORY_LOCKED_PROVIDER_TIMEOUT_MS} through {@link boundLockedProviderCall};
  * a call still pending when the timeout callback runs, or one that settles after
  * the bound, is refused with `503 memory_provider_timeout` and nothing is
@@ -275,7 +281,8 @@ export async function withMemoryWriteLock<T>(
  *  acquires again. Used by the automatic writers: the visibility
  *  backfill, the automatic promotion stamp, the embedding backfill, the
  *  embedding-stamp migration's `.content`-suffix fallback, the synthetic CI
- *  migration's re-stamp, the feed dedup repair, both `lastReflected` stamps,
+ *  migration's re-stamp, the maintenance archive/expiry action, the
+ *  usage-count writer, the feed dedup repair, both `lastReflected` stamps,
  *  the federation merge of a Memory row and the batch
  *  reindex writer. A held lock or a
  *  marker answers `busy`/`unknown`; that attempt of the writer writes nothing

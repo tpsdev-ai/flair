@@ -210,7 +210,7 @@ describe("a grant-authorized ordinary successor: a predecessor visibility change
     await expectRefused(response, pred.id, succ, "private", false);
   }, 60_000);
 
-  it("POST /Memory: the owner makes the private predecessor shared while the close is held after staging: 409, nothing written", async () => {
+  it("POST /Memory: the owner's competing change is refused by the held lock and the staged close lands", async () => {
     const pred = await ownerMemory("post-staged", "private");
     const succ = `gvc-succ-${randomUUID()}`;
     const { response, competed, released } = await withPausedClose(
@@ -219,8 +219,15 @@ describe("a grant-authorized ordinary successor: a predecessor visibility change
       async () => (await send(owner, "PUT", `/Memory/${pred.id}`, { ...pred.body, visibility: "shared" })).status,
     );
     expect(released, "the close was not paused and released by this test").toBe("go");
-    expect(competed, "the owner's visibility change failed").toBeLessThan(300);
-    await expectRefused(response, pred.id, succ, "shared", false);
+    // The POST holds the predecessor's lock while the close is staged, so the
+    // owner's competing write is refused rather than landing. The lock is the
+    // serialization this case exercises (flair#2478).
+    expect(competed, "the owner's visibility change was not refused by the lock").toBe(503);
+    const text = await response.text();
+    expect([200, 201], `grantee POST returned ${response.status}: ${text.slice(0, 300)}`).toContain(response.status);
+    expect(await stored(succ), "the successor was not written").not.toBeNull();
+    const predecessor = await stored(pred.id);
+    expect(predecessor?.validTo ?? null, "the predecessor was not closed").not.toBeNull();
   }, 60_000);
 
   it("an owner edit that keeps the visibility refuses the write by name as stored_row_changed: nothing written, the edit kept", async () => {
