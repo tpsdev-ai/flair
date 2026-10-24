@@ -200,6 +200,23 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
   return false;
 }
 
+/** The captured server log, for a case that asserts which path the writer took. */
+function serverLog(): string {
+  return harper.getLog?.() ?? "";
+}
+/** Wait for text appended since `from` to satisfy `matches`; the child flushes
+ *  its console output slightly after the request returns. */
+async function waitForLogSince(from: number, matches: (appended: string) => boolean, timeoutMs: number): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  let appended = serverLog().slice(from);
+  while (Date.now() < deadline) {
+    if (matches(appended)) return appended;
+    await new Promise((r) => setTimeout(r, 25));
+    appended = serverLog().slice(from);
+  }
+  return matches(appended) ? appended : null;
+}
+
 /**
  * Arm `point`, start `trigger`, run `compete` once the trigger is paused inside
  * that point, release, and await the trigger. Returns the trigger's response
@@ -297,14 +314,19 @@ describe("flair#2441 — the usage-recording count bump confirms the stored row 
   // the whole transaction, including at `memory-delete`. The count bump takes
   // the same lock once, without waiting, so it writes nothing (no ledger row,
   // no bump) and RecordUsage answers its invariant response.
-  it("an owner DELETE holding the id makes the count bump skip its write; the DELETE lands and the row stays deleted", async () => {
+  it("an owner DELETE holding the id makes the contribution observe the busy skip, not a caught exception; the DELETE lands and the row stays deleted", async () => {
     const id = `csr-usage-del-${Date.now()}`;
     await seed(id, randomUUID());
     armPoint("memory-delete");
     const delPending = authSend(owner, "DELETE", `/Memory/${id}`);
     expect(await waitFor(join(pauseDir, "paused.memory-delete"), 15_000), "the owner delete was not paused").toBe(true);
     // The DELETE holds the id here. The contribution cannot take the lock, so
-    // it skips the whole contribution rather than writing unserialized.
+    // it skips the whole contribution rather than writing unserialized. The
+    // response is the invariant one for a skip AND for a caught exception, so
+    // this case reads the server log the skip itself emits: the busy-lock
+    // branch warns "contribution skipped: busy for memory <id>", while a
+    // thrown per-id failure is logged by RecordUsage.post's catch instead.
+    const logFrom = serverLog().length;
     const rec = await record(id);
     expect(rec.status, (await rec.clone().text()).slice(0, 200)).toBe(200);
     expect(await rec.json()).toEqual({ recorded: true });
@@ -312,6 +334,10 @@ describe("flair#2441 — the usage-recording count bump confirms the stored row 
     expect(held?.usageCount ?? null, "the skipped contribution bumped the count").toBeNull();
     expect(held?.writeBackWriteId ?? null, "the skipped contribution staged a bump").toBeNull();
     expect(await ledgerRow(owner.id, id), "the skipped contribution wrote a ledger row").toBeNull();
+    const skipLine = `[usage-recording] contribution skipped: busy for memory ${id}`;
+    const appended = await waitForLogSince(logFrom, (text) => text.includes(skipLine), 10_000);
+    expect(appended, "the contribution did not report the busy skip server-side").not.toBeNull();
+    expect(appended, "the busy skip was reported as a caught per-id exception").not.toContain("RecordUsage.post:");
     releasePoint("memory-delete");
     const del = await delPending;
     expect(del.status, (await del.clone().text()).slice(0, 200)).toBeLessThan(300);
