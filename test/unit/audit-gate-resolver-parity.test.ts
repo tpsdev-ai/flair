@@ -93,6 +93,10 @@ function fixture(): { prefix: string; realHarper: string } {
       mkdirSync(join(root, "prefix", dir), { recursive: true });
       writeFileSync(join(root, "prefix", dir, "package.json"), JSON.stringify(manifest));
     }
+    writeFileSync(
+      join(root, "prefix", SYMLINKED_TARGET, "index.js"),
+      'module.exports = { resolved: require.resolve("dep-copy/package.json") };\n',
+    );
     symlinkSync(join(root, "prefix", SYMLINKED_TARGET), join(root, "prefix", SYMLINKED));
     mkdirSync(join(root, "home"));
   }
@@ -151,6 +155,38 @@ function nodeAnswers(edgeList: Edge[]): NodeAnswer[] {
     throw new Error(`node resolver script failed (status ${run.status}, ${run.error?.message ?? "no spawn error"}):\n${run.stderr}`);
   }
   return JSON.parse(run.stdout) as NodeAnswer[];
+}
+
+/**
+ * Load `name` from `anchor`'s package.json in a Node child, by the module name
+ * as listed, and return the real path of its entry point and of the
+ * `dep-copy/package.json` the loaded copy resolved from inside itself.
+ */
+function nodeLoadsListed(anchor: string, name: string): { entry: string; resolved: string } {
+  const script = join(root!, "node-load.mjs");
+  writeFileSync(
+    script,
+    [
+      'import { createRequire } from "node:module";',
+      'import { readFileSync, realpathSync } from "node:fs";',
+      'const input = JSON.parse(readFileSync(0, "utf8"));',
+      "const requireFromAnchor = createRequire(input.anchor);",
+      "const entry = requireFromAnchor.resolve(input.name);",
+      "const loaded = requireFromAnchor(input.name);",
+      'process.stdout.write(JSON.stringify({ entry: realpathSync(entry), resolved: realpathSync(loaded.resolved) }));',
+      "",
+    ].join("\n"),
+  );
+  const run = spawnSync("node", [script], {
+    input: JSON.stringify({ anchor, name }),
+    encoding: "utf8",
+    timeout: NODE_TIMEOUT_MS,
+    env: { PATH: process.env.PATH ?? "", HOME: join(root!, "home") },
+  });
+  if (run.error || run.status !== 0) {
+    throw new Error(`node loader script failed (status ${run.status}, ${run.error?.message ?? "no spawn error"}):\n${run.stderr}`);
+  }
+  return JSON.parse(run.stdout) as { entry: string; resolved: string };
 }
 
 describe("the audit gate's dependency lookup matches Node's resolver", () => {
@@ -227,9 +263,10 @@ describe("the audit gate's dependency lookup matches Node's resolver", () => {
       expect(gate?.dir).toBe(join(prefix, HARPER, "node_modules", ".real", "node_modules", "dep-copy"));
       expect(JSON.parse(readFileSync(gate!.manifest, "utf8")).version).toBe("2.0.0");
 
-      // Node loads the requirer through the symlink (preserveSymlinks=false), so it resolves from the real directory.
-      const answer = nodeAnswers([{ requirer: realDir, dep: "dep-copy" }])[0]!;
-      expect(answer.resolved).toBe(gate!.manifest);
+      // Node loads the requirer by the listed path, a symlink; the loaded copy resolves dep-copy from its real directory.
+      const listed = nodeLoadsListed(join(prefix, HARPER, "package.json"), "shadow-requirer");
+      expect(listed.entry).toBe(join(realDir, "index.js"));
+      expect(listed.resolved).toBe(gate!.manifest);
 
       // The listed path's own search reaches the shallower copy, which the gate must not select.
       expect(resolveHarperDependency(listedDir, realHarper, "dep-copy")?.dir).toBe(
