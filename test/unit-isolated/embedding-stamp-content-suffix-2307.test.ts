@@ -53,6 +53,7 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
       continue;
     }
     commitPatch(id, patch);
+    committedAnyUpdate = true;
   }
   afterCommit?.();
   return result;
@@ -80,6 +81,12 @@ let afterCommit: (() => void) | null = null;
  *  pre-write row either way; arming it models only the post-commit
  *  verification read missing the commit. */
 let staleVerifyRead: { row: Row; times: number } | null = null;
+/** True once an update has committed; a read of an explicit empty context after
+ *  that is a post-commit verification read. */
+let committedAnyUpdate = false;
+/** Throw on every post-commit verification read, which verifyCommittedFields
+ *  reports as "unreadable". */
+let throwVerifyAfterCommit = false;
 
 function commitPatch(id: string, patch: Row): void {
   const merged = { ...(store.get(id) ?? {}), ...structuredClone(patch), id };
@@ -100,6 +107,9 @@ function matches(row: Row, cond: any): boolean {
 const table = {
   async get(id: string, ctx?: any) {
     const row = store.get(id);
+    if (row && throwVerifyAfterCommit && committedAnyUpdate && ctx !== null && typeof ctx === "object" && Object.keys(ctx).length === 0) {
+      throw new Error("verification read failed");
+    }
     if (row && staleVerifyRead && ctx !== null && typeof ctx === "object" && Object.keys(ctx).length === 0) {
       if (staleVerifyRead.times > 0) {
         staleVerifyRead.times--;
@@ -155,6 +165,8 @@ beforeEach(() => {
   afterStage = null;
   afterCommit = null;
   staleVerifyRead = null;
+  committedAnyUpdate = false;
+  throwVerifyAfterCommit = false;
 });
 
 describe("flair#2307 — the content-suffix re-embed validates the vector and committed re-read", () => {
@@ -299,6 +311,15 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
     expect(result).toEqual({ processed: 0, touchedIds: [], unconfirmedIds: [LEGACY_ID] });
     expect(store.get(LEGACY_ID)).toMatchObject({ embedding: [0.5, 0.25, 0.125], embeddingModel: CURRENT });
     expect(await migration().countPending()).toBe(0);
+  });
+
+  it("reports an id whose post-commit verification read threw, and does not count it", async () => {
+    // The write commits; the post-commit verification read throws, so
+    // verifyCommittedFields answers "unreadable" and the loop stops. The row
+    // is not counted and its id is reported as unconfirmed.
+    throwVerifyAfterCommit = true;
+    const result = await migration().run(10);
+    expect(result).toEqual({ processed: 0, touchedIds: [], unconfirmedIds: [LEGACY_ID] });
   });
 
   it("does not count a row another writer made current between the scan and the read", async () => {
