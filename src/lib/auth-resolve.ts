@@ -241,9 +241,27 @@ function deadlineStatusClause(status: number | undefined): string {
 
 /**
  * Where a deadline in force came from: `env` is FLAIR_REQUEST_TIMEOUT_MS, or
- * the default when it is unset; `explicit` is a caller's own override.
+ * the default when it is unset; `rem` is FLAIR_REM_REQUEST_TIMEOUT_MS, or the
+ * REM work routes' own default when it is unset; `explicit` is a caller's own
+ * override, which no variable changes.
  */
-export type RequestDeadlineSource = "env" | "explicit";
+export type RequestDeadlineSource = "env" | "rem" | "explicit";
+
+/** The variable, if any, that governs a deadline from `source`. */
+function deadlineEnvName(source: RequestDeadlineSource): string | undefined {
+  if (source === "env") return REQUEST_DEADLINE_ENV;
+  if (source === "rem") return REM_REQUEST_DEADLINE_ENV;
+  return undefined;
+}
+
+/** The remedy named in an expiry message for a deadline from `source`. */
+function deadlineRemedy(source: RequestDeadlineSource): string {
+  const envName = deadlineEnvName(source);
+  if (envName === undefined) {
+    return `This command sets its own deadline; raise it there if this request legitimately runs longer.`;
+  }
+  return `Raise ${envName} (${REQUEST_DEADLINE_MIN_MS} to ${REQUEST_DEADLINE_MAX_MS}) if this request legitimately runs longer.`;
+}
 
 /**
  * Thrown when a GET or HEAD crosses the whole-request deadline. The split is by
@@ -259,9 +277,10 @@ export class ApiRequestTimeout extends Error {
   /** The status line that arrived before the deadline fired, when one did. */
   readonly status: number | undefined;
   constructor(method: string, path: string, deadlineMs: number, status: number | undefined, source: RequestDeadlineSource) {
+    const envName = deadlineEnvName(source);
     super(
       `${method} ${path} did not complete within ${deadlineMs} ms` +
-        (source === "env" ? ` (${REQUEST_DEADLINE_ENV})` : "") +
+        (envName === undefined ? "" : ` (${envName})`) +
         deadlineStatusClause(status),
     );
     this.name = "ApiRequestTimeout";
@@ -285,13 +304,11 @@ export class ApiRequestOutcomeUnknown extends Error {
   /** The status line that arrived before the deadline fired, when one did. */
   readonly status: number | undefined;
   constructor(method: string, path: string, deadlineMs: number, status: number | undefined, source: RequestDeadlineSource) {
-    const raise = source === "env"
-      ? `Raise ${REQUEST_DEADLINE_ENV} (${REQUEST_DEADLINE_MIN_MS} to ${REQUEST_DEADLINE_MAX_MS}) if this request legitimately runs longer.`
-      : `This command sets its own deadline; raise it there if this request legitimately runs longer.`;
+    const envName = deadlineEnvName(source);
     super(
       `${method} ${path} may or may not have taken effect: no complete response within ${deadlineMs} ms` +
-        (source === "env" ? ` (${REQUEST_DEADLINE_ENV})` : "") +
-        `${deadlineStatusClause(status)}. Expiry does not show whether the request was delivered or took effect; do not retry it blindly. ${raise}`,
+        (envName === undefined ? "" : ` (${envName})`) +
+        `${deadlineStatusClause(status)}. Expiry does not show whether the request was delivered or took effect; do not retry it blindly. ${deadlineRemedy(source)}`,
     );
     this.name = "ApiRequestOutcomeUnknown";
     this.method = method;
@@ -1234,12 +1251,18 @@ export async function sendJsonRequest(
   body: unknown,
   authHeader: string | undefined,
   isLocal: boolean,
-  transport: { refuseRedirects?: boolean; signedOnly?: SignedOnlyHintContext; deadlineMs?: number } = {},
+  transport: {
+    refuseRedirects?: boolean;
+    signedOnly?: SignedOnlyHintContext;
+    deadlineMs?: number;
+    deadlineSource?: RequestDeadlineSource;
+  } = {},
 ): Promise<any> {
   // The deadline covers the request AND the response body read: a server that
   // sends headers and then stalls the body is bounded too. Resolved before the
   // request, so an invalid FLAIR_REQUEST_TIMEOUT_MS sends nothing.
-  const deadlineSource: RequestDeadlineSource = transport.deadlineMs === undefined ? "env" : "explicit";
+  const deadlineSource: RequestDeadlineSource =
+    transport.deadlineSource ?? (transport.deadlineMs === undefined ? "env" : "explicit");
   const deadlineMs = resolveRequestDeadlineMs(transport.deadlineMs);
   const controller = new AbortController();
   let timedOut = false;
@@ -1321,7 +1344,7 @@ export async function tryAgentKeyFloor(
   method: string,
   body: unknown,
   keysDir: string,
-  transport: { refuseRedirects?: boolean; deadlineMs?: number } = {},
+  transport: { refuseRedirects?: boolean; deadlineMs?: number; deadlineSource?: RequestDeadlineSource } = {},
 ): Promise<any> {
   let keyFiles: string[] = [];
   try {
@@ -1499,6 +1522,12 @@ export interface AuthedRequestOptions {
    * comment saying why.
    */
   deadlineMs?: number;
+  /**
+   * Where `deadlineMs` came from, when it is not the value `env` names. A REM
+   * work route passes `rem` so its expiry names FLAIR_REM_REQUEST_TIMEOUT_MS,
+   * the variable that overrides that route's deadline.
+   */
+  deadlineSource?: RequestDeadlineSource;
 }
 
 /** The Authorization scheme of an Ed25519 agent signature (buildEd25519Auth). */
@@ -1639,6 +1668,7 @@ export async function authedRequest(
     return await sendJsonRequest(url, method, body, authHeader, isLocal, {
       refuseRedirects: opts.refuseRedirects,
       deadlineMs: opts.deadlineMs,
+      deadlineSource: opts.deadlineSource,
       ...(opts.signedOnly ? { signedOnly: { agentId: opts.agentId, keysDir } } : {}),
     });
   } catch (err: unknown) {
@@ -1649,6 +1679,7 @@ export async function authedRequest(
       const floorResult = await tryAgentKeyFloor(url, method, body, keysDir, {
         refuseRedirects: opts.refuseRedirects,
         deadlineMs: opts.deadlineMs,
+        deadlineSource: opts.deadlineSource,
       });
       if (floorResult !== undefined) return floorResult;
     }

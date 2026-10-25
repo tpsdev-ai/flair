@@ -83,17 +83,21 @@ const REM_WORK_ROUTES: ReadonlySet<string> = new Set([
 export const REM_WORK_REQUEST_DEADLINE_MS = DEFAULT_REM_REQUEST_DEADLINE_MS;
 
 /**
- * `{ deadlineMs }` for every REM work route, `{}` for every other request. The
- * new-variable value is resolved per call, so an invalid
- * FLAIR_REM_REQUEST_TIMEOUT_MS is refused before the request is sent.
+ * `{ deadlineMs, deadlineSource }` for every REM work route, `{}` for every
+ * other request. The new-variable value is resolved per call, so an invalid
+ * FLAIR_REM_REQUEST_TIMEOUT_MS is refused before the request is sent. The
+ * source travels with the deadline so its expiry names the variable that
+ * governs it, whether the value came from the variable or the default.
  */
 export function longRemRequestDeadline(
   method: string,
   path: string,
   env: NodeJS.ProcessEnv = process.env,
-): { deadlineMs?: number } {
+): { deadlineMs?: number; deadlineSource?: "rem" } {
   if (method !== "POST") return {};
-  if (REM_WORK_ROUTES.has(path)) return { deadlineMs: resolveRemRequestDeadlineMs(env) };
+  if (REM_WORK_ROUTES.has(path)) {
+    return { deadlineMs: resolveRemRequestDeadlineMs(env), deadlineSource: "rem" };
+  }
   return {};
 }
 

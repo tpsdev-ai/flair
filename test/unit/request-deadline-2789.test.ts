@@ -466,7 +466,7 @@ describe("rem long-route deadline (flair#2789)", () => {
   test("one deadline covers every REM work route and nothing else", () => {
     expect(REM_WORK_REQUEST_DEADLINE_MS).toBe(1_800_000);
     for (const path of REM_ROUTES) {
-      expect(longRemRequestDeadline("POST", path, {})).toEqual({ deadlineMs: 1_800_000 });
+      expect(longRemRequestDeadline("POST", path, {})).toEqual({ deadlineMs: 1_800_000, deadlineSource: "rem" });
     }
     expect(longRemRequestDeadline("GET", "/MemoryMaintenance", {})).toEqual({});
     expect(longRemRequestDeadline("POST", "/ConsolidateMemories", {})).toEqual({});
@@ -475,7 +475,7 @@ describe("rem long-route deadline (flair#2789)", () => {
   test("FLAIR_REM_REQUEST_TIMEOUT_MS changes the REM work deadline, not another route", () => {
     const env = { [REM_REQUEST_DEADLINE_ENV]: "2400000" };
     for (const path of REM_ROUTES) {
-      expect(longRemRequestDeadline("POST", path, env)).toEqual({ deadlineMs: 2_400_000 });
+      expect(longRemRequestDeadline("POST", path, env)).toEqual({ deadlineMs: 2_400_000, deadlineSource: "rem" });
     }
     expect(longRemRequestDeadline("POST", "/ConsolidateMemories", env)).toEqual({});
   });
@@ -484,6 +484,7 @@ describe("rem long-route deadline (flair#2789)", () => {
     for (const value of ["", "   ", "\t\n"]) {
       expect(longRemRequestDeadline("POST", "/AutoPromoteCandidates", { [REM_REQUEST_DEADLINE_ENV]: value })).toEqual({
         deadlineMs: 1_800_000,
+        deadlineSource: "rem",
       });
       expect(resolveRequestDeadlineMs(undefined, { [REQUEST_DEADLINE_ENV]: value })).toBe(DEFAULT_REQUEST_DEADLINE_MS);
     }
@@ -501,6 +502,30 @@ describe("rem long-route deadline (flair#2789)", () => {
     }
     expect(server.requests).toHaveLength(0);
   }, 5_000);
+
+  test("a REM work route expiry from the 1,800 s default names the REM variable and its range", () => {
+    const opts = longRemRequestDeadline("POST", "/MemoryMaintenance", {});
+    expect(opts.deadlineMs).toBe(1_800_000);
+    expect(opts.deadlineSource).toBe("rem");
+    const unknown = new ApiRequestOutcomeUnknown("POST", "/MemoryMaintenance", opts.deadlineMs!, undefined, opts.deadlineSource!);
+    expect(unknown.message).toContain("within 1800000 ms (FLAIR_REM_REQUEST_TIMEOUT_MS)");
+    expect(unknown.message).toContain("Raise FLAIR_REM_REQUEST_TIMEOUT_MS (1 to 3600000)");
+    expect(unknown.message).not.toContain("FLAIR_REQUEST_TIMEOUT_MS");
+    expect(unknown.message).not.toContain("sets its own deadline");
+    const timeout = new ApiRequestTimeout("GET", "/Health", opts.deadlineMs!, undefined, opts.deadlineSource!);
+    expect(timeout.message).toContain("within 1800000 ms (FLAIR_REM_REQUEST_TIMEOUT_MS)");
+    expect(timeout.message).not.toContain("FLAIR_REQUEST_TIMEOUT_MS");
+  });
+
+  test("an explicit deadline no variable changes keeps the command's-own-deadline remedy", () => {
+    const unknown = new ApiRequestOutcomeUnknown("PUT", "/Memory/m1", 900_000, undefined, "explicit");
+    expect(unknown.message).toContain("This command sets its own deadline");
+    expect(unknown.message).not.toContain("FLAIR_REQUEST_TIMEOUT_MS");
+    expect(unknown.message).not.toContain("FLAIR_REM_REQUEST_TIMEOUT_MS");
+    const timeout = new ApiRequestTimeout("GET", "/Health", 900_000, undefined, "explicit");
+    expect(timeout.message).not.toContain("FLAIR_REQUEST_TIMEOUT_MS");
+    expect(timeout.message).not.toContain("FLAIR_REM_REQUEST_TIMEOUT_MS");
+  });
 });
 
 describe("api() — a write with an unknown outcome is not replayed on the alternate configured port (flair#2789)", () => {
@@ -561,6 +586,32 @@ describe("api() — a write with an unknown outcome is not replayed on the alter
 
   const memoryAdd = ["memory", "add", "--agent", "agent-a", "--admin-pass", "test-pass", "--content", "deadline probe"];
 
+  test("a built-CLI REM work route expiry names FLAIR_REM_REQUEST_TIMEOUT_MS, not the shared variable", async () => {
+    ensureCliBuild();
+    const primary = await serve(neverAnswer);
+    const home = mkdtempSync(join(tmpdir(), "flair-2789-rem-deadline-"));
+    try {
+      const result = await runCli(["rem", "light", "--agent", "agent-a"], {
+        HOME: home,
+        FLAIR_URL: primary.baseUrl,
+        FLAIR_ADMIN_PASS: "test-pass",
+        FLAIR_REM_REQUEST_TIMEOUT_MS: "150",
+        NO_COLOR: "1",
+      });
+      const detail = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+      expect(primary.requests.filter((r) => r.method === "POST" && r.path === "/MemoryMaintenance"), detail).toHaveLength(1);
+      expect(result.code, detail).toBe(3);
+      expect(result.stderr, detail).toContain("Unknown outcome:");
+      expect(result.stderr, detail).toContain("FLAIR_REM_REQUEST_TIMEOUT_MS");
+      expect(result.stderr, detail).toContain("Raise FLAIR_REM_REQUEST_TIMEOUT_MS (1 to 3600000)");
+      expect(result.stderr, detail).not.toContain("FLAIR_REQUEST_TIMEOUT_MS");
+      expect(result.stderr, detail).not.toContain("sets its own deadline");
+      expect(result.stderr, detail).not.toContain("test-pass");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("a write whose deadline expires exits 3 and the alternate configured port receives no request", async () => {
     ensureCliBuild();
     const primary = await serve(neverAnswer);
@@ -576,6 +627,7 @@ describe("api() — a write with an unknown outcome is not replayed on the alter
       expect(result.code, detail).toBe(3);
       expect(result.stderr, detail).toContain("Unknown outcome:");
       expect(result.stderr, detail).toContain("may or may not have taken effect");
+      expect(result.stderr, detail).toContain("Raise FLAIR_REQUEST_TIMEOUT_MS (1 to 3600000)");
       expect(primary.requests.filter((r) => r.method === "PUT"), detail).toHaveLength(1);
     } finally {
       rmSync(home, { recursive: true, force: true });

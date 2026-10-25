@@ -143,6 +143,7 @@ import {
   KeyLoadError,
   isLocalBase,
   authedRequest,
+  type RequestDeadlineSource,
 } from "./lib/auth-resolve.js";
 import {
   resolveSigningIdentity,
@@ -2836,7 +2837,7 @@ function b64url(bytes: Uint8Array): string {
  * / disabling authorizeLocal there) is tracked separately in flair#654 and is
  * out of scope for this HTTP/REST auth path.
  */
-async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string; signedOnly?: boolean; refuseRedirects?: boolean; deadlineMs?: number }): Promise<any> {
+async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string; signedOnly?: boolean; refuseRedirects?: boolean; deadlineMs?: number; deadlineSource?: RequestDeadlineSource }): Promise<any> {
   // Resolve port via the canonical path (flair#1129): options.baseUrl > FLAIR_URL > resolveHttpPort.
   // api() callers mean the default install, so resolveHttpPort({}) with no --data-dir is correct.
   const hasExplicitBase = !!(options?.baseUrl || process.env.FLAIR_URL);
@@ -2870,6 +2871,7 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     signedOnly: options?.signedOnly,
     refuseRedirects: options?.refuseRedirects,
     deadlineMs: options?.deadlineMs,
+    deadlineSource: options?.deadlineSource,
   };
 
   try {
