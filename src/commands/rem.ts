@@ -76,18 +76,23 @@ const REM_WORK_ROUTES: ReadonlySet<string> = new Set([
  * The single whole-request deadline for every REM work route: POST
  * /MemoryMaintenance, POST /ReflectMemories, POST /MemoryDedupStats and POST
  * /AutoPromoteCandidates. Its sizing basis is documented on
- * {@link DEFAULT_REM_REQUEST_DEADLINE_MS}; FLAIR_REM_REQUEST_TIMEOUT_MS
- * overrides it. Every other request through the shared REST sender resolves
- * FLAIR_REQUEST_TIMEOUT_MS, else the shared default.
+ * {@link DEFAULT_REM_REQUEST_DEADLINE_MS}. FLAIR_REM_REQUEST_TIMEOUT_MS
+ * overrides it and is read only for these four routes, so an invalid value of
+ * that variable refuses only those requests, before they are sent. Every other
+ * request through the shared REST sender that passes no explicit deadline
+ * resolves FLAIR_REQUEST_TIMEOUT_MS, else the shared default; an explicit
+ * deadline is validated and returned before that variable is read, so an
+ * invalid value of it does not refuse a request that passes one.
  */
 export const REM_WORK_REQUEST_DEADLINE_MS = DEFAULT_REM_REQUEST_DEADLINE_MS;
 
 /**
  * `{ deadlineMs, deadlineSource }` for every REM work route, `{}` for every
  * other request. The new-variable value is resolved per call, so an invalid
- * FLAIR_REM_REQUEST_TIMEOUT_MS is refused before the request is sent. The
- * source travels with the deadline so its expiry names the variable that
- * governs it, whether the value came from the variable or the default.
+ * FLAIR_REM_REQUEST_TIMEOUT_MS is refused for these routes before the request
+ * is sent. The source travels with the deadline so its expiry names the
+ * variable that governs it, whether the value came from the variable or the
+ * default.
  */
 export function longRemRequestDeadline(
   method: string,

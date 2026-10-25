@@ -181,8 +181,9 @@ export const REM_REQUEST_DEADLINE_ENV = "FLAIR_REM_REQUEST_TIMEOUT_MS";
  * (DEDUP_CLUSTER_MAX_MEMORIES_DEFAULT), so 20,000 x ~57 ms = ~1,140 s and this
  * deadline sits above it. It is a sizing estimate, not a throughput claim, and
  * is within {@link REQUEST_DEADLINE_MAX_MS}. {@link REM_REQUEST_DEADLINE_ENV}
- * overrides it; every other request through the shared REST sender resolves
- * FLAIR_REQUEST_TIMEOUT_MS, else the shared default.
+ * overrides it; every other request through the shared REST sender that passes
+ * no explicit deadline resolves FLAIR_REQUEST_TIMEOUT_MS, else the shared
+ * default.
  */
 export const DEFAULT_REM_REQUEST_DEADLINE_MS = 1_800_000;
 
@@ -204,15 +205,17 @@ function parseDeadlineEnv(name: string, raw: string | undefined): number | undef
 
 /**
  * The whole-request deadline in force: `explicit` when given, else the env
- * override, else the default. An out-of-range or non-integer env value is
- * refused here, before any request is sent, naming the variable and the range;
- * it is never silently defaulted. An empty or whitespace-only value is unset.
+ * override, else the default. An explicit deadline is validated and returned
+ * before `FLAIR_REQUEST_TIMEOUT_MS` is read, so an invalid value of that
+ * variable refuses only the requests it governs — those with no explicit
+ * deadline. An out-of-range or non-integer env value is refused here, before
+ * any request is sent, naming the variable and the range; it is never
+ * silently defaulted. An empty or whitespace-only value is unset.
  */
 export function resolveRequestDeadlineMs(
   explicit: number | undefined = undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): number {
-  const envValue = parseDeadlineEnv(REQUEST_DEADLINE_ENV, env[REQUEST_DEADLINE_ENV]);
   if (explicit !== undefined) {
     if (!Number.isSafeInteger(explicit) || explicit < REQUEST_DEADLINE_MIN_MS || explicit > REQUEST_DEADLINE_MAX_MS) {
       throw new Error(
@@ -221,7 +224,7 @@ export function resolveRequestDeadlineMs(
     }
     return explicit;
   }
-  return envValue ?? DEFAULT_REQUEST_DEADLINE_MS;
+  return parseDeadlineEnv(REQUEST_DEADLINE_ENV, env[REQUEST_DEADLINE_ENV]) ?? DEFAULT_REQUEST_DEADLINE_MS;
 }
 
 /**
@@ -1519,7 +1522,9 @@ export interface AuthedRequestOptions {
    * Whole-request deadline in milliseconds, overriding
    * FLAIR_REQUEST_TIMEOUT_MS and the default. A caller whose request can
    * legitimately run longer than the default passes its own value here, with a
-   * comment saying why.
+   * comment saying why. It is validated and returned before
+   * FLAIR_REQUEST_TIMEOUT_MS is read, so an invalid shared value does not
+   * refuse a request that passes this.
    */
   deadlineMs?: number;
   /**

@@ -503,7 +503,37 @@ describe("rem long-route deadline (flair#2789)", () => {
     expect(server.requests).toHaveLength(0);
   }, 5_000);
 
-  test("a REM work route expiry from the 1,800 s default names the REM variable and its range", () => {
+  test("an invalid FLAIR_REQUEST_TIMEOUT_MS does not refuse a REM work route", async () => {
+    const saved = process.env[REQUEST_DEADLINE_ENV];
+    try {
+      process.env[REQUEST_DEADLINE_ENV] = "abc";
+      const server = await serve(answerSoon({ ok: true }, 0));
+      const opts = longRemRequestDeadline("POST", "/MemoryMaintenance", {
+        [REM_REQUEST_DEADLINE_ENV]: "2400000",
+      });
+      const result = await sendJsonRequest(new URL(`${server.baseUrl}/MemoryMaintenance`), "POST", {}, ADMIN_AUTH, true, opts);
+      expect(result).toEqual({ ok: true });
+      expect(server.requests).toEqual([{ method: "POST", path: "/MemoryMaintenance" }]);
+    } finally {
+      if (saved === undefined) delete process.env[REQUEST_DEADLINE_ENV];
+      else process.env[REQUEST_DEADLINE_ENV] = saved;
+    }
+  }, 5_000);
+
+  test("an explicit deadline is returned before the shared value is parsed", () => {
+    expect(resolveRequestDeadlineMs(900_000, { [REQUEST_DEADLINE_ENV]: "abc" })).toBe(900_000);
+  });
+
+  test("an invalid FLAIR_REM_REQUEST_TIMEOUT_MS does not refuse a non-REM request", async () => {
+    const server = await serve(answerSoon({ ok: true }, 0));
+    const opts = longRemRequestDeadline("POST", "/ConsolidateMemories", { [REM_REQUEST_DEADLINE_ENV]: "abc" });
+    expect(opts).toEqual({});
+    const result = await sendJsonRequest(new URL(`${server.baseUrl}/ConsolidateMemories`), "POST", {}, ADMIN_AUTH, true, opts);
+    expect(result).toEqual({ ok: true });
+    expect(server.requests).toEqual([{ method: "POST", path: "/ConsolidateMemories" }]);
+  }, 5_000);
+
+  test("a REM work route expiry from the 1,800 s default names the REM variable and its range in the unknown-outcome message", () => {
     const opts = longRemRequestDeadline("POST", "/MemoryMaintenance", {});
     expect(opts.deadlineMs).toBe(1_800_000);
     expect(opts.deadlineSource).toBe("rem");
@@ -512,6 +542,9 @@ describe("rem long-route deadline (flair#2789)", () => {
     expect(unknown.message).toContain("Raise FLAIR_REM_REQUEST_TIMEOUT_MS (1 to 3600000)");
     expect(unknown.message).not.toContain("FLAIR_REQUEST_TIMEOUT_MS");
     expect(unknown.message).not.toContain("sets its own deadline");
+    // Error-class formatting only: every REM work route is POST, so an expiry
+    // there raises ApiRequestOutcomeUnknown. This GET is constructed directly
+    // to check that the timeout class names the variable without its range.
     const timeout = new ApiRequestTimeout("GET", "/Health", opts.deadlineMs!, undefined, opts.deadlineSource!);
     expect(timeout.message).toContain("within 1800000 ms (FLAIR_REM_REQUEST_TIMEOUT_MS)");
     expect(timeout.message).not.toContain("FLAIR_REQUEST_TIMEOUT_MS");
