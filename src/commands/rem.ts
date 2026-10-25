@@ -1313,8 +1313,8 @@ export function register(program: Command): void {
       // (test/bench/rem-responsiveness.md). All four REM work routes get the
       // one 1,800 s deadline from longRemRequestDeadline,
       // FLAIR_REM_REQUEST_TIMEOUT_MS overrides it, and every other call
-      // through the shared REST sender resolves FLAIR_REQUEST_TIMEOUT_MS when
-      // it is set, else the default.
+      // through the shared REST sender that passes no explicit deadline
+      // resolves FLAIR_REQUEST_TIMEOUT_MS when it is set, else the default.
       const remDeadline = longRemRequestDeadline;
       const agentApiCall = (method: string, path: string, body?: unknown) =>
         api(method, path, body, { agentId, agentIdSource: "flag", signedOnly: true, ...remDeadline(method, path) });
@@ -1591,7 +1591,7 @@ export function register(program: Command): void {
           const unknownCount =
             result.unknown.memories.length + result.unknown.souls.length + result.unknown.candidates.length;
           if (unknownCount > 0) {
-            console.log(`  Unknown:      ${unknownCount} ids ended at the request deadline; their write may or may not have taken effect, and no further attempt was sent after it`);
+            console.log(`  Unknown:      ${unknownCount} ids ended at the request deadline; their write may or may not have taken effect, and no later write to the same table and record id was sent`);
             for (const id of result.unknown.memories) {
               const state = result.verified?.unknownStates.find((s) => s.entity === "memory" && s.id === id);
               console.log(`    - ${state ? formatUnknownState(state) : `memory ${id}: post-restore verification did not complete; its state is unverified`}`);

@@ -230,8 +230,8 @@ export function resolveRequestDeadlineMs(
 /**
  * The REM work deadline in force: {@link REM_REQUEST_DEADLINE_ENV} when set,
  * else {@link DEFAULT_REM_REQUEST_DEADLINE_MS}. An out-of-range or non-integer
- * value is refused here, before any request is sent, naming the variable and
- * the range; an empty or whitespace-only value is unset.
+ * value is refused here, before the REM work request is sent, naming the
+ * variable and the range; an empty or whitespace-only value is unset.
  */
 export function resolveRemRequestDeadlineMs(env: NodeJS.ProcessEnv = process.env): number {
   return parseDeadlineEnv(REM_REQUEST_DEADLINE_ENV, env[REM_REQUEST_DEADLINE_ENV]) ?? DEFAULT_REM_REQUEST_DEADLINE_MS;
@@ -1263,7 +1263,8 @@ export async function sendJsonRequest(
 ): Promise<any> {
   // The deadline covers the request AND the response body read: a server that
   // sends headers and then stalls the body is bounded too. Resolved before the
-  // request, so an invalid FLAIR_REQUEST_TIMEOUT_MS sends nothing.
+  // request, so an invalid FLAIR_REQUEST_TIMEOUT_MS sends nothing for a request
+  // that resolves that variable (one with no explicit deadline).
   const deadlineSource: RequestDeadlineSource =
     transport.deadlineSource ?? (transport.deadlineMs === undefined ? "env" : "explicit");
   const deadlineMs = resolveRequestDeadlineMs(transport.deadlineMs);

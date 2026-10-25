@@ -150,12 +150,13 @@ export interface RestoreResult {
    * complete response, so whether it took effect is unknown. The unknown
    * attempt adds no `errors` entry and no restored or deleted count; earlier
    * known operations on the same id can remain in `errors`, `deleted` or
-   * `restored`. No further attempt is sent after an unknown outcome; an earlier
-   * provider-timeout refusal may already have triggered a retry (`retried`). Once
-   * any write to a table and record id has an unknown outcome, no later write
-   * to that same table and record id in this run is sent — a late write could
-   * change or remove the row — and the skipped snapshot id is listed in
-   * `skippedAfterUnknownDelete`. Any entry here makes `status` `unresolved`.
+   * `restored`. The loops continue with the other ids, but once any write to a
+   * table and record id has an unknown outcome, no later write to that same
+   * table and record id in this run is sent — a late write could change or
+   * remove the row — and the skipped snapshot id is listed in
+   * `skippedAfterUnknownDelete`. An earlier provider-timeout refusal may
+   * already have triggered a retry (`retried`). Any entry here makes `status`
+   * `unresolved`.
    * When verification completes, `verified.unknownStates` reports what its
    * id-only read shows for each memory and soul id here.
    */
