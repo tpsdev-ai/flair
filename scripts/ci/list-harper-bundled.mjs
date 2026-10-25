@@ -37,7 +37,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 // other path separator, not starting with `.` or `_`, at most 214 characters. This is narrower than "any string" and
 // broader than npm's full rule for new names (which also refuses names such as `-foo` or `node_modules`): its job is
 // that each entry names exactly one directory under harper's node_modules, never a path into another package's tree.
-// Every entry harper 5.3.3 bundles satisfies it.
+// Every entry harper 5.3.4 bundles satisfies it.
 const PACKAGE_NAME_RE = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
 
 function isPackageName(value) {

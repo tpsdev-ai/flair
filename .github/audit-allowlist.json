@@ -46,7 +46,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> @fastify/static",
-      "reason": "Renewed 2026-10-22 after re-reading against harper 5.3.1; harper 5.3.3, the version flair pins (package.json:69), ships the same copies (first added 2026-07-27; renewed 2026-09-25 and 2026-10-07). Resolved copies: one in bun.lock (@fastify/static 9.3.0, pulled only by harper ^9.1.3) and harper 5.3.3's bundled copy 9.3.0 (node_modules/harper/node_modules/@fastify/static in npm and bun installs of flair). The fix is 10.1.1 (10.1.2 for GHSA-8pvw-jcv7-9cmj; npm's latest is 10.1.7), and the 9.x line ends at 9.3.0 with no backport. Every harper release inspected still declares ^9.1.3 (5.3.1; 5.3.3, latest; 5.3.2; 5.2.15, latest-5.2; 5.1.29, latest-5.1; 5.3.0-beta.4, next), so the fix is a major bump inside harper's HTTP layer that a root override would force on the server harper itself mounts. Where it is used: harper 5.3.3 imports it only in dist/server/operationsServer.js:53 and registers it once (:208), on the operations server, with a fixed root of harper's own Studio assets (studio/web); flair's localStudio enabled: false (src/commands/init.ts:1039,1194) changes only which page the / handler serves (:209-215), not that registration. That file adds no request hook of its own; authentication on the operations server is per-route preValidation (GET /api/openapi/rest :217, POST / :220, and the operations MCP route at :194-203, registered only when mcp.operations is configured, which flair does not set), so no guard is tied to the paths the plugin serves. harper's application-port static handler uses send, not this plugin (dist/server/static.js:12), and flair's component config declares no static handler (config.yaml). flair does not import @fastify/static. The default flair install binds the operations server to 127.0.0.1 (src/cli.ts:578, resolved at :1882-1891) plus a domain socket (src/commands/init.ts:1026,1037) that is owner-only unless FLAIR_SOCKET_GROUP opts a group in (posture at src/cli.ts:2129-2147,2165-2173); an operator who widens the bind with --ops-bind or FLAIR_OPS_BIND makes the plugin reachable beyond loopback. Short leash (11 days), expiry aligned with the other harper-pinned high entries, pending the upstream move.",
+      "reason": "Renewed 2026-10-22 after re-reading against harper 5.3.1; harper 5.3.4, the version flair pins (package.json:69), ships the same copies (first added 2026-07-27; renewed 2026-09-25 and 2026-10-07). Resolved copies: one in bun.lock (@fastify/static 9.3.0, pulled only by harper ^9.1.3) and harper 5.3.4's bundled copy 9.3.0 (node_modules/harper/node_modules/@fastify/static in npm and bun installs of flair). The fix is 10.1.1 (10.1.2 for GHSA-8pvw-jcv7-9cmj; npm's latest is 10.1.7), and the 9.x line ends at 9.3.0 with no backport. Every harper release inspected still declares ^9.1.3 (5.3.1; 5.3.4, latest; 5.3.2; 5.2.15, latest-5.2; 5.1.29, latest-5.1; 5.3.0-beta.4, next), so the fix is a major bump inside harper's HTTP layer that a root override would force on the server harper itself mounts. Where it is used: harper 5.3.4 imports it only in dist/server/operationsServer.js:53 and registers it once (:208), on the operations server, with a fixed root of harper's own Studio assets (studio/web); flair's localStudio enabled: false (src/commands/init.ts:1039,1194) changes only which page the / handler serves (:209-215), not that registration. That file adds no request hook of its own; authentication on the operations server is per-route preValidation (GET /api/openapi/rest :217, POST / :220, and the operations MCP route at :194-203, registered only when mcp.operations is configured, which flair does not set), so no guard is tied to the paths the plugin serves. harper's application-port static handler uses send, not this plugin (dist/server/static.js:12), and flair's component config declares no static handler (config.yaml). flair does not import @fastify/static. The default flair install binds the operations server to 127.0.0.1 (src/cli.ts:578, resolved at :1882-1891) plus a domain socket (src/commands/init.ts:1026,1037) that is owner-only unless FLAIR_SOCKET_GROUP opts a group in (posture at src/cli.ts:2129-2147,2165-2173); an operator who widens the bind with --ops-bind or FLAIR_OPS_BIND makes the plugin reachable beyond loopback. Short leash (11 days), expiry aligned with the other harper-pinned high entries, pending the upstream move.",
       "added": "2026-10-22",
       "expires": "2026-11-02",
       "removeWhen": "flair moves to a harper release whose installed tree resolves @fastify/static >=10.1.1 (>=10.1.2 also retires GHSA-8pvw-jcv7-9cmj), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. As of 2026-10-22 no published harper release does: 5.3.3, 5.3.2, 5.3.1, 5.2.15, 5.1.29 and 5.3.0-beta.4 all declare ^9.1.3, and the 9.x line ends at 9.3.0."
@@ -62,7 +62,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> @fastify/static",
-      "reason": "Renewed 2026-10-22 after re-reading against harper 5.3.1; harper 5.3.3, the version flair pins (package.json:69), ships the same copies (first added 2026-07-27; re-checked 2026-10-07). Same vendored edge, same resolved copies (@fastify/static 9.3.0 in bun.lock and in harper 5.3.3's bundle at node_modules/harper/node_modules/@fastify/static in npm and bun installs) and same exposure as GHSA-83w8-p2f5-377r: harper registers the plugin only on its operations server, for its own Studio assets (node_modules/harper/dist/server/operationsServer.js:208), with no authorization tied to the paths it serves; flair does not import it. Fixed in 10.1.2 (npm's latest is 10.1.7); none of the inspected harper releases (5.3.1, 5.3.3, 5.3.2, 5.2.15, 5.1.29, 5.3.0-beta.4) moves off ^9.1.3. Expiry aligned with GHSA-83w8-p2f5-377r so the shared fix is re-decided once.",
+      "reason": "Renewed 2026-10-22 after re-reading against harper 5.3.1; harper 5.3.4, the version flair pins (package.json:69), ships the same copies (first added 2026-07-27; re-checked 2026-10-07). Same vendored edge, same resolved copies (@fastify/static 9.3.0 in bun.lock and in harper 5.3.4's bundle at node_modules/harper/node_modules/@fastify/static in npm and bun installs) and same exposure as GHSA-83w8-p2f5-377r: harper registers the plugin only on its operations server, for its own Studio assets (node_modules/harper/dist/server/operationsServer.js:208), with no authorization tied to the paths it serves; flair does not import it. Fixed in 10.1.2 (npm's latest is 10.1.7); none of the inspected harper releases (5.3.1, 5.3.3, 5.3.2, 5.2.15, 5.1.29, 5.3.0-beta.4) moves off ^9.1.3. Expiry aligned with GHSA-83w8-p2f5-377r so the shared fix is re-decided once.",
       "added": "2026-10-22",
       "expires": "2026-11-02",
       "removeWhen": "flair moves to a harper release whose installed tree resolves @fastify/static >=10.1.2 (the same move that retires GHSA-83w8-p2f5-377r), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. As of 2026-10-22 no published harper release does."
@@ -77,7 +77,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fastify",
-      "reason": "harper's installed tree carries fastify 5.12.5: harper 5.3.3, the version flair pins (package.json:69), ships it as a bundled copy at node_modules/harper/node_modules/fastify, which harper's runtime loads in npm and bun installs. flair's own tree resolves the fixed version (the root override fastify ^5.12.7 resolves 5.12.7 in bun.lock), but that override does not reach harper's bundled copy and bun audit reads only bun.lock. flair does not import fastify.",
+      "reason": "harper's installed tree carries fastify 5.12.5: harper 5.3.4, the version flair pins (package.json:69), ships it as a bundled copy at node_modules/harper/node_modules/fastify, which harper's runtime loads in npm and bun installs. flair's own tree resolves the fixed version (the root override fastify ^5.12.7 resolves 5.12.7 in bun.lock), but that override does not reach harper's bundled copy and bun audit reads only bun.lock. flair does not import fastify.",
       "added": "2026-10-22",
       "expires": "2026-11-05",
       "removeWhen": "flair moves to a harper release whose installed tree resolves fastify >=5.12.6, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
@@ -93,7 +93,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> validate.js",
-      "reason": "Renewed 2026-10-22 after re-reading against harper 5.3.1; harper 5.3.3, the version flair pins (package.json:69), ships the same copies (first added 2026-07-27). No fixed release exists: npm's latest validate.js is 0.13.1 (released 2019), inside the affected range (<=0.13.1). Resolved copies: one in bun.lock (validate.js 0.13.1, pulled only by harper's exact 0.13.1) and harper 5.3.3's bundled copy 0.13.1 (node_modules/harper/node_modules/validate.js in npm and bun installs of flair). flair's own code does not import validate.js.",
+      "reason": "Renewed 2026-10-22 after re-reading against harper 5.3.1; harper 5.3.4, the version flair pins (package.json:69), ships the same copies (first added 2026-07-27). No fixed release exists: npm's latest validate.js is 0.13.1 (released 2019), inside the affected range (<=0.13.1). Resolved copies: one in bun.lock (validate.js 0.13.1, pulled only by harper's exact 0.13.1) and harper 5.3.4's bundled copy 0.13.1 (node_modules/harper/node_modules/validate.js in npm and bun installs of flair). flair's own code does not import validate.js.",
       "added": "2026-10-22",
       "expires": "2026-11-05",
       "removeWhen": "validate.js publishes a fixed release AND harper picks it up, or flair stops depending on harper. The gate flags the first half automatically."
@@ -111,7 +111,7 @@
       "reason": "Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1; bundled copies from 5.3.2, fast-uri 3.1.0 at the top level and 4.2.1 nested under fast-json-stringify in 5.3.3), which neither npm nor bun reaches with a root override. The bun override (fast-uri 4.2.3) fixes flair's own tree in bun.lock, but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. Retired when every fast-uri copy in harper's installed tree is outside this advisory's vulnerable ranges, which on the 3.x and 4.x lines are >=3.0.0 <=3.1.3 (fixed in 3.1.4) and >=4.0.0 <=4.1.0 (fixed in 4.1.1). Of harper 5.2.8's copies, 3.1.0 is affected; harper 5.3.0 still pins an affected 3.1.0.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
-      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <=3.1.3, fixed in 3.1.4; 4.x >=4.0.0 <=4.1.0, fixed in 4.1.1); no release through harper 5.3.3 does"
+      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <=3.1.3, fixed in 3.1.4; 4.x >=4.0.0 <=4.1.0, fixed in 4.1.1); no release through harper 5.3.4 does"
     },
     {
       "ghsa": "GHSA-7p8r-x3mc-p8w7",
@@ -126,7 +126,7 @@
       "reason": "Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1; bundled copies from 5.3.2, fast-uri 3.1.0 at the top level and 4.2.1 nested under fast-json-stringify in 5.3.3), which neither npm nor bun reaches with a root override. The bun override (fast-uri 4.2.3) fixes flair's own tree in bun.lock, but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. Retired when every fast-uri copy in harper's installed tree is outside this advisory's vulnerable ranges, which on the 3.x and 4.x lines are >=3.0.0 <3.1.5 (fixed in 3.1.5) and >=4.0.0 <4.1.2 (fixed in 4.1.2). Of harper 5.2.8's copies, 3.1.0 is affected; harper 5.3.0 still pins an affected 3.1.0.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
-      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <3.1.5, fixed in 3.1.5; 4.x >=4.0.0 <4.1.2, fixed in 4.1.2); no release through harper 5.3.3 does"
+      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <3.1.5, fixed in 3.1.5; 4.x >=4.0.0 <4.1.2, fixed in 4.1.2); no release through harper 5.3.4 does"
     },
     {
       "ghsa": "GHSA-q3j6-qgpj-74h6",
@@ -141,7 +141,7 @@
       "reason": "Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1; bundled copies from 5.3.2, fast-uri 3.1.0 at the top level and 4.2.1 nested under fast-json-stringify in 5.3.3), which neither npm nor bun reaches with a root override. The bun override (fast-uri 4.2.3) fixes flair's own tree in bun.lock, but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. Retired when every fast-uri copy in harper's installed tree is outside this advisory's vulnerable ranges, which on the 3.x and 4.x lines is >=3.0.0 <=3.1.0 (fixed in 3.1.1); it does not affect 4.x. Of harper 5.2.8's copies, 3.1.0 is affected; harper 5.3.0 still pins an affected 3.1.0.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
-      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <=3.1.0, fixed in 3.1.1; 4.x not affected); no release through harper 5.3.3 does"
+      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <=3.1.0, fixed in 3.1.1; 4.x not affected); no release through harper 5.3.4 does"
     },
     {
       "ghsa": "GHSA-4c8g-83qw-93j6",
@@ -156,7 +156,7 @@
       "reason": "Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1; bundled copies from 5.3.2, fast-uri 3.1.0 at the top level and 4.2.1 nested under fast-json-stringify in 5.3.3), which neither npm nor bun reaches with a root override. The bun override (fast-uri 4.2.3) fixes flair's own tree in bun.lock, but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. Retired when every fast-uri copy in harper's installed tree is outside this advisory's vulnerable ranges, which on the 3.x and 4.x lines are >=3.0.0 <3.1.3 (fixed in 3.1.3) and >=4.0.0 <4.0.1 (fixed in 4.0.1). Of harper 5.2.8's copies, 3.1.0 is affected; harper 5.3.0 still pins an affected 3.1.0.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
-      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <3.1.3, fixed in 3.1.3; 4.x >=4.0.0 <4.0.1, fixed in 4.0.1); no release through harper 5.3.3 does"
+      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <3.1.3, fixed in 3.1.3; 4.x >=4.0.0 <4.0.1, fixed in 4.0.1); no release through harper 5.3.4 does"
     },
     {
       "ghsa": "GHSA-v39h-62p7-jpjc",
@@ -171,7 +171,7 @@
       "reason": "Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1; bundled copies from 5.3.2, fast-uri 3.1.0 at the top level and 4.2.1 nested under fast-json-stringify in 5.3.3), which neither npm nor bun reaches with a root override. The bun override (fast-uri 4.2.3) fixes flair's own tree in bun.lock, but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. Retired when every fast-uri copy in harper's installed tree is outside this advisory's vulnerable ranges, which on the 3.x and 4.x lines is >=3.0.0 <=3.1.1 (fixed in 3.1.2); it does not affect 4.x. Of harper 5.2.8's copies, 3.1.0 is affected; harper 5.3.0 still pins an affected 3.1.0.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
-      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <=3.1.1, fixed in 3.1.2; 4.x not affected); no release through harper 5.3.3 does"
+      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <=3.1.1, fixed in 3.1.2; 4.x not affected); no release through harper 5.3.4 does"
     },
     {
       "ghsa": "GHSA-f65p-4m7j-42xc",
@@ -186,7 +186,7 @@
       "reason": "Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1; bundled copies from 5.3.2, fast-uri 3.1.0 at the top level and 4.2.1 nested under fast-json-stringify in 5.3.3), which neither npm nor bun reaches with a root override. The bun override (fast-uri 4.2.3) fixes flair's own tree in bun.lock, but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. Retired when every fast-uri copy in harper's installed tree is outside this advisory's vulnerable ranges, which on the 3.x and 4.x lines are >=3.0.0 <3.1.6 (fixed in 3.1.6) and >=4.0.0 <4.1.3 (fixed in 4.1.3). Of harper 5.2.8's copies, 3.1.0 and 4.1.2 are affected; harper 5.3.0 still pins an affected 3.1.0.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
-      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <3.1.6, fixed in 3.1.6; 4.x >=4.0.0 <4.1.3, fixed in 4.1.3); no release through harper 5.3.3 does"
+      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <3.1.6, fixed in 3.1.6; 4.x >=4.0.0 <4.1.3, fixed in 4.1.3); no release through harper 5.3.4 does"
     },
     {
       "ghsa": "GHSA-jqff-g426-hqxp",
@@ -201,7 +201,7 @@
       "reason": "Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1; bundled copies from 5.3.2, fast-uri 3.1.0 at the top level and 4.2.1 nested under fast-json-stringify in 5.3.3), which neither npm nor bun reaches with a root override. The bun override (fast-uri 4.2.3) fixes flair's own tree in bun.lock, but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. Retired when every fast-uri copy in harper's installed tree is outside this advisory's vulnerable ranges, which on the 3.x and 4.x lines are >=3.0.0 <3.1.6 (fixed in 3.1.6) and >=4.0.0 <4.1.3 (fixed in 4.1.3). Of harper 5.2.8's copies, 3.1.0 and 4.1.2 are affected; harper 5.3.0 still pins an affected 3.1.0.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
-      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <3.1.6, fixed in 3.1.6; 4.x >=4.0.0 <4.1.3, fixed in 4.1.3); no release through harper 5.3.3 does"
+      "removeWhen": "flair moves to a harper release whose installed tree puts every fast-uri copy outside this advisory's vulnerable ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; 3.x >=3.0.0 <3.1.6, fixed in 3.1.6; 4.x >=4.0.0 <4.1.3, fixed in 4.1.3); no release through harper 5.3.4 does"
     },
     {
       "ghsa": "GHSA-qw65-cvwx-89v3",
@@ -231,7 +231,7 @@
       "reason": "Published 2026-09-29. Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2), which neither npm nor bun reaches with a root override: the top-level 3.1.0 is in the affected range (fixed in 3.1.8), and the nested copy under fastify's fast-json-stringify moved to 4.2.1 in 5.3.0, outside it (fixed in 4.1.5). The bun override (raised to ^4.1.5 for this advisory, now fast-uri 4.2.3) keeps flair's own tree on a fixed 4.x (4.2.3), but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. flair does not import fast-uri; in an npm install of the flair package the only copies are harper's, reached through its fastify stack (@fastify/ajv-compiler, ajv, fast-json-stringify). Same edge and same retirement path as the other fast-uri entries, so it shares their expiry.",
       "added": "2026-09-30",
       "expires": "2026-11-02",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy out of the affected ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; >=3.1.8 on 3.x, >=4.1.5 on 4.x); no release through harper 5.3.3 does"
+      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy out of the affected ranges (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; >=3.1.8 on 3.x, >=4.1.5 on 4.x); no release through harper 5.3.4 does"
     },
     {
       "ghsa": "GHSA-f886-m6hf-6m8v",
@@ -318,10 +318,10 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
-      "reason": "Published 2026-09-29. Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; harper 5.2.8 through 5.3.3 all ship 5.0.4), which neither npm nor bun reaches with a root override. The bun override (brace-expansion ^5.0.12, raised for this advisory and GHSA-qhr7-859c-m2p7 / GHSA-q2hr-2g5m-vwhr) keeps flair's own tree on the fixed 5.0.12, but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. flair does not import brace-expansion; in an npm install of the flair package the only copy is harper's, reached through its @fastify/static -> glob -> minimatch. Same edge and same retirement path as the other brace-expansion entries, so it shares the expiry of the high ones.",
+      "reason": "Published 2026-09-29. Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; harper 5.2.8 through 5.3.4 all ship 5.0.4), which neither npm nor bun reaches with a root override. The bun override (brace-expansion ^5.0.12, raised for this advisory and GHSA-qhr7-859c-m2p7 / GHSA-q2hr-2g5m-vwhr) keeps flair's own tree on the fixed 5.0.12, but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. flair does not import brace-expansion; in an npm install of the flair package the only copy is harper's, reached through its @fastify/static -> glob -> minimatch. Same edge and same retirement path as the other brace-expansion entries, so it shares the expiry of the high ones.",
       "added": "2026-09-30",
       "expires": "2026-11-02",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion >=5.0.10 (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2); no release through harper 5.3.3 does"
+      "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion >=5.0.10 (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2); no release through harper 5.3.4 does"
     },
     {
       "ghsa": "GHSA-qhr7-859c-m2p7",
@@ -333,10 +333,10 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
-      "reason": "Published 2026-09-29. Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; harper 5.2.8 through 5.3.3 all ship 5.0.4), which neither npm nor bun reaches with a root override. The bun override (brace-expansion ^5.0.12, raised for this advisory and GHSA-6j4f-fj2g-mc7p / GHSA-q2hr-2g5m-vwhr) keeps flair's own tree on the fixed 5.0.12, but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. flair does not import brace-expansion; in an npm install of the flair package the only copy is harper's, reached through its @fastify/static -> glob -> minimatch. Same edge and same retirement path as the other brace-expansion entries, so it shares the expiry of the high ones.",
+      "reason": "Published 2026-09-29. Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; harper 5.2.8 through 5.3.4 all ship 5.0.4), which neither npm nor bun reaches with a root override. The bun override (brace-expansion ^5.0.12, raised for this advisory and GHSA-6j4f-fj2g-mc7p / GHSA-q2hr-2g5m-vwhr) keeps flair's own tree on the fixed 5.0.12, but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. flair does not import brace-expansion; in an npm install of the flair package the only copy is harper's, reached through its @fastify/static -> glob -> minimatch. Same edge and same retirement path as the other brace-expansion entries, so it shares the expiry of the high ones.",
       "added": "2026-09-30",
       "expires": "2026-11-02",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion >=5.0.11 (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2); no release through harper 5.3.3 does"
+      "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion >=5.0.11 (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2); no release through harper 5.3.4 does"
     },
     {
       "ghsa": "GHSA-q2hr-2g5m-vwhr",
@@ -348,10 +348,10 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
-      "reason": "Published 2026-09-29. Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; harper 5.2.8 through 5.3.3 all ship 5.0.4), which neither npm nor bun reaches with a root override. The bun override (brace-expansion ^5.0.12, raised for this advisory and GHSA-6j4f-fj2g-mc7p / GHSA-qhr7-859c-m2p7) keeps flair's own tree on the fixed 5.0.12, but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. flair does not import brace-expansion; in an npm install of the flair package the only copy is harper's, reached through its @fastify/static -> glob -> minimatch. Same edge and same retirement path as the other brace-expansion entries, so it shares the expiry of the moderate ones.",
+      "reason": "Published 2026-09-29. Resolved inside harper's installed tree (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2; harper 5.2.8 through 5.3.4 all ship 5.0.4), which neither npm nor bun reaches with a root override. The bun override (brace-expansion ^5.0.12, raised for this advisory and GHSA-6j4f-fj2g-mc7p / GHSA-qhr7-859c-m2p7) keeps flair's own tree on the fixed 5.0.12, but harper's runtime loads its bundled copies in a bun install too, and npm installs carry the same copies. flair does not import brace-expansion; in an npm install of the flair package the only copy is harper's, reached through its @fastify/static -> glob -> minimatch. Same edge and same retirement path as the other brace-expansion entries, so it shares the expiry of the moderate ones.",
       "added": "2026-09-30",
       "expires": "2027-03-02",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion >=5.0.12 (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2); no release through harper 5.3.3 does"
+      "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion >=5.0.12 (npm-shrinkwrap through 5.3.1, bundled copies from 5.3.2); no release through harper 5.3.4 does"
     },
     {
       "ghsa": "GHSA-c96f-x56v-gq3h",
@@ -404,7 +404,7 @@
       "severity": "moderate",
       "class": "vendor-pinned",
       "introducedBy": "harper -> stream-json",
-      "reason": "O(depth-squared) event-loop DoS in stream-json's pick/ignore/filter/replace filters on crafted nested JSON. stream-json@1.9.1 is a bundled copy inside harper@5.3.3; it cannot be overridden from this repo (harper ships the copy in its installed tree, where a root override does not reach in npm or bun installs, flair#1498/#1510). flair does not import stream-json directly - reachability is only via harper's internal streaming parser, not flair code.",
+      "reason": "O(depth-squared) event-loop DoS in stream-json's pick/ignore/filter/replace filters on crafted nested JSON. stream-json@1.9.1 is a bundled copy inside harper@5.3.4; it cannot be overridden from this repo (harper ships the copy in its installed tree, where a root override does not reach in npm or bun installs, flair#1498/#1510). flair does not import stream-json directly - reachability is only via harper's internal streaming parser, not flair code.",
       "sources": [
         "bun",
         "npm-install"
@@ -420,7 +420,7 @@
       "severity": "moderate",
       "class": "vendor-pinned",
       "introducedBy": "harper -> stream-json",
-      "reason": "Prototype pollution in stream-json's Assembler (fixed in 3.6.0). Harper 5.3.3 ships stream-json 1.9.1 as a bundled copy, which a root override does not reach in npm or bun installs (flair#1498/#1510). A Bun root override to stream-json 3.x is deferred pending compatibility testing. flair does not import stream-json. Harper 5.3.3 imports StreamArray and Batch in dist/dataLayer/bulkLoad.js; its import_from_s3 operation selects JSON from the S3 object's extension. StreamArray builds each element through the Assembler, so that path is in scope; Harper checks target-table insert permission for an insert import, update permission for update, and both for upsert (dist/utility/operation_authorization.js).",
+      "reason": "Prototype pollution in stream-json's Assembler (fixed in 3.6.0). Harper 5.3.4 ships stream-json 1.9.1 as a bundled copy, which a root override does not reach in npm or bun installs (flair#1498/#1510). A Bun root override to stream-json 3.x is deferred pending compatibility testing. flair does not import stream-json. Harper 5.3.4 imports StreamArray and Batch in dist/dataLayer/bulkLoad.js; its import_from_s3 operation selects JSON from the S3 object's extension. StreamArray builds each element through the Assembler, so that path is in scope; Harper checks target-table insert permission for an insert import, update permission for update, and both for upsert (dist/utility/operation_authorization.js).",
       "sources": ["bun", "npm-install"],
       "approvedBy": "tps-flint",
       "added": "2026-10-06",
@@ -433,7 +433,7 @@
       "severity": "moderate",
       "class": "vendor-pinned",
       "introducedBy": "harper -> stream-json",
-      "reason": "Quadratic re-scan in stream-json's JSONC parser and verifier (fixed after 3.5.0). The installed stream-json 1.9.1 package ships no JSONC parser. Harper 5.3.3 ships stream-json 1.9.1 as a bundled copy, which a root override does not reach in npm or bun installs (flair#1498/#1510). A Bun root override to stream-json 3.x is deferred pending compatibility testing. flair does not import stream-json. Harper 5.3.3 imports StreamArray and Batch in dist/dataLayer/bulkLoad.js; its import_from_s3 operation selects JSON from the S3 object's extension.",
+      "reason": "Quadratic re-scan in stream-json's JSONC parser and verifier (fixed after 3.5.0). The installed stream-json 1.9.1 package ships no JSONC parser. Harper 5.3.4 ships stream-json 1.9.1 as a bundled copy, which a root override does not reach in npm or bun installs (flair#1498/#1510). A Bun root override to stream-json 3.x is deferred pending compatibility testing. flair does not import stream-json. Harper 5.3.4 imports StreamArray and Batch in dist/dataLayer/bulkLoad.js; its import_from_s3 operation selects JSON from the S3 object's extension.",
       "sources": ["bun", "npm-install"],
       "approvedBy": "tps-flint",
       "added": "2026-10-06",
@@ -451,7 +451,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> node-forge",
-      "reason": "Renewed 2026-10-07 after re-reading against harper 5.2.8, the version flair then pinned; harper 5.3.3 ships the same copy (first added 2026-10-02). No fixed release exists: npm's latest node-forge is 1.4.0, inside the affected range (<=1.4.0). Resolved copies: one in bun.lock (node-forge 1.4.0, pulled only by harper ^1.3.1) and harper 5.3.3's bundled copy 1.4.0 (node_modules/harper/node_modules/node-forge in npm and bun installs of flair); 5.3.3 declares ^1.3.1. flair's own code does not import it. harper 5.3.3's only import is node_modules/harper/dist/security/keys.js:64, which uses forge.pki to create and sign its CA and server certificates (generateCertificates :543-567, generateCertAuthority :589-613) and to parse and PEM-encode keys and certificates (:491, :538-539, :547, :617, :649, :689, :695, :706, :708). keys.js never calls node-forge's RSA signature verification, the path this advisory affects. As a no-patch-published entry, the gate blocks it once npm's latest node-forge is outside the affected range (when the audit can reach the registry). Expiry aligned with the other harper-pinned high entries.",
+      "reason": "Renewed 2026-10-07 after re-reading against harper 5.2.8, the version flair then pinned; harper 5.3.4 ships the same copy (first added 2026-10-02). No fixed release exists: npm's latest node-forge is 1.4.0, inside the affected range (<=1.4.0). Resolved copies: one in bun.lock (node-forge 1.4.0, pulled only by harper ^1.3.1) and harper 5.3.4's bundled copy 1.4.0 (node_modules/harper/node_modules/node-forge in npm and bun installs of flair); 5.3.4 declares ^1.3.1. flair's own code does not import it. harper 5.3.4's only import is node_modules/harper/dist/security/keys.js:64, which uses forge.pki to create and sign its CA and server certificates (generateCertificates :543-567, generateCertAuthority :589-613) and to parse and PEM-encode keys and certificates (:491, :538-539, :547, :617, :649, :689, :695, :706, :708). keys.js never calls node-forge's RSA signature verification, the path this advisory affects. As a no-patch-published entry, the gate blocks it once npm's latest node-forge is outside the affected range (when the audit can reach the registry). Expiry aligned with the other harper-pinned high entries.",
       "added": "2026-10-07",
       "expires": "2026-11-02",
       "removeWhen": "npm's latest node-forge release is outside the affected range (the gate then blocks this entry): reassess; a maintainer removes the entry once harper resolves a fixed release or drops node-forge"
@@ -482,7 +482,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Published 2026-10-23; URI scheme spoofing via percent-encoded scheme decoding. Resolved inside harper's installed tree, which neither npm nor bun reaches with a root override: harper 5.3.3, the version flair pins (package.json:69), bundles fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in npm and bun installs of flair. The root override (fast-uri 4.2.3) keeps flair's own tree on the fixed 4.x, but harper's runtime loads its bundled copies too. flair does not import fast-uri; the copies in an npm install of the flair package are harper's, reached through its fastify stack. Fixed in 3.1.9 (3.x) and 4.2.3 (4.x); both bundled copies are affected.",
+      "reason": "Published 2026-10-23; URI scheme spoofing via percent-encoded scheme decoding. Resolved inside harper's installed tree, which neither npm nor bun reaches with a root override: harper 5.3.4, the version flair pins (package.json:69), bundles fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in npm and bun installs of flair. The root override (fast-uri 4.2.3) keeps flair's own tree on the fixed 4.x, but harper's runtime loads its bundled copies too. flair does not import fast-uri; the copies in an npm install of the flair package are harper's, reached through its fastify stack. Fixed in 3.1.9 (3.x) and 4.2.3 (4.x); both bundled copies are affected.",
       "added": "2026-10-24",
       "expires": "2026-11-02",
       "removeWhen": "flair moves to a harper release whose installed tree resolves fast-uri >=3.1.9 on the 3.x line and >=4.2.3 on the 4.x line, or flair stops depending on harper."
@@ -497,7 +497,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Published 2026-10-23; host confusion via unchecked WHATWG host canonicalization. Resolved inside harper's installed tree, which neither npm nor bun reaches with a root override: harper 5.3.3, the version flair pins (package.json:69), bundles fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in npm and bun installs of flair. The root override (fast-uri 4.2.3) keeps flair's own tree on the fixed 4.x, but harper's runtime loads its bundled copies too. flair does not import fast-uri; the copies in an npm install of the flair package are harper's, reached through its fastify stack. Fixed in 3.1.9 (3.x) and 4.2.3 (4.x); only the 4.2.1 copy is affected: this advisory's 3.x range starts at 3.1.3, which harper's 3.1.0 predates.",
+      "reason": "Published 2026-10-23; host confusion via unchecked WHATWG host canonicalization. Resolved inside harper's installed tree, which neither npm nor bun reaches with a root override: harper 5.3.4, the version flair pins (package.json:69), bundles fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in npm and bun installs of flair. The root override (fast-uri 4.2.3) keeps flair's own tree on the fixed 4.x, but harper's runtime loads its bundled copies too. flair does not import fast-uri; the copies in an npm install of the flair package are harper's, reached through its fastify stack. Fixed in 3.1.9 (3.x) and 4.2.3 (4.x); only the 4.2.1 copy is affected: this advisory's 3.x range starts at 3.1.3, which harper's 3.1.0 predates.",
       "added": "2026-10-24",
       "expires": "2026-11-02",
       "removeWhen": "flair moves to a harper release whose installed tree resolves fast-uri >=4.2.3 on the 4.x line (its 3.x copy is outside this advisory's range), or flair stops depending on harper."
@@ -512,7 +512,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Published 2026-10-23; improper path equivalence in relative reference normalization. Resolved inside harper's installed tree, which neither npm nor bun reaches with a root override: harper 5.3.3, the version flair pins (package.json:69), bundles fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in npm and bun installs of flair. The root override (fast-uri 4.2.3) keeps flair's own tree on the fixed 4.x, but harper's runtime loads its bundled copies too. flair does not import fast-uri; the copies in an npm install of the flair package are harper's, reached through its fastify stack. Fixed in 3.1.9 (3.x) and 4.2.3 (4.x); both bundled copies are affected.",
+      "reason": "Published 2026-10-23; improper path equivalence in relative reference normalization. Resolved inside harper's installed tree, which neither npm nor bun reaches with a root override: harper 5.3.4, the version flair pins (package.json:69), bundles fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in npm and bun installs of flair. The root override (fast-uri 4.2.3) keeps flair's own tree on the fixed 4.x, but harper's runtime loads its bundled copies too. flair does not import fast-uri; the copies in an npm install of the flair package are harper's, reached through its fastify stack. Fixed in 3.1.9 (3.x) and 4.2.3 (4.x); both bundled copies are affected.",
       "added": "2026-10-24",
       "expires": "2026-11-02",
       "removeWhen": "flair moves to a harper release whose installed tree resolves fast-uri >=3.1.9 on the 3.x line and >=4.2.3 on the 4.x line, or flair stops depending on harper."
@@ -527,7 +527,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Published 2026-10-23; scheme injection via an unescaped first-segment colon in suffix references. Resolved inside harper's installed tree, which neither npm nor bun reaches with a root override: harper 5.3.3, the version flair pins (package.json:69), bundles fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in npm and bun installs of flair. The root override (fast-uri 4.2.3) keeps flair's own tree on the fixed 4.x, but harper's runtime loads its bundled copies too. flair does not import fast-uri; the copies in an npm install of the flair package are harper's, reached through its fastify stack. Fixed in 3.1.9 (3.x) and 4.2.3 (4.x); both bundled copies are affected.",
+      "reason": "Published 2026-10-23; scheme injection via an unescaped first-segment colon in suffix references. Resolved inside harper's installed tree, which neither npm nor bun reaches with a root override: harper 5.3.4, the version flair pins (package.json:69), bundles fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in npm and bun installs of flair. The root override (fast-uri 4.2.3) keeps flair's own tree on the fixed 4.x, but harper's runtime loads its bundled copies too. flair does not import fast-uri; the copies in an npm install of the flair package are harper's, reached through its fastify stack. Fixed in 3.1.9 (3.x) and 4.2.3 (4.x); both bundled copies are affected.",
       "added": "2026-10-24",
       "expires": "2026-11-02",
       "removeWhen": "flair moves to a harper release whose installed tree resolves fast-uri >=3.1.9 on the 3.x line and >=4.2.3 on the 4.x line, or flair stops depending on harper."
