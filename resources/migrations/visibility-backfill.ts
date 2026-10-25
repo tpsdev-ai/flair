@@ -213,8 +213,13 @@ export function createVisibilityBackfillMigration(
     async checkUnconfirmed(id: string) {
       const row = await getTable().get(id);
       if (!row) return "no-row" as const;
+      // The target for a row is the value its durability derives (flair#2840);
+      // an owner may narrow a persistent row to `private`, so `private` alone
+      // is not this migration's target for that row.
       const visibility = (row as { visibility?: unknown }).visibility;
-      return visibility === "private" || visibility === "shared" ? "at-target" as const : "pending" as const;
+      return visibility === deriveVisibilityFromDurability((row as { durability?: unknown }).durability)
+        ? "at-target" as const
+        : "pending" as const;
     },
 
     async run(batchSize: number): Promise<RunBatchResult> {

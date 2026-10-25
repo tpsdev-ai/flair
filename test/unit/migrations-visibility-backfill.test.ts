@@ -151,6 +151,21 @@ describe("deriveVisibilityFromDurability — the flair#509 rule, exhaustively", 
   });
 });
 
+describe("visibility-backfill migration — checkUnconfirmed compares against the row's derived target", () => {
+  it("answers at-target only when the row's visibility is the one its durability derives", async () => {
+    const { table } = makeFakeMemoryTable([
+      { id: "m1", durability: "persistent", visibility: "shared" },
+      { id: "m2", durability: "persistent", visibility: "private" },
+      { id: "m3", durability: "standard", visibility: "private" },
+    ]);
+    const m = makeMigration(() => table);
+    expect(await m.checkUnconfirmed!("m1")).toBe("at-target");
+    expect(await m.checkUnconfirmed!("m2")).toBe("pending");
+    expect(await m.checkUnconfirmed!("m3")).toBe("at-target");
+    expect(await m.checkUnconfirmed!("absent-row")).toBe("no-row");
+  });
+});
+
 describe("visibility-backfill migration — detect/countPending", () => {
   it("detect() is false when every row already carries an explicit visibility", async () => {
     const { table } = makeFakeMemoryTable([
