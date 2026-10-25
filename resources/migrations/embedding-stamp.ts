@@ -294,13 +294,14 @@ export function resolveSelfBaseUrl(env: NodeJS.ProcessEnv = process.env): string
  * Triggers Memory.patch()'s re-embed branch via a genuine loopback HTTP
  * PATCH — the ONLY reliable way to reach resources/Memory.ts's subclass logic
  * (see module doc). The body names only the two embedding fields, never the
- * row this migration read. Returns true iff the request succeeded (2xx);
- * NEVER throws — on false the row is re-checked on the next batch or cycle.
+ * row this migration read. Returns true iff the request succeeded (2xx); a
+ * 503 `write_outcome_unknown` answers `{ ok: false, unconfirmed: true }`;
+ * NEVER throws — a false outcome is re-checked on the next batch or cycle.
  */
 async function regenViaHttpPatch(
   id: string,
   fetchImpl: typeof fetch,
-): Promise<boolean> {
+): Promise<boolean | { ok: boolean; unconfirmed: boolean }> {
   const authHeader = resolveAdminAuthHeader();
   if (!authHeader) return false; // no admin credential available this cycle — retried next boot
   try {
@@ -310,7 +311,12 @@ async function regenViaHttpPatch(
       body: JSON.stringify({ embedding: null, embeddingModel: null }),
       signal: AbortSignal.timeout(REGEN_HTTP_TIMEOUT_MS),
     });
-    if (res.status === 503) await logRegenRefusal(id, res);
+    if (res.status === 503) {
+      const code = await logRegenRefusal(id, res);
+      // The id has an unresolved write, which may have committed: report it by
+      // id as unconfirmed (flair#2840).
+      if (code === "write_outcome_unknown") return { ok: false, unconfirmed: true };
+    }
     return res.ok;
   } catch {
     return false;
@@ -325,10 +331,9 @@ async function regenViaHttpPatch(
  *  unresolved write, which can be this request's own re-embed (a committed row
  *  it could not read back, or one whose read-back did not show the write, or a
  *  step after a commit that failed before any read-back), so that write may have
- *  committed. The
- *  row is uncounted; the next scan decides whether it is still stale. Logs the
- *  refusal's code. */
-async function logRegenRefusal(id: string, res: Response): Promise<void> {
+ *  committed. The row is uncounted; the next scan decides whether it is still
+ *  stale. Returns the refusal's code (or `unnamed`). */
+async function logRegenRefusal(id: string, res: Response): Promise<string> {
   let code = "unnamed";
   try {
     const body = (await res.json()) as { error?: unknown };
@@ -337,6 +342,7 @@ async function logRegenRefusal(id: string, res: Response): Promise<void> {
     // An unreadable refusal body is logged as unnamed.
   }
   console.warn("[embedding-stamp] %s: the re-embed request was refused 503 %s; the row is uncounted and the next scan decides whether it is still stale", id, code);
+  return code;
 }
 
 /** A vector this migration may stamp as current: a non-empty array of finite numbers. */
@@ -527,7 +533,7 @@ async function stageContentSuffixUpdate(
 export function createEmbeddingStampMigration(
   getTable: () => MemoryTableLike = defaultMemoryTable,
   getCurrentModelId: () => string = getModelId,
-  regen: (id: string, existing: Record<string, unknown>) => Promise<boolean> = (id) =>
+  regen: (id: string, existing: Record<string, unknown>) => Promise<boolean | { ok: boolean; unconfirmed: boolean }> = (id) =>
     regenViaHttpPatch(id, fetch),
   contentSuffixRegen: ContentSuffixRegenDeps = defaultContentSuffixRegenDeps,
 ): Migration {
@@ -726,7 +732,15 @@ export function createEmbeddingStampMigration(
           // Test-only: inert unless the fault-injection env opt-in is set and armed.
           const pause = txnPausePoint("embedding-stamp-regen-pre");
           if (pause) await pause;
-          ok = await regen(id, existing);
+          const outcome = await regen(id, existing);
+          if (typeof outcome === "boolean") {
+            ok = outcome;
+          } else {
+            ok = outcome.ok;
+            // The loopback PATCH answered 503 write_outcome_unknown: the id has
+            // an unresolved write, which may have committed (flair#2840).
+            if (outcome.unconfirmed) unconfirmed = true;
+          }
         }
         if (ok) touchedIds.push(id);
         else if (unconfirmed) unconfirmedIds.push(id);

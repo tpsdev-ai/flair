@@ -9,8 +9,8 @@
   The runner attempts to write them to the migration state file when the run
   completes and when it halts, except on a `pre-flight integrity check failed`
   halt, which updates `/HealthDetail` only. State-file writes are
-  best-effort. The embedding stamp's loopback PATCH path logs a 503
-  `write_outcome_unknown` and leaves the row uncounted without naming it. A
+  best-effort. The embedding stamp's loopback PATCH path reports a 503
+  `write_outcome_unknown` row as unconfirmed. A
   listed id is cleared once a later batch verifies its write or a later read
   finds its row at the migration's target or finds no row. The runner writes
   at most 100 ids into the state file's record, and a later cycle starts from
