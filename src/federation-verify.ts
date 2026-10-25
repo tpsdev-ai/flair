@@ -362,9 +362,9 @@ export async function runFederationVerify(
     }, apiOpts);
     log(`1. Wrote local memory: ${memId}`);
   } catch (e: unknown) {
-    // The canary write, archive or delete crossed its deadline: it may have
-    // taken effect. That is not a verdict of the check, so let the caller's
-    // top-level handler report the unknown outcome and exit 3.
+    // The canary write crossed its deadline: it may have taken effect. That
+    // is not a verdict of the check, so let the caller's top-level handler
+    // report the unknown outcome and exit 3.
     if (e instanceof ApiRequestOutcomeUnknown) throw e;
     const message = e instanceof Error ? e.message : String(e);
     err(`1. Local write FAILED: ${message}`);

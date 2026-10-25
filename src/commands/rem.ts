@@ -65,17 +65,19 @@ export type RemCli = {
 let cli: RemCli;
 
 /**
- * The whole-request deadline for the two REM routes that can legitimately run
- * longer: POST /MemoryMaintenance and POST /ReflectMemories. A REM command
- * that calls either route passes it from here.
+ * The whole-request deadline for POST /MemoryMaintenance and
+ * POST /ReflectMemories. POST /MemoryDedupStats has its own deadline, below.
+ * A REM command that calls either of the first two passes it from here.
  */
 export const LONG_REM_REQUEST_DEADLINE_MS = 900_000;
 
 /**
- * POST /MemoryDedupStats sweeps up to DEDUP_CLUSTER_MAX_MEMORIES_DEFAULT
- * (20,000) memories. At the repo fixture's dedup rate (23.07 s over 403 live
- * vectors, ~57 ms/memory) that is 20,000 x ~57 ms = ~1,140 s, so this deadline
- * is a round value above it and stays within REQUEST_DEADLINE_MAX_MS.
+ * POST /MemoryDedupStats: a sizing estimate from one observation, not a
+ * throughput claim. The route scans every Memory row before it selects the
+ * capped ANN set of up to DEDUP_CLUSTER_MAX_MEMORIES_DEFAULT (20,000). The
+ * repo fixture's 23.07 s over 403 live vectors is ~57 ms/memory, so
+ * 20,000 x ~57 ms = ~1,140 s; this deadline is a round value above that and
+ * stays within REQUEST_DEADLINE_MAX_MS.
  */
 export const DEDUP_REQUEST_DEADLINE_MS = 1_800_000;
 
@@ -1287,13 +1289,13 @@ export function register(program: Command): void {
       // silently replaced by an ambient credential.
       //
       // The REM work calls can legitimately outrun the default deadline:
-      // maintenance scans up to the run's row cap (measured 23.07 s over 403
-      // live vectors, and a 3,065-row repro exceeded a 60 s client deadline —
-      // test/bench/rem-responsiveness.md), and reflection waits on a generative
-      // backend. They get the shared 900 s deadline from
-      // longRemRequestDeadline, and the instance-wide dedup sweep has its own
-      // 1,800 s deadline; every other call through the shared REST sender
-      // resolves FLAIR_REQUEST_TIMEOUT_MS when it is set, else the default.
+      // maintenance scans its scoped rows with no run row cap, reflection
+      // waits on a generative backend, and the instance-wide dedup sweep has
+      // its own 1,800 s deadline (sized from the fixture's 23.07 s over 403
+      // live vectors, test/bench/rem-responsiveness.md). Maintenance and
+      // reflection get the shared 900 s deadline from longRemRequestDeadline;
+      // every other call through the shared REST sender resolves
+      // FLAIR_REQUEST_TIMEOUT_MS when it is set, else the default.
       const remDeadline = longRemRequestDeadline;
       const agentApiCall = (method: string, path: string, body?: unknown) =>
         api(method, path, body, { agentId, agentIdSource: "flag", signedOnly: true, ...remDeadline(method, path) });
