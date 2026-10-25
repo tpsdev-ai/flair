@@ -177,7 +177,7 @@ describe("flair#2874 — a retry row reopened after a terminal outcome", () => {
       const terminal = await readRow("FederationRetry", retryKey(id));
       expect(terminal.state, JSON.stringify(terminal)).toBe("terminal");
       expect(terminal.resolution).toBe("merged");
-      // Every field the terminal outcome set on the stored row.
+      // The fields the terminal outcome gave a value on the stored row.
       const terminalFields = RETRY_ROW_FIELDS.filter((field) => (pending[field] ?? null) === null && (terminal[field] ?? null) !== null);
       expect(terminalFields).toContain("resolution");
       expect(terminalFields).toContain("completedAt");
