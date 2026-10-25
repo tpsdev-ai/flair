@@ -390,6 +390,12 @@ export async function runFederationVerify(
 
   let pushed = false;
   let cleanedUp = false;
+  // Cleanup runs in a finally, so it must not throw: a throw there would
+  // replace an error already in flight from the verification body. Record
+  // each unknown outcome and report it after the finally has completed.
+  const unknownCleanup: ApiRequestOutcomeUnknown[] = [];
+  let bodyFailed = false;
+  let bodyError: unknown;
   let result: FederationVerifyResult = {
     exitCode: FED_VERIFY_EXIT_OK,
     verdict: describeFederationVerify([]),
@@ -402,6 +408,7 @@ export async function runFederationVerify(
   };
 
   try {
+    verifyBody: {
     log("   Pushing canary via federation sync…");
     const syncResult = await deps.syncOnce(opts.syncOpts);
     if (syncResult.error) {
@@ -442,7 +449,7 @@ export async function runFederationVerify(
         pushed,
         tag: opts.tag,
       };
-      return result;
+      break verifyBody;
     }
 
     const selected = selectPeersToProbe(listed, opts.peerId);
@@ -467,7 +474,7 @@ export async function runFederationVerify(
         pushed,
         tag: opts.tag,
       };
-      return result;
+      break verifyBody;
     }
 
     log(`2. Probing ${toProbe.length} peer(s) over ${opts.waitSeconds}s window…`);
@@ -594,7 +601,11 @@ export async function runFederationVerify(
       pushed,
       tag: opts.tag,
     };
-    return result;
+    break verifyBody;
+    }
+  } catch (e: unknown) {
+    bodyFailed = true;
+    bodyError = e;
   } finally {
     // Federation merge is LWW put-by-id — local DELETE never reaches the
     // hub. If we injected the canary, archive it and push that update so
@@ -620,9 +631,12 @@ export async function runFederationVerify(
           log(`4. Cleanup: pushed archive of ${memId} (peers drop it from search)`);
         }
       } catch (e: unknown) {
-        if (e instanceof ApiRequestOutcomeUnknown) throw e;
-        const message = e instanceof Error ? e.message : String(e);
-        log(`4. Cleanup: could not archive canary for peer cleanup (${message})`);
+        if (e instanceof ApiRequestOutcomeUnknown) {
+          unknownCleanup.push(e);
+        } else {
+          const message = e instanceof Error ? e.message : String(e);
+          log(`4. Cleanup: could not archive canary for peer cleanup (${message})`);
+        }
       }
     }
     try {
@@ -630,9 +644,29 @@ export async function runFederationVerify(
       cleanedUp = true;
       log(`4. Cleanup: deleted local memory ${memId}`);
     } catch (e: unknown) {
-      if (e instanceof ApiRequestOutcomeUnknown) throw e;
-      log(`4. Cleanup: could NOT delete local memory ${memId} (manual cleanup needed)`);
+      if (e instanceof ApiRequestOutcomeUnknown) {
+        unknownCleanup.push(e);
+      } else {
+        log(`4. Cleanup: could NOT delete local memory ${memId} (manual cleanup needed)`);
+      }
     }
     result.cleanedUp = cleanedUp;
   }
+
+  // The unknown outcome outranks a definite failure from the body: both are
+  // printed and the command exits 3.
+  if (bodyFailed && bodyError instanceof ApiRequestOutcomeUnknown) {
+    unknownCleanup.unshift(bodyError);
+  } else if (bodyFailed) {
+    if (unknownCleanup.length === 0) throw bodyError;
+    err(`Error: ${bodyError instanceof Error ? bodyError.message : String(bodyError)}`);
+  }
+  if (unknownCleanup.length > 0) {
+    for (const unknown of unknownCleanup) {
+      err(`Unknown outcome: ${unknown.message}`);
+      err("The request may or may not have taken effect; inspect the target before re-running.");
+    }
+    result.exitCode = 3;
+  }
+  return result;
 }

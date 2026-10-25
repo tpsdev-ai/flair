@@ -21,6 +21,7 @@ import {
   type FederationVerifyDeps,
   type FederationVerifyOptions,
 } from "../../src/federation-verify";
+import { ApiRequestOutcomeUnknown } from "../../src/lib/auth-resolve";
 import { assertVisibilityAllowedForDurability } from "../../resources/memory-visibility";
 
 function makePeer(overrides: Partial<FederationPeerResult> = {}): FederationPeerResult {
@@ -591,5 +592,60 @@ describe("runFederationVerify", () => {
     expect(r.memId).toBeNull();
     expect(fetches).toBe(0);
     expect(deps.deletes.length).toBe(0);
+  });
+
+  test("an unknown archive PUT still deletes locally, reports the unknown outcome and exits 3", async () => {
+    const calls: string[] = [];
+    const errors: string[] = [];
+    const deps: FederationVerifyDeps = {
+      log: () => {},
+      error: (msg) => errors.push(msg),
+      clock: advancingClock(),
+      syncOnce: async () => ({ pushed: 1, skipped: 0 }),
+      fetch: (async () => jsonRes(200, { results: [{ content: "fed-verify-test — ok" }] })) as unknown as typeof fetch,
+      api: async (method, path, body) => {
+        calls.push(`${method} ${path}`);
+        if (method === "PUT" && path.startsWith("/Memory/")) {
+          if ((body as { archived?: boolean } | undefined)?.archived === true) {
+            throw new ApiRequestOutcomeUnknown("PUT", path, 100, undefined, "explicit");
+          }
+          return {};
+        }
+        if (method === "DELETE" && path.startsWith("/Memory/")) return {};
+        if (method === "GET" && path === "/FederationPeers") return { peers: [makeRecord()] };
+        throw new Error(`unexpected api ${method} ${path}`);
+      },
+    };
+    const r = await runFederationVerify(baseOpts(), deps);
+    const deletes = calls.filter((c) => c.startsWith("DELETE /Memory/"));
+    expect(deletes).toHaveLength(1);
+    expect(r.cleanedUp).toBe(true);
+    expect(r.exitCode).toBe(3);
+    expect(errors.join("\n")).toContain("Unknown outcome: PUT /Memory/");
+    expect(errors.join("\n")).toContain("may or may not have taken effect");
+  });
+
+  test("a definite body failure and an unknown cleanup DELETE both print; exit 3", async () => {
+    const errors: string[] = [];
+    const deps: FederationVerifyDeps = {
+      log: () => {},
+      error: (msg) => errors.push(msg),
+      clock: advancingClock(),
+      syncOnce: async () => { throw new Error("push exploded"); },
+      fetch: (async () => jsonRes(200, { results: [] })) as unknown as typeof fetch,
+      api: async (method, path) => {
+        if (method === "DELETE" && path.startsWith("/Memory/")) {
+          throw new ApiRequestOutcomeUnknown("DELETE", path, 100, undefined, "explicit");
+        }
+        if (method === "PUT" && path.startsWith("/Memory/")) return {};
+        if (method === "GET" && path === "/FederationPeers") return { peers: [makeRecord()] };
+        throw new Error(`unexpected api ${method} ${path}`);
+      },
+    };
+    const r = await runFederationVerify(baseOpts(), deps);
+    const printed = errors.join("\n");
+    expect(printed).toContain("Error: push exploded");
+    expect(printed).toContain("Unknown outcome: DELETE /Memory/");
+    expect(r.exitCode).toBe(3);
   });
 });
