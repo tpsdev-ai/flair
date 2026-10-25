@@ -351,7 +351,8 @@ describe("flair#2478 — the migration's HTTP delegation holds the id's lock thr
     h.expectIncrementalWrites("esl-b3", HTTP_WRITER);
 
     // b4: an unreadable post-commit read. The request answers
-    // write_outcome_unknown, the row is not counted, and the id is fenced.
+    // write_outcome_unknown, the row is not counted, the id is reported as
+    // unconfirmed, and the id is fenced.
     await handOff(GATE, "memory-reembed-verify");
     await h.assertPaused("memory-reembed-verify");
     writeFileSync(join(pauseDir, "arm.memory-get-fail.esl-b4"), "");
@@ -361,7 +362,7 @@ describe("flair#2478 — the migration's HTTP delegation holds the id's lock thr
     expect(await h.waitForLog(unreadable), `the unreadable-read refusal was not logged within 30s: ${unreadable}`).toBe(true);
     expect(serverLog()).toContain(unreadable);
     await expectRefused(await ownerWrite("PUT", "esl-b4", OWNER_TEXT), "write_outcome_unknown");
-    expect(runs()[0]).toEqual({ processed: 1, touchedIds: ["esl-b3"] });
+    expect(runs()[0]).toEqual({ processed: 1, touchedIds: ["esl-b3"], unconfirmedIds: ["esl-b4"] });
     for (const id of ["esl-b1", "esl-b2", "esl-b4"]) expect(touched(id), `${id} was counted`).toBe(0);
   }, 300_000);
 });
