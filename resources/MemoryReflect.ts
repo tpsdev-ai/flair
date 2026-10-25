@@ -116,7 +116,7 @@ export class ReflectMemories extends Resource {
     // Authenticated identity comes from getContext().request, not this.request
     // (see SemanticSearch / MemoryBootstrap for the same bug class). The prior
     // check was silently bypassed — bob could reflect on alice's memories and
-    // mutate alice's records via the lastReflected patchRecordSilent below.
+    // mutate alice's records through the lastReflected stamp below.
     const ctx = (this as any).getContext?.();
     const request = ctx?.request ?? ctx;
     const actorId: string | undefined = request?.tpsAgent;
@@ -308,17 +308,21 @@ export class ReflectMemories extends Resource {
         }
         const toStage = dedupeCandidates(staleIntentResult.kept, existingPendingClaims);
 
-        // generatedBy: GenerateResult in the pinned harper 5.1.17 has
-        // no model/backend-id field (content/finishReason/usage/toolCalls/trace
-        // only) — the "from the generate result if available" branch is
-        // unreachable in this version, so this always falls back to the
-        // configured logical name, matching Harper's own default routing name.
+        // generatedBy: Harper's GenerateResult carries no model or backend id
+        // (content, toolCalls, finishReason, usage and trace only; re-checked
+        // against harper 5.3.1's types), so this uses the configured logical
+        // name, matching Harper's own default routing name.
         const resolvedModel = configuredModel ?? "default";
         const generatedAt = new Date().toISOString();
         // Write-window atomicity (#1263): generate has already succeeded.
         // Each MemoryCandidate.put is its own short commit. A throw mid-loop
         // leaves earlier puts durable and skips lastReflected (never reached).
-        // lastReflected is patchRecordSilent — it cannot fail the request.
+        // The stamp runs patchRecord under withMemoryWriteLockOnce. A held lock
+        // is logged. After patchRecord returns, the explicit verification logs
+        // an unreadable or mismatching row as unconfirmed; an error from
+        // patchRecord's helper is logged as a write-back refusal. Either failure
+        // may follow a committed write. A stamp failure does not fail the
+        // request.
         // 502/503 stay generate-only (no_backend / distillation_failed).
         const staged: any[] = [];
         for (const c of toStage) {

@@ -28,7 +28,7 @@ import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { stripInlinePointerFields } from "./host-source-visibility.js";
 import { applyPromotionBinding } from "./promotion-binding.js";
-import { memoryBusyResponse, memoryLockUnavailableResponse, withMemoryWriteLock, withMemoryWriteLockOnce, writeOutcomeUnknownResponse } from "./memory-write-lock.js";
+import { markMemoryWriteOutcomeUnknown, memoryBusyResponse, memoryLockUnavailableResponse, withMemoryWriteLock, withMemoryWriteLockOnce, writeOutcomeUnknownResponse } from "./memory-write-lock.js";
 
 /** The per-id Memory write-lock store (flair#2478). */
 function memoryLockStore(): unknown {
@@ -336,7 +336,10 @@ export class FeedMemories extends Resource {
     // waits its budget and can answer `503 memory_busy`; a marked id answers
     // `503 write_outcome_unknown` at once; a store with no lock answers
     // `503 memory_lock_unavailable`. The write-back confirms its committed row
-    // as before. An omitted id is generated; a caller-supplied id can contend.
+    // as before; when its read-back of that row fails or does not show the
+    // write (409 `feed_write_unconfirmed`), it records the id outcome-unknown
+    // before the lock is released (flair#2806). An omitted id is generated; a
+    // caller-supplied id can contend.
     // The skill branch above returns before this lock; its conversion is
     // deferred.
     const locked = await withMemoryWriteLock(
@@ -414,14 +417,23 @@ export class FeedMemories extends Resource {
               pausePoint: () => txnPausePoint("feed-ingest"),
               pauseAfterStage: () => txnPausePoint("feed-ingest-staged"),
               pauseBeforeCommit: () => txnPausePoint("feed-ingest-commit"),
+              // Test-only: after the commit, before the read-back.
+              pauseBeforeVerify: () => txnPausePoint("feed-ingest-verify"),
               expectedRow: existingRecord,
             },
           );
         } catch (err) {
           if (refusal) return { response: refusal };
           if (err instanceof WriteBackConflictError) {
+            if (err.outcome === "conflict") return { response: feedTargetChanged(record.id) };
+            // flair#2806: the commit resolved and the read-back does not show the
+            // write, so the row may hold it. Record the id's outcome-unknown
+            // marker here, inside the id's lock, as the owner PUT and PATCH do
+            // (writeOutcomeUnknownFor), so a later write to the id answers
+            // 503 write_outcome_unknown until restart.
+            markMemoryWriteOutcomeUnknown(record.id);
             return {
-              response: err.outcome === "conflict" ? feedTargetChanged(record.id) : Response.json({
+              response: Response.json({
                 error: "feed_write_unconfirmed", outcome: err.outcome, message: err.message,
               }, { status: 409 }),
             };
@@ -471,7 +483,7 @@ export class FeedMemories extends Resource {
    * Two layers decide what a non-admin subscriber receives:
    *
    * 1. Harper's synchronous `SubscriptionRequest.rowFilter`, set to the
-   *    predicate. In the pinned Harper (5.2.8) the filter is evaluated on the
+   *    predicate. In Harper 5.2.8 the filter is evaluated on the
    *    full stored row for the rows replayed when the subscription opens, for
    *    every live change (an update is re-read from the primary store and
    *    delivered as a full-row `put`) and for reload re-deliveries; a history
@@ -680,9 +692,11 @@ function feedWriteResponse(result: any, redactedValues: number, supplied: Readon
  * committed read must equal the transaction's read before the write, else the
  * repair starts over (FEED_DEDUP_REPAIR_ATTEMPTS attempts, then the 409). A
  * change committed after that read and before the commit follows Harper's
- * timestamp order. After the commit, an owned read must show the match with
- * the written expiry (else the 409); that row is returned. Returned rows carry
- * no inline pointer fields (stripInlinePointerFields).
+ * timestamp order. After the commit, an owned read that shows the match with
+ * the written expiry returns that row; a read that does not show it is refused
+ * (409 FEED_DEDUP_TARGET_CHANGED_ERROR), and a read that fails rethrows, so the
+ * request answers 500. Returned rows carry no inline pointer fields
+ * (stripInlinePointerFields).
  */
 async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> {
   const id = String(match.id);
@@ -745,8 +759,22 @@ async function repairDeduplicatedExpiryLocked(ctx: unknown, match: any, id: stri
     // Test-only: the update committed and the lock is still held.
     const committedPoint = txnPausePoint("feed-dedup-repair-committed");
     if (committedPoint) await committedPoint;
-    const confirmed = await withOwnedTransaction(ctx, async (c) => (databases as any).flair.Memory.get(id, c));
-    if (!isDedupMatch(confirmed, match) || confirmed.expiresAt !== outcome.row.expiresAt) return feedDedupTargetChanged(id);
+    let confirmed: any;
+    try {
+      confirmed = await withOwnedTransaction(ctx, async (c) => (databases as any).flair.Memory.get(id, c));
+    } catch (err) {
+      // flair#2806: the update committed and this confirmation read failed, so
+      // the row may hold the expiry. Record the id's outcome-unknown marker
+      // inside the lock, as the ordinary feed write-back and the owner writes do.
+      markMemoryWriteOutcomeUnknown(id);
+      throw err;
+    }
+    if (!isDedupMatch(confirmed, match) || confirmed.expiresAt !== outcome.row.expiresAt) {
+      // flair#2806: the update committed and this read does not show it on the
+      // matched row. Record the marker inside the lock, as for a failed read.
+      markMemoryWriteOutcomeUnknown(id);
+      return feedDedupTargetChanged(id);
+    }
     return stripInlinePointerFields(confirmed);
   }
   return feedDedupTargetChanged(id);

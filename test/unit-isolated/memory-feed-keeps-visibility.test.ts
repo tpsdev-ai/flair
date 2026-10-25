@@ -4,6 +4,7 @@
  */
 import { describe, expect, test, beforeEach, afterAll, mock } from "bun:test";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
+import { memoryWriteOutcomeUnknown, resetMemoryWriteOutcomeUnknownForTest } from "../../resources/memory-write-lock.ts";
 import { installFakeHarperTransaction } from "../helpers/fake-harper-txn";
 
 let memoryStore: Map<string, any>;
@@ -61,7 +62,21 @@ beforeEach(() => {
   getCount = 0;
   failGetAt = null;
   writeRace = undefined;
+  resetMemoryWriteOutcomeUnknownForTest("owned");
   memoryStore.set("owned", { id: "owned", agentId: "alice", content: "owner-only note", durability: "standard", visibility: "private" });
+});
+
+test("an unconfirmed feed write marks the id outcome-unknown, and the next write to that id is refused", async () => {
+  writeRace = "unconfirmed";
+  const first = await feed().post({ id: "owned", agentId: "alice", content: "submitted" });
+  expect(first.status).toBe(409);
+  expect(await first.json()).toMatchObject({ error: "feed_write_unconfirmed" });
+  expect(memoryWriteOutcomeUnknown("owned")).toBe(true);
+
+  const next = await feed().post({ id: "owned", agentId: "alice", content: "retry after the unknown outcome" });
+  expect(next.status).toBe(503);
+  expect(await next.json()).toMatchObject({ error: "write_outcome_unknown" });
+  expect(memoryStore.get("owned").content).toBe("competing");
 });
 
 for (const outcome of ["conflict", "unconfirmed"] as const) {

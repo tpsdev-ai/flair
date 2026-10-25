@@ -49,11 +49,11 @@
   ],
   "dependencies": {
     "@tpsdev-ai/flair-client": "0.62.0",
-    "zod": "3.25.76"
+    "zod": "4.6.7"
   },
   "peerDependencies": {
     "n8n-workflow": "*",
-    "@langchain/core": "*",
+    "@langchain/core": ">=0.3.0 <2",
     "@langchain/classic": "*"
   },
   "devDependencies": {

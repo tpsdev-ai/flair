@@ -1,16 +1,39 @@
 {
   "$documentation": [
     "Dated, enumerated exemptions for the supply-chain bake-time gate",
-    "(scripts/check-dep-ages.mjs, run by the `Check production dep bake time` step in",
+    "(scripts/check-dep-ages.mjs, run by the `Check dependency bake time` step in",
     ".github/workflows/test.yml). Policy narrative: docs/supply-chain-policy.md.",
     "",
-    "An entry lets one otherwise checked exact-pinned version — in `dependencies`, `optionalDependencies`",
-    "or `overrides` — stay on a release published less than FLAIR_DEP_MIN_AGE_DAYS ago.",
+    "An entry lets one otherwise checked version — an exact pin, or the version bun.lock resolves",
+    "a range to — stay on a release younger than the bake window (7 days; under --ci the gate",
+    "refuses FLAIR_DEP_MIN_AGE_DAYS, so CI always uses the committed window).",
     "The author supplies a GHSA-formatted id; review verifies the version fixes it.",
     "Every entry carries a hard expiry. An",
     "expired entry FAILS the gate before any registry request; removing it lets an",
-    "otherwise checked pin be age-checked. Re-read the reason before re-dating; removing the entry",
+    "otherwise checked version be age-checked. Re-read the reason before re-dating; removing the entry",
     "once the version has aged past the window is the normal outcome."
   ],
-  "entries": []
+  "entries": [
+    {
+      "package": "body-parser",
+      "version": "2.4.0",
+      "ghsa": "GHSA-27r3-jxmh-p828",
+      "added": "2026-10-23",
+      "expires": "2026-10-30",
+      "reason": "Root overrides pin body-parser 2.4.0, the first 2.x release that fixes GHSA-27r3-jxmh-p828 (HIGH, entered GitHub's database 2026-10-23). It was published 2026-10-22, inside the 7-day bake window, and the advisory blocks the Dependency Audit job. Its only consumer in the lockfile is express 5.2.1 (body-parser ^2.2.1), which the pin satisfies. 2.4.0 reaches the bake age on 2026-10-29; remove this entry then."
+    },
+    {
+      "package": "fast-uri",
+      "version": "4.2.3",
+      "ghsa": [
+        "GHSA-w74x-v6f9-j3xg",
+        "GHSA-wjr9-j795-jxcr",
+        "GHSA-xhq7-xmqj-769h",
+        "GHSA-333x-w4r6-6crp"
+      ],
+      "added": "2026-10-24",
+      "expires": "2026-10-27",
+      "reason": "Root override pins fast-uri 4.2.3, the first 4.x release that fixes GHSA-w74x-v6f9-j3xg (moderate), GHSA-wjr9-j795-jxcr (moderate), GHSA-xhq7-xmqj-769h (low) and GHSA-333x-w4r6-6crp (low), all published 2026-10-23 and blocking the Dependency Audit gate. 4.2.3 was published 2026-10-19 22:51Z, inside the 7-day bake window; it reaches the bake age on 2026-10-26, so remove this entry on 2026-10-27."
+    }
+  ]
 }

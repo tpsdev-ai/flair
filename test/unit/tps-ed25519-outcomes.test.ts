@@ -17,6 +17,7 @@ const getOutcomes: Array<[string, number | readonly number[], string]> = [
   ["AdminIdp", 403, "resources/AdminIdp.ts:11: allowRead allowAdmin refuses before get:15; no search"],
   ["AdminInstance", 403, "resources/AdminInstance.ts:101: allowRead allowAdmin refuses before get:105; no search"],
   ["AdminMemory", 403, "resources/AdminMemory.ts:31: allowRead allowAdmin refuses before get:35; no search"],
+  ["AdminMemoryCandidates", 403, "resources/AdminMemoryCandidates.ts:71: allowRead allowAdmin refuses before get:75; no search"],
   ["AdminPrincipals", 403, "resources/AdminPrincipals.ts:12: allowRead allowAdmin refuses before get:16; no search"],
   ["Agent", 200, "resources/Agent.ts:28: allowRead allowVerified; inherited table get/search serve collection"],
   ["AgentCard", 400, "resources/AgentCard.ts:8: allowRead true; get:12 requires path agentId; no search"],

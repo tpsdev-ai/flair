@@ -59,11 +59,9 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildRegistry, type MigrationRegistry } from "./migrations/registry.js";
 import { runMigrationCycle } from "./migrations/runner.js";
-import { markIdleMigrationsFailed, seedIdleProgress, setCyclePhase } from "./migrations/progress.js";
-import {
-  describeUnresolvableDataDir,
-  resolveWritableMigrationDataDir,
-} from "./migrations/data-dir.js";
+import { markUnstartedMigrationsFailed, setCyclePhase } from "./migrations/progress.js";
+import { describeUnresolvableDataDir, noteSelectedMigrationDataDir } from "./migrations/data-dir.js";
+import { seedBootProgress } from "./migrations/boot-progress.js";
 import { scheduleFollowUpCycles, type FollowUpScheduler } from "./migrations/recheck.js";
 import type { SourceTable } from "./migrations/types.js";
 import { getMode } from "./embeddings-provider.js";
@@ -144,14 +142,14 @@ async function waitForEmbeddingsSettled(maxWaitMs = 8_500, intervalMs = 150): Pr
  *
  * `failed` (not `halted`) is deliberate for these: nothing was attempted
  * against the corpus, so there is no halted work to resume. And the marking
- * deliberately touches only migrations still `idle` — see
- * `markIdleMigrationsFailed` for why overwriting a terminal state would be
- * a downgrade rather than extra information.
+ * deliberately leaves alone an entry the runner wrote this boot — see
+ * `markUnstartedMigrationsFailed` for why overwriting it would be a
+ * downgrade rather than extra information.
  */
 function reportBootFailure(registry: MigrationRegistry, reason: string): void {
   console.error(`[flair-migrations] ${reason}`);
   setCyclePhase("done", reason);
-  markIdleMigrationsFailed(registry.list().map((m) => m.id), reason);
+  markUnstartedMigrationsFailed(registry.list().map((m) => m.id), reason);
 }
 
 let scheduled = false;
@@ -206,7 +204,11 @@ export function scheduleMigrationBoot(): void {
   scheduled = true;
 
   const registry = buildRegistry();
-  seedIdleProgress(registry.list().map((m) => m.id));
+  // flair#2840: resolve the writable data dir once, here, and seed progress
+  // from its state file, not blindly `idle`. When a directory is usable,
+  // /HealthDetail reads it from this call on (before the first cycle), and
+  // the cycle below runs against it.
+  const resolved = seedBootProgress(registry.list().map((m) => m.id));
   // Proof-of-life, set SYNCHRONOUSLY at module load: from here on,
   // `cyclePhase === "idle"` means this module never loaded at all — the
   // one hypothesis flair#812 could not otherwise rule out from the outside.
@@ -224,11 +226,10 @@ export function scheduleMigrationBoot(): void {
       }
       await waitForEmbeddingsSettled();
 
-      // Resolve a data dir PROVEN writable before handing one to the runner
-      // — the runner's first act is to take a file lock there, and a
-      // failure at that point is reported back rather than thrown, which is
-      // precisely how flair#812 stayed invisible. See data-dir.ts.
-      const resolved = resolveWritableMigrationDataDir();
+      // The data dir resolved above was PROVEN writable when it was probed —
+      // the runner's first act is to take a file lock there, and a failure at
+      // that point is reported back rather than thrown, which is precisely
+      // how flair#812 stayed invisible. See data-dir.ts.
       const dataDir = resolved.dataDir;
       if (!dataDir) {
         reportBootFailure(registry, describeUnresolvableDataDir(resolved.tried));
@@ -265,6 +266,7 @@ export function isBenignSkip(reason: string): boolean {
 // ever boots once).
 export function _resetMigrationBootForTests(): void {
   scheduled = false;
+  noteSelectedMigrationDataDir(null);
   followUp?.cancel();
   followUp = null;
 }

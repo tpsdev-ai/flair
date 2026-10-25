@@ -53,6 +53,7 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
       continue;
     }
     commitPatch(id, patch);
+    committedAnyUpdate = true;
   }
   afterCommit?.();
   return result;
@@ -75,6 +76,17 @@ let writeCalls: { method: "put" | "update"; id: string; fields: string[] }[];
 let afterStage: (() => void) | null = null;
 /** Runs after the transaction commits, before the migration reads the row back. */
 let afterCommit: (() => void) | null = null;
+/** Arm committed re-reads (explicit empty contexts) to answer with a stale row
+ *  for the given number of reads. The pre-commit confirmation read sees the
+ *  pre-write row either way; arming it models only the post-commit
+ *  verification read missing the commit. */
+let staleVerifyRead: { row: Row; times: number } | null = null;
+/** True once an update has committed; a read of an explicit empty context after
+ *  that is a post-commit verification read. */
+let committedAnyUpdate = false;
+/** Throw on every post-commit verification read, which verifyCommittedFields
+ *  reports as "unreadable". */
+let throwVerifyAfterCommit = false;
 
 function commitPatch(id: string, patch: Row): void {
   const merged = { ...(store.get(id) ?? {}), ...structuredClone(patch), id };
@@ -93,8 +105,17 @@ function matches(row: Row, cond: any): boolean {
 }
 
 const table = {
-  async get(id: string) {
+  async get(id: string, ctx?: any) {
     const row = store.get(id);
+    if (row && throwVerifyAfterCommit && committedAnyUpdate && ctx !== null && typeof ctx === "object" && Object.keys(ctx).length === 0) {
+      throw new Error("verification read failed");
+    }
+    if (row && staleVerifyRead && ctx !== null && typeof ctx === "object" && Object.keys(ctx).length === 0) {
+      if (staleVerifyRead.times > 0) {
+        staleVerifyRead.times--;
+        return structuredClone(staleVerifyRead.row);
+      }
+    }
     return row ? structuredClone(row) : null;
   },
   async put(row: Row, ctx?: any) {
@@ -143,6 +164,9 @@ beforeEach(() => {
   embedImpl = async () => [0.5, 0.25, 0.125];
   afterStage = null;
   afterCommit = null;
+  staleVerifyRead = null;
+  committedAnyUpdate = false;
+  throwVerifyAfterCommit = false;
 });
 
 describe("flair#2307 — the content-suffix re-embed validates the vector and committed re-read", () => {
@@ -271,6 +295,57 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
     expect(store.get(LEGACY_ID)!.embeddedContentHash).toBe(hashEmbeddedText("a", "edited after the commit"));
   });
 
+  it("does not count an attempt whose post-commit verification read missed it, and reports its id", async () => {
+    // The write commits. The pre-commit confirmation read sees the pre-write
+    // row (it is a committed read, and the write is still staged), so it
+    // passes; the post-commit verification read is answered with that same
+    // pre-write row, so the attempt is unconfirmed. The retry's fresh read
+    // finds the row current and the loop stops without a second write, so the
+    // row is reported by id rather than counted.
+    const before = store.get(LEGACY_ID)!;
+    afterCommit = () => {
+      afterCommit = null;
+      staleVerifyRead = { row: before, times: 10 };
+    };
+    const result = await migration().run(10);
+    expect(result).toEqual({ processed: 0, touchedIds: [], unconfirmedIds: [LEGACY_ID] });
+    expect(store.get(LEGACY_ID)).toMatchObject({ embedding: [0.5, 0.25, 0.125], embeddingModel: CURRENT });
+    expect(await migration().countPending()).toBe(0);
+  });
+
+  it("reports an id whose post-commit verification read threw, and does not count it", async () => {
+    // The write commits; the post-commit verification read throws, so
+    // verifyCommittedFields answers "unreadable" and the loop stops. The row
+    // is not counted and its id is reported as unconfirmed.
+    throwVerifyAfterCommit = true;
+    const result = await migration().run(10);
+    expect(result).toEqual({ processed: 0, touchedIds: [], unconfirmedIds: [LEGACY_ID] });
+  });
+
+  it("does not count a row another writer made current between the scan and the read", async () => {
+    // The scan still yields the stale row; the read that follows finds another
+    // writer's current row. This run never attempted the row.
+    const originalGet = table.get.bind(table);
+    let reads = 0;
+    (table as any).get = async (id: string, ctx?: any) => {
+      if (reads++ === 0) {
+        store.set(id, {
+          ...store.get(id)!,
+          embedding: [0.9, 0.8, 0.7],
+          embeddingModel: CURRENT,
+          embeddedContentHash: hashEmbeddedText("a", "legacy body"),
+        });
+      }
+      return originalGet(id, ctx);
+    };
+    try {
+      expect(await migration().run(10)).toEqual({ processed: 0, touchedIds: [] });
+      expect(writeCalls).toEqual([]);
+    } finally {
+      (table as any).get = originalGet;
+    }
+  });
+
   it("a row another writer made current after the commit is not counted", async () => {
     afterCommit = () => {
       afterCommit = null;
@@ -283,7 +358,9 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
       });
     };
     const result = await migration().run(10);
-    expect(result).toEqual({ processed: 0, touchedIds: [] });
+    // Another writer made the row current, so this run's attempt could not be
+    // verified. It is not counted as done and is reported by id.
+    expect(result).toEqual({ processed: 0, touchedIds: [], unconfirmedIds: [LEGACY_ID] });
   });
 
   it("a row re-created under the same id by another owner after staging is not patched", async () => {

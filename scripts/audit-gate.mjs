@@ -57,7 +57,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ALLOWLIST_PATH = join(REPO_ROOT, ".github", "audit-allowlist.json");
@@ -77,11 +77,36 @@ const REQUIRED_ENTRY_FIELDS = [
   "approvedBy",
 ];
 
-// The two observations the gate can run. `bun` is the lockfile observation
-// (`bun audit`); `npm-install` is the installed-tree observation (`npm audit
-// --omit=dev --json` on the packed-and-installed prefix). An allowlist entry
-// declares which of these it expects to see its advisory in.
-const VALID_SOURCES = new Set(["bun", "npm-install", "npm-install-adk"]);
+/**
+ * The consumer-install observations. Each is one published package, packed
+ * from its workspace directory `dir` and installed with npm --omit=dev outside
+ * this repo (so without its overrides), then audited with `npm audit
+ * --omit=dev --json`. npm overrides in a package do not apply to its consumers,
+ * so the workspace's bun lockfile does not show what a consumer of each package
+ * resolves (flair#1498, flair#2398, flair#2757).
+ *
+ * Each input is a mandatory flag naming an install prefix. Before any audit
+ * runs, the gate refuses a missing flag, two flags naming one prefix, and a
+ * prefix whose install records fail `prefixIdentityProblems` against the
+ * workspace manifest the job packs: the package as a production dependency
+ * from a local tarball, with that manifest's version and `dependencies`.
+ * `source` is the name an allowlist entry's `sources` uses for that tree.
+ * `vendor`, when set, is the only direct dependency a vendor-pinned entry's
+ * chain may name second.
+ */
+export const CONSUMER_INSTALLS = [
+  { flag: "--npm-install-prefix", source: "npm-install", package: "@tpsdev-ai/flair", dir: "." },
+  { flag: "--adk-npm-install-prefix", source: "npm-install-adk", package: "@tpsdev-ai/adk-flair", dir: "packages/adk-flair-js", vendor: "@google/adk" },
+  { flag: "--mcp-npm-install-prefix", source: "npm-install-mcp", package: "@tpsdev-ai/flair-mcp", dir: "packages/flair-mcp" },
+  { flag: "--openclaw-npm-install-prefix", source: "npm-install-openclaw", package: "@tpsdev-ai/openclaw-flair", dir: "packages/openclaw-flair" },
+  { flag: "--pi-npm-install-prefix", source: "npm-install-pi", package: "@tpsdev-ai/pi-flair", dir: "packages/pi-flair" },
+  { flag: "--n8n-npm-install-prefix", source: "npm-install-n8n", package: "@tpsdev-ai/n8n-nodes-flair", dir: "packages/n8n-nodes-flair" },
+];
+
+// The observations the gate runs. `bun` is the lockfile observation (`bun
+// audit`); the others are the consumer-install observations above. An
+// allowlist entry declares which of these it expects to see its advisory in.
+const VALID_SOURCES = new Set(["bun", ...CONSUMER_INSTALLS.map((input) => input.source)]);
 
 const VALID_CLASSES = new Set([
   // No patched version exists anywhere yet. Nothing to do but wait upstream.
@@ -495,7 +520,7 @@ export function validateAllowlist(allowlist, today) {
       );
     }
     if (!Array.isArray(entry.sources) || entry.sources.length === 0) {
-      problems.push(`${where}: "sources" must be a non-empty array of "bun" and/or "npm-install"`);
+      problems.push(`${where}: "sources" must be a non-empty array of ${[...VALID_SOURCES].map((v) => `"${v}"`).join(", ")}`);
     } else {
       for (const s of entry.sources) {
         if (!VALID_SOURCES.has(s)) {
@@ -590,29 +615,73 @@ function realPathInsideHarper(path, realHarper, label) {
 }
 
 /**
- * Resolve a dependency inside harper's installed tree; never outside it: a
- * candidate package.json whose real path is outside harper's tree throws.
- * Returns the package directory and the real path of its package.json, or null.
+ * Applies `realPathInsideHarper` to each directory on `relPath` below
+ * `harperDir`, from its first segment to its last. `relPath` is relative to
+ * `harperDir`, and the error names the directory relative to it. Returns the
+ * real path of the last directory.
  */
-function resolveHarperDependency(fromDir, harperDir, realHarper, name) {
+function directoriesInsideHarper(harperDir, relPath, realHarper) {
+  const segments = relPath.split(/[\\/]/);
+  let real = realHarper;
+  for (let i = 1; i <= segments.length; i++) {
+    const label = segments.slice(0, i).join("/");
+    real = realPathInsideHarper(join(harperDir, label), realHarper, label);
+  }
+  return real;
+}
+
+/**
+ * The node_modules directories Node's resolver searches for a package required
+ * from `fromDir`, a real path at or below `realHarper`, cut off at harper's
+ * directory: walking from `fromDir` up to and including `realHarper`, each
+ * directory not itself named node_modules contributes its node_modules child.
+ */
+export function harperSearchPaths(fromDir, realHarper) {
+  if (fromDir !== realHarper && !fromDir.startsWith(`${realHarper}${sep}`)) {
+    throw new Error("a dependency search started outside harper's installed tree");
+  }
+  const paths = [];
   let dir = fromDir;
   while (true) {
-    const candidate = join(dir, "node_modules", name);
-    try {
-      const manifest = realPathInsideHarper(
-        join(candidate, "package.json"),
-        realHarper,
-        relative(harperDir, join(candidate, "package.json")),
-      );
-      return { dir: candidate, manifest };
-    } catch (e) {
-      if (e.code !== "ENOENT" && e.code !== "ENOTDIR") throw e;
-    }
-    if (dir === harperDir) return null;
+    if (basename(dir) !== "node_modules") paths.push(join(dir, "node_modules"));
+    if (dir === realHarper) return paths;
     const parent = dirname(dir);
-    if (parent === dir) return null;
+    if (parent === dir) throw new Error("a dependency search did not reach harper's directory");
     dir = parent;
   }
+}
+
+/** True for a dependency name shaped like an npm package name: `name` or `@scope/name`. */
+function isPackageName(name) {
+  return /^(?:@[^@/\\]+\/)?[^@/\\][^@/\\]*$/.test(name) &&
+    !name.split("/").some((part) => part === "." || part === "..");
+}
+
+/**
+ * Look up the package `name` required from `fromDir` (a real path at or below
+ * `realHarper`) in `harperSearchPaths(fromDir, realHarper)`, in order: the
+ * first search directory that holds `<name>/package.json` wins. A name that is
+ * not shaped like a package name resolves to nothing. Once a package.json is
+ * found, it and each directory from harper's directory down to its package
+ * directory must resolve inside harper's installed tree, or this throws.
+ * Returns the real paths of the package directory and its package.json, or null.
+ */
+export function resolveHarperDependency(fromDir, realHarper, name) {
+  if (typeof name !== "string" || !isPackageName(name)) return null;
+  for (const searchDir of harperSearchPaths(fromDir, realHarper)) {
+    const relPath = relative(realHarper, join(searchDir, name));
+    // Walk installed manifests, not runtime imports: a package may export
+    // subpaths without exporting its bare name.
+    let manifest;
+    try {
+      manifest = realPathInsideHarper(join(realHarper, relPath, "package.json"), realHarper, `${relPath}/package.json`);
+    } catch (e) {
+      if (e.code === "ENOENT" || e.code === "ENOTDIR") continue;
+      throw e;
+    }
+    return { dir: directoriesInsideHarper(realHarper, relPath, realHarper), manifest };
+  }
+  return null;
 }
 
 /** Read and parse a package.json under harper; an unreadable or invalid one throws a named error. */
@@ -634,15 +703,17 @@ function readHarperManifest(manifestPath, name) {
  * `roots` or in their dependency closure. npm ships each bundled package's
  * dependency closure inside the tarball too; closure members may be hoisted to
  * the top level of harper's tree (for example fast-uri through fastify) or
- * nested below it. Each dependency is resolved before it is compared with the
- * target, and it matches only when it resolves to `node_modules/<target>` at
- * harper's top level. Missing dependencies are skipped; their absence does not
- * enlarge the bundled set. The walk makes at most `limit` lookups, the bundled
- * packages included, and throws past that.
+ * nested below it. Each dependency is resolved with `resolveHarperDependency`
+ * from the real path of the package that requires it, before it is compared
+ * with the target, and it matches only when it resolves to the real path of
+ * `node_modules/<target>` at harper's top level. Missing dependencies are
+ * skipped; their absence does not enlarge the bundled set. The walk makes at
+ * most `limit` lookups, the bundled packages included, and throws past that.
  */
 function harperBundleIncludes(harperDir, roots, target, limit = 5000) {
   const realHarper = realpathSync(harperDir);
-  const targetDir = join(harperDir, "node_modules", target);
+  const targetDir = resolveHarperDependency(realHarper, realHarper, target)?.dir;
+  if (!targetDir) return false;
   const seen = new Set();
   const queue = [];
   let lookups = 0;
@@ -650,18 +721,19 @@ function harperBundleIncludes(harperDir, roots, target, limit = 5000) {
     if (++lookups > limit) {
       throw new Error(`dependency closure for harper's bundled packages exceeded ${limit} lookups`);
     }
-    const found = resolveHarperDependency(from, harperDir, realHarper, name);
-    if (!found || seen.has(found.dir)) return false;
+    const found = resolveHarperDependency(from, realHarper, name);
+    if (!found) return false;
     if (name === target && found.dir === targetDir) {
       readHarperManifest(found.manifest, target);
       return true;
     }
+    if (seen.has(found.dir)) return false;
     seen.add(found.dir);
     queue.push(found);
     return false;
   };
   for (const name of roots) {
-    if (reaches(harperDir, name)) return true;
+    if (reaches(realHarper, name)) return true;
   }
   while (queue.length) {
     const { dir, manifest } = queue.shift();
@@ -724,7 +796,8 @@ function harperShippedVersion(npmPrefix, harperRoot, node) {
     throw new Error("harper's package.json declares no bundleDependencies");
   }
   const harperDir = join(npmPrefix, harperRoot);
-  if (!resolveHarperDependency(harperDir, harperDir, realpathSync(harperDir), topLevel)) {
+  const realHarper = realpathSync(harperDir);
+  if (!resolveHarperDependency(realHarper, realHarper, topLevel)) {
     throw new Error(`harper's tree has no package.json for ${JSON.stringify(topLevel)}`);
   }
   if (!harperBundleIncludes(harperDir, roots, topLevel)) {
@@ -753,9 +826,10 @@ function harperShrinkwrapDecides(npmPrefix, harperRoot) {
  * and any audit-reported version with the version harper shipped it at: the
  * shrinkwrap pin for releases that carry one, otherwise the bundle evidence in the
  * consumer install's package-lock and harper's package.json. Empty node lists,
- * a node package.json whose real path is outside harper's installed tree,
- * unreadable required metadata, and version mismatches block the gate; errors
- * name a node when one was reported.
+ * a node package.json, package directory or directory between harper's and it
+ * whose real path is outside harper's installed tree, unreadable required
+ * metadata, and version mismatches block the gate; errors name a node when one
+ * was reported.
  */
 export function vendorPinnedNodeProblems(adv, npmPrefix) {
   const nodes = adv.nodes;
@@ -774,11 +848,10 @@ export function vendorPinnedNodeProblems(adv, npmPrefix) {
     const harperRoot = harperNodeRoot(node, adv.package);
     const pinKey = node.slice(harperRoot.length + 1);
     try {
-      const manifest = realPathInsideHarper(
-        join(npmPrefix, node, "package.json"),
-        realpathSync(join(npmPrefix, harperRoot)),
-        `${pinKey}/package.json`,
-      );
+      const harperDir = join(npmPrefix, harperRoot);
+      const realHarper = realpathSync(harperDir);
+      const manifest = realPathInsideHarper(join(npmPrefix, node, "package.json"), realHarper, `${pinKey}/package.json`);
+      directoriesInsideHarper(harperDir, pinKey, realHarper);
       const installed = JSON.parse(readFileSync(manifest, "utf8"))?.version;
       const reported = adv.nodeVersions?.[node];
       if (typeof installed !== "string" || !installed ||
@@ -804,16 +877,25 @@ export function vendorPinnedNodeProblems(adv, npmPrefix) {
   return problems;
 }
 
-function adkVendorPinnedNodeProblems(adv, npmPrefix, entry) {
+/**
+ * For a vendor-pinned entry on a consumer-install observation other than the
+ * root tarball's: the entry's `introducedBy` chain must start at that input's
+ * package (then its `vendor`, when set) and end at the advisory's package, each
+ * later link must be a declared dependency of the one before it and resolve on
+ * disk, every reported node must be the chain's resolved node, and the
+ * installed version must equal the entry's `version`.
+ */
+function consumerVendorPinnedNodeProblems(adv, npmPrefix, entry, input) {
   if (!Array.isArray(adv.nodes) || adv.nodes.length === 0) {
     return [`${adv.ghsa} (${adv.package}): npm audit reported no nodes.`];
   }
   try {
     const chain = entry.introducedBy.split(" -> ");
-    if (chain[0] !== "@tpsdev-ai/adk-flair" || chain[1] !== "@google/adk" ||
+    if (chain.length < 2 || chain[0] !== input.package ||
+        (input.vendor !== undefined && chain[1] !== input.vendor) ||
         chain.at(-1) !== adv.package ||
         !chain.every((pkg) => /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/.test(pkg))) {
-      throw new Error("invalid ADK dependency chain");
+      throw new Error(`invalid ${input.package} dependency chain`);
     }
     const prefix = resolve(npmPrefix);
     let parent = prefix;
@@ -853,11 +935,11 @@ function adkVendorPinnedNodeProblems(adv, npmPrefix, entry) {
         }
         return [];
       } catch (e) {
-        return [`${adv.ghsa} (${adv.package}): cannot verify ADK node ${JSON.stringify(node)} version: ${e.message}.`];
+        return [`${adv.ghsa} (${adv.package}): cannot verify ${input.package} node ${JSON.stringify(node)} version: ${e.message}.`];
       }
     });
   } catch (e) {
-    return [`${adv.ghsa} (${adv.package}): cannot verify ADK dependency chain: ${e.message}.`];
+    return [`${adv.ghsa} (${adv.package}): cannot verify ${input.package} dependency chain: ${e.message}.`];
   }
 }
 
@@ -868,6 +950,195 @@ async function latestPublishedVersion(pkg) {
   const body = await res.json();
   if (!body?.version) throw new Error(`registry response for ${pkg} had no version field`);
   return body.version;
+}
+
+/* ------------------------------------------------------------------ *
+ * Consumer-install prefix identity                                    *
+ * ------------------------------------------------------------------ */
+
+/**
+ * The workspace manifest the job packs for `input` (`<repo>/<dir>/package.json`,
+ * the file `npm pack` reads): its path, its version and its `dependencies` (an
+ * empty object when it has none). Throws when that manifest cannot be read,
+ * names a different package, has no version, or has a `dependencies` field
+ * that is not an object of string specs.
+ */
+export function packedManifest(repoRoot, input) {
+  const rel = join(input.dir, "package.json");
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(repoRoot, rel), "utf8"));
+  } catch (e) {
+    throw new Error(`cannot read the workspace manifest ${rel} the job packs for ${input.flag}: ${e.message}`);
+  }
+  if (manifest?.name !== input.package) {
+    throw new Error(`the workspace manifest ${rel} names ${JSON.stringify(manifest?.name)}, expected ${input.package}`);
+  }
+  if (typeof manifest.version !== "string" || !manifest.version) {
+    throw new Error(`the workspace manifest ${rel} has no version`);
+  }
+  const dependencies = manifest.dependencies === undefined ? {} : manifest.dependencies;
+  if (!isObject(dependencies) || !Object.values(dependencies).every((spec) => typeof spec === "string")) {
+    throw new Error(`the workspace manifest ${rel} has a "dependencies" field that is not an object of string specs`);
+  }
+  return { path: rel, version: manifest.version, dependencies };
+}
+
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** The prefix's direct dependencies as its package-lock.json records them, for refusal messages. */
+function directDependencies(lock) {
+  const deps = Object.keys(lock?.packages?.[""]?.dependencies ?? {});
+  return deps.length ? `direct dependencies ${deps.join(", ")}` : "no direct dependencies";
+}
+
+/** A spec that installs a local tarball, as npm records one in a consumer's package.json and lockfile. */
+function isLocalTarballSpec(spec) {
+  return typeof spec === "string" && spec.startsWith("file:") && spec.endsWith(".tgz");
+}
+
+/** The root dependency fields other than `dependencies`; the package must be in none of them. */
+const NON_PRODUCTION_FIELDS = ["devDependencies", "optionalDependencies", "peerDependencies"];
+
+/** Lock-row flags of a node that is not a production dependency of the root. */
+const NON_PRODUCTION_FLAGS = ["dev", "optional", "devOptional", "peer", "extraneous"];
+
+/**
+ * What is wrong with `root` (the consumer's package.json, or the "" row of its
+ * package-lock.json, named `where`) as a root that depends on `name` in
+ * production from a local tarball.
+ */
+function productionLinkProblems(where, root, name) {
+  if (!isObject(root)) return [`${where} has no root package record`];
+  const problems = [];
+  const spec = isObject(root.dependencies) && Object.hasOwn(root.dependencies, name)
+    ? root.dependencies[name]
+    : undefined;
+  if (!isLocalTarballSpec(spec)) {
+    problems.push(`${where} does not name it in "dependencies" from a local .tgz (found ${JSON.stringify(spec ?? null)})`);
+  }
+  for (const field of NON_PRODUCTION_FIELDS) {
+    if (isObject(root[field]) && Object.hasOwn(root[field], name)) {
+      problems.push(`${where} also names it in "${field}"`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * How a `dependencies` field `found` differs from the workspace manifest's
+ * `expected`, as a list (empty when both declare the same names with the same
+ * specs). An absent field is an empty one.
+ */
+function dependencyDifferences(found, expected) {
+  const actual = found === undefined ? {} : found;
+  if (!isObject(actual)) return [`"dependencies" is ${JSON.stringify(actual)}, not an object`];
+  const differences = [];
+  for (const [dep, spec] of Object.entries(expected)) {
+    if (!Object.hasOwn(actual, dep)) differences.push(`${dep} is missing (expected ${JSON.stringify(spec)})`);
+    else if (actual[dep] !== spec) differences.push(`${dep} is ${JSON.stringify(actual[dep])} (expected ${JSON.stringify(spec)})`);
+  }
+  for (const dep of Object.keys(actual)) {
+    if (!Object.hasOwn(expected, dep)) differences.push(`${dep} ${JSON.stringify(actual[dep])} is not in the workspace manifest`);
+  }
+  return differences;
+}
+
+/**
+ * What is wrong with `prefix` as an npm install of the packed tarball of
+ * `name`, against `packed` (the workspace manifest the job packs, from
+ * `packedManifest`), as a list (empty when nothing is). The prefix must hold:
+ *
+ *   - `node_modules/<name>/package.json` with that name and version;
+ *   - a package-lock.json (the tree `npm audit` reads) that records
+ *     `node_modules/<name>` at that version, resolved from a local `.tgz`;
+ *   - a package.json, and a package-lock.json "" row, that name the package in
+ *     `dependencies` with a local `.tgz` spec and in none of
+ *     `NON_PRODUCTION_FIELDS`, and a `node_modules/<name>` lock row with none
+ *     of `NON_PRODUCTION_FLAGS`;
+ *   - in both the installed package.json and that lock row, the same
+ *     `dependencies` names and specs as the workspace manifest.
+ *
+ * An unreadable or unparseable file is a problem, never a pass.
+ */
+export function prefixIdentityProblems(prefix, name, packed) {
+  const { version } = packed;
+  const problems = [];
+  let lock;
+  try {
+    lock = JSON.parse(readFileSync(join(prefix, "package-lock.json"), "utf8"));
+  } catch (e) {
+    problems.push(`no readable package-lock.json (${e.code ?? e.message})`);
+  }
+  let installed;
+  try {
+    installed = JSON.parse(readFileSync(join(prefix, "node_modules", name, "package.json"), "utf8"));
+  } catch (e) {
+    problems.push(`no readable node_modules/${name}/package.json (${e.code ?? e.message})`);
+  }
+  let consumer;
+  try {
+    consumer = JSON.parse(readFileSync(join(prefix, "package.json"), "utf8"));
+  } catch (e) {
+    problems.push(`no readable package.json (${e.code ?? e.message})`);
+  }
+  const row = lock?.packages?.[`node_modules/${name}`];
+  if (installed !== undefined) {
+    if (installed?.name !== name) {
+      problems.push(`node_modules/${name}/package.json names ${JSON.stringify(installed?.name)}`);
+    }
+    if (installed?.version !== version) {
+      problems.push(`node_modules/${name}/package.json has version ${JSON.stringify(installed?.version)}`);
+    }
+  }
+  if (lock !== undefined) {
+    if (!isObject(row)) {
+      problems.push(`package-lock.json has no "node_modules/${name}" entry; found ${directDependencies(lock)}`);
+    } else {
+      if (row.version !== version) {
+        problems.push(`package-lock.json records version ${JSON.stringify(row.version)}`);
+      }
+      if (!isLocalTarballSpec(row.resolved)) {
+        problems.push(`package-lock.json resolves it from ${JSON.stringify(row.resolved ?? null)}, not a local .tgz`);
+      }
+    }
+  }
+
+  // Production linkage: the consumer depends on the package in production.
+  if (consumer !== undefined) problems.push(...productionLinkProblems("package.json", consumer, name));
+  if (lock !== undefined) {
+    problems.push(...productionLinkProblems('package-lock.json\'s "" row', lock?.packages?.[""], name));
+    if (isObject(row)) {
+      for (const flag of NON_PRODUCTION_FLAGS) {
+        if (row[flag] !== undefined && row[flag] !== false) {
+          problems.push(`package-lock.json marks "node_modules/${name}" ${JSON.stringify(flag)}: ${JSON.stringify(row[flag])}`);
+        }
+      }
+    }
+  }
+
+  // Dependency declarations: the installed package declares what the workspace manifest does.
+  const declarations = [];
+  if (isObject(installed)) declarations.push([`node_modules/${name}/package.json`, installed.dependencies]);
+  if (isObject(row)) declarations.push([`package-lock.json's "node_modules/${name}" row`, row.dependencies]);
+  for (const [where, found] of declarations) {
+    const differences = dependencyDifferences(found, packed.dependencies);
+    if (differences.length) {
+      problems.push(`${where} declares dependencies that differ from ${packed.path}: ${differences.join(", ")}`);
+    }
+  }
+  return problems;
+}
+
+/** A prefix's real path, or its resolved path when it does not exist (it then fails the identity check). */
+function canonicalPrefix(prefix) {
+  try {
+    return realpathSync(prefix);
+  } catch {
+    return resolve(prefix);
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -884,44 +1155,71 @@ async function main() {
   }
   const todayStr = today.toISOString().slice(0, 10);
 
-  // --npm-install-prefix <dir>: the npm-install observation is MANDATORY. The
-  // gate refuses to run without it — a bun-only pass is the exact escape
-  // Sherlock's verdict forbade (a PR whose tarball lane is skipped or optional
-  // would merge with the npm observation never made). Both observations run in
-  // every invocation.
-  const npmPrefixIdx = process.argv.indexOf("--npm-install-prefix");
-  const npmPrefix = npmPrefixIdx !== -1 ? process.argv[npmPrefixIdx + 1] : null;
-  if (!npmPrefix) {
-    console.error(
-      "DEPENDENCY AUDIT GATE: missing --npm-install-prefix <dir> — the npm-install observation is mandatory; the gate refuses to run bun-only.",
-    );
-    process.exit(2);
+  // Every consumer-install input is a MANDATORY flag. The gate refuses to run
+  // without each one: a PR whose tarball lane is skipped or optional would merge
+  // with that observation never made, and a check that can be skipped is not a
+  // check.
+  const prefixes = new Map();
+  const missing = [];
+  for (const input of CONSUMER_INSTALLS) {
+    const idx = process.argv.indexOf(input.flag);
+    const value = idx !== -1 ? process.argv[idx + 1] : undefined;
+    if (!value || value.startsWith("--")) missing.push(input);
+    else prefixes.set(input.source, value);
   }
+  for (const input of missing) {
+    console.error(
+      input.source === "npm-install"
+        ? `DEPENDENCY AUDIT GATE: missing --npm-install-prefix <dir> — the published ${input.package} package's npm-install observation is mandatory; the gate refuses to run bun-only.`
+        : `DEPENDENCY AUDIT GATE: missing ${input.flag} <dir> — the published ${input.package} package's consumer-install observation is mandatory; the gate refuses to run without it.`,
+    );
+  }
+  if (missing.length) process.exit(2);
 
-  // --adk-npm-install-prefix <dir>: the consumer install of the published ADK
-  // package, observed the same way as the root tarball. MANDATORY for the same
-  // reason --npm-install-prefix is: a check that can be skipped is not a check.
-  // npm overrides in a package do not apply to its consumers, so the root
-  // tarball's clean tree says nothing about what a consumer of @tpsdev-ai/adk-flair
-  // resolves; an install of that tarball is what shows it (flair#2398).
-  const adkPrefixIdx = process.argv.indexOf("--adk-npm-install-prefix");
-  const adkPrefix = adkPrefixIdx !== -1 ? process.argv[adkPrefixIdx + 1] : null;
-  if (!adkPrefix) {
-    console.error(
-      "DEPENDENCY AUDIT GATE: missing --adk-npm-install-prefix <dir> — the published ADK package's consumer-install observation is mandatory; the gate refuses to run without it.",
-    );
-    process.exit(2);
+  // Each prefix must be its own install and pass prefixIdentityProblems
+  // against the workspace manifest the job packs for its flag. A prefix of
+  // another package, a dev-only install, an archive whose dependencies differ
+  // from that manifest, or one prefix passed twice is refused before any audit
+  // runs.
+  const identityProblems = [];
+  const prefixOwner = new Map();
+  for (const input of CONSUMER_INSTALLS) {
+    const prefix = prefixes.get(input.source);
+    const key = canonicalPrefix(prefix);
+    if (prefixOwner.has(key)) {
+      identityProblems.push(
+        `${prefixOwner.get(key)} and ${input.flag} name the same prefix ${prefix}; each consumer-install input needs its own install.`,
+      );
+      continue;
+    }
+    prefixOwner.set(key, input.flag);
+    let packed;
+    try {
+      packed = packedManifest(REPO_ROOT, input);
+    } catch (e) {
+      identityProblems.push(`${e.message}.`);
+      continue;
+    }
+    const found = prefixIdentityProblems(prefix, input.package, packed);
+    if (found.length) {
+      identityProblems.push(
+        `${input.flag} ${prefix} is not an npm install of the packed ${input.package}@${packed.version}: ${found.join("; ")}.`,
+      );
+    }
   }
+  for (const problem of identityProblems) console.error(`DEPENDENCY AUDIT GATE: ${problem}`);
+  if (identityProblems.length) process.exit(2);
 
   let allowlist;
   let advisories;
   try {
     allowlist = loadAllowlist();
     advisories = flattenAdvisories(runBunAudit());
-    advisories = advisories.concat(flattenNpmAdvisories(runNpmAudit(npmPrefix)));
-    advisories = advisories.concat(
-      flattenNpmAdvisories(runNpmAudit(adkPrefix), "npm-install-adk"),
-    );
+    for (const input of CONSUMER_INSTALLS) {
+      advisories = advisories.concat(
+        flattenNpmAdvisories(runNpmAudit(prefixes.get(input.source)), input.source),
+      );
+    }
   } catch (e) {
     console.error(`\n  DEPENDENCY AUDIT GATE: FAILED TO RUN\n\n  ${e.message}\n`);
     console.error("  The gate fails closed: an audit that cannot run is not an audit that passed.\n");
@@ -997,10 +1295,15 @@ async function main() {
       continue;
     }
 
-    if (entry.class === "vendor-pinned" && (adv.source === "npm-install" || adv.source === "npm-install-adk")) {
-      const nodeProblems = adv.source === "npm-install-adk"
-        ? adkVendorPinnedNodeProblems(adv, adkPrefix, entry)
-        : vendorPinnedNodeProblems(adv, npmPrefix);
+    if (entry.class === "vendor-pinned" && adv.source !== "bun") {
+      const nodeProblems = adv.source === "npm-install"
+        ? vendorPinnedNodeProblems(adv, prefixes.get(adv.source))
+        : consumerVendorPinnedNodeProblems(
+            adv,
+            prefixes.get(adv.source),
+            entry,
+            CONSUMER_INSTALLS.find((input) => input.source === adv.source),
+          );
       if (nodeProblems.length) {
         for (const problem of nodeProblems) fail(problem);
         blocked.push(adv);
@@ -1046,10 +1349,12 @@ async function main() {
 
   // Check 6 — staleness + sources mismatch.
   //
-  // The gate always runs BOTH observations (bun lockfile + npm-install tree), so
-  // every declared source is observed in every invocation. An entry is STALE when
-  // its advisory appears in no source at all; a SOURCES MISMATCH when the observed
-  // sources and the declared sources do not agree in either direction.
+  // A run that reaches this point has run `bun audit` and, on every
+  // consumer-install prefix (each passed the identity check above), `npm audit
+  // --omit=dev`, so each source an entry can declare has a report. An
+  // entry is STALE when its advisory appears in no source at all; a SOURCES
+  // MISMATCH when the observed sources and the declared sources do not agree
+  // in either direction.
   const matchedGhsa = new Set(matchedBySource.keys());
   for (const entry of allowlist.entries) {
     if (!entry?.ghsa) continue;

@@ -105,7 +105,7 @@ function suffixWrite(verb: "PUT" | "PATCH", id: string): Promise<Response> {
 }
 
 /** Every run result the migration logged (test-only instrumentation). */
-function runs(): { processed: number; touchedIds: string[] }[] {
+function runs(): { processed: number; touchedIds: string[]; unconfirmedIds?: string[] }[] {
   const path = join(pauseDir, "embedding-stamp-runs.jsonl");
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
@@ -156,7 +156,7 @@ async function waitForHalt(reason: string, timeoutMs: number): Promise<boolean> 
   }
   return false;
 }
-async function waitForRun(predicate: (run: { processed: number; touchedIds: string[] }) => boolean, timeoutMs = 60_000): Promise<boolean> {
+async function waitForRun(predicate: (run: { processed: number; touchedIds: string[]; unconfirmedIds?: string[] }) => boolean, timeoutMs = 60_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (runs().some(predicate)) return true;
@@ -221,7 +221,7 @@ afterAll(async () => {
 
 
 describe("flair#2478 — the migration's HTTP delegation holds the id's lock through its commit (real Harper)", () => {
-  it("held after staging, after confirmation and after commit: owner PUT and PATCH are refused; DELETEs leave no row; drift stores only the current text's vector", async () => {
+  it("held after staging, after confirmation and after commit: owner PUT, PATCH and DELETE are refused; DELETEs after the release leave no row; drift stores only the current text's vector", async () => {
     // a1 contention; a2-a4 DELETE at each held point; a5 drift after staging;
     // a6 drift before the request; a7 uncontended control.
     const ids = ["esl-a1", "esl-a2", "esl-a3", "esl-a4", "esl-a5", "esl-a6", "esl-a7"];
@@ -257,12 +257,21 @@ describe("flair#2478 — the migration's HTTP delegation holds the id's lock thr
     expect(afterPatch.content).toBe(EDITED);
     expect(afterPatch.visibility).toBe("shared");
 
+    // The request holds the id past the DELETE's wait budget: the DELETE is
+    // refused and changes nothing. Once the next row reaches `next`, this row's
+    // request has answered, and a DELETE leaves no row.
     const deleteAt = async (id: string, point: string, next: string) => {
       await h.assertPaused(point);
+      const before = await h.readRow(id);
+      const body = await expectRefused(await h.signed(owner, "DELETE", memPath(id)), "memory_busy");
+      expect(body).toEqual({ error: "memory_busy", caller: owner.id });
+      expect(await h.readRow(id), `${id}: the refused DELETE changed the row`).toEqual(before);
+      await handOff(point, next);
+      await h.assertPaused(next);
+      await expectBoundTo(await h.readRow(id), ORIGINAL);
       const del = await h.signed(owner, "DELETE", memPath(id));
       expect(del.status, await del.clone().text()).toBe(200);
       expect(await h.readRow(id)).toBeNull();
-      await handOff(point, next);
     };
     await deleteAt("esl-a2", STAGED, GATE);
     // a3: DELETE after confirmation.
@@ -288,9 +297,9 @@ describe("flair#2478 — the migration's HTTP delegation holds the id's lock thr
     await expectBoundTo(await h.readRow("esl-a6"), EDITED, ORIGINAL);
     await expectBoundTo(await h.readRow("esl-a7"), ORIGINAL);
     await expectBoundTo(await h.readRow("esl-a5"), EDITED, ORIGINAL);
-    expect(runs()[0]).toEqual({ processed: 4, touchedIds: ["esl-a1", "esl-a4", "esl-a6", "esl-a7"] });
+    expect(runs()[0]).toEqual({ processed: 6, touchedIds: ["esl-a1", "esl-a2", "esl-a3", "esl-a4", "esl-a6", "esl-a7"] });
     expect(runs()[1]).toEqual({ processed: 1, touchedIds: ["esl-a5"] });
-    for (const id of ["esl-a1", "esl-a5", "esl-a6", "esl-a7"]) h.expectIncrementalWrites(id, HTTP_WRITER);
+    for (const id of ["esl-a1", "esl-a2", "esl-a3", "esl-a4", "esl-a5", "esl-a6", "esl-a7"]) h.expectIncrementalWrites(id, HTTP_WRITER);
     for (const id of ["esl-a2", "esl-a3", "esl-a4"]) expect(await h.readRow(id)).toBeNull();
   }, 300_000);
 
@@ -342,7 +351,8 @@ describe("flair#2478 — the migration's HTTP delegation holds the id's lock thr
     h.expectIncrementalWrites("esl-b3", HTTP_WRITER);
 
     // b4: an unreadable post-commit read. The request answers
-    // write_outcome_unknown, the row is not counted, and the id is fenced.
+    // write_outcome_unknown, the row is not counted, the id is reported as
+    // unconfirmed, and the id is fenced.
     await handOff(GATE, "memory-reembed-verify");
     await h.assertPaused("memory-reembed-verify");
     writeFileSync(join(pauseDir, "arm.memory-get-fail.esl-b4"), "");
@@ -352,7 +362,7 @@ describe("flair#2478 — the migration's HTTP delegation holds the id's lock thr
     expect(await h.waitForLog(unreadable), `the unreadable-read refusal was not logged within 30s: ${unreadable}`).toBe(true);
     expect(serverLog()).toContain(unreadable);
     await expectRefused(await ownerWrite("PUT", "esl-b4", OWNER_TEXT), "write_outcome_unknown");
-    expect(runs()[0]).toEqual({ processed: 1, touchedIds: ["esl-b3"] });
+    expect(runs()[0]).toEqual({ processed: 1, touchedIds: ["esl-b3"], unconfirmedIds: ["esl-b4"] });
     for (const id of ["esl-b1", "esl-b2", "esl-b4"]) expect(touched(id), `${id} was counted`).toBe(0);
   }, 300_000);
 });
@@ -452,7 +462,10 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
     await expectBoundTo(await h.readRow(c5), EDITED, ORIGINAL);
     await expectBoundTo(await h.readRow(c6), EDITED, ORIGINAL);
     await expectBoundTo(await h.readRow(c8), ORIGINAL);
-    expect(runs()[0]).toEqual({ processed: 3, touchedIds: [c1, c4, c9] });
+    // c3's row was deleted after its confirmation, and c7's post-commit read
+    // was unreadable: neither is counted as done, and both are reported by id
+    // (flair#2840).
+    expect(runs()[0]).toEqual({ processed: 3, touchedIds: [c1, c4, c9], unconfirmedIds: [c3, c7] });
     for (const id of [c5, c6, c8]) expect(touched(id), `${id} was not counted exactly once`).toBe(1);
     expect(touched(c7), "the unconfirmed row was counted").toBe(0);
     for (const id of [c1, c5, c6, c8, c9]) h.expectIncrementalWrites(id, SUFFIX_WRITER);

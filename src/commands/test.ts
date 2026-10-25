@@ -9,6 +9,7 @@
 import { Command } from "commander";
 import * as render from "../render.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { ApiRequestOutcomeUnknown } from "../lib/auth-resolve.js";
 
 export type TestCli = {
   api: (...args: any[]) => any;
@@ -67,6 +68,7 @@ program
           failed++;
         }
       } catch (e: unknown) {
+        if (e instanceof ApiRequestOutcomeUnknown) throw e;
         const message = e instanceof Error ? e.message : String(e);
         console.log(`  ${render.icons.error} ${render.wrap(render.c.red, "FAIL")} ${name}: ${render.wrap(render.c.dim, message?.slice(0, 120))}`);
         failed++;
@@ -74,7 +76,7 @@ program
     };
 
     // 1. Write a test memory via PUT /Memory/<id>.
-    // Schema only exposes PUT — POST returns 'Memory does not have a post method implemented'.
+    // The CLI writes through PUT /Memory/<id>; a bare POST /Memory reaches Memory.post() too.
     await check("Write test memory (PUT /Memory/<id>)", async () => {
       const id = `flair-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const body: Record<string, any> = {

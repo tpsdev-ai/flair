@@ -196,12 +196,13 @@ jobs:
         # dist-tag pin here rots the listing (flair#1307: 0.44.13 while
         # npm latest was 0.46.0). Unpinning is the policy.
         run: node scripts/check-plugin-mcp-unpinned.mjs
-      - name: "Check production dep bake time (≥7 days)"
+      - name: "Check dependency bake time (≥7 days)"
         # Supply-chain bake-time guard. See docs/supply-chain-policy.md.
-        # Tunable via FLAIR_DEP_MIN_AGE_DAYS env. Workspace-internal deps exempt.
-        # --ci marks THIS invocation as the gate: it refuses to run if
-        # FLAIR_CHECK_DEP_AGES_ROOT is set (that variable is for the tests,
-        # which point the gate at a fixture repo without --ci).
+        # Workspace-internal deps exempt. --ci marks THIS invocation as the gate:
+        # it refuses to run if FLAIR_CHECK_DEP_AGES_ROOT (for the tests, which
+        # point the gate at a fixture repo without --ci), FLAIR_DEP_MIN_AGE_DAYS
+        # or FLAIR_DEP_KEEP_CURRENT is set, or if FLAIR_NPM_REGISTRY names a host
+        # other than loopback (127.0.0.1, localhost or [::1]).
         run: node scripts/check-dep-ages.mjs --ci
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
@@ -394,6 +395,22 @@ jobs:
         # Bounded so a stalled download cannot spend the case budgets above.
         timeout-minutes: 3
         run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+      # flair#2824: on a fresh macOS runner, ggml's Metal library load
+      # (ggml_metal_library_init) took 40 s once, inside the first test Harper's
+      # 60 s readiness wait, which spans its embedding engine's boot. This step
+      # loads the engine once, before the steps below start their test Harpers,
+      # so the job's first Metal library load happens here.
+      - name: Load the embedding engine once before the test Harpers (flair#2824)
+        timeout-minutes: 5
+        run: |
+          node --input-type=module <<'JS'
+          import { init, dispose } from "harper-fabric-embeddings";
+          const started = Date.now();
+          await init({ modelPath: `${process.env.GITHUB_WORKSPACE}/models/nomic-embed-text-v1.5.Q4_K_M.gguf`, gpuLayers: 99 });
+          const loadedMs = Date.now() - started;
+          await dispose();
+          console.log(`Metal warm-up: the embedding engine loaded in ${loadedMs}ms`);
+          JS
       - name: using-flair seed acceptance (flair#2141)
         run: bun test test/integration/using-flair-seed-2141.test.ts test/integration/using-flair-seed-reserved-2141.test.ts
       - name: Real-launchd doctor --fix integration (flair#1581)
@@ -2079,9 +2096,43 @@ jobs:
             npm init -y > /dev/null
             npm install --ignore-scripts --omit=dev "$GITHUB_WORKSPACE/packages/adk-flair-js/$ADK_TGZ"
           )
+          # flair#2757 — the same observation for flair-mcp, openclaw-flair,
+          # pi-flair and n8n-nodes-flair. Each depends on @tpsdev-ai/flair-client
+          # at the release version, which a release PR sets before that version
+          # is on the registry, so the packed client is installed alongside.
+          # Packing needs no build here: a build does not change a package's
+          # dependencies. openclaw-flair and n8n-nodes-flair declare their host
+          # application as peer dependencies; --legacy-peer-deps leaves peer
+          # dependencies, and so the host's tree, out of their install.
+          PACKED=$(mktemp -d)
+          pack() { (cd "$GITHUB_WORKSPACE/packages/$1" && npm pack --silent --ignore-scripts --pack-destination "$PACKED"); }
+          consumer_install() {
+            (
+              cd "$1"
+              npm init -y > /dev/null
+              npm install --ignore-scripts --omit=dev "${@:2}"
+            )
+          }
+          CLIENT_TGZ="$PACKED/$(pack flair-client)"
+          MCP_TGZ="$PACKED/$(pack flair-mcp)"
+          OPENCLAW_TGZ="$PACKED/$(pack openclaw-flair)"
+          PI_TGZ="$PACKED/$(pack pi-flair)"
+          N8N_TGZ="$PACKED/$(pack n8n-nodes-flair)"
+          MCP_PREFIX=$(mktemp -d)
+          OPENCLAW_PREFIX=$(mktemp -d)
+          PI_PREFIX=$(mktemp -d)
+          N8N_PREFIX=$(mktemp -d)
+          consumer_install "$MCP_PREFIX" "$CLIENT_TGZ" "$MCP_TGZ"
+          consumer_install "$OPENCLAW_PREFIX" --legacy-peer-deps "$CLIENT_TGZ" "$OPENCLAW_TGZ"
+          consumer_install "$PI_PREFIX" "$CLIENT_TGZ" "$PI_TGZ"
+          consumer_install "$N8N_PREFIX" --legacy-peer-deps "$CLIENT_TGZ" "$N8N_TGZ"
           bun "$GITHUB_WORKSPACE/scripts/audit-gate.mjs" --explain \
             --npm-install-prefix "$PREFIX" \
-            --adk-npm-install-prefix "$ADK_PREFIX"
+            --adk-npm-install-prefix "$ADK_PREFIX" \
+            --mcp-npm-install-prefix "$MCP_PREFIX" \
+            --openclaw-npm-install-prefix "$OPENCLAW_PREFIX" \
+            --pi-npm-install-prefix "$PI_PREFIX" \
+            --n8n-npm-install-prefix "$N8N_PREFIX"
 
   sast-semgrep:
     name: Semgrep SAST

@@ -133,7 +133,12 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
     expect(lastMig).toBeTruthy();
     expect(lastMig.state).toBe("completed");
     expect(lastMig.rowsRemaining).toBe(0);
-    expect(lastMig.rowsDone).toBeGreaterThanOrEqual(SEED_IDS.length);
+    // flair#2840: rowsDone counts writes whose committed effect was verified.
+    // This test expects every seeded row to be verified, so rowsDone is the
+    // seed count and no id is named unconfirmed.
+    expect(lastMig.rowsDone).toBe(SEED_IDS.length);
+    expect((lastMig.rowsUnconfirmed ?? 0) + lastMig.rowsDone).toBe(SEED_IDS.length);
+    expect(lastMig.unconfirmedIds ?? []).toEqual([]);
 
     for (const id of SEED_IDS) {
       const row = await fetchMemoryRow(id);
@@ -203,5 +208,7 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
     const state = JSON.parse(await Bun.file(statePath).text());
     expect(state[SYNTHETIC_MIGRATION_ID].lastOutcome).toBe("success");
     expect(typeof state[SYNTHETIC_MIGRATION_ID].completedAtVersion).toBe("string");
+    expect(state[SYNTHETIC_MIGRATION_ID].rowsProcessed).toBe(SEED_IDS.length);
+    expect(state[SYNTHETIC_MIGRATION_ID].rowsUnconfirmed ?? 0).toBe(0);
   });
 });

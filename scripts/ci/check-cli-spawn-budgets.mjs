@@ -152,7 +152,7 @@ function skipRegex(src, i) {
       j += 2;
       continue;
     }
-    if (c === "\n") return i; // never closed on this line — treat as division
+    if (LINE_BREAK_CHARS.has(c)) return i; // never closed on this line — treat as division
     if (c === "[") inClass = true;
     else if (c === "]") inClass = false;
     else if (c === "/" && !inClass) return j;
@@ -174,20 +174,10 @@ function scriptKindFor(fileName) {
 }
 
 /**
- * The source as TypeScript's parser reads it, with every comment and the text of
- * every string literal, template literal and regex literal replaced by spaces
- * (flair#2774). Newlines and length are kept, so every index still points at the
- * same character. A template's `${` and `}` and the expressions between them
- * stay as code: a `Bun.spawn(...)` of the CLI entry there IS a real call
- * (flair#1825). Used for spawn-CALL matching, so a `Bun.spawn(...)` mentioned in
- * a string or comment is not mistaken for a call. The argv/options TEXT a call
- * reports is sliced from the ORIGINAL source, so the CLI-entry check still reads
- * real literal text. A spawn's `timeout` is read from THIS text (flair#2774).
- *
  * A file the parser reports a syntax error in is refused with an error naming
  * it: the scan never falls back to the unmasked text.
  */
-function maskLiteralsAndComments(src, fileName = UNNAMED_SOURCE) {
+function parseSourceFile(src, fileName = UNNAMED_SOURCE) {
   const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, scriptKindFor(fileName));
   const diagnostics = sf.parseDiagnostics;
   if (!Array.isArray(diagnostics)) {
@@ -204,9 +194,91 @@ function maskLiteralsAndComments(src, fileName = UNNAMED_SOURCE) {
         `(${ts.flattenDiagnosticMessageText(first.messageText, " ")}); refusing to scan it unmasked (flair#2774).`,
     );
   }
+  return sf;
+}
+
+/**
+ * Whether `fileName` selects a script kind in which TypeScript parses JSX:
+ * `.tsx` and `.jsx` (`ScriptKind.TSX` / `ScriptKind.JSX`), and `.js`, `.mjs`
+ * and `.cjs` (`ScriptKind.JS`, which TypeScript also parses as the JSX
+ * language variant). `.ts`, `.mts` and `.cts` are parsed as standard
+ * TypeScript and cannot contain JSX.
+ */
+function isJsxFileName(fileName) {
+  const kind = scriptKindFor(fileName);
+  return kind === ts.ScriptKind.TSX || kind === ts.ScriptKind.JSX || kind === ts.ScriptKind.JS;
+}
+
+/**
+ * Every character TypeScript's line map treats as a line break: `\n`, `\r`,
+ * U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR). A `\r\n` pair is
+ * two of these characters. The three maskers below keep exactly this set, so a
+ * masked copy reports the same line and character for every position as the
+ * original (flair#2808). The text walks end a line at any of them; a regex
+ * spells the set as `\n\r\u2028\u2029` inside a character class.
+ */
+const LINE_BREAK_CHARS = new Set(["\n", "\r", "\u2028", "\u2029"]);
+
+/** Index of the first `LINE_BREAK_CHARS` character at or after `from`, or -1. */
+function indexOfLineBreak(src, from) {
+  for (let j = from; j < src.length; j++) if (LINE_BREAK_CHARS.has(src[j])) return j;
+  return -1;
+}
+
+/** The 1-based line of `index`, counted as TypeScript's line map counts it (a `\r\n` pair is one break). */
+function lineNumberAt(src, index) {
+  let line = 1;
+  for (let j = 0; j < index && j < src.length; j++) {
+    if (LINE_BREAK_CHARS.has(src[j]) && !(src[j] === "\r" && src[j + 1] === "\n")) line++;
+  }
+  return line;
+}
+
+/**
+ * The source with every JSX TEXT node replaced by spaces, keeping its length and
+ * its line breaks (flair#2808). JSX text is prose to the parser, not code: an
+ * apostrophe, quote or `//` in it otherwise opens a string or a comment in the
+ * text-based walks and swallows the closing paren of the call or case around
+ * it. Each `JsxText` node is masked from `pos` to `end`, replacing every
+ * character except the four in `LINE_BREAK_CHARS` with a space, so lengths and
+ * line/column positions stay aligned. A JSX attribute's string value is a
+ * TypeScript string literal, which the literal masker already blanks.
+ */
+export function maskJsxText(src, fileName = UNNAMED_SOURCE) {
+  if (!isJsxFileName(fileName)) return src;
+  const sf = parseSourceFile(src, fileName);
+  const out = src.split("");
+  let masked = false;
+  const visit = (node) => {
+    if (node.kind === ts.SyntaxKind.JsxText) {
+      masked = true;
+      for (let j = node.pos; j < node.end && j < src.length; j++) {
+        if (!LINE_BREAK_CHARS.has(src[j])) out[j] = " ";
+      }
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return masked ? out.join("") : src;
+}
+
+/**
+ * The source as TypeScript's parser reads it, with every comment and the text of
+ * every string literal, template literal and regex literal replaced by spaces
+ * (flair#2774). Line breaks (the four in `LINE_BREAK_CHARS`) and length are
+ * kept, so every index and every line/column position still points at the same
+ * character. A template's `${` and `}` and the expressions between them
+ * stay as code: a `Bun.spawn(...)` of the CLI entry there IS a real call
+ * (flair#1825). Used for spawn-CALL matching, so a `Bun.spawn(...)` mentioned in
+ * a string or comment is not mistaken for a call. The argv/options TEXT a call
+ * reports is sliced from the ORIGINAL source, so the CLI-entry check still reads
+ * real literal text.
+ */
+export function maskLiteralsAndComments(src, fileName = UNNAMED_SOURCE, sf = parseSourceFile(src, fileName)) {
   const out = src.split("");
   const blank = (from, to) => {
-    for (let j = from; j < to && j < src.length; j++) if (src[j] !== "\n") out[j] = " ";
+    for (let j = from; j < to && j < src.length; j++) if (!LINE_BREAK_CHARS.has(src[j])) out[j] = " ";
   };
   // Every comment sits in the trivia between two tokens, and TypeScript reports
   // it as a TRAILING comment range of the earlier token or a LEADING range of
@@ -271,7 +343,7 @@ function skipNonCode(src, i) {
     return src.length;
   }
   if (ch === "/" && src[i + 1] === "/") {
-    const nl = src.indexOf("\n", i);
+    const nl = indexOfLineBreak(src, i);
     return nl === -1 ? src.length : nl;
   }
   if (ch === "/" && src[i + 1] === "*") {
@@ -288,10 +360,11 @@ function skipNonCode(src, i) {
 /**
  * The source with every COMMENT body replaced by spaces (same length, so every
  * index still points at the same character). String and regex literals are left
- * alone — the CLI-entry and `timeout:` checks are literal text checks — but the
- * bracket walks skip their contents via `skipNonCode`.
+ * alone — the CLI-entry check reads their literal text — but the bracket walks
+ * skip their contents via `skipNonCode`. A spawn's deadline is not read here:
+ * it comes from the parsed options object literal (flair#2782).
  */
-function maskComments(src) {
+export function maskComments(src) {
   const out = src.split("");
   let i = 0;
   while (i < src.length) {
@@ -305,7 +378,7 @@ function maskComments(src) {
       continue;
     }
     if (ch === "/" && src[i + 1] === "/") {
-      while (i < src.length && src[i] !== "\n") {
+      while (i < src.length && !LINE_BREAK_CHARS.has(src[i])) {
         out[i] = " ";
         i++;
       }
@@ -313,7 +386,7 @@ function maskComments(src) {
     }
     if (ch === "/" && src[i + 1] === "*") {
       while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) {
-        if (src[i] !== "\n") out[i] = " ";
+        if (!LINE_BREAK_CHARS.has(src[i])) out[i] = " ";
         i++;
       }
       if (i < src.length) {
@@ -539,19 +612,111 @@ function textNamesCliEntry(text, ids) {
   return false;
 }
 
+/** Every call expression in the file, keyed by the index of its `(` (flair#2782). */
+function callExpressionsByOpenParen(sf) {
+  const byOpen = new Map();
+  const visit = (node) => {
+    if (ts.isCallExpression(node)) byOpen.set(node.arguments.pos - 1, node);
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return byOpen;
+}
+
+/** `expr` without its parentheses and `as` / `satisfies` / non-null (`!`) wrappers. */
+function stripWrappers(expr) {
+  let e = expr;
+  while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isNonNullExpression(e)) {
+    e = e.expression;
+  }
+  return e;
+}
+
+/**
+ * The call's argument at `index`, wrappers stripped; null when there is no call,
+ * no argument there, or a spread argument at or before it (after a spread, the
+ * scanner declines to determine positions).
+ */
+function argumentAt(call, index) {
+  if (!call) return null;
+  const args = call.arguments;
+  for (let i = 0; i <= index && i < args.length; i++) if (ts.isSpreadElement(args[i])) return null;
+  return index < args.length ? stripWrappers(args[index]) : null;
+}
+
+/**
+ * The options argument of a call whose runtime reads options at `optionsIndex`
+ * only after an argv array at `argvIndex`, or null (flair#2782). The argv
+ * argument, wrappers stripped, must be an array literal: `Bun.spawn({ cmd }, …)`
+ * and `spawnSync(command, options, …)` select the overload that ignores the
+ * later argument.
+ */
+function optionsAfterArgv(call, argvIndex, optionsIndex) {
+  const argv = argumentAt(call, argvIndex);
+  return argv && ts.isArrayLiteralExpression(argv) ? argumentAt(call, optionsIndex) : null;
+}
+
+/** An identifier or string-literal property key equal to `key`. */
+function propertyNameIs(name, key) {
+  return (ts.isIdentifier(name) || ts.isStringLiteral(name)) && name.text === key;
+}
+
+/**
+ * The deadline the gate reads from an options object literal, or null
+ * (flair#2782). The literal must have no spread, no computed key, no method, no
+ * get/set accessor and no property named `__proto__`, and exactly one property
+ * named `timeout`, a plain `timeout: <value>` assignment whose value is a
+ * numeric literal whose source text `timeoutLiteralMs` accepts: `0`, `5e3`,
+ * `undefined`, `null`, `void 0` and any other value are no deadline (flair#1825
+ * r6).
+ */
+function objectLiteralDeadlineMs(obj) {
+  let timeoutProp = null;
+  let count = 0;
+  for (const prop of obj.properties) {
+    if (ts.isSpreadAssignment(prop)) return null;
+    if (ts.isGetAccessorDeclaration(prop) || ts.isSetAccessorDeclaration(prop) || ts.isMethodDeclaration(prop)) return null;
+    if (!prop.name || ts.isComputedPropertyName(prop.name)) return null;
+    if (propertyNameIs(prop.name, "__proto__")) return null;
+    if (propertyNameIs(prop.name, "timeout")) {
+      timeoutProp = prop;
+      count++;
+    }
+  }
+  if (count !== 1 || !ts.isPropertyAssignment(timeoutProp)) return null;
+  return ts.isNumericLiteral(timeoutProp.initializer) ? timeoutLiteralMs(timeoutProp.initializer.getText()) : null;
+}
+
+/**
+ * The deadline the gate reads from a spawn's options argument, or null
+ * (flair#2782). Only an object literal written in the call (wrappers stripped)
+ * is read; an identifier or any other expression, including a larger expression
+ * containing a literal (`{ timeout: 5000 } && {}`), is no deadline.
+ */
+function optionsDeadlineMs(arg) {
+  return arg && ts.isObjectLiteralExpression(arg) ? objectLiteralDeadlineMs(arg) : null;
+}
+
 /** All spawn-family calls in the file (node forms + Bun forms), with CLI-entry targeting. */
 export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
-  const scan = maskLiteralsAndComments(source, fileName);
-  const ids = cliEntryIdentifiers(source);
-  const aliases = aliasedSpawnFns(source);
+  // JSX text is masked first, so the literal masker and the text-based
+  // identifier scans see prose as spaces (flair#2808). Indices still point at
+  // the original source, which the call text is sliced from.
+  const jsxSafe = maskJsxText(source, fileName);
+  const sf = parseSourceFile(jsxSafe, fileName);
+  const scan = maskLiteralsAndComments(jsxSafe, fileName, sf);
+  const callsByOpen = callExpressionsByOpenParen(sf);
+  const ids = cliEntryIdentifiers(jsxSafe);
+  const aliases = aliasedSpawnFns(jsxSafe);
   const constDecls = new Map();
-  for (const m of scan.matchAll(/(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g)) {
+  for (const m of scan.matchAll(/(?:^|[\n\r\u2028\u2029])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g)) {
     const after = m.index + m[0].length;
-    const lineEnd = source.indexOf("\n", after);
+    const lineEnd = indexOfLineBreak(source, after);
     constDecls.set(m[1], { start: after, end: lineEnd === -1 ? source.length : lineEnd });
   }
   const calls = [];
-  const lineOf = (index) => source.slice(0, index).split("\n").length;
+  const optionsArgOf = new Map();
+  const lineOf = (index) => lineNumberAt(source, index);
   const textAt = (span) => (span ? source.slice(span.start, span.end) : "");
   // The options span itself, or the one-line initializer of the identifier it names.
   const resolveOptSpan = (optSpan) => {
@@ -566,21 +731,16 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
     const args = topLevelArgs(scan, open);
     if (!args) continue;
     const argvText = BUN_ARGV_ARG_INDICES.map((i) => textAt(args.spans[i])).join(" ");
-    const optSpan = resolveOptSpan(args.spans[BUN_OPTIONS_ARG_INDEX]);
-    const optText = textAt(optSpan);
-    const optCode = optSpan ? scan.slice(optSpan.start, optSpan.end) : "";
-    calls.push({
+    const optText = textAt(resolveOptSpan(args.spans[BUN_OPTIONS_ARG_INDEX]));
+    const call = {
       fn,
       index: m.index,
       line: lineOf(m.index),
       text: `${argvText} ; ${optText}`,
-      // The OPTIONS text is kept separately, sliced from the call-matching mask
-      // (flair#2774): a `timeout` is read from HERE only, never from argv
-      // (round 9 item 2).
-      optCode,
       isCliEntry: textNamesCliEntry(argvText, ids),
-      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optCode),
-    });
+    };
+    calls.push(call);
+    optionsArgOf.set(call, optionsAfterArgv(callsByOpen.get(open), BUN_ARGV_ARG_INDICES[0], BUN_OPTIONS_ARG_INDEX));
   }
   // node child_process forms — bare, or via a named alias (flair#1825).
   for (const m of scan.matchAll(/(^|[^\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
@@ -591,28 +751,26 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
     const args = topLevelArgs(scan, open);
     if (!args) continue;
     const argvText = (ARGV_ARG_INDICES.get(fn) ?? [0, 1]).map((i) => textAt(args.spans[i])).join(" ");
-    const optSpan = resolveOptSpan(args.spans[OPTIONS_ARG_INDEX.get(fn)]);
-    const optText = textAt(optSpan);
-    const optCode = optSpan ? scan.slice(optSpan.start, optSpan.end) : "";
-    calls.push({
+    const optText = textAt(resolveOptSpan(args.spans[OPTIONS_ARG_INDEX.get(fn)]));
+    const call = {
       fn: raw,
       index: m.index,
       line: lineOf(m.index),
       text: `${argvText} ; ${optText}`,
-      optCode,
       isCliEntry: textNamesCliEntry(argvText, ids),
-      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optCode),
-    });
+    };
+    calls.push(call);
+    // `spawn`/`spawnSync`/`execFile`/`execFileSync` read options third only after an
+    // argv array; `exec`/`execSync`/`fork` read them second.
+    const optIndex = OPTIONS_ARG_INDEX.get(fn);
+    const ast = callsByOpen.get(open);
+    optionsArgOf.set(call, optIndex === 2 ? optionsAfterArgv(ast, 1, optIndex) : argumentAt(ast, optIndex));
   }
-  // A numeric `timeout:` value, so a case budget can be checked against the sum
-  // of the waits inside it (flair#1825).
+  // The deadline the gate reads from each spawn's options argument (flair#2782), so
+  // a case budget can be checked against the sum of the waits inside it
+  // (flair#1825). A `timeout` inside argv is never read (round 9 item 2).
   for (const call of calls) {
-    // OPTIONS ONLY: an argv element must never decide `hasTimeout` (round 9 item 2).
-    const m = (call.optCode ?? "").match(/(?:^|[^\w$.])timeout\s*[:=]\s*([^\s,;)}\]]+)/);
-    // ONLY the EXACT token `[1-9][0-9]*` (underscores allowed) is a deadline:
-    // `timeout: 0` is NO timeout (node and Bun), and `1e999` / `10000-10000` are
-    // expressions, not positive integers — all are unbounded (flair#1825 r6).
-    call.timeoutMs = m ? timeoutLiteralMs(m[1]) : null;
+    call.timeoutMs = optionsDeadlineMs(optionsArgOf.get(call));
     call.hasTimeout = call.timeoutMs !== null;
   }
   return { calls, ids };
@@ -634,7 +792,7 @@ function bodyBraceFrom(src, from) {
       continue;
     }
     if (src[i] === "{") {
-      const lineEnd = src.indexOf("\n", i);
+      const lineEnd = indexOfLineBreak(src, i);
       if (src.slice(i + 1, lineEnd === -1 ? src.length : lineEnd).trim() === "") return i;
     }
     i++;
@@ -646,7 +804,7 @@ function bodyBraceFrom(src, from) {
 export function functionBodies(source) {
   const src = maskComments(source);
   const bodies = [];
-  for (const m of src.matchAll(/(?:^|\n)\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
+  for (const m of src.matchAll(/(?:^|[\n\r\u2028\u2029])\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
     const open = src.indexOf("(", m.index);
     const bodyOpen = bodyBraceFrom(src, open);
     if (bodyOpen === -1) continue;
@@ -657,7 +815,7 @@ export function functionBodies(source) {
   // ONE-LINE function bodies (round 7 item 2): `function f(...) { … }` wholly on
   // one line — appended AFTER the existing detection so multiline bodies are
   // unchanged (no fingerprint ripple).
-  for (const m of src.matchAll(/(?:^|\n)[ \t]*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{([^}\n]*)\}/g)) {
+  for (const m of src.matchAll(/(?:^|[\n\r\u2028\u2029])[ \t]*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{([^}\n\r\u2028\u2029]*)\}/g)) {
     const open = src.indexOf("{", m.index);
     const close = src.indexOf("}", open);
     if (open !== -1 && close !== -1) {
@@ -670,7 +828,7 @@ export function functionBodies(source) {
     }
   }
   for (const m of src.matchAll(
-    /(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/g,
+    /(?:^|[\n\r\u2028\u2029])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/g,
   )) {
     const arrowEnd = m.index + m[0].length;
     const bodyOpen = bodyBraceFrom(src, arrowEnd);
@@ -679,7 +837,7 @@ export function functionBodies(source) {
       if (bodyClose === -1) continue;
       bodies.push({ name: m[1], start: bodyOpen, end: bodyClose });
     } else {
-      const lineEnd = src.indexOf("\n", arrowEnd);
+      const lineEnd = indexOfLineBreak(src, arrowEnd);
       bodies.push({ name: m[1], start: arrowEnd, end: lineEnd === -1 ? src.length : lineEnd });
     }
   }
@@ -710,9 +868,9 @@ export function localHelpersThatSpawn(source, calls) {
 }
 
 /** `it()` / `test()` cases, with whether each reaches a CLI-entry spawn. */
-/** A wait deadline is the EXACT token `[1-9][0-9]*` (underscores allowed). An
- *  exponent (`1e999`), a trailing operator (`10000-10000`), `0`, or any other
- *  expression is NOT a positive integer → null (unbounded, flair#1825 round 6). */
+/** A spawn deadline is read from a `timeout: <numeric literal>` property of an
+ *  inline object literal options argument (flair#2782); `timeoutLiteralMs` decides
+ *  whether that literal is a positive integer. A non-literal value is no deadline. */
 // ONE strict literal for EVERY site (round 7 item 4): no leading zero, no
 // leading/trailing/double underscore, at most 15 digits so the value is finite
 // and safe. Anything else — `0`, `1__000`, `_1000`, `1e999`, `10000-10000`, a
@@ -836,7 +994,7 @@ function isMethodDefinition(body, fetchStart, close) {
   if (!["{", ",", ";"].includes(prevChar) && prevWord !== "async") return false;
   const rest = body.slice(close + 1);
   const braceAt = rest.search(/\S/);
-  return braceAt !== -1 && rest[braceAt] === "{" && !/\n/.test(rest.slice(0, braceAt));
+  return braceAt !== -1 && rest[braceAt] === "{" && !/[\n\r\u2028\u2029]/.test(rest.slice(0, braceAt));
 }
 
 export function firstUnboundedFetch(body, src = body) {
@@ -896,7 +1054,7 @@ export function findCases(source, calls, helpers, bodies = []) {
     const budgetText = args.spans[2]?.text ?? "";
     cases.push({
       fn: m[2],
-      line: src.slice(0, m.index).split("\n").length,
+      line: lineNumberAt(src, m.index),
       name: (args.spans[0]?.text.trim() ?? "").replace(/^["'`]|["'`]$/g, ""),
       argCount: args.spans.length,
       reachesSpawn: reaches,
@@ -955,9 +1113,14 @@ function scopeOf(index, bodies, cases) {
 
 export function analyzeTestFile(source, fileName = UNNAMED_SOURCE) {
   const { calls, ids } = findSpawnCalls(source, fileName);
-  const helpers = localHelpersThatSpawn(source, calls);
-  const bodies = functionBodies(source);
-  const cases = findCases(source, calls, helpers, bodies);
+  // The case/helper walks match brackets in TEXT, so they read the source with
+  // JSX text masked in every file kind TypeScript parses JSX in (tsx, jsx,
+  // js/mjs/cjs); the mask keeps length and line breaks, so every index still
+  // points at the original character.
+  const jsxSafe = maskJsxText(source, fileName);
+  const helpers = localHelpersThatSpawn(jsxSafe, calls);
+  const bodies = functionBodies(jsxSafe);
+  const cases = findCases(jsxSafe, calls, helpers, bodies);
   for (const call of calls) call.scope = scopeOf(call.index, bodies, cases);
   return { calls, ids, helpers, cases, bodies };
 }

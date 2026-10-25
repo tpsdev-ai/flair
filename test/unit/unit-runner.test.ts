@@ -24,6 +24,7 @@ import {
   unitPlan,
   unitTempBase,
 } from "../../scripts/test-unit.ts";
+import { N8N_STEP_TIMEOUT_MS } from "../../scripts/ci/lane-shards.mjs";
 import { SHARDS } from "../../scripts/ci/unit-shards.mjs";
 
 function runUnitSteps(
@@ -513,7 +514,7 @@ describe("shared unit lane", () => {
     // Measured on CI legs and locally (see the constants in scripts/test-unit.ts):
     // the slowest lane shard, its slowest root step, the slowest other step, the
     // slowest setup, and the job's own steps outside the lane.
-    const lane = 793_000, rootStep = 266_000, otherStep = 43_000, outside = 53_000, setup = 34_000;
+    const lane = 793_000, rootStep = 266_000, otherStep = 43_000, outside = 53_000, setup = 34_000, n8nStep = 24_000;
     expect(KEEP_GOING_LIMITS).toEqual({ stepTimeoutMs: STEP_TIMEOUT_MS, laneBudgetMs: KEEP_GOING_LANE_BUDGET_MS });
     expect(KEEP_GOING_LANE_BUDGET_MS + CI_OUTSIDE_LANE_MS).toBeLessThanOrEqual(CI_JOB_LIMIT_MS);
     expect(CI_OUTSIDE_LANE_MS).toBeGreaterThan(outside);
@@ -529,10 +530,18 @@ describe("shared unit lane", () => {
     const derived = laneBudgetMsFromJobStart({ [JOB_START_ENV]: String((now - setup) / 1000) }, now);
     expect(derived!).toBeGreaterThanOrEqual(1.45 * lane);
     expect(lane + STEP_TIMEOUT_MS).toBeLessThanOrEqual(derived!);
+    // The n8n step's own 360 s limit, in place of its measured 24 s, still fits
+    // the derived budget even on the slowest shard.
+    expect(N8N_STEP_TIMEOUT_MS).toBeGreaterThan(n8nStep);
+    expect(lane - n8nStep + N8N_STEP_TIMEOUT_MS).toBeLessThanOrEqual(derived!);
     expect(ROOT_STEP_TIMEOUT_MS + CI_OUTSIDE_LANE_MS).toBeLessThanOrEqual(CI_JOB_LIMIT_MS);
     const limited = unitPlan(root).filter(step => step.timeoutMs !== undefined);
-    expect(limited).toHaveLength(SHARDS);
+    expect(limited).toHaveLength(SHARDS + 1);
     for (const step of limited) {
+      if (step.name === "n8n-nodes-flair unit tests") {
+        expect(step.timeoutMs).toBe(N8N_STEP_TIMEOUT_MS);
+        continue;
+      }
       expect(step.timeoutMs).toBe(ROOT_STEP_TIMEOUT_MS);
       expect(step.name).toMatch(/^root unit tests \(shard \d+\/\d+\)$/);
     }
@@ -621,7 +630,7 @@ describe("shared unit lane", () => {
     // under it.
     const started = laneRunSetup(invocation, { [JOB_START_ENV]: String(now / 1000 - 300) }, now);
     expect(started.limits?.laneBudgetMs).toBe(KEEP_GOING_LANE_BUDGET_MS - 300_000);
-    expect(started.mode).toContain("per-step caps: 150 s (root unit tests: 450 s), pre-empted by an earlier lane deadline; lane deadline: 900 s");
+    expect(started.mode).toContain("per-step caps: 150 s (root unit tests: 450 s; n8n-nodes-flair unit tests: 360 s), pre-empted by an earlier lane deadline; lane deadline: 900 s");
     const startedDir = fixture();
     const startedMarker = join(startedDir, "ran");
     const { result: startedCode } = captureErrors(() => runUnitSteps(

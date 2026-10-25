@@ -131,7 +131,7 @@ import { databases } from "harper";
 import { writeBackCommittedRow as writeBackCommittedRowImpl, type WriteBackFn } from "../write-back.js";
 import { txnPausePoint } from "../txn-pause-point.js";
 import { withMemoryWriteLockOnce } from "../memory-write-lock.js";
-import type { Migration, RunBatchResult } from "./types.js";
+import { BatchOutcomeError, type Migration, type RunBatchResult } from "./types.js";
 
 export type BackfilledVisibility = "private" | "shared";
 
@@ -210,6 +210,17 @@ export function createVisibilityBackfillMigration(
       return n;
     },
 
+    async checkUnconfirmed(id: string) {
+      const row = await getTable().get(id);
+      if (!row) return "no-row" as const;
+      // This migration only fills an absent visibility (flair#2840): once any
+      // value is present, run() never writes the row again, so the unconfirmed
+      // record is cleared. An owner's later value supersedes the unconfirmed
+      // write.
+      const visibility = (row as { visibility?: unknown }).visibility;
+      return visibility !== undefined && visibility !== null ? "at-target" as const : "pending" as const;
+    },
+
     async run(batchSize: number): Promise<RunBatchResult> {
       const table = getTable();
 
@@ -219,52 +230,74 @@ export function createVisibilityBackfillMigration(
       }
 
       const touchedIds: string[] = [];
+      const unconfirmedIds: string[] = [];
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
-        // The decision and the write run under the per-id memory write lock
-        // (flair#2478 slice 2). One attempt: a held id is left for the next
-        // cycle, never written unserialized and never waited on unboundedly.
-        const outcome = await withMemoryWriteLockOnce(getLockStore(), [id], async () => {
-          const result = await writeBackCommittedRow(
-            table as unknown as Parameters<WriteBackFn>[0],
-            id,
-            (existing: any) => {
-              if (!existing) return { skip: true } as const; // deleted since the search above — nothing to fix
+        // flair#2840: the write-back reports an attempt whose committed effect
+        // its post-commit verification read did not show. The row is counted as
+        // done only if a later attempt's write is verified; otherwise it is
+        // reported by id.
+        let ownUnconfirmed = false;
+        try {
+          // The decision and the write run under the per-id memory write lock
+          // (flair#2478 slice 2). One attempt: a held id is left for the next
+          // cycle, never written unserialized and never waited on unboundedly.
+          const outcome = await withMemoryWriteLockOnce(getLockStore(), [id], async () => {
+            const result = await writeBackCommittedRow(
+              table as unknown as Parameters<WriteBackFn>[0],
+              id,
+              (existing: any) => {
+                if (!existing) return { skip: true } as const; // deleted since the search above — nothing to fix
 
-              // Under the per-id Memory lock shared with owner PUT/PATCH,
-              // fill only an absent visibility.
-              if (existing.visibility !== undefined && existing.visibility !== null) return { skip: true } as const;
+                // Under the per-id Memory lock shared with owner PUT/PATCH,
+                // fill only an absent visibility.
+                if (existing.visibility !== undefined && existing.visibility !== null) return { skip: true } as const;
 
-              const derived = deriveVisibilityFromDurability(existing.durability);
-              // Never-widen invariant, asserted, not just tested: the only two
-              // values `deriveVisibilityFromDurability` can ever produce are
-              // "private"/"shared" (see its own doc), so this can never fire
-              // today — it exists to fail loudly (halting this migration via the
-              // runner's mid-batch-throw path, never a silent bad write) if a
-              // future edit to that function ever widens its return type or is
-              // bypassed via a type-unsafe call.
-              if (derived !== "private" && derived !== "shared") {
-                throw new Error(
-                  `visibility-backfill: derived an invalid visibility for row ${id} — refusing to write`,
-                );
-              }
+                const derived = deriveVisibilityFromDurability(existing.durability);
+                // Never-widen invariant, asserted, not just tested: the only two
+                // values `deriveVisibilityFromDurability` can ever produce are
+                // "private"/"shared" (see its own doc), so this can never fire
+                // today — it exists to fail loudly (halting this migration via the
+                // runner's mid-batch-throw path, never a silent bad write) if a
+                // future edit to that function ever widens its return type or is
+                // bypassed via a type-unsafe call.
+                if (derived !== "private" && derived !== "shared") {
+                  throw new Error(
+                    `visibility-backfill: derived an invalid visibility for row ${id} — refusing to write`,
+                  );
+                }
 
-              // Idempotent: once visibility is committed, a fresh plan sees it
-              // present and skips, so re-applying leaves the same committed row.
-              return { idempotent: true, update: { visibility: derived } } as const;
-            },
-            { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), confirmPoint: () => txnPausePoint("visibility-backfill-confirmed"), expectedRow: row },
-          );
-          // Test-only: the write-back committed and the lock is still held.
-          const committed = txnPausePoint("visibility-backfill-committed");
-          if (committed) await committed;
-          return result;
-        }, { phase: "visibility-backfill" });
-        if (outcome.kind === "done" && "update" in outcome.value) touchedIds.push(id);
+                // Idempotent: once visibility is committed, a fresh plan sees it
+                // present and skips, so re-applying leaves the same committed row.
+                return { idempotent: true, update: { visibility: derived } } as const;
+              },
+              { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), confirmPoint: () => txnPausePoint("visibility-backfill-confirmed"), expectedRow: row, onUnconfirmed: () => { ownUnconfirmed = true; } },
+            );
+            // Test-only: the write-back committed and the lock is still held.
+            const committed = txnPausePoint("visibility-backfill-committed");
+            if (committed) await committed;
+            return result;
+          }, { phase: "visibility-backfill" });
+          if (outcome.kind !== "done") continue;
+          if ("skip" in outcome.value) {
+            // A skip is not a write this run verified. If it follows an attempt
+            // whose committed effect was unconfirmed, the row is reported as
+            // unconfirmed; otherwise this run wrote nothing to the row
+            // (flair#2840).
+            if (ownUnconfirmed) unconfirmedIds.push(id);
+          } else if ("update" in outcome.value) touchedIds.push(id);
+        } catch (err) {
+          // flair#2840: carry this batch's outcomes on the error — the runner
+          // has no RunBatchResult to read when run() throws.
+          if (ownUnconfirmed) unconfirmedIds.push(id);
+          throw new BatchOutcomeError({ touchedIds, unconfirmedIds }, err);
+        }
       }
 
-      return { processed: touchedIds.length, touchedIds };
+      return unconfirmedIds.length > 0
+        ? { processed: touchedIds.length, touchedIds, unconfirmedIds }
+        : { processed: touchedIds.length, touchedIds };
     },
   };
 }

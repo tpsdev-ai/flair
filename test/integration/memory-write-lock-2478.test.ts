@@ -653,3 +653,98 @@ it.each([
     }
   }
 }, 240_000 + HARPER_STOP_BUDGET_MS);
+
+it.each([
+  ["pending", "getEmbedding = async () => new Promise(() => {});"],
+  ["late vector", "getEmbedding = async () => { const started = performance.now(); while (performance.now() - started < 100) {} return [1, 0, 0]; };"],
+])("a locked POST provider timeout (%s), at the dedup probe and at the embedding, answers memory_provider_timeout, writes nothing and releases the real Harper lock", async (_settlement, provider) => {
+  const component = mkdtempSync(join(tmpdir(), "flair-2478-post-provider-timeout-"));
+  let instance: HarperInstance | undefined;
+  try {
+    for (const entry of ["config.yaml", "package.json", "dist", "schemas"]) {
+      cpSync(join(process.cwd(), entry), join(component, entry), { recursive: true });
+    }
+    symlinkSync(join(process.cwd(), "node_modules"), join(component, "node_modules"), "dir");
+    appendFileSync(join(component, "dist/resources/embeddings-provider.js"),
+      `\n${provider}\n`);
+    instance = await startHarper({
+      cwd: component,
+      serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_MEMORY_LOCK_PROVIDER_TIMEOUT_MS: "50" },
+    });
+    const basic = "Basic " + Buffer.from(`${instance.admin.username}:${instance.admin.password}`).toString("base64");
+    const ops = async (body: Record<string, unknown>): Promise<any> => {
+      const response = await fetch(instance!.opsURL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: basic },
+        body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+      return response.json();
+    };
+    await ops({ operation: "upsert", database: "flair", table: "Agent", records: [{
+      id: owner.id, name: owner.id, publicKey: Buffer.from(owner.publicKey).toString("base64"),
+      createdAt: new Date().toISOString(),
+    }] });
+    const target = `wlk-post-timeout-target-${randomUUID()}`;
+    await ops({ operation: "insert", database: "flair", table: "Memory", records: [{
+      id: target, agentId: owner.id, content: "the original text", createdAt: new Date().toISOString(),
+      embedding: [0.1, 0.2, 0.3], instanceToken: randomUUID(),
+      durability: "standard", visibility: "shared",
+    }] });
+    const read = async (id: string) => (await ops({
+      operation: "search_by_id", database: "flair", table: "Memory", ids: [id], get_attributes: ["*"],
+    }))[0] ?? null;
+    const before = await read(target);
+    expect(before?.content).toBe("the original text");
+    const post = (body: Record<string, unknown>) => fetch(`${instance!.httpURL}/Memory`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: ed25519Header(owner, "POST", "/Memory") },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
+    });
+    // The bound is 50 ms; an unbounded call to a pending provider would hold
+    // the POST, and the id's lock, until this test's request timeout.
+    const refusedWithin = async (body: Record<string, unknown>) => {
+      const started = Date.now();
+      const refused = await post(body);
+      expect(refused.status, await refused.clone().text()).toBe(503);
+      expect((await refused.json() as any).error).toBe("memory_provider_timeout");
+      expect(Date.now() - started, "the refusal did not come within this test's 5 s response ceiling").toBeLessThan(5_000);
+    };
+
+    // At the dedup probe: a create under a named id (locked) with no supersedes.
+    const created = `wlk-post-timeout-create-${randomUUID()}`;
+    await refusedWithin({ id: created, agentId: owner.id, content: "a new note long enough for the dedup probe", visibility: "shared" });
+    expect(await read(created), "the refused create wrote a row").toBeNull();
+    // At the embedding: a successor (locked with its supersedes target), which skips the probe.
+    const successor = `wlk-post-timeout-successor-${randomUUID()}`;
+    await refusedWithin({ id: successor, agentId: owner.id, content: "the successor's text", visibility: "shared", supersedes: target });
+    expect(await read(successor), "the refused successor wrote a row").toBeNull();
+    expect(await read(target), "the refused successor changed its target").toEqual(before);
+
+    // The ids are free again: writes that need no provider call land at once.
+    const targetPath = `/Memory/${target}`;
+    const patched = await fetch(`${instance.httpURL}${targetPath}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: ed25519Header(owner, "PATCH", targetPath) },
+      body: JSON.stringify({ tags: ["after-timeout"] }), signal: AbortSignal.timeout(20_000),
+    });
+    expect(patched.status, await patched.clone().text()).toBeLessThan(300);
+    expect((await read(target))?.tags).toEqual(["after-timeout"]);
+    for (const id of [created, successor]) {
+      const put = await fetch(`${instance.httpURL}/Memory/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: basic },
+        body: JSON.stringify({ id, agentId: owner.id, content: "an admin write with its own vector", embedding: [0.4, 0.5, 0.6], visibility: "shared" }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      expect(put.status, await put.clone().text()).toBe(200);
+      expect((await read(id))?.content).toBe("an admin write with its own vector");
+    }
+  } finally {
+    try {
+      if (instance) await stopHarper(instance);
+    } finally {
+      rmSync(component, { recursive: true, force: true });
+    }
+  }
+}, 240_000 + HARPER_STOP_BUDGET_MS);

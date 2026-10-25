@@ -71,7 +71,7 @@ async function readWhenPresent(path: string, timeoutMs: number): Promise<string 
 }
 
 /** Every run result the migration logged (test-only instrumentation). */
-function migrationRuns(): { processed: number; touchedIds: string[] }[] {
+function migrationRuns(): { processed: number; touchedIds: string[]; unconfirmedIds?: string[] }[] {
   try {
     return readFileSync(join(pauseDir, "embedding-stamp-runs.jsonl"), "utf8")
       .split("\n")
@@ -216,7 +216,9 @@ describe("flair#2656 — the `.content`-suffix re-embed under a write committed 
     }
     expect(await readWhenPresent(join(pauseDir, `released.${VERIFY_POINT}`), 30_000)).toBe("go");
     const run = await waitForRunTouching(nextId, 10_000);
-    expect(run, "the batch did not continue after the deletion").toEqual({ processed: 1, touchedIds: [nextId] });
+    // The deleted row's post-commit read-back found no row, so it is not
+    // counted as done and is reported by id (flair#2840).
+    expect(run, "the batch did not continue after the deletion").toEqual({ processed: 1, touchedIds: [nextId], unconfirmedIds: [deletedId] });
     expect(await readRow(deletedId)).toBeNull();
     const next = await readRow(nextId);
     expect(next?.embeddedContentHash).toBe(computeContentHash("esc-deleted-agent", ORIGINAL));

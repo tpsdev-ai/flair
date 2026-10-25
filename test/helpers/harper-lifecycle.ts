@@ -228,7 +228,10 @@ export function sweepStaleHarperTrees(opts?: { olderThanMs?: number }): number {
 }
 
 const STARTUP_TIMEOUT_MS = 45_000;
-const INSTALL_TIMEOUT_MS = 20_000;
+// `harper install` into a fresh tree (flair#2824), measured on a 10-core macOS
+// host: 3.5–4.0 s idle, up to 14.0 s with one CPU burner per core and up to
+// 26.2 s with two per core. A CI macOS runner exceeded the earlier 20 s bound.
+const INSTALL_TIMEOUT_MS = 60_000;
 const MAX_SPAWN_ATTEMPTS = 3;
 
 // ─── Lifecycle budgets for before/after hooks (flair#2568) ──────────────────
@@ -258,8 +261,8 @@ export const HARPER_STARTUP_BUDGET_MS = 60_000;
 /**
  * The hook allowance for a `beforeAll`/`beforeEach` that calls `startHarper`
  * once: the 120 s those hooks already used, named. It is an allowance, not a
- * sum of the stage ceilings — install (20 s), the startup-banner wait (45 s)
- * and readiness (60 s) total 125 s, which exceeds it before spawn retries or
+ * sum of the stage ceilings — install (60 s), the startup-banner wait (45 s)
+ * and readiness (60 s) total 165 s, which exceeds it before spawn retries or
  * overhead. A boot that uses every stage ceiling can therefore still hit Bun's
  * hook timeout first; a hook that needs that guarantee must budget the sum.
  */
@@ -313,6 +316,49 @@ export function harperStartupPhase(log: string): string | null {
   let last: string | null = null;
   for (const m of String(log).matchAll(HARPER_STARTUP_DIAGNOSTIC_RE)) last = m[1].trim();
   return last;
+}
+
+// ggml's Metal backend logs `ggml_metal_library_init: using embedded metal
+// library` when it starts loading its Metal library and `ggml_metal_library_init:
+// loaded in <N> sec` when the load ends. On a fresh CI macOS runner that
+// load took 40 s inside the readiness window once and had not finished when
+// the window closed another time (flair#2824). Both texts are ggml's format
+// strings ("%s: using embedded metal library", "%s: loaded in %.3f sec").
+const METAL_LIBRARY_EVENT_RE = /ggml_metal_library_init: (?:loaded in ([0-9.]+) sec|using embedded metal library)/g;
+
+/**
+ * What the captured log says about the embedding engine's Metal library
+ * loads, for the readiness timeout. It counts start lines and "loaded in"
+ * lines: when there are more start lines than "loaded in" lines, it says how
+ * many loads logged no "loaded in" line, with the last logged duration if there
+ * is one; otherwise the duration from the LAST "loaded in" line. If neither form
+ * matched, any other `ggml_metal_library_init:` line produces the generic
+ * "started and logged no 'loaded in' line" note; with no such line the result is
+ * null.
+ */
+export function metalLibraryLoadNote(log: string): string | null {
+  const text = String(log);
+  let started = 0;
+  let loaded = 0;
+  let seconds: string | null = null;
+  for (const m of text.matchAll(METAL_LIBRARY_EVENT_RE)) {
+    if (m[1] === undefined) started += 1;
+    else {
+      loaded += 1;
+      seconds = m[1];
+    }
+  }
+  if (started > loaded && seconds !== null) {
+    return `${started - loaded} of the embedding engine's ${started} Metal library loads (ggml_metal_library_init) logged no "loaded in" line; the last logged load took ${seconds} s`;
+  }
+  if (started > loaded) {
+    return `the embedding engine's Metal library load (ggml_metal_library_init) started and logged no "loaded in" line`;
+  }
+  if (seconds !== null) return `the embedding engine's Metal library load (ggml_metal_library_init) took ${seconds} s`;
+  if (text.includes("ggml_metal_library_init:")) {
+    return `the embedding engine's Metal library load (ggml_metal_library_init) started and logged no "loaded in" line`;
+  }
+  return null;
 }
 
 // Harper logs exactly this ("Unable to bind to port NNNNN: Address already in
@@ -785,10 +831,12 @@ async function waitForHealth(
   const exit = getExited?.();
   const captured = getLog?.() ?? "";
   const stoppedIn = harperStartupPhase(captured) ?? phase;
+  const metalNote = metalLibraryLoadNote(captured);
   throw new Error(
     `Harper at ${httpURL} did not respond within ${timeoutMs}ms ` +
     `(${attempt} attempts, ${Date.now() - startedAt}ms elapsed, stopped in phase: ${stoppedIn}). ` +
     `Process ${exit ? `exited (code=${exit.code} signal=${exit.signal})` : "still alive"}. ` +
+    (metalNote ? `Captured log: ${metalNote}. ` : "") +
     `Harper log:\n${captured || "(not captured)"}`,
   );
 }
@@ -1138,13 +1186,25 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
 
   try {
   const install = spawn(NODE_BIN, [HARPER_BIN, "install"], { cwd, env: baseEnv });
+  const installStartedAt = Date.now();
   await new Promise<void>((resolve, reject) => {
     let output = "";
     install.stdout?.on("data", (d: Buffer) => output += d.toString());
     install.stderr?.on("data", (d: Buffer) => output += d.toString());
-    install.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`Harper install exited ${code}: ${output}`)));
-    install.on("error", reject);
-    setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, INSTALL_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      install.kill();
+      reject(new Error(
+        `Harper install did not exit within ${INSTALL_TIMEOUT_MS}ms ` +
+        `(${Date.now() - installStartedAt}ms elapsed, step: harper install). Output so far:\n${output}`,
+      ));
+    }, INSTALL_TIMEOUT_MS);
+    install.on("exit", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error(`Harper install exited ${code}: ${output}`));
+      console.log(`[harper-lifecycle] harper install exited 0 after ${Date.now() - installStartedAt}ms`);
+      resolve();
+    });
+    install.on("error", (err) => { clearTimeout(timer); reject(err); });
   });
 
   // Append caller-supplied top-level config blocks (see StartHarperOptions.

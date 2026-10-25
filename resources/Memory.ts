@@ -32,7 +32,7 @@ import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServe
 import { composesCallerWrite, isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { PredecessorVisibilityChanged, applyGrantedVisibility, committedVisibilityDiffers, predecessorVisibilityChangedRefusal } from "./grant-visibility.js";
 import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, grantedCloseRevokedRefusal, sameStoredRow, storedRowChangedRefusal, verifyCommittedFields, withoutHarperManagedFields, writeGrantHeld } from "./write-back.js";
-import { PAUSE_LIMIT_MS, txnPausePoint } from "./txn-pause-point.js";
+import { PAUSE_LIMIT_MS, txnFault, txnPausePoint } from "./txn-pause-point.js";
 import {
   markMemoryWriteOutcomeUnknown,
   memoryWriteOutcomeUnknown,
@@ -45,8 +45,12 @@ import {
   withMemoryWriteLock,
   withMemoryWriteLockOnce,
   writeOutcomeUnknownResponse,
+  MemoryWriteCapabilityError,
+  memoryWriteLockTokenIds,
   type MemoryLockOutcome,
+  type MemoryWriteLockToken,
 } from "./memory-write-lock.js";
+import { admitLockedMemoryWrite, type LockedMemoryTransaction, type LockedWriteAdmission, type MemoryWriteReceipt } from "./memory-write-transaction.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { embedTextField, enforceSkillDurability, isSkillWrite, type MemoryEmbeddingInputField, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate, skillMetadataHasDuplicateKey } from "./skill-write.js";
 import { embeddedTextHash, hashEmbeddedText } from "./memory-embed-hash.js";
@@ -256,6 +260,37 @@ function abortRequestTransaction(ctx: any): void {
 }
 
 /**
+ * flair#2478 part 3a — a checked write's entry into the PUT/PATCH write body,
+ * minted by {@link putMemoryWithLock} / {@link patchMemoryWithLock} after the
+ * capability check and consumed once by the body. Module-private: the entry
+ * object is a key into this map, so nothing else can make one.
+ */
+interface CheckedEntry {
+  readonly admission: LockedWriteAdmission;
+  /** Stored fields the post-commit confirmation compares exactly. */
+  readonly confirmFields: readonly string[];
+  /** Report the row staged; resolves true after the scope commits, false if it does not. */
+  readonly stage: () => Promise<boolean>;
+  /** Set when the body takes the entry: an entry is used once. */
+  used: boolean;
+}
+const checkedEntries = new WeakMap<object, CheckedEntry>();
+
+/** The checked entry the body was handed, or null for an ordinary verb call. */
+function takeCheckedEntry(entry: unknown): CheckedEntry | null {
+  if (entry === undefined) return null;
+  const checked = entry !== null && typeof entry === "object" ? checkedEntries.get(entry) : undefined;
+  if (!checked || checked.used) throw new MemoryWriteCapabilityError("not_a_transaction", "not a checked Memory write entry");
+  checked.used = true;
+  return checked;
+}
+
+/** A checked write refuses a body that would leave its locked scope. */
+function uncheckedBodyRefusal(what: string): MemoryWriteCapabilityError {
+  return new MemoryWriteCapabilityError("transaction_mismatch", `a checked Memory write does not take the ${what} path`);
+}
+
+/**
  * flair#2478 slice 1 — the `Memory.primaryStore` write-lock handle. Production
  * is a real Harper table (a `primaryStore` with `tryLock`/`unlock`). A store
  * without a lock reports `unavailable`, and PUT/PATCH refuse with 503
@@ -274,10 +309,65 @@ function putLockIds(resource: unknown, content?: unknown): string[] {
     .map((id) => String(id));
 }
 
+/** The lock ids a POST names: the addressed/body ids plus its `supersedes`
+ *  reference, which post() has already resolved to its canonical id
+ *  (canonicalizeSupersedes), the id the predecessor read and the close name.
+ *  A pure create under a fresh server-allocated id names no id and takes no
+ *  lock (the design's create case). */
+function postLockIds(resource: unknown, content?: unknown): string[] {
+  const ids = putLockIds(resource, content);
+  const supersedes = (content as { supersedes?: unknown } | null | undefined)?.supersedes;
+  if (typeof supersedes === "string" || typeof supersedes === "number") ids.push(String(supersedes));
+  return [...new Set(ids)];
+}
+
+/** The lock ids a DELETE names: the addressed id and any body id(s), dropping
+ *  non-id values. For a skill row, delete() adds the live head it closes when
+ *  its discovery read finds that head and it is another row. */
+function deleteLockIds(resource: unknown, id: unknown): string[] {
+  const ids = putLockIds(resource, id && typeof id === "object" ? id : undefined);
+  if (typeof id === "string" || typeof id === "number") ids.push(String(id));
+  return ids;
+}
+
+/** Attempts of a DELETE to lock the live head its skill writer closes, when
+ *  the head the writer resolves under the locks is not one of the held ids. */
+const SKILL_DELETE_HEAD_ATTEMPTS = 3;
+
+/** The ids a DELETE holds, and whether the skill writer found the head it
+ *  closes outside them (flair#2478). */
+interface SkillDeleteHeadLock {
+  ids: readonly string[];
+  outside: boolean;
+}
+
+/** Discovery only, with no lock held: when the addressed row is a skill row,
+ *  the live head a DELETE of it closes (resolveSkillHead), if that head is
+ *  another row (an older version's DELETE closes its subject's head). `read`
+ *  reads the addressed row as deleteLocked's first read does. A discovery read
+ *  that fails, or finds more than one live head, adds no head. Either way the
+ *  skill writer resolves the head again under the locks and writes only when
+ *  that head is one of the held ids. */
+async function skillDeleteHeadId(read: () => Promise<any>): Promise<string | null> {
+  try {
+    const record = await read();
+    if (!record || !rowIsSkill(record)) return null;
+    const head = await resolveSkillHead(String(record.skillSubjectId ?? record.id), String(record.id), {});
+    return head && String(head.id) !== String(record.id) ? String(head.id) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The caller id a lock-miss refusal carries — the request's agent annotation,
  *  else `anonymous`/`internal`. Never stored-row state (Sherlock S7). */
 function memoryLockCallerId(resource: any): string {
-  const ctx = resource?.getContext?.();
+  return memoryLockCallerIdFor(resource?.getContext?.());
+}
+
+/** {@link memoryLockCallerId} for a request context (flair#2478 part 3a: the
+ *  archive takes the lock itself and answers its refusal with the same body). */
+export function memoryLockCallerIdFor(ctx: any): string {
   const request = ctx?.request ?? ctx;
   if (typeof request?.tpsAgent === "string" && request.tpsAgent.length > 0) return request.tpsAgent;
   if (request?.tpsAnonymous === true) return "anonymous";
@@ -348,6 +438,7 @@ async function verifyWrittenRow(
   fallbackId: any,
   identity: { expectedToken: unknown },
   fields: readonly string[] = POSTCOMMIT_VERIFY_FIELDS,
+  checked?: { readonly exactFields: readonly string[] },
 ): Promise<{ mismatch?: boolean; unknown?: boolean }> {
   const id = declared?.id ?? fallbackId;
   if (id === undefined || id === null) return { unknown: true };
@@ -362,6 +453,18 @@ async function verifyWrittenRow(
   for (const field of fields) {
     if (!Object.prototype.hasOwnProperty.call(declared, field)) continue;
     if (!sameDeclaredField(row[field], declared[field])) return { mismatch: true };
+  }
+  // flair#2478 part 3a: a checked write also confirms the row's id and its
+  // `exactFields`, whether or not the write declared them: a field that reads
+  // as undefined in the staged write must read as undefined in the row, and a
+  // defined one must be equal (a null is a value).
+  if (checked) {
+    if (String(row.id) !== String(id)) return { mismatch: true };
+    for (const field of checked.exactFields) {
+      const staged = declared?.[field];
+      if ((row[field] === undefined) !== (staged === undefined)) return { mismatch: true };
+      if (staged !== undefined && !sameDeclaredField(row[field], staged)) return { mismatch: true };
+    }
   }
   return {};
 }
@@ -609,13 +712,9 @@ const memoryAuthGate = makeAuthGate();
  * Memory.post() directly, got ZERO dedup checking. Moving the gate here makes
  * it apply uniformly regardless of transport (HTTP PUT vs in-process post()).
  *
- * NOTE on HTTP verbs: the Memory schema only exposes PUT over HTTP (a raw
- * HTTP POST /Memory returns "Memory does not have a post method implemented"
- * — see src/cli.ts's `flair test` command and commit 2fa6d22 / ops-pj5).
- * `Memory.post()` IS reachable, but only via an in-process resource
- * instantiation (as resources/mcp-tools.ts does) — never via the real HTTP
- * POST route. Because flair-client's write() (used by flair-mcp, the CLI, and
- * every other integration package) issues an HTTP PUT, the actual
+ * NOTE on HTTP verbs: `Memory.post()` is reached by an HTTP POST /Memory and
+ * by an in-process resource instantiation (as resources/mcp-tools.ts does).
+ * Because flair-client's write() issues an HTTP PUT, the actual
  * field-observed bug (#526) flows through Memory.put(), not Memory.post().
  * The gate below is therefore a SHARED helper invoked from both post() and
  * put() — anchored in the same place the design calls out (Memory.post), but
@@ -1103,15 +1202,11 @@ async function hasWriteGrant(granteeId: string, ownerId: string, ctx?: unknown):
 }
 
 /**
- * Shared by post() AND put(): the Memory schema only exposes a working HTTP
- * PUT route (a raw HTTP POST /Memory 404s with "Memory does not have a post
- * method implemented" — see src/cli.ts's `flair test` command / commit
- * 2fa6d22 / ops-pj5). Memory.post() IS reachable, but only via an in-process
- * resource instantiation (resources/mcp-tools.ts does this). Since
- * flair-client's write()/update() — used by flair-mcp, the CLI, and every
- * other integration package — issue HTTP PUT, `supersedes` must be fully
- * handled (validated, authorized, and closed) from BOTH entry points for the
- * real-world write path to actually get the fix, not just the in-process one.
+ * Shared by post() AND put(): Memory.post() is reached by an HTTP POST /Memory
+ * and by an in-process resource instantiation (resources/mcp-tools.ts does
+ * this), and flair-client's write()/update() issue HTTP PUT, so `supersedes`
+ * must be fully handled (validated, authorized, and closed) from BOTH entry
+ * points.
  *
  * Validates the `supersedes` field's shape and, for a cross-agent supersede,
  * requires a "write" MemoryGrant from the target's owner (reuses the existing
@@ -1721,8 +1816,8 @@ async function confirmSkillDelete(args: {
 }
 
 /** Close the live head and delete its pointer in the version transaction. */
-async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record: Record<string, any> }): Promise<any> {
-  const { ctx, auth, record } = args;
+async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record: Record<string, any>; headLock?: SkillDeleteHeadLock }): Promise<any> {
+  const { ctx, auth, record, headLock } = args;
   let closedId = "";
   let closedRow: Record<string, any> | null = null;
   let pointerBefore: any = null;
@@ -1736,6 +1831,13 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
     agentId: String(record.agentId),
     head: (shared) => resolveSkillHead(subjectId, String(record.id), shared),
     plan: async (head, shared) => {
+      // flair#2478: the head this delete closes must be an id the DELETE holds.
+      // A head outside the held ids is not locked: write nothing; delete()
+      // discovers and locks again.
+      if (headLock) {
+        headLock.outside = !!head && !headLock.ids.includes(String(head.id));
+        if (headLock.outside) return storedRowChangedRefusal("Memory");
+      }
       // flair#2355: for a non-admin caller, re-read the COMMITTED rows before
       // the close. The delete is refused, and nothing is closed, when the
       // addressed row is present with an owner other than the caller (409
@@ -2279,7 +2381,36 @@ export class Memory extends (databases as any).flair.Memory {
     return joined;
   }
 
+  /** Unless it is submitted with the skill tag, a POST that names an id (URL
+   *  or body) or a `supersedes` reference takes the per-id lock for those ids,
+   *  the reference under its canonical id, and holds it across the handler's
+   *  read, decision and write and the predecessor's close (flair#2478 slice 1
+   *  part 2). Its non-skill row writes join an open request transaction, which
+   *  commits after the lock is released; a superseding skill write owns its
+   *  commit. A POST that names neither takes no lock. */
   async post(content: any, context?: any) {
+    // flair#2307: resolve the `supersedes` reference to its canonical id once,
+    // before lock selection (some POSTs take no lock), so the predecessor read,
+    // the close and any lock taken name that id (a selector or encoded
+    // spelling resolves to it).
+    canonicalizeSupersedes(content);
+    // A POST submitted with the skill tag is a skill version write; it takes
+    // no Memory lock here (later slice). Lock selection reads the submitted
+    // tags: an untagged POST that names a skill row (by id or `supersedes`)
+    // takes the lock, then inherits the tag (prepareSkillBody).
+    const ids = isSkillWrite(content) ? [] : postLockIds(this, content);
+    if (ids.length === 0) return this.postLocked(content, context, false);
+    const outcome = await withMemoryWriteLock(
+      memoryWriteLockStore(), ids, () => this.postLocked(content, context, true), { phase: "post" });
+    if (outcome.kind === "done") return outcome.value;
+    return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
+  }
+
+  /** `locked`: the POST holds the per-id lock, so its provider calls take the
+   *  bounded path putLocked's take (MEMORY_LOCKED_PROVIDER_TIMEOUT_MS): a call
+   *  still pending at the bound, or answering after it, is refused once the
+   *  event loop runs again; a provider that never yields it can prevent that. */
+  private async postLocked(content: any, context: any, locked: boolean) {
     // flair#2612: a POST body that is not a single JSON object — an array, null,
     // a string or a number — is refused here with a named 400 before any write
     // path runs. Without it, an array reaches Harper's collection create, which
@@ -2348,7 +2479,8 @@ export class Memory extends (databases as any).flair.Memory {
     // (below) and keeps a string a string, so reading them first names the
     // same fields.
     const suppliedText = suppliedStoredTextFields(content);
-    canonicalizeSupersedes(content);
+    // `content.supersedes` is already canonical: post() resolved it before
+    // lock selection (canonicalizeSupersedes runs once per request).
     // flair#2573: an empty `embedding` in the body is an omitted one. It is
     // removed before the omission check and prepareSkillBody, so every later
     // step, a skill update's carried vector included, sees a body without it.
@@ -2557,7 +2689,12 @@ export class Memory extends (databases as any).flair.Memory {
     const embeddingSupplied = Array.isArray(content.embedding) && content.embedding.length > 0;
     let dedupMatch: DedupMatch | null = null;
     if (!content.supersedes) {
-      dedupMatch = await runDedupGate(ctx, content);
+      try {
+        dedupMatch = await runDedupGate(ctx, content, locked);
+      } catch (err) {
+        if (err instanceof MemoryProviderTimeout) return memoryProviderTimeoutResponse();
+        throw err;
+      }
     } else {
       delete content.dedup;
       delete content.dedupThreshold;
@@ -2571,7 +2708,13 @@ export class Memory extends (databases as any).flair.Memory {
     // (skillEmbedText), not `content`.
     const embedText = skillEmbedText(content);
     if (embedText && !content.embedding) {
-      const vec = await getEmbedding(embedText, "document");
+      let vec: number[] | null;
+      try {
+        vec = locked ? await embedUnderLock(embedText) : await getEmbedding(embedText, "document");
+      } catch (err) {
+        if (err instanceof MemoryProviderTimeout) return memoryProviderTimeoutResponse();
+        throw err;
+      }
       if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
     }
 
@@ -2775,11 +2918,16 @@ export class Memory extends (databases as any).flair.Memory {
     return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
   }
 
-  private async patchLocked(content: any, query?: any) {
+  private async patchLocked(content: any, query?: any, checked?: unknown) {
+    // flair#2478 part 3a: a checked write (patchMemoryWithLock) joins its locked
+    // transaction; the ordinary verb passes no entry.
+    const locked = takeCheckedEntry(checked);
     const entry = txnPausePoint("memory-patch-entry");
     if (entry) await entry;
     // flair#2296: decided on the body as sent; the guards below add fields to it.
     const reembedRequest = isReembedPatch(content);
+    // The re-embed writes in its own owned transaction, outside a locked scope.
+    if (locked && reembedRequest) throw uncheckedBodyRefusal("re-embed");
     // flair#2141 S2: check the seed's fixed id against the operator-source
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
@@ -2839,7 +2987,10 @@ export class Memory extends (databases as any).flair.Memory {
     // it share this commit. (A re-embed PATCH writes in its own inner owned
     // transaction instead, which also commits before the lock releases.)
     const ctx = (this as any).getContext?.();
-    const patched = await withOwnedTransaction(ctx, async (c) => {
+    const patchScope = locked
+      ? <R>(cx: any, fn: (c: any) => Promise<R>) => locked.admission.join(cx, fn)
+      : withOwnedTransaction;
+    const patched = await patchScope(ctx, async (c: any): Promise<any> => {
       // The FIRST operation inside the owned transaction: the authoritative
       // stored read, by the URL-BOUND target id (a body id that disagrees with
       // the address, or a lookup that FAILS, is refused; a failed read is never
@@ -3101,6 +3252,10 @@ export class Memory extends (databases as any).flair.Memory {
     // successful Response is replaced by the write_response_withheld refusal
     // (writeResultResponse).
     if (patched instanceof Response) return writeResultResponse(patched);
+    // A checked write has only staged its row. It continues below once its
+    // locked scope has committed, as that scope's confirmation; a scope that
+    // does not commit ends it here (flair#2478 part 3a).
+    if (locked && !(await locked.stage())) return undefined;
     // flair#2573: the row write has committed (its transaction returned it), so
     // the embedding-space guard is notified now, before the verification read:
     // a refused or unknown verification still leaves the guard told about the
@@ -3116,7 +3271,7 @@ export class Memory extends (databases as any).flair.Memory {
     const verifyPause = txnPausePoint("memory-patch-verify");
     if (verifyPause) await verifyPause;
     const staged = "staged" in patched ? patched.staged : content;
-    const verified = await verifyWrittenRow((databases as any).flair.Memory, staged, (this as any).getId?.(), patched.identity, reembedRequest ? [] : declaredFields);
+    const verified = await verifyWrittenRow((databases as any).flair.Memory, staged, (this as any).getId?.(), patched.identity, reembedRequest ? [] : declaredFields, locked ? { exactFields: locked.confirmFields } : undefined);
     if (verified.unknown) return writeOutcomeUnknownFor(content?.id ?? (this as any).getId?.());
     if (verified.mismatch) return storedRowChangedRefusal("Memory");
     // A verified re-embed answers with its own response (it declares no text
@@ -3141,8 +3296,11 @@ export class Memory extends (databases as any).flair.Memory {
   async put(content: any, query?: any) {
     const ids = putLockIds(this, content);
     if (ids.length === 0) return memoryIdRequiredResponse();
+    // Citation-on-write, queued by putLocked, runs after this lock is released:
+    // it tries each cited id's lock, and the target id's lock is not held then.
+    const afterRelease: Array<() => Promise<void>> = [];
     const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async () => {
-      const result = await this.putLocked(content, query);
+      const result = await this.putLocked(content, query, afterRelease);
       // Test-only: the verb body has returned and the lock is still held. A body
       // that owned its transaction has committed it; a composed or `_reindex` put
       // that joined another transaction has not.
@@ -3150,11 +3308,15 @@ export class Memory extends (databases as any).flair.Memory {
       if (committed) await committed;
       return result;
     }, { phase: "put" });
-    if (outcome.kind === "done") return outcome.value;
-    return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
+    if (outcome.kind !== "done") return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
+    for (const step of afterRelease) await step();
+    return outcome.value;
   }
 
-  private async putLocked(content: any, query?: any) {
+  private async putLocked(content: any, query: any, afterRelease: Array<() => Promise<void>>, entry?: unknown) {
+    // flair#2478 part 3a: a checked write (putMemoryWithLock) joins its locked
+    // transaction; the ordinary verb passes no entry.
+    const locked = takeCheckedEntry(entry);
     const reembedding = content?.embedding === null && content?.embeddingModel === null;
     // flair#2141 S2: check the seed's fixed id against the operator-source
     // reservation (resources/seed-reservation.ts).
@@ -3171,6 +3333,7 @@ export class Memory extends (databases as any).flair.Memory {
     // auditability, it must be gated to admins. Internal calls (no auth
     // context) pass through, matching the pattern used in delete().
     if (content._reindex === true) {
+      if (locked) throw uncheckedBodyRefusal("_reindex");
       const ctx = (this as any).getContext?.();
       const request = ctx?.request ?? ctx;
       const actorId = request?.tpsAgent;
@@ -3259,8 +3422,13 @@ export class Memory extends (databases as any).flair.Memory {
       // transaction here. For a re-PUT that owns its transaction, an
       // unreadable or mismatching committed row is never reported as success.
       if (!reindexJoinsRequestTxn) {
+        // Test-only: a fault-injection switch makes this confirmation read
+        // throw.
+        const verifyTable = txnFault("memory-reindex-verify")
+          ? { get: async (): Promise<any> => { throw new Error("injected post-commit read failure"); } }
+          : (databases as any).flair.Memory;
         const committedVerdict = await verifyCommittedFields(
-          (databases as any).flair.Memory,
+          verifyTable,
           reindexRow.id,
           reindexRow,
           withoutHarperManagedFields(reindexRow),
@@ -3294,13 +3462,16 @@ export class Memory extends (databases as any).flair.Memory {
     // compare the written identity). Every other ordinary put owns its
     // transaction; the `_reindex` re-PUT above joins a request transaction when
     // one is open, as it did before the lock.
-    const composed = composesCallerWrite(ctx);
+    const composed = !locked && composesCallerWrite(ctx);
     let putResult: any;
     // flair#2467: the post-redaction text fields this write stages, for the response.
     let putStaged: StoredMemoryText = {};
     let putGrantedClosed: Record<string, any> | null = null;
     try {
-      putResult = await (composed ? withSharedWriteTransaction : withOwnedTransaction)(ctx, async (c) => {
+      const writeScope = locked
+        ? <R>(cx: any, fn: (c: any) => Promise<R>) => locked.admission.join(cx, fn)
+        : composed ? withSharedWriteTransaction : withOwnedTransaction;
+      putResult = await writeScope(ctx, async (c: any): Promise<any> => {
         // The authoritative stored read: the FIRST operation of an ordinary PUT's
         // owned transaction (a composed put runs it in its caller's transaction,
         // which may already have read). It reads by the URL-BOUND target id (a
@@ -3381,6 +3552,9 @@ export class Memory extends (databases as any).flair.Memory {
         // below only when present.
         const usedMemoryIds = content?.usedMemoryIds;
         if (content && typeof content === "object") delete content.usedMemoryIds;
+        // A checked write records no citations: they take the cited ids' locks
+        // after the write's lock is released, which its caller holds.
+        if (locked && usedMemoryIds !== undefined) throw uncheckedBodyRefusal("citation-on-write");
 
         // ── flair#1238: refuse an unrecognised durability (mirrors post()) ──
         // put() is the other HTTP-reachable write path (fresh create via CLI, and
@@ -3479,7 +3653,10 @@ export class Memory extends (databases as any).flair.Memory {
         // supersedes: optional reference to the ID of the memory this one
         // replaces. Validates shape + cross-agent-write authorization (shared
         // with post() — see validateAndAuthorizeSupersedes doc for why PUT needs
-        // this too: it's the only HTTP-reachable create path).
+        // this too: HTTP POST /Memory reaches Memory.post(), and flair-client's
+        // write() and update() both send PUT: default update() addresses the
+        // existing id, while its preserveHistory option supplies a new id and
+        // `supersedes`).
         const supersede = await validateAndAuthorizeSupersedes(content, auth, ctx, preExisting, requestedVisibility);
         if (supersede.denial) return supersede.denial;
         if (content.supersedes && !content.validFrom) {
@@ -3660,6 +3837,8 @@ export class Memory extends (databases as any).flair.Memory {
         stripUndeclaredMemoryAttributes(content);
         normalizeEmptyEmbedding(content);
         if (isSkillWrite(content)) {
+          // A skill write is a skill version write (part 3c), not a checked write.
+          if (locked) throw uncheckedBodyRefusal("skill version");
           const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
           const skillStaged: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null } = { supplied: suppliedText, text: null };
           // A PUT whose redaction replaced a value commits its redacted effective
@@ -3731,6 +3910,10 @@ export class Memory extends (databases as any).flair.Memory {
     // successful Response is replaced by the write_response_withheld refusal
     // (a storage-layer Response was replaced in the transaction, storageResult).
     if (putResult instanceof Response) return writeResultResponse(putResult);
+    // A checked write has only staged its row. It continues below once its
+    // locked scope has committed, as that scope's confirmation; a scope that
+    // does not commit ends it here (flair#2478 part 3a).
+    if (locked && !(await locked.stage())) return undefined;
     // embedding-space-guard slice 1 (see post()): the ordinary row write has
     // returned from its transaction, so the guard is notified now, with the
     // stored stamp and the row this PUT replaced (flair#2573), before the
@@ -3748,7 +3931,7 @@ export class Memory extends (databases as any).flair.Memory {
       if (verifyPause) await verifyPause;
       const verified = await verifyWrittenRow(
         (databases as any).flair.Memory, putResult.content, putResult.fallbackId,
-        { expectedToken: putResult.content?.instanceToken },
+        { expectedToken: putResult.content?.instanceToken }, POSTCOMMIT_VERIFY_FIELDS, locked ? { exactFields: locked.confirmFields } : undefined,
       );
       if (verified.unknown) return writeOutcomeUnknownFor(putResult.content?.id ?? putResult.fallbackId);
       if (verified.mismatch) return storedRowChangedRefusal("Memory");
@@ -3771,21 +3954,64 @@ export class Memory extends (databases as any).flair.Memory {
     if (putResult.close?.granteeId === undefined) await closeSupersededIfNeeded(ctx, putResult.content, putResult.close, "put");
 
     // flair#744 slice A: citation-on-write — POST-COMMIT, fully
-    // failure-isolated (see post()'s identical comment above).
+    // failure-isolated (see post()'s identical comment above). flair#2478: it
+    // is queued here and put() runs it after releasing this id's lock.
     if (putResult.usedMemoryIds !== undefined) {
-      try {
-        await recordCitations(ctx, putResult.auth, putResult.usedMemoryIds, new Date().toISOString());
-      } catch (err) {
-        console.error("Memory.put: citation recording failed (write already committed)", err);
-      }
+      const { auth: citingAuth, usedMemoryIds } = putResult;
+      afterRelease.push(async () => {
+        try {
+          await recordCitations(ctx, citingAuth, usedMemoryIds, new Date().toISOString());
+        } catch (err) {
+          console.error("Memory.put: citation recording failed (write already committed)", err);
+        }
+      });
     }
 
     return buildWriteResponse(putResult.content, result, putResult.dedupMatch, putResult.redactedValues, putStaged);
   }
 
+  /** Past the refusals that read no row, DELETE reads the addressed row with no
+   *  lock held (discovery only) and, for a skill row, finds the live head its
+   *  skill writer closes (for an older version, another row). It then takes the
+   *  addressed id's lock and that head's, which cover the authorization,
+   *  planning, write and owned transaction's commit that follow. When the head
+   *  the skill writer resolves under the locks is not one of the held ids,
+   *  nothing is written and the DELETE discovers and locks again, at most
+   *  SKILL_DELETE_HEAD_ATTEMPTS attempts in all, then answers `503 memory_busy`
+   *  (flair#2478 slice 1 part 2). */
   async delete(id: any) {
+    const ids = deleteLockIds(this, id);
+    if (ids.length === 0) return this.deleteLocked(id);
+    // The refusals that read no row answer before the head discovery reads it.
     const ctx = (this as any).getContext?.();
-    const auth = await resolveAgentAuth(ctx);
+    const early = this.deleteRefusalBeforeRead(id, ctx, await resolveAgentAuth(ctx));
+    if (early) return early;
+    for (let attempt = 1; attempt <= SKILL_DELETE_HEAD_ATTEMPTS; attempt++) {
+      const head = await skillDeleteHeadId(() => super.get(id));
+      if (head !== null) {
+        // Test-only: held after this attempt found the head, before it takes
+        // the locks.
+        const discovered = attempt === 1 ? txnPausePoint("memory-delete-head-first")
+          : attempt === 2 ? txnPausePoint("memory-delete-head-second")
+            : txnPausePoint("memory-delete-head-third");
+        if (discovered) await discovered;
+      }
+      const headLock: SkillDeleteHeadLock = { ids: [], outside: false };
+      const outcome = await withMemoryWriteLock(memoryWriteLockStore(), head === null ? ids : [...ids, head], (locked) => {
+        headLock.ids = memoryWriteLockTokenIds(locked);
+        return this.deleteLocked(id, headLock);
+      }, { phase: "delete" });
+      if (outcome.kind !== "done") return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
+      if (!headLock.outside) return outcome.value;
+    }
+    return memoryBusyResponse(memoryLockCallerId(this));
+  }
+
+  /** The DELETE refusals that read no Memory row: an anonymous caller, an
+   *  outcome-unknown id, a reserved seed id and a `.content`-suffixed target.
+   *  delete() answers them before its head discovery reads the row;
+   *  deleteLocked checks them again under the lock. */
+  private deleteRefusalBeforeRead(id: any, ctx: any, auth: AgentAuthVerdict): Response | null {
     if (auth.kind === "anonymous") return UNAUTH();
     // flair#2478: a DELETE of an id whose last owned PUT/PATCH settled with an
     // unknown outcome waits for reconciliation too: refused until restart, as a
@@ -3804,6 +4030,15 @@ export class Memory extends (databases as any).flair.Memory {
       [id, ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)], id,
     );
     if (contentSuffixDenial) return contentSuffixDenial;
+    return null;
+  }
+
+  private async deleteLocked(id: any, headLock?: SkillDeleteHeadLock) {
+    const ctx = (this as any).getContext?.();
+    const auth = await resolveAgentAuth(ctx);
+    const refusal = this.deleteRefusalBeforeRead(id, ctx, auth);
+    if (refusal) return refusal;
+    if (auth.kind === "anonymous") return UNAUTH();
     // Read stored ownership, not the read-scoped get() response. Enforce here
     // as well as middleware so MCP/in-process callers have the same policy.
     const record = await super.get(id);
@@ -3820,7 +4055,7 @@ export class Memory extends (databases as any).flair.Memory {
       // confirmation read inside.
       const beforeSkillDelete = txnPausePoint("memory-skill-delete-pre");
       if (beforeSkillDelete) await beforeSkillDelete;
-      return await writeSkillDelete({ ctx, auth, record });
+      return await writeSkillDelete({ ctx, auth, record, headLock });
     }
     // Durability controls retention, not the owner's authority to delete.
     // A1' item 2 (adjudication 0a/0c): the Memory delete, its pointer delete
@@ -3915,6 +4150,10 @@ export class Memory extends (databases as any).flair.Memory {
       }
     }
     if (!applied) return deleteNotAppliedRefusal("Memory", DELETE_APPLY_ATTEMPTS);
+    // Test-only: held after the owned transaction committed and the removal was
+    // confirmed, while the id's lock is still held (flair#2478).
+    const committedPause = txnPausePoint("memory-delete-committed");
+    if (committedPause) await committedPause;
     // An owned transaction has committed and its removal is confirmed.
     if (typeof targetIdProbe === "string" && targetIdProbe.length > 0) {
       noteMemoryDelete(targetIdProbe);
@@ -3922,4 +4161,94 @@ export class Memory extends (databases as any).flair.Memory {
     if (typeof id === "string") await clearHitStats(id, ctx).catch(() => {});
     return true;
   }
+}
+
+/** The input of a checked Memory write (flair#2478 part 3a). */
+export interface CheckedMemoryWriteInput {
+  /** The stored id the write lands on (the URL-bound target of a verb call). */
+  readonly id: string;
+  /** The write body, as a PUT or PATCH body. */
+  readonly content: Record<string, unknown>;
+  /** Stored fields the post-commit confirmation compares with the staged
+   *  write: a field that reads as undefined in the staged write must read as
+   *  undefined in the row, a defined one (null included) equal. The
+   *  confirmation also compares the row's id. */
+  readonly confirmFields?: readonly string[];
+}
+
+/** The ids a checked write writes: its target, the body id and, for a PUT, the
+ *  `supersedes` target it closes (raw and canonical). */
+function checkedWriteIds(verb: "put" | "patch", input: CheckedMemoryWriteInput): string[] {
+  const ids = [input.id];
+  const bodyId = input.content.id;
+  if (typeof bodyId === "string" || typeof bodyId === "number") ids.push(String(bodyId));
+  const supersedes = input.content.supersedes;
+  if (verb === "put" && typeof supersedes === "string") {
+    ids.push(supersedes);
+    const canonical = resolveMemoryReferenceId(supersedes);
+    if (canonical !== undefined) ids.push(canonical);
+  }
+  return ids;
+}
+
+function enterCheckedWrite(verb: "put" | "patch", held: MemoryWriteLockToken, tx: LockedMemoryTransaction, input: CheckedMemoryWriteInput): Promise<MemoryWriteReceipt> {
+  let admission: LockedWriteAdmission;
+  let snapshot: CheckedMemoryWriteInput;
+  try {
+    if (!input || typeof input.id !== "string" || input.id.length === 0 ||
+      input.content === null || typeof input.content !== "object" || Array.isArray(input.content)) {
+      throw new TypeError("a checked Memory write names a string id and an object body");
+    }
+    // One snapshot, taken before admission, decides the write set and is the
+    // write. The write set comes from its id strings, so a later change to
+    // the caller's input cannot change it. The body is a structuredClone
+    // (not a JSON round trip: a body read from a stored row can hold values
+    // JSON would not keep as they are, a typed-array vector or a Date), so
+    // a later change to a nested value does not reach the write either,
+    // except through memory a SharedArrayBuffer shares, which a clone keeps
+    // shared. A body it cannot clone is rejected here, before admission.
+    snapshot = Object.freeze({
+      id: input.id,
+      content: structuredClone(input.content),
+      confirmFields: Object.freeze([...(input.confirmFields ?? [])]),
+    });
+    admission = admitLockedMemoryWrite(held, tx, memoryWriteLockStore(), checkedWriteIds(verb, snapshot));
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  return admission.track(snapshot.id, async (stage) => {
+    const getResource = (Memory as any).getResource;
+    if (typeof getResource !== "function") throw new Error("flair: Memory.getResource is unavailable; a checked Memory write is refused");
+    const resource = await getResource.call(Memory, { id: snapshot.id }, admission.context, { hasContent: true, type: "update", method: verb });
+    const entry = Object.freeze({});
+    checkedEntries.set(entry, { admission, confirmFields: snapshot.confirmFields!, stage, used: false });
+    const body = snapshot.content;
+    return verb === "put" ? resource.putLocked(body, undefined, [], entry) : resource.patchLocked(body, undefined, entry);
+  });
+}
+
+/**
+ * flair#2478 part 3a — a Memory PUT made while the caller already holds the
+ * per-id lock. Not a Harper verb: an ordinary function. `held` must be a live
+ * lock token acquired on `Memory.primaryStore` for every id the write names
+ * (its target, the body id and a `supersedes` target), and `tx` the locked
+ * transaction scope opened on that acquisition (resources/memory-write-transaction.ts);
+ * otherwise it is refused (`MemoryWriteCapabilityError`) and nothing is staged.
+ * It enters the ordinary PUT's write body without acquiring a lock or opening a
+ * transaction, joins the scope's transaction and returns `staged`. After the
+ * scope commits, the body resumes for the PUT's post-commit steps; its
+ * verification also compares the row's id and `confirmFields`. A skill write
+ * or an `_reindex` body is refused.
+ */
+export function putMemoryWithLock(held: MemoryWriteLockToken, tx: LockedMemoryTransaction, input: CheckedMemoryWriteInput): Promise<MemoryWriteReceipt> {
+  return enterCheckedWrite("put", held, tx, input);
+}
+
+/**
+ * flair#2478 part 3a — a Memory PATCH made while the caller already holds the
+ * per-id lock; the PATCH counterpart of {@link putMemoryWithLock} (its target
+ * and body id are its write set). A re-embed body is refused.
+ */
+export function patchMemoryWithLock(held: MemoryWriteLockToken, tx: LockedMemoryTransaction, input: CheckedMemoryWriteInput): Promise<MemoryWriteReceipt> {
+  return enterCheckedWrite("patch", held, tx, input);
 }

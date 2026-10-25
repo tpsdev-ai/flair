@@ -58,6 +58,7 @@ import { withKeyLock } from "./key-lock.js";
 import { withDetachedTxn } from "./table-helpers.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
+import { withMemoryWriteLockOnce } from "./memory-write-lock.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import type { ReadScope, ScopableRecord } from "./memory-read-scope.js";
@@ -114,6 +115,16 @@ export class UsageLedgerReadError extends Error {
  * The ledger read and any create share an owned transaction. The count bump
  * uses a separate owned transaction through writeBackCommittedRow.
  *
+ * flair#2478: the whole contribution runs under the memory id's per-id write
+ * lock (resources/memory-write-lock.ts), taken before the ledger lock and once
+ * without waiting. The count bump is then decided on a committed row that an
+ * ordinary owner PUT or PATCH in the same Harper process, which holds the lock
+ * until it commits, cannot change under it. Not serialized with it: a
+ * composed or `_reindex` PUT that commits after releasing its lock, an owner
+ * DELETE (until #2787), and a raw operations write. A contribution that cannot
+ * take that lock, or the ledger lock, writes nothing for that id and is logged
+ * as skipped.
+ *
  * The count bump is the shared write-back helper (write-back.ts): the row is
  * read inside a transaction this call OWNS, the bump is built from THAT read,
  * and the committed row is re-read before commit. The plan skips an absent
@@ -136,20 +147,48 @@ export async function recordUsageContribution(
   now: string,
   canRead: CanReadMemory,
 ): Promise<void> {
-  // Within one Harper process, the per-(agentId, memoryId) lock serializes
-  // contributions across the ledger check, any create and any count bump.
-  const store = (databases as any)?.flair?.MemoryUsage?.primaryStore;
-  const outcome = await withKeyLock(
-    store,
-    [USAGE_LEDGER_LOCK_NAMESPACE, agentId, memoryId],
-    () => recordUsageContributionLocked(ctx, agentId, memoryId, attribution, now, canRead),
-    USAGE_LOCK_ATTEMPTS,
-    USAGE_LOCK_WAIT_MS,
+  // Global lock order (flair#2478): the sorted Memory id locks first, then the
+  // usage ledger. Memory.put() records its citations after releasing its target
+  // id's lock, so a citation holds no other Memory id lock when it tries this
+  // one. The whole contribution — the ledger check, any ledger create
+  // and the count bump — runs under the memory id's write lock, taken once with
+  // no wait: the count bump's decision is then made on a committed row an
+  // ordinary owner PUT or PATCH cannot change under it (the writes it does not
+  // serialize are named above).
+  // Test-only: before this contribution tries the memory id's lock.
+  const beforeLock = txnPausePoint("usage-contribution-lock");
+  if (beforeLock) await beforeLock;
+  const memoryOutcome = await withMemoryWriteLockOnce(
+    (databases as any)?.flair?.Memory?.primaryStore,
+    [memoryId],
+    async () => {
+      // Within one Harper process, the per-(agentId, memoryId) lock serializes
+      // contributions across the ledger check, any create and any count bump.
+      const store = (databases as any)?.flair?.MemoryUsage?.primaryStore;
+      return withKeyLock(
+        store,
+        [USAGE_LEDGER_LOCK_NAMESPACE, agentId, memoryId],
+        () => recordUsageContributionLocked(ctx, agentId, memoryId, attribution, now, canRead),
+        USAGE_LOCK_ATTEMPTS,
+        USAGE_LOCK_WAIT_MS,
+      );
+    },
+    { phase: "usage-count" },
   );
-  // The lock could not be acquired (or the store has none): this contribution
-  // writes no ledger row and makes no count change; the caller still gets its
-  // recorded response. Other ids in the same batch may already have been credited.
-  if (outcome.kind !== "done") return;
+  // The memory lock could not be acquired (a held id, an outcome-unknown
+  // marker, or a store with no lock): this contribution writes nothing and is
+  // skipped, never written unserialized over an owner's write. It is reported
+  // here; the caller still gets its recorded response. Other ids in the same
+  // batch may already have been credited.
+  if (memoryOutcome.kind !== "done") {
+    console.warn("[usage-recording] contribution skipped: %s for memory %s", memoryOutcome.kind, memoryId);
+    return;
+  }
+  // The ledger lock could not be acquired: same skip, same report.
+  if (memoryOutcome.value.kind !== "done") {
+    console.warn("[usage-recording] contribution skipped: usage_ledger_%s for memory %s", memoryOutcome.value.kind, memoryId);
+    return;
+  }
 
   // Test-only: pause after the ledger lock releases and the owned transaction
   // commits, before this request's transaction commits (flair#2333).
@@ -241,6 +280,7 @@ async function recordUsageContributionLocked(
       expectedRow: prepared,
       pausePre: () => txnPausePoint("usage-count-pre"),
       pausePoint: () => txnPausePoint("usage-count"),
+      pauseAfterStage: () => txnPausePoint("usage-count-staged"),
       pauseBeforeCommit: () => txnPausePoint("usage-count-commit"),
       pauseBeforeVerify: () => txnPausePoint("usage-count-verify"),
     },

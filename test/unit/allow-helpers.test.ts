@@ -12,6 +12,7 @@ mock.module("harper", () => ({
 }));
 
 const { allowVerified, allowAdmin } = await import("../../resources/agent-auth.ts");
+const { internalContext } = await import("../../resources/in-process.ts");
 
 // Belt-and-suspenders for auth: the two allow* helpers every agent-facing /
 // admin-only resource delegates to. resolveAgentAuth's verdict logic is covered
@@ -27,7 +28,8 @@ const reqNoAuth = { headers: { get: () => undefined } };
 const withBasic = (user: any) => ({ user, headers: { get: (n: string) => (n === "authorization" ? "Basic dXNlcjpwYXNz" : undefined) } });
 
 const CONTEXTS = {
-  internal:          undefined,                                              // no request → trusted in-process
+  omitted:            undefined,                                              // no context → internal by omission (flair#2837: refused by allowAdmin)
+  deliberateInternal: internalContext(),                                     // explicit elevated in-process call
   anonymousMarker:   { tpsAnonymous: true },                                 // non-rejecting gate marked it anon
   anonymousNoAuth:   reqNoAuth,                                              // raw request, no valid agent
   agentNonAdmin:     { tpsAgent: "agent-x", tpsAgentIsAdmin: false },        // verified non-admin agent
@@ -41,8 +43,9 @@ const CONTEXTS = {
 } as const;
 
 describe("allowVerified — agent-facing gate (deny anonymous, permit verified/admin/internal)", () => {
-  it("permits trusted internal calls", async () => {
-    expect(await allowVerified(CONTEXTS.internal)).toBe(true);
+  it("permits the internal verdict (deliberate or by omission)", async () => {
+    expect(await allowVerified(CONTEXTS.deliberateInternal)).toBe(true);
+    expect(await allowVerified(CONTEXTS.omitted)).toBe(true);
   });
   it("DENIES anonymous (explicit marker)", async () => {
     expect(await allowVerified(CONTEXTS.anonymousMarker)).toBe(false);
@@ -71,8 +74,11 @@ describe("allowVerified — agent-facing gate (deny anonymous, permit verified/a
 });
 
 describe("allowAdmin — admin-only gate (deny anonymous AND non-admin agents)", () => {
-  it("permits trusted internal calls", async () => {
-    expect(await allowAdmin(CONTEXTS.internal)).toBe(true);
+  it("permits an internalContext() call", async () => {
+    expect(await allowAdmin(CONTEXTS.deliberateInternal)).toBe(true);
+  });
+  it("DENIES an internal verdict reached by OMISSION (no context)", async () => {
+    expect(await allowAdmin(CONTEXTS.omitted)).toBe(false);
   });
   it("DENIES anonymous (explicit marker)", async () => {
     expect(await allowAdmin(CONTEXTS.anonymousMarker)).toBe(false);
