@@ -124,9 +124,11 @@ export function createSyntheticTestMigration(
           // flair#2478 slice 3b: an automatic writer. It takes the id's per-id
           // Memory write lock with one non-waiting acquisition, so its read,
           // decision, write and commit sit on one committed basis while an owner
-          // write holds the id. A held id, an id with an unresolved write outcome
-          // or a table with no lock writes nothing here and is reported; the row
-          // stays pending for the next boot's scan.
+          // write holds the id. When the lock is refused (a held id, an id with an
+          // unresolved write outcome, or a table with no lock), nothing is written
+          // here and the refusal is reported. A write this attempt made but could
+          // not confirm is reported as unconfirmed (above) and may have committed.
+          // Either way, the next scan decides whether the row is still pending.
           const locked = await withMemoryWriteLockOnce(table.primaryStore, [id], async () => {
             const result = await writeBackCommittedRow(
               table as unknown as Parameters<WriteBackFn>[0],
