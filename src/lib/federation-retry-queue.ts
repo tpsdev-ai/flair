@@ -65,6 +65,13 @@ export const RETRY_ROW_FIELDS = [
 ] as const;
 
 /**
+ * The fields a terminal outcome sets (terminalRetryRow) that a pending row
+ * leaves null. The operations-API `upsert` merges into the stored row, so the
+ * pending-row builders below write each of them as null.
+ */
+export const RETRY_TERMINAL_FIELDS = ["resolution", "completedAt", "bound"] as const;
+
+/**
  * Wait before offering a pending row again, by the number of attempts it has
  * reserved. The first re-offer is immediate (the lock or change that refused
  * it may already be gone); later ones back off. The last entry repeats.
@@ -172,6 +179,7 @@ export function retryRowForRefusal(input: RefusalRowInput): Record<string, unkno
     createdAt: prior?.createdAt ?? input.nowIso,
     updatedAt: input.nowIso,
   };
+  for (const field of RETRY_TERMINAL_FIELDS) row[field] = null;
   return row;
 }
 
@@ -198,6 +206,7 @@ export function retryRowForAttempt(row: RetryQueueRow, nowIso: string): Record<s
     updatedAt: nowIso,
   };
   if (typeof row.lastReason === "string") out.lastReason = row.lastReason;
+  for (const field of RETRY_TERMINAL_FIELDS) out[field] = null;
   return out;
 }
 
@@ -223,9 +232,11 @@ const CONFIRM_FIELDS = [
  * The first of `id`, `peerId`, `table`, `recordId`, `state`, `attempts`,
  * `lastReason`, `lastAttemptAt`, `firstRefusedAt`, `createdAt`, `resolution`,
  * `completedAt`, `updatedAt` and `bound` (CONFIRM_FIELDS, in that order) that
- * the written record carries and the stored row does not echo; `row` when the
- * stored row is null; otherwise null. A read-back that only agrees on `state`
- * and `lastReason` can hide an attempt that was never incremented.
+ * the written record carries and the stored row does not echo; then, for a
+ * stored row in state `pending`, the first of RETRY_TERMINAL_FIELDS it holds a
+ * value for, whether or not the record names it; `row` when the stored row is
+ * null; otherwise null. A read-back that only agrees on `state` and
+ * `lastReason` can hide an attempt that was never incremented.
  */
 export function retryRowConfirmation(record: Record<string, unknown>, stored: Record<string, unknown> | null): string | null {
   if (stored === null) return "row";
@@ -234,6 +245,11 @@ export function retryRowConfirmation(record: Record<string, unknown>, stored: Re
     const expected = record[field] ?? null;
     const actual = stored[field] ?? null;
     if (actual !== expected) return field;
+  }
+  if (stored.state === "pending") {
+    for (const field of RETRY_TERMINAL_FIELDS) {
+      if ((stored[field] ?? null) !== null) return field;
+    }
   }
   return null;
 }

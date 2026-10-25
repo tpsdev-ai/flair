@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test";
 import {
   MEMORY_RETRY_BACKOFF_MS,
   MEMORY_RETRY_REASONS,
+  RETRY_TERMINAL_FIELDS,
   dueRetryRows,
   retryBackoffMs,
   retryOfferProblem,
@@ -120,6 +121,9 @@ describe("flair#2797 — retry row transitions", () => {
       lastAttemptAt: NOW,
       createdAt: NOW,
       updatedAt: NOW,
+      resolution: null,
+      completedAt: null,
+      bound: null,
     });
   });
 
@@ -174,5 +178,46 @@ describe("flair#2797 — retry row transitions", () => {
     expect(Object.keys(row).sort()).toEqual(
       ["attempts", "bound", "completedAt", "createdAt", "firstRefusedAt", "id", "lastAttemptAt", "lastReason", "peerId", "recordId", "resolution", "state", "table", "updatedAt"].sort(),
     );
+  });
+});
+
+describe("flair#2874 — a row reopened after a terminal outcome", () => {
+  test("every pending-row builder writes each field a terminal outcome sets as null", () => {
+    const before = pending({ attempts: 2 });
+    const terminal = terminalRetryRow(before, "merged", NOW);
+    const setByTerminal = Object.keys(terminal).filter(
+      (field) => field !== "state" && field !== "updatedAt" && terminal[field] !== before[field],
+    );
+    expect(setByTerminal.sort()).toEqual([...RETRY_TERMINAL_FIELDS].sort());
+    const reopened = terminal as unknown as RetryQueueRow;
+    for (const row of [
+      retryRowForRefusal({ peerId: PEER, recordId: ROW, reason: "merge_target_busy", nowIso: NOW }),
+      retryRowForRefusal({ peerId: PEER, recordId: ROW, reason: "retry_unknown", nowIso: NOW, existing: before }),
+      retryRowForAttempt(before, NOW),
+      retryRowForAttempt(reopened, NOW),
+    ]) {
+      expect(row.state).toBe("pending");
+      for (const field of RETRY_TERMINAL_FIELDS) {
+        expect(field in row, field).toBe(true);
+        expect(row[field], field).toBeNull();
+      }
+    }
+  });
+
+  test("the read-back rejects a pending row that still carries a terminal field", () => {
+    const written = retryRowForRefusal({ peerId: PEER, recordId: ROW, reason: "merge_target_busy", nowIso: NOW });
+    // A write that does not name the terminal fields, as a merge-only write would.
+    const unnamed: Record<string, unknown> = { ...written };
+    for (const field of RETRY_TERMINAL_FIELDS) delete unnamed[field];
+    const leftover: Record<string, unknown> = { resolution: "merged", completedAt: NOW, bound: "attempts" };
+    for (const field of RETRY_TERMINAL_FIELDS) {
+      const stored = { ...unnamed, [field]: leftover[field] };
+      expect(retryRowConfirmation(unnamed, stored)).toBe(field);
+      expect(retryRowConfirmation(written, stored)).toBe(field);
+    }
+    expect(retryRowConfirmation(unnamed, { ...unnamed })).toBeNull();
+    expect(retryRowConfirmation(written, { ...written })).toBeNull();
+    const terminal = terminalRetryRow(pending(), "merged", NOW);
+    expect(retryRowConfirmation(terminal, { ...terminal })).toBeNull();
   });
 });
