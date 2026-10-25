@@ -71,11 +71,20 @@ let cli: RemCli;
  */
 export const LONG_REM_REQUEST_DEADLINE_MS = 900_000;
 
-/** `{ deadlineMs }` for those two routes, `{}` for every other request. */
+/**
+ * POST /MemoryDedupStats sweeps up to DEDUP_CLUSTER_MAX_MEMORIES_DEFAULT
+ * (20,000) memories. At the repo fixture's dedup rate (23.07 s over 403 live
+ * vectors, ~57 ms/memory) that is 20,000 x ~57 ms = ~1,140 s, so this deadline
+ * is a round value above it and stays within REQUEST_DEADLINE_MAX_MS.
+ */
+export const DEDUP_REQUEST_DEADLINE_MS = 1_800_000;
+
+/** `{ deadlineMs }` for the long REM routes, `{}` for every other request. */
 export function longRemRequestDeadline(method: string, path: string): { deadlineMs?: number } {
-  return method === "POST" && (path === "/MemoryMaintenance" || path === "/ReflectMemories")
-    ? { deadlineMs: LONG_REM_REQUEST_DEADLINE_MS }
-    : {};
+  if (method !== "POST") return {};
+  if (path === "/MemoryMaintenance" || path === "/ReflectMemories") return { deadlineMs: LONG_REM_REQUEST_DEADLINE_MS };
+  if (path === "/MemoryDedupStats") return { deadlineMs: DEDUP_REQUEST_DEADLINE_MS };
+  return {};
 }
 
 /** Bind shared CLI helpers. cli.ts calls this immediately before register(program). */
@@ -1282,7 +1291,8 @@ export function register(program: Command): void {
       // live vectors, and a 3,065-row repro exceeded a 60 s client deadline —
       // test/bench/rem-responsiveness.md), and reflection waits on a generative
       // backend. They get the shared 900 s deadline from
-      // longRemRequestDeadline; every other call through the shared REST sender
+      // longRemRequestDeadline, and the instance-wide dedup sweep has its own
+      // 1,800 s deadline; every other call through the shared REST sender
       // resolves FLAIR_REQUEST_TIMEOUT_MS when it is set, else the default.
       const remDeadline = longRemRequestDeadline;
       const agentApiCall = (method: string, path: string, body?: unknown) =>
@@ -1561,8 +1571,13 @@ export function register(program: Command): void {
             result.unknown.memories.length + result.unknown.souls.length + result.unknown.candidates.length;
           if (unknownCount > 0) {
             console.log(`  Unknown:      ${unknownCount} ids ended at the request deadline; their write may or may not have taken effect, and no further attempt was sent after it`);
-            for (const state of result.verified?.unknownStates ?? []) {
-              console.log(`    - ${formatUnknownState(state)}`);
+            for (const id of result.unknown.memories) {
+              const state = result.verified?.unknownStates.find((s) => s.entity === "memory" && s.id === id);
+              console.log(`    - ${state ? formatUnknownState(state) : `memory ${id}: post-restore verification did not complete; its state is unverified`}`);
+            }
+            for (const id of result.unknown.souls) {
+              const state = result.verified?.unknownStates.find((s) => s.entity === "soul" && s.id === id);
+              console.log(`    - ${state ? formatUnknownState(state) : `soul ${id}: post-restore verification did not complete; its state is unverified`}`);
             }
             for (const id of result.unknown.candidates) {
               console.log(`    - MemoryCandidate ${id}: verification does not read candidates back; its state is unverified`);

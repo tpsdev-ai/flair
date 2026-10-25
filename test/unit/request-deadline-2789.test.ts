@@ -27,7 +27,7 @@ import {
 } from "../../src/lib/auth-resolve.ts";
 import { applySnapshot, formatUnknownState, type ApiCall } from "../../src/rem/restore.ts";
 import { runNightlyCycle, type RunnerOpts } from "../../src/rem/runner.ts";
-import { summarizeNightlyOutcome, longRemRequestDeadline, LONG_REM_REQUEST_DEADLINE_MS } from "../../src/commands/rem.ts";
+import { summarizeNightlyOutcome, longRemRequestDeadline, LONG_REM_REQUEST_DEADLINE_MS, DEDUP_REQUEST_DEADLINE_MS } from "../../src/commands/rem.ts";
 import { createSnapshot } from "../../src/rem/snapshot.ts";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
@@ -110,6 +110,7 @@ describe("sendJsonRequest — whole-request deadline (flair#2789)", () => {
     expect(unknown.status).toBeUndefined();
     expect(unknown.message).toContain("may or may not have taken effect");
     expect(unknown.message).toContain(REQUEST_DEADLINE_ENV);
+    expect(unknown.message).not.toContain("stub-pass");
     expect(Date.now() - started).toBeLessThan(1500);
   }, 5_000);
 
@@ -124,6 +125,7 @@ describe("sendJsonRequest — whole-request deadline (flair#2789)", () => {
     expect(error).toBeInstanceOf(ApiRequestTimeout);
     expect(error).not.toBeInstanceOf(ApiRequestOutcomeUnknown);
     expect((error as ApiRequestTimeout).message).toContain("did not complete within 150 ms");
+    expect((error as ApiRequestTimeout).message).not.toContain("stub-pass");
   }, 5_000);
 
   test("headers then a stalled body is bounded too: PUT unknown, GET ordinary", async () => {
@@ -457,10 +459,12 @@ describe("rem nightly runner — a deadline expiry on a long route is unresolved
 });
 
 describe("rem long-route deadline (flair#2789)", () => {
-  test("only the two long REM routes get the 900 s deadline", () => {
+  test("the long REM routes get their own deadlines", () => {
     expect(LONG_REM_REQUEST_DEADLINE_MS).toBe(900_000);
     expect(longRemRequestDeadline("POST", "/MemoryMaintenance")).toEqual({ deadlineMs: 900_000 });
     expect(longRemRequestDeadline("POST", "/ReflectMemories")).toEqual({ deadlineMs: 900_000 });
+    expect(DEDUP_REQUEST_DEADLINE_MS).toBe(1_800_000);
+    expect(longRemRequestDeadline("POST", "/MemoryDedupStats")).toEqual({ deadlineMs: 1_800_000 });
     expect(longRemRequestDeadline("GET", "/MemoryMaintenance")).toEqual({});
     expect(longRemRequestDeadline("POST", "/ConsolidateMemories")).toEqual({});
   });
@@ -556,6 +560,67 @@ describe("api() — a write with an unknown outcome is not replayed on the alter
       expect(alternate.requests.filter((r) => r.method === "PUT"), detail).toHaveLength(1);
     } finally {
       rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("an unknown DELETE's id is printed when post-restore verification did not complete", async () => {
+    ensureCliBuild();
+    let memoryReads = 0;
+    const server = await serve((req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (req.method === "GET" && url.pathname === "/Memory") {
+        memoryReads++;
+        if (memoryReads === 1) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify([{ id: "m1", agentId: "agent-a", content: "current", durability: "persistent" }]));
+          return;
+        }
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "verification read failed" }));
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/Soul") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("[]");
+        return;
+      }
+      if (req.method === "GET" && url.pathname.startsWith("/AdminMemoryCandidates/")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ candidates: [], hasMore: false }));
+        return;
+      }
+      if (req.method === "DELETE" && url.pathname.startsWith("/Memory/")) {
+        return;
+      }
+      res.writeHead(404);
+      res.end("not found");
+    });
+    const home = mkdtempSync(join(tmpdir(), "flair-2789-unknown-"));
+    const passDir = mkdtempSync(join(tmpdir(), "flair-2789-unknown-pass-"));
+    try {
+      const passFile = join(passDir, "restore-admin-pass");
+      writeFileSync(passFile, "stub-pass", { mode: 0o600 });
+      const created = await createSnapshot({
+        agentId: "agent-a",
+        flairVersion: "0.0.0-test",
+        memories: [{ id: "m1", agentId: "agent-a", content: "restored", durability: "persistent" }],
+        soul: null,
+        pendingCandidateCount: 0,
+        rootOverride: join(home, ".flair", "snapshots"),
+      });
+      const stem = created.path.split("/").pop()!.replace(/\.tar\.gz$/, "");
+      const result = await runCli(
+        ["rem", "restore", stem, "--agent", "agent-a", "--apply", "--admin-pass-file", passFile],
+        { HOME: home, FLAIR_URL: server.baseUrl, FLAIR_OPS_PORT: "1", FLAIR_REQUEST_TIMEOUT_MS: "150", NO_COLOR: "1" },
+      );
+      const detail = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+      expect(result.code, detail).toBe(3);
+      expect(result.stdout, detail).toContain("Status:       unresolved");
+      expect(result.stdout, detail).toContain("memory m1: post-restore verification did not complete");
+      expect(result.stdout, detail).not.toContain("stub-pass");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(passDir, { recursive: true, force: true });
     }
   }, 30_000);
 });

@@ -44,7 +44,9 @@ export const DEDUP_CLUSTER_ANN_K_DEFAULT = 10;
  *  foreseeable future, and the brief explicitly asked to prefer the full ANN
  *  sweep over sampling. When the instance exceeds this, the sweep covers the
  *  most-recently-created N memories (deterministic, documented) rather than
- *  a random sample. */
+ *  a random sample. The CLI's `POST /MemoryDedupStats` deadline (1,800 s,
+ *  `DEDUP_REQUEST_DEADLINE_MS` in `src/commands/rem.ts`) covers this cap at
+ *  the measured ~57 ms per memory. */
 export const DEDUP_CLUSTER_MAX_MEMORIES_DEFAULT = 20_000;
 
 /** Server-side stat artifact home (Slice 1c Part 2 — smallest-surface

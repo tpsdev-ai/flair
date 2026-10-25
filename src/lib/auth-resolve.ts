@@ -154,7 +154,7 @@ export class ApiHttpError extends Error {
  * The whole-request deadline `sendJsonRequest` enforces when
  * `FLAIR_REQUEST_TIMEOUT_MS` is unset and the caller passes no deadline. Five
  * minutes is above the figures the repo's responsiveness fixture reports for
- * the CLI: a maintenance/dedup pass at 23.07 s over 403 live vectors, and a
+ * the CLI: a dedup pass at 23.07 s over 403 live vectors, and a
  * 3,065-row repro that exceeded a 60 s client deadline
  * (test/bench/rem-responsiveness.md); the repro's own duration was not
  * measured. A single memory write's server-side embedding provider bound is
