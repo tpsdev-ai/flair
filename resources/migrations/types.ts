@@ -46,10 +46,11 @@ export interface MigrationProgress {
    * Rows recorded as unconfirmed (flair#2840): an attempt whose committed
    * effect its post-commit read did not show. A listed id leaves the count when
    * a later batch verifies its write or a later read finds the row at the
-   * target or gone. A later cycle starts from the state file's capped list, so
-   * the ids beyond it stay in the count as a number that no later batch or read
-   * reduces. `unconfirmedIds` carries at most {@link UNCONFIRMED_IDS_LIMIT} of
-   * them; this count is not capped.
+   * target or gone. A later cycle starts from the record it reads from the
+   * state file, whose id list is capped, so ids beyond the list are carried
+   * only in its count, which no later batch or read reduces. `unconfirmedIds`
+   * carries at most {@link UNCONFIRMED_IDS_LIMIT} of them; this count is not
+   * capped.
    */
   rowsUnconfirmed?: number;
   /** Up to {@link UNCONFIRMED_IDS_LIMIT} unconfirmed row ids, in the order they

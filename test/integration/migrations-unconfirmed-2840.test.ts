@@ -297,7 +297,7 @@ describe("flair#2840 — an unconfirmed write is reported by id and not counted 
     expect(existsSync(join(faultDir, `fired.verify-miss.${ROW_CONTENT}`))).toBe(true);
   }, 150_000);
 
-  it("the record survives a no-pending cycle and a restart, and an id clears once its row is at the target", async () => {
+  it("a no-pending cycle keeps the record, a second boot seeds it from the state file, and an id clears once its row is at the target", async () => {
     // (a) The boot's follow-up cycle finds nothing pending. The two ids that
     // reached the target are cleared (ROW_MISS through the migration's own
     // write, ROW_COMPETING through the competing writer); the away row, still

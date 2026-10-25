@@ -140,10 +140,11 @@ export function progressFromStateEntry(id: string, entry: MigrationStateEntry): 
 
 /**
  * Seeds the in-process progress store from the state file at boot
- * (flair#2840). A migration the state file records keeps that record —
- * including unconfirmed ids, their count and the status its last outcome maps
- * to — instead of being replaced by `idle`; one with no entry starts `idle`.
- * An existing entry is never overwritten. A seeded entry counts as not started
+ * (flair#2840). When the file parses as a JSON object, a migration with an
+ * entry is seeded from it, including unconfirmed ids, their count and the
+ * status its last outcome maps to. A migration without one, or every migration
+ * when the file is missing, unreadable, invalid or not an object, is seeded
+ * `idle`. An existing entry is never overwritten. A seeded entry counts as not started
  * this boot until `setMigrationProgress` writes its id (see
  * {@link markUnstartedMigrationsFailed}).
  */

@@ -314,12 +314,16 @@ describe("visibility-backfill migration — NEVER overwrites an existing visibil
     // holds the row another writer set. This run never attempted the row.
     const pending: Row = { id: "m1", content: "a", durability: "standard" };
     const set: Row = { ...pending, visibility: "private" };
-    const { table, writes } = makeStagedTable([set], [pending]);
-    const m = makeMigration(() => table, writeBackCommittedRow);
+    const { table, writes, restore } = makeStagedTable([set], [pending]);
+    try {
+      const m = makeMigration(() => table, writeBackCommittedRow);
 
-    expect(await m.run(50)).toEqual({ processed: 0, touchedIds: [] });
-    expect(writes).toEqual([]);
-    expect(table.store.get("m1")!.visibility).toBe("private");
+      expect(await m.run(50)).toEqual({ processed: 0, touchedIds: [] });
+      expect(writes).toEqual([]);
+      expect(table.store.get("m1")!.visibility).toBe("private");
+    } finally {
+      restore();
+    }
   });
 
   it("a mixed batch only touches the genuinely-pending rows, never the already-set ones", async () => {
