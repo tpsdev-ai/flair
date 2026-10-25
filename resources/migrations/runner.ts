@@ -673,6 +673,8 @@ async function runOneMigration(
     // to read. Merge them before the halt writes the record; a throw from a
     // path that does not wrap its batch carries nothing.
     if (err instanceof BatchOutcomeError) {
+      // The batch verified and stamped these rows before it threw; count them.
+      rowsDone += err.touchedIds.length;
       for (const id of err.touchedIds) unconfirmed.delete(id);
       for (const id of err.unconfirmedIds) unconfirmed.add(id);
     }

@@ -22,6 +22,7 @@ const { getMigrationStatusSnapshot } = await import("../../resources/migrations/
 const { _resetInProcessLockForTests } = await import("../../resources/migrations/lock.ts");
 const { hashSourceFields } = await import("../../resources/migrations/source-fields.ts");
 const { createEmbeddingStampMigration } = await import("../../resources/migrations/embedding-stamp.ts");
+const { BatchOutcomeError } = await import("../../resources/migrations/types.ts");
 
 import type { Migration, RunBatchResult } from "../../resources/migrations/types.ts";
 
@@ -404,6 +405,48 @@ describe("runMigrationCycle — unconfirmed rows (flair#2840)", () => {
     expect(progress?.rowsDone).toBe(2);
     expect(progress?.rowsUnconfirmed).toBeUndefined();
     expect(progress?.unconfirmedIds).toBeUndefined();
+  });
+
+  it("counts the verified rows of a batch that threw, and keeps its unconfirmed id", async () => {
+    const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
+    const relationship = makeStore([]);
+    const migration: Migration = {
+      id: "fake-thrown-batch",
+      riskClass: "derived-only",
+      affectsTables: ["Memory"],
+      async detect() {
+        return true;
+      },
+      async countPending() {
+        return 0;
+      },
+      async run(): Promise<RunBatchResult> {
+        throw new BatchOutcomeError(
+          { touchedIds: ["m1", "m2"], unconfirmedIds: ["m4"] },
+          new Error("the batch failed after stamping two rows"),
+        );
+      },
+    };
+    const result = await runMigrationCycle({
+      registry: buildRegistryWith(migration),
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: fastSleep,
+    });
+
+    expect(result.ran).toBe(true);
+    const progress = listMigrationProgress().find((p) => p.id === "fake-thrown-batch");
+    expect(progress?.state).toBe("halted");
+    expect(progress?.rowsDone).toBe(2);
+    expect(progress?.rowsUnconfirmed).toBe(1);
+    expect(progress?.unconfirmedIds).toEqual(["m4"]);
+
+    const state = readMigrationState(defaultStatePath(dataDir));
+    expect(state["fake-thrown-batch"].lastOutcome).toBe("halted");
+    expect(state["fake-thrown-batch"].rowsProcessed).toBe(2);
+    expect(state["fake-thrown-batch"].rowsUnconfirmed).toBe(1);
+    expect(state["fake-thrown-batch"].unconfirmedIds).toEqual(["m4"]);
   });
 
   it("reports a count of 105 while capping the id list at 100", async () => {
