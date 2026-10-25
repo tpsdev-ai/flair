@@ -32,8 +32,10 @@ export interface MigrationStateEntry {
   reason?: string;
   rowsProcessed?: number;
   rowsRemaining?: number;
-  /** Rows recorded as unconfirmed and not since cleared: an attempt whose
-   *  committed effect its post-commit read did not show. A listed id clears
+  /** Rows recorded as unconfirmed and not since cleared: a write this
+   *  migration made but could not verify, or a loopback re-embed that answered
+   *  503 `write_outcome_unknown`, which can reflect an earlier writer's
+   *  unresolved write. A listed id clears
    *  when a later batch verifies its write or a later read finds the row at
    *  the target or gone; the ids beyond `unconfirmedIds` are carried as a
    *  number that no later batch or read reduces (flair#2840). */

@@ -43,8 +43,10 @@ export interface MigrationProgress {
   /** Present when state is "halted" or "failed" — the exact, actionable reason. */
   reason?: string;
   /**
-   * Rows recorded as unconfirmed (flair#2840): an attempt whose committed
-   * effect its post-commit read did not show. A listed id leaves the count when
+   * Rows recorded as unconfirmed (flair#2840): a write this migration made but
+   * could not verify, or a loopback re-embed that answered 503
+   * `write_outcome_unknown`, which can reflect an earlier writer's unresolved
+   * write rather than this migration's. A listed id leaves the count when
    * a later batch verifies its write or a later read finds the row at the
    * target or gone. A later cycle starts from the record it reads from the
    * state file, whose id list is capped, so ids beyond the list are carried
@@ -75,8 +77,10 @@ export interface RunBatchResult {
   /** IDs touched this batch — used by the content-transform gate (old-row envelope + new-row presence). */
   touchedIds: string[];
   /**
-   * IDs this batch attempted whose committed effect the batch could not verify
-   * (flair#2840). Disjoint from `touchedIds`: a row whose write a later attempt
+   * IDs this batch reports as unconfirmed (flair#2840): a write the batch made
+   * but could not verify, or a loopback re-embed that answered 503
+   * `write_outcome_unknown`, which can reflect an earlier writer's unresolved
+   * write. Disjoint from `touchedIds`: a row whose write a later attempt
    * in the same batch verified belongs in `touchedIds`, not here. The runner
    * unions these across batches, removing the ids a later batch verifies, into
    * the progress record.

@@ -632,10 +632,12 @@ async function runOneMigration(
   // ── Execution: throttled batches, resumable via per-row markers ──
   setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: initialRemaining, state: "running", ...unconfirmedProgress(carried) });
   let rowsDone = 0;
-  // flair#2840: rows recorded as unconfirmed — this run's attempts whose
-  // post-commit verification read did not show the write, plus the listed ids
-  // an earlier cycle recorded and no later read has cleared. A batch that
-  // verifies an id removes it here.
+  // flair#2840: rows recorded as unconfirmed — the ids this run's batches
+  // report (a write the migration made but could not verify, or a loopback
+  // re-embed that answered 503 `write_outcome_unknown`, which can reflect an
+  // earlier writer's unresolved write), plus the listed ids an earlier cycle
+  // recorded and no later read has cleared. A batch that verifies an id
+  // removes it here.
   const unconfirmed = new Set<string>(carried?.ids ?? []);
   // Ids the durable record counted but never listed cannot be re-read; carry
   // their number (flair#2840).

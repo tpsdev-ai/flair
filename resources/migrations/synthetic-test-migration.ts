@@ -30,8 +30,8 @@
  * The write runs under the row's per-id Memory write lock (flair#2478 slice
  * 3b): one non-waiting acquisition per row, around the write-back's read,
  * decision, write and commit. A held row, an unresolved write outcome on it or
- * a table with no lock writes nothing and is logged; the row stays pending for
- * the next scan.
+ * a table with no lock writes nothing and is logged; the next scan decides
+ * whether the row is still pending.
  */
 import { databases } from "harper";
 import { writeBackCommittedRow as writeBackCommittedRowImpl, type WriteBackFn } from "../write-back.js";
