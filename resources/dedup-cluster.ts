@@ -44,8 +44,9 @@ export const DEDUP_CLUSTER_ANN_K_DEFAULT = 10;
  *  foreseeable future, and the brief explicitly asked to prefer the full ANN
  *  sweep over sampling. When the instance exceeds this, the sweep covers the
  *  most-recently-created N memories (deterministic, documented) rather than
- *  a random sample. The CLI's `POST /MemoryDedupStats` deadline (1,800 s,
- *  `DEDUP_REQUEST_DEADLINE_MS` in `src/commands/rem.ts`) is a sizing estimate
+ *  a random sample. The CLI's `POST /MemoryDedupStats` shares the REM work
+ *  deadline (1,800 s by default, `REM_WORK_REQUEST_DEADLINE_MS` in
+ *  `src/commands/rem.ts`) which is a sizing estimate
  *  from one observation, not a throughput claim: 20,000 x ~57 ms = ~1,140 s.
  *  The route also scans every Memory row before it selects the capped ANN
  *  set. */

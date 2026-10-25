@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 
 import { dirname, resolve } from "node:path";
 import * as render from "../render.js";
-import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, resolveAdminPassFromSources, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP, ADMIN_PASS_FLAG, ADMIN_PASS_HELP, ApiRequestOutcomeUnknown, apiErrorRawBody, boundErrorText } from "../lib/auth-resolve.js";
+import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, resolveAdminPassFromSources, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP, ADMIN_PASS_FLAG, ADMIN_PASS_HELP, ApiRequestOutcomeUnknown, apiErrorRawBody, boundErrorText, resolveRemRequestDeadlineMs, DEFAULT_REM_REQUEST_DEADLINE_MS } from "../lib/auth-resolve.js";
 import type { OpsSearch } from "../rem/runner.js";
 import {
   validatePromoteOpts,
@@ -64,28 +64,36 @@ export type RemCli = {
 
 let cli: RemCli;
 
-/**
- * The whole-request deadline for POST /MemoryMaintenance and
- * POST /ReflectMemories. POST /MemoryDedupStats has its own deadline, below.
- * A REM command that calls either of the first two passes it from here.
- */
-export const LONG_REM_REQUEST_DEADLINE_MS = 900_000;
+/** The REM work routes that share {@link REM_WORK_REQUEST_DEADLINE_MS}. */
+const REM_WORK_ROUTES: ReadonlySet<string> = new Set([
+  "/MemoryMaintenance",
+  "/ReflectMemories",
+  "/MemoryDedupStats",
+  "/AutoPromoteCandidates",
+]);
 
 /**
- * POST /MemoryDedupStats: a sizing estimate from one observation, not a
- * throughput claim. The route scans every Memory row before it selects the
- * capped ANN set of up to DEDUP_CLUSTER_MAX_MEMORIES_DEFAULT (20,000). The
- * repo fixture's 23.07 s over 403 live vectors is ~57 ms/memory, so
- * 20,000 x ~57 ms = ~1,140 s; this deadline is a round value above that and
- * stays within REQUEST_DEADLINE_MAX_MS.
+ * The single whole-request deadline for every REM work route: POST
+ * /MemoryMaintenance, POST /ReflectMemories, POST /MemoryDedupStats and POST
+ * /AutoPromoteCandidates. Its sizing basis is documented on
+ * {@link DEFAULT_REM_REQUEST_DEADLINE_MS}; FLAIR_REM_REQUEST_TIMEOUT_MS
+ * overrides it. Every other request through the shared REST sender resolves
+ * FLAIR_REQUEST_TIMEOUT_MS, else the shared default.
  */
-export const DEDUP_REQUEST_DEADLINE_MS = 1_800_000;
+export const REM_WORK_REQUEST_DEADLINE_MS = DEFAULT_REM_REQUEST_DEADLINE_MS;
 
-/** `{ deadlineMs }` for the long REM routes, `{}` for every other request. */
-export function longRemRequestDeadline(method: string, path: string): { deadlineMs?: number } {
+/**
+ * `{ deadlineMs }` for every REM work route, `{}` for every other request. The
+ * new-variable value is resolved per call, so an invalid
+ * FLAIR_REM_REQUEST_TIMEOUT_MS is refused before the request is sent.
+ */
+export function longRemRequestDeadline(
+  method: string,
+  path: string,
+  env: NodeJS.ProcessEnv = process.env,
+): { deadlineMs?: number } {
   if (method !== "POST") return {};
-  if (path === "/MemoryMaintenance" || path === "/ReflectMemories") return { deadlineMs: LONG_REM_REQUEST_DEADLINE_MS };
-  if (path === "/MemoryDedupStats") return { deadlineMs: DEDUP_REQUEST_DEADLINE_MS };
+  if (REM_WORK_ROUTES.has(path)) return { deadlineMs: resolveRemRequestDeadlineMs(env) };
   return {};
 }
 
@@ -1288,14 +1296,16 @@ export function register(program: Command): void {
       // admin-pass file. A selected agent with no key is refused, not
       // silently replaced by an ambient credential.
       //
-      // The REM work calls can legitimately outrun the default deadline:
+      // The REM work calls can legitimately outrun the shared default:
       // maintenance scans its scoped rows with no run row cap, reflection
-      // waits on a generative backend, and the instance-wide dedup sweep has
-      // its own 1,800 s deadline (sized from the fixture's 23.07 s over 403
-      // live vectors, test/bench/rem-responsiveness.md). Maintenance and
-      // reflection get the shared 900 s deadline from longRemRequestDeadline;
-      // every other call through the shared REST sender resolves
-      // FLAIR_REQUEST_TIMEOUT_MS when it is set, else the default.
+      // waits on a generative backend, the auto-promote sweep carries up to
+      // DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE promotions, and the instance-wide
+      // dedup sweep is sized from the fixture's 23.07 s over 403 live vectors
+      // (test/bench/rem-responsiveness.md). All four REM work routes get the
+      // one 1,800 s deadline from longRemRequestDeadline,
+      // FLAIR_REM_REQUEST_TIMEOUT_MS overrides it, and every other call
+      // through the shared REST sender resolves FLAIR_REQUEST_TIMEOUT_MS when
+      // it is set, else the default.
       const remDeadline = longRemRequestDeadline;
       const agentApiCall = (method: string, path: string, body?: unknown) =>
         api(method, path, body, { agentId, agentIdSource: "flag", signedOnly: true, ...remDeadline(method, path) });

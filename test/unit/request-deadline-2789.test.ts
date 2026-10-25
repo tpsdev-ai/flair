@@ -22,12 +22,14 @@ import {
   ApiRequestTimeout,
   DEFAULT_REQUEST_DEADLINE_MS,
   REQUEST_DEADLINE_ENV,
+  REM_REQUEST_DEADLINE_ENV,
+  resolveRequestDeadlineMs,
   sendJsonRequest,
   tryAgentKeyFloor,
 } from "../../src/lib/auth-resolve.ts";
 import { applySnapshot, formatUnknownState, type ApiCall } from "../../src/rem/restore.ts";
 import { runNightlyCycle, type RunnerOpts } from "../../src/rem/runner.ts";
-import { summarizeNightlyOutcome, longRemRequestDeadline, LONG_REM_REQUEST_DEADLINE_MS, DEDUP_REQUEST_DEADLINE_MS } from "../../src/commands/rem.ts";
+import { summarizeNightlyOutcome, longRemRequestDeadline, REM_WORK_REQUEST_DEADLINE_MS } from "../../src/commands/rem.ts";
 import { createSnapshot } from "../../src/rem/snapshot.ts";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
@@ -459,15 +461,46 @@ describe("rem nightly runner — a deadline expiry on a long route is unresolved
 });
 
 describe("rem long-route deadline (flair#2789)", () => {
-  test("the long REM routes get their own deadlines", () => {
-    expect(LONG_REM_REQUEST_DEADLINE_MS).toBe(900_000);
-    expect(longRemRequestDeadline("POST", "/MemoryMaintenance")).toEqual({ deadlineMs: 900_000 });
-    expect(longRemRequestDeadline("POST", "/ReflectMemories")).toEqual({ deadlineMs: 900_000 });
-    expect(DEDUP_REQUEST_DEADLINE_MS).toBe(1_800_000);
-    expect(longRemRequestDeadline("POST", "/MemoryDedupStats")).toEqual({ deadlineMs: 1_800_000 });
-    expect(longRemRequestDeadline("GET", "/MemoryMaintenance")).toEqual({});
-    expect(longRemRequestDeadline("POST", "/ConsolidateMemories")).toEqual({});
+  const REM_ROUTES = ["/MemoryMaintenance", "/ReflectMemories", "/MemoryDedupStats", "/AutoPromoteCandidates"];
+
+  test("one deadline covers every REM work route and nothing else", () => {
+    expect(REM_WORK_REQUEST_DEADLINE_MS).toBe(1_800_000);
+    for (const path of REM_ROUTES) {
+      expect(longRemRequestDeadline("POST", path, {})).toEqual({ deadlineMs: 1_800_000 });
+    }
+    expect(longRemRequestDeadline("GET", "/MemoryMaintenance", {})).toEqual({});
+    expect(longRemRequestDeadline("POST", "/ConsolidateMemories", {})).toEqual({});
   });
+
+  test("FLAIR_REM_REQUEST_TIMEOUT_MS changes the REM work deadline, not another route", () => {
+    const env = { [REM_REQUEST_DEADLINE_ENV]: "2400000" };
+    for (const path of REM_ROUTES) {
+      expect(longRemRequestDeadline("POST", path, env)).toEqual({ deadlineMs: 2_400_000 });
+    }
+    expect(longRemRequestDeadline("POST", "/ConsolidateMemories", env)).toEqual({});
+  });
+
+  test("empty and whitespace values of both variables behave as unset", () => {
+    for (const value of ["", "   ", "\t\n"]) {
+      expect(longRemRequestDeadline("POST", "/AutoPromoteCandidates", { [REM_REQUEST_DEADLINE_ENV]: value })).toEqual({
+        deadlineMs: 1_800_000,
+      });
+      expect(resolveRequestDeadlineMs(undefined, { [REQUEST_DEADLINE_ENV]: value })).toBe(DEFAULT_REQUEST_DEADLINE_MS);
+    }
+  });
+
+  test("an invalid FLAIR_REM_REQUEST_TIMEOUT_MS is refused before any request is sent", async () => {
+    const server = await serve(answerSoon({ ok: true }, 0));
+    for (const value of ["abc", "0", "-1", "1.5", "3600001"]) {
+      const env = { [REM_REQUEST_DEADLINE_ENV]: value };
+      const attempt = async () => {
+        const opts = longRemRequestDeadline("POST", "/AutoPromoteCandidates", env);
+        await sendJsonRequest(new URL(`${server.baseUrl}/AutoPromoteCandidates`), "POST", {}, ADMIN_AUTH, true, opts);
+      };
+      await expect(attempt()).rejects.toThrow(`${REM_REQUEST_DEADLINE_ENV} must be an integer from 1 to 3600000`);
+    }
+    expect(server.requests).toHaveLength(0);
+  }, 5_000);
 });
 
 describe("api() — a write with an unknown outcome is not replayed on the alternate configured port (flair#2789)", () => {

@@ -5,7 +5,7 @@
  * light and restorative run as the built CLI against a local HTTP listener;
  * the request that expires is POST /ConsolidateMemories, which uses
  * FLAIR_REQUEST_TIMEOUT_MS. rapid's only request is POST /ReflectMemories, which
- * carries the explicit 900 s deadline, so its action is driven from the built
+ * carries the explicit REM work deadline, so its action is driven from the built
  * dist module with an injected api that throws the same error the deadline
  * raises. That is the command action and its catch, not a unit of the catch.
  */

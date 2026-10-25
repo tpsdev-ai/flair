@@ -3,7 +3,7 @@
  * after an unknown write still exits 3 (flair#2789).
  *
  * The built CLI runs a cycle against a local HTTP listener. POST
- * /AutoPromoteCandidates is a write and is held past FLAIR_REQUEST_TIMEOUT_MS,
+ * /AutoPromoteCandidates is a write and is held past FLAIR_REM_REQUEST_TIMEOUT_MS,
  * so its outcome is unknown. The audit log path is a directory, so appending
  * the row fails. The report must carry the unknown outcome (exit 3) and print
  * the log failure too, instead of escaping to the command's exit-1 catch.
@@ -130,7 +130,7 @@ describe("flair#2789 — a nightly log append that fails after an unknown write"
   test("the report keeps the unknown outcome (exit 3) and prints the log failure", async () => {
     const result = await runCli(
       ["rem", "nightly", "run-once", "--agent", AGENT_ID],
-      { HOME: home, FLAIR_URL: `http://127.0.0.1:${listener.port}`, FLAIR_REQUEST_TIMEOUT_MS: String(DEADLINE_MS), NO_COLOR: "1" },
+      { HOME: home, FLAIR_URL: `http://127.0.0.1:${listener.port}`, FLAIR_REM_REQUEST_TIMEOUT_MS: String(DEADLINE_MS), NO_COLOR: "1" },
     );
     const detail = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
     expect(result.code, detail).toBe(3);

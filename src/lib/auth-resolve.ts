@@ -169,26 +169,50 @@ export const REQUEST_DEADLINE_ENV = "FLAIR_REQUEST_TIMEOUT_MS";
 export const REQUEST_DEADLINE_MIN_MS = 1;
 export const REQUEST_DEADLINE_MAX_MS = 3_600_000;
 
+/** The env var that overrides {@link DEFAULT_REM_REQUEST_DEADLINE_MS}. */
+export const REM_REQUEST_DEADLINE_ENV = "FLAIR_REM_REQUEST_TIMEOUT_MS";
+
+/**
+ * The single whole-request deadline for the REM work routes: POST
+ * /MemoryMaintenance, POST /ReflectMemories, POST /MemoryDedupStats and POST
+ * /AutoPromoteCandidates. The sizing basis is the dedup sweep: the repo
+ * fixture's 23.07 s over 403 live vectors is ~57 ms/memory, and the route
+ * scans every Memory row before it selects the capped ANN set of up to 20,000
+ * (DEDUP_CLUSTER_MAX_MEMORIES_DEFAULT), so 20,000 x ~57 ms = ~1,140 s and this
+ * deadline sits above it. It is a sizing estimate, not a throughput claim, and
+ * is within {@link REQUEST_DEADLINE_MAX_MS}. {@link REM_REQUEST_DEADLINE_ENV}
+ * overrides it; every other request through the shared REST sender resolves
+ * FLAIR_REQUEST_TIMEOUT_MS, else the shared default.
+ */
+export const DEFAULT_REM_REQUEST_DEADLINE_MS = 1_800_000;
+
+/**
+ * One deadline value from `raw`: undefined when the variable is unset, empty or
+ * whitespace-only; the number when it is an integer in range; a refusal naming
+ * `name` otherwise.
+ */
+function parseDeadlineEnv(name: string, raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < REQUEST_DEADLINE_MIN_MS || value > REQUEST_DEADLINE_MAX_MS) {
+    throw new Error(
+      `${name} must be an integer from ${REQUEST_DEADLINE_MIN_MS} to ${REQUEST_DEADLINE_MAX_MS} (milliseconds)`,
+    );
+  }
+  return value;
+}
+
 /**
  * The whole-request deadline in force: `explicit` when given, else the env
  * override, else the default. An out-of-range or non-integer env value is
  * refused here, before any request is sent, naming the variable and the range;
- * it is never silently defaulted.
+ * it is never silently defaulted. An empty or whitespace-only value is unset.
  */
 export function resolveRequestDeadlineMs(
   explicit: number | undefined = undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): number {
-  const raw = env[REQUEST_DEADLINE_ENV];
-  let envValue: number | undefined;
-  if (raw !== undefined) {
-    envValue = Number(raw);
-    if (!Number.isSafeInteger(envValue) || envValue < REQUEST_DEADLINE_MIN_MS || envValue > REQUEST_DEADLINE_MAX_MS) {
-      throw new Error(
-        `${REQUEST_DEADLINE_ENV} must be an integer from ${REQUEST_DEADLINE_MIN_MS} to ${REQUEST_DEADLINE_MAX_MS} (milliseconds)`,
-      );
-    }
-  }
+  const envValue = parseDeadlineEnv(REQUEST_DEADLINE_ENV, env[REQUEST_DEADLINE_ENV]);
   if (explicit !== undefined) {
     if (!Number.isSafeInteger(explicit) || explicit < REQUEST_DEADLINE_MIN_MS || explicit > REQUEST_DEADLINE_MAX_MS) {
       throw new Error(
@@ -198,6 +222,16 @@ export function resolveRequestDeadlineMs(
     return explicit;
   }
   return envValue ?? DEFAULT_REQUEST_DEADLINE_MS;
+}
+
+/**
+ * The REM work deadline in force: {@link REM_REQUEST_DEADLINE_ENV} when set,
+ * else {@link DEFAULT_REM_REQUEST_DEADLINE_MS}. An out-of-range or non-integer
+ * value is refused here, before any request is sent, naming the variable and
+ * the range; an empty or whitespace-only value is unset.
+ */
+export function resolveRemRequestDeadlineMs(env: NodeJS.ProcessEnv = process.env): number {
+  return parseDeadlineEnv(REM_REQUEST_DEADLINE_ENV, env[REM_REQUEST_DEADLINE_ENV]) ?? DEFAULT_REM_REQUEST_DEADLINE_MS;
 }
 
 /** The `HTTP <status>` clause for a deadline that fired after a status line. */
