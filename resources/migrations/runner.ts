@@ -217,9 +217,9 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
     const entry = state[migration.id];
     // flair#2840: re-read the ids a previous run recorded as unconfirmed on
     // each cycle that acquires the lock (this function), pending or not. A
-    // listed id is cleared here when the re-read finds its row at this
-    // migration's target or finds no row; a later batch that verifies the row's
-    // write clears it too.
+    // listed id is cleared here when the re-read answers `at-target` (the row
+    // needs no further write from this migration) or `no-row`; a later batch
+    // that verifies the row's write clears it too.
     const record = await reverifyUnconfirmed(migration, entry);
     records.set(migration.id, record);
     const survived = record && record.count > 0 ? record : null;
@@ -491,7 +491,8 @@ function stateFromOutcome(entry: MigrationStateEntry | undefined): MigrationProg
 /**
  * Re-reads the ids a state entry records as unconfirmed (flair#2840) and
  * returns the record that survives: an id is cleared when `checkUnconfirmed`
- * finds its row at this migration's target, or finds no row.
+ * answers `at-target` (the row needs no further write from this migration) or
+ * `no-row`.
  *
  * Conservative by construction: a `pending` verdict keeps the id, a read that
  * throws keeps it (unknown never clears a record), and a record whose count is

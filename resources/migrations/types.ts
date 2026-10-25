@@ -46,13 +46,13 @@ export interface MigrationProgress {
    * Rows recorded as unconfirmed (flair#2840): a write this migration made but
    * could not verify, or a loopback re-embed that answered 503
    * `write_outcome_unknown`, which can reflect an earlier writer's unresolved
-   * write rather than this migration's. A listed id leaves the count when
-   * a later batch verifies its write or a later read finds the row at the
-   * target or gone. A later cycle starts from the record it reads from the
-   * state file, whose id list is capped, so ids beyond the list are carried
-   * only in its count, which no later batch or read reduces. `unconfirmedIds`
-   * carries at most {@link UNCONFIRMED_IDS_LIMIT} of them; this count is not
-   * capped.
+   * write rather than this migration's. A listed id leaves the count when a
+   * later batch verifies its write, or a later read answers `at-target` (the
+   * row needs no further write from this migration) or `no-row`. A later cycle
+   * starts from the record it reads from the state file, whose id list is
+   * capped, so ids beyond the list are carried only in its count, which no
+   * later batch or read reduces. `unconfirmedIds` carries at most
+   * {@link UNCONFIRMED_IDS_LIMIT} of them; this count is not capped.
    */
   rowsUnconfirmed?: number;
   /** Up to {@link UNCONFIRMED_IDS_LIMIT} unconfirmed row ids, in the order they

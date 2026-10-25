@@ -35,10 +35,11 @@ export interface MigrationStateEntry {
   /** Rows recorded as unconfirmed and not since cleared: a write this
    *  migration made but could not verify, or a loopback re-embed that answered
    *  503 `write_outcome_unknown`, which can reflect an earlier writer's
-   *  unresolved write. A listed id clears
-   *  when a later batch verifies its write or a later read finds the row at
-   *  the target or gone; the ids beyond `unconfirmedIds` are carried as a
-   *  number that no later batch or read reduces (flair#2840). */
+   *  unresolved write. A listed id clears when a later batch verifies its
+   *  write, or a later read answers `at-target` (the row needs no further
+   *  write from this migration) or `no-row`; the ids beyond `unconfirmedIds`
+   *  are carried as a number that no later batch or read reduces
+   *  (flair#2840). */
   rowsUnconfirmed?: number;
   /** Up to `UNCONFIRMED_IDS_LIMIT` of those row ids. */
   unconfirmedIds?: string[];
