@@ -8,10 +8,10 @@
   `unconfirmedIds` (up to 100 ids, shown to admin callers) in `/HealthDetail`.
   The runner attempts to write them to the migration state file when the run
   completes and when it halts, except on a `pre-flight integrity check failed`
-  halt, which updates `/HealthDetail` only. The write is best-effort: after a
-  restart, the boot reads the record back from the data directory it selects
-  for writes, so `/HealthDetail` shows the record from the last write that
-  succeeded there.
+  halt, which updates `/HealthDetail` only. State-file writes are
+  best-effort. After a restart, the boot reads the state file in the data
+  directory it selects for writes; when that file is readable, `/HealthDetail`
+  shows its recorded outcome, and an unreadable file is treated as no record.
   The embedding stamp's loopback PATCH path logs a 503 `write_outcome_unknown`
   and leaves the row uncounted without naming it. The record is kept through
   cycles with no pending work, `detect()` failures and halts. A listed id is
