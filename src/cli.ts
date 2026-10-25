@@ -2877,6 +2877,8 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
   } catch (err) {
     // A write that reached its deadline may have committed. Never replay it
     // against another port: that is a blind retry of an unknown outcome.
+    // pinned by test/unit/request-deadline-2789.test.ts "a write whose deadline
+    // expires exits 3 and the alternate configured port receives no request"
     if (err instanceof ApiRequestOutcomeUnknown) throw err;
     // flair#1719: the resolved port came from Harper's boot record, which can
     // be stale for the default install. Before surfacing a connect failure,

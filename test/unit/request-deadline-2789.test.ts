@@ -6,9 +6,12 @@
  * Every test that uses a server talks to a real HTTP server (node:http); fetch
  * is never mocked. The never-answer and headers-then-stall servers are bounded
  * by the deadline under test, not by the test's own timer. The default-constant
- * test starts no server.
+ * test starts no server. The alternate-port describe spawns the built CLI with
+ * a scratch HOME that names the primary port in harper-config.yaml and the
+ * alternate in config.yaml, with no explicit base URL.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
@@ -26,6 +29,9 @@ import { applySnapshot, formatUnknownState, type ApiCall } from "../../src/rem/r
 import { runNightlyCycle, type RunnerOpts } from "../../src/rem/runner.ts";
 import { summarizeNightlyOutcome, longRemRequestDeadline, LONG_REM_REQUEST_DEADLINE_MS } from "../../src/commands/rem.ts";
 import { createSnapshot } from "../../src/rem/snapshot.ts";
+import { ensureCliBuild } from "../helpers/build-cli-once.js";
+import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const ADMIN_AUTH = `Basic ${Buffer.from("admin:stub-pass").toString("base64")}`;
 
@@ -458,4 +464,98 @@ describe("rem long-route deadline (flair#2789)", () => {
     expect(longRemRequestDeadline("GET", "/MemoryMaintenance")).toEqual({});
     expect(longRemRequestDeadline("POST", "/ConsolidateMemories")).toEqual({});
   });
+});
+
+describe("api() — a write with an unknown outcome is not replayed on the alternate configured port (flair#2789)", () => {
+  const CLI_PATH = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
+  const CHILD_DEADLINE_MS = 20_000;
+
+  function runCli(args: string[], env: Record<string, string>): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    return new Promise((resolve, reject) => {
+      const startedAt = Date.now();
+      const childEnv: Record<string, string> = {};
+      for (const [key, value] of Object.entries(process.env)) {
+        if (value !== undefined && !key.startsWith("FLAIR_") && !key.startsWith("HDB_")) childEnv[key] = value;
+      }
+      Object.assign(childEnv, env);
+      const child = spawn(nodeBin({ env: childEnv, cwd: env.HOME }), [CLI_PATH, ...args], {
+        cwd: env.HOME,
+        env: childEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+        // Literal so the spawn-budget gate sees a deadline (flair#1807).
+        timeout: 20_000,
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => (stdout += d));
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("close", (code, signal) => {
+        if (signal !== null) {
+          reject(new Error(childOverranDeadline("flair CLI", cliLeg(args), CHILD_DEADLINE_MS, { status: code, signal, elapsedMs: Date.now() - startedAt, stdout, stderr })));
+          return;
+        }
+        resolve({ stdout, stderr, code });
+      });
+    });
+  }
+
+  /**
+   * A scratch HOME shaped as the CLI resolves a default install: Harper's
+   * record in ~/.flair/data names the primary port, and ~/.flair/config.yaml
+   * names the alternate. No FLAIR_URL is set for the run.
+   */
+  function scratchHome(primaryPort: number, alternatePort: number): string {
+    const home = mkdtempSync(join(tmpdir(), "flair-2789-altport-"));
+    const flairDir = join(home, ".flair");
+    mkdirSync(join(flairDir, "data"), { recursive: true });
+    writeFileSync(join(flairDir, "data", "harper-config.yaml"), `http:\n  port: ${primaryPort}\n`);
+    writeFileSync(join(flairDir, "config.yaml"), `port: ${alternatePort}\n`);
+    return home;
+  }
+
+  /** A port nothing listens on: a connection there is refused. */
+  async function refusedPort(): Promise<number> {
+    const server = createServer((_req, _res) => { /* never reached */ });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    return port;
+  }
+
+  const memoryAdd = ["memory", "add", "--agent", "agent-a", "--admin-pass", "test-pass", "--content", "deadline probe"];
+
+  test("a write whose deadline expires exits 3 and the alternate configured port receives no request", async () => {
+    ensureCliBuild();
+    const primary = await serve(neverAnswer);
+    const alternate = await serve(answerSoon({ ok: true }, 0));
+    const home = scratchHome(
+      Number(new URL(primary.baseUrl).port),
+      Number(new URL(alternate.baseUrl).port),
+    );
+    try {
+      const result = await runCli(memoryAdd, { HOME: home, FLAIR_REQUEST_TIMEOUT_MS: "150", NO_COLOR: "1" });
+      const detail = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+      expect(alternate.requests, detail).toEqual([]);
+      expect(result.code, detail).toBe(3);
+      expect(result.stderr, detail).toContain("Unknown outcome:");
+      expect(result.stderr, detail).toContain("may or may not have taken effect");
+      expect(primary.requests.filter((r) => r.method === "PUT"), detail).toHaveLength(1);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("a connect-refused first target falls back to the alternate configured port", async () => {
+    ensureCliBuild();
+    const alternate = await serve(answerSoon({ ok: true }, 0));
+    const home = scratchHome(await refusedPort(), Number(new URL(alternate.baseUrl).port));
+    try {
+      const result = await runCli(memoryAdd, { HOME: home, FLAIR_REQUEST_TIMEOUT_MS: "150", NO_COLOR: "1" });
+      const detail = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+      expect(result.code, detail).toBe(0);
+      expect(alternate.requests.filter((r) => r.method === "PUT"), detail).toHaveLength(1);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
