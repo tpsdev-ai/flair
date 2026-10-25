@@ -41,7 +41,7 @@ describe("ordinary DELETE pointer compensation commit guard", () => {
     });
     expect(guard).toBeDefined();
     guard.saved = true;
-    // A real DatabaseTransaction, not a hand-built `this`: Harper 5.3.3's save() calls
+    // A real DatabaseTransaction, not a hand-built `this`: Harper 5.3.4's save() calls
     // getHandleStagedTxnTime(), which only the class provides.
     const txn = new DatabaseTransaction();
     txn.timestamp = 1;
