@@ -2118,21 +2118,27 @@ jobs:
           OPENCLAW_TGZ="$PACKED/$(pack openclaw-flair)"
           PI_TGZ="$PACKED/$(pack pi-flair)"
           N8N_TGZ="$PACKED/$(pack n8n-nodes-flair)"
+          BENCH_TGZ="$PACKED/$(pack flair-bench)"
           MCP_PREFIX=$(mktemp -d)
           OPENCLAW_PREFIX=$(mktemp -d)
           PI_PREFIX=$(mktemp -d)
           N8N_PREFIX=$(mktemp -d)
+          BENCH_PREFIX=$(mktemp -d)
           consumer_install "$MCP_PREFIX" "$CLIENT_TGZ" "$MCP_TGZ"
           consumer_install "$OPENCLAW_PREFIX" --legacy-peer-deps "$CLIENT_TGZ" "$OPENCLAW_TGZ"
           consumer_install "$PI_PREFIX" "$CLIENT_TGZ" "$PI_TGZ"
           consumer_install "$N8N_PREFIX" --legacy-peer-deps "$CLIENT_TGZ" "$N8N_TGZ"
+          # flair-bench depends on node-llama-cpp, not on flair-client, so it
+          # is installed alone.
+          consumer_install "$BENCH_PREFIX" "$BENCH_TGZ"
           bun "$GITHUB_WORKSPACE/scripts/audit-gate.mjs" --explain \
             --npm-install-prefix "$PREFIX" \
             --adk-npm-install-prefix "$ADK_PREFIX" \
             --mcp-npm-install-prefix "$MCP_PREFIX" \
             --openclaw-npm-install-prefix "$OPENCLAW_PREFIX" \
             --pi-npm-install-prefix "$PI_PREFIX" \
-            --n8n-npm-install-prefix "$N8N_PREFIX"
+            --n8n-npm-install-prefix "$N8N_PREFIX" \
+            --bench-npm-install-prefix "$BENCH_PREFIX"
 
   sast-semgrep:
     name: Semgrep SAST
