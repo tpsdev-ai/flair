@@ -212,8 +212,11 @@ function deadlineStatusClause(status: number | undefined): string {
 export type RequestDeadlineSource = "env" | "explicit";
 
 /**
- * Thrown when a GET or HEAD crosses the whole-request deadline. This is an
- * ordinary failure: a read has no effect to be unsure about.
+ * Thrown when a GET or HEAD crosses the whole-request deadline. The split is by
+ * method, not by effect: GET and HEAD that reach the deadline throw this type,
+ * and every other method throws {@link ApiRequestOutcomeUnknown}. A GET is not
+ * proof of no effect — `GET /FederationInstance` creates the identity row on
+ * first boot — so this type reports only that no complete response arrived.
  */
 export class ApiRequestTimeout extends Error {
   readonly method: string;
@@ -1258,7 +1261,8 @@ export async function sendJsonRequest(
     return JSON.parse(text);
   } catch (err: unknown) {
     // A fired deadline is reported by the deadline, not by the abort error
-    // fetch raised: a write may have committed, so it is an unknown outcome.
+    // fetch raised: a non-GET/HEAD request may have committed, so it is an
+    // unknown outcome, and a GET or HEAD is a plain timeout.
     if (timedOut) {
       const status = res?.status;
       if (readOnly) throw new ApiRequestTimeout(method, url.pathname, deadlineMs, status, deadlineSource);

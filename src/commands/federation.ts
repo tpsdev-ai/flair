@@ -2567,9 +2567,12 @@ export function register(program: Command): void {
           }
         } catch (e: any) {
           if (e instanceof ApiRequestOutcomeUnknown) {
-            // The DELETE may have committed. Count it apart from a definite
-            // failure and exit 3 for it (unknown outranks a known failure, as
-            // rem's `unresolved` does).
+            // An expired request is reported as an unknown outcome, like every
+            // other non-GET/HEAD request the CLI sends: the client cannot tell
+            // whether the server acted. Count it apart from a definite failure
+            // and exit 3 for it (unknown outranks a known failure, as rem's
+            // `unresolved` does). The route this DELETE targets cannot accept
+            // it; that route defect is #2868, outside this change.
             unknown++;
             console.log(`Unknown outcome for ${p.id}: ${e.message}`);
             continue;

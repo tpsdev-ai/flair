@@ -5,10 +5,15 @@
  * Two paths are driven through the built CLI against a local HTTP listener
  * that accepts the request and never answers:
  *
- *   federation prune --apply  catches the DELETE itself: it counts the peer
- *                             apart from a definite failure and exits 3.
+ *   federation prune --apply  catches the expired DELETE: it prints one
+ *                             unknown line for the peer, does not count it as
+ *                             an error, and exits 3.
  *   memory add                lets the error propagate: the top-level handler
  *                             reports it as `rem` does and exits 3.
+ *
+ * The prune case pins the CLI's reporting only. The local listener accepts any
+ * request; the real `/FederationPeers` route implements GET alone and cannot
+ * accept this DELETE (flair#2868).
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
@@ -101,7 +106,7 @@ afterAll(async () => {
 });
 
 describe("flair#2789 — a write with an unknown outcome exits 3", () => {
-  test("federation prune --apply counts the peer as unknown, not an error, and exits 3", async () => {
+  test("federation prune --apply reports an expired DELETE as unknown, not an error, and exits 3", async () => {
     listener.seen.length = 0;
     const result = await runCli(
       ["federation", "prune", "--apply", "--older-than", "1m", "--target", `http://127.0.0.1:${listener.port}`],
