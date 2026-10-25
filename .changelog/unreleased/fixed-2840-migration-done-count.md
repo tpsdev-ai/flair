@@ -12,7 +12,7 @@
   best-effort. The embedding stamp's loopback PATCH path reports a 503
   `write_outcome_unknown` row as unconfirmed. A
   listed id is cleared once a later batch verifies its write or a later read
-  finds its row at the migration's target or finds no row. The runner writes
+  finds its row needs no further write from the migration or finds no row. The runner writes
   at most 100 ids into the state file's record, and a later cycle starts from
   the record it reads back, so ids beyond those 100 are carried only in its
   count. (#2840)

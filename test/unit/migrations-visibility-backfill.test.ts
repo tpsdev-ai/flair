@@ -151,17 +151,19 @@ describe("deriveVisibilityFromDurability — the flair#509 rule, exhaustively", 
   });
 });
 
-describe("visibility-backfill migration — checkUnconfirmed compares against the row's derived target", () => {
-  it("answers at-target only when the row's visibility is the one its durability derives", async () => {
+describe("visibility-backfill migration — checkUnconfirmed clears a row with any non-null visibility", () => {
+  it("answers at-target when a value is present, pending when it is still null, no-row when there is no row", async () => {
     const { table } = makeFakeMemoryTable([
-      { id: "m1", durability: "persistent", visibility: "shared" },
-      { id: "m2", durability: "persistent", visibility: "private" },
-      { id: "m3", durability: "standard", visibility: "private" },
+      // An owner narrowed a persistent row to `private`: present, so this
+      // migration never writes it again and the unconfirmed record clears.
+      { id: "narrowed", durability: "persistent", visibility: "private" },
+      { id: "shared", durability: "persistent", visibility: "shared" },
+      { id: "null-visibility", durability: "persistent", visibility: null },
     ]);
     const m = makeMigration(() => table);
-    expect(await m.checkUnconfirmed!("m1")).toBe("at-target");
-    expect(await m.checkUnconfirmed!("m2")).toBe("pending");
-    expect(await m.checkUnconfirmed!("m3")).toBe("at-target");
+    expect(await m.checkUnconfirmed!("narrowed")).toBe("at-target");
+    expect(await m.checkUnconfirmed!("shared")).toBe("at-target");
+    expect(await m.checkUnconfirmed!("null-visibility")).toBe("pending");
     expect(await m.checkUnconfirmed!("absent-row")).toBe("no-row");
   });
 });

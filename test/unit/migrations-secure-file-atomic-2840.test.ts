@@ -17,7 +17,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wr
 import { Worker } from "node:worker_threads";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { ensureSecureDir, secureFileTempSuffix, writeSecureFile } from "../../resources/migrations/dir-safety.ts";
+import { ensureSecureDir, secureFileFsync, secureFileTempSuffix, writeSecureFile } from "../../resources/migrations/dir-safety.ts";
 
 const WORKER = join(import.meta.dirname, "..", "helpers", "migrations-secure-file-reader-2840.ts");
 
@@ -91,6 +91,35 @@ describe("writeSecureFile — atomic replacement (flair#2840)", () => {
     expect(readFileSync(file, "utf8")).toBe(NEW);
     expect(statSync(file).mode & 0o777).toBe(0o600 & ~process.umask());
     expect(readdirSync(dir)).toEqual(["state.json"]);
+  });
+
+  it("flushes the temporary file's data before the rename publishes it", () => {
+    const dir = secureDir();
+    const file = join(dir, "state.json");
+    writeSecureFile(file, OLD, dir);
+
+    const realSync = secureFileFsync.sync;
+    const seen: { fsynced: number; targetAtFsync: string | null }[] = [];
+    secureFileFsync.sync = (fd: number) => {
+      let targetAtFsync: string | null;
+      try {
+        targetAtFsync = readFileSync(file, "utf8");
+      } catch {
+        targetAtFsync = null;
+      }
+      seen.push({ fsynced: fd, targetAtFsync });
+      realSync(fd);
+    };
+    try {
+      writeSecureFile(file, NEW, dir);
+    } finally {
+      secureFileFsync.sync = realSync;
+    }
+
+    expect(seen.length).toBe(1);
+    // The rename has not happened yet: the target still holds the old contents.
+    expect(seen[0].targetAtFsync).toBe(OLD);
+    expect(readFileSync(file, "utf8")).toBe(NEW);
   });
 
   it("removes its temporary file when the rename fails (target is a directory)", () => {

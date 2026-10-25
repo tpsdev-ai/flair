@@ -191,10 +191,12 @@ export interface Migration {
    * OPTIONAL (flair#2840). The runner calls this for each row id a state-file
    * record lists as unconfirmed, on each cycle that acquires the migration lock
    * (including one with no pending work), to decide whether the id can be
-   * cleared: `at-target` when this read found the row at this migration's
-   * target for that id, `no-row` when it found no row, `pending` to keep the
-   * id. A read that throws is treated as unknown and also keeps the id. Omitted
-   * by migrations that never report unconfirmed ids.
+   * cleared: `at-target` when this read found the row needs no further write
+   * from this migration, `no-row` when it found no row, `pending` to keep the
+   * id. For visibility backfill, `at-target` means a visibility value is
+   * present, whoever wrote it; an owner's later value supersedes the
+   * unconfirmed write. A read that throws is treated as unknown and also keeps
+   * the id. Omitted by migrations that never report unconfirmed ids.
    */
   checkUnconfirmed?(id: string): Promise<UnconfirmedVerdict>;
 }
