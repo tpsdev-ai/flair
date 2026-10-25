@@ -18,7 +18,7 @@
  * Two real, ephemeral, loopback, HOME-isolated Harpers. Fixtures are neutral
  * (`agent-a`, `flair_spoke_a`, `flair_hub_a`).
  */
-import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -89,10 +89,51 @@ async function clearRetries(): Promise<void> {
   }
 }
 
+/** Put the sender's cursor at `at`. */
+async function setCursor(at: Date): Promise<void> {
+  const iso = at.toISOString();
+  await ops(sender, { operation: "update", table: "Peer", records: [{ id: HUB_ID, lastSyncAt: iso, updatedAt: iso }] });
+}
+
 /** Put the sender's cursor ahead of every row already on the instance. */
 async function setCursorNow(): Promise<void> {
-  const now = new Date().toISOString();
-  await ops(sender, { operation: "update", table: "Peer", records: [{ id: HUB_ID, lastSyncAt: now, updatedAt: now }] });
+  await setCursor(new Date());
+}
+
+/** Put the sender's cursor an hour back, so rows written now are past it. */
+async function setCursorBehindRows(): Promise<void> {
+  await setCursor(new Date(Date.now() - 3_600_000));
+}
+
+/** Delete every row of `table` on `h`, so an earlier case's row cannot be selected. */
+async function clearTable(h: HarperInstance, table: string): Promise<void> {
+  const rows = await ops(h, { operation: "sql", sql: `SELECT * FROM flair.${table}` });
+  for (const row of (Array.isArray(rows) ? rows : (rows?.results ?? [])) as any[]) {
+    await deleteRow(h, table, row.id);
+  }
+}
+
+const MERGE_PAUSE = "federation-merge";
+
+/**
+ * Release a pause an earlier case may still hold and remove every marker this
+ * file arms. Both Harpers share one pause directory, and the pause point opens
+ * its `claimed`/`paused`/`released` files with O_EXCL: a leftover marker makes
+ * the next arm inert, while a leftover arm pauses the next push.
+ */
+async function resetPauseMarkers(): Promise<void> {
+  writeFileSync(join(pauseDir, `go.${MERGE_PAUSE}`), "");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  for (const name of [
+    `arm.${MERGE_PAUSE}`,
+    `claimed.${MERGE_PAUSE}`,
+    `paused.${MERGE_PAUSE}`,
+    `go.${MERGE_PAUSE}`,
+    `released.${MERGE_PAUSE}`,
+    "fail.federation-synclog",
+  ]) {
+    rmSync(join(pauseDir, name), { force: true });
+  }
 }
 
 function retryRow(recordId: string, lastReason: string, over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -216,7 +257,20 @@ afterAll(async () => {
 }, HARPER_STOP_BUDGET_MS * 2 + 60_000);
 
 describe("flair#2797 — a merge_target_busy refusal is re-offered after the lock clears", () => {
+  beforeEach(async () => {
+    await resetPauseMarkers();
+    await clearTable(sender, "Memory");
+    await clearTable(receiver, "Memory");
+    await clearRetries();
+    await ops(sender, { operation: "update", table: "Peer", records: [{ id: HUB_ID, endpoint: receiver.httpURL, updatedAt: new Date().toISOString() }] });
+  }, 120_000);
+
+  afterEach(async () => {
+    await resetPauseMarkers();
+  }, 120_000);
+
   it("re-offers the refused row on the next sync, past the sender's cursor", async () => {
+    await setCursorBehindRows();
     const id = "memory-reoffer-a";
     const updatedAt = new Date(Date.now() - 120_000).toISOString();
     const fromSpoke = memoryRow(id, "from-spoke", updatedAt);
@@ -263,8 +317,8 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
   }, 420_000);
 
   it("a non-retryable refusal is not recorded and is not re-offered", async () => {
+    await setCursorBehindRows();
     const id = `memory.${randomBytes(3).toString("hex")}.content`;
-    // These cases share one sender; a row written now is past its cursor.
     const updatedAt = new Date().toISOString();
     await insertRow(sender, "Memory", memoryRow(id, "not-federated", updatedAt));
 
@@ -280,6 +334,7 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
   }, 240_000);
 
   it("the busy skip writes a SyncLog row naming its skippedReasons", async () => {
+    await setCursorBehindRows();
     const id = "memory-synclog-a";
     const updatedAt = new Date().toISOString();
     await insertRow(sender, "Memory", memoryRow(id, "logged", updatedAt));
@@ -372,7 +427,7 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
 
   it("a first indeterminate offer records a pending row before the cursor advances", async () => {
     await clearRetries();
-    await setCursorNow();
+    await setCursorBehindRows();
     const id = "memory-first-indeterminate";
     const updatedAt = new Date().toISOString();
     await insertRow(sender, "Memory", memoryRow(id, "first-indeterminate", updatedAt));
