@@ -105,7 +105,7 @@ function suffixWrite(verb: "PUT" | "PATCH", id: string): Promise<Response> {
 }
 
 /** Every run result the migration logged (test-only instrumentation). */
-function runs(): { processed: number; touchedIds: string[] }[] {
+function runs(): { processed: number; touchedIds: string[]; unconfirmedIds?: string[] }[] {
   const path = join(pauseDir, "embedding-stamp-runs.jsonl");
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
@@ -156,7 +156,7 @@ async function waitForHalt(reason: string, timeoutMs: number): Promise<boolean> 
   }
   return false;
 }
-async function waitForRun(predicate: (run: { processed: number; touchedIds: string[] }) => boolean, timeoutMs = 60_000): Promise<boolean> {
+async function waitForRun(predicate: (run: { processed: number; touchedIds: string[]; unconfirmedIds?: string[] }) => boolean, timeoutMs = 60_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (runs().some(predicate)) return true;
@@ -351,7 +351,8 @@ describe("flair#2478 — the migration's HTTP delegation holds the id's lock thr
     h.expectIncrementalWrites("esl-b3", HTTP_WRITER);
 
     // b4: an unreadable post-commit read. The request answers
-    // write_outcome_unknown, the row is not counted, and the id is fenced.
+    // write_outcome_unknown, the row is not counted, the id is reported as
+    // unconfirmed, and the id is fenced.
     await handOff(GATE, "memory-reembed-verify");
     await h.assertPaused("memory-reembed-verify");
     writeFileSync(join(pauseDir, "arm.memory-get-fail.esl-b4"), "");
@@ -361,7 +362,7 @@ describe("flair#2478 — the migration's HTTP delegation holds the id's lock thr
     expect(await h.waitForLog(unreadable), `the unreadable-read refusal was not logged within 30s: ${unreadable}`).toBe(true);
     expect(serverLog()).toContain(unreadable);
     await expectRefused(await ownerWrite("PUT", "esl-b4", OWNER_TEXT), "write_outcome_unknown");
-    expect(runs()[0]).toEqual({ processed: 1, touchedIds: ["esl-b3"] });
+    expect(runs()[0]).toEqual({ processed: 1, touchedIds: ["esl-b3"], unconfirmedIds: ["esl-b4"] });
     for (const id of ["esl-b1", "esl-b2", "esl-b4"]) expect(touched(id), `${id} was counted`).toBe(0);
   }, 300_000);
 });
@@ -461,7 +462,10 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
     await expectBoundTo(await h.readRow(c5), EDITED, ORIGINAL);
     await expectBoundTo(await h.readRow(c6), EDITED, ORIGINAL);
     await expectBoundTo(await h.readRow(c8), ORIGINAL);
-    expect(runs()[0]).toEqual({ processed: 3, touchedIds: [c1, c4, c9] });
+    // c3's row was deleted after its confirmation, and c7's post-commit read
+    // was unreadable: neither is counted as done, and both are reported by id
+    // (flair#2840).
+    expect(runs()[0]).toEqual({ processed: 3, touchedIds: [c1, c4, c9], unconfirmedIds: [c3, c7] });
     for (const id of [c5, c6, c8]) expect(touched(id), `${id} was not counted exactly once`).toBe(1);
     expect(touched(c7), "the unconfirmed row was counted").toBe(0);
     for (const id of [c1, c5, c6, c8, c9]) h.expectIncrementalWrites(id, SUFFIX_WRITER);

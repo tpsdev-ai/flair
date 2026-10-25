@@ -29,10 +29,13 @@ import {
   rewriteFederationPairLocalAccessError,
 } from "../lib/federation-pair-access.js";
 import {
+  ApiHttpError,
+  apiErrorRawBody,
   defaultAdminPassPath,
   isLocalBase,
   resolveAdminPassFromSources,
   resolveAdminUser,
+  ApiRequestOutcomeUnknown,
   ADMIN_PASS_FILE_FLAG,
   ADMIN_PASS_FILE_HELP,
   ADMIN_PASS_FLAG,
@@ -40,6 +43,17 @@ import {
 } from "../lib/auth-resolve.js";
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "../federation/scheduler.js";
 import { FEDERATION_MEMORY_SELECT } from "../lib/federation-memory-attributes.js";
+import { retryEntryKey } from "../lib/federation-retry-row.js";
+import {
+  MEMORY_RETRY_REASONS,
+  dueRetryRows,
+  retryOfferProblem,
+  retryRowConfirmation,
+  retryRowForAttempt,
+  retryRowForRefusal,
+  terminalRetryRow,
+  type RetryQueueRow,
+} from "../lib/federation-retry-queue.js";
 import {
   presenceCursorMs,
   presenceSendEnabled,
@@ -592,6 +606,10 @@ export function describeFederationStatusFetchFailed(url: string, setting: string
  *  `TypeError: fetch failed`, Bun's `Unable to connect…`, or a cause
  *  carrying a connect/DNS errno. Auth and HTTP errors stay out. */
 export function isFederationStatusConnectFailure(err: unknown): boolean {
+  // Every ApiHttpError is excluded: the ones sendJsonRequest raises are built
+  // only after a response arrived, so that connection did not fail, whatever
+  // the body says (flair#2764).
+  if (err instanceof ApiHttpError) return false;
   const msg = err instanceof Error ? err.message : String(err);
   if (/\bfetch failed\b/i.test(msg)) return true;
   if (/unable to connect/i.test(msg)) return true;
@@ -625,11 +643,11 @@ export function isFederationStatusAuthFailure(err: unknown): boolean {
     const status = (err as { status?: unknown }).status;
     if (status === 401 || status === 403) return true;
   }
-  const m = err instanceof Error
+  const m = apiErrorRawBody(err) || (err instanceof Error
     ? err.message
     : String(typeof err === "object" && err && "message" in err
       ? (err as { message?: unknown }).message ?? err
-      : err);
+      : err));
   return m.includes("missing_or_invalid_authorization") || /(?:^|\D)401(?:\D|$)/.test(m);
 }
 
@@ -645,11 +663,11 @@ export function isFederationStatusAuthRemedy(err: unknown): boolean {
   if (typeof err === "object" && "status" in err && (err as { status?: unknown }).status === 401) {
     return true;
   }
-  const m = err instanceof Error
+  const m = apiErrorRawBody(err) || (err instanceof Error
     ? err.message
     : String(typeof err === "object" && err && "message" in err
       ? (err as { message?: unknown }).message ?? err
-      : err);
+      : err));
   return m.includes("missing_or_invalid_authorization") || /(?:^|\D)401(?:\D|$)/.test(m);
 }
 
@@ -821,6 +839,156 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
     const tables = ["Memory", "Soul", "Agent", "Relationship"];
     const instance = await api("GET", "/FederationInstance", undefined, apiOpts);
+
+    // ── federation retry bookkeeping (flair#2797) ─────────────────────────
+    // An eligible generic Memory row the hub refused for a retryable reason is
+    // kept in FederationRetry and offered again on a later cycle while its
+    // pending row is valid, its backoff is due and the source row is still
+    // eligible, independent of the since cursor. A source the cursor selects
+    // that also has a pending row gets the same treatment: a valid row's
+    // attempt is reserved before the send and the outcome updates or resolves
+    // it; a malformed row is reported and left as stored. A non-retryable
+    // refusal ends the obligation; the retry path in one sender run does not
+    // select a terminal row again, and concurrent sender runs for one peer are
+    // not serialized (a separate issue).
+    const retryHeaders = { "Content-Type": "application/json", Authorization: auth };
+    // One projection for every Memory read: the cursor query and the retry
+    // re-read must not differ in what a row exposes to the signed batch.
+    const memorySelect = [...FEDERATION_MEMORY_SELECT];
+    const pendingRetries = new Map<string, RetryQueueRow>();
+    /** Pending rows whose attempt this run reserved before sending. */
+    const reservedOffers = new Set<string>();
+
+    async function loadPendingRetries(): Promise<void> {
+      const res = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: retryHeaders,
+        body: JSON.stringify({
+          operation: "search_by_conditions",
+          schema: "flair",
+          table: "FederationRetry",
+          operator: "and",
+          conditions: [
+            { search_attribute: "peerId", search_type: "equals", search_value: hub.id },
+            { search_attribute: "table", search_type: "equals", search_value: "Memory" },
+            { search_attribute: "state", search_type: "equals", search_value: "pending" },
+          ],
+          get_attributes: ["*"],
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`FederationRetry read failed (${res.status})`);
+      const list = await res.json() as unknown;
+      if (!Array.isArray(list)) throw new Error("FederationRetry read failed: body is not a row list");
+      for (const row of list as RetryQueueRow[]) pendingRetries.set(row.id, row);
+    }
+
+    /** Read one retry row back and check it with retryRowConfirmation. */
+    async function confirmRetryRow(operation: "upsert" | "update", record: Record<string, unknown>): Promise<void> {
+      const read = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: retryHeaders,
+        body: JSON.stringify({ operation: "search_by_hash", database: "flair", table: "FederationRetry", hash_values: [record.id], get_attributes: ["*"] }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!read.ok) throw new Error(`FederationRetry read-back failed (${read.status})`);
+      const rows = await read.json() as unknown;
+      if (!Array.isArray(rows)) throw new Error("FederationRetry read-back failed: body is not a row list");
+      const stored = (rows as any[]).find((r) => r.id === record.id) ?? null;
+      const mismatch = retryRowConfirmation(record, stored);
+      if (mismatch !== null) {
+        throw new Error(`FederationRetry ${operation} was not confirmed for ${String(record.id)} (${mismatch})`);
+      }
+    }
+
+    /** Write one retry row; an unconfirmed write is an error, never a silent success. */
+    async function writeRetryRow(operation: "upsert" | "update", record: Record<string, unknown>): Promise<void> {
+      const res = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: retryHeaders,
+        body: JSON.stringify({ operation, database: "flair", table: "FederationRetry", records: [record] }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`FederationRetry ${operation} failed (${res.status})`);
+      if (operation === "update") {
+        const body = await res.json().catch(() => null) as any;
+        if (!Array.isArray(body?.update_hashes) || !body.update_hashes.map(String).includes(String(record.id))) {
+          throw new Error(`FederationRetry update was not confirmed for ${String(record.id)}`);
+        }
+      }
+      // The upsert answer does not name the row and an update's hash only says
+      // it matched one. Read the row back: a write the sender cannot see is not
+      // a recorded obligation.
+      await confirmRetryRow(operation, record);
+    }
+
+    async function retireRetry(row: RetryQueueRow, resolution: string, nowIso = new Date().toISOString()): Promise<void> {
+      await writeRetryRow("update", terminalRetryRow(row, resolution, nowIso));
+      pendingRetries.delete(row.id);
+    }
+
+    async function loadMemoryRow(id: string): Promise<any | null> {
+      const res = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: retryHeaders,
+        body: JSON.stringify({
+          operation: "search_by_conditions",
+          schema: "flair",
+          table: "Memory",
+          operator: "and",
+          conditions: [{ search_attribute: "id", search_type: "equals", search_value: id }],
+          get_attributes: memorySelect,
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`Memory read failed (${res.status})`);
+      const rows = await res.json() as unknown;
+      if (!Array.isArray(rows)) throw new Error("Memory read failed: body is not a row list");
+      return (rows as any[])[0] ?? null;
+    }
+
+    async function applyMemoryOutcomes(
+      batch: any[],
+      result: { refused: Array<{ table: string; id: string; reason: string }>; indeterminate: Array<{ table: string; id: string }> },
+    ): Promise<void> {
+      const keyOf = (table: string, id: string) => JSON.stringify([table, id]);
+      const refused = new Map(result.refused.map((r) => [keyOf(r.table, r.id), r.reason]));
+      const undecided = new Set(result.indeterminate.map((r) => keyOf(r.table, r.id)));
+      const nowIso = new Date().toISOString();
+      for (const record of batch) {
+        if (record.table !== "Memory") continue;
+        const key = retryEntryKey(hub.id, "Memory", record.id);
+        const attemptReserved = reservedOffers.delete(key);
+        const prior = pendingRetries.get(key) ?? null;
+        // A row the shared validator names malformed is reported before the
+        // offer and left as stored: the outcome does not transition it.
+        if (prior !== null && retryOfferProblem(prior) !== null) continue;
+        if (undecided.has(keyOf(record.table, record.id))) {
+          // The receiver did not decide this record. Offering it again is safe
+          // (the merge is idempotent); `retry_unknown` is the sender's own name.
+          // A first offer records the obligation too, or the cursor advance
+          // would lose it.
+          const row = retryRowForRefusal({ peerId: hub.id, recordId: record.id, reason: "retry_unknown", nowIso, existing: prior, attemptReserved });
+          await writeRetryRow("upsert", row);
+          pendingRetries.set(String(row.id), row as unknown as RetryQueueRow);
+          continue;
+        }
+        const reason = refused.get(keyOf(record.table, record.id));
+        if (reason !== undefined) {
+          if (MEMORY_RETRY_REASONS.has(reason)) {
+            const row = retryRowForRefusal({ peerId: hub.id, recordId: record.id, reason, nowIso, existing: prior, attemptReserved });
+            await writeRetryRow("upsert", row);
+            pendingRetries.set(String(row.id), row as unknown as RetryQueueRow);
+          } else if (prior) {
+            await retireRetry(prior, "refused_terminal", nowIso);
+          }
+          continue;
+        }
+        if (prior) await retireRetry(prior, "merged", nowIso);
+      }
+    }
+
+    await loadPendingRetries();
     // A stored endpoint with a trailing slash still yields `<hub>/FederationSync`.
     const hubUrl = normalizeHubUrl(hub.endpoint ?? hub.id);
 
@@ -910,7 +1078,11 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
       const refused = parseSyncBatchRefused(body);
       const indeterminate = parseSyncBatchIndeterminate(body);
-      if (validatePresence) {
+      // A Memory batch changes the sender's retry state and advances its
+      // cursor, so its response must account for every offered record. Presence
+      // already requires the same. Other generic tables are checked on their
+      // counts.
+      if (validatePresence || batch[0]?.table === "Memory") {
         const outcomeBody = body as { refused?: unknown; indeterminate?: unknown };
         const validList = (raw: unknown, parsed: readonly unknown[]) =>
           raw === undefined || (Array.isArray(raw) && raw.length === parsed.length);
@@ -954,7 +1126,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           res = await fetch(`${opsEndpoint}/`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: auth },
-            body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions: [query], get_attributes: table === "Memory" ? [...FEDERATION_MEMORY_SELECT] : ["*"] }),
+            body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions: [query], get_attributes: table === "Memory" ? memorySelect : ["*"] }),
             signal: AbortSignal.timeout(15_000),
           });
         } catch (err: any) {
@@ -976,6 +1148,50 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         const federable = sinceCursor.filter((r: any) => table !== "Memory" || !isFederationPrivateVisibility(r.visibility));
         if (table === "Memory") privateHeldBack += sinceCursor.length - federable.length;
         rows = rows.concat(federable);
+      }
+      if (table === "Memory" && pendingRetries.size > 0) {
+        // Re-offer the pending rows whose backoff has elapsed. A row still
+        // selected by the since cursor is offered once (the set below). A row
+        // that is gone or has become private ends its obligation here.
+        const seen = new Set(rows.map((r: any) => r.id));
+        for (const pending of pendingRetries.values()) {
+          const problem = retryOfferProblem(pending);
+          if (problem !== null) {
+            console.warn(`⚠️  FederationRetry row ${pending.id} is malformed (${problem}); left as stored.`);
+          }
+        }
+        // A source the cursor selects that also has a valid pending row is
+        // offered now — a new change is not a retry, so the backoff does not
+        // hold it back — and its attempt is reserved before the send, exactly
+        // as on the re-offer path. A malformed row reserves nothing.
+        for (const row of rows) {
+          const pending = pendingRetries.get(retryEntryKey(hub.id, "Memory", row.id));
+          if (!pending || retryOfferProblem(pending) !== null) continue;
+          const reserved = retryRowForAttempt(pending, new Date().toISOString());
+          await writeRetryRow("upsert", reserved);
+          pendingRetries.set(String(reserved.id), reserved as unknown as RetryQueueRow);
+          reservedOffers.add(String(reserved.id));
+        }
+        for (const pending of dueRetryRows([...pendingRetries.values()], Date.now())) {
+          if (seen.has(pending.recordId)) continue;
+          const row = await loadMemoryRow(pending.recordId);
+          if (!row) {
+            await retireRetry(pending, "source_deleted");
+            continue;
+          }
+          if (isFederationPrivateVisibility(row.visibility)) {
+            await retireRetry(pending, "source_ineligible");
+            continue;
+          }
+          // Reserve this offer before the send; an unconfirmed send keeps the
+          // reservation, so the next cycle waits out its backoff.
+          const reserved = retryRowForAttempt(pending, new Date().toISOString());
+          await writeRetryRow("upsert", reserved);
+          pendingRetries.set(String(reserved.id), reserved as unknown as RetryQueueRow);
+          reservedOffers.add(String(reserved.id));
+          rows.push(row);
+          seen.add(pending.recordId);
+        }
       }
       if (rows.length === 0) continue;
 
@@ -1039,6 +1255,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
 
         if (batch.length >= BUDGET_RECORDS || (batch.length > 0 && batchBytes + srBytes > BUDGET_BYTES)) {
           const result = await sendBatch(batch);
+          if (table === "Memory") await applyMemoryOutcomes(batch, result);
           totalMerged += result.merged;
           totalSkipped += result.skipped;
           totalBatches++;
@@ -1053,6 +1270,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       // Send final partial batch for this table
       if (batch.length > 0) {
         const result = await sendBatch(batch);
+        if (table === "Memory") await applyMemoryOutcomes(batch, result);
         totalMerged += result.merged;
         totalSkipped += result.skipped;
         totalBatches++;
@@ -2334,6 +2552,7 @@ export function register(program: Command): void {
       // DELETE which requires admin auth.
       let deleted = 0;
       let errors = 0;
+      let unknown = 0;
       for (const p of candidates) {
         try {
           const res = await api("DELETE", `/FederationPeers/${encodeRecordId(p.id)}`, undefined, baseUrl ? { baseUrl } : undefined);
@@ -2347,11 +2566,23 @@ export function register(program: Command): void {
             console.log(`Failed to delete ${p.id}: ${JSON.stringify(res)}`);
           }
         } catch (e: any) {
+          if (e instanceof ApiRequestOutcomeUnknown) {
+            // An expired request is reported as an unknown outcome, like every
+            // other non-GET/HEAD request through the shared REST sender: the client cannot tell
+            // whether the server acted. Count it apart from a definite failure
+            // and exit 3 for it (unknown outranks a known failure, as rem's
+            // `unresolved` does). The route this DELETE targets cannot accept
+            // it; that route defect is #2868, outside this change.
+            unknown++;
+            console.log(`Unknown outcome for ${p.id}: ${e.message}`);
+            continue;
+          }
           errors++;
           console.log(`Failed to delete ${p.id}: ${e.message}`);
         }
       }
-      console.log(`${deleted} peer(s) deleted; ${errors} error(s).`);
+      console.log(`${deleted} peer(s) deleted; ${errors} error(s); ${unknown} unknown outcome(s).`);
+      if (unknown > 0) process.exit(3);
       if (errors > 0) process.exit(1);
     });
 

@@ -3,7 +3,7 @@
  * list-harper-bundled.mjs — print the packages harper ships in its own tree.
  *
  * Since 5.3.2 harper bundles some of its production dependencies
- * (`bundleDependencies`; 70 of 83 in 5.3.3) instead of shipping an
+ * (`bundleDependencies`; 70 of 83 in 5.3.4) instead of shipping an
  * `npm-shrinkwrap.json`. Those copies sit
  * under `node_modules/harper/node_modules`, where they resolve ahead of the
  * root tree: root overrides do not replace them in a bun install either, and

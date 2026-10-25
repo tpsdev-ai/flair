@@ -213,7 +213,7 @@ import { txnPausePoint } from "../txn-pause-point.js";
 import { harperPortValue } from "../../src/lib/harper-port-value.js";
 import { DEFAULT_HTTP_PORT } from "../a2a-url.js";
 import { currentSpaceRawForms, isCurrentSpaceStamp } from "../embedding-space-guard.js";
-import type { Migration, RunBatchResult } from "./types.js";
+import { BatchOutcomeError, type Migration, type RunBatchResult } from "./types.js";
 import { EMBEDDING_STAMP_ID } from "./stamp-outstanding.js";
 import { endsWithContentSelectorSuffix } from "../../src/lib/memory-id-policy.js";
 import { skillEmbedText } from "../skill-write.js";
@@ -294,13 +294,14 @@ export function resolveSelfBaseUrl(env: NodeJS.ProcessEnv = process.env): string
  * Triggers Memory.patch()'s re-embed branch via a genuine loopback HTTP
  * PATCH — the ONLY reliable way to reach resources/Memory.ts's subclass logic
  * (see module doc). The body names only the two embedding fields, never the
- * row this migration read. Returns true iff the request succeeded (2xx);
- * NEVER throws — on false the row is re-checked on the next batch or cycle.
+ * row this migration read. Returns true iff the request succeeded (2xx); a
+ * 503 `write_outcome_unknown` answers `{ ok: false, unconfirmed: true }`;
+ * NEVER throws — a false outcome is re-checked on the next batch or cycle.
  */
 async function regenViaHttpPatch(
   id: string,
   fetchImpl: typeof fetch,
-): Promise<boolean> {
+): Promise<boolean | { ok: boolean; unconfirmed: boolean }> {
   const authHeader = resolveAdminAuthHeader();
   if (!authHeader) return false; // no admin credential available this cycle — retried next boot
   try {
@@ -310,7 +311,12 @@ async function regenViaHttpPatch(
       body: JSON.stringify({ embedding: null, embeddingModel: null }),
       signal: AbortSignal.timeout(REGEN_HTTP_TIMEOUT_MS),
     });
-    if (res.status === 503) await logRegenRefusal(id, res);
+    if (res.status === 503) {
+      const code = await logRegenRefusal(id, res);
+      // The id has an unresolved write, which may have committed: report it by
+      // id as unconfirmed (flair#2840).
+      if (code === "write_outcome_unknown") return { ok: false, unconfirmed: true };
+    }
     return res.ok;
   } catch {
     return false;
@@ -325,10 +331,9 @@ async function regenViaHttpPatch(
  *  unresolved write, which can be this request's own re-embed (a committed row
  *  it could not read back, or one whose read-back did not show the write, or a
  *  step after a commit that failed before any read-back), so that write may have
- *  committed. The
- *  row is uncounted; the next scan decides whether it is still stale. Logs the
- *  refusal's code. */
-async function logRegenRefusal(id: string, res: Response): Promise<void> {
+ *  committed. The row is uncounted; the next scan decides whether it is still
+ *  stale. Returns the refusal's code (or `unnamed`). */
+async function logRegenRefusal(id: string, res: Response): Promise<string> {
   let code = "unnamed";
   try {
     const body = (await res.json()) as { error?: unknown };
@@ -337,6 +342,7 @@ async function logRegenRefusal(id: string, res: Response): Promise<void> {
     // An unreadable refusal body is logged as unnamed.
   }
   console.warn("[embedding-stamp] %s: the re-embed request was refused 503 %s; the row is uncounted and the next scan decides whether it is still stale", id, code);
+  return code;
 }
 
 /** A vector this migration may stamp as current: a non-empty array of finite numbers. */
@@ -527,7 +533,7 @@ async function stageContentSuffixUpdate(
 export function createEmbeddingStampMigration(
   getTable: () => MemoryTableLike = defaultMemoryTable,
   getCurrentModelId: () => string = getModelId,
-  regen: (id: string, existing: Record<string, unknown>) => Promise<boolean> = (id) =>
+  regen: (id: string, existing: Record<string, unknown>) => Promise<boolean | { ok: boolean; unconfirmed: boolean }> = (id) =>
     regenViaHttpPatch(id, fetch),
   contentSuffixRegen: ContentSuffixRegenDeps = defaultContentSuffixRegenDeps,
 ): Migration {
@@ -615,6 +621,14 @@ export function createEmbeddingStampMigration(
       return n;
     },
 
+    async checkUnconfirmed(id: string) {
+      const row = await getTable().get(id);
+      if (!row) return "no-row" as const;
+      return rowEmbeddingCurrent(row as Record<string, unknown>, getCurrentModelId())
+        ? "at-target" as const
+        : "pending" as const;
+    },
+
     async run(batchSize: number): Promise<RunBatchResult> {
       const table = getTable();
       const current = getCurrentModelId();
@@ -626,14 +640,32 @@ export function createEmbeddingStampMigration(
       }
 
       const touchedIds: string[] = [];
+      const unconfirmedIds: string[] = [];
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
         const existing = await table.get(id);
         if (!existing) continue; // deleted since the search above — nothing to fix
-        if (rowEmbeddingCurrent(existing, current)) continue; // already current (stamp and hash) — idempotent skip
+        if (rowEmbeddingCurrent(existing, current)) {
+          // Current now although the scan above selected it: another writer's
+          // change between the scan and this read. This run has not attempted
+          // the row, so it is not this migration's work and stays uncounted
+          // (flair#2840).
+          continue;
+        }
 
         let ok: boolean;
+        // Set when this row's outcome is unconfirmed (flair#2840). On the
+        // `.content` path: an attempt whose committed effect the post-commit
+        // verification read did not show; the row is counted as done only if a
+        // later attempt in that loop is verified (`ok`), and otherwise it is
+        // reported by id when the batch returns or the retry read throws (the
+        // BatchOutcomeError below). On the loopback path: a 503
+        // `write_outcome_unknown` answer, which can reflect an earlier writer's
+        // unresolved write; `regenViaHttpPatch` answers `ok: false`, and the
+        // row is reported by id when the batch returns. A throw elsewhere in the
+        // batch that does not wrap its outcome loses the id.
+        let unconfirmed = false;
         if (endsWithContentSelectorSuffix(id)) {
           // flair#2656: the commit is not proof the update landed. A newer write
           // committing after the confirm read can make the commit resolve while
@@ -641,7 +673,6 @@ export function createEmbeddingStampMigration(
           // bound; count the row touched only when the committed row shows the
           // staged fields and the text the vector was computed for.
           ok = false;
-          let unconfirmed = false;
           // The vector and text of this row's last unconfirmed attempt.
           let ownUnconfirmed: StagedVector | undefined;
           // One guard over the whole retry loop (flair#2478): when the loop ends
@@ -649,9 +680,10 @@ export function createEmbeddingStampMigration(
           // unconfirmed, by a break, a refusal or a thrown error, the unconfirmed
           // outcome is logged exactly once. A later verified attempt sets `ok`,
           // and nothing is logged. An error the loop itself throws (a retry's
-          // fresh read of the row) propagates to the runner after the line is
-          // logged; an error inside an attempt is caught by regenContentSuffixRow
-          // and ends the loop as a skipped attempt.
+          // fresh read of the row) leaves as a BatchOutcomeError carrying this
+          // row and the batch's earlier outcomes, after the line is logged; an
+          // error inside an attempt is caught by regenContentSuffixRow and ends
+          // the loop as a skipped attempt.
           try {
             for (let attempt = 1; attempt <= CONTENT_SUFFIX_REGEN_ATTEMPTS; attempt++) {
               const rowNow = attempt === 1 ? existing : await table.get(id);
@@ -690,6 +722,11 @@ export function createEmbeddingStampMigration(
               ownUnconfirmed = attemptResult.staged;
               if (attemptResult.verdict === "unreadable") break;
             }
+          } catch (err) {
+            // flair#2840: carry this batch's outcomes on the error — the runner
+            // has no RunBatchResult to read when run() throws.
+            if (unconfirmed) unconfirmedIds.push(id);
+            throw new BatchOutcomeError({ touchedIds, unconfirmedIds }, err);
           } finally {
             if (!ok && unconfirmed) {
               console.warn("[embedding-stamp] %s: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed, the row is uncounted and a later scan decides pending state", id);
@@ -699,9 +736,18 @@ export function createEmbeddingStampMigration(
           // Test-only: inert unless the fault-injection env opt-in is set and armed.
           const pause = txnPausePoint("embedding-stamp-regen-pre");
           if (pause) await pause;
-          ok = await regen(id, existing);
+          const outcome = await regen(id, existing);
+          if (typeof outcome === "boolean") {
+            ok = outcome;
+          } else {
+            ok = outcome.ok;
+            // The loopback PATCH answered 503 write_outcome_unknown: the id has
+            // an unresolved write, which may have committed (flair#2840).
+            if (outcome.unconfirmed) unconfirmed = true;
+          }
         }
         if (ok) touchedIds.push(id);
+        else if (unconfirmed) unconfirmedIds.push(id);
         // A false result does not add the row to touchedIds. It does not prove
         // nothing was written (a loopback PATCH can commit before its response
         // fails); the next live scan decides, retrying the row only if it is
@@ -709,8 +755,11 @@ export function createEmbeddingStampMigration(
         // transaction is known to write nothing.
       }
 
-      noteTestMigrationRun({ processed: touchedIds.length, touchedIds });
-      return { processed: touchedIds.length, touchedIds };
+      const result: RunBatchResult = unconfirmedIds.length > 0
+        ? { processed: touchedIds.length, touchedIds, unconfirmedIds }
+        : { processed: touchedIds.length, touchedIds };
+      noteTestMigrationRun(result);
+      return result;
     },
   };
 }

@@ -57,7 +57,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ALLOWLIST_PATH = join(REPO_ROOT, ".github", "audit-allowlist.json");
@@ -615,29 +615,73 @@ function realPathInsideHarper(path, realHarper, label) {
 }
 
 /**
- * Resolve a dependency inside harper's installed tree; never outside it: a
- * candidate package.json whose real path is outside harper's tree throws.
- * Returns the package directory and the real path of its package.json, or null.
+ * Applies `realPathInsideHarper` to each directory on `relPath` below
+ * `harperDir`, from its first segment to its last. `relPath` is relative to
+ * `harperDir`, and the error names the directory relative to it. Returns the
+ * real path of the last directory.
  */
-function resolveHarperDependency(fromDir, harperDir, realHarper, name) {
+function directoriesInsideHarper(harperDir, relPath, realHarper) {
+  const segments = relPath.split(/[\\/]/);
+  let real = realHarper;
+  for (let i = 1; i <= segments.length; i++) {
+    const label = segments.slice(0, i).join("/");
+    real = realPathInsideHarper(join(harperDir, label), realHarper, label);
+  }
+  return real;
+}
+
+/**
+ * The node_modules directories Node's resolver searches for a package required
+ * from `fromDir`, a real path at or below `realHarper`, cut off at harper's
+ * directory: walking from `fromDir` up to and including `realHarper`, each
+ * directory not itself named node_modules contributes its node_modules child.
+ */
+export function harperSearchPaths(fromDir, realHarper) {
+  if (fromDir !== realHarper && !fromDir.startsWith(`${realHarper}${sep}`)) {
+    throw new Error("a dependency search started outside harper's installed tree");
+  }
+  const paths = [];
   let dir = fromDir;
   while (true) {
-    const candidate = join(dir, "node_modules", name);
-    try {
-      const manifest = realPathInsideHarper(
-        join(candidate, "package.json"),
-        realHarper,
-        relative(harperDir, join(candidate, "package.json")),
-      );
-      return { dir: candidate, manifest };
-    } catch (e) {
-      if (e.code !== "ENOENT" && e.code !== "ENOTDIR") throw e;
-    }
-    if (dir === harperDir) return null;
+    if (basename(dir) !== "node_modules") paths.push(join(dir, "node_modules"));
+    if (dir === realHarper) return paths;
     const parent = dirname(dir);
-    if (parent === dir) return null;
+    if (parent === dir) throw new Error("a dependency search did not reach harper's directory");
     dir = parent;
   }
+}
+
+/** True for a dependency name shaped like an npm package name: `name` or `@scope/name`. */
+function isPackageName(name) {
+  return /^(?:@[^@/\\]+\/)?[^@/\\][^@/\\]*$/.test(name) &&
+    !name.split("/").some((part) => part === "." || part === "..");
+}
+
+/**
+ * Look up the package `name` required from `fromDir` (a real path at or below
+ * `realHarper`) in `harperSearchPaths(fromDir, realHarper)`, in order: the
+ * first search directory that holds `<name>/package.json` wins. A name that is
+ * not shaped like a package name resolves to nothing. Once a package.json is
+ * found, it and each directory from harper's directory down to its package
+ * directory must resolve inside harper's installed tree, or this throws.
+ * Returns the real paths of the package directory and its package.json, or null.
+ */
+export function resolveHarperDependency(fromDir, realHarper, name) {
+  if (typeof name !== "string" || !isPackageName(name)) return null;
+  for (const searchDir of harperSearchPaths(fromDir, realHarper)) {
+    const relPath = relative(realHarper, join(searchDir, name));
+    // Walk installed manifests, not runtime imports: a package may export
+    // subpaths without exporting its bare name.
+    let manifest;
+    try {
+      manifest = realPathInsideHarper(join(realHarper, relPath, "package.json"), realHarper, `${relPath}/package.json`);
+    } catch (e) {
+      if (e.code === "ENOENT" || e.code === "ENOTDIR") continue;
+      throw e;
+    }
+    return { dir: directoriesInsideHarper(realHarper, relPath, realHarper), manifest };
+  }
+  return null;
 }
 
 /** Read and parse a package.json under harper; an unreadable or invalid one throws a named error. */
@@ -659,15 +703,17 @@ function readHarperManifest(manifestPath, name) {
  * `roots` or in their dependency closure. npm ships each bundled package's
  * dependency closure inside the tarball too; closure members may be hoisted to
  * the top level of harper's tree (for example fast-uri through fastify) or
- * nested below it. Each dependency is resolved before it is compared with the
- * target, and it matches only when it resolves to `node_modules/<target>` at
- * harper's top level. Missing dependencies are skipped; their absence does not
- * enlarge the bundled set. The walk makes at most `limit` lookups, the bundled
- * packages included, and throws past that.
+ * nested below it. Each dependency is resolved with `resolveHarperDependency`
+ * from the real path of the package that requires it, before it is compared
+ * with the target, and it matches only when it resolves to the real path of
+ * `node_modules/<target>` at harper's top level. Missing dependencies are
+ * skipped; their absence does not enlarge the bundled set. The walk makes at
+ * most `limit` lookups, the bundled packages included, and throws past that.
  */
 function harperBundleIncludes(harperDir, roots, target, limit = 5000) {
   const realHarper = realpathSync(harperDir);
-  const targetDir = join(harperDir, "node_modules", target);
+  const targetDir = resolveHarperDependency(realHarper, realHarper, target)?.dir;
+  if (!targetDir) return false;
   const seen = new Set();
   const queue = [];
   let lookups = 0;
@@ -675,18 +721,19 @@ function harperBundleIncludes(harperDir, roots, target, limit = 5000) {
     if (++lookups > limit) {
       throw new Error(`dependency closure for harper's bundled packages exceeded ${limit} lookups`);
     }
-    const found = resolveHarperDependency(from, harperDir, realHarper, name);
-    if (!found || seen.has(found.dir)) return false;
+    const found = resolveHarperDependency(from, realHarper, name);
+    if (!found) return false;
     if (name === target && found.dir === targetDir) {
       readHarperManifest(found.manifest, target);
       return true;
     }
+    if (seen.has(found.dir)) return false;
     seen.add(found.dir);
     queue.push(found);
     return false;
   };
   for (const name of roots) {
-    if (reaches(harperDir, name)) return true;
+    if (reaches(realHarper, name)) return true;
   }
   while (queue.length) {
     const { dir, manifest } = queue.shift();
@@ -749,7 +796,8 @@ function harperShippedVersion(npmPrefix, harperRoot, node) {
     throw new Error("harper's package.json declares no bundleDependencies");
   }
   const harperDir = join(npmPrefix, harperRoot);
-  if (!resolveHarperDependency(harperDir, harperDir, realpathSync(harperDir), topLevel)) {
+  const realHarper = realpathSync(harperDir);
+  if (!resolveHarperDependency(realHarper, realHarper, topLevel)) {
     throw new Error(`harper's tree has no package.json for ${JSON.stringify(topLevel)}`);
   }
   if (!harperBundleIncludes(harperDir, roots, topLevel)) {
@@ -778,9 +826,10 @@ function harperShrinkwrapDecides(npmPrefix, harperRoot) {
  * and any audit-reported version with the version harper shipped it at: the
  * shrinkwrap pin for releases that carry one, otherwise the bundle evidence in the
  * consumer install's package-lock and harper's package.json. Empty node lists,
- * a node package.json whose real path is outside harper's installed tree,
- * unreadable required metadata, and version mismatches block the gate; errors
- * name a node when one was reported.
+ * a node package.json, package directory or directory between harper's and it
+ * whose real path is outside harper's installed tree, unreadable required
+ * metadata, and version mismatches block the gate; errors name a node when one
+ * was reported.
  */
 export function vendorPinnedNodeProblems(adv, npmPrefix) {
   const nodes = adv.nodes;
@@ -799,11 +848,10 @@ export function vendorPinnedNodeProblems(adv, npmPrefix) {
     const harperRoot = harperNodeRoot(node, adv.package);
     const pinKey = node.slice(harperRoot.length + 1);
     try {
-      const manifest = realPathInsideHarper(
-        join(npmPrefix, node, "package.json"),
-        realpathSync(join(npmPrefix, harperRoot)),
-        `${pinKey}/package.json`,
-      );
+      const harperDir = join(npmPrefix, harperRoot);
+      const realHarper = realpathSync(harperDir);
+      const manifest = realPathInsideHarper(join(npmPrefix, node, "package.json"), realHarper, `${pinKey}/package.json`);
+      directoriesInsideHarper(harperDir, pinKey, realHarper);
       const installed = JSON.parse(readFileSync(manifest, "utf8"))?.version;
       const reported = adv.nodeVersions?.[node];
       if (typeof installed !== "string" || !installed ||

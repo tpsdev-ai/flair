@@ -44,15 +44,17 @@
  *
  *   resolveAgentAuth({ request: { tpsAgent: undefined } })  ->  { kind: "internal" }
  *   resolveAgentAuth({ request: { tpsAgent: ""        } })  ->  { kind: "internal" }
- *   allowAdmin({ request: { tpsAgent: undefined } })        ->  true
+ *   allowAdmin({ request: { tpsAgent: undefined } })        ->  false
  *
  * `resolveAgentAuth` tests `tpsAgent` for TRUTHINESS, so a missing or empty id
  * is indistinguishable from "no identity was supplied at all" — and that is the
  * trusted verdict. The consequence is that the most ordinary application bug
  * there is — `agentContext(session.agentId)` where the field is undefined, a
- * typo'd property, a lookup that found nothing — would not fail closed. It
- * would silently grant unfiltered cross-agent reads and writes, and pass the
- * admin-only gate on admin-only resources. No error, no 403, no log line.
+ * typo'd property, a lookup that found nothing — would not fail closed: the
+ * agent-facing gate (`allowVerified`) admits the `internal` verdict, and a
+ * `Memory` read with it is unfiltered. The admin-only gate refuses it:
+ * `allowAdmin` admits the `internal` verdict only for a call that carries
+ * `internalContext()`'s marker and no request headers.
  *
  * That is the same defect class as a check that cannot fail: **the failure mode
  * of "I forgot the id" must never be "you are now an administrator."** So:
@@ -113,9 +115,8 @@ function requireAgentId(agentId: unknown, fnName: string): string {
     throw new InProcessContextError(
       `${fnName}() requires a non-empty agent id, but received ${got}. ` +
       "This is refused rather than defaulted because flair resolves a missing or empty " +
-      "tpsAgent to its trusted `internal` verdict, which reads and writes UNFILTERED across " +
-      "every agent and passes the admin-only gate — so returning a context here would have " +
-      "turned a missing id into silent administrator access. Resolve the agent id from your " +
+      "tpsAgent to its trusted `internal` verdict, which can keep UNFILTERED access on " +
+      "agent-facing paths. Resolve the agent id from your " +
       "own server-side state before calling, and never from request data.",
     );
   }
@@ -189,15 +190,14 @@ export function adminContext(agentId: string): CallContext {
  *
  * This exists for work that is genuinely infrastructure rather than an agent's:
  * provisioning a principal, a migration, a maintenance sweep. It is the same
- * verdict a context-less call used to fall into by accident; naming it means an
- * application can no longer reach it by forgetting an argument, and means
- * `git grep internalContext` enumerates every place flair or an embedder took
- * that authority deliberately.
+ * `internal` verdict that `resolveAgentAuth(undefined)` returns, and
+ * `git grep internalContext` finds textual references to this helper's name in
+ * tracked files.
  *
  * There is no id to validate: the verdict comes precisely from the ABSENCE of
- * an identity annotation, so the returned object carries none. The marker field
- * is inert — it documents intent at a debugger breakpoint and is read by
- * nothing.
+ * an identity annotation, so the returned object carries none. The admin-only
+ * gate reads its marker: `allowAdmin` admits the `internal` verdict only for a
+ * call that carries it and no request headers.
  *
  * ```ts
  * // Registering a principal — infrastructure, not an agent's own write.

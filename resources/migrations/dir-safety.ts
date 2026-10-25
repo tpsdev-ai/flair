@@ -19,7 +19,9 @@
  * creation.") — a directory can be re-permissioned by something else on the
  * host between creation and a later write in a long-running batch loop.
  */
-import { existsSync, mkdirSync, chmodSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { basename, dirname, join } from "node:path";
 
 export class UnsafeDirectoryError extends Error {
   constructor(
@@ -63,12 +65,62 @@ export function ensureSecureDir(dir: string): void {
   }
 }
 
+/** Test seam: the random part of {@link writeSecureFile}'s temporary file name. */
+export const secureFileTempSuffix = { next: (): string => randomBytes(8).toString("hex") };
+
+/** Test seam: the data flush {@link writeSecureFile} makes before its rename. */
+export const secureFileFsync = { sync: (fd: number): void => fsyncSync(fd) };
+
 /**
  * Writes `contents` to `path` at 0600, re-verifying the CONTAINING
  * directory is still 0700 immediately before the write (per Kern's
  * write-time re-verification requirement above).
+ *
+ * The write is ATOMIC: the contents go to a fresh temporary file beside the
+ * target (same directory, so the rename stays on one filesystem), created with
+ * mode 0600 (the process umask can only remove bits from it), which is then
+ * renamed over the target. Once the target exists, a concurrent reader
+ * observes either the old file or the new file — never a truncated or
+ * half-written one (a plain writeFileSync truncates first and fills second, so
+ * a reader can land in between and see an empty or partial file); before the
+ * first rename there is no file to read. The temporary file's data is flushed
+ * (fsyncSync) before the rename, so after a power loss or OS crash the target
+ * is not left empty or truncated. The rename's directory entry itself is NOT
+ * fsynced.
+ *
+ * What this does NOT solve: two concurrent WRITERS still race on their
+ * read-modify-write cycles (last rename wins, the other writer's entry is
+ * lost). Serializing writers is a separate follow-up, not done here.
  */
 export function writeSecureFile(path: string, contents: string, dir: string): void {
   verifySecureDir(dir);
-  writeFileSync(path, contents, { mode: 0o600 });
+  const targetDir = dirname(path);
+  const temp = join(targetDir, `.${basename(path)}.${process.pid}.${secureFileTempSuffix.next()}.tmp`);
+  // Set once the exclusive create succeeds. The catch unlinks the temporary
+  // path only when it is set, so a pre-existing file at that path is left in
+  // place when the create fails on it.
+  let created = false;
+  try {
+    const fd = openSync(temp, "wx", 0o600);
+    created = true;
+    try {
+      writeFileSync(fd, contents);
+      // Flush the data before the rename publishes the name: without this a
+      // crash can keep the rename but lose the data, leaving an empty or
+      // truncated target that reads as no record.
+      secureFileFsync.sync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(temp, path);
+  } catch (err) {
+    if (created) {
+      try {
+        unlinkSync(temp);
+      } catch {
+        // The original error is the one worth surfacing.
+      }
+    }
+    throw err;
+  }
 }

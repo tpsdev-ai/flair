@@ -382,7 +382,7 @@ OAuth rate limits and env vars: [docs/auth.md](auth.md#rate-limiting).
 
 ### Admin UI
 
-All `/Admin*` routes require **Admin Basic**.
+Reads of the `/Admin*` routes below are admin-only: **Admin Basic**, or a `TPS-Ed25519` signature from an admin agent.
 
 | Path | Purpose |
 |------|---------|
@@ -391,6 +391,7 @@ All `/Admin*` routes require **Admin Basic**.
 | `/AdminConnectors` | OAuth clients and sessions |
 | `/AdminIdp` | IdP configuration |
 | `/AdminMemory` | Browse / search memory as operator |
+| `/AdminMemoryCandidates/{agentId}` | JSON: one agent's MemoryCandidate ids in id order (`limit`, default 200, max 500; `after=<id>` for the ids after that one), used by `flair rem restore` |
 | `/AdminInstance` | Federation status, peers, instance |
 
 ---

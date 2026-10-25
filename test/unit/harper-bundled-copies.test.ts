@@ -27,7 +27,7 @@ function fixture(files: Record<string, unknown>): string {
   return root;
 }
 
-const harper = (extra: Record<string, unknown> = {}) => ({ name: "harper", version: "5.3.3", ...extra });
+const harper = (extra: Record<string, unknown> = {}) => ({ name: "harper", version: "5.3.4", ...extra });
 
 describe("harper's bundled copies", () => {
   test("lists top-level, scoped and nested copies with their versions", () => {
@@ -39,7 +39,7 @@ describe("harper's bundled copies", () => {
       "harper/node_modules/fast-uri/package.json": { name: "fast-uri", version: "3.1.0" },
     });
     const listing = listBundledCopies(join(root, "node_modules"));
-    expect(listing.harperVersion).toBe("5.3.3");
+    expect(listing.harperVersion).toBe("5.3.4");
     expect(listing.declared).toEqual(["fastify", "@fastify/static", "fast-uri"]);
     expect(listing.copies.map((copy) => `${copy.name}@${copy.version}`)).toEqual([
       "@fastify/static@9.3.0",

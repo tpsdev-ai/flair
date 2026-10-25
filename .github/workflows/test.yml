@@ -196,12 +196,13 @@ jobs:
         # dist-tag pin here rots the listing (flair#1307: 0.44.13 while
         # npm latest was 0.46.0). Unpinning is the policy.
         run: node scripts/check-plugin-mcp-unpinned.mjs
-      - name: "Check production dep bake time (≥7 days)"
+      - name: "Check dependency bake time (≥7 days)"
         # Supply-chain bake-time guard. See docs/supply-chain-policy.md.
-        # Tunable via FLAIR_DEP_MIN_AGE_DAYS env. Workspace-internal deps exempt.
-        # --ci marks THIS invocation as the gate: it refuses to run if
-        # FLAIR_CHECK_DEP_AGES_ROOT is set (that variable is for the tests,
-        # which point the gate at a fixture repo without --ci).
+        # Workspace-internal deps exempt. --ci marks THIS invocation as the gate:
+        # it refuses to run if FLAIR_CHECK_DEP_AGES_ROOT (for the tests, which
+        # point the gate at a fixture repo without --ci), FLAIR_DEP_MIN_AGE_DAYS
+        # or FLAIR_DEP_KEEP_CURRENT is set, or if FLAIR_NPM_REGISTRY names a host
+        # other than loopback (127.0.0.1, localhost or [::1]).
         run: node scripts/check-dep-ages.mjs --ci
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
@@ -394,6 +395,22 @@ jobs:
         # Bounded so a stalled download cannot spend the case budgets above.
         timeout-minutes: 3
         run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+      # flair#2824: on a fresh macOS runner, ggml's Metal library load
+      # (ggml_metal_library_init) took 40 s once, inside the first test Harper's
+      # 60 s readiness wait, which spans its embedding engine's boot. This step
+      # loads the engine once, before the steps below start their test Harpers,
+      # so the job's first Metal library load happens here.
+      - name: Load the embedding engine once before the test Harpers (flair#2824)
+        timeout-minutes: 5
+        run: |
+          node --input-type=module <<'JS'
+          import { init, dispose } from "harper-fabric-embeddings";
+          const started = Date.now();
+          await init({ modelPath: `${process.env.GITHUB_WORKSPACE}/models/nomic-embed-text-v1.5.Q4_K_M.gguf`, gpuLayers: 99 });
+          const loadedMs = Date.now() - started;
+          await dispose();
+          console.log(`Metal warm-up: the embedding engine loaded in ${loadedMs}ms`);
+          JS
       - name: using-flair seed acceptance (flair#2141)
         run: bun test test/integration/using-flair-seed-2141.test.ts test/integration/using-flair-seed-reserved-2141.test.ts
       - name: Real-launchd doctor --fix integration (flair#1581)
@@ -1497,7 +1514,7 @@ jobs:
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
       - name: Harper's bundled copies are readable (flair#2781)
-        # harper 5.3.3 bundles some of its production dependencies under its
+        # harper 5.3.4 bundles some of its production dependencies under its
         # own node_modules; this step measures that bundled tree. This runs on the frozen install the install checks in
         # this job use, lists every copy, and exits nonzero for a declared entry
         # with no directory or a copy whose manifest is missing, unreadable or

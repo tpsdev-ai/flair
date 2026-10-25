@@ -328,7 +328,7 @@ The web admin at `/AdminDashboard` provides a UI for managing:
 - **Memory:** browse and search stored memories
 - **Instance:** federation status, peer connections
 
-Access requires admin-level authentication (Basic auth with the Harper admin password).
+Access goes through the `allowAdmin` gate. It admits an admin agent, and admits the `internal` verdict only for a call whose context carries the marker that `internalContext()` sets and no request headers; a call that reaches the gate with no context is refused.
 
 ## Soul authorship
 

@@ -10,9 +10,9 @@
  * completed/halted outcome is still genuinely useful in that window instead
  * of reporting nothing.
  */
-import { listMigrationProgress, getCycleStatus, getStateFileStatus, type StateFileStatus } from "./progress.js";
+import { listMigrationProgress, getCycleStatus, getStateFileStatus, progressFromStateEntry, type StateFileStatus } from "./progress.js";
 import { readMigrationState, defaultStatePath } from "./state.js";
-import type { MigrationProgress, MigrationState } from "./types.js";
+import type { MigrationProgress } from "./types.js";
 
 export interface MigrationStatusSnapshot {
   cyclePhase: string;
@@ -34,18 +34,7 @@ export function getMigrationStatusSnapshot(dataDir: string): MigrationStatusSnap
 
   if (migrations.length === 0) {
     const state = readMigrationState(defaultStatePath(dataDir));
-    migrations = Object.entries(state).map(([id, entry]) => {
-      const derivedState: MigrationState =
-        entry.lastOutcome === "success" ? "completed" : entry.lastOutcome === "halted" ? "halted" : "failed";
-      const row: MigrationProgress = {
-        id,
-        rowsDone: entry.rowsProcessed ?? 0,
-        rowsRemaining: entry.rowsRemaining ?? 0,
-        state: derivedState,
-      };
-      if (entry.reason) row.reason = entry.reason;
-      return row;
-    });
+    migrations = Object.entries(state).map(([id, entry]) => progressFromStateEntry(id, entry));
   }
 
   return {

@@ -1,4 +1,5 @@
 import { resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
+import { isDeliberateInternalVerdict } from "./internal-authority.js";
 import { FORBIDDEN, UNAUTH } from "./record-type-kit.js";
 import { buildProvenance } from "./provenance.js";
 import { databases } from "harper";
@@ -12,7 +13,7 @@ export type SoulWriteSource = "operator" | "internal";
 export function soulWriteSource(context: any, auth: AgentAuthVerdict): SoulWriteSource | null {
   const request = context?.request ?? context;
   // Internal path needs a deliberate __flairInternal marker; a contextless call is refused.
-  if (auth.kind === "internal" && context?.__flairInternal === true && !request?.headers) return "internal";
+  if (isDeliberateInternalVerdict(context, auth)) return "internal";
   const header = request?.headers?.get?.("authorization") ?? request?.headers?.asObject?.authorization ?? "";
   if (auth.kind === "agent" && auth.isAdmin && /^Basic\s/i.test(header)) return "operator";
   return null;

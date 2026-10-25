@@ -59,6 +59,7 @@ import { dirname, resolve } from "node:path";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { createSnapshot } from "./snapshot.js";
 import { resolveHome } from "../lib/home.js";
+import { ApiRequestOutcomeUnknown, apiErrorRawBody, boundErrorText } from "../lib/auth-resolve.js";
 
 export const REM_PAUSE_FLAG = resolve(resolveHome(), ".flair", "rem.paused");
 export const REM_NIGHTLY_LOG = resolve(resolveHome(), ".flair", "logs", "rem-nightly.jsonl");
@@ -340,7 +341,7 @@ export interface RunnerOpts {
   healthTimeoutMs?: number;
 }
 
-export type RunnerStatus = "paused" | "completed" | "dry-run" | "failed" | "refused";
+export type RunnerStatus = "paused" | "completed" | "dry-run" | "unresolved" | "failed" | "refused";
 
 /**
  * Audit-row `slice` field. Tracks which phase of FLAIR-NIGHTLY-REM
@@ -368,6 +369,14 @@ export interface RunnerLogRow {
   pendingCandidates?: PendingCandidateCount;
   durationMs: number;
   errors: string[];
+  /**
+   * Writes on the nightly path (the maintenance and reflection calls and the
+   * auto-promote and dedup writes) whose whole-request deadline expired
+   * without a complete response: each may or may not have taken effect. They
+   * are not in `errors`. A non-empty list makes `status` `unresolved`, never
+   * `failed` or `completed`.
+   */
+  outcomeUnknown?: string[];
   /** Deliberate stage skips; errors alone fail the run. */
   skips: string[];
   /** `runAt` for a cycle with generation and no errors or skips. */
@@ -470,10 +479,28 @@ function readPauseSentinel(path: string): boolean {
   }
 }
 
+/**
+ * A failed append of the nightly audit row. The row is carried so the CLI can
+ * still report an unknown write outcome (exit 3) even though the log failed.
+ */
+export class RunnerLogWriteError extends Error {
+  readonly row: RunnerLogRow;
+
+  constructor(row: RunnerLogRow, cause: unknown) {
+    super(`could not append the nightly log row: ${(cause as { message?: unknown })?.message ?? String(cause)}`);
+    this.name = "RunnerLogWriteError";
+    this.row = row;
+  }
+}
+
 function appendLogRow(logPath: string, row: RunnerLogRow): void {
   const dir = dirname(logPath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  appendFileSync(logPath, JSON.stringify(row) + "\n", { mode: 0o600 });
+  try {
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    appendFileSync(logPath, JSON.stringify(row) + "\n", { mode: 0o600 });
+  } catch (err) {
+    throw new RunnerLogWriteError(row, err);
+  }
 }
 
 /**
@@ -507,20 +534,32 @@ function rowsFromRead(raw: unknown, label: string): any[] {
 
 /**
  * Best-effort extraction of a readable message out of a thrown API error.
- * `apiCall` implementations (see `api()` in src/cli.ts) throw
- * `Error(responseBodyText)` for non-2xx HTTP responses — /ReflectMemories's
- * 503 (no backend configured) and 502 (distillation_failed) bodies are JSON
- * `{ error: string, detail?: string }`. Unwraps that shape into a single
- * string so distinct failure modes read distinctly in the audit log instead
- * of as a raw JSON blob; falls back to the raw input for network errors or
- * any other shape.
+ * `api()` (src/cli.ts) throws an ApiHttpError for a non-2xx HTTP response
+ * (flair#2764). When that error was built from a non-empty response body
+ * (ApiHttpError.fromResponse), its unredacted text is parsed here
+ * (apiErrorRawBody); otherwise (the credential-less 403 and a refused redirect
+ * carry only a message, as does any other error) the message is parsed
+ * instead. /ReflectMemories's 503 (no backend configured) and 502
+ * (distillation_failed) bodies are JSON `{ error: string, detail?: string }`.
+ * A JSON object with a string `error` becomes one bounded line through
+ * boundErrorText, which redacts the credential values read from the request's
+ * Authorization header (credentialsInHeader) from the server's text within the
+ * scope stated on ApiHttpError, or withholds that text when the header's
+ * credential could not be read and the response text was non-empty, even when
+ * the text derived from it is empty (a prefix added when the line is written
+ * is outside the scope):
+ * `error: detail` when `detail` is a non-empty string and `error` alone
+ * otherwise, so distinct failure modes read distinctly in the audit log
+ * instead of as a raw JSON blob. Text that is not JSON, or JSON without a
+ * string `error`, falls back to the error's message.
  */
 function describeApiError(err: unknown): string {
   const message = typeof err === "string" ? err : (err as any)?.message ?? String(err);
   try {
-    const parsed = JSON.parse(message);
+    const parsed = JSON.parse(apiErrorRawBody(err) || message);
     if (parsed && typeof parsed === "object" && typeof parsed.error === "string") {
-      return parsed.detail ? `${parsed.error}: ${parsed.detail}` : parsed.error;
+      const detail = typeof parsed.detail === "string" ? parsed.detail : "";
+      return boundErrorText(err, detail ? `${parsed.error}: ${detail}` : parsed.error);
     }
   } catch {
     // Not a JSON error body — network error, plain string, etc.
@@ -529,7 +568,7 @@ function describeApiError(err: unknown): string {
 }
 
 function structuredApiError(err: unknown): string | null {
-  const message = typeof err === "string" ? err : (err as { message?: unknown })?.message;
+  const message = apiErrorRawBody(err) || (typeof err === "string" ? err : (err as { message?: unknown })?.message);
   if (typeof message !== "string") return null;
   try {
     const body = JSON.parse(message);
@@ -741,6 +780,9 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   }
 
   const errors: string[] = [];
+  // A deadline expiry on a write can leave an effect behind: it is carried
+  // apart from `errors` and makes the cycle `unresolved`.
+  const outcomeUnknown: string[] = [];
   // flair#924 defect 1: deliberate skips (no backend / idle ADK / operator
   // pause) land here, not in `errors`. Dedup so a per-tag or per-stage repeat
   // of the same reason is recorded once.
@@ -878,6 +920,26 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
       archived = typeof obj.archived === "number" ? obj.archived : 0;
     }
   } catch (err: any) {
+    if (err instanceof ApiRequestOutcomeUnknown) {
+      // The maintenance write may have landed. Do not continue writing state
+      // whose order depended on it, and do not report a plain failure.
+      outcomeUnknown.push(`maintenance: ${err.message}`);
+      const row: RunnerLogRow = {
+        ...baseRow,
+        slice: sliceLabel,
+        status: "unresolved",
+        snapshotPath,
+        memoryCount,
+        soulCount,
+        pendingCandidates,
+        durationMs: Date.now() - startedMs,
+        errors,
+        outcomeUnknown,
+        skips,
+      };
+      appendLogRow(logPath, row);
+      return { status: "unresolved", logRow: row, snapshotPath };
+    }
     errors.push(`maintenance: ${err?.message ?? String(err)}`);
     const row: RunnerLogRow = {
       ...baseRow,
@@ -999,6 +1061,11 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
             staged.push(...collectStagedIds(obj));
           }
         } catch (err: any) {
+          if (err instanceof ApiRequestOutcomeUnknown) {
+            // May have staged candidates; reported apart from `errors`.
+            outcomeUnknown.push(`distillation[${tag}]: ${describeApiError(err)}`);
+            continue;
+          }
           if (isNoBackendConfigured(err)) {
             pushSkipOnce(NO_BACKEND_SKIP);
             break;
@@ -1008,7 +1075,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
             distillAborted = true;
             break;
           }
-          errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
+          errors.push(`distillation[${tag}]: ${describeApiError(err)}`);
         }
       }
       // `candidates` is defined (even if empty) whenever distillation was
@@ -1046,13 +1113,15 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         // 3). Zero partial candidates is guaranteed server-side (all-or-
         // nothing staging in /ReflectMemories). rem_aborted IS fatal to the
         // rest of this cycle (no auto-promote / dedup).
-        if (isNoBackendConfigured(err)) {
+        if (err instanceof ApiRequestOutcomeUnknown) {
+          outcomeUnknown.push(`distillation: ${describeApiError(err)}`);
+        } else if (isNoBackendConfigured(err)) {
           pushSkipOnce(NO_BACKEND_SKIP);
         } else {
           if (isRemAbortedFailure(err)) {
             pushSkipOnce("distillation: aborted by operator (rem_aborted)");
             distillAborted = true;
-          } else errors.push(`distillation: ${describeApiError(err?.message ?? err)}`);
+          } else errors.push(`distillation: ${describeApiError(err)}`);
         }
       }
     }
@@ -1114,6 +1183,11 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
             distilled++;
           }
         } catch (err: any) {
+          if (err instanceof ApiRequestOutcomeUnknown) {
+            // May have staged candidates; reported apart from `errors`.
+            outcomeUnknown.push(`distillation[${tag}]: ${describeApiError(err)}`);
+            continue;
+          }
           if (isNoBackendConfigured(err)) {
             pushSkipOnce(NO_BACKEND_SKIP);
             break;
@@ -1123,7 +1197,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
             distillAborted = true;
             break;
           }
-          errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
+          errors.push(`distillation[${tag}]: ${describeApiError(err)}`);
         }
       }
       continuitySessions = distilled;
@@ -1162,7 +1236,12 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           autoPromoted = { promoted: promotedCount, skipped: skippedCount, incomplete: incompleteCount, unconfirmed: unconfirmedCount };
         }
       } catch (err: any) {
-        errors.push(`auto-promote: ${describeApiError(err?.message ?? err)}`);
+        if (err instanceof ApiRequestOutcomeUnknown) {
+          // The sweep may have promoted candidates; its outcome is unknown.
+          outcomeUnknown.push(`auto-promote: ${describeApiError(err)}`);
+        } else {
+          errors.push(`auto-promote: ${describeApiError(err)}`);
+        }
       }
     }
   }
@@ -1233,7 +1312,12 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         errors.push("dedup: unexpected /MemoryDedupStats response shape");
       }
     } catch (err: any) {
-      errors.push(`dedup: ${describeApiError(err?.message ?? err)}`);
+      if (err instanceof ApiRequestOutcomeUnknown) {
+        // The stat write may have persisted; its outcome is unknown.
+        outcomeUnknown.push(`dedup: ${describeApiError(err)}`);
+      } else {
+        errors.push(`dedup: ${describeApiError(err)}`);
+      }
     }
   }
 
@@ -1249,7 +1333,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   const row: RunnerLogRow = {
     ...baseRow,
     slice: sliceLabel,
-    status: errors.length > 0 ? "failed" : opts.dryRun ? "dry-run" : "completed",
+    status: outcomeUnknown.length > 0 ? "unresolved" : errors.length > 0 ? "failed" : opts.dryRun ? "dry-run" : "completed",
     dryRun: opts.dryRun || undefined,
     snapshotPath,
     memoryCount,
@@ -1264,8 +1348,9 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     dedup,
     durationMs: Date.now() - startedMs,
     errors,
+    outcomeUnknown: outcomeUnknown.length > 0 ? outcomeUnknown : undefined,
     skips,
-    distilledAt: distillRan && !distillAborted && errors.length === 0 && skips.length === 0 ? baseRow.runAt : undefined,
+    distilledAt: distillRan && !distillAborted && errors.length === 0 && outcomeUnknown.length === 0 && skips.length === 0 ? baseRow.runAt : undefined,
     // `consolidated` remains undefined — this runner has no consolidation
     // step; it's reserved for a future slice that adds one.
   };
