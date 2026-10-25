@@ -431,7 +431,8 @@ for (const config of HARPERS) {
           if (anon.connack === MQTT_REASON.SUCCESS) {
             // authorizeLocal admits the loopback session; the policy still
             // refuses the subscription as one without a valid credential.
-            expect(await suback(anon.client, [filter]), `anonymous SUBSCRIBE ${filter}`).toEqual([MQTT_REASON.UNSPECIFIED_ERROR]);
+            // Harper 5.3.3: "MQTT v5 reports a missing login as Not authorized (0x87)."
+            expect(await suback(anon.client, [filter]), `anonymous SUBSCRIBE ${filter}`).toEqual([MQTT_REASON.NOT_AUTHORIZED]);
           } else {
             expect(typeof anon.connack === "number" && anon.connack !== MQTT_REASON.SUCCESS, `anonymous CONNACK ${anon.connack}`).toBe(true);
           }
@@ -471,8 +472,9 @@ for (const config of HARPERS) {
           const anonMarker = `${p}-pub-anon-${randomUUID()}`;
           const anon = await mqttAs("anonymous");
           if (anon.connack === MQTT_REASON.SUCCESS) {
+            // Harper 5.3.3: "MQTT v5 reports a missing login as Not authorized (0x87)."
             expect(await anon.client.publish(`Memory/${anonMarker}`, record(anonMarker)), "anonymous PUBLISH (QoS 1)")
-              .toEqual({ kind: "answered", value: MQTT_REASON.UNSPECIFIED_ERROR });
+              .toEqual({ kind: "answered", value: MQTT_REASON.NOT_AUTHORIZED });
           } else {
             expect(typeof anon.connack === "number" && anon.connack !== MQTT_REASON.SUCCESS, `anonymous CONNACK ${anon.connack}`).toBe(true);
             await anon.client.publish(`Memory/${anonMarker}`, record(anonMarker), 0);
@@ -523,7 +525,8 @@ for (const config of HARPERS) {
             ["retained delete", await anon.client.publishRetained(`Memory/${others}`, null)],
             ["retained Agent PUBLISH", await anon.client.publishRetained(`Agent/${newAgent}`, { id: newAgent, name: newAgent, role: "admin", publicKey: "not-a-key", createdAt: now() })],
           ] as const) {
-            expect(outcome, `anonymous ${what}`).toEqual({ kind: "answered", value: MQTT_REASON.UNSPECIFIED_ERROR });
+            // Harper 5.3.3: "MQTT v5 reports a missing login as Not authorized (0x87)."
+            expect(outcome, `anonymous ${what}`).toEqual({ kind: "answered", value: MQTT_REASON.NOT_AUTHORIZED });
           }
         } else {
           expect(typeof anon.connack === "number" && anon.connack !== MQTT_REASON.SUCCESS, `anonymous CONNACK ${anon.connack}`).toBe(true);
@@ -598,10 +601,11 @@ for (const config of HARPERS) {
             if (anon.connack === MQTT_REASON.SUCCESS) {
               // authorizeLocal admits the loopback session; the policy still
               // refuses the write as one without a valid credential.
+              // Harper 5.3.3: "MQTT v5 reports a missing login as Not authorized (0x87)."
               expect(
                 await anon.client.publishRetained(topic, variant(next, primaryKey, changed, anonMarker, key)),
                 `anonymous retained PUBLISH ${topic}`,
-              ).toEqual({ kind: "answered", value: MQTT_REASON.UNSPECIFIED_ERROR });
+              ).toEqual({ kind: "answered", value: MQTT_REASON.NOT_AUTHORIZED });
             } else {
               expect(typeof anon.connack === "number" && anon.connack !== MQTT_REASON.SUCCESS, `anonymous CONNACK ${anon.connack}`).toBe(true);
             }
@@ -714,7 +718,9 @@ for (const config of HARPERS) {
           continue;
         }
         expect(connack, `${who}: the MQTT session is accepted`).toEqual({ kind: "answered", value: MQTT_REASON.SUCCESS });
-        expect(await suback(tcp, ["Memory/#", "Message/#"]), `${who}: SUBSCRIBE`).toEqual([MQTT_REASON.UNSPECIFIED_ERROR, MQTT_REASON.UNSPECIFIED_ERROR]);
+        // Harper 5.3.3: "MQTT v5 reports a missing login as Not authorized (0x87)."
+        const refused = MQTT_REASON.NOT_AUTHORIZED;
+        expect(await suback(tcp, ["Memory/#", "Message/#"]), `${who}: SUBSCRIBE`).toEqual([refused, refused]);
         const marker = `tmq-${tag}-tcp-${randomUUID()}`;
         const newAgent = `${marker}-agent`;
         for (const [what, outcome] of [
@@ -723,7 +729,7 @@ for (const config of HARPERS) {
           ["retained delete", await tcp.publishRetained(`Memory/${rowId}`, null)],
           ["retained Agent PUBLISH", await tcp.publishRetained(`Agent/${newAgent}`, { id: newAgent, name: newAgent, role: "admin", publicKey: "not-a-key", createdAt: now() })],
         ] as const) {
-          expect(outcome, `${who}: ${what}`).toEqual({ kind: "answered", value: MQTT_REASON.UNSPECIFIED_ERROR });
+          expect(outcome, `${who}: ${what}`).toEqual({ kind: "answered", value: refused });
         }
         expect((await read("Memory", rowId))?.content, `${who}: the row is unchanged`).toBe(`${rowId} original`);
         expect(await read("Agent", newAgent), `${who}: no Agent row was created`).toBeUndefined();

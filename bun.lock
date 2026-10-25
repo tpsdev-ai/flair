@@ -8,7 +8,7 @@
         "@harperfast/oauth": "2.9.0",
         "@types/js-yaml": "4.0.9",
         "commander": "14.0.3",
-        "harper": "5.3.1",
+        "harper": "5.3.4",
         "harper-fabric-embeddings": "^0.5.0",
         "jose": "6.2.2",
         "js-yaml": "^4.3.2",
@@ -138,7 +138,7 @@
       },
       "peerDependencies": {
         "@langchain/classic": "*",
-        "@langchain/core": "*",
+        "@langchain/core": ">=0.3.0 <2",
         "n8n-workflow": "*",
       },
     },
@@ -393,23 +393,23 @@
 
     "@harperfast/oauth": ["@harperfast/oauth@2.9.0", "", { "dependencies": { "jsonwebtoken": "^9.0.2", "jwks-rsa": "^3.1.0" }, "peerDependencies": { "harper": ">=5.0.0" } }, "sha512-RxVrtRgUWYW15D4g0RopEunVBfEoK+q/nZwPRHGlh9zoWBe1R/WNeO2XImwm16RmZIEwxOCIwRMiFh2sDfl6Mw=="],
 
-    "@harperfast/rocksdb-js": ["@harperfast/rocksdb-js@2.10.0", "", { "dependencies": { "@harperfast/extended-iterable": "^1.0.3", "msgpackr": "^2.0.6", "ordered-binary": "^1.6.1" }, "optionalDependencies": { "@harperfast/rocksdb-js-darwin-arm64": "2.10.0", "@harperfast/rocksdb-js-darwin-x64": "2.10.0", "@harperfast/rocksdb-js-linux-arm64-glibc": "2.10.0", "@harperfast/rocksdb-js-linux-arm64-musl": "2.10.0", "@harperfast/rocksdb-js-linux-x64-glibc": "2.10.0", "@harperfast/rocksdb-js-linux-x64-musl": "2.10.0", "@harperfast/rocksdb-js-win32-arm64": "2.10.0", "@harperfast/rocksdb-js-win32-x64": "2.10.0" }, "bin": { "rocksdb-js": "./bin/rocksdb-js.mjs" } }, "sha512-o9oCwMMZfRK0jvHA4jmKU5g4+AGm7q/gas3ZJgas09AkNu0YZVnmun0zqVg6kZCzZEsUdjMUKdemLeI/RnSTVg=="],
+    "@harperfast/rocksdb-js": ["@harperfast/rocksdb-js@2.11.0", "", { "dependencies": { "@harperfast/extended-iterable": "^1.0.3", "msgpackr": "^2.0.6", "ordered-binary": "^1.6.1" }, "optionalDependencies": { "@harperfast/rocksdb-js-darwin-arm64": "2.11.0", "@harperfast/rocksdb-js-darwin-x64": "2.11.0", "@harperfast/rocksdb-js-linux-arm64-glibc": "2.11.0", "@harperfast/rocksdb-js-linux-arm64-musl": "2.11.0", "@harperfast/rocksdb-js-linux-x64-glibc": "2.11.0", "@harperfast/rocksdb-js-linux-x64-musl": "2.11.0", "@harperfast/rocksdb-js-win32-arm64": "2.11.0", "@harperfast/rocksdb-js-win32-x64": "2.11.0" }, "bin": { "rocksdb-js": "./bin/rocksdb-js.mjs" } }, "sha512-gTi21KHzRtL8rJN8KEMtc/7DFdgwjtUwo2onjhs2DflHQpcWTH4BNkKo8VgUn9IbbCn5c1ZBtqvD2F9lBb6haw=="],
 
-    "@harperfast/rocksdb-js-darwin-arm64": ["@harperfast/rocksdb-js-darwin-arm64@2.10.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-VFyg2CcW3k5e7Qt65BPVZ9lvQz9FWCdNdwJJPfAScXAPrpyzklj9Qp3w/bTgW41+6qQbYiEHGUa5jK7qqMsBOA=="],
+    "@harperfast/rocksdb-js-darwin-arm64": ["@harperfast/rocksdb-js-darwin-arm64@2.11.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-MRiNs+bp7BOyYY+zCfecafQLelgmpNfyouVGJl2HD7H8phyicQ+YGD3LFgZRMMQTMGnVSSoTaMJXZV4A/31i4A=="],
 
-    "@harperfast/rocksdb-js-darwin-x64": ["@harperfast/rocksdb-js-darwin-x64@2.10.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-OccEC4uWEzX9S1kzUFocBcEUGql6m4CVZlqkQTMZMS4RqA6O7YNNKb/smaiKISmPaS1vgIbyI0dmo08gypkZ/g=="],
+    "@harperfast/rocksdb-js-darwin-x64": ["@harperfast/rocksdb-js-darwin-x64@2.11.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-ESWQAx1aD9idWo+gtQZoYvNcQQh3aiLhzovNAW+5fLWzIwJLe/yBT3LnzAjIVGx92Vnc6X1QkV1wudqygsK9jg=="],
 
-    "@harperfast/rocksdb-js-linux-arm64-glibc": ["@harperfast/rocksdb-js-linux-arm64-glibc@2.10.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-W1SrRk/ijpVPkmHPCKrfEd6yrgK6jgadS45Q1bhlGY3LJj1fWGx0CodMtZQ9rOiyTi7RLaB+IS/wXkjgV6puog=="],
+    "@harperfast/rocksdb-js-linux-arm64-glibc": ["@harperfast/rocksdb-js-linux-arm64-glibc@2.11.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-17ecIc+5/relPJEv85LSgV7xEf3pktQxy/V2j71Un2BOgLbXyENBbvXEIXhDX0aF5f7A3ZsBdijz0Y0paj/BzQ=="],
 
-    "@harperfast/rocksdb-js-linux-arm64-musl": ["@harperfast/rocksdb-js-linux-arm64-musl@2.10.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-e7pI3wbOGyV5YQtEItuL/RmzRi2b0ysGWvooOSEx/fDjGidirHcqtL4ejydwdXS29Em5+iDkgdHyeKZAopiV7w=="],
+    "@harperfast/rocksdb-js-linux-arm64-musl": ["@harperfast/rocksdb-js-linux-arm64-musl@2.11.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-EkcWfwFShsFsUBgg+TgxLgdanxvBn+fqI5BR6Ucd1dsGN3RIxp67xAjmbWdnOTdrzXDgAvWor+wbyZE7Z6SmQA=="],
 
-    "@harperfast/rocksdb-js-linux-x64-glibc": ["@harperfast/rocksdb-js-linux-x64-glibc@2.10.0", "", { "os": "linux", "cpu": "x64" }, "sha512-8Ap0n+5pcG2/oX61Gfi88CmNDcKg3EU7ektpBsEgdXmvzkMb9E9hwVu2zDIMezG3pLmddEvmIlN/qOYwqNW3wA=="],
+    "@harperfast/rocksdb-js-linux-x64-glibc": ["@harperfast/rocksdb-js-linux-x64-glibc@2.11.0", "", { "os": "linux", "cpu": "x64" }, "sha512-lYLLrQQ+VxZqAsampUhiTK0uql/Nyd9DYhhzVnchaTBRhvBVxViPOWmvQZJWtLK/V9wRHIfo85iuYZnFTxfJew=="],
 
-    "@harperfast/rocksdb-js-linux-x64-musl": ["@harperfast/rocksdb-js-linux-x64-musl@2.10.0", "", { "os": "linux", "cpu": "x64" }, "sha512-iXzNINutMiSKq8QcGm2gLrtmegROcU+CMl67xjBaIwerb8x/qYGISecw04L9BlcMbX/pSYZpBZJfC6j/dJZunw=="],
+    "@harperfast/rocksdb-js-linux-x64-musl": ["@harperfast/rocksdb-js-linux-x64-musl@2.11.0", "", { "os": "linux", "cpu": "x64" }, "sha512-LTqVTXuu6DRudjxMFrYWhCsrIOEurT1ikTeOBg8+iK8GYvfGmSG2qlf9zS7aTFMDEY+3TJQLJjsRMtD22XoTfg=="],
 
-    "@harperfast/rocksdb-js-win32-arm64": ["@harperfast/rocksdb-js-win32-arm64@2.10.0", "", { "os": "win32", "cpu": "arm64" }, "sha512-BcR26Y9ScJ0sycm+HJ8xaepH1vkzlQ1qWhm0803szb0vIfxPAKGVn3ZaybLQW696ssgfD+taKz23rEalRTmrpg=="],
+    "@harperfast/rocksdb-js-win32-arm64": ["@harperfast/rocksdb-js-win32-arm64@2.11.0", "", { "os": "win32", "cpu": "arm64" }, "sha512-p5CzDgFQGWZ2xxFs0CCqRIWfj5LVwda6ybEUJ9egocgdop/36v1EiZccWPPwPBTQr7VoQdemI1KLZTh/C/aZwA=="],
 
-    "@harperfast/rocksdb-js-win32-x64": ["@harperfast/rocksdb-js-win32-x64@2.10.0", "", { "os": "win32", "cpu": "x64" }, "sha512-l/jNPBiySXVfTMNndE4C5ZpyAZEHag0NZgkDaHABlEUuTrbDwb7RmOkdLusJaAHS1Tl8sguk3W8iy8ieU+0mHw=="],
+    "@harperfast/rocksdb-js-win32-x64": ["@harperfast/rocksdb-js-win32-x64@2.11.0", "", { "os": "win32", "cpu": "x64" }, "sha512-CfWwNVYSMLimp7L8eDlhfAEUt8ru39snr6yh5QSLKo6SXeDsfim512YYJUlmfEp91YFyZOKbZjYJLJWBrliZ7Q=="],
 
     "@harperfast/skills": ["@harperfast/skills@1.12.1", "", {}, "sha512-gO1YBfo7e2P7qEmmVyXMy+R8BcQnqOTItzRcxBZcVTrWGDiT0XRUs4FMCUM79/r4tPC6IEjZvsm0cgTzDQQXIg=="],
 
@@ -1313,7 +1313,7 @@
 
     "handlebars": ["handlebars@4.7.10", "", { "dependencies": { "minimist": "^1.2.8", "neo-async": "^2.6.2", "source-map": "^0.6.1", "wordwrap": "^1.0.0" }, "optionalDependencies": { "uglify-js": "^3.1.4" }, "bin": { "handlebars": "bin/handlebars" } }, "sha512-P5VJMVM7qgBn6vjXMw8WG9uVI+ncf2pi72j4de4yz5ZULLj2RGqLYaKOYGsgyrViQ0tePOVlN1tDCCXXtFqXKg=="],
 
-    "harper": ["harper@5.3.1", "", { "dependencies": { "@endo/static-module-record": "^1.1.2", "@fastify/autoload": "^6.3.1", "@fastify/compress": "^8.3.1", "@fastify/cors": "^11.2.0", "@fastify/static": "^9.1.3", "@harperfast/extended-iterable": "1.0.3", "@harperfast/rocksdb-js": "2.10.0", "@harperfast/skills": "^1.10.8", "@inquirer/confirm": "^6.3.2", "@inquirer/input": "^5.1.6", "@inquirer/password": "^5.2.2", "@inquirer/select": "^5.2.5", "@turf/area": "6.5.0", "@turf/boolean-contains": "6.5.0", "@turf/boolean-disjoint": "6.5.0", "@turf/boolean-equal": "6.5.0", "@turf/circle": "6.5.0", "@turf/difference": "6.5.0", "@turf/distance": "6.5.0", "@turf/helpers": "6.5.0", "@turf/length": "6.5.0", "alasql": "4.19.1", "amaro": "^1.1.8", "argon2": "0.45.1", "asn1js": "3.0.10", "busboy": "^1.6.0", "cbor-x": "1.6.6", "chalk": "4.1.2", "chokidar": "^4.0.3", "cli-progress": "3.12.0", "clone": "2.1.2", "dotenv": "^16.4.7", "easy-ocsp": "1.3.2", "fast-glob": "3.3.3", "fastify": "^5.8.2", "fastify-plugin": "^5.1.0", "fs-extra": "11.4.0", "graphql": "^16.10.0", "graphql-http": "^1.22.4", "gunzip-maybe": "1.4.2", "human-readable-ids": "1.0.4", "is-number": "7.0.0", "joi": "17.13.8", "json-bigint-fixes": "1.1.0", "jsonata": "1.8.9", "jsonwebtoken": "9.0.3", "lmdb": "3.5.6", "lodash": "^4.17.23", "mathjs": "11.12.0", "micromatch": "^4.0.8", "minimist": "1.2.8", "moment": "2.31.0", "mqtt-packet": "~9.0.1", "msgpackr": "2.1.0", "needle": "3.5.0", "node-forge": "^1.3.1", "node-stream-zip": "1.16.0", "normalize-path": "^3.0.0", "ora": "8.2.0", "ordered-binary": "1.6.2", "papaparse": "5.7.0", "passport": "0.7.0", "passport-http": "0.3.0", "passport-local": "1.0.0", "pino": "8.21.0", "pkijs": "3.4.1", "properties-reader": "2.3.0", "recursive-iterator": "3.3.0", "semver": "7.8.5", "send": "^1.2.0", "ses": "^1.15.0", "stream-chain": "2.2.5", "stream-json": "1.9.1", "structon": "1.1.0", "systeminformation": "^5.31.4", "tar-fs": "^3.1.2", "tar-stream": "3.2.0", "ulidx": "0.5.0", "uuid": "11.1.1", "validate.js": "0.13.1", "weak-lru-cache": "^1.2.2", "ws": "8.21.3", "yaml": "2.9.1" }, "optionalDependencies": { "@harperfast/fulltext": "0.5.0", "@harperfast/hnsw": "0.4.0", "bufferutil": "4.1.0", "segfault-handler": "1.3.0", "utf-8-validate": "5.0.10" }, "peerDependencies": { "@aws-sdk/client-bedrock-runtime": "^3.0.0", "@aws-sdk/client-s3": "^3.0.0", "@aws-sdk/lib-storage": "^3.0.0", "uWebSockets.js": "20.68.0" }, "optionalPeers": ["@aws-sdk/client-bedrock-runtime", "@aws-sdk/client-s3", "@aws-sdk/lib-storage", "uWebSockets.js"], "bin": { "harper": "dist/bin/harper.js" } }, "sha512-ESiMdD5H5AZIjcMJ6ocMj9i78DpLtdIM46fLJJQfRmeoEjq+PFX2ifrmNMlDQI74qXM9nF65ygMNsxB5zMabmw=="],
+    "harper": ["harper@5.3.4", "", { "dependencies": { "@endo/static-module-record": "^1.1.2", "@fastify/autoload": "^6.3.1", "@fastify/compress": "^8.3.1", "@fastify/cors": "^11.2.0", "@fastify/static": "^9.1.3", "@harperfast/extended-iterable": "1.0.3", "@harperfast/rocksdb-js": "2.11.0", "@harperfast/skills": "^1.10.8", "@inquirer/confirm": "^6.3.2", "@inquirer/input": "^5.1.6", "@inquirer/password": "^5.2.2", "@inquirer/select": "^5.2.5", "@turf/area": "6.5.0", "@turf/boolean-contains": "6.5.0", "@turf/boolean-disjoint": "6.5.0", "@turf/boolean-equal": "6.5.0", "@turf/circle": "6.5.0", "@turf/difference": "6.5.0", "@turf/distance": "6.5.0", "@turf/helpers": "6.5.0", "@turf/length": "6.5.0", "alasql": "4.19.1", "amaro": "^1.1.8", "argon2": "0.45.1", "asn1js": "3.0.10", "busboy": "^1.6.0", "cbor-x": "1.6.6", "chalk": "4.1.2", "chokidar": "^4.0.3", "cli-progress": "3.12.0", "clone": "2.1.2", "dotenv": "^16.4.7", "easy-ocsp": "1.3.2", "fast-glob": "3.3.3", "fastify": "^5.8.2", "fastify-plugin": "^5.1.0", "fs-extra": "11.4.0", "graphql": "^16.10.0", "graphql-http": "^1.22.4", "gunzip-maybe": "1.4.2", "human-readable-ids": "1.0.4", "is-number": "7.0.0", "joi": "17.13.8", "json-bigint-fixes": "1.1.0", "jsonata": "1.8.9", "jsonwebtoken": "9.0.3", "lmdb": "3.5.6", "lodash": "^4.17.23", "mathjs": "11.12.0", "micromatch": "^4.0.8", "minimist": "1.2.8", "moment": "2.31.0", "mqtt-packet": "~9.0.1", "msgpackr": "2.1.0", "needle": "3.5.0", "node-forge": "^1.3.1", "node-stream-zip": "1.16.0", "normalize-path": "^3.0.0", "ora": "8.2.0", "ordered-binary": "1.6.2", "papaparse": "5.7.0", "passport": "0.7.0", "passport-http": "0.3.0", "passport-local": "1.0.0", "pino": "8.21.0", "pkijs": "3.4.1", "properties-reader": "2.3.0", "recursive-iterator": "3.3.0", "semver": "7.8.5", "send": "^1.2.0", "ses": "^1.15.0", "stream-chain": "2.2.5", "stream-json": "1.9.1", "structon": "1.1.0", "systeminformation": "5.33.13", "tar-fs": "3.1.3", "tar-stream": "3.2.0", "ulidx": "0.5.0", "uuid": "11.1.1", "validate.js": "0.13.1", "weak-lru-cache": "1.2.2", "ws": "8.21.3", "yaml": "2.9.1" }, "optionalDependencies": { "@harperfast/fulltext": "0.5.0", "@harperfast/hnsw": "0.4.0", "bufferutil": "4.1.0", "segfault-handler": "1.3.0", "utf-8-validate": "5.0.10" }, "peerDependencies": { "@aws-sdk/client-bedrock-runtime": "^3.0.0", "@aws-sdk/client-s3": "^3.0.0", "@aws-sdk/lib-storage": "^3.0.0", "uWebSockets.js": "20.68.0" }, "optionalPeers": ["@aws-sdk/client-bedrock-runtime", "@aws-sdk/client-s3", "@aws-sdk/lib-storage", "uWebSockets.js"], "bin": { "harper": "dist/bin/harper.js" } }, "sha512-FYRZMkiruJwQBgl0r1+OqlkDU8jvm/ustVuXaCJ+LeRnSMm7OCCauzzvfRdy68Og4ZPXv9LSWipVWXq21UuV5Q=="],
 
     "harper-fabric-embeddings": ["harper-fabric-embeddings@0.5.0", "", { "optionalDependencies": { "@node-llama-cpp/linux-arm64": "3.18.1", "@node-llama-cpp/linux-armv7l": "3.18.1", "@node-llama-cpp/linux-x64": "3.18.1", "@node-llama-cpp/mac-arm64-metal": "3.18.1", "@node-llama-cpp/mac-x64": "3.18.1", "@node-llama-cpp/win-arm64": "3.18.1", "@node-llama-cpp/win-x64": "3.18.1" } }, "sha512-Ez7aHMAyp5Fe8OlDHchYKeoatZVdA7zQyofwnlWkhon1mz4Rix/J1k/LyzDJTvacM3fRwSJPwD6dSQVD0C4yPg=="],
 
@@ -1933,7 +1933,7 @@
 
     "supports-color": ["supports-color@7.2.0", "", { "dependencies": { "has-flag": "^4.0.0" } }, "sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw=="],
 
-    "systeminformation": ["systeminformation@5.33.1", "", { "os": "!aix", "bin": { "systeminformation": "lib/cli.js" } }, "sha512-DEN6ICHk3Tk0Uf/hrAHh7xlt7iL5CJFBtPZinA0H62DrGG/KPKqq/Nzj6lCXPS4Ay/sf/14zNnk9LpqKzBIc+w=="],
+    "systeminformation": ["systeminformation@5.33.13", "", { "os": "!aix", "bin": { "systeminformation": "lib/cli.js" } }, "sha512-GtyakkchTQKymM1WeAB652zi3rM1q00RKdc+jZe9KGstuc/mWUwAnQGN/RE5gVYvHIR8xYOUIUD9irVKDtA0wA=="],
 
     "tar": ["tar@7.5.22", "", { "dependencies": { "@isaacs/fs-minipass": "^4.0.0", "chownr": "^3.0.0", "minipass": "^7.1.2", "minizlib": "^3.1.0", "yallist": "^5.0.0" } }, "sha512-MFO/QzvtAOmJbkhOaCTvbGcFN9L9b+JunIsDwaKljSOdcLMea3NJ1k9Usz/rjdfSXTq4dfzfeS7W4p4YOAAHeA=="],
 
