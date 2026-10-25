@@ -2568,7 +2568,7 @@ export function register(program: Command): void {
         } catch (e: any) {
           if (e instanceof ApiRequestOutcomeUnknown) {
             // An expired request is reported as an unknown outcome, like every
-            // other non-GET/HEAD request the CLI sends: the client cannot tell
+            // other non-GET/HEAD request through the shared REST sender: the client cannot tell
             // whether the server acted. Count it apart from a definite failure
             // and exit 3 for it (unknown outranks a known failure, as rem's
             // `unresolved` does). The route this DELETE targets cannot accept
