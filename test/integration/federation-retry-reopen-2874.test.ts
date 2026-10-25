@@ -2,9 +2,10 @@
  * federation-retry-reopen-2874.test.ts — flair#2874 (real Harper sender).
  *
  * A retry row that reached a terminal outcome and is refused again (or left
- * undecided) is stored as a pending row with no terminal field, and the next
- * cycle re-offers the record. The sender is a real, ephemeral, loopback,
- * HOME-isolated Harper, whose operations-API upsert is the write under test.
+ * undecided) is stored as a pending row whose terminal fields are null or
+ * absent, and the next cycle re-offers the record. The sender is a real,
+ * ephemeral, loopback, HOME-isolated Harper, whose operations-API upsert is
+ * the write under test.
  * The hub is a stand-in that answers FederationSync with the receiver's
  * response shape (`merged`, `skipped`, `refused`, `indeterminate`).
  */
@@ -159,7 +160,7 @@ describe("flair#2874 — a retry row reopened after a terminal outcome", () => {
     ["an indeterminate outcome", "indeterminate", "retry_unknown"],
   ];
   for (const [label, reopenMode, reopenReason] of cases) {
-    it(`${label} stores a pending row with no terminal field, and the next cycle re-offers the record`, async () => {
+    it(`${label} stores a pending row with terminal fields null or absent, and the next cycle re-offers the record`, async () => {
       const id = `memory-reopen-${reopenMode}`;
       await ops({ operation: "insert", table: "Memory", records: [memoryRow(id)] });
 
@@ -177,7 +178,7 @@ describe("flair#2874 — a retry row reopened after a terminal outcome", () => {
       const terminal = await readRow("FederationRetry", retryKey(id));
       expect(terminal.state, JSON.stringify(terminal)).toBe("terminal");
       expect(terminal.resolution).toBe("merged");
-      // The fields the terminal outcome gave a value on the stored row.
+      // The fields the terminal outcome gave a non-null value on the stored row.
       const terminalFields = RETRY_ROW_FIELDS.filter((field) => (pending[field] ?? null) === null && (terminal[field] ?? null) !== null);
       expect(terminalFields).toContain("resolution");
       expect(terminalFields).toContain("completedAt");

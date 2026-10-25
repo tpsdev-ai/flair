@@ -234,9 +234,9 @@ const CONFIRM_FIELDS = [
  * `completedAt`, `updatedAt` and `bound` (CONFIRM_FIELDS, in that order) that
  * the written record carries and the stored row does not echo; then, for a
  * stored row in state `pending`, the first of RETRY_TERMINAL_FIELDS it holds a
- * value for, whether or not the record names it; `row` when the stored row is
- * null; otherwise null. A read-back that only agrees on `state` and
- * `lastReason` can hide an attempt that was never incremented.
+ * non-null value for, whether or not the record names it; `row` when the
+ * stored row is null; otherwise null. A read-back that only agrees on `state`
+ * and `lastReason` can hide an attempt that was never incremented.
  */
 export function retryRowConfirmation(record: Record<string, unknown>, stored: Record<string, unknown> | null): string | null {
   if (stored === null) return "row";

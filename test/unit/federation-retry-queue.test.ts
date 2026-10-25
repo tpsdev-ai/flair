@@ -204,7 +204,7 @@ describe("flair#2874 — a row reopened after a terminal outcome", () => {
     }
   });
 
-  test("the read-back rejects a pending row that still carries a terminal field", () => {
+  test("the read-back rejects a pending row that still has a non-null terminal value", () => {
     const written = retryRowForRefusal({ peerId: PEER, recordId: ROW, reason: "merge_target_busy", nowIso: NOW });
     // A write that does not name the terminal fields, as a merge-only write would.
     const unnamed: Record<string, unknown> = { ...written };
