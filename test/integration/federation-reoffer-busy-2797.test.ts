@@ -466,25 +466,34 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
     // result for good.
     writeFileSync(join(pauseDir, `arm.${MERGE_PAUSE}`), "");
     const stuck = push(memoryRow("memory-cleanup-ack-stuck", "stuck", at));
-    await waitForEmptyRelease(MERGE_PAUSE);
-    rmSync(join(pauseDir, `released.${MERGE_PAUSE}`), { force: true });
-    const failingAt = Date.now();
-    let failure: unknown = null;
     try {
-      await resetPauseMarkers();
-    } catch (error) {
-      failure = error;
-    }
-    const failedAfter = Date.now() - failingAt;
-    expect(failure, "cleanup resolved without the release acknowledgement").not.toBeNull();
-    expect(String(failure)).toContain(
-      `did not observe the ${MERGE_PAUSE} pause release within ${RELEASE_ACK_BOUND_MS}ms`,
-    );
-    expect(failedAfter).toBeGreaterThanOrEqual(RELEASE_ACK_BOUND_MS);
-    expect(failedAfter).toBeLessThan(RELEASE_ACK_BOUND_MS + 6_000);
-    expect((await stuck).status).toBe(200);
-    for (const name of [`arm.${MERGE_PAUSE}`, `claimed.${MERGE_PAUSE}`, `paused.${MERGE_PAUSE}`, `go.${MERGE_PAUSE}`]) {
-      rmSync(join(pauseDir, name), { force: true });
+      await waitForEmptyRelease(MERGE_PAUSE);
+      rmSync(join(pauseDir, `released.${MERGE_PAUSE}`), { force: true });
+      const failingAt = Date.now();
+      let failure: unknown = null;
+      try {
+        await resetPauseMarkers();
+      } catch (error) {
+        failure = error;
+      }
+      const failedAfter = Date.now() - failingAt;
+      expect(failure, "cleanup resolved without the release acknowledgement").not.toBeNull();
+      expect(String(failure)).toContain(
+        `did not observe the ${MERGE_PAUSE} pause release within ${RELEASE_ACK_BOUND_MS}ms`,
+      );
+      expect(failedAfter).toBeGreaterThanOrEqual(RELEASE_ACK_BOUND_MS);
+      expect(failedAfter).toBeLessThan(RELEASE_ACK_BOUND_MS + 6_000);
+      expect((await stuck).status).toBe(200);
+    } finally {
+      for (const name of [
+        `arm.${MERGE_PAUSE}`,
+        `claimed.${MERGE_PAUSE}`,
+        `paused.${MERGE_PAUSE}`,
+        `go.${MERGE_PAUSE}`,
+        `released.${MERGE_PAUSE}`,
+      ]) {
+        rmSync(join(pauseDir, name), { force: true });
+      }
     }
   }, 240_000);
 
