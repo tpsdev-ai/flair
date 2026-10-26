@@ -139,6 +139,26 @@ function pauseResult(point: string): string | null {
   }
 }
 
+/**
+ * Wait, bounded, until the pause point has created `released.<point>` empty.
+ * It creates `paused` before `released`, so `paused` alone does not mean the
+ * release marker exists yet.
+ */
+async function waitForEmptyRelease(point: string): Promise<void> {
+  const deadline = Date.now() + RELEASE_ACK_BOUND_MS;
+  for (;;) {
+    try {
+      if (readFileSync(join(pauseDir, `released.${point}`), "utf8").length === 0) return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`the ${point} pause did not create its release marker within ${RELEASE_ACK_BOUND_MS}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 function markerExists(name: string): boolean {
   try {
     readFileSync(join(pauseDir, name));
@@ -165,10 +185,7 @@ async function resetPauseMarkers(): Promise<void> {
     const deadline = Date.now() + RELEASE_ACK_BOUND_MS;
     while (pauseResult(MERGE_PAUSE) === null) {
       if (Date.now() >= deadline) {
-        throw new Error(
-          `did not observe the ${MERGE_PAUSE} pause release within ${RELEASE_ACK_BOUND_MS}ms; ` +
-          "the pause still holds the merge",
-        );
+        throw new Error(`did not observe the ${MERGE_PAUSE} pause release within ${RELEASE_ACK_BOUND_MS}ms`);
       }
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
@@ -444,12 +461,12 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
     await pending;
     expect(markerExists(`released.${MERGE_PAUSE}`), "cleanup left the released marker").toBe(false);
 
-    // A release whose acknowledgement is never recorded fails cleanup within
-    // the bound instead of leaving an active merge behind. The pause keeps its
-    // own open descriptor, so removing the marker hides its result for good.
+    // Cleanup fails when it cannot observe the release acknowledgement. The
+    // pause keeps its own open descriptor, so removing the marker hides its
+    // result for good.
     writeFileSync(join(pauseDir, `arm.${MERGE_PAUSE}`), "");
     const stuck = push(memoryRow("memory-cleanup-ack-stuck", "stuck", at));
-    expect(await waitFor(join(pauseDir, `paused.${MERGE_PAUSE}`), 120_000), "the merge never paused").toBe(true);
+    await waitForEmptyRelease(MERGE_PAUSE);
     rmSync(join(pauseDir, `released.${MERGE_PAUSE}`), { force: true });
     const failingAt = Date.now();
     let failure: unknown = null;
