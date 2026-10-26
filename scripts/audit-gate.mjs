@@ -101,6 +101,7 @@ export const CONSUMER_INSTALLS = [
   { flag: "--openclaw-npm-install-prefix", source: "npm-install-openclaw", package: "@tpsdev-ai/openclaw-flair", dir: "packages/openclaw-flair" },
   { flag: "--pi-npm-install-prefix", source: "npm-install-pi", package: "@tpsdev-ai/pi-flair", dir: "packages/pi-flair" },
   { flag: "--n8n-npm-install-prefix", source: "npm-install-n8n", package: "@tpsdev-ai/n8n-nodes-flair", dir: "packages/n8n-nodes-flair" },
+  { flag: "--bench-npm-install-prefix", source: "npm-install-bench", package: "@tpsdev-ai/flair-bench", dir: "packages/flair-bench" },
 ];
 
 // The observations the gate runs. `bun` is the lockfile observation (`bun

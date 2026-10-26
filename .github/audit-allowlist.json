@@ -14,7 +14,7 @@
     "Adding an entry is a REVIEWED act, not a way to get green. Each one must carry the",
     "advisory id, what pulls it in, why it cannot be fixed from this repo, a hard expiry",
     "date, and the concrete condition that retires it. The gate enforces all of that",
-    "mechanically, including a severity-scaled cap on how long an entry may live — you",
+    "mechanically, including a severity-scaled cap on how long an entry may live \u2014 you",
     "cannot park a critical for a year.",
     "",
     "When an entry expires the build FAILS and a human re-decides. That is the mechanism",
@@ -421,7 +421,10 @@
       "class": "vendor-pinned",
       "introducedBy": "harper -> stream-json",
       "reason": "Prototype pollution in stream-json's Assembler (fixed in 3.6.0). Harper 5.2.8 pins stream-json 1.9.1 in its npm-shrinkwrap, which blocks a root override for npm installs (flair#1498/#1510). A Bun root override to stream-json 3.x is deferred pending compatibility testing. flair does not import stream-json. Harper 5.2.8 imports StreamArray and Batch in dist/dataLayer/bulkLoad.js; its import_from_s3 operation selects JSON from the S3 object's extension. StreamArray builds each element through the Assembler, so that path is in scope; Harper checks target-table insert permission for an insert import, update permission for update, and both for upsert (dist/utility/operation_authorization.js).",
-      "sources": ["bun", "npm-install"],
+      "sources": [
+        "bun",
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "added": "2026-10-06",
       "expires": "2026-12-03",
@@ -434,7 +437,10 @@
       "class": "vendor-pinned",
       "introducedBy": "harper -> stream-json",
       "reason": "Quadratic re-scan in stream-json's JSONC parser and verifier (fixed after 3.5.0). The installed stream-json 1.9.1 package ships no JSONC parser. Harper 5.2.8 pins stream-json 1.9.1 in its npm-shrinkwrap, which blocks a root override for npm installs (flair#1498/#1510). A Bun root override to stream-json 3.x is deferred pending compatibility testing. flair does not import stream-json. Harper 5.2.8 imports StreamArray and Batch in dist/dataLayer/bulkLoad.js; its import_from_s3 operation selects JSON from the S3 object's extension.",
-      "sources": ["bun", "npm-install"],
+      "sources": [
+        "bun",
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "added": "2026-10-06",
       "expires": "2026-12-03",
@@ -531,6 +537,70 @@
       "added": "2026-10-24",
       "expires": "2026-11-02",
       "removeWhen": "flair moves to a harper release whose installed tree resolves fast-uri >=3.1.9 on the 3.x line and >=4.2.3 on the 4.x line, or flair stops depending on harper."
+    },
+    {
+      "ghsa": "GHSA-v5rq-49vh-5v5c",
+      "package": "@simple-git/argv-parser",
+      "severity": "critical",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install-bench"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "@tpsdev-ai/flair-bench -> node-llama-cpp -> simple-git -> @simple-git/argv-parser",
+      "version": "1.1.1",
+      "reason": "Resolved inside node-llama-cpp's own tree, which we do not control the resolution of: node-llama-cpp 3.18.1, the version @tpsdev-ai/flair-bench pins (packages/flair-bench/package.json:36), declares simple-git ^3.33.0, which installs simple-git 3.36.0, and simple-git 3.36.0 declares @simple-git/argv-parser ^1.1.0, installed as 1.1.1 at node_modules/@simple-git/argv-parser in an npm install of the packed flair-bench tarball. npm overrides in a dependency do not reach its consumers, so the workspace's pins of simple-git 4.0.2 and @simple-git/argv-parser 2.0.1 do not apply. node-llama-cpp's latest release (3.22.2, 2026-10-17) still declares simple-git ^3.36.0, and the 3.x line ends at 3.36.0; the fix is a major move inside node-llama-cpp. flair-bench does not import @simple-git/argv-parser directly. Reachability: node-llama-cpp imports simple-git only to clone llama.cpp's source on its source-build fallback (no prebuilt binary loads, or its own postinstall), never at import time or during model loading and inference; those calls use fixed option objects and a tag placed in one `--branch=<tag>` argument before `--`, and flair-bench passes no options, so none of this advisory's preconditions (attacker-influenced arguments, config, push options or environment) is reachable from flair-bench.",
+      "added": "2026-10-24",
+      "expires": "2026-11-02",
+      "removeWhen": "a node-llama-cpp release consumed by @tpsdev-ai/flair-bench declares simple-git on the 4.x line (>=4.0.2, which depends on @simple-git/argv-parser 2.0.1), or flair-bench stops depending on node-llama-cpp. As of 2026-10-24 the latest node-llama-cpp (3.22.2) declares ^3.36.0 and the 3.x line ends at 3.36.0."
+    },
+    {
+      "ghsa": "GHSA-x6jw-m9v5-85vh",
+      "package": "simple-git",
+      "severity": "critical",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install-bench"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "@tpsdev-ai/flair-bench -> node-llama-cpp -> simple-git",
+      "version": "3.36.0",
+      "reason": "Resolved inside node-llama-cpp's own tree: node-llama-cpp 3.18.1, the version @tpsdev-ai/flair-bench pins (packages/flair-bench/package.json:36), declares simple-git ^3.33.0, installed as 3.36.0 at node_modules/simple-git in an npm install of the packed flair-bench tarball. This advisory's range covers 3.15.0 through 3.36.0, the 3.x line ends at 3.36.0, and the fix is simple-git 4.0.2. npm overrides in a dependency do not reach its consumers, and node-llama-cpp's latest release (3.22.2, 2026-10-17) still declares ^3.36.0, so the fix is a major move inside node-llama-cpp. flair-bench does not import simple-git directly. Reachability: node-llama-cpp imports simple-git only to clone llama.cpp's source on its source-build fallback (no prebuilt binary loads, or its own postinstall), never at import time or during model loading and inference; those calls use fixed option objects and a tag placed in one `--branch=<tag>` argument before `--`, and flair-bench passes no options, so none of this advisory's preconditions (attacker-influenced arguments, config, push options or environment) is reachable from flair-bench.",
+      "added": "2026-10-24",
+      "expires": "2026-11-02",
+      "removeWhen": "a node-llama-cpp release consumed by @tpsdev-ai/flair-bench declares simple-git on the 4.x line (>=4.0.2), or flair-bench stops depending on node-llama-cpp. As of 2026-10-24 the latest node-llama-cpp (3.22.2) declares ^3.36.0 and the 3.x line ends at 3.36.0."
+    },
+    {
+      "ghsa": "GHSA-g4wm-2vf7-vfgr",
+      "package": "simple-git",
+      "severity": "high",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install-bench"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "@tpsdev-ai/flair-bench -> node-llama-cpp -> simple-git",
+      "version": "3.36.0",
+      "reason": "Same resolved copy as GHSA-x6jw-m9v5-85vh: node-llama-cpp 3.18.1 declares simple-git ^3.33.0, installed as 3.36.0 at node_modules/simple-git in an npm install of the packed flair-bench tarball. This advisory's range is <=3.36.0 and the 3.x line ends at 3.36.0; the fix is simple-git 4.0.2. npm overrides in a dependency do not reach its consumers, and node-llama-cpp's latest release (3.22.2, 2026-10-17) still declares ^3.36.0. flair-bench does not import simple-git directly. Reachability: node-llama-cpp imports simple-git only to clone llama.cpp's source on its source-build fallback (no prebuilt binary loads, or its own postinstall), never at import time or during model loading and inference; those calls use fixed option objects and a tag placed in one `--branch=<tag>` argument before `--`, and flair-bench passes no options, so none of this advisory's preconditions (attacker-influenced arguments, config, push options or environment) is reachable from flair-bench.",
+      "added": "2026-10-24",
+      "expires": "2026-11-02",
+      "removeWhen": "a node-llama-cpp release consumed by @tpsdev-ai/flair-bench declares simple-git on the 4.x line (>=4.0.2), or flair-bench stops depending on node-llama-cpp. As of 2026-10-24 the latest node-llama-cpp (3.22.2) declares ^3.36.0 and the 3.x line ends at 3.36.0."
+    },
+    {
+      "ghsa": "GHSA-858h-whjf-mvg5",
+      "package": "simple-git",
+      "severity": "high",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install-bench"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "@tpsdev-ai/flair-bench -> node-llama-cpp -> simple-git",
+      "version": "3.36.0",
+      "reason": "Same resolved copy as GHSA-x6jw-m9v5-85vh: node-llama-cpp 3.18.1 declares simple-git ^3.33.0, installed as 3.36.0 at node_modules/simple-git in an npm install of the packed flair-bench tarball. This advisory's range is <=3.36.0 and the 3.x line ends at 3.36.0; the fix is simple-git 4.0.2. npm overrides in a dependency do not reach its consumers, and node-llama-cpp's latest release (3.22.2, 2026-10-17) still declares ^3.36.0. flair-bench does not import simple-git directly. Reachability: node-llama-cpp imports simple-git only to clone llama.cpp's source on its source-build fallback (no prebuilt binary loads, or its own postinstall), never at import time or during model loading and inference; those calls use fixed option objects and a tag placed in one `--branch=<tag>` argument before `--`, and flair-bench passes no options, so none of this advisory's preconditions (attacker-influenced arguments, config, push options or environment) is reachable from flair-bench.",
+      "added": "2026-10-24",
+      "expires": "2026-11-02",
+      "removeWhen": "a node-llama-cpp release consumed by @tpsdev-ai/flair-bench declares simple-git on the 4.x line (>=4.0.2), or flair-bench stops depending on node-llama-cpp. As of 2026-10-24 the latest node-llama-cpp (3.22.2) declares ^3.36.0 and the 3.x line ends at 3.36.0."
     }
   ]
 }
