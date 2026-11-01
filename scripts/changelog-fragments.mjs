@@ -33,7 +33,7 @@
 //   node scripts/changelog-fragments.mjs render      print the assembled section
 //   node scripts/changelog-fragments.mjs list        one line per fragment
 //   node scripts/changelog-fragments.mjs check       validate; non-zero on error
-//   node scripts/changelog-fragments.mjs promote <version> [--date=YYYY-MM-DD] [--with-dependencies]
+//   node scripts/changelog-fragments.mjs promote <version> [--date=YYYY-MM-DD] [--with-dependencies] [--allow-no-release-tag]
 //                                                    write the section into
 //                                                    CHANGELOG.md and delete the
 //                                                    fragments
@@ -64,7 +64,7 @@ const HEADING = {
 // The body `## [Unreleased]` carries once entries live in fragments. Kept as a
 // constant so the docs-freshness gate and the release script agree on it.
 export const UNRELEASED_NOTE = [
-  "Entries for the next release live as **fragment files** under [`.changelog/unreleased/`](.changelog/unreleased/) —",
+  "Write ordinary release entries as **fragment files** under [`.changelog/unreleased/`](.changelog/unreleased/) —",
   "one file per change, so two pull requests never edit the same lines and never conflict here.",
   "",
   "Add `.changelog/unreleased/<category>-<slug>.md` containing your entry exactly as it should read",
@@ -308,7 +308,7 @@ export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = F
     throw new FragmentError(`promote: invalid version '${version}'. Expected semver, e.g. 0.31.0.`);
   }
   const fragments = readFragments(dir);
-  if (fragments.length === 0) {
+  if (fragments.length === 0 && dependencies.length === 0) {
     throw new FragmentError(
       `promote: no fragments in ${FRAGMENT_DIR_REL}/ — refusing to cut v${version} with an empty changelog section. ` +
         `Add the entries for this release before running the release script.`,
@@ -339,10 +339,9 @@ export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = F
     );
   }
 
-  // Dependency bumps merged by Renovate since the last tag are recorded here
-  // rather than as fragments: the hosted app cannot add one (flair#2872).
+  // Eligible commits supplied by the release collector appear here.
   const dependencySection = formatDependenciesSection(dependencies);
-  const sectionBody = dependencySection ? `${section}\n\n${dependencySection}` : section;
+  const sectionBody = [section, dependencySection].filter(Boolean).join("\n\n");
 
   const day = date ?? new Date().toISOString().slice(0, 10);
   const replacement = [
@@ -465,14 +464,14 @@ if (isMain) {
       const version = process.argv[3];
       const dateArg = process.argv.find((a) => a.startsWith("--date="));
       const dependencies = process.argv.includes("--with-dependencies")
-        ? collectRenovateDependencyCommits({ cwd: ROOT })
+        ? collectRenovateDependencyCommits({ cwd: ROOT, allowNoReleaseTag: process.argv.includes("--allow-no-release-tag") })
         : [];
       const res = promote(version, {
         date: dateArg ? dateArg.slice("--date=".length) : undefined,
         dependencies,
       });
       process.stdout.write(
-        `✓ promoted ${res.entries} entr(ies) into '## [${res.version}] - ${res.date}'; removed ${res.removed.length} fragment(s).\n`,
+        `✓ promoted ${res.entries} fragment entr(ies) into '## [${res.version}] - ${res.date}'; removed ${res.removed.length} fragment(s).\n`,
       );
     } else {
       process.stderr.write(`changelog-fragments: unknown command '${cmd}'. Try: render | list | check | promote <version>\n`);

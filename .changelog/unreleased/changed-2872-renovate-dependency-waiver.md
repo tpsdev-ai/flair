@@ -1,5 +1,6 @@
-- **The docs-freshness gate waives the changelog fragment for Renovate dependency-only changes.**
+- **The docs-freshness gate can waive a changelog fragment for a Renovate PR changing only `package.json`, `bun.lock`, `package-lock.json`, or `npm-shrinkwrap.json`.**
 
-  The waiver applies only when the pull request author from the workflow event is the
-  Renovate app and every changed path is a dependency manifest or lockfile; release
-  notes list the merged dependency commits under Dependencies (#2872).
+  The gate reads the PR author login from the workflow event. At release, `feat` and
+  `fix` commits since the tag selected by `git describe` enter Dependencies when
+  their recorded author name matches `renovate[bot]` and their changed paths use
+  those four basenames (#2872).

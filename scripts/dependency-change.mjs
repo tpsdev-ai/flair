@@ -1,26 +1,22 @@
-// Dependency-manifest changes and the Renovate waiver (flair#2872).
+// JavaScript manifest and lockfile changes (flair#2872).
 //
-// A hosted Renovate dependency bump cannot carry a changelog fragment: the app
-// cannot add a file to the branch. The waiver is deliberately narrow, with two
-// independent conditions:
+// The waiver has two conditions:
 //
 //   * At pull-request time the author comes from the workflow event
 //     (`github.event.pull_request.user.login`), passed in as
 //     FLAIR_PR_AUTHOR_LOGIN. It is never inferred from commit metadata, which a
 //     branch can set to any value.
-//   * Every path against the merge base is a dependency manifest or lockfile.
+//   * Every path against the merge base is package.json, bun.lock,
+//     package-lock.json, or npm-shrinkwrap.json.
 //     A change to anything else keeps the normal fragment requirement.
 //
-// A merged squash commit records its author, so the release-time record uses
-// the same shape over history: author renovate[bot] AND a dependency-only diff.
+// Release collection matches the recorded author name and changed filenames.
 
 import { execFileSync } from "node:child_process";
 
 export const RENOVATE_LOGIN = "renovate[bot]";
 
-// package.json at any depth, plus the lockfiles the issue names. Renovate
-// configuration is deliberately absent: a config edit is a policy change, not
-// a dependency bump.
+// Accepted basenames at any depth.
 const DEPENDENCY_FILE_NAMES = new Set([
   "package.json",
   "bun.lock",
@@ -28,7 +24,7 @@ const DEPENDENCY_FILE_NAMES = new Set([
   "npm-shrinkwrap.json",
 ]);
 
-/** Whether one path is a dependency manifest or lockfile this waiver covers. */
+/** Whether a path has one of the four accepted basenames. */
 export function isDependencyManifestPath(relPath) {
   const p = String(relPath ?? "").replaceAll("\\", "/").replace(/^\.\//, "");
   if (!p) return false;
@@ -36,9 +32,7 @@ export function isDependencyManifestPath(relPath) {
 }
 
 /**
- * Whether a changed-path list is non-empty and entirely dependency manifests or
- * lockfiles. An empty list is not a dependency-only change: it means the diff
- * could not be read, so the caller must keep the requirement.
+ * Whether a non-empty path list uses only the four accepted basenames.
  */
 export function isDependencyOnlyChange(relPaths) {
   const paths = (relPaths ?? [])
@@ -52,7 +46,7 @@ export function isRenovateLogin(login) {
   return String(login ?? "").trim().toLowerCase() === RENOVATE_LOGIN;
 }
 
-/** Whether a commit's recorded author name is the Renovate app. */
+/** Whether a commit's recorded author name matches renovate[bot]. */
 export function isRenovateCommitAuthor(name) {
   return String(name ?? "").trim().toLowerCase() === RENOVATE_LOGIN;
 }
@@ -66,45 +60,48 @@ function git(cwd, args) {
 }
 
 /**
- * Whether a merged commit is a Renovate dependency bump: author renovate[bot]
- * AND a diff that touches only dependency manifests or lockfiles. Any git
- * failure answers false, so an unreadable commit keeps the normal requirement.
+ * Whether the recorded author name matches renovate[bot] and the commit changes
+ * only package.json, bun.lock, package-lock.json, or npm-shrinkwrap.json.
  */
 export function isRenovateDependencyCommit(sha, cwd) {
   let meta;
-  try {
-    meta = git(cwd, ["show", "-s", "--format=%an", String(sha)]);
-  } catch {
-    return false;
-  }
+  try { meta = git(cwd, ["show", "-s", "--format=%an", String(sha)]); }
+  catch (err) { throw new Error(`could not read commit ${sha}: ${err?.message ?? err}`); }
   const name = meta.replace(/\n$/, "");
   if (!isRenovateCommitAuthor(name)) return false;
   let changed;
-  try {
-    changed = git(cwd, ["diff-tree", "--no-commit-id", "--name-only", "-r", String(sha)]);
-  } catch {
-    return false;
-  }
+  try { changed = git(cwd, ["diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", String(sha)]); }
+  catch (err) { throw new Error(`could not read diff for commit ${sha}: ${err?.message ?? err}`); }
   const paths = changed.split("\n").map((p) => p.trim()).filter((p) => p !== "");
   return isDependencyOnlyChange(paths);
 }
 
-/** Most recent v* tag reachable from HEAD, or null when the repo has none. */
-export function lastReleaseTag(cwd) {
+/** Tag selected by git describe, or null with explicit first-release permission. */
+export function lastReleaseTag(cwd, { allowNoReleaseTag = false } = {}) {
   try {
     const tag = git(cwd, ["describe", "--tags", "--abbrev=0", "--match", "v*"]).trim();
-    return tag === "" ? null : tag;
-  } catch {
-    return null;
+    if (tag) return tag;
+    throw new Error("git describe returned an empty tag");
+  } catch (err) {
+    let tags;
+    try { tags = git(cwd, ["tag", "--list", "v*"]).trim(); }
+    catch (tagErr) { throw new Error(`could not check release tags: ${tagErr?.message ?? tagErr}`); }
+    if (!tags) {
+      if (allowNoReleaseTag) return null;
+      throw new Error("repository has no v* release tag; pass --allow-no-release-tag for a first release");
+    }
+    throw new Error(`could not resolve release tag with git describe: ${err?.message ?? err}`);
   }
 }
 
 /**
- * Renovate dependency commits reachable from HEAD but not from the last v*
- * tag, oldest first. With no tag the whole history is used.
+ * Eligible commits since the tag selected by git describe, oldest first.
  */
-export function collectRenovateDependencyCommits({ cwd = process.cwd(), sinceTag } = {}) {
-  const tag = sinceTag === undefined ? lastReleaseTag(cwd) : sinceTag;
+export function collectRenovateDependencyCommits({ cwd = process.cwd(), sinceTag, allowNoReleaseTag = false } = {}) {
+  if (sinceTag !== undefined && (typeof sinceTag !== "string" || sinceTag.trim() === "")) {
+    throw new Error("invalid sinceTag: supply a tag name or omit sinceTag");
+  }
+  const tag = sinceTag === undefined ? lastReleaseTag(cwd, { allowNoReleaseTag }) : sinceTag;
   const range = tag ? `${tag}..HEAD` : "HEAD";
   let log;
   try {
@@ -128,7 +125,7 @@ export function collectRenovateDependencyCommits({ cwd = process.cwd(), sinceTag
   });
 }
 
-/** A Keep-a-Changelog section body listing the dependency commits, or "". */
+/** A Keep-a-Changelog section body listing supplied commits, or "". */
 export function formatDependenciesSection(commits) {
   if (!Array.isArray(commits) || commits.length === 0) return "";
   return `### Dependencies\n\n${commits.map((c) => `- ${c.subject}`).join("\n")}`;

@@ -1,15 +1,10 @@
-// Renovate dependency-bump waiver for the docs-freshness gate (flair#2872).
-//
-// The waiver has two independent halves: the PR author comes from the workflow
-// event (FLAIR_PR_AUTHOR_LOGIN), and every changed path is a dependency
-// manifest or lockfile. These are behaviour tests: each builds a throwaway git
-// repo, runs the real gate as a subprocess, and asserts on the exit code and the
-// message. The release-time cases read the same rule from merged history.
+// Tests for the PR event login and the recorded release author name.
 
 import { describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { load } from "js-yaml";
 
 import { tempDir } from "../helpers/temp-dir.ts";
 
@@ -32,7 +27,7 @@ function fakeCli(n: number): string {
 }
 
 function git(dir: string, ...args: string[]): void {
-  execFileSync("git", args, { cwd: dir, stdio: ["ignore", "pipe", "ignore"] });
+  execFileSync("git", args, { cwd: dir, stdio: ["ignore", "pipe", "pipe"] });
 }
 
 function gitOut(dir: string, ...args: string[]): string {
@@ -110,6 +105,23 @@ function runGate(dir: string, author?: string): { status: number | null; out: st
   return { status: r.status, out: `${r.stdout}${r.stderr}` };
 }
 
+function runPromotion(dir: string, extraArgs: string[] = [], env: NodeJS.ProcessEnv = process.env) {
+  const r = spawnSync("bash", [join(dir, "scripts", "release-promote-changelog.sh"), "0.2.0", ...extraArgs], {
+    cwd: dir, encoding: "utf8", env,
+  });
+  return { status: r.status, out: `${r.stdout}${r.stderr}` };
+}
+
+function failingGitEnv(dir: string, command: string): NodeJS.ProcessEnv {
+  const bin = join(dir, "fake-bin");
+  mkdirSync(bin);
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const shim = join(bin, "git");
+  writeFileSync(shim, `#!/bin/sh\nif [ "$1" = "${command}" ]; then echo forced-${command}-failure >&2; exit 1; fi\nexec "${realGit}" "$@"\n`);
+  chmodSync(shim, 0o755);
+  return { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+}
+
 function addDependencyOnlyCommit(dir: string, opts: { author?: "renovate" } = {}): void {
   writeFixtureFile(dir, join("packages", "dep", "package.json"), JSON.stringify({
     name: "@example/dep",
@@ -124,8 +136,8 @@ function addDependencyOnlyCommit(dir: string, opts: { author?: "renovate" } = {}
   }
 }
 
-describe("Renovate dependency waiver at PR time", () => {
-  test("Renovate author + dependency-only diff is waived", () => {
+describe("PR author login and accepted JavaScript filenames", () => {
+  test("Renovate login + package.json and bun.lock changes are waived", () => {
     const dir = makeRepo();
     addDependencyOnlyCommit(dir);
     const res = runGate(dir, "renovate[bot]");
@@ -134,7 +146,7 @@ describe("Renovate dependency waiver at PR time", () => {
     expect(res.status).toBe(0);
   });
 
-  test("Renovate author + a source file in the diff still requires a fragment", () => {
+  test("Renovate event login + a source file still requires a fragment", () => {
     const dir = makeRepo();
     addDependencyOnlyCommit(dir);
     writeFixtureFile(dir, join("packages", "dep", "src", "index.ts"), "export const n = 1;\n");
@@ -145,7 +157,27 @@ describe("Renovate dependency waiver at PR time", () => {
     expect(res.status).not.toBe(0);
   });
 
-  test("a human author + dependency-only diff still requires a fragment", () => {
+  test("a source file renamed to package.json retains the fragment requirement", () => {
+    const dir = makeRepo();
+    writeFixtureFile(dir, "src/manifest.json", "{\"name\":\"example\"}\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-qm", "chore: add source manifest");
+    git(dir, "push", "-q", "origin", "HEAD:refs/heads/main");
+    git(dir, "fetch", "-q", "origin");
+    mkdirSync(join(dir, "packages", "renamed"), { recursive: true });
+    git(dir, "mv", "src/manifest.json", "packages/renamed/package.json");
+    commitAs(dir, "renovate[bot]", "fixture@example.invalid", "fix(deps): rename source manifest");
+    expect(gitOut(dir, "diff", "--name-status", "origin/main..HEAD")).toMatch(/^R\d+\s+src\/manifest.json\s+packages\/renamed\/package.json/m);
+    const res = runGate(dir, "renovate[bot]");
+    expect(res.out).toContain("adds no changelog fragment");
+    expect(res.status).not.toBe(0);
+    cpSync(join(REPO_ROOT, "scripts", "release-promote-changelog.sh"), join(dir, "scripts", "release-promote-changelog.sh"));
+    const promotion = runPromotion(dir);
+    expect(promotion.status).not.toBe(0);
+    expect(promotion.out).toContain("no fragments");
+  });
+
+  test("a human login + accepted filenames still requires a fragment", () => {
     const dir = makeRepo();
     addDependencyOnlyCommit(dir);
     const res = runGate(dir, "human-a");
@@ -183,7 +215,7 @@ describe("Renovate dependency waiver at PR time", () => {
 });
 
 describe("release-time history", () => {
-  test("a merged Renovate dependency commit does not count as a missing-fragment commit", () => {
+  test("an eligible recorded-name commit does not count as a missing-fragment commit", () => {
     const dir = makeRepo();
     addDependencyOnlyCommit(dir, { author: "renovate" });
     // On main the per-change range is empty; only the since-tag count can fire.
@@ -193,7 +225,7 @@ describe("release-time history", () => {
     expect(res.status).toBe(0);
   });
 
-  test("release notes record a human fix and a merged Renovate dependency commit", () => {
+  test("release notes include a human fix and an eligible recorded-name commit", () => {
     const dir = makeRepo();
 
     writeFixtureFile(dir, join("src", "cli.ts"), "const DEFAULT_PORT = 9927;\nexport const fixed = true;\n");
@@ -215,18 +247,10 @@ describe("release-time history", () => {
     const before = runGate(dir);
     expect(before.status).toBe(0);
 
-    const deps = execFileSync(
-      process.execPath,
-      [
-        join(dir, "scripts", "changelog-fragments.mjs"),
-        "promote",
-        "0.2.0",
-        "--date=2026-11-01",
-        "--with-dependencies",
-      ],
-      { cwd: dir, encoding: "utf8" },
-    );
-    expect(deps).toContain("promoted 1 entr(ies)");
+    cpSync(join(REPO_ROOT, "scripts", "release-promote-changelog.sh"), join(dir, "scripts", "release-promote-changelog.sh"));
+    const deps = runPromotion(dir);
+    expect(deps.status).toBe(0);
+    expect(deps.out).toContain("promoted 1 fragment entr(ies)");
 
     const changelog = readFileSync(join(dir, "CHANGELOG.md"), "utf8");
     expect(changelog).toContain("### Dependencies");
@@ -249,11 +273,76 @@ describe("release-time history", () => {
     const after = runGate(dir);
     expect(after.status).toBe(0);
   });
+
+  test("promotion and rendered notes include dependency commits without fragments", () => {
+    const dir = makeRepo();
+    addDependencyOnlyCommit(dir, { author: "renovate" });
+    cpSync(join(REPO_ROOT, "scripts", "release-promote-changelog.sh"), join(dir, "scripts", "release-promote-changelog.sh"));
+    const result = runPromotion(dir);
+    expect(result.status).toBe(0);
+    expect(result.out).toContain("promoted 0 fragment entr(ies)");
+    const changelog = readFileSync(join(dir, "CHANGELOG.md"), "utf8");
+    expect(changelog).toContain("### Dependencies\n\n- fix(deps): update dependency left-pad to v1.3.0 (#42)");
+    const rendered = execFileSync(process.execPath, [join(dir, "scripts", "changelog-release-notes.mjs"), "0.2.0", "CHANGELOG.md"], { cwd: dir, encoding: "utf8" });
+    expect(rendered).toContain("update dependency left-pad to v1.3.0");
+  });
+
+  test("promotion refuses a section without fragments or eligible commits", () => {
+    const dir = makeRepo();
+    addDependencyOnlyCommit(dir);
+    cpSync(join(REPO_ROOT, "scripts", "release-promote-changelog.sh"), join(dir, "scripts", "release-promote-changelog.sh"));
+    const result = runPromotion(dir);
+    expect(result.status).not.toBe(0);
+    expect(result.out).toContain("no fragments");
+  });
+
+  test("promotion names a failed tag lookup", () => {
+    const dir = makeRepo();
+    cpSync(join(REPO_ROOT, "scripts", "release-promote-changelog.sh"), join(dir, "scripts", "release-promote-changelog.sh"));
+    const result = runPromotion(dir, [], failingGitEnv(dir, "describe"));
+    expect(result.status).not.toBe(0);
+    expect(result.out).toContain("could not resolve release tag with git describe");
+  });
+
+  test("first release needs an explicit no-tag flag", () => {
+    const dir = makeRepo();
+    addDependencyOnlyCommit(dir, { author: "renovate" });
+    git(dir, "tag", "-d", "v0.1.0");
+    cpSync(join(REPO_ROOT, "scripts", "release-promote-changelog.sh"), join(dir, "scripts", "release-promote-changelog.sh"));
+    const refused = runPromotion(dir);
+    expect(refused.status).not.toBe(0);
+    expect(refused.out).toContain("pass --allow-no-release-tag");
+    const allowed = runPromotion(dir, ["--allow-no-release-tag"]);
+    expect(allowed.status).toBe(0);
+    expect(readFileSync(join(dir, "CHANGELOG.md"), "utf8")).toContain("### Dependencies");
+  });
+
+  test.each(["show", "diff-tree"])("promotion stops when git %s fails", (command) => {
+    const dir = makeRepo();
+    addDependencyOnlyCommit(dir, { author: "renovate" });
+    cpSync(join(REPO_ROOT, "scripts", "release-promote-changelog.sh"), join(dir, "scripts", "release-promote-changelog.sh"));
+    const result = runPromotion(dir, [], failingGitEnv(dir, command));
+    expect(result.status).not.toBe(0);
+    expect(result.out).toContain(command === "show" ? "could not read commit" : "could not read diff for commit");
+  });
 });
 
 describe("release wiring", () => {
-  test("release.sh asks promote to record dependency commits", () => {
+  test("release.sh calls the executable promotion helper", () => {
     const sh = readFileSync(join(REPO_ROOT, "scripts", "release.sh"), "utf8");
-    expect(sh).toContain('promote "$VERSION" --with-dependencies');
+    expect(sh).toContain('bash scripts/release-promote-changelog.sh "$VERSION" "${RELEASE_TAG_ARGS[@]}"');
+    expect(sh).toContain('RELEASE_TAG_ARGS=(--allow-no-release-tag)');
+  });
+
+  test("docs-freshness step gets the PR event author login exactly once", () => {
+    const workflow = load(readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8")) as {
+      jobs: Record<string, { env?: Record<string, string>; steps: Array<{ run?: string; env?: Record<string, string> }> }>;
+    };
+    const job = workflow.jobs["docs-freshness"];
+    const step = job.steps.find((entry) => entry.run === "node scripts/docs-freshness-check.mjs");
+    expect(step?.env?.FLAIR_PR_AUTHOR_LOGIN).toBe("${{ github.event.pull_request.user.login }}");
+    const bindings = [job.env, ...job.steps.map((entry) => entry.env)].filter((env) => env && Object.hasOwn(env, "FLAIR_PR_AUTHOR_LOGIN"));
+    expect(bindings).toHaveLength(1);
+    expect(JSON.stringify(job).match(/FLAIR_PR_AUTHOR_LOGIN/g)).toHaveLength(1);
   });
 });

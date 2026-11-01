@@ -360,7 +360,7 @@ defineCheck("changelog-unreleased", null, () => {
     });
   }
 
-  // How much work has landed since the last release?
+  // How much work has landed since the tag selected by git describe?
   let commitsSinceTag = null;
   try {
     const tag = execFileSync("git", ["describe", "--tags", "--abbrev=0", "--match", "v*"],
@@ -377,8 +377,7 @@ defineCheck("changelog-unreleased", null, () => {
         return { sha, subject: rest.join("\0") };
       })
       : [];
-    // A merged Renovate dependency bump is not a changelog event: the app cannot
-    // add a fragment. Count only feat/fix commits that are not that shape.
+    // Exclude eligible feat/fix commits from the missing-fragment count.
     commitsSinceTag = rows.filter(({ sha, subject }) =>
       /^(feat|fix)(\(|!|:)/.test(subject) && !isRenovateDependencyCommit(sha, ROOT),
     ).length;
@@ -390,7 +389,7 @@ defineCheck("changelog-unreleased", null, () => {
     // specifically so this path is never taken there; if it is, the workflow has
     // drifted away from the gate and that is worth failing over.
     return { failures, scanned: null, skips: [skip(
-      `could not resolve the last v* tag (${err?.message ?? err}), so 'feat/fix commits landed since the release with no changelog fragment' was NOT checked.`,
+      `could not check the since-tag feat/fix history (${err?.message ?? err}), so the fragment rule was NOT checked.`,
       "git fetch --tags --unshallow  (CI uses actions/checkout with fetch-depth: 0)",
     )] };
   }
@@ -439,7 +438,7 @@ defineCheck("changelog-unreleased", null, () => {
     base = execFileSync("git", ["merge-base", "HEAD", baseRef],
       { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
     if (base) {
-      const changed = execFileSync("git", ["diff", "--name-only", `${base}..HEAD`],
+      const changed = execFileSync("git", ["diff", "--no-renames", "--name-only", `${base}..HEAD`],
         { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
       changedPaths = changed ? changed.split("\n") : [];
       thisChangeShips = changeTouchesPublished(changedPaths, ROOT);
@@ -449,20 +448,21 @@ defineCheck("changelog-unreleased", null, () => {
   }
 
   // ── Renovate dependency waiver (flair#2872) ──────────────────────────────────
-  // Both halves must hold: the PR author as reported by the workflow event, and
-  // a diff that is entirely dependency manifests and lockfiles. The author is
+  // Both halves must hold: the login supplied by the workflow, and
+  // a diff using only package.json, bun.lock, package-lock.json, or
+  // npm-shrinkwrap.json. The author is
   // never read from commit metadata, which the branch controls; an empty or
   // missing value keeps the requirement (fail closed).
   const waiverApplies = isRenovateLogin(process.env.FLAIR_PR_AUTHOR_LOGIN) &&
     changedPaths !== null && isDependencyOnlyChange(changedPaths);
   if (waiverApplies) {
-    console.log(`  ↷ changelog-unreleased: waived the per-PR fragment requirement — PR author is ${RENOVATE_LOGIN} and every changed path is a dependency manifest or lockfile.`);
+    console.log(`  ↷ changelog-unreleased: waived the per-PR fragment requirement — FLAIR_PR_AUTHOR_LOGIN matches ${RENOVATE_LOGIN} and changed paths use the four accepted JavaScript manifest or lockfile names.`);
   }
 
   if (commitsSinceTag !== null && commitsSinceTag > 0 && !hasContent && thisChangeShips && !waiverApplies) {
     failures.push({
       file: `${FRAGMENT_DIR_REL}/`, line: 1,
-      msg: `no changelog fragments staged, but ${commitsSinceTag} feat/fix commit(s) have landed since the last release tag. Add ${FRAGMENT_DIR_REL}/<category>-<slug>.md describing what changed (categories: ${CATEGORIES.join(", ")}).`,
+      msg: `no changelog fragments staged, but ${commitsSinceTag} feat/fix commit(s) have landed since the tag selected by git describe. Add ${FRAGMENT_DIR_REL}/<category>-<slug>.md describing what changed (categories: ${CATEGORIES.join(", ")}).`,
     });
   }
 
