@@ -16,8 +16,9 @@ import { randomUUID } from "node:crypto";
  * Response:
  *   { agent, soulEntries, memories, created, alreadyExisted, soulCreated, soulAlreadyExisted }
  *
- * `agent` and every `soulEntries` element are read back from the committed
- * store. For attempted creates, `created` / `soulCreated` mean the stored row
+ * `agent`, every `soulEntries` element and every `memories` element this call
+ * wrote are read back from the committed store. For attempted creates,
+ * `created` / `soulCreated` mean the stored row
  * matches every field of this seed's staged row, including generated timestamps
  * and Soul provenance. Otherwise, including an independent concurrent seed with
  * the same input but different generated fields, or an entry found before staging,
@@ -40,7 +41,8 @@ import { stampEphemeralExpiry } from "./memory-durability.js";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
 import { SKILL_ASSIGNMENT_KEY } from "./skill-provenance.js";
 import { withOwnedTransaction } from "./request-transaction.js";
-import { txnPausePoint } from "./txn-pause-point.js";
+import { txnFault, txnPausePoint } from "./txn-pause-point.js";
+import { committedShowsFields, withoutHarperManagedFields } from "./write-back.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
   name: displayName,
@@ -205,6 +207,7 @@ export class AgentSeed extends Resource {
         : DEFAULT_MEMORIES(agentId, now);
 
       const memories: any[] = [];
+      const stagedMemories: any[] = [];
       // Only seed memories if this is a first-time seed (none tagged onboarding yet)
       const hasOnboardingMemory = await (async () => {
         for await (const m of (databases as any).flair.Memory.search()) {
@@ -254,17 +257,17 @@ export class AgentSeed extends Resource {
           stampEphemeralExpiry(record);
           await (databases as any).flair.Memory.put(record, c);
           noteMemoryUpsert(record);
-          memories.push(record);
+          stagedMemories.push(record);
         }
       } // end !hasOnboardingMemory
 
-      const pause = txnPausePoint("agentseed-before-commit");
+      const pause = txnPausePoint("agentseed-before-commit", undefined, undefined, { memories: stagedMemories });
       if (pause) await pause;
-      return { agent, soulAttempts, memories };
+      return { agent, soulAttempts, memories, stagedMemories };
     });
 
     if (outcome instanceof Response) return outcome;
-    const { agent: seededAgent, soulAttempts, memories } = outcome;
+    const { agent: seededAgent, soulAttempts, memories, stagedMemories } = outcome;
 
     // The seed's transaction has committed. Report what is STORED, not what
     // this call staged: Harper can drop a staged create that lost to a newer
@@ -300,6 +303,23 @@ export class AgentSeed extends Resource {
       soulEntries.push(stored);
       if (attempt.written && sameSeededSoul(stored, attempt.written)) soulCreated.push(attempt.key);
       else soulAlreadyExisted.push(attempt.key);
+    }
+
+    // Each starter memory this call staged: the committed row must show this
+    // call's write (committedShowsFields: the sameStoredRow identity, with the
+    // incarnation token, and every staged field).
+    for (const staged of stagedMemories) {
+      let stored: any;
+      try {
+        // Test-only: a fault-injection switch makes this read throw.
+        if (txnFault("agentseed-memory-verify")) throw new Error("injected post-commit read failure");
+        stored = await (databases as any).flair.Memory.get(staged.id, {});
+      } catch (err) {
+        console.error("AgentSeed: the post-commit Memory read failed", { agentId, id: staged.id, err });
+        return unconfirmed(`starter memory ${staged.id}`);
+      }
+      if (!committedShowsFields(stored, staged, withoutHarperManagedFields(staged))) return unconfirmed(`starter memory ${staged.id}`);
+      memories.push(stored);
     }
 
     const created = agentWritten && sameSeededAgent(storedAgent, seededAgent);
