@@ -205,10 +205,11 @@ async function releaseMergePause(): Promise<void> {
 }
 
 /**
- * Wait, bounded, for every tracked push to settle. The pause records its
- * release before the merge it guards writes, so the response (and with it the
- * write) can still be in flight when the release is acknowledged: a case's
- * write must finish before the next case clears the tables it writes to.
+ * Wait, bounded, for the pushes tracked at call time to settle. The pause
+ * records its release before the merge it guards writes, so the response (and
+ * with it the write) can still be in flight when the release is acknowledged:
+ * a case's write must finish before the next case clears the tables it writes
+ * to.
  */
 async function awaitOutstandingPushes(): Promise<void> {
   const pending = [...outstandingPushes];
