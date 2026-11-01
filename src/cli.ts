@@ -415,6 +415,7 @@ import {
   bindCli as bindAttentionCli,
   register as registerAttention,
 } from "./commands/attention.js";
+import { registerHelp } from "./commands/help.js";
 import {
   bindCli as bindBootstrapCli,
   register as registerBootstrap,
@@ -4870,6 +4871,9 @@ program.configureHelp({ showGlobalOptions: true });
 // redundant noise on the one command whose whole job is this exact report.
 program.hook("preAction", async (_thisCommand, actionCommand) => {
   if (actionCommand.name() === "doctor") return;
+  // flair#2887: `help` only prints. Skip the handshake probe so showing help
+  // never reaches the server.
+  if (actionCommand.name() === "help") return;
   // flair#2034 §2: `status` reports the server's version itself, next to this
   // CLI's and the install tree that serves it, and decides the advice from
   // that one comparison — a second, tree-blind "run: flair restart" line here
@@ -9179,6 +9183,10 @@ bindAttentionCli({
   resolveSigningAgentId,
 });
 registerAttention(program);
+
+// ─── flair help ──────────────────────────────────────────────────────────────
+// Command registration lives in src/commands/help.ts (flair#2887).
+registerHelp(program);
 
 // Parse argv and run the CLI. Exported so the CommonJS preflight shim
 // (cli-shim.cts → dist/cli-shim.cjs, the real bin entry) can invoke it after

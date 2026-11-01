@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=148 options=702
+# commands=149 options=702
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -18,7 +18,7 @@ flair
     -v, --version
       description: output the version number
       attr: version
-  subcommands: init, agent, keys, hook, mcp, principal, idp, grant, revoke, integrity, federation, rem, status, snapshot, upgrade, stop, start, restart, uninstall, reembed, test, deploy, fleet, doctor, quality, session, memory, search, bootstrap, relationship, soul, bridge, backup, restore, backup-approval, export, import, inspect, migrate-harness-memory, presence, workspace, orgevent, attention
+  subcommands: init, agent, keys, hook, mcp, principal, idp, grant, revoke, integrity, federation, rem, status, snapshot, upgrade, stop, start, restart, uninstall, reembed, test, deploy, fleet, doctor, quality, session, memory, search, bootstrap, relationship, soul, bridge, backup, restore, backup-approval, export, import, inspect, migrate-harness-memory, presence, workspace, orgevent, attention, help
 
 flair init
   description: One-command Flair setup — bootstrap the instance, register an agent, and wire MCP clients
@@ -3053,6 +3053,13 @@ flair attention
       description: Output raw JSON
       attr: json
 
+flair help
+  description: display help for command
+  usage: [options] [command...]
+  arguments:
+    command (optional, variadic)
+  options: (none)
+
 ========================================================================
 HELP
 ========================================================================
@@ -3108,7 +3115,7 @@ Commands:
   workspace                                 Manage agent workspace state (The Office Space)
   orgevent [options]                        Publish an org-wide coordination event attributed to your agent (PUT /OrgEvent/{id})
   attention [options] <type:value>          What's touching this entity in the last N days? Argument is a vocabulary string (type:value from a closed set, e.g. repo:owner/name). Grouped view across memory/relationship/workspace/presence/orgevent (POST /AttentionQuery)
-  help [command]                            display help for command
+  help [command...]                         display help for command
 
 ----- flair init -----
 Usage: flair init [options]
@@ -6690,3 +6697,14 @@ Options:
 
 Global Options:
   -v, --version   output the version number
+
+----- flair help -----
+Usage: flair help [options] [command...]
+
+display help for command
+
+Options:
+  -h, --help     display help for command
+
+Global Options:
+  -v, --version  output the version number
