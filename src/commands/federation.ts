@@ -858,6 +858,11 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const pendingRetries = new Map<string, RetryQueueRow>();
     /** Pending rows whose attempt this run reserved before sending. */
     const reservedOffers = new Set<string>();
+    /**
+     * A Memory row's stored pending retry row, whose attempt this run
+     * reserves immediately before the batch carrying the row is sent.
+     */
+    const reservationTargets = new Map<string, RetryQueueRow>();
 
     async function loadPendingRetries(): Promise<void> {
       const res = await fetch(`${opsEndpoint}/`, {
@@ -985,6 +990,26 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           continue;
         }
         if (prior) await retireRetry(prior, "merged", nowIso);
+      }
+    }
+
+    /**
+     * Reserve one attempt for each Memory record in `batch` that has a
+     * pending retry row. Called immediately before that batch is sent, so a
+     * batch the run never reaches leaves its rows' attempts and lastAttemptAt
+     * as stored. A reservation write that fails throws here, before the send.
+     */
+    async function reserveBatchAttempts(batch: any[]): Promise<void> {
+      const nowIso = new Date().toISOString();
+      for (const record of batch) {
+        if (record.table !== "Memory") continue;
+        const pending = reservationTargets.get(String(record.id));
+        if (!pending) continue;
+        reservationTargets.delete(String(record.id));
+        const reserved = retryRowForAttempt(pending, nowIso);
+        await writeRetryRow("upsert", reserved);
+        pendingRetries.set(String(reserved.id), reserved as unknown as RetryQueueRow);
+        reservedOffers.add(String(reserved.id));
       }
     }
 
@@ -1162,15 +1187,13 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         }
         // A source the cursor selects that also has a valid pending row is
         // offered now — a new change is not a retry, so the backoff does not
-        // hold it back — and its attempt is reserved before the send, exactly
-        // as on the re-offer path. A malformed row reserves nothing.
+        // hold it back. Its attempt is reserved immediately before the batch
+        // carrying it is sent, as on the re-offer path. A malformed row
+        // reserves nothing.
         for (const row of rows) {
           const pending = pendingRetries.get(retryEntryKey(hub.id, "Memory", row.id));
           if (!pending || retryOfferProblem(pending) !== null) continue;
-          const reserved = retryRowForAttempt(pending, new Date().toISOString());
-          await writeRetryRow("upsert", reserved);
-          pendingRetries.set(String(reserved.id), reserved as unknown as RetryQueueRow);
-          reservedOffers.add(String(reserved.id));
+          reservationTargets.set(String(row.id), pending);
         }
         for (const pending of dueRetryRows([...pendingRetries.values()], Date.now())) {
           if (seen.has(pending.recordId)) continue;
@@ -1183,12 +1206,10 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
             await retireRetry(pending, "source_ineligible");
             continue;
           }
-          // Reserve this offer before the send; an unconfirmed send keeps the
-          // reservation, so the next cycle waits out its backoff.
-          const reserved = retryRowForAttempt(pending, new Date().toISOString());
-          await writeRetryRow("upsert", reserved);
-          pendingRetries.set(String(reserved.id), reserved as unknown as RetryQueueRow);
-          reservedOffers.add(String(reserved.id));
+          // This offer's attempt is reserved immediately before the batch
+          // carrying it is sent; an unconfirmed send keeps the reservation, so
+          // the next cycle waits out its backoff.
+          reservationTargets.set(String(row.id), pending);
           rows.push(row);
           seen.add(pending.recordId);
         }
@@ -1254,6 +1275,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         const srBytes = JSON.stringify(sr).length;
 
         if (batch.length >= BUDGET_RECORDS || (batch.length > 0 && batchBytes + srBytes > BUDGET_BYTES)) {
+          if (table === "Memory") await reserveBatchAttempts(batch);
           const result = await sendBatch(batch);
           if (table === "Memory") await applyMemoryOutcomes(batch, result);
           totalMerged += result.merged;
@@ -1269,6 +1291,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
 
       // Send final partial batch for this table
       if (batch.length > 0) {
+        if (table === "Memory") await reserveBatchAttempts(batch);
         const result = await sendBatch(batch);
         if (table === "Memory") await applyMemoryOutcomes(batch, result);
         totalMerged += result.merged;

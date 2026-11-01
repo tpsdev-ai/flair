@@ -1,0 +1,1 @@
+- **Federation reserves a Memory row's retry attempt just before the batch carrying it is sent.** A batch that is never sent leaves its rows' attempts and last attempt time as stored.
