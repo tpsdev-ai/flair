@@ -106,7 +106,9 @@ Both mechanisms independently forced a pass (`|| echo` made the shell exit 0, so
 | `added`, `expires` | hard dates; lifetime is capped by severity |
 | `removeWhen` | the concrete condition that retires the entry |
 
-`scripts/audit-gate.mjs` fails the build on: an unlisted advisory, a malformed entry, an entry parked beyond its severity cap (critical 30 days, high 60, moderate/low 180), an **expired** entry, a **stale** entry whose advisory no longer appears, or a `no-patch-published` entry for which a patched version has since shipped. That last pair matters — an allowlist that only ever grows is the same failure with more ceremony.
+An advisory can have several entries, one per install source or dependency chain; an entry is identified by its `ghsa`, `package`, `sources` and `introducedBy`. At most one entry per advisory and package may name `bun` or the root npm install. When an advisory has several entries, each entry that names another consumer install must have an `introducedBy` chain that resolves to an installed copy there, and each reported copy must be covered by exactly one entry. `vendor-pinned` is refused for `bun`, which the root `overrides` control.
+
+`scripts/audit-gate.mjs` fails the build on: an unlisted advisory, a malformed entry, an entry parked beyond its severity cap (critical 30 days, high 60, moderate/low 180), an **expired** entry, a **stale** entry whose advisory no longer appears (or, for an advisory with several entries, an entry that covers no reported location in a source it names), or a `no-patch-published` entry for which a patched version has since shipped. That last pair matters — an allowlist that only ever grows is the same failure with more ceremony.
 
 When an entry expires the build fails and a human re-decides. **That is the mechanism working, not a flaw.** Re-dating an entry without re-reading its reason is how this file rots back into the thing it replaced.
 

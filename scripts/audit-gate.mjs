@@ -39,6 +39,15 @@
  *   6. STALENESS — an allowlist entry whose advisory no longer appears BLOCKS
  *      with "remove this entry". An allowlist that only ever grows is the same
  *      failure with more ceremony.
+ *   6a. COVERAGE PER LOCATION — an advisory may carry several entries, keyed by
+ *      GHSA, package, sources and introducedBy. On `bun` and the root
+ *      npm-install observation, one entry per (GHSA, package) may name the
+ *      source. On another consumer install, each entry's chain resolves to one
+ *      node and every reported node must be the node of exactly one entry. Such
+ *      an entry that covers no reported location in a source it names is stale,
+ *      whatever its siblings cover. A GHSA with one entry is matched as before.
+ *   6b. CLASS PER SOURCE — `vendor-pinned` is refused on `bun`: bun.lock
+ *      resolves through this repository's root overrides.
  *   7. FIXABILITY DRIFT — entries claiming `no-patch-published` are re-checked
  *      against the registry. If a patched version has since shipped, the stated
  *      justification is false and the entry BLOCKS.
@@ -107,6 +116,30 @@ export const CONSUMER_INSTALLS = [
 // audit`); the others are the consumer-install observations above. An
 // allowlist entry declares which of these it expects to see its advisory in.
 const VALID_SOURCES = new Set(["bun", ...CONSUMER_INSTALLS.map((input) => input.source)]);
+
+/**
+ * Sources where at most one entry per (ghsa, package) may cover an advisory.
+ * `bun audit` reports no location, and the root npm-install observation is
+ * checked against harper's shipped evidence per entry, not per chain. On every
+ * other consumer-install source an advisory may be split across entries, one
+ * per dependency chain, each covering the node its chain resolves to.
+ */
+const SINGLE_ENTRY_SOURCES = new Set(["bun", "npm-install"]);
+
+/**
+ * The identity of an allowlist entry: GHSA (case-insensitive), package, the set
+ * of sources and introducedBy. Several entries may share a GHSA; two with the
+ * same key are a duplicate.
+ */
+export function entryKey(entry) {
+  const sources = Array.isArray(entry?.sources) ? [...new Set(entry.sources)].sort() : entry?.sources;
+  return JSON.stringify([String(entry?.ghsa ?? "").toUpperCase(), entry?.package, sources, entry?.introducedBy]);
+}
+
+/** How a diagnostic names an entry when its GHSA has more than one. */
+function entryLabel(entry, index) {
+  return `entry[${index}] (${entry.ghsa} / ${entry.package}, sources [${(entry.sources ?? []).join(", ")}], via ${entry.introducedBy})`;
+}
 
 const VALID_CLASSES = new Set([
   // No patched version exists anywhere yet. Nothing to do but wait upstream.
@@ -493,7 +526,8 @@ const isIsoDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s ?? "")) && !Number.
 export function validateAllowlist(allowlist, today) {
   const problems = [];
   const caps = allowlist?.policy?.maxLifetimeDaysBySeverity ?? {};
-  const seen = new Set();
+  const seenKeys = new Map();
+  const singleSourceOwner = new Map();
 
   allowlist.entries.forEach((entry, i) => {
     const where = `entry[${i}] (${entry?.ghsa ?? "no ghsa"} / ${entry?.package ?? "no package"})`;
@@ -509,10 +543,15 @@ export function validateAllowlist(allowlist, today) {
     if (!/^GHSA-[a-z0-9-]+$/i.test(entry.ghsa)) {
       problems.push(`${where}: "ghsa" must be a GHSA id`);
     }
-    if (seen.has(entry.ghsa)) {
-      problems.push(`${where}: duplicate entry for ${entry.ghsa}`);
+    const key = entryKey(entry);
+    const duplicateKey = seenKeys.has(key);
+    if (duplicateKey) {
+      problems.push(
+        `${where}: duplicate entry for ${entry.ghsa} (entry[${seenKeys.get(key)}] has the same package, sources and introducedBy)`,
+      );
+    } else {
+      seenKeys.set(key, i);
     }
-    seen.add(entry.ghsa);
 
     if (!VALID_CLASSES.has(entry.class)) {
       problems.push(
@@ -526,6 +565,30 @@ export function validateAllowlist(allowlist, today) {
         if (!VALID_SOURCES.has(s)) {
           problems.push(`${where}: unknown source "${s}" (expected one of ${[...VALID_SOURCES].join(", ")})`);
         }
+      }
+      // One entry per (ghsa, package) on a source whose advisories carry no
+      // per-chain location: two would both cover the same report.
+      for (const s of new Set(entry.sources)) {
+        if (!SINGLE_ENTRY_SOURCES.has(s) || duplicateKey) continue;
+        const owner = JSON.stringify([String(entry.ghsa).toUpperCase(), entry.package, s]);
+        if (singleSourceOwner.has(owner)) {
+          const j = singleSourceOwner.get(owner);
+          problems.push(
+            `${where}: duplicate coverage — ${entryLabel(allowlist.entries[j], j)} and ${entryLabel(entry, i)} ` +
+              `both cover ${entry.ghsa} (${entry.package}) in source "${s}"; at most one entry per advisory and package may name that source.`,
+          );
+        } else {
+          singleSourceOwner.set(owner, i);
+        }
+      }
+      // bun.lock resolves through this repository's root overrides, so its copy
+      // is never in a tree we do not control: vendor-pinned is false there.
+      if (entry.class === "vendor-pinned" && entry.sources.includes("bun")) {
+        problems.push(
+          `${where}: class "vendor-pinned" cannot cover source "bun": bun.lock resolves through this ` +
+            `repository's root overrides, so the bun copy is not in a tree we do not control. Give the bun ` +
+            `copy its own entry classed remediation-available or no-patch-published.`,
+        );
       }
     }
     if (!isIsoDate(entry.added)) problems.push(`${where}: "added" must be YYYY-MM-DD`);
@@ -878,69 +941,89 @@ export function vendorPinnedNodeProblems(adv, npmPrefix) {
 }
 
 /**
- * For a vendor-pinned entry on a consumer-install observation other than the
- * root tarball's: the entry's `introducedBy` chain must start at that input's
- * package (then its `vendor`, when set) and end at the advisory's package, each
+ * The install-relative node that `entry.introducedBy` resolves to in the
+ * consumer install at `npmPrefix` for `input`. The chain must start at the
+ * input's package (then its `vendor`, when set) and end at `advPackage`; each
  * later link must be a declared dependency of the one before it and resolve on
- * disk, every reported node must be the chain's resolved node, and the
- * installed version must equal the entry's `version`.
+ * disk, found by walking up from the requiring package's directory. Throws on
+ * any break in the chain.
+ */
+function consumerChainNode(npmPrefix, entry, input, advPackage) {
+  const chain = entry.introducedBy.split(" -> ");
+  if (chain.length < 2 || chain[0] !== input.package ||
+      (input.vendor !== undefined && chain[1] !== input.vendor) ||
+      chain.at(-1) !== advPackage ||
+      !chain.every((pkg) => /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/.test(pkg))) {
+    throw new Error(`invalid ${input.package} dependency chain`);
+  }
+  const prefix = resolve(npmPrefix);
+  let parent = prefix;
+  let manifest;
+  for (const pkg of chain) {
+    if (manifest && !Object.hasOwn(manifest.dependencies ?? {}, pkg)) {
+      throw new Error(`${manifest.name} does not depend on ${pkg}`);
+    }
+    let search = parent;
+    while (!existsSync(join(search, "node_modules", pkg, "package.json"))) {
+      if (search === prefix) throw new Error(`cannot resolve ${pkg}`);
+      search = dirname(search);
+    }
+    parent = join(search, "node_modules", pkg);
+    manifest = JSON.parse(readFileSync(join(parent, "package.json"), "utf8"));
+    if (manifest.name !== pkg) throw new Error(`package name mismatch for ${pkg}`);
+  }
+  return relative(prefix, parent).split("\\").join("/");
+}
+
+/**
+ * The version problems of `node`, a node an entry's chain resolves to: the
+ * installed version must equal the entry's `version`, and an audit-reported
+ * version must equal the installed one.
+ */
+function consumerNodeVersionProblems(adv, npmPrefix, entry, input, node) {
+  const prefix = resolve(npmPrefix);
+  try {
+    const installed = JSON.parse(readFileSync(join(prefix, node, "package.json"), "utf8"))?.version;
+    const reported = adv.nodeVersions?.[node];
+    if (typeof entry.version !== "string" || !entry.version.trim()) {
+      throw new Error("missing or invalid allowlist version");
+    }
+    if (typeof installed !== "string" || !installed.trim()) {
+      throw new Error("missing or invalid installed version");
+    }
+    if (installed !== entry.version) {
+      throw new Error(`installed version ${installed} differs from allowlist version ${entry.version}`);
+    }
+    if (reported !== undefined && reported !== installed) {
+      throw new Error(`audit version ${JSON.stringify(reported)} conflicts with installed version ${installed}`);
+    }
+    return [];
+  } catch (e) {
+    return [`${adv.ghsa} (${adv.package}): cannot verify ${input.package} node ${JSON.stringify(node)} version: ${e.message}.`];
+  }
+}
+
+/**
+ * For a vendor-pinned entry on a consumer-install observation other than the
+ * root tarball's, when it is the only entry for its advisory: the entry's
+ * `introducedBy` chain must resolve (`consumerChainNode`), every reported node
+ * must be the chain's resolved node, and the installed version must equal the
+ * entry's `version` (`consumerNodeVersionProblems`).
  */
 function consumerVendorPinnedNodeProblems(adv, npmPrefix, entry, input) {
   if (!Array.isArray(adv.nodes) || adv.nodes.length === 0) {
     return [`${adv.ghsa} (${adv.package}): npm audit reported no nodes.`];
   }
+  let expected;
   try {
-    const chain = entry.introducedBy.split(" -> ");
-    if (chain.length < 2 || chain[0] !== input.package ||
-        (input.vendor !== undefined && chain[1] !== input.vendor) ||
-        chain.at(-1) !== adv.package ||
-        !chain.every((pkg) => /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/.test(pkg))) {
-      throw new Error(`invalid ${input.package} dependency chain`);
-    }
-    const prefix = resolve(npmPrefix);
-    let parent = prefix;
-    let manifest;
-    for (const pkg of chain) {
-      if (manifest && !Object.hasOwn(manifest.dependencies ?? {}, pkg)) {
-        throw new Error(`${manifest.name} does not depend on ${pkg}`);
-      }
-      let search = parent;
-      while (!existsSync(join(search, "node_modules", pkg, "package.json"))) {
-        if (search === prefix) throw new Error(`cannot resolve ${pkg}`);
-        search = dirname(search);
-      }
-      parent = join(search, "node_modules", pkg);
-      manifest = JSON.parse(readFileSync(join(parent, "package.json"), "utf8"));
-      if (manifest.name !== pkg) throw new Error(`package name mismatch for ${pkg}`);
-    }
-    const expected = relative(prefix, parent).split("\\").join("/");
-    return adv.nodes.flatMap((node) => {
-      if (node !== expected) {
-        return [`${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} is outside the dependency chain ${entry.introducedBy} (resolved node ${expected}).`];
-      }
-      try {
-        const installed = JSON.parse(readFileSync(join(prefix, node, "package.json"), "utf8"))?.version;
-        const reported = adv.nodeVersions?.[node];
-        if (typeof entry.version !== "string" || !entry.version.trim()) {
-          throw new Error("missing or invalid allowlist version");
-        }
-        if (typeof installed !== "string" || !installed.trim()) {
-          throw new Error("missing or invalid installed version");
-        }
-        if (installed !== entry.version) {
-          throw new Error(`installed version ${installed} differs from allowlist version ${entry.version}`);
-        }
-        if (reported !== undefined && reported !== installed) {
-          throw new Error(`audit version ${JSON.stringify(reported)} conflicts with installed version ${installed}`);
-        }
-        return [];
-      } catch (e) {
-        return [`${adv.ghsa} (${adv.package}): cannot verify ${input.package} node ${JSON.stringify(node)} version: ${e.message}.`];
-      }
-    });
+    expected = consumerChainNode(npmPrefix, entry, input, adv.package);
   } catch (e) {
     return [`${adv.ghsa} (${adv.package}): cannot verify ${input.package} dependency chain: ${e.message}.`];
   }
+  return adv.nodes.flatMap((node) =>
+    node !== expected
+      ? [`${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} is outside the dependency chain ${entry.introducedBy} (resolved node ${expected}).`]
+      : consumerNodeVersionProblems(adv, npmPrefix, entry, input, node));
 }
 
 async function latestPublishedVersion(pkg) {
@@ -1235,67 +1318,63 @@ async function main() {
   const schemaProblems = validateAllowlist(allowlist, today);
   for (const p of schemaProblems) fail(`allowlist is malformed — ${p}`);
 
-  const byGhsa = new Map();
-  for (const e of allowlist.entries) if (e?.ghsa) byGhsa.set(e.ghsa.toUpperCase(), e);
+  // Every entry for a GHSA, in file order. A GHSA with one entry is matched as
+  // it always was; one with several is matched per source and per location.
+  const entriesByGhsa = new Map();
+  allowlist.entries.forEach((entry, index) => {
+    if (!entry?.ghsa) return;
+    const g = String(entry.ghsa).toUpperCase();
+    if (!entriesByGhsa.has(g)) entriesByGhsa.set(g, []);
+    entriesByGhsa.get(g).push({ entry, index });
+  });
 
-  const matchedBySource = new Map();
+  // The sources in which each entry (by index) covers a reported advisory.
+  const coveredBy = new Map();
+  const cover = (index, source) => {
+    if (!coveredBy.has(index)) coveredBy.set(index, new Set());
+    coveredBy.get(index).add(source);
+  };
   const allowed = [];
   const blocked = [];
 
-  for (const adv of advisories) {
-    if (!adv.ghsa) {
-      fail(
-        `${adv.package}: advisory "${adv.title}" has no GHSA id in its url (${adv.url || "none"}) ` +
-          `and therefore cannot be allowlisted. Investigate manually.`,
-      );
-      blocked.push(adv);
-      continue;
-    }
-    const entry = byGhsa.get(adv.ghsa.toUpperCase());
-    if (!entry) {
-      blocked.push(adv);
-      fail(
-        `${adv.severity.toUpperCase()} ${adv.ghsa} in ${adv.package} (${adv.vulnerableVersions}) ` +
-          `is NOT allowlisted.\n      ${adv.title}\n      ${adv.url}\n` +
-          `      Fix it, or add a justified, dated entry to .github/audit-allowlist.json.`,
-      );
-      continue;
-    }
-    if (!matchedBySource.has(adv.ghsa.toUpperCase())) {
-      matchedBySource.set(adv.ghsa.toUpperCase(), new Set());
-    }
-    matchedBySource.get(adv.ghsa.toUpperCase()).add(adv.source);
-
+  /**
+   * The checks every covering entry passes: package, severity, expiry, and the
+   * vendor-pinned and harper evidence for its source. `chainChecked` skips the
+   * consumer-install chain check when the caller already matched the node.
+   * `index` is set when the entry's GHSA has sibling entries; diagnostics then
+   * name the entry. Records each failure; returns whether the entry admits the
+   * advisory.
+   */
+  const admit = (adv, entry, chainChecked = false, index = undefined) => {
+    const named = index === undefined ? `allowlist entry ${entry.ghsa}` : `allowlist ${entryLabel(entry, index)}`;
+    const namedPkg = index === undefined ? `allowlist entry ${entry.ghsa} (${entry.package})` : named;
     if (entry.package !== adv.package) {
       fail(
-        `allowlist entry ${entry.ghsa} says package "${entry.package}" but the advisory is against ` +
+        `${named} says package "${entry.package}" but the advisory is against ` +
           `"${adv.package}". Correct the entry.`,
       );
-      blocked.push(adv);
-      continue;
+      return false;
     }
     if (entry.severity !== adv.severity) {
       fail(
-        `allowlist entry ${entry.ghsa} records severity "${entry.severity}" but the advisory is now ` +
+        `${named} records severity "${entry.severity}" but the advisory is now ` +
           `"${adv.severity}". Re-assess it against the severity expiry cap, then update the entry.`,
       );
-      blocked.push(adv);
-      continue;
+      return false;
     }
 
     // Expiry. This is the mechanism working, not a malfunction.
     if (todayStr >= entry.expires) {
       fail(
-        `allowlist entry ${entry.ghsa} (${entry.package}, ${entry.severity}) EXPIRED on ${entry.expires}.\n` +
+        `${index === undefined ? `allowlist entry ${entry.ghsa} (${entry.package}, ${entry.severity})` : `${named} (${entry.severity})`} EXPIRED on ${entry.expires}.\n` +
           `      Original reason: ${entry.reason}\n` +
           `      Retires when:    ${entry.removeWhen}\n` +
           `      A human must now re-decide: fix it, or re-justify with a new date.`,
       );
-      blocked.push(adv);
-      continue;
+      return false;
     }
 
-    if (entry.class === "vendor-pinned" && adv.source !== "bun") {
+    if (entry.class === "vendor-pinned" && adv.source !== "bun" && !chainChecked) {
       const nodeProblems = adv.source === "npm-install"
         ? vendorPinnedNodeProblems(adv, prefixes.get(adv.source))
         : consumerVendorPinnedNodeProblems(
@@ -1306,8 +1385,7 @@ async function main() {
           );
       if (nodeProblems.length) {
         for (const problem of nodeProblems) fail(problem);
-        blocked.push(adv);
-        continue;
+        return false;
       }
     }
 
@@ -1324,43 +1402,179 @@ async function main() {
     ) {
       if (!String(entry.introducedBy ?? "").startsWith("harper -> ")) {
         fail(
-          `allowlist entry ${entry.ghsa} (${entry.package}) is vendor-pinned under harper but its ` +
+          `${namedPkg} is vendor-pinned under harper but its ` +
             `introducedBy ("${entry.introducedBy}") does not start with "harper -> ". Fix it.`,
         );
-        blocked.push(adv);
-        continue;
+        return false;
       }
       if (!/harper/i.test(String(entry.removeWhen ?? ""))) {
         fail(
-          `allowlist entry ${entry.ghsa} (${entry.package}) is vendor-pinned under harper but its ` +
+          `${namedPkg} is vendor-pinned under harper but its ` +
             `removeWhen ("${entry.removeWhen}") does not name a harper version. Fix it.`,
         );
-        blocked.push(adv);
-        continue;
+        return false;
       }
     }
+    return true;
+  };
 
+  const allow = (adv, entry) => {
     allowed.push({ adv, entry });
     const daysLeft = Math.ceil((Date.parse(entry.expires) - today.getTime()) / DAY_MS);
     if (daysLeft <= 14) {
       warn(`${entry.ghsa} (${entry.package}) expires in ${daysLeft}d on ${entry.expires}.`);
     }
+  };
+
+  for (const adv of advisories) {
+    if (!adv.ghsa) {
+      fail(
+        `${adv.package}: advisory "${adv.title}" has no GHSA id in its url (${adv.url || "none"}) ` +
+          `and therefore cannot be allowlisted. Investigate manually.`,
+      );
+      blocked.push(adv);
+      continue;
+    }
+    const candidates = entriesByGhsa.get(adv.ghsa.toUpperCase()) ?? [];
+    if (candidates.length === 0) {
+      blocked.push(adv);
+      fail(
+        `${adv.severity.toUpperCase()} ${adv.ghsa} in ${adv.package} (${adv.vulnerableVersions}) ` +
+          `is NOT allowlisted.\n      ${adv.title}\n      ${adv.url}\n` +
+          `      Fix it, or add a justified, dated entry to .github/audit-allowlist.json.`,
+      );
+      continue;
+    }
+
+    // One entry for this GHSA: it covers the advisory wherever it is observed,
+    // and the source and package checks below report any mismatch.
+    if (candidates.length === 1) {
+      const { entry, index } = candidates[0];
+      cover(index, adv.source);
+      if (admit(adv, entry)) allow(adv, entry);
+      else blocked.push(adv);
+      continue;
+    }
+
+    // Several entries: only an entry for this package that names this source
+    // can cover it.
+    const named = candidates.filter(({ entry }) =>
+      entry.package === adv.package && Array.isArray(entry.sources) && entry.sources.includes(adv.source));
+    if (named.length === 0) {
+      blocked.push(adv);
+      fail(
+        `${adv.severity.toUpperCase()} ${adv.ghsa} in ${adv.package} (${adv.vulnerableVersions}) ` +
+          `is NOT allowlisted in source [${adv.source}]: none of the ${candidates.length} entries for ` +
+          `${adv.ghsa} names that source for package "${adv.package}".\n      ${adv.title}\n      ${adv.url}\n` +
+          `      Fix it, or add a justified, dated entry to .github/audit-allowlist.json.`,
+      );
+      continue;
+    }
+
+    // bun and the root npm-install observation: exactly one entry per
+    // (ghsa, package) for the source.
+    if (SINGLE_ENTRY_SOURCES.has(adv.source)) {
+      if (named.length > 1) {
+        blocked.push(adv);
+        fail(
+          `${adv.ghsa} (${adv.package}): duplicate coverage — ${named.map(({ entry, index }) => entryLabel(entry, index)).join(" and ")} ` +
+            `all cover source "${adv.source}"; at most one entry per advisory and package may name it.`,
+        );
+        continue;
+      }
+      const { entry, index } = named[0];
+      cover(index, adv.source);
+      if (admit(adv, entry, false, index)) allow(adv, entry);
+      else blocked.push(adv);
+      continue;
+    }
+
+    // A consumer-install observation: each entry's chain resolves to one node,
+    // and every reported node must be the node of exactly one entry.
+    const input = CONSUMER_INSTALLS.find((i) => i.source === adv.source);
+    const prefix = prefixes.get(adv.source);
+    const problems = [];
+    const resolved = [];
+    for (const { entry, index } of named) {
+      try {
+        resolved.push({ entry, index, node: consumerChainNode(prefix, entry, input, adv.package) });
+      } catch (e) {
+        problems.push(
+          `${adv.ghsa} (${adv.package}): ${entryLabel(entry, index)} cannot verify its ${input.package} dependency chain: ${e.message}.`,
+        );
+      }
+    }
+    const nodes = Array.isArray(adv.nodes) ? adv.nodes : [];
+    if (nodes.length === 0) problems.push(`${adv.ghsa} (${adv.package}): npm audit reported no nodes.`);
+    const covering = new Map();
+    for (const node of nodes) {
+      const matches = resolved.filter((r) => r.node === node);
+      if (matches.length === 0) {
+        problems.push(
+          `${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} in ${adv.source} is covered by no allowlist entry ` +
+            `(the entries' chains resolve to ${resolved.map((r) => r.node).join(", ") || "no node"}).`,
+        );
+        continue;
+      }
+      if (matches.length > 1) {
+        problems.push(
+          `${adv.ghsa} (${adv.package}): duplicate coverage — ${matches.map((m) => entryLabel(m.entry, m.index)).join(" and ")} ` +
+            `all resolve to node ${JSON.stringify(node)} in ${adv.source}.`,
+        );
+        continue;
+      }
+      const [{ entry, index }] = matches;
+      cover(index, adv.source);
+      problems.push(...consumerNodeVersionProblems(adv, prefix, entry, input, node));
+      covering.set(index, entry);
+    }
+    let admitted = problems.length === 0;
+    for (const problem of problems) fail(problem);
+    for (const [index, entry] of covering) {
+      if (!admit(adv, entry, true, index)) admitted = false;
+    }
+    if (!admitted) {
+      blocked.push(adv);
+      continue;
+    }
+    for (const entry of covering.values()) allow(adv, entry);
   }
 
-  // Check 6 — staleness + sources mismatch.
+  // Check 6 — staleness + sources mismatch, per entry.
   //
   // A run that reaches this point has run `bun audit` and, on every
   // consumer-install prefix (each passed the identity check above), `npm audit
-  // --omit=dev`, so each source an entry can declare has a report. An
-  // entry is STALE when its advisory appears in no source at all; a SOURCES
-  // MISMATCH when the observed sources and the declared sources do not agree
-  // in either direction.
-  const matchedGhsa = new Set(matchedBySource.keys());
-  for (const entry of allowlist.entries) {
-    if (!entry?.ghsa) continue;
-    const g = entry.ghsa.toUpperCase();
-    const observed = matchedBySource.get(g) ?? new Set();
+  // --omit=dev`, so each source an entry can declare has a report. An entry is
+  // STALE when it covers a reported advisory in no source at all; a SOURCES
+  // MISMATCH when the sources it covers and the sources it declares do not
+  // agree in either direction. An entry whose GHSA has sibling entries covers
+  // only the sources (and, on a consumer install, the nodes) it was matched
+  // to, so a live sibling never keeps it.
+  allowlist.entries.forEach((entry, index) => {
+    if (!entry?.ghsa) return;
+    const observed = coveredBy.get(index) ?? new Set();
     const declared = new Set(entry.sources ?? []);
+    const siblings = (entriesByGhsa.get(String(entry.ghsa).toUpperCase()) ?? []).length > 1;
+    if (siblings) {
+      const label = `allowlist ${entryLabel(entry, index)}`;
+      if (observed.size === 0) {
+        fail(
+          `${label} is STALE — it covers no reported advisory location in any source it declares ` +
+            `(${[...declared].join(", ") || "none"}). Delete the entry, or correct its sources or introducedBy. ` +
+            `An allowlist that only ever grows is the same failure with more ceremony.`,
+        );
+        return;
+      }
+      for (const s of declared) {
+        if (!observed.has(s)) {
+          fail(
+            `${label} declares source [${s}] but covers no reported advisory location in it. ` +
+              `STALE for that source — fix the entry's sources or introducedBy.`,
+          );
+        }
+      }
+      return;
+    }
     if (observed.size === 0) {
       fail(
         `allowlist entry ${entry.ghsa} (${entry.package}) is STALE — that advisory no longer appears ` +
@@ -1385,31 +1599,32 @@ async function main() {
         }
       }
     }
-  }
+  });
 
   // NOT-REPORTED-BY-BUN — allowlisted advisories that this run's npm-install
   // observation reported, with every node under harper, and its bun lockfile
   // observation did not report.
   const notReportedByBun = [];
-  for (const entry of allowlist.entries) {
-    if (!entry?.ghsa) continue;
+  allowlist.entries.forEach((entry, index) => {
+    if (!entry?.ghsa) return;
     const g = entry.ghsa.toUpperCase();
-    const observed = matchedBySource.get(g) ?? new Set();
-    if (observed.has("bun") || !observed.has("npm-install")) continue;
+    const observed = coveredBy.get(index) ?? new Set();
+    if (!observed.has("npm-install")) return;
+    if (advisories.some((a) => a.source === "bun" && a.ghsa?.toUpperCase() === g)) return;
     const npmAdv = advisories.find(
       (a) =>
         a.source === "npm-install" &&
         a.ghsa?.toUpperCase() === g &&
-        allowed.some(({ adv }) => adv === a) &&
+        allowed.some(({ adv, entry: e }) => adv === a && e === entry) &&
         (a.nodes ?? []).length > 0 &&
         a.nodes.every((n) => harperNodeRoot(n, a.package) !== null),
     );
-    if (!npmAdv) continue;
+    if (!npmAdv) return;
     notReportedByBun.push({ entry, npmAdv });
-  }
+  });
 
-  // Check 7 — fixability drift.
-  const drift = allowlist.entries.filter((e) => matchedGhsa.has(String(e.ghsa).toUpperCase()));
+  // Check 7 — fixability drift, per entry that covered a reported advisory.
+  const drift = allowlist.entries.filter((e, index) => e?.ghsa && (coveredBy.get(index)?.size ?? 0) > 0);
   const pkgs = [...new Set(drift.map((e) => e.package))];
   const latest = new Map();
   let registryReachable = true;
@@ -1427,7 +1642,9 @@ async function main() {
   for (const entry of drift) {
     const v = latest.get(entry.package);
     if (!v) continue;
-    const adv = advisories.find((a) => a.ghsa?.toUpperCase() === String(entry.ghsa).toUpperCase());
+    const g = String(entry.ghsa).toUpperCase();
+    const adv = advisories.find((a) => a.ghsa?.toUpperCase() === g && a.package === entry.package) ??
+      advisories.find((a) => a.ghsa?.toUpperCase() === g);
     if (!adv) continue;
     const stillVulnerable = isVulnerable(v, adv.vulnerableVersions);
     if (entry.class === "no-patch-published" && !stillVulnerable) {
@@ -1462,7 +1679,7 @@ async function main() {
 
   console.log(`\nDependency audit gate — ${todayStr}`);
   console.log(`  advisories reported: ${advisories.length} (${countStr})`);
-  console.log(`  allowlisted (justified + dated):  ${allowed.length}`);
+  console.log(`  allowlisted (justified + dated):  ${new Set(allowed.map(({ adv }) => adv)).size}`);
   console.log(`  blocking:                         ${blocked.length}\n`);
 
   for (const { entry } of notReportedByBun) {
