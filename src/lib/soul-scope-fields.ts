@@ -2,8 +2,7 @@
  * Soul is scoped to an `agentId` and its schema has no `tags` or `scopeTag`
  * (schemas/memory.graphql), so a Soul row cannot record a per-user scope. A
  * write request that supplies either field is refused whatever the tag's
- * prefix, so the refusal holds for connectors this repository does not know
- * about and does not depend on the `adk:` bridge (flair#1540).
+ * prefix, so the refusal does not depend on the `adk:` bridge (flair#1540).
  *
  * Shared with the replay writers (`flair import`, `flair restore`, REM
  * restore), which report the refusal by name.
