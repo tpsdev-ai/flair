@@ -118,12 +118,11 @@ export class UsageLedgerReadError extends Error {
  * flair#2478: the whole contribution runs under the memory id's per-id write
  * lock (resources/memory-write-lock.ts), taken before the ledger lock and once
  * without waiting. The count bump is then decided on a committed row that an
- * ordinary owner PUT or PATCH in the same Harper process, which holds the lock
- * until it commits, cannot change under it. Not serialized with it: a
- * composed PUT that commits after releasing its lock, an owner
- * DELETE (until #2787), and a raw operations write. A contribution that cannot
- * take that lock, or the ledger lock, writes nothing for that id and is logged
- * as skipped.
+ * ordinary owner PUT, PATCH or DELETE in the same Harper process, which holds
+ * the lock until it commits, cannot change under it. Not serialized with it: a
+ * composed PUT that commits after releasing its lock, and a raw operations
+ * write. A contribution that cannot take that lock, or the ledger lock,
+ * writes nothing for that id and is logged as skipped.
  *
  * The count bump is the shared write-back helper (write-back.ts): the row is
  * read inside a transaction this call OWNS, the bump is built from THAT read,

@@ -11,12 +11,11 @@
 
   A usage contribution (POST /RecordUsage and citation-on-write) takes the
   memory id's lock before the usage-ledger lock, so the count bump's
-  read-modify-write runs on a row that an ordinary owner PUT or PATCH in the
-  same Harper process, which holds the lock until it commits, cannot change
-  under it. Not serialized with it: a composed PUT that commits after
-  releasing its lock, an owner DELETE (until #2787), and a raw operations
-  write. The count bump writes `usageCount` and the helper's commit
-  marker.
+  read-modify-write runs on a row that an ordinary owner PUT, PATCH or DELETE
+  in the same Harper process, which holds the lock until it commits, cannot
+  change under it. Not serialized with it: a composed PUT that commits after
+  releasing its lock, and a raw operations write. The count bump writes
+  `usageCount` and the helper's commit marker.
 
   A run or contribution that cannot take the lock — a held id, an id whose
   last write's outcome is unresolved, or a store with no lock — writes
