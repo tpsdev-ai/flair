@@ -33,7 +33,7 @@
 //   node scripts/changelog-fragments.mjs render      print the assembled section
 //   node scripts/changelog-fragments.mjs list        one line per fragment
 //   node scripts/changelog-fragments.mjs check       validate; non-zero on error
-//   node scripts/changelog-fragments.mjs promote <version> [--date=YYYY-MM-DD]
+//   node scripts/changelog-fragments.mjs promote <version> [--date=YYYY-MM-DD] [--with-dependencies]
 //                                                    write the section into
 //                                                    CHANGELOG.md and delete the
 //                                                    fragments
@@ -42,6 +42,7 @@ import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, unlinkS
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { operatorRemedyViolation } from "./changelog-release-notes.mjs";
+import { collectRenovateDependencyCommits, formatDependenciesSection } from "./dependency-change.mjs";
 
 export const ROOT = resolve(fileURLToPath(import.meta.url), "../..");
 export const FRAGMENT_DIR_REL = join(".changelog", "unreleased");
@@ -302,7 +303,7 @@ export function strayUnreleasedEntries(body) {
   return body.split("\n").filter((l) => l.startsWith("- "));
 }
 
-export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = FRAGMENT_DIR } = {}) {
+export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = FRAGMENT_DIR, dependencies = [] } = {}) {
   if (!/^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$/.test(version ?? "")) {
     throw new FragmentError(`promote: invalid version '${version}'. Expected semver, e.g. 0.31.0.`);
   }
@@ -338,6 +339,11 @@ export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = F
     );
   }
 
+  // Dependency bumps merged by Renovate since the last tag are recorded here
+  // rather than as fragments: the hosted app cannot add one (flair#2872).
+  const dependencySection = formatDependenciesSection(dependencies);
+  const sectionBody = dependencySection ? `${section}\n\n${dependencySection}` : section;
+
   const day = date ?? new Date().toISOString().slice(0, 10);
   const replacement = [
     "",
@@ -345,7 +351,7 @@ export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = F
     "",
     `## [${version}] - ${day}`,
     "",
-    section,
+    sectionBody,
     "",
   ];
   const next = [...lines.slice(0, loc.start + 1), ...replacement, ...lines.slice(loc.end)];
@@ -458,7 +464,13 @@ if (isMain) {
     } else if (cmd === "promote") {
       const version = process.argv[3];
       const dateArg = process.argv.find((a) => a.startsWith("--date="));
-      const res = promote(version, { date: dateArg ? dateArg.slice("--date=".length) : undefined });
+      const dependencies = process.argv.includes("--with-dependencies")
+        ? collectRenovateDependencyCommits({ cwd: ROOT })
+        : [];
+      const res = promote(version, {
+        date: dateArg ? dateArg.slice("--date=".length) : undefined,
+        dependencies,
+      });
       process.stdout.write(
         `✓ promoted ${res.entries} entr(ies) into '## [${res.version}] - ${res.date}'; removed ${res.removed.length} fragment(s).\n`,
       );

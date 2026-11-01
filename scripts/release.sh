@@ -356,7 +356,7 @@ echo "📰 Assembling changelog fragments..."
 (cd "$ROOT" && node scripts/changelog-fragments.mjs check-fixed) || {
   echo "❌ A 'fixed' fragment overstates a harper-pinned advisory — fix it before releasing."; exit 1;
 }
-(cd "$ROOT" && node scripts/changelog-fragments.mjs promote "$VERSION") || {
+(cd "$ROOT" && node scripts/changelog-fragments.mjs promote "$VERSION" --with-dependencies) || {
   echo "❌ Changelog assembly failed — fix the fragments before releasing."; exit 1;
 }
 
