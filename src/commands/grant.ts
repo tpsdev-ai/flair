@@ -8,6 +8,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
+import { addAdminPassOptions, applyAdminPassFile } from "../lib/auth-resolve.js";
 
 export type GrantCli = {
   resolveHttpPort: (...args: any[]) => any;
@@ -37,16 +38,15 @@ function resolveAdminUser(...args: any[]): any {
 export function register(program: Command): void {
 // ─── flair grant / revoke ─────────────────────────────────────────────────────
 
-program
-  .command("grant <from-agent> <to-agent>")
+addAdminPassOptions(program.command("grant <from-agent> <to-agent>"))
   .description("Grant an agent read access to another agent's memories")
   .option("--scope <scope>", "Grant scope: read or search", "read")
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
-  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys (for from-agent Ed25519 auth)")
   .action(async (fromAgent: string, toAgent: string, opts) => {
+    applyAdminPassFile(opts);
     const httpPort = resolveHttpPort(opts);
     const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
@@ -94,14 +94,13 @@ program
     console.log(`   Scope: ${scope}`);
   });
 
-program
-  .command("revoke <from-agent> <to-agent>")
+addAdminPassOptions(program.command("revoke <from-agent> <to-agent>"))
   .description("Revoke a memory grant between two agents")
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
-  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .action(async (fromAgent: string, toAgent: string, opts) => {
+    applyAdminPassFile(opts);
     const httpPort = resolveHttpPort(opts);
     const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";

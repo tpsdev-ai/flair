@@ -25,6 +25,8 @@ import { join } from "node:path";
 import * as render from "../render.js";
 import {
   resolveAdminPassFromSources,
+  addAdminPassOptions,
+  applyAdminPassFile,
   defaultKeysDir,
   resolveLocalAdminPass,
   resolveAdminUser,
@@ -444,16 +446,15 @@ export function register(program: Command): void {
       );
     });
 
-  agent
-    .command("list")
+  addAdminPassOptions(agent.command("list"))
     .description("List all agents")
-    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--agent <id>", "Agent ID to authenticate as via Ed25519 (or FLAIR_AGENT_ID env) when no admin pass")
     .option("--keys-dir <dir>", "Directory holding the agent's Ed25519 key")
     .option("--port <port>", "Harper HTTP port")
     .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (opts) => {
+      applyAdminPassFile(opts);
       const port = resolveHttpPort(opts);
       // fromEnv is true ONLY when the resolved value came from env (no inline override).
       const adminPassFromEnv = !opts.adminPass && (!!process.env.FLAIR_ADMIN_PASS || !!process.env.HDB_ADMIN_PASSWORD);
@@ -572,15 +573,14 @@ export function register(program: Command): void {
       }
     });
 
-  agent
-    .command("rotate-key <id>")
+  addAdminPassOptions(agent.command("rotate-key <id>"))
     .description("Rotate an agent's Ed25519 keypair")
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper operations API port")
-    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .action(async (id: string, opts) => {
+      applyAdminPassFile(opts);
       const httpPort = resolveHttpPort(opts);
       const opsPort = resolveOpsPort(opts);
       // fromEnv is true ONLY when the resolved value came from env (no inline override).
@@ -665,17 +665,16 @@ export function register(program: Command): void {
 
   // ─── flair agent remove ──────────────────────────────────────────────────────
 
-  agent
-    .command("remove <id>")
+  addAdminPassOptions(agent.command("remove <id>"))
     .description("Remove an agent and all its data from Flair")
     .option("--keep-keys", "Do not delete key files from disk")
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper operations API port")
-    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .option("--force", "Skip interactive confirmation (required when stdin is not a TTY)")
     .action(async (id: string, opts) => {
+      applyAdminPassFile(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const adminUser = resolveAdminUser(opts.adminUser);
       const keysDir: string = opts.keysDir ?? defaultKeysDir();

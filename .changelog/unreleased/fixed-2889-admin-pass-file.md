@@ -1,0 +1,1 @@
+- **Commands that take `--admin-pass` now also accept `--admin-pass-file`.** The file is read through the resolver `agent add` uses, with its owner-only mode check and its refusal for a missing, empty or group-readable file.

@@ -7,7 +7,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { defaultKeysDir, resolveAdminUser } from "../lib/auth-resolve.js";
+import { defaultKeysDir, resolveAdminUser, addAdminPassOptions, applyAdminPassFile } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import * as render from "../render.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -62,17 +62,16 @@ export function register(program: Command): void {
 // ─── flair import ────────────────────────────────────────────────────────────
 
 
-program
-  .command("import <path>")
+addAdminPassOptions(program.command("import <path>"))
   .description("Import an agent from an export file into this Flair instance")
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--ops-target <url>", "Explicit ops API URL for the Agent seed (env: FLAIR_OPS_TARGET; bypasses port derivation). Use when --url is remote and the ops port isn't HTTP-1.")
-  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Keys directory", defaultKeysDir())
   .action(async (importPath, opts) => {
+    applyAdminPassFile(opts);
     const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
     const opsPort = resolveOpsPort(opts);
     // Resolve where the Agent record is seeded. The Agent goes through the ops

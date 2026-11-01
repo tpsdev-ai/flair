@@ -29,6 +29,8 @@ import {
   defaultKeysDir,
   resolveLocalAdminPass,
   resolveAdminUser,
+  addAdminPassOptions,
+  applyAdminPassFile,
 } from "../lib/auth-resolve.js";
 import { resolveOpsUrl } from "../lib/mcp-enable.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
@@ -222,12 +224,14 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
 
 /** Both state verbs accept the same target and admin credentials. */
 function registerPrincipalStatusCommand(command: Command, status: "active" | "deactivated"): void {
-  command
-    .option("--admin-pass <pass>", "Admin password; required explicitly for a remote --instance")
+  addAdminPassOptions(command, "Admin password; required explicitly for a remote --instance")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port (local target)")
     .option("--instance <url>", "Remote Flair instance (else FLAIR_URL); its ops API is derived as in mcp enable")
-    .action(async (id: string, opts) => setPrincipalStatus(id, status, opts));
+    .action(async (id: string, opts) => {
+      applyAdminPassFile(opts);
+      return setPrincipalStatus(id, status, opts);
+    });
 }
 
 // ─── flair principal ─────────────────────────────────────────────────────────
@@ -257,8 +261,7 @@ export function register(program: Command): void {
 
   const principal = program.command("principal").description("Manage principals (humans and agents)");
 
-  principal
-    .command("add <id>")
+  addAdminPassOptions(principal.command("add <id>"))
     .description("Create a new principal")
     .option("--kind <kind>", "Principal kind: human or agent", "agent")
     .option("--name <name>", "Display name (defaults to id)")
@@ -266,7 +269,6 @@ export function register(program: Command): void {
     .option("--trust <tier>", "Default trust tier: endorsed, corroborated, or unverified")
     .option("--runtime <runtime>", "Runtime: openclaw, claude-code, headless, external")
     .option("--port <port>", "Harper HTTP port")
-    .option("--admin-pass <pass>", "Admin password for registration")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .option("--ops-port <port>", "Harper operations API port")
@@ -305,9 +307,7 @@ export function register(program: Command): void {
       const trustTier: string = opts.trust ?? (isAdmin ? "endorsed" : "unverified");
       const runtime: string | undefined = opts.runtime;
 
-      // #590 — same local-only fallback as `agent add`: FLAIR_ADMIN_PASS env, then
-      // the secure ~/.flair/admin-pass file (mode 0600). `principal add` has no
-      // --target/--ops-target (always localhost), so the fallback always applies.
+      applyAdminPassFile(opts);
       let adminPass: string | undefined;
       try {
         adminPass = resolveLocalAdminPass(opts.adminPass);
@@ -474,16 +474,15 @@ export function register(program: Command): void {
       console.log(`   Private key: ${privPath}`);
     });
 
-  principal
-    .command("list")
+  addAdminPassOptions(principal.command("list"))
     .description("List all principals")
     .option("--kind <kind>", "Filter by kind: human or agent")
-    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (opts) => {
+      applyAdminPassFile(opts);
       const opsPort = resolveOpsPort(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       if (!adminPass) {
@@ -618,13 +617,12 @@ export function register(program: Command): void {
     "active",
   );
 
-  principal
-    .command("promote <id> <tier>")
+  addAdminPassOptions(principal.command("promote <id> <tier>"))
     .description("Change a principal's trust tier (endorsed, corroborated, unverified)")
-    .option("--admin-pass <pass>", "Admin password")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, tier: string, opts) => {
+      applyAdminPassFile(opts);
       const validTiers = ["endorsed", "corroborated", "unverified"];
       if (!validTiers.includes(tier)) {
         console.error(`Error: tier must be one of: ${validTiers.join(", ")}`);
@@ -700,8 +698,7 @@ export function register(program: Command): void {
     "machine's local credentials and are never sent to a remote instance)";
   const MAPPING_ADMIN_USER_HELP = "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)";
 
-  principal
-    .command("link <principal>")
+  addAdminPassOptions(principal.command("link <principal>"), MAPPING_ADMIN_PASS_HELP)
     .description(
       "Map one IdP login to an existing principal on an already-enabled instance — the identity-mapping step " +
         "`flair mcp enable` runs, and nothing else. " + MAPPING_TARGET_HELP,
@@ -710,9 +707,9 @@ export function register(program: Command): void {
     .option("--idp-provider <name>", "Upstream IdP provider", "github")
     .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
     .option("--replace", "Move a subject that is already mapped to a different principal")
-    .option("--admin-pass <pass>", MAPPING_ADMIN_PASS_HELP)
     .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
     .action(async (principalId: string, opts) => {
+      applyAdminPassFile(opts);
       if (!opts.idpSubject) {
         console.error("Error: --idp-subject <login> is required — it is the login the identity provider reports for this person.");
         process.exit(1);
@@ -735,21 +732,20 @@ export function register(program: Command): void {
       }
     });
 
-  principal
-    .command("unlink <principal>")
+  addAdminPassOptions(principal.command("unlink <principal>"), MAPPING_ADMIN_PASS_HELP)
     .description(
       "Revoke one IdP login's mapping; success requires confirmed updates and no resolvable subject mapping on readback. " + MAPPING_TARGET_HELP,
     )
     .option("--idp-subject <login>", "The login the identity provider reports for this person (GitHub: the username)")
     .option("--idp-provider <name>", "Upstream IdP provider the mapping carries", "github")
     .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
-    .option("--admin-pass <pass>", MAPPING_ADMIN_PASS_HELP)
     .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
     .action(async (principalId: string, opts) => {
       if (!opts.idpSubject) {
         console.error("Error: --idp-subject <login> is required — it is the login the identity provider reports for this person.");
         process.exit(1);
       }
+      applyAdminPassFile(opts);
       const target = mappingTarget(opts, "flair principal unlink");
       try {
         const result = await unlinkPrincipalMapping({
@@ -767,15 +763,14 @@ export function register(program: Command): void {
       }
     });
 
-  principal
-    .command("links <principal>")
+  addAdminPassOptions(principal.command("links <principal>"), MAPPING_ADMIN_PASS_HELP)
     .description(
       "List a principal's current IdP mappings on an already-enabled instance. " + MAPPING_TARGET_HELP,
     )
     .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
-    .option("--admin-pass <pass>", MAPPING_ADMIN_PASS_HELP)
     .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
     .action(async (principalId: string, opts) => {
+      applyAdminPassFile(opts);
       const target = mappingTarget(opts, "flair principal links");
       try {
         const result = await listPrincipalMappings({

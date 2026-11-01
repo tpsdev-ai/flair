@@ -14,7 +14,7 @@ import { encodeRecordId } from "../lib/record-id-path.js";
 import { Command } from "commander";
 import { randomUUID } from "node:crypto";
 import * as render from "../render.js";
-import { resolveAdminUser } from "../lib/auth-resolve.js";
+import { resolveAdminUser, addAdminPassOptions, applyAdminPassFile } from "../lib/auth-resolve.js";
 
 export type IdpCli = {
   api: (...args: any[]) => Promise<any>;
@@ -42,8 +42,7 @@ export function register(program: Command): void {
 
   const idp = program.command("idp").description("Manage enterprise IdP configurations (XAA)");
 
-  idp
-    .command("add")
+  addAdminPassOptions(idp.command("add"))
     .description("Register a trusted enterprise IdP")
     .requiredOption("--name <name>", "Display name (e.g., 'Harper Corporate')")
     .requiredOption("--issuer <url>", "IdP issuer URL (e.g., https://accounts.google.com)")
@@ -52,10 +51,10 @@ export function register(program: Command): void {
     .option("--required-domain <domain>", "Reject tokens without this domain (hd/tid claim)")
     .option("--no-jit-provision", "Disable auto-creation of principals for new IdP users")
     .option("--default-trust <tier>", "Trust tier for JIT principals", "unverified")
-    .option("--admin-pass <pass>", "Admin password")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (opts) => {
+      applyAdminPassFile(opts);
       const opsPort = resolveOpsPort(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       if (!adminPass) {
@@ -100,14 +99,13 @@ export function register(program: Command): void {
       console.log(`   JIT:      ${opts.jitProvision !== false}`);
     });
 
-  idp
-    .command("list")
+  addAdminPassOptions(idp.command("list"))
     .description("List configured IdPs")
-    .option("--admin-pass <pass>", "Admin password")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (opts) => {
+      applyAdminPassFile(opts);
       const opsPort = resolveOpsPort(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       if (!adminPass) {
@@ -157,13 +155,12 @@ export function register(program: Command): void {
       }
     });
 
-  idp
-    .command("remove <id>")
+  addAdminPassOptions(idp.command("remove <id>"))
     .description("Remove an IdP configuration")
-    .option("--admin-pass <pass>", "Admin password")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, opts) => {
+      applyAdminPassFile(opts);
       const opsPort = resolveOpsPort(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       if (!adminPass) {
@@ -186,12 +183,11 @@ export function register(program: Command): void {
       console.log(`✅ IdP '${id}' removed`);
     });
 
-  idp
-    .command("test <id>")
+  addAdminPassOptions(idp.command("test <id>"))
     .description("Test IdP connectivity (fetches JWKS)")
-    .option("--admin-pass <pass>", "Admin password")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, opts) => {
+      applyAdminPassFile(opts);
       const opsPort = resolveOpsPort(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       if (!adminPass) {

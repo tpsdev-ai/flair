@@ -7,7 +7,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { defaultKeysDir, resolveAdminUser } from "../lib/auth-resolve.js";
+import { defaultKeysDir, resolveAdminUser, addAdminPassOptions, applyAdminPassFile } from "../lib/auth-resolve.js";
 import * as render from "../render.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -51,17 +51,16 @@ export function register(program: Command): void {
 // ─── flair export ────────────────────────────────────────────────────────────
 
 
-program
-  .command("export <agent-id>")
+addAdminPassOptions(program.command("export <agent-id>"))
   .description("Export a single agent's identity (soul + memories) to a portable file")
   .option("--output <path>", "Output file path")
   .option("--include-key", "Include private key in export (UNENCRYPTED — keep the output file secure)")
   .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
-  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Keys directory", defaultKeysDir())
   .action(async (agentId, opts) => {
+    applyAdminPassFile(opts);
     const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     if (!adminPass) { console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required"); process.exit(1); }

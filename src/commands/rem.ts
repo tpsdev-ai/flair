@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 
 import { dirname, resolve } from "node:path";
 import * as render from "../render.js";
-import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, resolveAdminPassFromSources, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP, ADMIN_PASS_FLAG, ADMIN_PASS_HELP, ApiRequestOutcomeUnknown, apiErrorRawBody, boundErrorText, resolveRemRequestDeadlineMs, DEFAULT_REM_REQUEST_DEADLINE_MS } from "../lib/auth-resolve.js";
+import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, resolveAdminPassFromSources, addAdminPassOptions, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP, ADMIN_PASS_FLAG, ADMIN_PASS_HELP, ApiRequestOutcomeUnknown, apiErrorRawBody, boundErrorText, resolveRemRequestDeadlineMs, DEFAULT_REM_REQUEST_DEADLINE_MS } from "../lib/auth-resolve.js";
 import type { OpsSearch } from "../rem/runner.js";
 import {
   validatePromoteOpts,
@@ -842,17 +842,16 @@ export function register(program: Command): void {
   // populating. Per spec § 5: candidates are NEVER auto-promoted; this command
   // is the operator's review surface.
 
-  rem
-    .command("candidates")
+  addAdminPassOptions(rem.command("candidates"))
     .description("List staged memory candidates from the FLAIR-NIGHTLY-REM cycle (pending review)")
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper operations API port")
-    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--agent <id>", "Agent ID (or FLAIR_AGENT_ID env)")
     .option("--status <s>", "Filter by status: pending | promoted | rejected (default: pending)")
     .option("--json", "Output as JSON for scripting")
     .action(async (opts: any) => {
+      applyAdminPassFile(opts);
       const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
       const status = opts.status ?? "pending";
       const validStatuses = new Set(["pending", "promoted", "rejected"]);

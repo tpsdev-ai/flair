@@ -35,6 +35,7 @@ import {
   isLocalBase,
   resolveAdminPassFromSources,
   resolveAdminUser,
+  addAdminPassOptions,
   ApiRequestOutcomeUnknown,
   ADMIN_PASS_FILE_FLAG,
   ADMIN_PASS_FILE_HELP,
@@ -2472,17 +2473,16 @@ export function register(program: Command): void {
       }
     });
 
-  federation
-    .command("watch")
+  addAdminPassOptions(federation.command("watch"))
     .description("Run federation sync in a loop (foreground daemon)")
     .option("--interval <seconds>", "Seconds between syncs", "30")
     .option("--port <port>", "Harper HTTP port")
-    .option("--admin-pass <pass>", "Admin password")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--target <url>", "Remote Flair URL")
     .option("--ops-target <url>", "Explicit ops API URL")
     .action(async (opts: any) => {
+      applyAdminPassFile(opts);
       await runFederationWatch(opts);
     });
 

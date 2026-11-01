@@ -18,7 +18,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { dirname, join } from "node:path";
 import nacl from "tweetnacl";
 import * as render from "../render.js";
-import { defaultKeysDir, resolveAdminUser, resolveLocalAdminPass } from "../lib/auth-resolve.js";
+import { defaultKeysDir, resolveAdminUser, resolveLocalAdminPass, addAdminPassOptions, applyAdminPassFile } from "../lib/auth-resolve.js";
 import {
   resolveAgentKeyPath,
   loadEd25519PrivateKeyFromFile,
@@ -659,8 +659,7 @@ export function register(program: Command): void {
       }
     });
 
-  mcp
-    .command("grant <name>")
+  addAdminPassOptions(mcp.command("grant <name>"))
     .description(
       "Provision a named, individually-revocable machine client for the /mcp OAuth surface " +
         "(flair Agent + Ed25519 keypair; the existing CIMD path — see `flair mcp token` — makes it usable).",
@@ -668,7 +667,6 @@ export function register(program: Command): void {
     .option("--issuer <url>", "Public origin for the CIMD client_id (defaults to FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)")
     .option("--keys-dir <dir>", "Directory to write the new key pair into (else FLAIR_KEY_DIR, ~/.flair/keys)")
     .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
-    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper operations API port")
@@ -693,6 +691,7 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
+      applyAdminPassFile(opts);
       const adminPass = resolveLocalAdminPass(opts.adminPass);
       if (!adminPass) {
         console.error(
@@ -735,11 +734,9 @@ export function register(program: Command): void {
       }
     });
 
-  mcp
-    .command("revoke <name>")
+  addAdminPassOptions(mcp.command("revoke <name>"))
     .description("Server-side revoke a granted machine client (deletes its backing Agent record), then clean up locally.")
     .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
-    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--issuer <url>", "Public origin of the /mcp OAuth surface — used only for the enable-gate probe (defaults to FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)")
     .option("--ops-port <port>", "Harper operations API port")
@@ -759,6 +756,7 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
+      applyAdminPassFile(opts);
       const adminPass = resolveLocalAdminPass(opts.adminPass);
       if (!adminPass) {
         console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required for `flair mcp revoke`.");
@@ -812,8 +810,7 @@ export function register(program: Command): void {
       console.log(render.table(cols, entries as unknown as Array<Record<string, unknown>>));
     });
 
-  mcp
-    .command("enable")
+  addAdminPassOptions(mcp.command("enable"), "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
     .description(
       "Enable the OAuth /mcp surface for claude.ai. " +
         "Rejects invalid issuer URLs, localhost/.localhost/.local hosts, " +
@@ -840,7 +837,6 @@ export function register(program: Command): void {
         "Always refused with --fabric or a *.harperfabric.com instance. " +
         "Without it the list is not changed (shipped: claude.ai,claude.com)",
     )
-    .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
     .option("--fabric", "Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host")
@@ -876,6 +872,7 @@ export function register(program: Command): void {
       }
 
       const dryRun = Boolean(opts.dryRun);
+      applyAdminPassFile(opts);
       const adminPass = dryRun ? (opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "") : resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
       if (!dryRun && !adminPass) {
         console.error(
@@ -993,11 +990,9 @@ export function register(program: Command): void {
       for (const line of enableSuccessLines(result)) console.log(line);
     });
 
-  mcp
-    .command("disable")
+  addAdminPassOptions(mcp.command("disable"), "Admin password for the remote target instance; pass it explicitly with --admin-pass or --admin-pass-file")
     .description("Flag off + restart = byte-identical boot (Model-2 contract) — removes the /mcp OAuth surface.")
     .option("--instance <url>", "Remote flair instance to disable against (else FLAIR_URL)")
-    .option("--admin-pass <pass>", "Admin password for the remote target instance; pass it explicitly with --admin-pass")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-flag-off", "Confirm FLAIR_MCP_OAUTH is already unset on the target instance's environment (skips the interactive confirm)")
     .option("--json", "Print machine-readable JSON instead of a human summary")
@@ -1009,6 +1004,7 @@ export function register(program: Command): void {
       }
       // --instance is always remote for this command — see the matching
       // comment in `mcp enable` above.
+      applyAdminPassFile(opts);
       const adminPass = resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
       if (!adminPass) {
         console.error("Error: --admin-pass <pass> is required for a REMOTE target. Pass the target instance's admin password explicitly.");

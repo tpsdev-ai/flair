@@ -130,11 +130,8 @@ import {
   defaultAdminPassPath,
   defaultKeysDir,
   resolveLocalAdminPass,
-  resolveAdminPassFromSources,
-  ADMIN_PASS_FLAG,
-  ADMIN_PASS_HELP,
-  ADMIN_PASS_FILE_FLAG,
-  ADMIN_PASS_FILE_HELP,
+  applyAdminPassFile,
+  addAdminPassOptions,
   DEFAULT_ADMIN_USER,
   resolveAdminUser,
   resolveKeyPath,
@@ -1491,49 +1488,12 @@ export const SHARED_IDENTITY_FLAGS = {
 } as const;
 
 function addSharedCredentialOptions(cmd: Command): Command {
-  return cmd
-    .option(ADMIN_PASS_FLAG, ADMIN_PASS_HELP)
-    .option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP)
+  return addAdminPassOptions(cmd)
     .option(SHARED_CREDENTIAL_FLAGS.adminUser, "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)");
 }
 
 function addSharedIdentityOption(cmd: Command): Command {
   return cmd.option(SHARED_IDENTITY_FLAGS.agent, "Agent ID (or set FLAIR_AGENT_ID env)");
-}
-
-/**
- * Resolve the admin password for the commands that declare the shared
- * credential flags, through the ONE resolver (`resolveAdminPassFromSources` —
- * the same one `federation token`/`pair` use, flair#1873/#1910). The resolved
- * value is written back into the `adminPass` slot every call site reads.
- *
- * Precedence, as the usage text states: an explicit `--admin-pass-file` or
- * `--admin-pass` over the ambient `FLAIR_ADMIN_PASS`/`HDB_ADMIN_PASSWORD`.
- * Supplying BOTH the file and the flag is a usage error (it used to let the
- * flag silently win); a file that is missing, empty or group-/world-readable
- * is refused naming the path and its mode. Never prints the value.
- */
-function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
-  try {
-    // envPass is DELIBERATELY omitted: this wrapper folds an explicit
-    // `--admin-pass-file` (or `--admin-pass`) into `opts.adminPass`, and each
-    // call site keeps its own `opts.adminPass ?? FLAIR_ADMIN_PASS` fallback —
-    // exactly main's shape. Resolving the ambient env HERE would pre-fill
-    // `opts.adminPass`, and a call site that threads it as `explicitAdminPass`
-    // (memory add, soul, …) would then send ambient admin Basic auth where it
-    // used to send nothing and let the `--agent`/env tier decide (flair#1910
-    // round 2: `federation sync` merged nothing in the mixed-version compat
-    // lane because `memory add --agent X` with FLAIR_ADMIN_PASS set signed as
-    // admin, not as X).
-    const pass = resolveAdminPassFromSources({
-      adminPassFile: opts.adminPassFile,
-      adminPass: opts.adminPass,
-    });
-    if (pass) opts.adminPass = pass;
-  } catch (err: any) {
-    console.error(`Error: ${err.message}`);
-    process.exit(1);
-  }
 }
 
 // Ops port resolution: valid --ops-port flag > FLAIR_OPS_PORT env > config opsPort > httpPort - 1.

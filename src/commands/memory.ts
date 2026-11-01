@@ -13,7 +13,7 @@
  */
 import { Command, Option } from "commander";
 import * as render from "../render.js";
-import { resolveAdminUser } from "../lib/auth-resolve.js";
+import { resolveAdminUser, addAdminPassOptions } from "../lib/auth-resolve.js";
 import type { ResolvedSigningIdentity } from "../lib/signing-identity.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { DURABILITY_TIERS_HELP } from "../lib/durability-copy.js";
@@ -279,10 +279,9 @@ export function register(program: Command): void {
       console.log(memId);
     });
 
-  memory.command("search [query]")
+  addAdminPassOptions(memory.command("search [query]"))
     .description("Semantic search over an agent's memories (query via positional arg or --q)")
     .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
-    .option("--admin-pass <pass>", "Admin password — sign as admin while --agent names whose memories to search (flair#1500: a flag-pinned agent with no key no longer falls back to FLAIR_ADMIN_PASS)")
     .option("--q <query>", "search query (alias for positional arg)")
     .option("--json", "Output raw JSON array")
     .option("--limit <n>", "Max results", "5")
@@ -292,6 +291,7 @@ export function register(program: Command): void {
     .option("--url <url>", "Flair base URL (overrides --port)")
     .option("--port <port>", "Harper HTTP port")
     .action(async (queryArg: string | undefined, opts: any) => {
+      applyAdminPassFile(opts);
       const { agentId, source } = resolveSigningAgentId(opts, "memory search");
       if (!agentId) {
         console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
