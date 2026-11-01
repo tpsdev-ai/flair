@@ -7,10 +7,10 @@
  * main's position.
  *
  * The fixture holds, for every command that declared `--admin-pass` on
- * origin/main (8b5096d9), that description, plus every command's ordered
- * option names. It was generated from main's CLI by walking the registered
- * commander tree with the same `walkCliCommands` helper the CLI-surface
- * snapshot uses.
+ * origin/main (b6a06807), that description, plus every command's ordered
+ * option names. It was generated from main's built CLI by walking the
+ * registered commander tree with the same `walkCliCommands` helper the
+ * CLI-surface snapshot uses.
  *
  * Isolated: it imports src/cli.ts (registration only) in its own process.
  */

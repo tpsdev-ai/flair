@@ -1277,5 +1277,8 @@
       "--target",
       "--json"
     ]
+  },
+  "flair help": {
+    "options": []
   }
 }
