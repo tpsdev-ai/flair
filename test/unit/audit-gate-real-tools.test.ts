@@ -19,8 +19,10 @@ import { tempDir } from "../helpers/temp-dir.ts";
  * gate's exit status and output. The servers record every request, and each
  * gate case checks which fixture each tool reached.
  *
- * The fixture allowlist has no entries, so a gate run that gets past both
- * audit stages passes exactly when both stages report zero advisories.
+ * The fixture allowlist has no entries unless a case writes its own (the ADK
+ * uuid cases copy the committed uuid entries); with no entries, a gate run that
+ * gets past both audit stages passes exactly when both stages report zero
+ * advisories.
  */
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
