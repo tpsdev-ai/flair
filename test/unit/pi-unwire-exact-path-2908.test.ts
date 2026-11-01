@@ -1,11 +1,13 @@
 // pi-unwire-exact-path-2908.test.ts — flair#2908.
 //
 // Unwiring pi dropped every `extensions` entry whose string merely CONTAINED
-// "pi-flair". That substring heuristic exists so doctor can NAME the entry it
-// matched; using it to decide a removal meant a user file such as
-// ~/dist/pi-flair-notes.js was deleted from the user's own settings. Removal
-// now follows the entry Flair writes: an npm pi-flair spec, or a path with a
-// whole `pi-flair` segment.
+// "pi-flair", and matched a path with any `pi-flair` segment. That substring
+// heuristic exists so doctor can NAME the entry it matched; using it to decide
+// a removal meant a user file such as ~/dist/pi-flair-notes.js or
+// ~/work/pi-flair/notes.js was deleted from the user's own settings. Removal
+// now follows the entry Flair writes: the npm spec
+// `npm:@tpsdev-ai/pi-flair[@<spec>]`, or a path with the consecutive segments
+// `node_modules/@tpsdev-ai/pi-flair/`.
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -15,7 +17,7 @@ import { dirname, join } from "node:path";
 import {
   ALL_CLIENTS,
   PI_FLAIR_PACKAGE,
-  isInsidePiFlairPackage,
+  isFlairOwnedPiEntry,
   piSettingsPath,
 } from "../../src/install/clients.ts";
 import { withHome } from "../../src/lib/home.ts";
@@ -25,8 +27,11 @@ const piClient = ALL_CLIENTS.find((c) => c.id === "pi")!;
 // The file-path wiring Flair documents for pre-0.49 pi: a path INSIDE the
 // installed package.
 const FLAIR_ENTRY = "~/.pi/agent/npm/node_modules/@tpsdev-ai/pi-flair/dist/index.js";
-// A user file that only carries the name.
-const LOOKALIKE = "~/dist/pi-flair-notes.js";
+// User entries that only carry the name, in three shapes.
+const WORK_LOOKALIKE = "~/work/pi-flair/notes.js";
+const NPM_LOOKALIKE = "npm:@other/pi-flair";
+const NAME_LOOKALIKE = "~/dist/pi-flair-notes.js";
+const LOOKALIKES = [WORK_LOOKALIKE, NPM_LOOKALIKE, NAME_LOOKALIKE];
 // An unrelated extension source.
 const OTHER = "npm:@acme/pi-tools@2.1.0";
 
@@ -53,30 +58,27 @@ function writePiSettings(config: unknown): string {
 }
 
 describe("pi unwire — only the entry Flair writes", () => {
-  it("removes Flair's own entry; the lookalike and the unrelated extension survive byte-identical", () => {
+  it("removes Flair's own npm spec and package path; each lookalike survives and is reported", () => {
     const path = writePiSettings({
-      extensions: [FLAIR_ENTRY, LOOKALIKE, OTHER],
-      packages: [`npm:${PI_FLAIR_PACKAGE}`],
+      extensions: [FLAIR_ENTRY, WORK_LOOKALIKE, NAME_LOOKALIKE, OTHER],
+      packages: [`npm:${PI_FLAIR_PACKAGE}@0.50.0`, NPM_LOOKALIKE],
     });
     const before = JSON.parse(readFileSync(path, "utf-8"));
-    expect(before.extensions).toEqual([FLAIR_ENTRY, LOOKALIKE, OTHER]);
+    expect(before.extensions).toEqual([FLAIR_ENTRY, WORK_LOOKALIKE, NAME_LOOKALIKE, OTHER]);
+    expect(before.packages).toEqual([`npm:${PI_FLAIR_PACKAGE}@0.50.0`, NPM_LOOKALIKE]);
 
     const res = withHome(isoHome, () => piClient.unwire());
 
     const after = JSON.parse(readFileSync(path, "utf-8"));
     expect(res.ok).toBe(true);
     expect(res.removed).toBe(true);
-    expect(after.extensions).toHaveLength(2);
-    expect(after.extensions[0]).toBe(before.extensions[1]);
-    expect(after.extensions[1]).toBe(before.extensions[2]);
-    expect(after.extensions).toEqual([LOOKALIKE, OTHER]);
-    expect(after.packages).toEqual([]);
-    // The entry it kept is named in the unwire result.
-    expect(res.message).toContain(LOOKALIKE);
+    expect(after.extensions).toEqual([WORK_LOOKALIKE, NAME_LOOKALIKE, OTHER]);
+    expect(after.packages).toEqual([NPM_LOOKALIKE]);
+    for (const lookalike of LOOKALIKES) expect(res.message).toContain(lookalike);
   });
 
-  it("leaves the file untouched and names the lookalike when there is no Flair entry", () => {
-    const path = writePiSettings({ extensions: [LOOKALIKE, OTHER] });
+  it("leaves the file untouched and names each lookalike when there is no Flair entry", () => {
+    const path = writePiSettings({ extensions: [WORK_LOOKALIKE, NAME_LOOKALIKE, OTHER], packages: [NPM_LOOKALIKE] });
     const before = readFileSync(path, "utf-8");
 
     const res = withHome(isoHome, () => piClient.unwire());
@@ -84,13 +86,18 @@ describe("pi unwire — only the entry Flair writes", () => {
     expect(res.ok).toBe(true);
     expect(res.removed).toBe(false);
     expect(readFileSync(path, "utf-8")).toBe(before);
-    expect(res.message).toContain(LOOKALIKE);
+    for (const lookalike of LOOKALIKES) expect(res.message).toContain(lookalike);
   });
 
-  it("matches a whole `pi-flair` path segment, not a substring of the file name", () => {
-    expect(isInsidePiFlairPackage(FLAIR_ENTRY)).toBe(true);
-    expect(isInsidePiFlairPackage("C:\\Users\\agent\\.pi\\agent\\npm\\node_modules\\@tpsdev-ai\\pi-flair\\dist\\index.js")).toBe(true);
-    expect(isInsidePiFlairPackage(LOOKALIKE)).toBe(false);
-    expect(isInsidePiFlairPackage("~/dist/my-pi-flair-notes.js")).toBe(false);
+  it("accepts only the exact npm spec and the installed package path", () => {
+    expect(isFlairOwnedPiEntry(`npm:${PI_FLAIR_PACKAGE}`)).toBe(true);
+    expect(isFlairOwnedPiEntry(`npm:${PI_FLAIR_PACKAGE}@0.50.0`)).toBe(true);
+    expect(isFlairOwnedPiEntry(FLAIR_ENTRY)).toBe(true);
+    expect(
+      isFlairOwnedPiEntry("C:\\Users\\agent\\.pi\\agent\\npm\\node_modules\\@tpsdev-ai\\pi-flair\\dist\\index.js"),
+    ).toBe(true);
+    for (const lookalike of LOOKALIKES) expect(isFlairOwnedPiEntry(lookalike)).toBe(false);
+    expect(isFlairOwnedPiEntry(`npm:${PI_FLAIR_PACKAGE}-extras`)).toBe(false);
+    expect(isFlairOwnedPiEntry("~/node_modules/@tpsdev-ai/pi-flair")).toBe(false);
   });
 });

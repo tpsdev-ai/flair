@@ -1078,24 +1078,44 @@ export function extractPiFlairPin(source: string): string | null {
  * pre-0.49 workaround: a local path to the installed dist/index.js)? A
  * substring heuristic on the package/directory name — the entry is user-
  * written free text, so this is deliberately loose and REPORTING only:
- * doctor names the entry it matched, and `_unwirePi` reports the entries this
- * matches but `isInsidePiFlairPackage` rejects. Removal is decided by
- * `isPiFlairNpmSource` and `isInsidePiFlairPackage`, never here (flair#2908).
+ * doctor names the entry it matched. Removal of an `extensions` entry is
+ * decided by `isFlairOwnedPiEntry`, never here (flair#2908).
  */
 export function isPiFlairExtensionPath(entry: string): boolean {
   if (typeof entry !== "string" || entry.startsWith("npm:") || entry.startsWith("git:")) return false;
   return entry.includes("pi-flair");
 }
 
+/** The path segments that make a file path pi-flair's own installed entry. */
+const PI_FLAIR_PACKAGE_SEGMENTS = ["node_modules", "@tpsdev-ai", "pi-flair"];
+
 /**
- * Is this `extensions` entry a path inside the pi-flair package Flair wires
- * (`<agent dir>/npm/node_modules/@tpsdev-ai/pi-flair/dist/index.js`)? A whole
- * path SEGMENT must be `pi-flair`, so that path matches and a user file that
- * merely carries the name (`~/dist/pi-flair-notes.js`) does not (flair#2908).
+ * Is this `extensions` entry a path inside the pi-flair package Flair installs
+ * (`<agent dir>/npm/node_modules/@tpsdev-ai/pi-flair/dist/index.js`)? After
+ * normalising backslashes, the path must contain the consecutive segments
+ * `node_modules/@tpsdev-ai/pi-flair/`, so `~/work/pi-flair/notes.js` and
+ * `~/dist/pi-flair-notes.js` do not match (flair#2908).
  */
 export function isInsidePiFlairPackage(entry: string): boolean {
   if (typeof entry !== "string" || entry.startsWith("npm:") || entry.startsWith("git:")) return false;
-  return entry.replace(/\\/g, "/").split("/").some((segment) => segment === "pi-flair");
+  const segments = entry.replace(/\\/g, "/").split("/");
+  for (let i = 0; i + PI_FLAIR_PACKAGE_SEGMENTS.length < segments.length; i++) {
+    if (PI_FLAIR_PACKAGE_SEGMENTS.every((segment, offset) => segments[i + offset] === segment)) return true;
+  }
+  return false;
+}
+
+/**
+ * Is this entry Flair's own pi wiring? An npm source must be exactly
+ * `npm:@tpsdev-ai/pi-flair` or `npm:@tpsdev-ai/pi-flair@<spec>`; a file path
+ * must sit inside the installed package (`node_modules/@tpsdev-ai/pi-flair/`).
+ * Anything else that carries the name — `npm:@other/pi-flair`,
+ * `~/work/pi-flair/notes.js` — is not Flair's (flair#2908).
+ */
+export function isFlairOwnedPiEntry(entry: unknown): boolean {
+  if (typeof entry !== "string") return false;
+  if (entry.startsWith("npm:")) return isPiFlairNpmSource(entry);
+  return isInsidePiFlairPackage(entry);
 }
 
 /** What one pi settings file says about pi-flair. Pure — callers do the fs. */
@@ -1646,12 +1666,13 @@ function _unwirePi(): UnwireResult {
   try {
     let settled: UnwireResult | null = null;
     let written: UnwireResult | null = null;
-    // An `extensions` entry that merely carries "pi-flair" in its path is left
-    // in place and named in the result: a user file such as
-    // ~/dist/pi-flair-notes.js is not Flair's wiring (flair#2908).
+    // An entry that carries "pi-flair" but is not Flair's own wiring (in
+    // `packages` or `extensions`) is left in place and named in the result:
+    // npm:@other/pi-flair and ~/work/pi-flair/notes.js are not the entry Flair
+    // installs (flair#2908).
     const lookalikes: string[] = [];
     const described = (): string =>
-      lookalikes.length === 0 ? "" : `; left ${lookalikes.join(", ")} in place (path is not inside the pi-flair package)`;
+      lookalikes.length === 0 ? "" : `; left ${lookalikes.join(", ")} in place (not the pi-flair entry Flair installs)`;
     const result = withConfigCriticalSection(
       path,
       (bytes) => {
@@ -1673,7 +1694,9 @@ function _unwirePi(): UnwireResult {
         if (Array.isArray(config.packages)) {
           const kept = config.packages.filter((entry: unknown) => {
             const source = piPackageEntrySource(entry);
-            return !(source && isPiFlairNpmSource(source));
+            if (source && isPiFlairNpmSource(source)) return false;
+            if (source && source.includes("pi-flair") && !lookalikes.includes(source)) lookalikes.push(source);
+            return true;
           });
           if (kept.length !== config.packages.length) {
             config.packages = kept;
@@ -1683,8 +1706,8 @@ function _unwirePi(): UnwireResult {
         if (Array.isArray(config.extensions)) {
           const kept = config.extensions.filter((entry: unknown) => {
             if (typeof entry !== "string") return true;
-            if (isPiFlairNpmSource(entry) || isInsidePiFlairPackage(entry)) return false;
-            if (isPiFlairExtensionPath(entry) && !lookalikes.includes(entry)) lookalikes.push(entry);
+            if (isFlairOwnedPiEntry(entry)) return false;
+            if (entry.includes("pi-flair") && !lookalikes.includes(entry)) lookalikes.push(entry);
             return true;
           });
           if (kept.length !== config.extensions.length) {

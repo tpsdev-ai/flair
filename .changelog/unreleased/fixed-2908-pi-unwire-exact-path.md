@@ -1,2 +1,6 @@
 - **Unwiring pi leaves an `extensions` entry that is not Flair's own in place.**
-  A path entry is removed when it names an npm pi-flair spec or has a whole `pi-flair` path segment (the location Flair installs it); one that merely contains the substring, such as `~/dist/pi-flair-notes.js`, survives and is named in the unwire result (#2908).
+  An entry is removed only when it is exactly `npm:@tpsdev-ai/pi-flair`
+  (`@<spec>` allowed), or a file path containing the consecutive segments
+  `node_modules/@tpsdev-ai/pi-flair/`. Anything else carrying the name, such as
+  `npm:@other/pi-flair`, `~/work/pi-flair/notes.js` or `~/dist/pi-flair-notes.js`,
+  survives and is named in the unwire result (#2908).
