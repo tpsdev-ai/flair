@@ -689,7 +689,7 @@ function mdReferenceTarget(raw) {
   return filePart;
 }
 
-defineCheck("doc-link-pack-coverage", "doc reference", () => {
+defineCheck("doc-link-pack-coverage", "shipped doc", () => {
   const docs = [];
   const walk = (dir) => {
     for (const name of readdirSync(dir)) {
@@ -716,14 +716,11 @@ defineCheck("doc-link-pack-coverage", "doc reference", () => {
   }
 
   const failures = [];
-  let scanned = 0;
   const LINK_RE = /\[[^\]]*\]\(\s*<?([^)\s>]+)>?/g;
   const TICK_RE = /`([^`\n]+)`/g;
-
   const considered = (doc, line, raw, rootRelative) => {
     const target = mdReferenceTarget(raw);
     if (target === null) return;
-    scanned++;
     const bases = [dirname(join(ROOT, doc))];
     if (rootRelative) bases.push(ROOT);
     const resolved = bases
@@ -752,7 +749,7 @@ defineCheck("doc-link-pack-coverage", "doc reference", () => {
       for (const m of prose.matchAll(TICK_RE)) considered(doc, i + 1, m[1], true);
     });
   }
-  return { failures, scanned };
+  return { failures, scanned: docs.length };
 });
 
 // ─── Run ────────────────────────────────────────────────────────────────────────
