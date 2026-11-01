@@ -1061,6 +1061,20 @@ describe("several allowlist entries for one advisory, per source and per locatio
     expect(res.stdout).not.toContain("NOT allowlisted");
   }, 12_000);
 
+  it("reports a non-array sources value beside a sibling entry instead of crashing", () => {
+    // The schema check records the problem and the gate goes on matching; naming
+    // that entry in a later diagnostic must not throw, or the crash handler
+    // prints a stack trace and the recorded schema problem is never shown.
+    const res = runMulti({
+      entries: [uuidEntry(VERTEXAI), uuidEntry(GTOKEN, { sources: "npm-install-adk" })],
+      npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE),
+    });
+    expectBlocked(res, `entry[1] (${UUID} / uuid): "sources" must be a non-empty array`);
+    expect(res.stderr).not.toContain("audit-gate crashed");
+    // The staleness diagnostic names no sources rather than the string's characters.
+    expect(res.stdout).toContain("in any source it declares (none)");
+  }, 12_000);
+
   it("refuses vendor-pinned on the bun source and accepts remediation-available there", () => {
     const vendor = entry(GLOB, "glob", "vendor-pinned", ["bun"], "harper -> @fastify/static -> glob");
     expect(validateAllowlist({ policy: ALLOWLIST.policy, entries: [vendor] }, new Date("2026-10-01")).join("\n"))

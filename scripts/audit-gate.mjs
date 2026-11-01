@@ -139,7 +139,11 @@ export function entryKey(entry) {
 
 /** How a diagnostic names an entry when its GHSA has more than one. */
 function entryLabel(entry, index) {
-  return `entry[${index}] (${entry.ghsa} / ${entry.package}, sources [${(entry.sources ?? []).join(", ")}], via ${entry.introducedBy})`;
+  // Diagnostics name entries the schema check has already refused, so the
+  // label must not assume a valid shape: a throw here would replace every
+  // recorded problem with a stack trace.
+  const sources = Array.isArray(entry.sources) ? entry.sources.join(", ") : String(entry.sources ?? "");
+  return `entry[${index}] (${entry.ghsa} / ${entry.package}, sources [${sources}], via ${entry.introducedBy})`;
 }
 
 const VALID_CLASSES = new Set([
@@ -1554,7 +1558,9 @@ async function main() {
   allowlist.entries.forEach((entry, index) => {
     if (!entry?.ghsa) return;
     const observed = coveredBy.get(index) ?? new Set();
-    const declared = new Set(entry.sources ?? []);
+    // A non-array value is a schema problem already recorded; a string here would
+    // be split into characters and named as sources.
+    const declared = new Set(Array.isArray(entry.sources) ? entry.sources : []);
     const siblings = (entriesByGhsa.get(String(entry.ghsa).toUpperCase()) ?? []).length > 1;
     if (siblings) {
       const label = `allowlist ${entryLabel(entry, index)}`;
