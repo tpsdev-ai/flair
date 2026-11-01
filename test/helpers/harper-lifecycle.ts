@@ -232,6 +232,10 @@ const STARTUP_TIMEOUT_MS = 45_000;
 // host: 3.5–4.0 s idle, up to 14.0 s with one CPU burner per core and up to
 // 26.2 s with two per core. A CI macOS runner exceeded the earlier 20 s bound.
 const INSTALL_TIMEOUT_MS = 60_000;
+// flair#2879: a timed-out installer gets SIGTERM, then up to this long to exit
+// before SIGKILL, and up to this long again after SIGKILL before the timeout
+// is reported.
+const INSTALL_STOP_GRACE_MS = 5_000;
 const MAX_SPAWN_ATTEMPTS = 3;
 
 // ─── Lifecycle budgets for before/after hooks (flair#2568) ──────────────────
@@ -466,6 +470,62 @@ async function killProcess(proc: ChildProcess): Promise<void> {
     setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} r(); }, 3000);
   });
   proc.removeAllListeners();
+}
+
+// ─── flair#2879: do not report a timed-out install before the child is gone ──
+//
+// The installer is still writing into the install tree when its timeout fires.
+// Rejecting right after `kill()` hands that tree to the caller's cleanup while
+// the child may still be alive, so the cleanup races the writer. Wait for the
+// child on every timeout path instead: SIGTERM, wait `graceMs`, SIGKILL, wait
+// `graceMs` again. Both waits are bounded by the arguments, never by output.
+type ExitWaitOutcome = "exited" | "timeout" | "error";
+
+function waitForExitOutcome(child: ChildProcess, ms: number): Promise<ExitWaitOutcome> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve("exited");
+  return new Promise<ExitWaitOutcome>((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout;
+    const finish = (outcome: ExitWaitOutcome) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      child.off("error", onError);
+      resolve(outcome);
+    };
+    const onExit = () => finish("exited");
+    const onError = () => finish("error");
+    timer = setTimeout(() => finish("timeout"), ms);
+    child.on("exit", onExit);
+    child.on("error", onError);
+  });
+}
+
+/**
+ * Wait for `child` to exit: resolve if it exits within `timeoutMs` (or fails to
+ * spawn — a spawn error is terminal too). On timeout, send SIGTERM and wait up
+ * to `graceMs`, then SIGKILL and wait up to `graceMs` again; reject only once
+ * the child has exited, or after the SIGKILL wait expires, naming the pid.
+ */
+export async function waitForChildExit(
+  child: ChildProcess,
+  timeoutMs: number,
+  graceMs: number,
+): Promise<void> {
+  if (await waitForExitOutcome(child, timeoutMs) !== "timeout") return;
+  const pid = child.pid ?? "(unknown)";
+  try { child.kill("SIGTERM"); } catch { /* already gone */ }
+  if (await waitForExitOutcome(child, graceMs) === "exited") {
+    throw new Error(`child ${pid} did not exit within ${timeoutMs}ms (exited after SIGTERM)`);
+  }
+  try { child.kill("SIGKILL"); } catch { /* already gone */ }
+  if (await waitForExitOutcome(child, graceMs) === "exited") {
+    throw new Error(`child ${pid} did not exit within ${timeoutMs}ms (exited after SIGKILL)`);
+  }
+  throw new Error(
+    `child ${pid} did not exit within ${timeoutMs}ms and was still running ${graceMs}ms after SIGKILL`,
+  );
 }
 
 // ─── flair#1440: wait for the RocksDB LOCK, not just the process exit ────────
@@ -1187,25 +1247,26 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   try {
   const install = spawn(NODE_BIN, [HARPER_BIN, "install"], { cwd, env: baseEnv });
   const installStartedAt = Date.now();
-  await new Promise<void>((resolve, reject) => {
-    let output = "";
-    install.stdout?.on("data", (d: Buffer) => output += d.toString());
-    install.stderr?.on("data", (d: Buffer) => output += d.toString());
-    const timer = setTimeout(() => {
-      install.kill();
-      reject(new Error(
-        `Harper install did not exit within ${INSTALL_TIMEOUT_MS}ms ` +
-        `(${Date.now() - installStartedAt}ms elapsed, step: harper install). Output so far:\n${output}`,
-      ));
-    }, INSTALL_TIMEOUT_MS);
-    install.on("exit", (code) => {
-      clearTimeout(timer);
-      if (code !== 0) return reject(new Error(`Harper install exited ${code}: ${output}`));
-      console.log(`[harper-lifecycle] harper install exited 0 after ${Date.now() - installStartedAt}ms`);
-      resolve();
-    });
-    install.on("error", (err) => { clearTimeout(timer); reject(err); });
-  });
+  let installOutput = "";
+  install.stdout?.on("data", (d: Buffer) => installOutput += d.toString());
+  install.stderr?.on("data", (d: Buffer) => installOutput += d.toString());
+  let installSpawnError: Error | undefined;
+  let installExitCode: number | null = null;
+  install.on("error", (err) => { installSpawnError = err; });
+  install.on("exit", (code) => { installExitCode = code; });
+
+  try {
+    await waitForChildExit(install, INSTALL_TIMEOUT_MS, INSTALL_STOP_GRACE_MS);
+  } catch (err) {
+    throw new Error(
+      `Harper install did not exit within ${INSTALL_TIMEOUT_MS}ms ` +
+      `(${Date.now() - installStartedAt}ms elapsed, step: harper install): ` +
+      `${(err as Error).message}. Output so far:\n${installOutput}`,
+    );
+  }
+  if (installSpawnError) throw installSpawnError;
+  if (installExitCode !== 0) throw new Error(`Harper install exited ${installExitCode}: ${installOutput}`);
+  console.log(`[harper-lifecycle] harper install exited 0 after ${Date.now() - installStartedAt}ms`);
 
   // Append caller-supplied top-level config blocks (see StartHarperOptions.
   // appendRootConfigYaml). Fail loudly on a top-level key collision — a
