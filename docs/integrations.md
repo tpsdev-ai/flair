@@ -23,8 +23,8 @@ Where Flair already runs. Each integration can reach one shared Flair memory sto
 | **n8n** | [`n8n-nodes-flair`](#n8n) | Ed25519 with Agent Private Key selected; deprecated administrator Basic | Three nodes (chat memory, search, store) |
 | **Hermes Agent** | [`hermes-flair`](#hermes-agent) | Ed25519 | Python `MemoryProvider` |
 | **Pi agent** | [`pi-flair`](#pi-agent) | Ed25519 | Native pi extension (pi has no MCP support); with `--agent <id>` and wiring enabled, `flair init` attempts Pi wiring for `--client pi`, for detected Pi under `--client all`, or for detected Pi when `--client` is omitted; `--client none` and `--no-mcp` skip it. |
-| **Google ADK** (Python) | [`adk-flair`](../packages/adk-flair/README.md) | Ed25519 | `BaseMemoryService`; see [hosted auth](#hosted-flair-auth--your-agent-got-a-404) if you just got a 404 |
-| **Google ADK** (JS/TS) | [`@tpsdev-ai/adk-flair`](../packages/adk-flair-js/README.md) | Ed25519 | Same identity model as the Python package |
+| **Google ADK** (Python) | [`adk-flair`](https://github.com/tpsdev-ai/flair/blob/main/packages/adk-flair/README.md) | Ed25519 | `BaseMemoryService`; see [hosted auth](#hosted-flair-auth--your-agent-got-a-404) if you just got a 404 |
+| **Google ADK** (JS/TS) | [`@tpsdev-ai/adk-flair`](https://github.com/tpsdev-ai/flair/blob/main/packages/adk-flair-js/README.md) | Ed25519 | Same identity model as the Python package |
 
 Don't see your harness? If it speaks **MCP** — Flair already works with `flair-mcp`. For a custom memory protocol such as LangGraph's `BaseStore` or CrewAI's `RAGStorage`, an adapter must translate that protocol's operations to Flair; [open an issue](https://github.com/tpsdev-ai/flair/issues) or [send a PR](https://github.com/tpsdev-ai/flair).
 
@@ -76,8 +76,8 @@ A verified agent that is not allowed the row gets 404, never 403. Anonymous by-i
 
 | Adapter | URL | Agent id | Keyfile | Hosted extras |
 |---|---|---|---|---|
-| **adk-flair** (Python) | `FLAIR_URL` | `FLAIR_AGENT_ID` | `FLAIR_KEYFILE` | `FLAIR_ALLOW_REMOTE_URL=1`, `FLAIR_HTTP_TIMEOUT` — [adk-flair README](../packages/adk-flair/README.md#hosted-flair) |
-| **adk-flair-js** (JS/TS) | `FLAIR_URL` | `FLAIR_AGENT_ID` | `FLAIR_KEYFILE` | For a non-localhost URL, set `FLAIR_ALLOW_REMOTE_URL=1`; request timeout comes from constructor `timeoutMs` (default 2000 ms), not `FLAIR_HTTP_TIMEOUT` — [adk-flair-js README](../packages/adk-flair-js/README.md) |
+| **adk-flair** (Python) | `FLAIR_URL` | `FLAIR_AGENT_ID` | `FLAIR_KEYFILE` | `FLAIR_ALLOW_REMOTE_URL=1`, `FLAIR_HTTP_TIMEOUT` — [adk-flair README](https://github.com/tpsdev-ai/flair/blob/main/packages/adk-flair/README.md#hosted-flair) |
+| **adk-flair-js** (JS/TS) | `FLAIR_URL` | `FLAIR_AGENT_ID` | `FLAIR_KEYFILE` | For a non-localhost URL, set `FLAIR_ALLOW_REMOTE_URL=1`; request timeout comes from constructor `timeoutMs` (default 2000 ms), not `FLAIR_HTTP_TIMEOUT` — [adk-flair-js README](https://github.com/tpsdev-ai/flair/blob/main/packages/adk-flair-js/README.md) |
 | **flair-mcp** / Cursor plugin | `FLAIR_URL` | `FLAIR_AGENT_ID` | `FLAIR_KEY_PATH` (optional; auto-resolved) | Key must be on the **npx host** |
 | **Hermes** | `FLAIR_URL` | `FLAIR_AGENT_ID` | `FLAIR_KEY_PATH` or Hermes `key_path` | Same Ed25519 model |
 | **Pi** | `FLAIR_URL` | `FLAIR_AGENT_ID` | `FLAIR_KEY_PATH` or Pi client `keyPath` | Same Ed25519 model |
@@ -173,7 +173,7 @@ const store = new FlairStore({ agentId: "my-langgraph-agent" });
 const agent = createReactAgent({ llm, tools, store });
 ```
 
-Maps LangGraph namespaces to Flair tags, keys to ids, values to JSON content. Non-empty search queries call Flair's `/SemanticSearch` endpoint. The server selects hybrid (BM25 plus vector), vector-only, or BM25-only retrieval; embedding availability affects whether the vector leg can run. Filter operators applied client-side. Full mapping table: [`packages/langgraph-flair/README.md`](../packages/langgraph-flair/README.md).
+Maps LangGraph namespaces to Flair tags, keys to ids, values to JSON content. Non-empty search queries call Flair's `/SemanticSearch` endpoint. The server selects hybrid (BM25 plus vector), vector-only, or BM25-only retrieval; embedding availability affects whether the vector leg can run. Filter operators applied client-side. Full mapping table: [`packages/langgraph-flair/README.md`](https://github.com/tpsdev-ai/flair/blob/main/packages/langgraph-flair/README.md).
 
 This package contains the TypeScript adapter; it does not include a Python implementation.
 
@@ -187,7 +187,7 @@ This package contains the TypeScript adapter; it does not include a Python imple
 openclaw plugins install @tpsdev-ai/openclaw-flair
 ```
 
-Configuration via OpenClaw's standard plugin surface. See [`docs/openclaw.md`](openclaw.md) for the per-agent install pattern. The host's own workspace files load each agent's `SOUL.md` / `AGENTS.md`; Flair does not manage or anchor these.
+Configuration via OpenClaw's standard plugin surface. See [`docs/openclaw.md`](openclaw.md) for the per-agent install pattern. The host's own workspace files load each agent's `SOUL.md` / `AGENTS.md`; Flair does not manage or anchor these. <!-- docs-freshness-allow: names files in the host's workspace -->
 
 ---
 
@@ -256,7 +256,7 @@ export FLAIR_AGENT_ID=my-agent   # per host/purpose
 pi
 ```
 
-Full details (tools, env reference, auto-recall/auto-capture flags, security notes): [`packages/pi-flair/README.md`](../packages/pi-flair/README.md).
+Full details (tools, env reference, auto-recall/auto-capture flags, security notes): [`packages/pi-flair/README.md`](https://github.com/tpsdev-ai/flair/blob/main/packages/pi-flair/README.md).
 
 ---
 

@@ -24,7 +24,7 @@
 
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join, resolve, relative } from "node:path";
+import { dirname, join, normalize, resolve, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   CATEGORIES,
@@ -174,6 +174,7 @@ const EXPECTED_CHECKS = [
   "broken-backup-restore-docs",
   "api-reference-schema-coverage",
   "changelog-lede-length",
+  "doc-link-pack-coverage",
 ];
 
 // ── Check 1: stale install pin of the root package ──────────────────────────────
@@ -648,6 +649,110 @@ defineCheck("changelog-lede-length", "changelog fragment", () => {
     }
   }
   return { failures, scanned: fragments.length };
+});
+
+// ── Check 10: every .md a doc names ships in the package (flair#2888) ──────────
+// docs/ and README.md ship (package.json `files`), so a doc that names a .md the
+// tarball does not contain hands the reader a dead end. A name is a reference
+// when it is a Markdown link target or a backtick-quoted file name; a URL and an
+// in-page anchor are not package files, and a link with an anchor checks the
+// file part. A link target resolves against the referencing file; a
+// backtick-quoted name resolves against the referencing file or the repo root,
+// because prose names files either way. A pack that fails or prints no file
+// list fails the check: an empty list would report every reference as missing.
+function npmPackPaths() {
+  const stdout = execFileSync("npm", ["pack", "--dry-run", "--json"], {
+    cwd: ROOT,
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 600_000,
+  }).toString();
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error("`npm pack --dry-run --json` printed output that is not JSON");
+  }
+  const files = Array.isArray(parsed) ? parsed[0]?.files : null;
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new Error("`npm pack --dry-run --json` printed no file list");
+  }
+  return new Set(files.map((f) => String(f.path)));
+}
+
+// The .md path a reference names, or null when it names no package file.
+function mdReferenceTarget(raw) {
+  const token = raw.trim();
+  if (!token || token.startsWith("#") || /^[a-z][a-z0-9+.-]*:/i.test(token)) return null;
+  const filePart = token.split("#")[0];
+  if (!/\.md$/i.test(filePart) || /\s/.test(filePart)) return null;
+  return filePart;
+}
+
+defineCheck("doc-link-pack-coverage", "doc reference", () => {
+  const docs = [];
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) walk(full);
+      else if (name.endsWith(".md")) docs.push(relative(ROOT, full));
+    }
+  };
+  if (existsSync(join(ROOT, "docs"))) walk(join(ROOT, "docs"));
+  if (existsSync(join(ROOT, "README.md"))) docs.push("README.md");
+  docs.sort();
+
+  let packed;
+  try {
+    packed = npmPackPaths();
+  } catch (err) {
+    return {
+      failures: [{
+        file: "package.json", line: 1,
+        msg: `${err?.message ?? err} — the doc references were not checked, because there is no packed file list to check them against.`,
+      }],
+      scanned: null,
+    };
+  }
+
+  const failures = [];
+  let scanned = 0;
+  const LINK_RE = /\[[^\]]*\]\(\s*<?([^)\s>]+)>?/g;
+  const TICK_RE = /`([^`\n]+)`/g;
+
+  const considered = (doc, line, raw, rootRelative) => {
+    const target = mdReferenceTarget(raw);
+    if (target === null) return;
+    scanned++;
+    const bases = [dirname(join(ROOT, doc))];
+    if (rootRelative) bases.push(ROOT);
+    const resolved = bases
+      .map((base) => relative(ROOT, normalize(join(base, target))))
+      .find((rel) => packed.has(rel));
+    if (resolved !== undefined) return;
+    failures.push({
+      file: doc, line,
+      msg: `references '${target}', which is not in the package's npm pack file list.`,
+    });
+  };
+
+  for (const doc of docs) {
+    const lines = linesOf(doc);
+    lines.forEach((line, i) => {
+      if (hasAllow(lines, i)) return;
+      // Backticks inside a link are that link's label or target: the link pass
+      // already covers the target, and a label is prose, not a second reference.
+      const covered = [];
+      for (const m of line.matchAll(LINK_RE)) {
+        covered.push([m.index, m.index + m[0].length]);
+        considered(doc, i + 1, m[1], false);
+      }
+      const prose = [...line].map((ch, idx) =>
+        covered.some(([a, b]) => idx >= a && idx < b) ? " " : ch).join("");
+      for (const m of prose.matchAll(TICK_RE)) considered(doc, i + 1, m[1], true);
+    });
+  }
+  return { failures, scanned };
 });
 
 // ─── Run ────────────────────────────────────────────────────────────────────────

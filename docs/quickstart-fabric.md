@@ -89,7 +89,7 @@ In Cursor: **Plugins → Configure**
 | `FLAIR_URL` | `https://<cluster>.<org>.harperfabric.com` |
 | `FLAIR_AGENT_ID` | `mybot` (the id you just added) |
 
-Those are the two plugin schema fields. Local Cursor's `npx` can use the key from step 3 at `~/.flair/keys/mybot.key`. A cloud agent's `npx` runs on a different machine — that VM needs the key (or host-env admin credentials). See [`packages/cursor-flair/README.md`](../packages/cursor-flair/README.md).
+Those are the two plugin schema fields. Local Cursor's `npx` can use the key from step 3 at `~/.flair/keys/mybot.key`. A cloud agent's `npx` runs on a different machine — that VM needs the key (or host-env admin credentials). See [`packages/cursor-flair/README.md`](https://github.com/tpsdev-ai/flair/blob/main/packages/cursor-flair/README.md).
 
 ## 5. Wire a Grok Bot agent
 

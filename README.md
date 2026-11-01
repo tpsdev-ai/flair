@@ -166,7 +166,7 @@ Embeddings are generated in-process by [nomic-embed-text](https://huggingface.co
 
 Requests are signed as `agentId:timestamp:nonce:METHOD:/path` and verified against the agent's registered public key, with a 30-second replay window and nonce deduplication.
 
-See **[DESIGN.md](DESIGN.md)** for the invariants behind the three primitives — why they're shaped the way they are.
+See **[DESIGN.md](https://github.com/tpsdev-ai/flair/blob/main/DESIGN.md)** for the invariants behind the three primitives — why they're shaped the way they are.
 
 ## Features
 
@@ -187,7 +187,7 @@ See **[DESIGN.md](DESIGN.md)** for the invariants behind the three primitives �
 | **OAuth 2.1 server** | PKCE, dynamic client registration, standards-compliant token endpoint. Delegate auth to Flair without a separate IdP. [docs/auth.md](docs/auth.md) |
 | **XAA** | Bind agent identities to Google Workspace, Azure AD or Okta accounts. |
 | **Web admin** | Server-rendered UI for principals, connectors, IdPs and instance config. No separate dashboard service. |
-| **Benchmarks** | [`flair-bench`](packages/flair-bench/README.md) scores candidate embedding models against the same recall corpus Flair's CI gates on. Runs standalone — no Flair install, no server. |
+| **Benchmarks** | [`flair-bench`](https://github.com/tpsdev-ai/flair/blob/main/packages/flair-bench/README.md) scores candidate embedding models against the same recall corpus Flair's CI gates on. Runs standalone — no Flair install, no server. |
 
 Trust-graded recall reaches the authenticated HTTP API and the built-in `/mcp` tools today — the latter being off by default, see [One install, one binary](#one-install-one-binary). CLI, `@tpsdev-ai/flair-client` and `flair-mcp` exposure is a follow-up. REM needs a configured generative backend (Ollama, OpenAI, Anthropic, …) — without one, `flair rem rapid` fails with `Reflection error: No generative backend configured`.
 
@@ -227,7 +227,7 @@ Flair works with any agent runtime. Pick the path that fits yours — **[full ca
 }
 ```
 
-Then add to your `CLAUDE.md`:
+Then add to your `CLAUDE.md`: <!-- docs-freshness-allow: names a file in the reader's project -->
 
     At the start of every session, run mcp__flair__bootstrap before responding.
 
@@ -243,7 +243,7 @@ Per-CLI config snippets (Gemini CLI's `~/.gemini/settings.json`, Codex CLI's `~/
 openclaw plugins install @tpsdev-ai/openclaw-flair
 ```
 
-Auto-detects the agent identity, provides `memory_store` / `memory_search` / `memory_get`, and provides bootstrap context from `before_prompt_build` (requires host opt-in). See the [plugin README](packages/openclaw-flair/README.md).
+Auto-detects the agent identity, provides `memory_store` / `memory_search` / `memory_get`, and provides bootstrap context from `before_prompt_build` (requires host opt-in). See the [plugin README](https://github.com/tpsdev-ai/flair/blob/main/packages/openclaw-flair/README.md).
 
 ### n8n
 
@@ -289,7 +289,7 @@ const ctx = await flair.bootstrap({ maxTokens: 4000 })
 await flair.soul.get('role')
 ```
 
-No Harper, no embeddings — just HTTP and auth. Full API in the [client README](packages/flair-client/README.md).
+No Harper, no embeddings — just HTTP and auth. Full API in the [client README](https://github.com/tpsdev-ai/flair/blob/main/packages/flair-client/README.md).
 
 ### HTTP API (any language)
 
@@ -415,7 +415,7 @@ bun run build        # compile TypeScript → dist/
 bun test             # unit + integration tests
 ```
 
-Integration tests spin up a real Harper instance on a random port and tear it down afterwards — no mocks for the database layer. Every commit runs unit tests, integration tests, type check, dependency audit, Semgrep and CodeQL SAST, and a from-scratch Docker validation. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Integration tests spin up a real Harper instance on a random port and tear it down afterwards — no mocks for the database layer. Every commit runs unit tests, integration tests, type check, dependency audit, Semgrep and CodeQL SAST, and a from-scratch Docker validation. See [CONTRIBUTING.md](https://github.com/tpsdev-ai/flair/blob/main/CONTRIBUTING.md).
 
 ## Status
 
