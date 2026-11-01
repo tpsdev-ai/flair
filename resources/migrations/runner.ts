@@ -494,7 +494,8 @@ function stateFromOutcome(entry: MigrationStateEntry | undefined): MigrationProg
  * answers `at-target` (the row needs no further write from this migration) or
  * `no-row`.
  *
-* Conservative by construction: any other verdict keeps the id (one that is not `pending` is logged), a read that
+ * Conservative by construction: any other verdict keeps the id (one that is
+ * not `pending` is logged), a read that
  * throws keeps it (unknown never clears a record), and a record whose count is
  * larger than its id list keeps the unlisted remainder as a count with no ids —
  * those rows were never named, so no read can clear them.
@@ -513,7 +514,7 @@ async function reverifyUnconfirmed(
       if (verdict === "at-target" || verdict === "no-row") continue;
       if (verdict !== "pending") {
         console.warn(`[flair-migrations] ${migration.id}: checkUnconfirmed(${id}) answered ${JSON.stringify(verdict)}; keeping the record`);
-       }
+      }
       kept.push(id);
     } catch {
       kept.push(id);
