@@ -9226,8 +9226,8 @@ registerAttention(program);
 // ─── flair help ──────────────────────────────────────────────────────────────
 // flair#2887: commander's implicit `help` command forwards only its first
 // operand, so `flair help presence set` printed `flair presence`'s help. This
-// registered command resolves the whole path and prints the leaf's help, the
-// same bytes as `<path> --help`. Resolving help never invokes a command action.
+// registered command resolves the whole path and prints that command's help,
+// the same bytes as `<path> --help`. Resolving help never invokes a command action.
 // Registered last so the root listing keeps the help entry at the bottom, where
 // the implicit one sat.
 program

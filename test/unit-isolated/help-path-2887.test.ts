@@ -38,8 +38,7 @@ function leafPaths(): string[] {
 }
 
 // A leaf's `--help` exits through commander's `_exit`; without an override it
-// would end this test process. The help command resolves paths itself and never
-// exits, so it needs one only for its `--help`.
+// would end this test process.
 for (const { cmd } of commandNodes(program)) cmd.exitOverride();
 
 interface RunResult {
