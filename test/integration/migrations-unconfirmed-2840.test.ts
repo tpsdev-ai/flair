@@ -36,7 +36,7 @@
  * state file; the `.content`-suffix case asserts the record through
  * HealthDetail, not the state file.
  *
- * The second boot's first cycle is held at its start (`migration-cycle-start`,
+ * The third boot's first cycle is held at its start (`migration-cycle-start`,
  * the runner's own pause point) so the entry boot seeding wrote is read before
  * that cycle reads the state file.
  */
@@ -323,7 +323,7 @@ describe("flair#2840 — an unconfirmed write is reported by id and not counted 
     expect(existsSync(join(faultDir, `fired.verify-miss.${ROW_CONTENT}`))).toBe(true);
   }, 150_000);
 
-  it("a no-pending cycle keeps the record, a second boot seeds it from the state file, and an id clears once its row is at the target", async () => {
+  it("a no-pending cycle keeps the record, the third boot seeds it from the state file, and an id clears once its row is at the target", async () => {
     // (a) The boot's follow-up cycle finds nothing pending. The two ids that
     // reached the target are cleared (ROW_MISS through the migration's own
     // write, ROW_COMPETING through the competing writer); the away row, still
@@ -345,7 +345,7 @@ describe("flair#2840 — an unconfirmed write is reported by id and not counted 
     expect(mig?.rowsUnconfirmed).toBe(1);
     expect(mig?.unconfirmedIds).toEqual([ROW_AWAY]);
 
-    // (b) A second boot from the same state file seeds the record from it.
+    // (b) The third boot from the same state file seeds the record from it.
     // Hold that boot's first cycle at its entry — after it takes the lock,
     // before it reads the state file — and read the entry while it is held.
     writeFileSync(join(faultDir, "arm.migration-cycle-start"), "");
