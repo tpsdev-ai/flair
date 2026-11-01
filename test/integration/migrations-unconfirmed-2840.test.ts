@@ -169,7 +169,7 @@ async function healthDetail(): Promise<any> {
 async function waitForMarker(path: string, budgetMs: number): Promise<void> {
   const deadline = Date.now() + budgetMs;
   while (!existsSync(path)) {
-    if (Date.now() >= deadline) throw new Error(`migration cycle never paused (${path})`);
+    if (Date.now() >= deadline) throw new Error(`migration cycle did not pause in time (${path})`);
     await new Promise((r) => setTimeout(r, 50));
   }
 }
@@ -182,7 +182,7 @@ async function waitForRelease(path: string, budgetMs: number): Promise<string> {
       const content = readFileSync(path, "utf-8");
       if (content.length > 0) return content;
     }
-    if (Date.now() >= deadline) throw new Error(`migration cycle never released (${path})`);
+    if (Date.now() >= deadline) throw new Error(`migration cycle did not release in time (${path})`);
     await new Promise((r) => setTimeout(r, 50));
   }
 }
