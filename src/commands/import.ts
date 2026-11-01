@@ -158,9 +158,9 @@ program
           headers: { "Content-Type": "application/json", Authorization: auth },
           body: JSON.stringify(soul),
         });
-        // A row the server refuses by name for supplying `tags`/`scopeTag` is
-        // reported with its id and left out of the count; the rest of the
-        // archive is imported as before (flair#1540).
+        // A row the server refuses by name for supplying a non-empty `scopeTag`
+        // or a non-empty `tags` array is reported with its id and left out of
+        // the count; the rest of the export is imported as before (flair#1540).
         if (!res.ok) {
           const refusal = await namedRefusal(res);
           if (refusal === SOUL_SCOPE_FIELDS_REFUSAL) {

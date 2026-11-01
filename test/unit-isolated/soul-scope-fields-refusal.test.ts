@@ -1,9 +1,10 @@
 /**
- * A Soul write whose request supplies `scopeTag` or a non-empty `tags` array is
- * refused by name, whatever the tag's prefix and from either write source, with
- * nothing written. Soul has neither column, so the refusal cannot depend on the
- * `adk:` bridge. Isolated so the harper mock does not collide with the other
- * Soul suites.
+ * A Soul write whose request supplies a non-empty `scopeTag` or a non-empty
+ * `tags` array is refused with `soul_scope_fields_not_writable` when earlier
+ * guards permit the request, whatever the tag's prefix and from either write
+ * source, with nothing written. Soul has no dedicated or enforced per-user
+ * scope field, so this check does not depend on the `adk:` bridge. Isolated so
+ * the harper mock does not collide with the other Soul suites.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
 

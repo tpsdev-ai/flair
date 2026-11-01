@@ -67,8 +67,8 @@ export async function refuseLearnedSoulWrite(content: any): Promise<Response | n
   return null;
 }
 
-/** Refuse a write whose request supplies `scopeTag` or `tags`: Soul has neither
- *  column, so a per-user scope cannot be recorded there (flair#1540). */
+/** Refuse a write whose request supplies a non-empty `scopeTag` or a non-empty
+ *  `tags` array: Soul has no dedicated or enforced per-user scope field (flair#1540). */
 export function refuseSoulScopeFields(supplied: any): Response | null {
   return suppliesSoulScopeFields(supplied) ? FORBIDDEN(SOUL_SCOPE_FIELDS_REFUSAL) : null;
 }

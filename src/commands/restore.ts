@@ -183,8 +183,9 @@ program
       for (const row of rows) {
         const { status, error } = await adminWrite("PUT", `/${name}/${encodeRecordId(row.id)}`, row);
         if (status === undefined || status < 200 || status >= 300) {
-          // A row the server refuses for supplying `tags`/`scopeTag` is
-          // reported with the row and the refusal's name (flair#1540).
+          // A failed write whose error name equals this refusal's gets that
+          // name appended; the row and status are reported either way
+          // (flair#1540).
           failures.push(`${diagnostic(name, row, "PUT", status)}${error === SOUL_SCOPE_FIELDS_REFUSAL ? `: ${error}` : ""}`);
         }
       }

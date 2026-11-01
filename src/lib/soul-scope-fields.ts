@@ -1,14 +1,18 @@
 /**
- * Soul is scoped to an `agentId` and its schema has no `tags` or `scopeTag`
- * (schemas/memory.graphql), so a Soul row cannot record a per-user scope. A
- * write request that supplies either field is refused whatever the tag's
- * prefix, so the refusal does not depend on the `adk:` bridge (flair#1540).
+ * Soul is scoped to an `agentId` and has no dedicated or enforced per-user
+ * scope field (schemas/memory.graphql). A write request that supplies a
+ * A write request that supplies a non-empty `scopeTag` or a non-empty `tags`
+ * array is refused by name when earlier guards permit the request, whatever
+ * the tag's prefix, so this check does not depend on the `adk:` bridge
+ * (flair#1540).
  *
- * Shared with the replay writers (`flair import`, `flair restore`, REM
- * restore), which report the refusal by name.
+ * The predicate runs in the server's write policy. The refusal name is
+ * imported by `flair import` and `flair restore`, which report a row refused
+ * with it; `flair rem restore` reports its generic HTTP error and imports
+ * neither.
  */
 
-/** The named refusal for a Soul write request that supplies `scopeTag` or `tags`. */
+/** The named refusal for a Soul write request that supplies a non-empty `scopeTag` or a non-empty `tags` array. */
 export const SOUL_SCOPE_FIELDS_REFUSAL = "soul_scope_fields_not_writable";
 
 /**

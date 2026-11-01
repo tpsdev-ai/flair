@@ -2,20 +2,25 @@
  * soul-scope-fields-replay-1540.test.ts — the replay writers against a REAL
  * Harper and the REAL built CLI (flair#1540).
  *
- * A stored Soul row that carries `tags` or `scopeTag` is refused, not stripped,
- * when a writer sends it back. Two writers replay a stored row whole:
+ * A write that supplies a non-empty `scopeTag` or a non-empty `tags` array for
+ * a stored Soul row is refused, not stripped, when a writer sends it back.
+ * This test exercises two CLI writers, each replaying a stored row whole:
  *
  *   - `flair restore` over a real backup archive whose Soul rows were edited to
- *     carry the fields: the refused rows are reported with their ids and the
- *     refusal's name, the rest of the archive still restores, and restore exits
- *     non-zero. An `adk:`-tagged row in the same archive shows the handling a
- *     refused Soul row already got before this change: reported by id and HTTP
- *     status, nothing written.
+ *     carry the fields: the scoped row is reported with its id and the
+ *     refusal's name, the `adk:`-tagged row with its id and HTTP status alone,
+ *     the rest of the archive still restores, and restore exits non-zero.
  *   - `flair import` over a real agent-export file carrying the same row: the
  *     refused row is named with its id and the refusal's name, the ordinary
  *     Soul row still lands, and import exits zero.
  *
- * Real files: the archive and export are files on disk, under a throwaway HOME.
+ * The same instance also takes operator POST and PATCH writes carrying those
+ * fields, so the refusal is exercised through Harper's own routing rather than
+ * a mock.
+ *
+ * Real files: the archive and export are real temporary files, and the CLI runs
+ * under a separate throwaway HOME.
+ *
  * Build prerequisite: `bun run build && bun run build:cli` (this file exits in
  * beforeAll if dist/cli.js is absent).
  */
@@ -95,6 +100,28 @@ async function operatorPut(path: string, body: unknown): Promise<number> {
   });
   await res.text();
   return res.status;
+}
+
+interface OperatorResult { status: number; body: any }
+
+async function operatorSend(method: "POST" | "PATCH", path: string, body: unknown): Promise<OperatorResult> {
+  const res = await fetch(harper.httpURL + path, {
+    method,
+    headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const text = await res.text();
+  return { status: res.status, body: text.length > 0 ? JSON.parse(text) : undefined };
+}
+
+/** InstructionVersion rows for a Soul subject (`<agentId>:<key>`). */
+async function versionCount(subjectId: string): Promise<number> {
+  const rows = await op({
+    operation: "search_by_value", database: "flair", table: "InstructionVersion",
+    search_attribute: "subjectId", search_value: subjectId, get_attributes: ["id"],
+  });
+  return (rows as any[]).length;
 }
 
 const soulRow = async (id: string): Promise<any> =>
@@ -211,4 +238,48 @@ describe("flair import refuses an exported Soul row that carries scope fields (f
     expect(await soulRow(plainId)).toMatchObject({ agentId: IMPORT_AGENT, value: "The row the export brings back" });
     expect(await soulRow(scopedId)).toBeUndefined();
   }, 300_000);
+});
+
+describe("operator POST and PATCH on the real instance (flair#1540)", () => {
+  test("a POST carrying a non-empty scopeTag is refused with the exact body and writes no row or version", async () => {
+    const key = "post-scoped";
+    const res = await operatorSend("POST", "/Soul/", {
+      id: `${AGENT}:${key}`, agentId: AGENT, key, value: "fresh", scopeTag: "team:alpha",
+    });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: REFUSAL });
+    expect(await soulRow(`${AGENT}:${key}`)).toBeUndefined();
+    expect(await versionCount(`${AGENT}:${key}`)).toBe(0);
+  }, 120_000);
+
+  test("a POST carrying a non-empty tags array is refused with the exact body and writes no row or version", async () => {
+    const key = "post-tags";
+    const res = await operatorSend("POST", "/Soul/", {
+      id: `${AGENT}:${key}`, agentId: AGENT, key, value: "fresh", tags: ["team-alpha"],
+    });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: REFUSAL });
+    expect(await soulRow(`${AGENT}:${key}`)).toBeUndefined();
+    expect(await versionCount(`${AGENT}:${key}`)).toBe(0);
+  }, 120_000);
+
+  for (const [label, scope] of [
+    ["a non-empty scopeTag", { scopeTag: "team:alpha" }],
+    ["a non-empty tags array", { tags: ["team-alpha"] }],
+  ] as const) {
+    test(`a PATCH carrying ${label} is refused with the exact body and leaves the row and its version count unchanged`, async () => {
+      const key = `patch-${label.includes("scopeTag") ? "scoped" : "tags"}`;
+      const id = `${AGENT}:${key}`;
+      expect(await operatorPut(`/Soul/${encodeURIComponent(id)}`, {
+        id, agentId: AGENT, key, value: "before", durability: "permanent", createdAt: CREATED_AT,
+      })).toBeLessThan(300);
+      const before = await soulRow(id);
+      const versionsBefore = await versionCount(id);
+      const res = await operatorSend("PATCH", `/Soul/${encodeURIComponent(id)}`, { value: "after", ...scope });
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: REFUSAL });
+      expect(await soulRow(id)).toEqual(before);
+      expect(await versionCount(id)).toBe(versionsBefore);
+    }, 120_000);
+  }
 });
