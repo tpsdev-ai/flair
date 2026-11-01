@@ -144,6 +144,20 @@ describe("the audit step must remain able to fail", () => {
     expect(auditDirectives).not.toMatch(/run:\s*bun audit/);
   });
 
+  it("invokes the gate with every consumer-install prefix flag", () => {
+    // The gate invocation is one shell command continued with backslashes.
+    const lines = auditDirectives.split("\n");
+    const start = lines.findIndex((l) => l.includes("audit-gate.mjs"));
+    expect(start).toBeGreaterThanOrEqual(0);
+    let end = start;
+    while (end < lines.length - 1 && lines[end]!.trimEnd().endsWith("\\")) end++;
+    const invocation = lines.slice(start, end + 1).join("\n");
+    for (const input of CONSUMER_INPUTS) {
+      expect(invocation).toMatch(new RegExp(`(?:^|\\s)${input.flag} "\\$[A-Z0-9_]+"`));
+    }
+    expect(invocation.match(/--[a-z0-9-]*npm-install-prefix/g)?.length).toBe(CONSUMER_INPUTS.length);
+  });
+
   it("still carries the reasoning that explains why it is blocking", () => {
     // A future reader who deletes the comment loses the only record of why the
     // escape hatch was removed, which is how it got reinstated last time.
@@ -509,6 +523,41 @@ describe("the four added consumer-install inputs, stand-in tools (flair#2757)", 
       expect(res.stdout).not.toContain("PASS —");
     }, 12_000);
 
+    it("prints the single-chain consumer diagnostics byte for byte", () => {
+      // Captured at 49f24987, before an advisory could carry several entries.
+      const golden = {
+        "outside": {
+          "status": 1,
+          "lines": [
+            "::error::audit-gate: GHSA-0000-0000-2757 (hono): node \"node_modules/other/node_modules/hono\" is outside the dependency chain @tpsdev-ai/flair-mcp -> @modelcontextprotocol/sdk -> hono (resolved node node_modules/hono).",
+            "    - GHSA-0000-0000-2757 (hono): node \"node_modules/other/node_modules/hono\" is outside the dependency chain @tpsdev-ai/flair-mcp -> @modelcontextprotocol/sdk -> hono (resolved node node_modules/hono)."
+          ]
+        },
+        "wrongRoot": {
+          "status": 1,
+          "lines": [
+            "::error::audit-gate: GHSA-0000-0000-2757 (hono): cannot verify @tpsdev-ai/flair-mcp dependency chain: invalid @tpsdev-ai/flair-mcp dependency chain.",
+            "    - GHSA-0000-0000-2757 (hono): cannot verify @tpsdev-ai/flair-mcp dependency chain: invalid @tpsdev-ai/flair-mcp dependency chain."
+          ]
+        }
+      };
+      const diag = (out: string) => out.split("\n").filter((l) => l.startsWith("::error::") || l.startsWith("    - "));
+      const outside = runGate({
+        reports: { "npm-install-mcp": report(["node_modules/hono", "node_modules/other/node_modules/hono"]) },
+        entries: [vendorEntry()],
+        setup: installChain,
+      });
+      const wrongRoot = runGate({
+        reports: { "npm-install-mcp": report() },
+        entries: [vendorEntry("@tpsdev-ai/pi-flair -> @modelcontextprotocol/sdk -> hono")],
+        setup: installChain,
+      });
+      expect({
+        outside: { status: outside.status, lines: diag(outside.stdout) },
+        wrongRoot: { status: wrongRoot.status, lines: diag(wrongRoot.stdout) },
+      }).toEqual(golden);
+    }, 24_000);
+
     it("blocks a chain that does not start at the observed package", () => {
       const res = runGate({
         reports: { "npm-install-mcp": report() },
@@ -757,6 +806,60 @@ esac
     expect(res.stdout).toContain("outside the dependency chain");
   }, 12_000);
 
+  // The single-chain ADK diagnostics, byte for byte, as the gate printed them
+  // before an advisory could carry several entries (captured at 49f24987).
+  const SINGLE_CHAIN_ADK_GOLDEN: Record<string, { status: number; lines: string[] }> = {
+    "outside": {
+      "status": 1,
+      "lines": [
+        "::error::audit-gate: GHSA-w5hq-g745-h8pq (uuid): node \"node_modules/other/node_modules/uuid\" is outside the dependency chain @tpsdev-ai/adk-flair -> @google/adk -> @google-cloud/vertexai -> google-auth-library -> gaxios -> uuid (resolved node node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid).",
+        "    - GHSA-w5hq-g745-h8pq (uuid): node \"node_modules/other/node_modules/uuid\" is outside the dependency chain @tpsdev-ai/adk-flair -> @google/adk -> @google-cloud/vertexai -> google-auth-library -> gaxios -> uuid (resolved node node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid)."
+      ]
+    },
+    "additional": {
+      "status": 1,
+      "lines": [
+        "::error::audit-gate: GHSA-w5hq-g745-h8pq (uuid): node \"node_modules/uuid\" is outside the dependency chain @tpsdev-ai/adk-flair -> @google/adk -> @google-cloud/vertexai -> google-auth-library -> gaxios -> uuid (resolved node node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid).",
+        "    - GHSA-w5hq-g745-h8pq (uuid): node \"node_modules/uuid\" is outside the dependency chain @tpsdev-ai/adk-flair -> @google/adk -> @google-cloud/vertexai -> google-auth-library -> gaxios -> uuid (resolved node node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid)."
+      ]
+    },
+    "missing": {
+      "status": 1,
+      "lines": [
+        "::error::audit-gate: GHSA-w5hq-g745-h8pq (uuid): cannot verify @tpsdev-ai/adk-flair node \"node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid\" version: missing or invalid installed version.",
+        "    - GHSA-w5hq-g745-h8pq (uuid): cannot verify @tpsdev-ai/adk-flair node \"node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid\" version: missing or invalid installed version."
+      ]
+    },
+    "different": {
+      "status": 1,
+      "lines": [
+        "::error::audit-gate: GHSA-w5hq-g745-h8pq (uuid): cannot verify @tpsdev-ai/adk-flair node \"node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid\" version: installed version 9.0.2 differs from allowlist version 9.0.1.",
+        "    - GHSA-w5hq-g745-h8pq (uuid): cannot verify @tpsdev-ai/adk-flair node \"node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid\" version: installed version 9.0.2 differs from allowlist version 9.0.1."
+      ]
+    },
+    "conflicting": {
+      "status": 1,
+      "lines": [
+        "::error::audit-gate: GHSA-w5hq-g745-h8pq (uuid): cannot verify @tpsdev-ai/adk-flair node \"node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid\" version: audit version \"9.0.2\" conflicts with installed version 9.0.1.",
+        "    - GHSA-w5hq-g745-h8pq (uuid): cannot verify @tpsdev-ai/adk-flair node \"node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid\" version: audit version \"9.0.2\" conflicts with installed version 9.0.1."
+      ]
+    }
+  };
+
+  for (const [name, nodes, versions] of [
+    ["outside", ["node_modules/other/node_modules/uuid"], {}],
+    ["additional", [adkUuidNode, "node_modules/uuid"], {}],
+    ["missing", [adkUuidNode], { installed: null }],
+    ["different", [adkUuidNode], { installed: "9.0.2" }],
+    ["conflicting", [adkUuidNode], { installed: "9.0.1", reported: "9.0.2" }],
+  ] as const) {
+    it(`prints the single-chain ADK diagnostics byte for byte: ${name}`, () => {
+      const { res } = runFixtureGate([...nodes], "5.11.3", true, versions as { installed?: string | null; reported?: string });
+      const lines = res.stdout.split("\n").filter((l) => l.startsWith("::error::") || l.startsWith("    - "));
+      expect({ status: res.status, lines }).toEqual(SINGLE_CHAIN_ADK_GOLDEN[name]!);
+    }, 12_000);
+  }
+
   it("passes the gate for a harper-only node", () => {
     const { res, wrote } = runFixtureGate([harperNode]);
     expect(res.error).toBeUndefined();
@@ -793,6 +896,302 @@ esac
     expect(res.stdout).not.toContain("PASS —");
     expect(wrote).toBe(false);
   }, 12_000);
+});
+
+// ─── Several entries for one advisory: per source, per location ──────────────
+
+describe("several allowlist entries for one advisory, per source and per location", () => {
+  const UUID = "GHSA-w5hq-g745-h8pq";
+  const GLOB = "GHSA-3g3m-2fjr-6pw4";
+  const MINIMATCH = "GHSA-g3hv-75wg-m249";
+  const VERTEXAI = ["@tpsdev-ai/adk-flair", "@google/adk", "@google-cloud/vertexai", "google-auth-library", "gaxios", "uuid"].join(" -> ");
+  const GTOKEN = ["@tpsdev-ai/adk-flair", "@google/adk", "@google-cloud/vertexai", "google-auth-library", "gtoken", "gaxios", "uuid"].join(" -> ");
+  const ADK_GLOB = ["@tpsdev-ai/adk-flair", "@google/adk", "@google-cloud/aiplatform", "google-gax", "rimraf", "glob"].join(" -> ");
+  const VERTEXAI_NODE = "node_modules/@google-cloud/vertexai/node_modules/uuid";
+  const GTOKEN_NODE = "node_modules/gtoken/node_modules/uuid";
+  const RANGES: Record<string, string> = { uuid: "<11.1.1", glob: ">=9.0.0 <=14.0.1", minimatch: "<11.0.1" };
+  const GHSAS: Record<string, string> = { uuid: UUID, glob: GLOB, minimatch: MINIMATCH };
+
+  const entry = (ghsa: string, pkg: string, cls: string, sources: string[], introducedBy: string, extra: Record<string, unknown> = {}) => ({
+    ghsa, package: pkg, severity: "moderate", class: cls, sources, approvedBy: "fixture", introducedBy,
+    reason: "Fixture entry.", added: "2026-09-30", expires: "2026-10-14", removeWhen: "the fixture tree resolves a patched copy",
+    ...extra,
+  });
+  const uuidEntry = (introducedBy: string, extra: Record<string, unknown> = {}) =>
+    entry(UUID, "uuid", "vendor-pinned", ["npm-install-adk"], introducedBy, { version: "9.0.1", ...extra });
+  const TWO_UUID = [uuidEntry(VERTEXAI), uuidEntry(GTOKEN)];
+
+  /** A bun report listing `pkgs`, in `bun audit --json`'s shape. */
+  const bunReport = (pkgs: string[]) => Object.fromEntries(pkgs.map((pkg) => [pkg, [{
+    id: 1, url: `https://github.com/advisories/${GHSAS[pkg]}`, title: `Fixture ${pkg} advisory`, severity: "moderate",
+    vulnerable_versions: RANGES[pkg],
+  }]]));
+  /** An npm report listing each package at its nodes, in `npm audit --json`'s shape. */
+  const npmReport = (nodesByPkg: Record<string, string[]>) => ({
+    vulnerabilities: Object.fromEntries(Object.entries(nodesByPkg).map(([pkg, nodes]) => [pkg, { nodes, via: [{
+      url: `https://github.com/advisories/${GHSAS[pkg]}`, title: `Fixture ${pkg} advisory`, severity: "moderate", range: RANGES[pkg],
+    }] }])),
+  });
+
+  /** Writes package.json for each `[node, manifest]` row under `prefix`. */
+  const writeTree = (prefix: string, rows: [string, Record<string, unknown>][]) => {
+    for (const [node, manifest] of rows) {
+      mkdirSync(join(prefix, node), { recursive: true });
+      writeFileSync(join(prefix, node, "package.json"), JSON.stringify(manifest));
+    }
+  };
+  const pkg = (name: string, version: string, deps: string[] = []) =>
+    ({ name, version, dependencies: Object.fromEntries(deps.map((d) => [d, "*"])) });
+
+  /**
+   * The real gate in a fixture repo with stand-in tools. The ADK prefix holds
+   * @google/adk's two uuid 9.0.1 copies (under @google-cloud/vertexai and under
+   * gtoken), a uuid 11.1.1 at the top that no report names, and the
+   * aiplatform -> google-gax -> rimraf -> glob 10.5.0 -> minimatch 9.0.9 path.
+   * The root prefix holds harper's shrinkwrap-pinned glob 13.0.6 and minimatch
+   * 10.2.4. `bun` prints `bun`; `npm` prints `npm[source]` in that source's
+   * prefix and an empty report elsewhere.
+   */
+  function runMulti(opts: { entries: object[]; bun?: object; npm?: Record<string, object>; today?: string }) {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-multi-"));
+    try {
+      for (const dir of ["scripts", ".github", "bin", "home", "tmp"]) mkdirSync(join(root, dir));
+      writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts/audit-gate.mjs")));
+      writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({ policy: ALLOWLIST.policy, entries: opts.entries }));
+      const prefixes: Record<string, string> = Object.fromEntries(
+        CONSUMER_INPUTS.map(({ source }) => [source, join(root, `prefix-${source}`)]),
+      );
+      writeIdentities(root, (source) => prefixes[source]!);
+      const adk = prefixes["npm-install-adk"]!;
+      writeTree(adk, [
+        ["node_modules/@google/adk", pkg("@google/adk", "2.4.0", ["@google-cloud/vertexai", "@google-cloud/aiplatform", "@a2a-js/sdk"])],
+        ["node_modules/@google-cloud/vertexai", pkg("@google-cloud/vertexai", "1.12.0", ["google-auth-library"])],
+        ["node_modules/@google-cloud/vertexai/node_modules/google-auth-library", pkg("google-auth-library", "9.15.1", ["gaxios", "gtoken"])],
+        ["node_modules/@google-cloud/vertexai/node_modules/gaxios", pkg("gaxios", "6.7.1", ["uuid"])],
+        ["node_modules/@google-cloud/vertexai/node_modules/uuid", pkg("uuid", "9.0.1")],
+        ["node_modules/gtoken", pkg("gtoken", "7.1.0", ["gaxios"])],
+        ["node_modules/gtoken/node_modules/gaxios", pkg("gaxios", "6.7.1", ["uuid"])],
+        ["node_modules/gtoken/node_modules/uuid", pkg("uuid", "9.0.1")],
+        ["node_modules/@a2a-js/sdk", pkg("@a2a-js/sdk", "0.3.14", ["uuid"])],
+        ["node_modules/uuid", pkg("uuid", "11.1.1")],
+        ["node_modules/@google-cloud/aiplatform", pkg("@google-cloud/aiplatform", "6.11.0", ["google-gax"])],
+        ["node_modules/google-gax", pkg("google-gax", "5.0.8", ["rimraf"])],
+        ["node_modules/rimraf", pkg("rimraf", "5.0.10", ["glob"])],
+        ["node_modules/glob", pkg("glob", "10.5.0", ["minimatch"])],
+        ["node_modules/minimatch", pkg("minimatch", "9.0.9")],
+      ]);
+      const adkInput = CONSUMER_INPUTS.find((input) => input.source === "npm-install-adk")!;
+      declareDependencies(root, adkInput, adk, { "@google/adk": "*" });
+      const rootPrefix = prefixes["npm-install"]!;
+      writeTree(rootPrefix, [
+        ["node_modules/harper/node_modules/glob", { name: "glob", version: "13.0.6" }],
+        ["node_modules/harper/node_modules/minimatch", { name: "minimatch", version: "10.2.4" }],
+      ]);
+      writeFileSync(join(rootPrefix, "node_modules/harper/npm-shrinkwrap.json"), JSON.stringify({
+        packages: { "node_modules/glob": { version: "13.0.6" }, "node_modules/minimatch": { version: "10.2.4" } },
+      }));
+      const empty = JSON.stringify({ vulnerabilities: {} });
+      const cases = Object.entries(opts.npm ?? {})
+        .map(([source, body]) => `  */prefix-${source}) printf '%s\\n' '${JSON.stringify(body)}' ;;\n`)
+        .join("");
+      writeFileSync(join(root, "bin/npm"), `#!/bin/sh\ncase "$PWD" in\n${cases}  *) printf '%s\\n' '${empty}' ;;\nesac\n`);
+      writeFileSync(join(root, "bin/bun"), `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(opts.bun ?? {})}'\n`);
+      chmodSync(join(root, "bin/npm"), 0o755);
+      chmodSync(join(root, "bin/bun"), 0o755);
+      writeFileSync(join(root, "offline.mjs"), "globalThis.fetch = async () => { throw new Error('fixture offline'); };\n");
+      return spawnSync(
+        process.execPath,
+        ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), ...prefixArgs((source) => prefixes[source]!)],
+        {
+          encoding: "utf8",
+          timeout: 10_000,
+          env: {
+            ...process.env,
+            PATH: `${join(root, "bin")}:${process.env.PATH}`,
+            HOME: join(root, "home"),
+            TMPDIR: join(root, "tmp"),
+            AUDIT_GATE_TODAY: opts.today ?? "2026-10-01",
+          },
+        },
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+  const uuidAt = (...nodes: string[]) => ({ "npm-install-adk": npmReport({ uuid: nodes }) });
+  const expectPass = (res: ReturnType<typeof runMulti>) => {
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("PASS —");
+  };
+  const expectBlocked = (res: ReturnType<typeof runMulti>, ...lines: string[]) => {
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(1);
+    for (const line of lines) expect(res.stdout).toContain(line);
+    expect(res.stdout).not.toContain("PASS —");
+  };
+
+  it("two_adk_uuid_chains_pass: one entry per uuid copy covers both ADK nodes", () => {
+    const res = runMulti({ entries: TWO_UUID, npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE) });
+    expectPass(res);
+    expect(res.stdout).toContain("advisories reported: 1 (1 moderate)");
+    expect(res.stdout).toContain("allowlisted (justified + dated):  1");
+  }, 12_000);
+
+  it("extra_uncovered_uuid_node: a third reported uuid copy is covered by no entry", () => {
+    const res = runMulti({ entries: TWO_UUID, npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE, "node_modules/uuid") });
+    expectBlocked(res, `${UUID} (uuid): node "node_modules/uuid" in npm-install-adk is covered by no allowlist entry`);
+  }, 12_000);
+
+  it("refuses an empty ADK chain beside a valid sibling before matching", () => {
+    const res = runMulti({ entries: [uuidEntry(VERTEXAI), uuidEntry("")], npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE) });
+    expectBlocked(res, 'missing required field "introducedBy"');
+    expect(res.stdout).not.toContain("allowlisted (justified + dated)");
+  }, 12_000);
+
+  for (const [name, introducedBy, refusal] of [
+    ["prefix-only", "@tpsdev-ai/adk-flair -> @google/adk", "invalid @tpsdev-ai/adk-flair dependency chain"],
+    ["broken-edge", "@tpsdev-ai/adk-flair -> @google/adk -> gtoken -> gaxios -> uuid", "@google/adk does not depend on gtoken"],
+    ["wrong-copy", "@tpsdev-ai/adk-flair -> @google/adk -> @a2a-js/sdk -> uuid", "is STALE — it covers no reported advisory location"],
+  ] as const) {
+    it(`refuses the ${name} ADK chain beside a valid sibling, and leaves the gtoken copy uncovered`, () => {
+      const res = runMulti({ entries: [uuidEntry(VERTEXAI), uuidEntry(introducedBy)], npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE) });
+      expectBlocked(res, refusal, `node "${GTOKEN_NODE}" in npm-install-adk is covered by no allowlist entry`);
+    }, 12_000);
+  }
+
+  it("stale_chain_with_live_sibling: an entry whose node is not reported is stale though its sibling covers the GHSA", () => {
+    const res = runMulti({ entries: TWO_UUID, npm: uuidAt(VERTEXAI_NODE) });
+    expectBlocked(res, `allowlist entry[1] (${UUID} / uuid, sources [npm-install-adk], via ${GTOKEN}) is STALE`);
+    expect(res.stdout).not.toContain("NOT allowlisted");
+  }, 12_000);
+
+  it("reports a non-array sources value beside a sibling entry instead of crashing", () => {
+    // The gate stops before matching, so no later diagnostic names this entry.
+    const res = runMulti({
+      entries: [uuidEntry(VERTEXAI), uuidEntry(GTOKEN, { sources: "npm-install-adk" })],
+      npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE),
+    });
+    expectBlocked(res, `entry[1] (${UUID} / uuid): "sources" must be a non-empty array`);
+    expect(res.stderr).not.toContain("audit-gate crashed");
+    expect(res.stdout).not.toContain("allowlisted (justified + dated)");
+  }, 12_000);
+
+  it("refuses a required field that is not a string, and does not admit the advisory", () => {
+    // String({}) is "[object Object]", so a presence check alone let an object
+    // through, and the bun admission path never reads introducedBy.
+    const objectChain = entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob", { introducedBy: {} });
+    expect(validateAllowlist({ policy: ALLOWLIST.policy, entries: [objectChain] }, new Date("2026-10-01")).join("\n"))
+      .toContain('"introducedBy" must be a string (found object)');
+    const res = runMulti({ entries: [objectChain], bun: bunReport(["glob"]) });
+    expectBlocked(res, '"introducedBy" must be a string (found object)');
+    expect(res.stdout).not.toContain("allowlisted (justified + dated)");
+  }, 12_000);
+
+  it("refuses an array-valued class before matching", () => {
+    // The gate stops before matching, so this entry is never counted as allowlisted.
+    const arrayClass = entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob", { class: ["remediation-available"] });
+    const res = runMulti({ entries: [arrayClass], bun: bunReport(["glob"]) });
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(1);
+    expect(res.stdout).toContain('"class" must be a string (found an array)');
+    expect(res.stderr).not.toContain("audit-gate crashed");
+    expect(res.stdout).not.toContain("allowlisted (justified + dated)");
+  }, 12_000);
+
+  it("refuses vendor-pinned on the bun source and accepts remediation-available there", () => {
+    const vendor = entry(GLOB, "glob", "vendor-pinned", ["bun"], "harper -> @fastify/static -> glob");
+    expect(validateAllowlist({ policy: ALLOWLIST.policy, entries: [vendor] }, new Date("2026-10-01")).join("\n"))
+      .toContain('class "vendor-pinned" cannot cover source "bun"');
+    expectBlocked(runMulti({ entries: [vendor], bun: bunReport(["glob"]) }), 'class "vendor-pinned" cannot cover source "bun"');
+    const remediation = entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob");
+    expect(validateAllowlist({ policy: ALLOWLIST.policy, entries: [remediation] }, new Date("2026-10-01"))).toEqual([]);
+    expectPass(runMulti({ entries: [remediation], bun: bunReport(["glob"]) }));
+  }, 24_000);
+
+  const ACROSS = [
+    entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob"),
+    entry(GLOB, "glob", "vendor-pinned", ["npm-install"], "harper -> @fastify/static -> glob", { removeWhen: "harper's shrinkwrap resolves a patched glob" }),
+    entry(GLOB, "glob", "vendor-pinned", ["npm-install-adk"], ADK_GLOB, { version: "10.5.0" }),
+    entry(MINIMATCH, "minimatch", "remediation-available", ["bun"], "harper -> @fastify/static -> glob -> minimatch"),
+    entry(MINIMATCH, "minimatch", "vendor-pinned", ["npm-install"], "harper -> @fastify/static -> glob -> minimatch", { removeWhen: "harper's shrinkwrap resolves a patched minimatch" }),
+    entry(MINIMATCH, "minimatch", "vendor-pinned", ["npm-install-adk"], `${ADK_GLOB} -> minimatch`, { version: "9.0.9" }),
+  ];
+  const ACROSS_REPORTS = {
+    bun: bunReport(["glob", "minimatch"]),
+    npm: {
+      "npm-install": npmReport({ glob: ["node_modules/harper/node_modules/glob"], minimatch: ["node_modules/harper/node_modules/minimatch"] }),
+      "npm-install-adk": npmReport({ glob: ["node_modules/glob"], minimatch: ["node_modules/minimatch"] }),
+    },
+  };
+
+  it("glob_and_minimatch_across_sources_pass: bun remediation-available, npm-install and npm-install-adk vendor-pinned", () => {
+    const res = runMulti({ entries: ACROSS, ...ACROSS_REPORTS });
+    expectPass(res);
+    expect(res.stdout).toContain("advisories reported: 6 (6 moderate)");
+    expect(res.stdout).toContain("allowlisted (justified + dated):  6");
+  }, 12_000);
+
+  it("same_ghsa_different_classes_per_source: one advisory, a different true class in each source", () => {
+    expectPass(runMulti({
+      entries: ACROSS.slice(0, 2),
+      bun: bunReport(["glob"]),
+      npm: { "npm-install": npmReport({ glob: ["node_modules/harper/node_modules/glob"] }) },
+    }));
+  }, 12_000);
+
+  it("blocks the npm-install glob copy when only its bun sibling is listed", () => {
+    const res = runMulti({ entries: [ACROSS[0]!, ACROSS[2]!], ...ACROSS_REPORTS, npm: { "npm-install": ACROSS_REPORTS.npm["npm-install"] } });
+    expectBlocked(res, `MODERATE ${GLOB} in glob (>=9.0.0 <=14.0.1) is NOT allowlisted in source [npm-install]`);
+  }, 12_000);
+
+  it("duplicate_coverage_fails: two entries naming bun for one advisory and package", () => {
+    const twice = [
+      entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob"),
+      entry(GLOB, "glob", "remediation-available", ["bun"], "@tpsdev-ai/pi-flair -> @earendil-works/pi-coding-agent -> glob"),
+    ];
+    const problems = validateAllowlist({ policy: ALLOWLIST.policy, entries: twice }, new Date("2026-10-01")).join("\n");
+    expect(problems).toContain("duplicate coverage — entry[0]");
+    expect(problems).toContain("and entry[1]");
+    expect(problems).toContain('both cover GHSA-3g3m-2fjr-6pw4 (glob) in source "bun"');
+    expectBlocked(runMulti({ entries: twice, bun: bunReport(["glob"]) }), "duplicate coverage");
+  }, 12_000);
+
+  it("duplicate_coverage_fails: two ADK entries whose chains resolve to the same node", () => {
+    const res = runMulti({
+      entries: [uuidEntry(VERTEXAI), uuidEntry(VERTEXAI, { sources: ["npm-install-adk", "npm-install-mcp"] }), uuidEntry(GTOKEN)],
+      npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE),
+    });
+    expectBlocked(res, `duplicate coverage — entry[0]`, `all resolve to node "${VERTEXAI_NODE}" in npm-install-adk`);
+  }, 12_000);
+
+  it("still refuses an exact duplicate of one entry", () => {
+    const problems = validateAllowlist({ policy: ALLOWLIST.policy, entries: [uuidEntry(VERTEXAI), uuidEntry(VERTEXAI)] }, new Date("2026-10-01"));
+    expect(problems.join("\n")).toContain("duplicate entry for GHSA-w5hq-g745-h8pq (entry[0] has the same package, sources and introducedBy)");
+  });
+
+  it("expired_or_unapproved_sibling: an expired sibling blocks while the other entry is valid", () => {
+    const res = runMulti({ entries: [uuidEntry(VERTEXAI), uuidEntry(GTOKEN, { expires: "2026-10-01" })], npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE) });
+    expectBlocked(res, `allowlist entry[1] (${UUID} / uuid, sources [npm-install-adk], via ${GTOKEN}) (moderate) EXPIRED on 2026-10-01`);
+    expect(res.stdout).not.toContain(`entry[0] (${UUID} / uuid, sources [npm-install-adk], via ${VERTEXAI}) (moderate) EXPIRED`);
+  }, 12_000);
+
+  it("expired_or_unapproved_sibling: an unapproved sibling blocks while the other entry is valid", () => {
+    const unapproved: Record<string, unknown> = uuidEntry(GTOKEN);
+    delete unapproved.approvedBy;
+    const res = runMulti({ entries: [uuidEntry(VERTEXAI), unapproved], npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE) });
+    expectBlocked(res, 'entry[1] (GHSA-w5hq-g745-h8pq / uuid): missing required field "approvedBy"');
+  }, 12_000);
+
+  it("treats an entry as live the day before its expiry and expired on the day itself", () => {
+    const entries = [uuidEntry(VERTEXAI, { expires: "2026-10-02" }), uuidEntry(GTOKEN, { expires: "2026-10-02" })];
+    expectPass(runMulti({ entries, npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE), today: "2026-10-01" }));
+    expectBlocked(
+      runMulti({ entries, npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE), today: "2026-10-02" }),
+      `allowlist entry[0] (${UUID} / uuid, sources [npm-install-adk], via ${VERTEXAI}) (moderate) EXPIRED on 2026-10-02`,
+      `allowlist entry[1] (${UUID} / uuid, sources [npm-install-adk], via ${GTOKEN}) (moderate) EXPIRED on 2026-10-02`,
+    );
+  }, 24_000);
 });
 
 // ─── Allowlist integrity ─────────────────────────────────────────────────────
@@ -875,9 +1274,15 @@ describe("the committed allowlist", () => {
     expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain("unknown source");
   });
 
-  it("carries the ADK consumer-install observation (uuid, flair#2398)", () => {
+  it("carries the ADK consumer-install observation (uuid, glob and minimatch; flair#2398)", () => {
     const adk = ALLOWLIST.entries.filter((e) => e.sources.includes("npm-install-adk"));
-    expect(adk.map((e) => e.ghsa)).toEqual(["GHSA-w5hq-g745-h8pq"]);
+    // uuid has one entry per copy (the vertexai and gtoken chains).
+    expect(adk.map((e) => e.ghsa).sort()).toEqual([
+      "GHSA-3g3m-2fjr-6pw4",
+      "GHSA-g3hv-75wg-m249",
+      "GHSA-w5hq-g745-h8pq",
+      "GHSA-w5hq-g745-h8pq",
+    ]);
   });
 
   it("marks harper-pinned npm advisories as npm-install-only (NOT-REPORTED-BY-BUN)", () => {

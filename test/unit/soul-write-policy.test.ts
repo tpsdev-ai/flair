@@ -19,6 +19,6 @@ describe("generic Soul policy stays vendor-neutral", () => {
   });
 
   test("the dated adk: bridge is still scheduled, not permanent", () => {
-    expect(ADK_SOUL_REFUSE_KILL_DATE).toBe("2026-10-31");
+    expect(ADK_SOUL_REFUSE_KILL_DATE).toBe("2026-11-30");
   });
 });
