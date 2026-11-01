@@ -4,8 +4,8 @@
  * `flair help <command> <subcommand>` used to print the parent's help, because
  * commander's implicit help command forwards only its first operand. These
  * tests drive the REAL registered program: every leaf reachable by walking the
- * commander tree is compared against the same leaf's `--help`, and every
- * command action is wrapped so that running one during `help` fails the file.
+ * commander tree is compared against the same leaf's `--help`, and every action
+ * except `help`'s own is wrapped so that running one during help fails the file.
  *
  * Isolated: installs exit overrides on the shared `program` and writes through
  * process.stdout/stderr spies.
@@ -19,11 +19,11 @@ interface CommandNode {
   cmd: Command;
 }
 
-/** Registration-order walk of the real program. */
+/** Registration-order walk of the real program and every command below it. */
 function commandNodes(root: Command): CommandNode[] {
   const out: CommandNode[] = [];
   const visit = (cmd: Command, parts: string[]): void => {
-    if (parts[0] !== "help") out.push({ path: parts.join(" "), cmd });
+    out.push({ path: parts.join(" "), cmd });
     for (const sub of cmd.commands) visit(sub, [...parts, sub.name()]);
   };
   for (const sub of root.commands) visit(sub, [sub.name()]);
@@ -41,7 +41,6 @@ function leafPaths(): string[] {
 // would end this test process. The help command resolves paths itself and never
 // exits, so it needs one only for its `--help`.
 for (const { cmd } of commandNodes(program)) cmd.exitOverride();
-program.commands.find((candidate) => candidate.name() === "help")?.exitOverride();
 
 interface RunResult {
   out: string;
@@ -125,6 +124,8 @@ describe("flair#2887 — help resolves the full command path", () => {
     const invoked: string[] = [];
     const restores: Array<() => void> = [];
     for (const { path, cmd } of commandNodes(program)) {
+      // `help`'s own action is the code under test, not a command being helped.
+      if (path === "help") continue;
       const internal = cmd as unknown as { _actionHandler?: (...args: unknown[]) => unknown };
       const original = internal._actionHandler;
       if (typeof original !== "function") continue;
