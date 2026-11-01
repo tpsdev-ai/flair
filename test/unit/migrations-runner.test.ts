@@ -600,6 +600,44 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
     expect(progress?.rowsUnconfirmed).toBe(1);
     expect(progress?.unconfirmedIds).toEqual(["m2"]);
   });
+
+  it("an unrecognized verdict keeps the id and is logged (flair#2881)", async () => {
+    const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", stamp: "not-yet" }]);
+    const relationship = makeStore([]);
+    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-unrecognized", {
+      lastOutcome: "halted",
+      reason: "completion gate failed: rowsRemaining=0",
+      rowsProcessed: 1,
+      rowsRemaining: 0,
+      rowsUnconfirmed: 1,
+      unconfirmedIds: ["m2"],
+    });
+    const calls = { detect: 0 };
+    const migration = {
+       ...makeTargetMigration("fake-unrecognized", memory, calls),
+      async checkUnconfirmed() {
+        return "unrecognized-answer" as unknown as "pending";
+      },
+    } satisfies Migration;
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await runMigrationCycle({
+        registry: buildRegistryWith(migration),
+        getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+        dataDir,
+        runningVersion: "0.1.0",
+        sleep: fastSleep,
+      });
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("unrecognized-answer"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+
+    const progress = listMigrationProgress().find((p) => p.id === "fake-unrecognized");
+    expect(progress?.state).toBe("halted");
+    expect(progress?.rowsUnconfirmed).toBe(1);
+    expect(progress?.unconfirmedIds).toEqual(["m2"]);
+  });
 });
 
 describe("runMigrationCycle — a recorded unconfirmed row survives a countPending throw and a detect() throw (flair#2840)", () => {

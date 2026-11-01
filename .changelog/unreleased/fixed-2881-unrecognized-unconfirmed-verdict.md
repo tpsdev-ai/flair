@@ -1,0 +1,1 @@
+- The migration runner keeps an unconfirmed row's record when a migration's re-check answers something other than at-target, no-row or pending, and logs the answer, instead of clearing the record.
