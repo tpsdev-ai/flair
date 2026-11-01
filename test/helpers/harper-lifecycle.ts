@@ -232,9 +232,9 @@ const STARTUP_TIMEOUT_MS = 45_000;
 // host: 3.5–4.0 s idle, up to 14.0 s with one CPU burner per core and up to
 // 26.2 s with two per core. A CI macOS runner exceeded the earlier 20 s bound.
 const INSTALL_TIMEOUT_MS = 60_000;
-// flair#2879: a timed-out installer gets SIGTERM, then up to this long to exit
-// before SIGKILL, and up to this long again after SIGKILL before the timeout
-// is reported.
+// flair#2879: after SIGTERM, wait up to this long for exit; if exit is not
+// observed, send SIGKILL and wait up to this long again before reporting.
+// The final bound can expire before exit is observed.
 const INSTALL_STOP_GRACE_MS = 5_000;
 const MAX_SPAWN_ATTEMPTS = 3;
 
@@ -472,13 +472,12 @@ async function killProcess(proc: ChildProcess): Promise<void> {
   proc.removeAllListeners();
 }
 
-// ─── flair#2879: do not report a timed-out install before the child is gone ──
+// ─── flair#2879: wait for exit unless the final shutdown bound expires ──────
 //
-// The installer is still writing into the install tree when its timeout fires.
-// Rejecting right after `kill()` hands that tree to the caller's cleanup while
-// the child may still be alive, so the cleanup races the writer. Wait for the
-// child on every timeout path instead: SIGTERM, wait `graceMs`, SIGKILL, wait
-// `graceMs` again. Both waits are bounded by the arguments, never by output.
+// The installer may still be writing into the install tree when its timeout fires.
+// Rejecting right after `kill()` can race the caller's cleanup with the writer.
+// Send SIGTERM and wait up to `graceMs`; if exit is not observed, send SIGKILL
+// and wait up to `graceMs` again. The final bound can expire before exit is observed.
 type ExitWaitOutcome = "exited" | "timeout" | "error";
 
 function waitForExitOutcome(child: ChildProcess, ms: number): Promise<ExitWaitOutcome> {
@@ -505,8 +504,8 @@ function waitForExitOutcome(child: ChildProcess, ms: number): Promise<ExitWaitOu
 /**
  * Wait for `child` to exit: resolve if it exits within `timeoutMs` (or fails to
  * spawn — a spawn error is terminal too). On timeout, send SIGTERM and wait up
- * to `graceMs`, then SIGKILL and wait up to `graceMs` again; reject only once
- * the child has exited, or after the SIGKILL wait expires, naming the pid.
+ * to `graceMs`; if exit is not observed, send SIGKILL and wait up to `graceMs`
+ * again. The final bound can expire before exit is observed; timeout errors name the pid.
  */
 export async function waitForChildExit(
   child: ChildProcess,

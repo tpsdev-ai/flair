@@ -1,6 +1,5 @@
-// flair#2879 — a timed-out install must be reported only after its child has
-// exited, so the caller's cleanup cannot remove the install tree while the
-// installer is still writing to it.
+// flair#2879 — wait for a timed-out install's child to exit before reporting,
+// unless the final shutdown bound expires before exit is observed.
 //
 // These tests drive `waitForChildExit` (the extracted wait) with real node
 // children and short timeouts: no Harper install runs here.
