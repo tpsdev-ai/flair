@@ -858,10 +858,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const pendingRetries = new Map<string, RetryQueueRow>();
     /** Pending rows whose attempt this run reserved before sending. */
     const reservedOffers = new Set<string>();
-    /**
-     * A Memory row's stored pending retry row, whose attempt this run
-     * reserves immediately before the batch carrying the row is sent.
-     */
+    /** Pending retry rows to reserve when their batch is reached. */
     const reservationTargets = new Map<string, RetryQueueRow>();
 
     async function loadPendingRetries(): Promise<void> {
@@ -1206,9 +1203,8 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
             await retireRetry(pending, "source_ineligible");
             continue;
           }
-          // This offer's attempt is reserved immediately before the batch
-          // carrying it is sent; an unconfirmed send keeps the reservation, so
-          // the next cycle waits out its backoff.
+          // An unconfirmed send keeps the reservation; retry backoff applies
+          // while the row remains behind the cursor.
           reservationTargets.set(String(row.id), pending);
           rows.push(row);
           seen.add(pending.recordId);
