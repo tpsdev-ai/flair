@@ -1075,6 +1075,27 @@ describe("several allowlist entries for one advisory, per source and per locatio
     expect(res.stdout).toContain("in any source it declares (none)");
   }, 12_000);
 
+  it("refuses a required field that is not a string, and does not admit the advisory", () => {
+    // String({}) is "[object Object]", so a presence check alone let an object
+    // through, and the bun admission path never reads introducedBy.
+    const objectChain = entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob", { introducedBy: {} });
+    expect(validateAllowlist({ policy: ALLOWLIST.policy, entries: [objectChain] }, new Date("2026-10-01")).join("\n"))
+      .toContain('"introducedBy" must be a string (found object)');
+    expectBlocked(runMulti({ entries: [objectChain], bun: bunReport(["glob"]) }), '"introducedBy" must be a string (found object)');
+  }, 12_000);
+
+  it("prints the problems it had recorded when a later diagnostic crashes", () => {
+    // Some diagnostics still assume a valid shape after the schema check has
+    // recorded the entry (an array-valued class reaches string formatting). A
+    // crash there must not replace the recorded problems with a stack trace.
+    const arrayClass = entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob", { class: ["remediation-available"] });
+    const res = runMulti({ entries: [arrayClass], bun: bunReport(["glob"]) });
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(1);
+    expect(`${res.stdout}\n${res.stderr}`).toContain('"class" must be a string (found an array)');
+    expect(`${res.stdout}\n${res.stderr}`).not.toContain("PASS —");
+  }, 12_000);
+
   it("refuses vendor-pinned on the bun source and accepts remediation-available there", () => {
     const vendor = entry(GLOB, "glob", "vendor-pinned", ["bun"], "harper -> @fastify/static -> glob");
     expect(validateAllowlist({ policy: ALLOWLIST.policy, entries: [vendor] }, new Date("2026-10-01")).join("\n"))

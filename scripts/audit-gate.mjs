@@ -541,6 +541,11 @@ export function validateAllowlist(allowlist, today) {
       const v = entry?.[f];
       if (v === undefined || v === null || String(v).trim() === "") {
         problems.push(`${where}: missing required field "${f}"`);
+      } else if (f !== "sources" && typeof v !== "string") {
+        // String({}) is "[object Object]": presence alone admitted an object,
+        // and paths that never read the field (bun admission and introducedBy)
+        // then let the entry cover an advisory.
+        problems.push(`${where}: "${f}" must be a string (found ${Array.isArray(v) ? "an array" : typeof v})`);
       }
     }
     if (problems.some((p) => p.startsWith(where))) return;
@@ -1745,6 +1750,12 @@ async function main() {
 // Only run when executed directly, so the unit tests can import the helpers.
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   main().catch((e) => {
+    // A crash must not hide what the gate had already found: a diagnostic that
+    // assumes a valid shape can throw on an entry the schema check refused.
+    if (failures.length) {
+      console.error(`audit-gate: ${failures.length} problem(s) were recorded before the crash:`);
+      for (const m of failures) console.error(`::error::audit-gate: ${m}`);
+    }
     console.error(`audit-gate crashed: ${e?.stack || e}`);
     process.exit(1);
   });

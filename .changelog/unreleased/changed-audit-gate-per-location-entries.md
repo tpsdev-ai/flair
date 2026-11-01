@@ -7,3 +7,6 @@
   names is stale even when another entry for the same advisory is in use. An entry classed
   `vendor-pinned` that names the `bun` source blocks, because bun.lock resolves through the root
   `overrides`.
+  Every required entry field must be a string (and `sources` a non-empty array): an object or array
+  in, say, `introducedBy` is refused rather than read as present. If a later diagnostic fails on a
+  malformed entry, the gate still prints every problem it had recorded before exiting non-zero.
