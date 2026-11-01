@@ -42,6 +42,12 @@ const CORE_VERSIONS = (
   .map((version) => version.trim())
   .filter(Boolean);
 
+if (CORE_VERSIONS.length === 0) {
+  throw new Error(
+    "FLAIR_N8N_HOST_CORE_VERSIONS names no version: unset it to run the default matrix, or list versions such as 0.3.0,1.3.0",
+  );
+}
+
 // Bounds each child process this file starts: the node build and each npm pack
 // at 20 s, npm init at 10 s, each registry install at 30 s, each driver run at
 // 30 s. Measured 2026-10-24: build 1.3 s, packs 0.7-0.9 s, init 0.2 s, installs
