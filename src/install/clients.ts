@@ -1639,7 +1639,7 @@ function piConfigFlairEntryScan(config: any): PiFlairEntryScan {
 }
 
 /** The unwire removes only Flair-owned entries, so only `present` makes it
- *  read the file. */
+ *  rewrite the file. */
 function piConfigHasFlairEntry(config: any): boolean {
   return piConfigFlairEntryScan(config).status === "present";
 }
