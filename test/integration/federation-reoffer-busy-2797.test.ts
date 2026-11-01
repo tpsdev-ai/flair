@@ -123,6 +123,23 @@ const MERGE_PAUSE = "federation-merge";
 const RELEASE_ACK_BOUND_MS = 10_000;
 
 /**
+ * How long cleanup waits for a released receiver push to finish. Fixed, so a
+ * push still pending at the bound fails cleanup by name rather than hanging.
+ */
+const OUTSTANDING_PUSH_BOUND_MS = 60_000;
+
+/** The named failure a push still pending at {@link OUTSTANDING_PUSH_BOUND_MS} raises. */
+class OutstandingPushTimeoutError extends Error {
+  constructor(pending: number) {
+    super(`${pending} receiver push(es) still pending after ${OUTSTANDING_PUSH_BOUND_MS}ms`);
+    this.name = "OutstandingPushTimeoutError";
+  }
+}
+
+/** The signed pushes whose response has not arrived yet. */
+const outstandingPushes = new Set<Promise<Response>>();
+
+/**
  * The result the pause point recorded for `point`: `"go"` or `"timeout"` once
  * its wait has ended, null before that. It creates `released.<point>` empty
  * before waiting and writes the result afterwards
@@ -170,16 +187,11 @@ function markerExists(name: string): boolean {
 }
 
 /**
- * Release a pause an earlier case may still hold and remove every marker this
- * file arms. Both Harpers share one pause directory, and the pause point opens
- * its `claimed`/`paused`/`released` files with O_EXCL: a leftover marker makes
- * the next arm inert, while a leftover arm pauses the next push.
- *
- * A pause the case claimed may still be waiting, so `go` stays in place until
- * the pause point records its result in `released`; only then are the markers
- * removed.
+ * Write `go` for the merge pause. A pause the case claimed may still be
+ * waiting, so this stays in place until the pause point records its result in
+ * `released`.
  */
-async function resetPauseMarkers(): Promise<void> {
+async function releaseMergePause(): Promise<void> {
   writeFileSync(join(pauseDir, `go.${MERGE_PAUSE}`), "");
   if (markerExists(`claimed.${MERGE_PAUSE}`) && pauseResult(MERGE_PAUSE) === null) {
     const deadline = Date.now() + RELEASE_ACK_BOUND_MS;
@@ -190,6 +202,29 @@ async function resetPauseMarkers(): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
   }
+}
+
+/**
+ * Wait, bounded, for every tracked push to settle. The pause records its
+ * release before the merge it guards writes, so the response (and with it the
+ * write) can still be in flight when the release is acknowledged: a case's
+ * write must finish before the next case clears the tables it writes to.
+ */
+async function awaitOutstandingPushes(): Promise<void> {
+  const pending = [...outstandingPushes];
+  if (pending.length === 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<"bound">((resolve) => {
+    timer = setTimeout(() => resolve("bound"), OUTSTANDING_PUSH_BOUND_MS);
+  });
+  const settled = Promise.allSettled(pending).then(() => "settled" as const);
+  const outcome = await Promise.race([settled, bound]);
+  clearTimeout(timer);
+  if (outcome === "bound") throw new OutstandingPushTimeoutError(outstandingPushes.size);
+}
+
+/** The marker names this file arms. */
+function removePauseMarkers(): void {
   for (const name of [
     `arm.${MERGE_PAUSE}`,
     `claimed.${MERGE_PAUSE}`,
@@ -200,6 +235,19 @@ async function resetPauseMarkers(): Promise<void> {
   ]) {
     rmSync(join(pauseDir, name), { force: true });
   }
+}
+
+/**
+ * Release a pause an earlier case may still hold, wait for its push, then
+ * remove every marker this file arms. Both Harpers share one pause directory,
+ * and the pause point opens its `claimed`/`paused`/`released` files with
+ * O_EXCL: a leftover marker makes the next arm inert, while a leftover arm
+ * pauses the next push. Markers go only after the released write has landed.
+ */
+async function resetPauseMarkers(): Promise<void> {
+  await releaseMergePause();
+  await awaitOutstandingPushes();
+  removePauseMarkers();
 }
 
 function retryRow(recordId: string, lastReason: string, over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -246,12 +294,18 @@ function push(memory: Record<string, unknown>): Promise<Response> {
     },
     senderKp.secretKey,
   );
-  return fetch(`${receiver.httpURL}/FederationSync`, {
+  const request = fetch(`${receiver.httpURL}/FederationSync`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(120_000),
   });
+  outstandingPushes.add(request);
+  const forget = () => {
+    outstandingPushes.delete(request);
+  };
+  request.then(forget, forget);
+  return request;
 }
 
 /** Wait until a direct push of this id is not refused merge_target_busy. */
@@ -485,15 +539,12 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
       expect(failedAfter).toBeLessThan(RELEASE_ACK_BOUND_MS + 6_000);
       expect((await stuck).status).toBe(200);
     } finally {
-      for (const name of [
-        `arm.${MERGE_PAUSE}`,
-        `claimed.${MERGE_PAUSE}`,
-        `paused.${MERGE_PAUSE}`,
-        `go.${MERGE_PAUSE}`,
-        `released.${MERGE_PAUSE}`,
-      ]) {
-        rmSync(join(pauseDir, name), { force: true });
-      }
+      // The release acknowledgement above is unobservable once `released` was
+      // removed, so this writes `go` without waiting for it and waits for the
+      // push itself: its write must land before the next case clears tables.
+      writeFileSync(join(pauseDir, `go.${MERGE_PAUSE}`), "");
+      await awaitOutstandingPushes();
+      removePauseMarkers();
     }
   }, 240_000);
 
