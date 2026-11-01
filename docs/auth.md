@@ -374,7 +374,7 @@ write. This is an exact-match backstop, not semantic detection of paraphrases.
 Existing Soul records remain readable without a migration.
 
 The legacy `adk:` body-tag and stored-tag refusal remains a compatibility
-bridge until **2026-10-31** (`ADK_SOUL_REFUSE_KILL_DATE` in
+bridge until **2026-11-30** (`ADK_SOUL_REFUSE_KILL_DATE` in
 `resources/soul-adk-guard.ts`). Runtime denial itself never depends on
 connector names — Soul writes are deny-by-default, and Flair stamps
 `sourceClass` from the authenticated credential, not from a body field.

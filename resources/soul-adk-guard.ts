@@ -12,7 +12,7 @@ import { ADK_SCOPE_TAG_PREFIX } from "../src/rem/promote-policy.js";
 export const ADK_SOUL_REFUSAL = "adk_sourced_claim_cannot_be_written_to_soul";
 
 /** Calendar date (UTC) after which this `adk:` bridge must be removed. */
-export const ADK_SOUL_REFUSE_KILL_DATE = "2026-10-31";
+export const ADK_SOUL_REFUSE_KILL_DATE = "2026-11-30";
 
 export interface SoulAdkLookup {
   searchCandidates?: (agentId: string) => AsyncIterable<{ claim?: unknown; scopeTag?: unknown; tags?: unknown }>;
