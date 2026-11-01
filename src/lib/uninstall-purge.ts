@@ -15,10 +15,15 @@
  * "fully purged" when anything remains.
  */
 
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { resolveHome, withHome } from "./home.js";
-import { ALL_CLIENTS } from "../install/clients.js";
+import {
+  ALL_CLIENTS,
+  clientConfigBackupPath,
+  clientConfigHasFlairEntry,
+  type ClientId,
+} from "../install/clients.js";
 import {
   uninstallContinuityHooks,
   uninstallHook,
@@ -46,7 +51,10 @@ export const FLAIR_NPM_PACKAGE = "@tpsdev-ai/flair";
 
 export interface PurgeLeftover {
   path: string;
-  kind: "intentional" | "failed";
+  /** `unverified`: the state of this path could not be decided (a read or
+   *  parse failed). It is left in place and reported by name — never claimed
+   *  removed and never silently kept (flair#2886). */
+  kind: "intentional" | "failed" | "unverified";
   reason: string;
   remedy?: string;
 }
@@ -168,11 +176,66 @@ function sweepHookBackup(
 }
 
 /**
+ * After a failed read: is the path genuinely absent? A dangling symlink also
+ * reads as ENOENT but is an entry purge could not check — not a missing one.
+ */
+function backupEntryAbsent(path: string): boolean {
+  try {
+    lstatSync(path);
+    return false;
+  } catch (err: unknown) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
+/**
+ * Client configs get the same sibling snapshot as hook settings: every
+ * `unwire()` write copies the pre-write bytes to `<config>.bak`, so after
+ * unwiring the copy still holds the pre-purge Flair wiring. Purge removes a
+ * copy that contains a Flair entry (detected the way the client's unwire
+ * decides it) and reports the path like a hook backup. A copy with no Flair
+ * entry may be the user's own file and stays — as does one whose contents
+ * cannot be read or parsed, which is reported as not checked (flair#2886).
+ */
+function sweepClientConfigBackup(
+  clientId: ClientId,
+  homeDir: string,
+  removed: string[],
+  leftovers: PurgeLeftover[],
+): void {
+  const backup = clientConfigBackupPath(clientId);
+  const display = displayUnderHome(homeDir, backup);
+  let bytes: Uint8Array;
+  try {
+    bytes = readFileSync(backup);
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" && backupEntryAbsent(backup)) return;
+    leftovers.push({
+      path: display,
+      kind: "unverified",
+      reason: `could not check for Flair wiring: could not read the file${code ? ` (${code})` : ""}`,
+    });
+    return;
+  }
+  const scan = clientConfigHasFlairEntry(clientId, bytes, display);
+  if (scan.status === "unknown") {
+    leftovers.push({
+      path: display,
+      kind: "unverified",
+      reason: `could not check for Flair wiring: ${scan.reason}`,
+    });
+    return;
+  }
+  if (scan.status === "present") rmPath(backup, removed, leftovers, display);
+}
+
+/**
  * Remove Flair-owned state under `homeDir`: the `~/.flair` tree (data, keys,
  * admin-pass, backups, logs, snapshots, shims), REM + federation scheduler
- * units on both platforms, SessionStart/continuity hooks, and MCP/native
- * client wiring. The npm package is listed as an intentional leftover
- * unless `omitNpmLeftover` is set.
+ * units on both platforms, SessionStart/continuity hooks, MCP/native
+ * client wiring, and the pre-unwire client-config snapshots. The npm package
+ * is listed as an intentional leftover unless `omitNpmLeftover` is set.
  */
 export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
   const homeDir = opts.homeDir ?? resolveHome();
@@ -215,6 +278,12 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
     }
   }
 
+  // The unwire above snapshots each config before writing it; sweep those
+  // snapshots (and any older one) once the active configs are clean.
+  for (const client of ALL_CLIENTS) {
+    sweepClientConfigBackup(client.id, homeDir, removed, leftovers);
+  }
+
   const flairDir = join(homeDir, ".flair");
   rmPath(flairDir, removed, leftovers, "~/.flair");
 
@@ -245,13 +314,18 @@ export function formatPurgeReport(result: PurgeResult): { lines: string[]; claim
   }
 
   const failed = result.leftovers.filter((l) => l.kind === "failed");
+  const unverified = result.leftovers.filter((l) => l.kind === "unverified");
   const intentional = result.leftovers.filter((l) => l.kind === "intentional");
 
   for (const item of failed) {
     lines.push(`⚠️  Left (failed): ${item.path} — ${item.reason}`);
   }
 
-  if (failed.length === 0 && intentional.length === 0) {
+  for (const item of unverified) {
+    lines.push(`❓ Not checked: ${item.path} — ${item.reason}`);
+  }
+
+  if (failed.length === 0 && unverified.length === 0 && intentional.length === 0) {
     lines.push("");
     lines.push("🗑️  Flair fully purged");
     return { lines, claimedFullyPurged: true };
@@ -271,5 +345,7 @@ export function formatPurgeReport(result: PurgeResult): { lines: string[]; claim
 }
 
 export function purgeHadFailures(result: PurgeResult): boolean {
-  return result.leftovers.some((l) => l.kind === "failed");
+  // An unverified path means purge could not prove it was clean, so the run is
+  // not a success either (flair#2886).
+  return result.leftovers.some((l) => l.kind === "failed" || l.kind === "unverified");
 }

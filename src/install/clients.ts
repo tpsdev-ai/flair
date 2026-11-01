@@ -90,7 +90,7 @@ import { decodeWiringSpec, wiringPinString } from "../lib/wiring-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "../lib/pin-write-guard.js";
 import { pinWriteWouldLowerOrIsUnknown, comparePinVersions } from "../lib/upgrade-status.js";
 import { withConfigCriticalSection, type ConfigSectionOptions } from "../lib/config-critical-section.js";
-import { backupBytesTo, encodeConfig, encodeText, parseSettingsBytes } from "../lib/settings-bytes.js";
+import { backupBytesTo, encodeConfig, encodeText, hookBackupPath, parseSettingsBytes } from "../lib/settings-bytes.js";
 import { readTomlStringArray } from "../lib/toml-string-array.js";
 
 /**
@@ -1380,6 +1380,50 @@ export function clientConfigPath(id: ClientId): string {
   }
 }
 
+/**
+ * The snapshot `withConfigCriticalSection` writes before it mutates a client
+ * config (settings-bytes `backupBytesTo`): a sibling `<config>.bak`. */
+export function clientConfigBackupPath(id: ClientId): string {
+  return hookBackupPath(clientConfigPath(id));
+}
+
+/**
+ * What a client-config snapshot says about Flair wiring. `unknown` is a read
+ * that could not be decided (unparseable, or a shape the unwire refuses to
+ * touch) — it is never "absent" (flair#2886).
+ */
+export type ClientConfigFlairScan =
+  | { status: "present" }
+  | { status: "absent" }
+  | { status: "unknown"; reason: string };
+
+/**
+ * Answer "does this client config carry a Flair entry?" with the SAME
+ * detection the client's `unwire()` uses, for callers reading a copy of the
+ * config rather than the live file (purge's `.bak` sweep, flair#2886).
+ * `path` only names the file in an `unknown` reason.
+ */
+export function clientConfigHasFlairEntry(
+  id: ClientId,
+  bytes: Uint8Array,
+  path: string,
+): ClientConfigFlairScan {
+  if (id === "codex") {
+    // config.toml is TEXT; its unwire tests the raw string, not JSON.
+    return codexConfigHasFlairSection(decodeText(bytes))
+      ? { status: "present" }
+      : { status: "absent" };
+  }
+  const read = parseSettingsBytes(bytes, path);
+  if (read.parseError) return { status: "unknown", reason: read.parseError };
+  const config: any = read.parsed ?? {};
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    return { status: "unknown", reason: `not a JSON object: ${path}` };
+  }
+  const present = id === "pi" ? piConfigHasFlairEntry(config) : mcpConfigHasFlairEntry(config);
+  return present ? { status: "present" } : { status: "absent" };
+}
+
 // ---- Internal wiring functions --------------------------------------------------
 //
 // Claude Code wiring lives in src/commands/init.ts (it writes ~/.claude.json, the
@@ -1517,6 +1561,32 @@ function displayUnderHome(configPath: string): string {
 }
 
 /**
+ * The MCP JSON shape that counts as a Flair entry. Shared by the unwire (the
+ * decision it acts on) and by an outside reader of a config snapshot (purge's
+ * client-backup sweep, flair#2886), so the two cannot answer differently.
+ */
+function mcpConfigHasFlairEntry(config: any): boolean {
+  const servers = config.mcpServers;
+  return !!servers && typeof servers === "object" && !Array.isArray(servers) && "flair" in servers;
+}
+
+/**
+ * The pi shape that counts as a Flair entry: a `packages` source naming
+ * pi-flair, or an `extensions` entry naming/pointing at it. Shared with
+ * `_unwirePi` for the same reason as `mcpConfigHasFlairEntry`.
+ */
+function piConfigHasFlairEntry(config: any): boolean {
+  const packages = Array.isArray(config.packages) ? config.packages : [];
+  if (packages.some((entry: unknown) => {
+    const source = piPackageEntrySource(entry);
+    return !!(source && isPiFlairNpmSource(source));
+  })) return true;
+  const extensions = Array.isArray(config.extensions) ? config.extensions : [];
+  return extensions.some((entry: unknown) =>
+    typeof entry === "string" && (isPiFlairNpmSource(entry) || isPiFlairExtensionPath(entry)));
+}
+
+/**
  * Remove `mcpServers.flair` from a JSON MCP config. Preserves sibling servers
  * and every other top-level key. A no-op when the file or the flair entry is
  * absent. Refuses to write when the file is not a JSON object.
@@ -1541,11 +1611,11 @@ function unwireJsonMcp(configPath: string, label: string): UnwireResult {
           outcome = { ok: false, removed: false, message: `${label}: refusing to modify a non-object config at ${display}` };
           return { hold: outcome.message };
         }
-        const servers = config.mcpServers;
-        if (!servers || typeof servers !== "object" || Array.isArray(servers) || !("flair" in servers)) {
+        if (!mcpConfigHasFlairEntry(config)) {
           outcome = { ok: true, removed: false, message: `${label}: no Flair MCP entry in ${display}` };
           return { noop: outcome.message };
         }
+        const servers = config.mcpServers;
         delete (servers as { flair?: unknown }).flair;
         if (Object.keys(servers).length === 0) {
           delete (config as { mcpServers?: unknown }).mcpServers;
@@ -1649,6 +1719,10 @@ function _unwirePi(): UnwireResult {
         if (!config || typeof config !== "object" || Array.isArray(config)) {
           settled = { ok: false, removed: false, message: `pi: refusing to modify a non-object config at ${display}` };
           return { hold: settled.message };
+        }
+        if (!piConfigHasFlairEntry(config)) {
+          settled = { ok: true, removed: false, message: `pi: no Flair extension in ${display}` };
+          return { noop: settled.message };
         }
         let changed = false;
         if (Array.isArray(config.packages)) {
