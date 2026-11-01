@@ -1,4 +1,4 @@
-- **The dependency audit gate accepts several allowlist entries for one advisory, one per install source or dependency chain.**
+- **The dependency audit gate accepts several allowlist entries for one advisory, for example one per install source or dependency chain.**
   An entry is identified by its `ghsa`, `package`, `sources` and `introducedBy`. At most one
   entry per advisory and package may name `bun` or the root npm-install observation. When an
   advisory has several entries, each entry that names another consumer install must have an

@@ -45,7 +45,8 @@
  *      source. On another consumer install, each entry's chain resolves to one
  *      node and every reported node must be the node of exactly one entry. Such
  *      an entry that covers no reported location in a source it names is stale,
- *      whatever its siblings cover. A GHSA with one entry is matched as before.
+ *      whatever its siblings cover. A GHSA with one entry keeps the
+ *      single-entry matching path; the class rule in 6b applies to it too.
  *   6b. CLASS PER SOURCE — `vendor-pinned` is refused on `bun`: bun.lock
  *      resolves through this repository's root overrides.
  *   7. FIXABILITY DRIFT — entries claiming `no-patch-published` are re-checked

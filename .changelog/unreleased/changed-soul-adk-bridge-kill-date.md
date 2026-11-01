@@ -1,1 +1,1 @@
-- **The Soul `adk:` refuse bridge now runs through 2026-11-30 (was 2026-10-31).** Its removal is #1540.
+- **The test deadline for removing the Soul `adk:` refuse bridge moves to 2026-11-30 (was 2026-10-31).** The runtime refusal is unchanged; its removal is #1540.
