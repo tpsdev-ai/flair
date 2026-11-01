@@ -186,18 +186,18 @@ flair agent rotate-key
   arguments:
     id (required)
   options:
-    --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env)
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --port <port>
       description: Harper HTTP port
       attr: port
     --ops-port <port>
       description: Harper operations API port
       attr: opsPort
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -211,12 +211,6 @@ flair agent remove
   arguments:
     id (required)
   options:
-    --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env)
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --keep-keys
       description: Do not delete key files from disk
       attr: keepKeys
@@ -226,6 +220,12 @@ flair agent remove
     --ops-port <port>
       description: Harper operations API port
       attr: opsPort
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -405,12 +405,6 @@ flair mcp grant
   arguments:
     name (required)
   options:
-    --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS)
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --issuer <url>
       description: Public origin for the CIMD client_id (defaults to FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)
       attr: issuer
@@ -420,6 +414,12 @@ flair mcp grant
     --manifest <path>
       description: Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)
       attr: manifest
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -439,15 +439,15 @@ flair mcp revoke
   arguments:
     name (required)
   options:
+    --manifest <path>
+      description: Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)
+      attr: manifest
     --admin-pass <pass>
       description: Admin password (or set FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
       description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
-    --manifest <path>
-      description: Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)
-      attr: manifest
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -479,12 +479,6 @@ flair mcp enable
   description: Enable the OAuth /mcp surface for claude.ai. Rejects invalid issuer URLs, localhost/.localhost/.local hosts, IPv4 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16 (also IPv4-mapped IPv6), and IPv6 ::, ::1, fc00::/7, fe80::/10; no DNS lookup.
   usage: [options]
   options:
-    --admin-pass <pass>
-      description: Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --instance <url>
       description: Canonical http(s) target origin, optionally followed by / (else FLAIR_URL)
       attr: instance
@@ -521,6 +515,12 @@ flair mcp enable
     --cimd-allowed-hosts <hosts>
       description: Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds that exact list, then read back, before the restart. Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. Always refused with --fabric or a *.harperfabric.com instance. Without it the list is not changed (shipped: claude.ai,claude.com)
       attr: cimdAllowedHosts
+    --admin-pass <pass>
+      description: Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -544,16 +544,15 @@ flair mcp disable
   description: Flag off + restart = byte-identical boot (Model-2 contract) — removes the /mcp OAuth surface.
   usage: [options]
   options:
+    --instance <url>
+      description: Remote flair instance to disable against (else FLAIR_URL)
+      attr: instance
     --admin-pass <pass>
       description: Admin password for the remote target instance; pass it explicitly with --admin-pass
       attr: adminPass
     --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      description: Read the remote target instance's admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted)
       attr: adminPassFile
-      hidden: true
-    --instance <url>
-      description: Remote flair instance to disable against (else FLAIR_URL)
-      attr: instance
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -590,12 +589,6 @@ flair principal add
   arguments:
     id (required)
   options:
-    --admin-pass <pass>
-      description: Admin password for registration
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --kind <kind>
       description: Principal kind: human or agent
       attr: kind
@@ -615,6 +608,12 @@ flair principal add
     --port <port>
       description: Harper HTTP port
       attr: port
+    --admin-pass <pass>
+      description: Admin password for registration
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -629,15 +628,15 @@ flair principal list
   description: List all principals
   usage: [options]
   options:
+    --kind <kind>
+      description: Filter by kind: human or agent
+      attr: kind
     --admin-pass <pass>
       description: Admin password (or set FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
       description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
-    --kind <kind>
-      description: Filter by kind: human or agent
-      attr: kind
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -731,12 +730,6 @@ flair principal link
   arguments:
     principal (required)
   options:
-    --admin-pass <pass>
-      description: Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --idp-subject <login>
       description: The login the identity provider reports for this person (GitHub: the username)
       attr: idpSubject
@@ -750,6 +743,12 @@ flair principal link
     --replace
       description: Move a subject that is already mapped to a different principal
       attr: replace
+    --admin-pass <pass>
+      description: Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -760,12 +759,6 @@ flair principal unlink
   arguments:
     principal (required)
   options:
-    --admin-pass <pass>
-      description: Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --idp-subject <login>
       description: The login the identity provider reports for this person (GitHub: the username)
       attr: idpSubject
@@ -776,6 +769,12 @@ flair principal unlink
     --instance <url>
       description: Remote flair instance holding the mapping (else FLAIR_URL)
       attr: instance
+    --admin-pass <pass>
+      description: Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -786,15 +785,15 @@ flair principal links
   arguments:
     principal (required)
   options:
+    --instance <url>
+      description: Remote flair instance holding the mapping (else FLAIR_URL)
+      attr: instance
     --admin-pass <pass>
       description: Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)
       attr: adminPass
     --admin-pass-file <path>
       description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
-    --instance <url>
-      description: Remote flair instance holding the mapping (else FLAIR_URL)
-      attr: instance
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -809,12 +808,6 @@ flair idp add
   description: Register a trusted enterprise IdP
   usage: [options]
   options:
-    --admin-pass <pass>
-      description: Admin password
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --name <name>
       description: Display name (e.g., 'Harper Corporate')
       attr: name
@@ -842,6 +835,12 @@ flair idp add
       description: Trust tier for JIT principals
       attr: defaultTrust
       default: "unverified"
+    --admin-pass <pass>
+      description: Admin password
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -911,12 +910,6 @@ flair grant
     from-agent (required)
     to-agent (required)
   options:
-    --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env)
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --scope <scope>
       description: Grant scope: read or search
       attr: scope
@@ -927,6 +920,12 @@ flair grant
     --ops-port <port>
       description: Harper operations API port
       attr: opsPort
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -941,18 +940,18 @@ flair revoke
     from-agent (required)
     to-agent (required)
   options:
-    --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env)
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --port <port>
       description: Harper HTTP port
       attr: port
     --ops-port <port>
       description: Harper operations API port
       attr: opsPort
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -967,12 +966,6 @@ flair integrity check
   description: Report missing checkpointed durable IDs or changed or missing previously nonempty tokens; rows created and lost entirely between scans are not observed
   usage: [options]
   options:
-    --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env)
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --json
       description: Print the verdict as JSON
       attr: json
@@ -985,6 +978,12 @@ flair integrity check
     --ops-port <port>
       description: Harper operations API port
       attr: opsPort
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -993,12 +992,6 @@ flair integrity prune-history
   description: Prune MemoryDeletionHistory rows older than the oldest named checkpoint watermark minus a margin; dry-run unless --apply
   usage: [options]
   options:
-    --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env)
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --checkpoint <path...>
       description: Checkpoint file whose watermark bounds the prune; repeat for several (default: ~/.flair/integrity-checkpoint.json)
       attr: checkpoint
@@ -1015,6 +1008,12 @@ flair integrity prune-history
     --ops-port <port>
       description: Harper operations API port
       attr: opsPort
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -1191,12 +1190,6 @@ flair federation watch
   description: Run federation sync in a loop (foreground daemon)
   usage: [options]
   options:
-    --admin-pass <pass>
-      description: Admin password
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --interval <seconds>
       description: Seconds between syncs
       attr: interval
@@ -1204,6 +1197,12 @@ flair federation watch
     --port <port>
       description: Harper HTTP port
       attr: port
+    --admin-pass <pass>
+      description: Admin password
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -1410,18 +1409,18 @@ flair rem candidates
   description: List staged memory candidates from the FLAIR-NIGHTLY-REM cycle (pending review)
   usage: [options]
   options:
-    --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS)
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --port <port>
       description: Harper HTTP port
       attr: port
     --ops-port <port>
       description: Harper operations API port
       attr: opsPort
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -2150,15 +2149,15 @@ flair memory search
   arguments:
     query (optional)
   options:
+    --agent <id>
+      description: Agent ID (or set FLAIR_AGENT_ID env)
+      attr: agent
     --admin-pass <pass>
       description: Admin password — sign as admin while --agent names whose memories to search (flair#1500: a flag-pinned agent with no key no longer falls back to FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
       description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
-    --agent <id>
-      description: Agent ID (or set FLAIR_AGENT_ID env)
-      attr: agent
     --q <query>
       description: search query (alias for positional arg)
       attr: q
@@ -2727,12 +2726,6 @@ flair restore
   arguments:
     path (required)
   options:
-    --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env)
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --merge
       description: Add/update records without deleting existing (default)
       attr: merge
@@ -2745,6 +2738,12 @@ flair restore
     --url <url>
       description: Flair base URL (overrides --port)
       attr: url
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -2838,12 +2837,6 @@ flair export
   arguments:
     agent-id (required)
   options:
-    --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env)
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --output <path>
       description: Output file path
       attr: output
@@ -2856,6 +2849,12 @@ flair export
     --url <url>
       description: Flair base URL (overrides --port)
       attr: url
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -2870,12 +2869,6 @@ flair import
   arguments:
     path (required)
   options:
-    --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env)
-      attr: adminPass
-    --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
-      attr: adminPassFile
     --port <port>
       description: Harper HTTP port
       attr: port
@@ -2888,6 +2881,12 @@ flair import
     --ops-target <url>
       description: Explicit ops API URL for the Agent seed (env: FLAIR_OPS_TARGET; bypasses port derivation). Use when --url is remote and the ops port isn't HTTP-1.
       attr: opsTarget
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -3272,6 +3271,8 @@ Usage: flair agent rotate-key [options] <id>
 Rotate an agent's Ed25519 keypair
 
 Options:
+  --port <port>             Harper HTTP port
+  --ops-port <port>         Harper operations API port
   --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env)
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -3280,8 +3281,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --port <port>             Harper HTTP port
-  --ops-port <port>         Harper operations API port
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --keys-dir <dir>          Directory for Ed25519 keys
@@ -3296,6 +3295,9 @@ Usage: flair agent remove [options] <id>
 Remove an agent and all its data from Flair
 
 Options:
+  --keep-keys               Do not delete key files from disk
+  --port <port>             Harper HTTP port
+  --ops-port <port>         Harper operations API port
   --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env)
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -3304,9 +3306,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --keep-keys               Do not delete key files from disk
-  --port <port>             Harper HTTP port
-  --ops-port <port>         Harper operations API port
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --keys-dir <dir>          Directory for Ed25519 keys
@@ -3546,6 +3545,12 @@ surface (flair Agent + Ed25519 keypair; the existing CIMD path — see `flair mc
 token` — makes it usable).
 
 Options:
+  --issuer <url>            Public origin for the CIMD client_id (defaults to
+                            FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)
+  --keys-dir <dir>          Directory to write the new key pair into (else
+                            FLAIR_KEY_DIR, ~/.flair/keys)
+  --manifest <path>         Path to the local machine-client manifest (else
+                            ~/.flair/mcp-clients.json)
   --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS)
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -3554,12 +3559,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --issuer <url>            Public origin for the CIMD client_id (defaults to
-                            FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)
-  --keys-dir <dir>          Directory to write the new key pair into (else
-                            FLAIR_KEY_DIR, ~/.flair/keys)
-  --manifest <path>         Path to the local machine-client manifest (else
-                            ~/.flair/mcp-clients.json)
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --port <port>             Harper HTTP port
@@ -3578,6 +3577,8 @@ Server-side revoke a granted machine client (deletes its backing Agent record),
 then clean up locally.
 
 Options:
+  --manifest <path>         Path to the local machine-client manifest (else
+                            ~/.flair/mcp-clients.json)
   --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS)
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -3586,8 +3587,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --manifest <path>         Path to the local machine-client manifest (else
-                            ~/.flair/mcp-clients.json)
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --issuer <url>            Public origin of the /mcp OAuth surface — used only
@@ -3625,8 +3624,6 @@ localhost/.localhost/.local hosts, IPv4 0/8, 10/8, 127/8, 169.254/16, 172.16/12,
 DNS lookup.
 
 Options:
-  --admin-pass <pass>                                Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance
-  --admin-pass-file <path>                           Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
   --instance <url>                                   Canonical http(s) target origin, optionally followed by / (else FLAIR_URL)
   --issuer <url>                                     Public origin claude.ai will use (else --instance)
   --idp-provider <name>                              Upstream IdP provider (default: "github")
@@ -3638,6 +3635,8 @@ Options:
   --secrets-mechanism <fabric-env-secrets|env-file>  Override the shape-aware secrets mechanism (else selected from --instance and --fabric)
   --secrets-path <path>                              Override the secrets staging file path
   --cimd-allowed-hosts <hosts>                       Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds that exact list, then read back, before the restart. Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. Always refused with --fabric or a *.harperfabric.com instance. Without it the list is not changed (shipped: claude.ai,claude.com)
+  --admin-pass <pass>                                Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance
+  --admin-pass-file <path>                           Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
   --admin-user <name>                                Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
   --confirm-secrets-applied                          Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
   --fabric                                           Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host
@@ -3656,18 +3655,25 @@ Flag off + restart = byte-identical boot (Model-2 contract) — removes the /mcp
 OAuth surface.
 
 Options:
-  --admin-pass <pass>  Admin password for the remote target instance; pass it
-                       explicitly with --admin-pass
-  --instance <url>     Remote flair instance to disable against (else FLAIR_URL)
-  --admin-user <name>  Admin username for Basic auth (env: FLAIR_ADMIN_USER;
-                       default: admin)
-  --confirm-flag-off   Confirm FLAIR_MCP_OAUTH is already unset on the target
-                       instance's environment (skips the interactive confirm)
-  --json               Print machine-readable JSON instead of a human summary
-  -h, --help           display help for command
+  --instance <url>          Remote flair instance to disable against (else
+                            FLAIR_URL)
+  --admin-pass <pass>       Admin password for the remote target instance; pass
+                            it explicitly with --admin-pass
+  --admin-pass-file <path>  Read the remote target instance's admin password
+                            from an owner-only file (group and world permission
+                            bits are refused; an owner-only mode such as 0600 or
+                            0400 is accepted)
+  --admin-user <name>       Admin username for Basic auth (env:
+                            FLAIR_ADMIN_USER; default: admin)
+  --confirm-flag-off        Confirm FLAIR_MCP_OAUTH is already unset on the
+                            target instance's environment (skips the interactive
+                            confirm)
+  --json                    Print machine-readable JSON instead of a human
+                            summary
+  -h, --help                display help for command
 
 Global Options:
-  -v, --version        output the version number
+  -v, --version             output the version number
 
 ----- flair mcp status -----
 Usage: flair mcp status [options]
@@ -3737,6 +3743,13 @@ Usage: flair principal add [options] <id>
 Create a new principal
 
 Options:
+  --kind <kind>             Principal kind: human or agent (default: "agent")
+  --name <name>             Display name (defaults to id)
+  --admin                   Grant admin privileges
+  --trust <tier>            Default trust tier: endorsed, corroborated, or
+                            unverified
+  --runtime <runtime>       Runtime: openclaw, claude-code, headless, external
+  --port <port>             Harper HTTP port
   --admin-pass <pass>       Admin password for registration
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -3745,13 +3758,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --kind <kind>             Principal kind: human or agent (default: "agent")
-  --name <name>             Display name (defaults to id)
-  --admin                   Grant admin privileges
-  --trust <tier>            Default trust tier: endorsed, corroborated, or
-                            unverified
-  --runtime <runtime>       Runtime: openclaw, claude-code, headless, external
-  --port <port>             Harper HTTP port
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --keys-dir <dir>          Directory for Ed25519 keys
@@ -3767,6 +3773,7 @@ Usage: flair principal list [options]
 List all principals
 
 Options:
+  --kind <kind>             Filter by kind: human or agent
   --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS)
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -3775,7 +3782,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --kind <kind>             Filter by kind: human or agent
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --port <port>             Harper HTTP port
@@ -3880,6 +3886,13 @@ REMOTE instance: --instance must be HTTPS, and an unparseable URL, localhost, a
 unique-local address literal is refused before any request.
 
 Options:
+  --idp-subject <login>     The login the identity provider reports for this
+                            person (GitHub: the username)
+  --idp-provider <name>     Upstream IdP provider (default: "github")
+  --instance <url>          Remote flair instance holding the mapping (else
+                            FLAIR_URL)
+  --replace                 Move a subject that is already mapped to a different
+                            principal
   --admin-pass <pass>       Admin password for the TARGET instance (required —
                             FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this
                             machine's local credentials and are never sent to a
@@ -3891,13 +3904,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --idp-subject <login>     The login the identity provider reports for this
-                            person (GitHub: the username)
-  --idp-provider <name>     Upstream IdP provider (default: "github")
-  --instance <url>          Remote flair instance holding the mapping (else
-                            FLAIR_URL)
-  --replace                 Move a subject that is already mapped to a different
-                            principal
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   -h, --help                display help for command
@@ -3915,6 +3921,12 @@ unspecified, RFC1918, link-local or IPv6 unique-local address literal is refused
 before any request.
 
 Options:
+  --idp-subject <login>     The login the identity provider reports for this
+                            person (GitHub: the username)
+  --idp-provider <name>     Upstream IdP provider the mapping carries (default:
+                            "github")
+  --instance <url>          Remote flair instance holding the mapping (else
+                            FLAIR_URL)
   --admin-pass <pass>       Admin password for the TARGET instance (required —
                             FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this
                             machine's local credentials and are never sent to a
@@ -3926,12 +3938,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --idp-subject <login>     The login the identity provider reports for this
-                            person (GitHub: the username)
-  --idp-provider <name>     Upstream IdP provider the mapping carries (default:
-                            "github")
-  --instance <url>          Remote flair instance holding the mapping (else
-                            FLAIR_URL)
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   -h, --help                display help for command
@@ -3948,6 +3954,8 @@ a .local name, or a loopback, unspecified, RFC1918, link-local or IPv6
 unique-local address literal is refused before any request.
 
 Options:
+  --instance <url>          Remote flair instance holding the mapping (else
+                            FLAIR_URL)
   --admin-pass <pass>       Admin password for the TARGET instance (required —
                             FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this
                             machine's local credentials and are never sent to a
@@ -3959,8 +3967,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --instance <url>          Remote flair instance holding the mapping (else
-                            FLAIR_URL)
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   -h, --help                display help for command
@@ -3992,14 +3998,6 @@ Usage: flair idp add [options]
 Register a trusted enterprise IdP
 
 Options:
-  --admin-pass <pass>         Admin password
-  --admin-pass-file <path>    Read the admin password from an owner-only file
-                              (group and world permission bits are refused; an
-                              owner-only mode such as 0600 or 0400 is accepted),
-                              keeping it out of shell history and the process
-                              list. An explicit option (this or --admin-pass)
-                              overrides FLAIR_ADMIN_PASS; combining it with
-                              --admin-pass is a usage error.
   --name <name>               Display name (e.g., 'Harper Corporate')
   --issuer <url>              IdP issuer URL (e.g., https://accounts.google.com)
   --jwks-uri <url>            JWKS endpoint URL
@@ -4009,6 +4007,14 @@ Options:
                               users
   --default-trust <tier>      Trust tier for JIT principals (default:
                               "unverified")
+  --admin-pass <pass>         Admin password
+  --admin-pass-file <path>    Read the admin password from an owner-only file
+                              (group and world permission bits are refused; an
+                              owner-only mode such as 0600 or 0400 is accepted),
+                              keeping it out of shell history and the process
+                              list. An explicit option (this or --admin-pass)
+                              overrides FLAIR_ADMIN_PASS; combining it with
+                              --admin-pass is a usage error.
   --admin-user <name>         Admin username for Basic auth (env:
                               FLAIR_ADMIN_USER; default: admin)
   --ops-port <port>           Harper operations API port
@@ -4088,6 +4094,9 @@ Usage: flair grant [options] <from-agent> <to-agent>
 Grant an agent read access to another agent's memories
 
 Options:
+  --scope <scope>           Grant scope: read or search (default: "read")
+  --port <port>             Harper HTTP port
+  --ops-port <port>         Harper operations API port
   --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env)
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -4096,9 +4105,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --scope <scope>           Grant scope: read or search (default: "read")
-  --port <port>             Harper HTTP port
-  --ops-port <port>         Harper operations API port
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --keys-dir <dir>          Directory for Ed25519 keys (for from-agent Ed25519
@@ -4114,6 +4120,8 @@ Usage: flair revoke [options] <from-agent> <to-agent>
 Revoke a memory grant between two agents
 
 Options:
+  --port <port>             Harper HTTP port
+  --ops-port <port>         Harper operations API port
   --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env)
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -4122,8 +4130,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --port <port>             Harper HTTP port
-  --ops-port <port>         Harper operations API port
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   -h, --help                display help for command
@@ -4159,6 +4165,13 @@ Report missing checkpointed durable IDs or changed or missing previously
 nonempty tokens; rows created and lost entirely between scans are not observed
 
 Options:
+  --json                    Print the verdict as JSON
+  --accept                  On an alert, advance the whole checkpoint only if no
+                            reported replacement lacks a token; otherwise write
+                            no checkpoint, even with other losses
+  --checkpoint <path>       Checkpoint file path (default:
+                            ~/.flair/integrity-checkpoint.json)
+  --ops-port <port>         Harper operations API port
   --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env)
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -4167,13 +4180,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --json                    Print the verdict as JSON
-  --accept                  On an alert, advance the whole checkpoint only if no
-                            reported replacement lacks a token; otherwise write
-                            no checkpoint, even with other losses
-  --checkpoint <path>       Checkpoint file path (default:
-                            ~/.flair/integrity-checkpoint.json)
-  --ops-port <port>         Harper operations API port
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   -h, --help                display help for command
@@ -4188,14 +4194,6 @@ Prune MemoryDeletionHistory rows older than the oldest named checkpoint
 watermark minus a margin; dry-run unless --apply
 
 Options:
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env)
-  --admin-pass-file <path>  Read the admin password from an owner-only file
-                            (group and world permission bits are refused; an
-                            owner-only mode such as 0600 or 0400 is accepted),
-                            keeping it out of shell history and the process
-                            list. An explicit option (this or --admin-pass)
-                            overrides FLAIR_ADMIN_PASS; combining it with
-                            --admin-pass is a usage error.
   --checkpoint <path...>    Checkpoint file whose watermark bounds the prune;
                             repeat for several (default:
                             ~/.flair/integrity-checkpoint.json)
@@ -4204,6 +4202,14 @@ Options:
   --max <n>                 Hard cap on rows pruned in one run (default: 500)
   --json                    Print the plan as JSON
   --ops-port <port>         Harper operations API port
+  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (group and world permission bits are refused; an
+                            owner-only mode such as 0600 or 0400 is accepted),
+                            keeping it out of shell history and the process
+                            list. An explicit option (this or --admin-pass)
+                            overrides FLAIR_ADMIN_PASS; combining it with
+                            --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   -h, --help                display help for command
@@ -4473,6 +4479,8 @@ Usage: flair federation watch [options]
 Run federation sync in a loop (foreground daemon)
 
 Options:
+  --interval <seconds>      Seconds between syncs (default: "30")
+  --port <port>             Harper HTTP port
   --admin-pass <pass>       Admin password
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -4481,8 +4489,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --interval <seconds>      Seconds between syncs (default: "30")
-  --port <port>             Harper HTTP port
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --ops-port <port>         Harper operations API port
@@ -4713,6 +4719,8 @@ Usage: flair rem candidates [options]
 List staged memory candidates from the FLAIR-NIGHTLY-REM cycle (pending review)
 
 Options:
+  --port <port>             Harper HTTP port
+  --ops-port <port>         Harper operations API port
   --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS)
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -4721,8 +4729,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --port <port>             Harper HTTP port
-  --ops-port <port>         Harper operations API port
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --agent <id>              Agent ID (or FLAIR_AGENT_ID env)
@@ -5705,6 +5711,7 @@ Usage: flair memory search [options] [query]
 Semantic search over an agent's memories (query via positional arg or --q)
 
 Options:
+  --agent <id>              Agent ID (or set FLAIR_AGENT_ID env)
   --admin-pass <pass>       Admin password — sign as admin while --agent names
                             whose memories to search (flair#1500: a flag-pinned
                             agent with no key no longer falls back to
@@ -5716,7 +5723,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --agent <id>              Agent ID (or set FLAIR_AGENT_ID env)
   --q <query>               search query (alias for positional arg)
   --json                    Output raw JSON array
   --limit <n>               Max results (default: "5")
@@ -6341,6 +6347,12 @@ Usage: flair restore [options] <path>
 Import a Flair backup archive
 
 Options:
+  --merge                   Add/update records without deleting existing
+                            (default)
+  --replace                 Delete archived Soul and Memory IDs first, then
+                            import
+  --port <port>             Harper HTTP port
+  --url <url>               Flair base URL (overrides --port)
   --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env)
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -6349,12 +6361,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --merge                   Add/update records without deleting existing
-                            (default)
-  --replace                 Delete archived Soul and Memory IDs first, then
-                            import
-  --port <port>             Harper HTTP port
-  --url <url>               Flair base URL (overrides --port)
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --dry-run                 Show what would be imported without making changes
@@ -6493,6 +6499,11 @@ Usage: flair export [options] <agent-id>
 Export a single agent's identity (soul + memories) to a portable file
 
 Options:
+  --output <path>           Output file path
+  --include-key             Include private key in export (UNENCRYPTED — keep
+                            the output file secure)
+  --port <port>             Harper HTTP port
+  --url <url>               Flair base URL (overrides --port)
   --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env)
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -6501,11 +6512,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --output <path>           Output file path
-  --include-key             Include private key in export (UNENCRYPTED — keep
-                            the output file secure)
-  --port <port>             Harper HTTP port
-  --url <url>               Flair base URL (overrides --port)
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --keys-dir <dir>          Keys directory (default: "~/.flair/keys")
@@ -6520,6 +6526,12 @@ Usage: flair import [options] <path>
 Import an agent from an export file into this Flair instance
 
 Options:
+  --port <port>             Harper HTTP port
+  --ops-port <port>         Harper operations API port
+  --url <url>               Flair base URL (overrides --port)
+  --ops-target <url>        Explicit ops API URL for the Agent seed (env:
+                            FLAIR_OPS_TARGET; bypasses port derivation). Use
+                            when --url is remote and the ops port isn't HTTP-1.
   --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env)
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (group and world permission bits are refused; an
@@ -6528,12 +6540,6 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
-  --port <port>             Harper HTTP port
-  --ops-port <port>         Harper operations API port
-  --url <url>               Flair base URL (overrides --port)
-  --ops-target <url>        Explicit ops API URL for the Agent seed (env:
-                            FLAIR_OPS_TARGET; bypasses port derivation). Use
-                            when --url is remote and the ops port isn't HTTP-1.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --keys-dir <dir>          Keys directory (default: "~/.flair/keys")

@@ -1,50 +1,1281 @@
 {
-  "flair init": "Admin password (generated if omitted)",
-  "flair agent add": "Admin password for registration",
-  "flair agent list": "Admin password (or set FLAIR_ADMIN_PASS env)",
-  "flair agent rotate-key": "Admin password (or set FLAIR_ADMIN_PASS env)",
-  "flair agent remove": "Admin password (or set FLAIR_ADMIN_PASS env)",
-  "flair agent stamp-home": "Admin password (or set FLAIR_ADMIN_PASS)",
-  "flair mcp grant": "Admin password (or set FLAIR_ADMIN_PASS)",
-  "flair mcp revoke": "Admin password (or set FLAIR_ADMIN_PASS)",
-  "flair mcp enable": "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance",
-  "flair mcp disable": "Admin password for the remote target instance; pass it explicitly with --admin-pass",
-  "flair principal add": "Admin password for registration",
-  "flair principal list": "Admin password (or set FLAIR_ADMIN_PASS)",
-  "flair principal disable": "Admin password; required explicitly for a remote --instance",
-  "flair principal enable": "Admin password; required explicitly for a remote --instance",
-  "flair principal promote": "Admin password",
-  "flair principal link": "Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)",
-  "flair principal unlink": "Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)",
-  "flair principal links": "Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)",
-  "flair idp add": "Admin password",
-  "flair idp list": "Admin password",
-  "flair idp remove": "Admin password",
-  "flair idp test": "Admin password",
-  "flair grant": "Admin password (or set FLAIR_ADMIN_PASS env)",
-  "flair revoke": "Admin password (or set FLAIR_ADMIN_PASS env)",
-  "flair integrity check": "Admin password (or set FLAIR_ADMIN_PASS env)",
-  "flair integrity prune-history": "Admin password (or set FLAIR_ADMIN_PASS env)",
-  "flair federation pair": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair federation token": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair federation sync": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair federation watch": "Admin password",
-  "flair federation instance list": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair federation instance prune": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair federation verify": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair rem candidates": "Admin password (or set FLAIR_ADMIN_PASS)",
-  "flair rem nightly run-once": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair rem restore": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair memory add": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair memory search": "Admin password — sign as admin while --agent names whose memories to search (flair#1500: a flag-pinned agent with no key no longer falls back to FLAIR_ADMIN_PASS)",
-  "flair soul set": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair soul get": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair soul list": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair backup": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair restore": "Admin password (or set FLAIR_ADMIN_PASS env)",
-  "flair backup-approval approve": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair backup-approval legacy-admit": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair backup-approval revoke": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)",
-  "flair export": "Admin password (or set FLAIR_ADMIN_PASS env)",
-  "flair import": "Admin password (or set FLAIR_ADMIN_PASS env)"
+  "flair": {
+    "options": [
+      "--version"
+    ]
+  },
+  "flair init": {
+    "options": [
+      "--agent-id",
+      "--agent",
+      "--port",
+      "--ops-port",
+      "--ops-bind",
+      "--http-bind",
+      "--admin-pass",
+      "--admin-pass-file",
+      "--reset-admin-pass",
+      "--admin-user",
+      "--keys-dir",
+      "--data-dir",
+      "--skip-start",
+      "--skip-soul",
+      "--client",
+      "--no-mcp",
+      "--skip-smoke",
+      "--skip-claude-md",
+      "--skip-hook",
+      "--target",
+      "--remote",
+      "--ops-target",
+      "--force",
+      "--cluster-admin-user",
+      "--cluster-admin-pass",
+      "--flair-admin-pass"
+    ],
+    "adminPass": "Admin password (generated if omitted)"
+  },
+  "flair agent": {
+    "options": []
+  },
+  "flair agent add": {
+    "options": [
+      "--name",
+      "--port",
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user",
+      "--keys-dir",
+      "--ops-port",
+      "--target",
+      "--ops-target"
+    ],
+    "adminPass": "Admin password for registration"
+  },
+  "flair agent list": {
+    "options": [
+      "--admin-pass",
+      "--admin-user",
+      "--agent",
+      "--keys-dir",
+      "--port",
+      "--json"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS env)"
+  },
+  "flair agent show": {
+    "options": [
+      "--json"
+    ]
+  },
+  "flair agent rotate-key": {
+    "options": [
+      "--port",
+      "--ops-port",
+      "--admin-pass",
+      "--admin-user",
+      "--keys-dir"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS env)"
+  },
+  "flair agent remove": {
+    "options": [
+      "--keep-keys",
+      "--port",
+      "--ops-port",
+      "--admin-pass",
+      "--admin-user",
+      "--keys-dir",
+      "--force"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS env)"
+  },
+  "flair agent stamp-home": {
+    "options": [
+      "--port",
+      "--ops-port",
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user",
+      "--apply"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS)"
+  },
+  "flair keys": {
+    "options": []
+  },
+  "flair keys prune": {
+    "options": [
+      "--apply",
+      "--keys-dir",
+      "--instance",
+      "--port"
+    ]
+  },
+  "flair hook": {
+    "options": []
+  },
+  "flair hook install": {
+    "options": [
+      "--harness",
+      "--dry-run",
+      "--agent",
+      "--agent-id",
+      "--url",
+      "--continuity",
+      "--action-recall",
+      "--capture"
+    ]
+  },
+  "flair hook uninstall": {
+    "options": [
+      "--harness",
+      "--dry-run",
+      "--continuity",
+      "--action-recall",
+      "--capture"
+    ]
+  },
+  "flair hook status": {
+    "options": [
+      "--harness",
+      "--action-recall",
+      "--capture"
+    ]
+  },
+  "flair mcp": {
+    "options": []
+  },
+  "flair mcp token": {
+    "options": [
+      "--agent-id",
+      "--client-id",
+      "--token-endpoint",
+      "--assertion-audience",
+      "--issuer",
+      "--resource",
+      "--keys-dir",
+      "--expires-in",
+      "--dry-run",
+      "--force-refresh",
+      "--json"
+    ]
+  },
+  "flair mcp grant": {
+    "options": [
+      "--issuer",
+      "--keys-dir",
+      "--manifest",
+      "--admin-pass",
+      "--admin-user",
+      "--port",
+      "--ops-port",
+      "--json"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS)"
+  },
+  "flair mcp revoke": {
+    "options": [
+      "--manifest",
+      "--admin-pass",
+      "--admin-user",
+      "--issuer",
+      "--ops-port",
+      "--port",
+      "--keep-keys"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS)"
+  },
+  "flair mcp list": {
+    "options": [
+      "--manifest",
+      "--json"
+    ]
+  },
+  "flair mcp enable": {
+    "options": [
+      "--instance",
+      "--issuer",
+      "--idp-provider",
+      "--idp-client-id",
+      "--idp-client-secret",
+      "--idp-subject",
+      "--principal",
+      "--principal-kind",
+      "--secrets-mechanism",
+      "--secrets-path",
+      "--cimd-allowed-hosts",
+      "--admin-pass",
+      "--admin-user",
+      "--confirm-secrets-applied",
+      "--fabric",
+      "--dry-run",
+      "--refresh-flag",
+      "--json"
+    ],
+    "adminPass": "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance"
+  },
+  "flair mcp disable": {
+    "options": [
+      "--instance",
+      "--admin-pass",
+      "--admin-user",
+      "--confirm-flag-off",
+      "--json"
+    ],
+    "adminPass": "Admin password for the remote target instance; pass it explicitly with --admin-pass"
+  },
+  "flair mcp status": {
+    "options": [
+      "--instance",
+      "--manifest",
+      "--json"
+    ]
+  },
+  "flair principal": {
+    "options": []
+  },
+  "flair principal add": {
+    "options": [
+      "--kind",
+      "--name",
+      "--admin",
+      "--trust",
+      "--runtime",
+      "--port",
+      "--admin-pass",
+      "--admin-user",
+      "--keys-dir",
+      "--ops-port"
+    ],
+    "adminPass": "Admin password for registration"
+  },
+  "flair principal list": {
+    "options": [
+      "--kind",
+      "--admin-pass",
+      "--admin-user",
+      "--port",
+      "--ops-port",
+      "--json"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS)"
+  },
+  "flair principal show": {
+    "options": [
+      "--json"
+    ]
+  },
+  "flair principal disable": {
+    "options": [
+      "--admin-pass",
+      "--admin-user",
+      "--ops-port",
+      "--instance"
+    ],
+    "adminPass": "Admin password; required explicitly for a remote --instance"
+  },
+  "flair principal enable": {
+    "options": [
+      "--admin-pass",
+      "--admin-user",
+      "--ops-port",
+      "--instance"
+    ],
+    "adminPass": "Admin password; required explicitly for a remote --instance"
+  },
+  "flair principal promote": {
+    "options": [
+      "--admin-pass",
+      "--admin-user",
+      "--ops-port"
+    ],
+    "adminPass": "Admin password"
+  },
+  "flair principal link": {
+    "options": [
+      "--idp-subject",
+      "--idp-provider",
+      "--instance",
+      "--replace",
+      "--admin-pass",
+      "--admin-user"
+    ],
+    "adminPass": "Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)"
+  },
+  "flair principal unlink": {
+    "options": [
+      "--idp-subject",
+      "--idp-provider",
+      "--instance",
+      "--admin-pass",
+      "--admin-user"
+    ],
+    "adminPass": "Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)"
+  },
+  "flair principal links": {
+    "options": [
+      "--instance",
+      "--admin-pass",
+      "--admin-user"
+    ],
+    "adminPass": "Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)"
+  },
+  "flair idp": {
+    "options": []
+  },
+  "flair idp add": {
+    "options": [
+      "--name",
+      "--issuer",
+      "--jwks-uri",
+      "--client-id",
+      "--required-domain",
+      "--no-jit-provision",
+      "--default-trust",
+      "--admin-pass",
+      "--admin-user",
+      "--ops-port"
+    ],
+    "adminPass": "Admin password"
+  },
+  "flair idp list": {
+    "options": [
+      "--admin-pass",
+      "--admin-user",
+      "--ops-port",
+      "--json"
+    ],
+    "adminPass": "Admin password"
+  },
+  "flair idp remove": {
+    "options": [
+      "--admin-pass",
+      "--admin-user",
+      "--ops-port"
+    ],
+    "adminPass": "Admin password"
+  },
+  "flair idp test": {
+    "options": [
+      "--admin-pass",
+      "--ops-port"
+    ],
+    "adminPass": "Admin password"
+  },
+  "flair grant": {
+    "options": [
+      "--scope",
+      "--port",
+      "--ops-port",
+      "--admin-pass",
+      "--admin-user",
+      "--keys-dir"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS env)"
+  },
+  "flair revoke": {
+    "options": [
+      "--port",
+      "--ops-port",
+      "--admin-pass",
+      "--admin-user"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS env)"
+  },
+  "flair integrity": {
+    "options": []
+  },
+  "flair integrity check": {
+    "options": [
+      "--json",
+      "--accept",
+      "--checkpoint",
+      "--ops-port",
+      "--admin-pass",
+      "--admin-user"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS env)"
+  },
+  "flair integrity prune-history": {
+    "options": [
+      "--checkpoint",
+      "--apply",
+      "--max",
+      "--json",
+      "--ops-port",
+      "--admin-pass",
+      "--admin-user"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS env)"
+  },
+  "flair federation": {
+    "options": []
+  },
+  "flair federation status": {
+    "options": [
+      "--port",
+      "--target",
+      "--ops-target",
+      "--json"
+    ]
+  },
+  "flair federation reachability": {
+    "options": [
+      "--port",
+      "--target",
+      "--quiet",
+      "--json",
+      "--peer-timeout"
+    ]
+  },
+  "flair federation pair": {
+    "options": [
+      "--port",
+      "--admin-pass-file",
+      "--admin-pass",
+      "--admin-user",
+      "--ops-port",
+      "--token",
+      "--token-from",
+      "--target",
+      "--ops-target"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair federation token": {
+    "options": [
+      "--port",
+      "--admin-pass-file",
+      "--admin-pass",
+      "--admin-user",
+      "--ops-port",
+      "--ttl",
+      "--target",
+      "--ops-target",
+      "--format"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair federation sync": {
+    "options": [
+      "--port",
+      "--ops-port",
+      "--target",
+      "--ops-target",
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair federation sync enable": {
+    "options": [
+      "--interval",
+      "--no-credentials"
+    ]
+  },
+  "flair federation sync disable": {
+    "options": [
+      "--remove-shim"
+    ]
+  },
+  "flair federation sync status": {
+    "options": [
+      "--json"
+    ]
+  },
+  "flair federation watch": {
+    "options": [
+      "--interval",
+      "--port",
+      "--admin-pass",
+      "--admin-user",
+      "--ops-port",
+      "--target",
+      "--ops-target"
+    ],
+    "adminPass": "Admin password"
+  },
+  "flair federation prune": {
+    "options": [
+      "--older-than",
+      "--apply",
+      "--include",
+      "--port",
+      "--ops-port",
+      "--target",
+      "--ops-target"
+    ]
+  },
+  "flair federation instance": {
+    "options": []
+  },
+  "flair federation instance list": {
+    "options": [
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user",
+      "--port",
+      "--ops-port",
+      "--target",
+      "--ops-target",
+      "--json"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair federation instance prune": {
+    "options": [
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user",
+      "--keep",
+      "--apply",
+      "--port",
+      "--ops-port",
+      "--target",
+      "--ops-target"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair federation verify": {
+    "options": [
+      "--peer",
+      "--wait",
+      "--tag",
+      "--port",
+      "--ops-port",
+      "--target",
+      "--ops-target",
+      "--agent",
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair rem": {
+    "options": []
+  },
+  "flair rem light": {
+    "options": [
+      "--port",
+      "--agent",
+      "--dry-run"
+    ]
+  },
+  "flair rem rapid": {
+    "options": [
+      "--port",
+      "--agent",
+      "--focus",
+      "--since",
+      "--prompt-only"
+    ]
+  },
+  "flair rem restorative": {
+    "options": [
+      "--port",
+      "--agent",
+      "--dry-run"
+    ]
+  },
+  "flair rem candidates": {
+    "options": [
+      "--port",
+      "--ops-port",
+      "--admin-pass",
+      "--admin-user",
+      "--agent",
+      "--status",
+      "--json"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS)"
+  },
+  "flair rem promote": {
+    "options": [
+      "--port",
+      "--rationale",
+      "--to",
+      "--key",
+      "--reviewer"
+    ]
+  },
+  "flair rem reject": {
+    "options": [
+      "--port",
+      "--reason",
+      "--reviewer"
+    ]
+  },
+  "flair rem nightly": {
+    "options": []
+  },
+  "flair rem nightly enable": {
+    "options": [
+      "--agent",
+      "--at",
+      "--flair-url",
+      "--admin-pass-file"
+    ]
+  },
+  "flair rem nightly disable": {
+    "options": [
+      "--remove-shim"
+    ]
+  },
+  "flair rem nightly status": {
+    "options": []
+  },
+  "flair rem nightly run-once": {
+    "options": [
+      "--agent",
+      "--ops-port",
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user",
+      "--dry-run"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair rem snapshot": {
+    "options": []
+  },
+  "flair rem snapshot list": {
+    "options": [
+      "--agent",
+      "--json"
+    ]
+  },
+  "flair rem restore": {
+    "options": [
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user",
+      "--agent",
+      "--target",
+      "--dry-run",
+      "--apply"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair rem pause": {
+    "options": []
+  },
+  "flair rem abort": {
+    "options": []
+  },
+  "flair rem resume": {
+    "options": []
+  },
+  "flair status": {
+    "options": [
+      "--port",
+      "--url",
+      "--target",
+      "--json",
+      "--agent"
+    ]
+  },
+  "flair status rem": {
+    "options": []
+  },
+  "flair status federation": {
+    "options": []
+  },
+  "flair status auth": {
+    "options": []
+  },
+  "flair status bridges": {
+    "options": []
+  },
+  "flair status deep": {
+    "options": [
+      "--bootstrap",
+      "--max-tokens"
+    ]
+  },
+  "flair snapshot": {
+    "options": []
+  },
+  "flair snapshot create": {
+    "options": [
+      "--data-dir",
+      "--port"
+    ]
+  },
+  "flair snapshot list": {
+    "options": [
+      "--json"
+    ]
+  },
+  "flair snapshot restore": {
+    "options": [
+      "--data-dir",
+      "--port",
+      "--yes"
+    ]
+  },
+  "flair upgrade": {
+    "options": [
+      "--check",
+      "--tree",
+      "--restart",
+      "--no-restart",
+      "--no-verify",
+      "--snapshot",
+      "--no-engine-snapshot",
+      "--all",
+      "--target",
+      "--fabric-user",
+      "--fabric-password",
+      "--fabric-password-file",
+      "--flair-version",
+      "--harper-version",
+      "--project",
+      "--no-replicated",
+      "--keep-mqtt-config",
+      "--ops-target",
+      "--yes",
+      "--install-hooks",
+      "--no-fleet-verify",
+      "--deploy-retries",
+      "--ignore-replication-errors",
+      "--no-convergence-check",
+      "--convergence-timeout"
+    ]
+  },
+  "flair stop": {
+    "options": [
+      "--port"
+    ]
+  },
+  "flair start": {
+    "options": [
+      "--port"
+    ]
+  },
+  "flair restart": {
+    "options": [
+      "--port"
+    ]
+  },
+  "flair uninstall": {
+    "options": [
+      "--purge"
+    ]
+  },
+  "flair reembed": {
+    "options": [
+      "--agent",
+      "--stale-only",
+      "--dry-run",
+      "--port",
+      "--batch-size",
+      "--delay-ms"
+    ]
+  },
+  "flair test": {
+    "options": [
+      "--agent",
+      "--port"
+    ]
+  },
+  "flair deploy": {
+    "options": [
+      "--fabric-org",
+      "--fabric-cluster",
+      "--fabric-user",
+      "--fabric-password",
+      "--fabric-password-file",
+      "--fabric-token",
+      "--target",
+      "--project",
+      "--pkg-version",
+      "--no-replicated",
+      "--no-restart",
+      "--keep-mqtt-config",
+      "--dry-run",
+      "--package-root",
+      "--deployment-timeout",
+      "--install-timeout",
+      "--no-verify",
+      "--verify-timeout",
+      "--verify-resource",
+      "--ops-target",
+      "--memory-checkpoint",
+      "--deploy-retries",
+      "--ignore-replication-errors",
+      "--no-convergence-check",
+      "--convergence-timeout",
+      "--no-fleet-verify"
+    ]
+  },
+  "flair fleet": {
+    "options": []
+  },
+  "flair fleet verify": {
+    "options": [
+      "--target",
+      "--fabric-user",
+      "--fabric-password",
+      "--fabric-password-file",
+      "--expect-version",
+      "--timeout",
+      "--json"
+    ]
+  },
+  "flair doctor": {
+    "options": [
+      "--port",
+      "--agent",
+      "--fix",
+      "--dry-run"
+    ]
+  },
+  "flair quality": {
+    "options": [
+      "--port",
+      "--url",
+      "--target",
+      "--json",
+      "--agent",
+      "--emit"
+    ]
+  },
+  "flair session": {
+    "options": []
+  },
+  "flair session snapshot": {
+    "options": []
+  },
+  "flair session snapshot create": {
+    "options": [
+      "--agent",
+      "--session-file",
+      "--label"
+    ]
+  },
+  "flair session snapshot list": {
+    "options": [
+      "--agent",
+      "--json"
+    ]
+  },
+  "flair session snapshot restore": {
+    "options": [
+      "--snapshot",
+      "--target",
+      "--dry-run"
+    ]
+  },
+  "flair memory": {
+    "options": []
+  },
+  "flair memory add": {
+    "options": [
+      "--agent",
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user",
+      "--content",
+      "--durability",
+      "--tags",
+      "--summary",
+      "--subject",
+      "--derived-from",
+      "--visibility",
+      "--entities"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair memory write-task-summary": {
+    "options": [
+      "--agent",
+      "--ref",
+      "--beads",
+      "--outcome",
+      "--summary",
+      "--files-touched",
+      "--lessons",
+      "--derived-from"
+    ]
+  },
+  "flair memory search": {
+    "options": [
+      "--agent",
+      "--admin-pass",
+      "--q",
+      "--json",
+      "--limit",
+      "--tag",
+      "--include-archived",
+      "--target",
+      "--url",
+      "--port"
+    ],
+    "adminPass": "Admin password — sign as admin while --agent names whose memories to search (flair#1500: a flag-pinned agent with no key no longer falls back to FLAIR_ADMIN_PASS)"
+  },
+  "flair memory basement": {
+    "options": [
+      "--agent",
+      "--target",
+      "--url",
+      "--port"
+    ]
+  },
+  "flair memory restore": {
+    "options": [
+      "--agent",
+      "--target",
+      "--url",
+      "--port"
+    ]
+  },
+  "flair memory list": {
+    "options": [
+      "--agent",
+      "--tag",
+      "--hash-fallback",
+      "--limit",
+      "--json"
+    ]
+  },
+  "flair memory hygiene": {
+    "options": [
+      "--apply",
+      "--pattern",
+      "--tiny-threshold",
+      "--port",
+      "--ops-port"
+    ]
+  },
+  "flair memory checkpoint": {
+    "options": [
+      "--target",
+      "--checkpoint",
+      "--ops-target",
+      "--fabric-user",
+      "--fabric-password",
+      "--fabric-password-file"
+    ]
+  },
+  "flair memory verify": {
+    "options": [
+      "--target",
+      "--checkpoint",
+      "--ops-target",
+      "--fabric-user",
+      "--fabric-password",
+      "--fabric-password-file"
+    ]
+  },
+  "flair memory compare-nodes": {
+    "options": [
+      "--node",
+      "--json",
+      "--fabric-user",
+      "--fabric-password",
+      "--fabric-password-file"
+    ]
+  },
+  "flair search": {
+    "options": [
+      "--agent",
+      "--limit",
+      "--port",
+      "--url",
+      "--target",
+      "--key",
+      "--tag",
+      "--subject",
+      "--subjects",
+      "--since",
+      "--as-of",
+      "--include-superseded",
+      "--scoring",
+      "--min-score",
+      "--durability",
+      "--source",
+      "--explain",
+      "--json"
+    ]
+  },
+  "flair bootstrap": {
+    "options": [
+      "--agent",
+      "--max-tokens",
+      "--port",
+      "--url",
+      "--target",
+      "--key",
+      "--json"
+    ]
+  },
+  "flair relationship": {
+    "options": []
+  },
+  "flair relationship add": {
+    "options": [
+      "--agent",
+      "--subject",
+      "--predicate",
+      "--object",
+      "--confidence",
+      "--valid-from",
+      "--valid-to",
+      "--source"
+    ]
+  },
+  "flair soul": {
+    "options": []
+  },
+  "flair soul set": {
+    "options": [
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user",
+      "--agent",
+      "--key",
+      "--value",
+      "--durability",
+      "--url",
+      "--json"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair soul get": {
+    "options": [
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user",
+      "--agent",
+      "--url",
+      "--json"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair soul list": {
+    "options": [
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user",
+      "--agent",
+      "--url",
+      "--json"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair bridge": {
+    "options": []
+  },
+  "flair bridge list": {
+    "options": [
+      "--json"
+    ]
+  },
+  "flair bridge scaffold": {
+    "options": [
+      "--file",
+      "--api",
+      "--force"
+    ]
+  },
+  "flair bridge import": {
+    "options": [
+      "--agent",
+      "--cwd",
+      "--dry-run",
+      "--port",
+      "--url",
+      "--key",
+      "--source",
+      "--user",
+      "--base-url",
+      "--api-key-file"
+    ]
+  },
+  "flair bridge export": {
+    "options": [
+      "--agent",
+      "--source",
+      "--subject",
+      "--since",
+      "--cwd",
+      "--dry-run",
+      "--port",
+      "--url",
+      "--key"
+    ]
+  },
+  "flair bridge test": {
+    "options": [
+      "--fixture",
+      "--cwd",
+      "--json"
+    ]
+  },
+  "flair bridge allow": {
+    "options": []
+  },
+  "flair bridge revoke": {
+    "options": []
+  },
+  "flair bridge allow-list": {
+    "options": [
+      "--json"
+    ]
+  },
+  "flair backup": {
+    "options": [
+      "--output",
+      "--agents",
+      "--port",
+      "--ops-target",
+      "--ops-timeout-ms",
+      "--url",
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair restore": {
+    "options": [
+      "--merge",
+      "--replace",
+      "--port",
+      "--url",
+      "--admin-pass",
+      "--admin-user",
+      "--dry-run"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS env)"
+  },
+  "flair backup-approval": {
+    "options": []
+  },
+  "flair backup-approval approve": {
+    "options": [
+      "--port",
+      "--ops-port",
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair backup-approval legacy-admit": {
+    "options": [
+      "--confirm-digest",
+      "--port",
+      "--ops-port",
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair backup-approval list": {
+    "options": []
+  },
+  "flair backup-approval revoke": {
+    "options": [
+      "--port",
+      "--ops-port",
+      "--admin-pass",
+      "--admin-pass-file",
+      "--admin-user"
+    ],
+    "adminPass": "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)"
+  },
+  "flair export": {
+    "options": [
+      "--output",
+      "--include-key",
+      "--port",
+      "--url",
+      "--admin-pass",
+      "--admin-user",
+      "--keys-dir"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS env)"
+  },
+  "flair import": {
+    "options": [
+      "--port",
+      "--ops-port",
+      "--url",
+      "--ops-target",
+      "--admin-pass",
+      "--admin-user",
+      "--keys-dir"
+    ],
+    "adminPass": "Admin password (or set FLAIR_ADMIN_PASS env)"
+  },
+  "flair inspect": {
+    "options": [
+      "--json"
+    ]
+  },
+  "flair migrate-harness-memory": {
+    "options": [
+      "--target",
+      "--agent",
+      "--dry-run"
+    ]
+  },
+  "flair presence": {
+    "options": []
+  },
+  "flair presence set": {
+    "options": [
+      "--activity",
+      "--task",
+      "--agent",
+      "--port",
+      "--target"
+    ]
+  },
+  "flair workspace": {
+    "options": []
+  },
+  "flair workspace set": {
+    "options": [
+      "--ref",
+      "--label",
+      "--provider",
+      "--task",
+      "--phase",
+      "--summary",
+      "--entities",
+      "--agent",
+      "--port",
+      "--target"
+    ]
+  },
+  "flair orgevent": {
+    "options": [
+      "--kind",
+      "--summary",
+      "--detail",
+      "--scope",
+      "--target",
+      "--entities",
+      "--agent",
+      "--port",
+      "--target-url"
+    ]
+  },
+  "flair attention": {
+    "options": [
+      "--days",
+      "--agent",
+      "--key",
+      "--port",
+      "--url",
+      "--target",
+      "--json"
+    ]
+  }
 }

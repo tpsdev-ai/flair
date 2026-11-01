@@ -42,15 +42,19 @@ export function register(program: Command): void {
 
   const idp = program.command("idp").description("Manage enterprise IdP configurations (XAA)");
 
-  addAdminPassOptions(idp.command("add"), "Admin password")
-    .description("Register a trusted enterprise IdP")
-    .requiredOption("--name <name>", "Display name (e.g., 'Harper Corporate')")
-    .requiredOption("--issuer <url>", "IdP issuer URL (e.g., https://accounts.google.com)")
-    .requiredOption("--jwks-uri <url>", "JWKS endpoint URL")
-    .requiredOption("--client-id <id>", "Flair's client_id at this IdP")
-    .option("--required-domain <domain>", "Reject tokens without this domain (hd/tid claim)")
-    .option("--no-jit-provision", "Disable auto-creation of principals for new IdP users")
-    .option("--default-trust <tier>", "Trust tier for JIT principals", "unverified")
+  addAdminPassOptions(
+    idp
+      .command("add")
+      .description("Register a trusted enterprise IdP")
+      .requiredOption("--name <name>", "Display name (e.g., 'Harper Corporate')")
+      .requiredOption("--issuer <url>", "IdP issuer URL (e.g., https://accounts.google.com)")
+      .requiredOption("--jwks-uri <url>", "JWKS endpoint URL")
+      .requiredOption("--client-id <id>", "Flair's client_id at this IdP")
+      .option("--required-domain <domain>", "Reject tokens without this domain (hd/tid claim)")
+      .option("--no-jit-provision", "Disable auto-creation of principals for new IdP users")
+      .option("--default-trust <tier>", "Trust tier for JIT principals", "unverified"),
+    "Admin password",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (opts) => {
@@ -99,8 +103,7 @@ export function register(program: Command): void {
       console.log(`   JIT:      ${opts.jitProvision !== false}`);
     });
 
-  addAdminPassOptions(idp.command("list"), "Admin password")
-    .description("List configured IdPs")
+  addAdminPassOptions(idp.command("list").description("List configured IdPs"), "Admin password")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
@@ -155,8 +158,7 @@ export function register(program: Command): void {
       }
     });
 
-  addAdminPassOptions(idp.command("remove <id>"), "Admin password")
-    .description("Remove an IdP configuration")
+  addAdminPassOptions(idp.command("remove <id>").description("Remove an IdP configuration"), "Admin password")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, opts) => {
@@ -183,8 +185,7 @@ export function register(program: Command): void {
       console.log(`✅ IdP '${id}' removed`);
     });
 
-  addAdminPassOptions(idp.command("test <id>"), "Admin password")
-    .description("Test IdP connectivity (fetches JWKS)")
+  addAdminPassOptions(idp.command("test <id>").description("Test IdP connectivity (fetches JWKS)"), "Admin password")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, opts) => {
       applyAdminPassFile(opts);

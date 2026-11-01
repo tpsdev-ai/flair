@@ -343,12 +343,16 @@ export function register(program: Command): void {
     .command("integrity")
     .description("Detect missing checkpointed durable Memory IDs or changed or missing previously nonempty tokens");
 
-  addAdminPassOptions(integrity.command("check"), "Admin password (or set FLAIR_ADMIN_PASS env)")
-    .description("Report missing checkpointed durable IDs or changed or missing previously nonempty tokens; rows created and lost entirely between scans are not observed")
-    .option("--json", "Print the verdict as JSON")
-    .option("--accept", "On an alert, advance the whole checkpoint only if no reported replacement lacks a token; otherwise write no checkpoint, even with other losses")
-    .option("--checkpoint <path>", "Checkpoint file path (default: ~/.flair/integrity-checkpoint.json)")
-    .option("--ops-port <port>", "Harper operations API port")
+  addAdminPassOptions(
+    integrity
+      .command("check")
+      .description("Report missing checkpointed durable IDs or changed or missing previously nonempty tokens; rows created and lost entirely between scans are not observed")
+      .option("--json", "Print the verdict as JSON")
+      .option("--accept", "On an alert, advance the whole checkpoint only if no reported replacement lacks a token; otherwise write no checkpoint, even with other losses")
+      .option("--checkpoint <path>", "Checkpoint file path (default: ~/.flair/integrity-checkpoint.json)")
+      .option("--ops-port <port>", "Harper operations API port"),
+    "Admin password (or set FLAIR_ADMIN_PASS env)",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .action(async (opts) => {
       applyAdminPassFile(opts);
@@ -414,13 +418,17 @@ export function register(program: Command): void {
   // bounded one-shot process, and the next run simply omits --apply. It prunes
   // nothing — with a named reason — when a checkpoint is missing or a watermark
   // is unreadable.
-  addAdminPassOptions(integrity.command("prune-history"), "Admin password (or set FLAIR_ADMIN_PASS env)")
-    .description("Prune MemoryDeletionHistory rows older than the oldest named checkpoint watermark minus a margin; dry-run unless --apply")
-    .option("--checkpoint <path...>", "Checkpoint file whose watermark bounds the prune; repeat for several (default: ~/.flair/integrity-checkpoint.json)")
-    .option("--apply", "Delete the eligible rows; without it nothing is deleted")
-    .option("--max <n>", "Hard cap on rows pruned in one run (default: 500)")
-    .option("--json", "Print the plan as JSON")
-    .option("--ops-port <port>", "Harper operations API port")
+  addAdminPassOptions(
+    integrity
+      .command("prune-history")
+      .description("Prune MemoryDeletionHistory rows older than the oldest named checkpoint watermark minus a margin; dry-run unless --apply")
+      .option("--checkpoint <path...>", "Checkpoint file whose watermark bounds the prune; repeat for several (default: ~/.flair/integrity-checkpoint.json)")
+      .option("--apply", "Delete the eligible rows; without it nothing is deleted")
+      .option("--max <n>", "Hard cap on rows pruned in one run (default: 500)")
+      .option("--json", "Print the plan as JSON")
+      .option("--ops-port <port>", "Harper operations API port"),
+    "Admin password (or set FLAIR_ADMIN_PASS env)",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .action(async (opts) => {
       applyAdminPassFile(opts);

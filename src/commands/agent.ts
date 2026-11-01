@@ -446,8 +446,7 @@ export function register(program: Command): void {
       );
     });
 
-  addAdminPassOptions(agent.command("list"), "Admin password (or set FLAIR_ADMIN_PASS env)")
-    .description("List all agents")
+  addAdminPassOptions(agent.command("list").description("List all agents"), "Admin password (or set FLAIR_ADMIN_PASS env)")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--agent <id>", "Agent ID to authenticate as via Ed25519 (or FLAIR_AGENT_ID env) when no admin pass")
     .option("--keys-dir <dir>", "Directory holding the agent's Ed25519 key")
@@ -573,10 +572,14 @@ export function register(program: Command): void {
       }
     });
 
-  addAdminPassOptions(agent.command("rotate-key <id>"), "Admin password (or set FLAIR_ADMIN_PASS env)")
-    .description("Rotate an agent's Ed25519 keypair")
-    .option("--port <port>", "Harper HTTP port")
-    .option("--ops-port <port>", "Harper operations API port")
+  addAdminPassOptions(
+    agent
+      .command("rotate-key <id>")
+      .description("Rotate an agent's Ed25519 keypair")
+      .option("--port <port>", "Harper HTTP port")
+      .option("--ops-port <port>", "Harper operations API port"),
+    "Admin password (or set FLAIR_ADMIN_PASS env)",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .action(async (id: string, opts) => {
@@ -665,11 +668,15 @@ export function register(program: Command): void {
 
   // ─── flair agent remove ──────────────────────────────────────────────────────
 
-  addAdminPassOptions(agent.command("remove <id>"), "Admin password (or set FLAIR_ADMIN_PASS env)")
-    .description("Remove an agent and all its data from Flair")
-    .option("--keep-keys", "Do not delete key files from disk")
-    .option("--port <port>", "Harper HTTP port")
-    .option("--ops-port <port>", "Harper operations API port")
+  addAdminPassOptions(
+    agent
+      .command("remove <id>")
+      .description("Remove an agent and all its data from Flair")
+      .option("--keep-keys", "Do not delete key files from disk")
+      .option("--port <port>", "Harper HTTP port")
+      .option("--ops-port <port>", "Harper operations API port"),
+    "Admin password (or set FLAIR_ADMIN_PASS env)",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .option("--force", "Skip interactive confirmation (required when stdin is not a TTY)")

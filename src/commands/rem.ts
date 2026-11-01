@@ -842,10 +842,14 @@ export function register(program: Command): void {
   // populating. Per spec § 5: candidates are NEVER auto-promoted; this command
   // is the operator's review surface.
 
-  addAdminPassOptions(rem.command("candidates"), "Admin password (or set FLAIR_ADMIN_PASS)")
-    .description("List staged memory candidates from the FLAIR-NIGHTLY-REM cycle (pending review)")
-    .option("--port <port>", "Harper HTTP port")
-    .option("--ops-port <port>", "Harper operations API port")
+  addAdminPassOptions(
+    rem
+      .command("candidates")
+      .description("List staged memory candidates from the FLAIR-NIGHTLY-REM cycle (pending review)")
+      .option("--port <port>", "Harper HTTP port")
+      .option("--ops-port <port>", "Harper operations API port"),
+    "Admin password (or set FLAIR_ADMIN_PASS)",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--agent <id>", "Agent ID (or FLAIR_AGENT_ID env)")
     .option("--status <s>", "Filter by status: pending | promoted | rejected (default: pending)")

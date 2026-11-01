@@ -2473,10 +2473,14 @@ export function register(program: Command): void {
       }
     });
 
-  addAdminPassOptions(federation.command("watch"), "Admin password")
-    .description("Run federation sync in a loop (foreground daemon)")
-    .option("--interval <seconds>", "Seconds between syncs", "30")
-    .option("--port <port>", "Harper HTTP port")
+  addAdminPassOptions(
+    federation
+      .command("watch")
+      .description("Run federation sync in a loop (foreground daemon)")
+      .option("--interval <seconds>", "Seconds between syncs", "30")
+      .option("--port <port>", "Harper HTTP port"),
+    "Admin password",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--target <url>", "Remote Flair URL")

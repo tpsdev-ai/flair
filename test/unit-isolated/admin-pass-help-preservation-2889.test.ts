@@ -2,22 +2,37 @@
  * admin-pass-help-preservation-2889.test.ts — flair#2889 fix round.
  *
  * Adding `--admin-pass-file` must not change the `--admin-pass` description a
- * command already had. The fixture is the raw `--admin-pass` description for
- * every command that declared one on origin/main (8b5096d9), generated from
- * main's CLI by walking the registered commander tree with the same
- * `walkCliCommands` helper the CLI-surface snapshot uses.
+ * command already had, and must not reorder any command's options: the file
+ * form is inserted immediately after `--admin-pass`, so every other flag keeps
+ * main's position.
+ *
+ * The fixture holds, for every command that declared `--admin-pass` on
+ * origin/main (8b5096d9), that description, plus every command's ordered
+ * option names. It was generated from main's CLI by walking the registered
+ * commander tree with the same `walkCliCommands` helper the CLI-surface
+ * snapshot uses.
  *
  * Isolated: it imports src/cli.ts (registration only) in its own process.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Command } from "commander";
 import { program } from "../../src/cli";
 import { walkCliCommands } from "../helpers/cli-surface";
 
-const FIXTURE: Record<string, string> = JSON.parse(
+interface CommandFixture {
+  adminPass?: string;
+  options: string[];
+}
+
+const FIXTURE: Record<string, CommandFixture> = JSON.parse(
   readFileSync(join(import.meta.dir, "..", "fixtures", "admin-pass-help-origin-main.json"), "utf8"),
 );
+
+function optionNames(cmd: Command): string[] {
+  return cmd.options.map((o) => o.long ?? o.short ?? o.flags);
+}
 
 describe("flair#2889 — --admin-pass descriptions are preserved", () => {
   test("every command's --admin-pass description matches origin/main", () => {
@@ -30,8 +45,33 @@ describe("flair#2889 — --admin-pass descriptions are preserved", () => {
     // The walk must have seen the surface it claims to check.
     expect(current.size).toBeGreaterThan(20);
 
-    const drifted = [...current].filter(([path, description]) => FIXTURE[path] !== description);
+    const expected = Object.entries(FIXTURE)
+      .filter(([, entry]) => entry.adminPass !== undefined)
+      .map(([path, entry]) => [path, entry.adminPass] as const);
+    expect(expected.length).toBe(current.size);
+    expect(expected.filter(([path, description]) => current.get(path) !== description)).toEqual([]);
+    expect([...current.keys()].filter((path) => FIXTURE[path]?.adminPass === undefined)).toEqual([]);
+  });
+});
+
+describe("flair#2889 — --admin-pass-file does not reorder options", () => {
+  test("every command's option list minus --admin-pass-file matches origin/main's order", () => {
+    const walked = new Map<string, string[]>();
+    for (const { path, cmd } of walkCliCommands(program)) walked.set(path, optionNames(cmd));
+
+    // The walk must have seen the surface it claims to check.
+    expect(walked.size).toBeGreaterThan(100);
+    expect(Object.keys(FIXTURE).length).toBe(walked.size);
+
+    const drifted = [...walked]
+      .map(([path, options]) => {
+        const expected = (FIXTURE[path]?.options ?? []).filter((name) => name !== "--admin-pass-file");
+        const actual = options.filter((name) => name !== "--admin-pass-file");
+        return { path, expected, actual };
+      })
+      .filter(({ expected, actual }) => expected.join(" ") !== actual.join(" "));
+
     expect(drifted).toEqual([]);
-    expect(Object.keys(FIXTURE).filter((path) => !current.has(path))).toEqual([]);
+    expect(Object.keys(FIXTURE).filter((path) => !walked.has(path))).toEqual([]);
   });
 });

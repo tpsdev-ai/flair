@@ -933,18 +933,17 @@ export const ADMIN_PASS_HELP =
 
 /**
  * Declare the admin-password pair on `cmd`: the argv form and the file form
- * together. `adminPassHelp` is the calling command's own description for
- * `--admin-pass`, passed through unchanged so each command keeps its wording.
- * `opts.hideAdminPassFile` omits the file form from this command's help output
- * while keeping the flag parseable.
+ * together, in that order. `adminPassHelp` is the calling command's own
+ * description for `--admin-pass`, passed through unchanged so each command
+ * keeps its wording. `opts.adminPassFileHelp` replaces the shared file-form
+ * description for a command whose target makes the shared wording wrong.
  */
 export function addAdminPassOptions(
   cmd: Command,
   adminPassHelp: string = ADMIN_PASS_HELP,
-  opts: { hideAdminPassFile?: boolean } = {},
+  opts: { adminPassFileHelp?: string } = {},
 ): Command {
-  const adminPassFile = new Option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP);
-  if (opts.hideAdminPassFile) adminPassFile.hideHelp();
+  const adminPassFile = new Option(ADMIN_PASS_FILE_FLAG, opts.adminPassFileHelp ?? ADMIN_PASS_FILE_HELP);
   return cmd.option(ADMIN_PASS_FLAG, adminPassHelp).addOption(adminPassFile);
 }
 

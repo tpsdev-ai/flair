@@ -62,12 +62,16 @@ export function register(program: Command): void {
 // ─── flair import ────────────────────────────────────────────────────────────
 
 
-addAdminPassOptions(program.command("import <path>"), "Admin password (or set FLAIR_ADMIN_PASS env)")
-  .description("Import an agent from an export file into this Flair instance")
-  .option("--port <port>", "Harper HTTP port")
-  .option("--ops-port <port>", "Harper operations API port")
-  .option("--url <url>", "Flair base URL (overrides --port)")
-  .option("--ops-target <url>", "Explicit ops API URL for the Agent seed (env: FLAIR_OPS_TARGET; bypasses port derivation). Use when --url is remote and the ops port isn't HTTP-1.")
+addAdminPassOptions(
+  program
+    .command("import <path>")
+    .description("Import an agent from an export file into this Flair instance")
+    .option("--port <port>", "Harper HTTP port")
+    .option("--ops-port <port>", "Harper operations API port")
+    .option("--url <url>", "Flair base URL (overrides --port)")
+    .option("--ops-target <url>", "Explicit ops API URL for the Agent seed (env: FLAIR_OPS_TARGET; bypasses port derivation). Use when --url is remote and the ops port isn't HTTP-1."),
+  "Admin password (or set FLAIR_ADMIN_PASS env)",
+)
   .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Keys directory", defaultKeysDir())
   .action(async (importPath, opts) => {

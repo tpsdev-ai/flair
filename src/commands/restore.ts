@@ -34,12 +34,16 @@ export function register(program: Command): void {
 // ─── flair restore ────────────────────────────────────────────────────────────
 
 
-addAdminPassOptions(program.command("restore <path>"), "Admin password (or set FLAIR_ADMIN_PASS env)")
-  .description("Import a Flair backup archive")
-  .option("--merge", "Add/update records without deleting existing (default)")
-  .option("--replace", "Delete archived Soul and Memory IDs first, then import")
-  .option("--port <port>", "Harper HTTP port")
-  .option("--url <url>", "Flair base URL (overrides --port)")
+addAdminPassOptions(
+  program
+    .command("restore <path>")
+    .description("Import a Flair backup archive")
+    .option("--merge", "Add/update records without deleting existing (default)")
+    .option("--replace", "Delete archived Soul and Memory IDs first, then import")
+    .option("--port <port>", "Harper HTTP port")
+    .option("--url <url>", "Flair base URL (overrides --port)"),
+  "Admin password (or set FLAIR_ADMIN_PASS env)",
+)
   .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--dry-run", "Show what would be imported without making changes")
   .action(async (backupPath: string, opts) => {

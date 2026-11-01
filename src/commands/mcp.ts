@@ -659,14 +659,18 @@ export function register(program: Command): void {
       }
     });
 
-  addAdminPassOptions(mcp.command("grant <name>"), "Admin password (or set FLAIR_ADMIN_PASS)")
-    .description(
-      "Provision a named, individually-revocable machine client for the /mcp OAuth surface " +
-        "(flair Agent + Ed25519 keypair; the existing CIMD path — see `flair mcp token` — makes it usable).",
-    )
-    .option("--issuer <url>", "Public origin for the CIMD client_id (defaults to FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)")
-    .option("--keys-dir <dir>", "Directory to write the new key pair into (else FLAIR_KEY_DIR, ~/.flair/keys)")
-    .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
+  addAdminPassOptions(
+    mcp
+      .command("grant <name>")
+      .description(
+        "Provision a named, individually-revocable machine client for the /mcp OAuth surface " +
+          "(flair Agent + Ed25519 keypair; the existing CIMD path — see `flair mcp token` — makes it usable).",
+      )
+      .option("--issuer <url>", "Public origin for the CIMD client_id (defaults to FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)")
+      .option("--keys-dir <dir>", "Directory to write the new key pair into (else FLAIR_KEY_DIR, ~/.flair/keys)")
+      .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)"),
+    "Admin password (or set FLAIR_ADMIN_PASS)",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper operations API port")
@@ -734,9 +738,13 @@ export function register(program: Command): void {
       }
     });
 
-  addAdminPassOptions(mcp.command("revoke <name>"), "Admin password (or set FLAIR_ADMIN_PASS)")
-    .description("Server-side revoke a granted machine client (deletes its backing Agent record), then clean up locally.")
-    .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
+  addAdminPassOptions(
+    mcp
+      .command("revoke <name>")
+      .description("Server-side revoke a granted machine client (deletes its backing Agent record), then clean up locally.")
+      .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)"),
+    "Admin password (or set FLAIR_ADMIN_PASS)",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--issuer <url>", "Public origin of the /mcp OAuth surface — used only for the enable-gate probe (defaults to FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)")
     .option("--ops-port <port>", "Harper operations API port")
@@ -810,10 +818,12 @@ export function register(program: Command): void {
       console.log(render.table(cols, entries as unknown as Array<Record<string, unknown>>));
     });
 
-  addAdminPassOptions(mcp.command("enable"), "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
-    .description(
-      "Enable the OAuth /mcp surface for claude.ai. " +
-        "Rejects invalid issuer URLs, localhost/.localhost/.local hosts, " +
+  addAdminPassOptions(
+    mcp
+      .command("enable")
+      .description(
+        "Enable the OAuth /mcp surface for claude.ai. " +
+          "Rejects invalid issuer URLs, localhost/.localhost/.local hosts, " +
         "IPv4 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16 (also IPv4-mapped IPv6), " +
         "and IPv6 ::, ::1, fc00::/7, fe80::/10; no DNS lookup.",
     )
@@ -836,7 +846,9 @@ export function register(program: Command): void {
         "process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. " +
         "Always refused with --fabric or a *.harperfabric.com instance. " +
         "Without it the list is not changed (shipped: claude.ai,claude.com)",
-    )
+      ),
+    "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
     .option("--fabric", "Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host")
@@ -990,17 +1002,17 @@ export function register(program: Command): void {
       for (const line of enableSuccessLines(result)) console.log(line);
     });
 
-  // `mcp disable` always targets a remote instance, and its help block is a
-  // stable contract (test/unit-isolated/mcp-disable-admin-pass-text.test.ts):
-  // the shared file-form help names FLAIR_ADMIN_PASS, a local credential this
-  // command never consults. Accept the flag but keep it out of this help.
+  // `mcp disable` always targets a remote instance, so its file-form help says
+  // so: the shared text names FLAIR_ADMIN_PASS, a local credential this command
+  // never consults.
   addAdminPassOptions(
-    mcp.command("disable"),
+    mcp
+      .command("disable")
+      .description("Flag off + restart = byte-identical boot (Model-2 contract) — removes the /mcp OAuth surface.")
+      .option("--instance <url>", "Remote flair instance to disable against (else FLAIR_URL)"),
     "Admin password for the remote target instance; pass it explicitly with --admin-pass",
-    { hideAdminPassFile: true },
+    { adminPassFileHelp: "Read the remote target instance's admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted)" },
   )
-    .description("Flag off + restart = byte-identical boot (Model-2 contract) — removes the /mcp OAuth surface.")
-    .option("--instance <url>", "Remote flair instance to disable against (else FLAIR_URL)")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-flag-off", "Confirm FLAIR_MCP_OAUTH is already unset on the target instance's environment (skips the interactive confirm)")
     .option("--json", "Print machine-readable JSON instead of a human summary")
