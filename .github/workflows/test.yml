@@ -39,9 +39,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Every job pins ubuntu-24.04: on the ubuntu-26.04 image that ubuntu-latest
-  # resolves to since late October 2026, Playwright 1.59.1 refuses to install
-  # Chromium and two unit tests' host assumptions fail.
+  # Jobs previously using ubuntu-latest now pin ubuntu-24.04.
+  # On this PR's first run, ubuntu-latest resolved to ubuntu-26.04:
+  # Playwright could not install Chromium, and three unit cases failed.
   # flair#2540 — share one build with pack-smoke and dist-esm-guard.
   build:
     name: "Build (shared dist)"
