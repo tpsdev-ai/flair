@@ -1,7 +1,7 @@
 /**
  * admin-pass-help-preservation-2889.test.ts — flair#2889 fix round.
  *
- * Adding `--admin-pass-file` must not rewrite the `--admin-pass` help text a
+ * Adding `--admin-pass-file` must not change the `--admin-pass` description a
  * command already had. The fixture is the raw `--admin-pass` description for
  * every command that declared one on origin/main (8b5096d9), generated from
  * main's CLI by walking the registered commander tree with the same

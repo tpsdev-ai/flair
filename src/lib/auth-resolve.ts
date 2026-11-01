@@ -934,9 +934,9 @@ export const ADMIN_PASS_HELP =
 /**
  * Declare the admin-password pair on `cmd`: the argv form and the file form
  * together. `adminPassHelp` is the calling command's own description for
- * `--admin-pass`, kept verbatim so adding the file form does not rewrite help
- * text users already read. `opts.hideAdminPassFile` omits the file form from
- * this command's help output while keeping the flag parseable.
+ * `--admin-pass`, passed through unchanged so each command keeps its wording.
+ * `opts.hideAdminPassFile` omits the file form from this command's help output
+ * while keeping the flag parseable.
  */
 export function addAdminPassOptions(
   cmd: Command,
