@@ -208,17 +208,24 @@ export class AgentSeed extends Resource {
 
       const memories: any[] = [];
       const stagedMemories: any[] = [];
-      // Only seed memories if this is a first-time seed (none tagged onboarding yet)
-      const hasOnboardingMemory = await (async () => {
+      // A prior starter memory for this agent is recognized by the marker the
+      // seed persists on every starter row (`source: "seed"`, written below), or
+      // by the onboarding tag, so a retry whose starter memories carry custom
+      // tags still sees the stored rows instead of writing duplicates
+      // (flair#2890).
+      const isSeededMemory = (m: any) =>
+        m.agentId === agentId && (m.source === "seed" || (m.tags ?? []).includes("onboarding"));
+      // Only seed memories if this is a first-time seed (no starter memory stored yet)
+      const hasSeededMemory = await (async () => {
         for await (const m of (databases as any).flair.Memory.search()) {
-          if (m.agentId === agentId && (m.tags ?? []).includes("onboarding")) return true;
+          if (isSeededMemory(m)) return true;
         }
         return false;
       })();
-      if (hasOnboardingMemory) {
-        // Re-seed: return existing onboarding memories without writing new ones
+      if (hasSeededMemory) {
+        // Re-seed: return existing starter memories without writing new ones
         for await (const m of (databases as any).flair.Memory.search()) {
-          if (m.agentId === agentId && (m.tags ?? []).includes("onboarding")) memories.push(m);
+          if (isSeededMemory(m)) memories.push(m);
         }
       } else {
         for (let i = 0; i < memDefs.length; i++) {
@@ -259,7 +266,7 @@ export class AgentSeed extends Resource {
           noteMemoryUpsert(record);
           stagedMemories.push(record);
         }
-      } // end !hasOnboardingMemory
+      } // end !hasSeededMemory
 
       const pause = txnPausePoint("agentseed-before-commit", undefined, undefined, { memories: stagedMemories });
       if (pause) await pause;

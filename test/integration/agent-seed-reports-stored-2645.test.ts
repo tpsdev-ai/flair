@@ -337,6 +337,31 @@ describe("flair#2645 — an AgentSeed response reports the stored rows", () => {
     expect(await rowIn("Memory", competing.id), "the competing Memory row was overwritten").toEqual(before);
   }, 120_000);
 
+  it("starter memory: a retry whose starter memories carry no onboarding tag reports the stored rows and writes no duplicates", async () => {
+    const agentId = nextId("memory-retry");
+    const input = { agentId, starterMemories: [{ content: "custom-tagged-memory", tags: ["custom"] }] };
+    const fail = join(pauseDir, "fail.agentseed-memory-verify");
+    writeFileSync(fail, "");
+    const first = await seed(input);
+    expect(existsSync(fail), "the post-commit Memory read was not the read that failed").toBe(false);
+    const firstText = await first.text();
+    expect(first.status, firstText.slice(0, 300)).toBe(500);
+    expect(JSON.parse(firstText).error).toBe("agent_seed_unconfirmed");
+    const afterFirst = await memoriesOf(agentId);
+    expect(afterFirst).toHaveLength(1);
+    expect(afterFirst[0].tags).toEqual(["custom"]);
+
+    const retry = await seed(input);
+    const retryText = await retry.text();
+    expect(retry.status, retryText.slice(0, 300)).toBe(200);
+    const retryBody = JSON.parse(retryText);
+    const afterRetry = await memoriesOf(agentId);
+    expect(afterRetry, "the retry duplicated the stored starter memory").toHaveLength(1);
+    expect(afterRetry[0].id).toBe(afterFirst[0].id);
+    expect(retryBody.memories.map((memory: any) => memory.id)).toEqual(afterRetry.map((memory: any) => memory.id));
+    expect(retryBody.memories[0]).toMatchObject({ id: afterFirst[0].id, content: "custom-tagged-memory" });
+  }, 120_000);
+
   it("starter memory: a failed post-commit read answers agent_seed_unconfirmed, not success", async () => {
     const agentId = nextId("memory-read");
     const fail = join(pauseDir, "fail.agentseed-memory-verify");
