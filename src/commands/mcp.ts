@@ -659,7 +659,7 @@ export function register(program: Command): void {
       }
     });
 
-  addAdminPassOptions(mcp.command("grant <name>"))
+  addAdminPassOptions(mcp.command("grant <name>"), "Admin password (or set FLAIR_ADMIN_PASS)")
     .description(
       "Provision a named, individually-revocable machine client for the /mcp OAuth surface " +
         "(flair Agent + Ed25519 keypair; the existing CIMD path — see `flair mcp token` — makes it usable).",
@@ -734,7 +734,7 @@ export function register(program: Command): void {
       }
     });
 
-  addAdminPassOptions(mcp.command("revoke <name>"))
+  addAdminPassOptions(mcp.command("revoke <name>"), "Admin password (or set FLAIR_ADMIN_PASS)")
     .description("Server-side revoke a granted machine client (deletes its backing Agent record), then clean up locally.")
     .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
@@ -990,7 +990,15 @@ export function register(program: Command): void {
       for (const line of enableSuccessLines(result)) console.log(line);
     });
 
-  addAdminPassOptions(mcp.command("disable"), "Admin password for the remote target instance; pass it explicitly with --admin-pass or --admin-pass-file")
+  // `mcp disable` always targets a remote instance, and its help block is a
+  // stable contract (test/unit-isolated/mcp-disable-admin-pass-text.test.ts):
+  // the shared file-form help names FLAIR_ADMIN_PASS, a local credential this
+  // command never consults. Accept the flag but keep it out of this help.
+  addAdminPassOptions(
+    mcp.command("disable"),
+    "Admin password for the remote target instance; pass it explicitly with --admin-pass",
+    { hideAdminPassFile: true },
+  )
     .description("Flag off + restart = byte-identical boot (Model-2 contract) — removes the /mcp OAuth surface.")
     .option("--instance <url>", "Remote flair instance to disable against (else FLAIR_URL)")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")

@@ -42,7 +42,7 @@ export function register(program: Command): void {
 
   const idp = program.command("idp").description("Manage enterprise IdP configurations (XAA)");
 
-  addAdminPassOptions(idp.command("add"))
+  addAdminPassOptions(idp.command("add"), "Admin password")
     .description("Register a trusted enterprise IdP")
     .requiredOption("--name <name>", "Display name (e.g., 'Harper Corporate')")
     .requiredOption("--issuer <url>", "IdP issuer URL (e.g., https://accounts.google.com)")
@@ -99,7 +99,7 @@ export function register(program: Command): void {
       console.log(`   JIT:      ${opts.jitProvision !== false}`);
     });
 
-  addAdminPassOptions(idp.command("list"))
+  addAdminPassOptions(idp.command("list"), "Admin password")
     .description("List configured IdPs")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
@@ -155,7 +155,7 @@ export function register(program: Command): void {
       }
     });
 
-  addAdminPassOptions(idp.command("remove <id>"))
+  addAdminPassOptions(idp.command("remove <id>"), "Admin password")
     .description("Remove an IdP configuration")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
@@ -183,7 +183,7 @@ export function register(program: Command): void {
       console.log(`✅ IdP '${id}' removed`);
     });
 
-  addAdminPassOptions(idp.command("test <id>"))
+  addAdminPassOptions(idp.command("test <id>"), "Admin password")
     .description("Test IdP connectivity (fetches JWKS)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, opts) => {

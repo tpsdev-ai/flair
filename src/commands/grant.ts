@@ -38,7 +38,7 @@ function resolveAdminUser(...args: any[]): any {
 export function register(program: Command): void {
 // ─── flair grant / revoke ─────────────────────────────────────────────────────
 
-addAdminPassOptions(program.command("grant <from-agent> <to-agent>"))
+addAdminPassOptions(program.command("grant <from-agent> <to-agent>"), "Admin password (or set FLAIR_ADMIN_PASS env)")
   .description("Grant an agent read access to another agent's memories")
   .option("--scope <scope>", "Grant scope: read or search", "read")
   .option("--port <port>", "Harper HTTP port")
@@ -94,7 +94,7 @@ addAdminPassOptions(program.command("grant <from-agent> <to-agent>"))
     console.log(`   Scope: ${scope}`);
   });
 
-addAdminPassOptions(program.command("revoke <from-agent> <to-agent>"))
+addAdminPassOptions(program.command("revoke <from-agent> <to-agent>"), "Admin password (or set FLAIR_ADMIN_PASS env)")
   .description("Revoke a memory grant between two agents")
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")

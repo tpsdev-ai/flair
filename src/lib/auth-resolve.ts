@@ -71,7 +71,7 @@ import {
 } from "node:fs";
 
 import { join } from "node:path";
-import type { Command } from "commander";
+import { Option, type Command } from "commander";
 import { createPrivateKey, randomUUID, sign as nodeCryptoSign } from "node:crypto";
 import type { SigningIdentitySource } from "./signing-identity.js";
 import { resolveHome } from "./home.js";
@@ -933,10 +933,19 @@ export const ADMIN_PASS_HELP =
 
 /**
  * Declare the admin-password pair on `cmd`: the argv form and the file form
- * together.
+ * together. `adminPassHelp` is the calling command's own description for
+ * `--admin-pass`, kept verbatim so adding the file form does not rewrite help
+ * text users already read. `opts.hideAdminPassFile` omits the file form from
+ * this command's help output while keeping the flag parseable.
  */
-export function addAdminPassOptions(cmd: Command, adminPassHelp: string = ADMIN_PASS_HELP): Command {
-  return cmd.option(ADMIN_PASS_FLAG, adminPassHelp).option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP);
+export function addAdminPassOptions(
+  cmd: Command,
+  adminPassHelp: string = ADMIN_PASS_HELP,
+  opts: { hideAdminPassFile?: boolean } = {},
+): Command {
+  const adminPassFile = new Option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP);
+  if (opts.hideAdminPassFile) adminPassFile.hideHelp();
+  return cmd.option(ADMIN_PASS_FLAG, adminPassHelp).addOption(adminPassFile);
 }
 
 /**

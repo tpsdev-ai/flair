@@ -34,7 +34,7 @@ export function register(program: Command): void {
 // ─── flair restore ────────────────────────────────────────────────────────────
 
 
-addAdminPassOptions(program.command("restore <path>"))
+addAdminPassOptions(program.command("restore <path>"), "Admin password (or set FLAIR_ADMIN_PASS env)")
   .description("Import a Flair backup archive")
   .option("--merge", "Add/update records without deleting existing (default)")
   .option("--replace", "Delete archived Soul and Memory IDs first, then import")

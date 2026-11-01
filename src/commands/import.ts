@@ -62,7 +62,7 @@ export function register(program: Command): void {
 // ─── flair import ────────────────────────────────────────────────────────────
 
 
-addAdminPassOptions(program.command("import <path>"))
+addAdminPassOptions(program.command("import <path>"), "Admin password (or set FLAIR_ADMIN_PASS env)")
   .description("Import an agent from an export file into this Flair instance")
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")

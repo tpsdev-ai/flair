@@ -446,7 +446,7 @@ export function register(program: Command): void {
       );
     });
 
-  addAdminPassOptions(agent.command("list"))
+  addAdminPassOptions(agent.command("list"), "Admin password (or set FLAIR_ADMIN_PASS env)")
     .description("List all agents")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--agent <id>", "Agent ID to authenticate as via Ed25519 (or FLAIR_AGENT_ID env) when no admin pass")
@@ -573,7 +573,7 @@ export function register(program: Command): void {
       }
     });
 
-  addAdminPassOptions(agent.command("rotate-key <id>"))
+  addAdminPassOptions(agent.command("rotate-key <id>"), "Admin password (or set FLAIR_ADMIN_PASS env)")
     .description("Rotate an agent's Ed25519 keypair")
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper operations API port")
@@ -665,7 +665,7 @@ export function register(program: Command): void {
 
   // ─── flair agent remove ──────────────────────────────────────────────────────
 
-  addAdminPassOptions(agent.command("remove <id>"))
+  addAdminPassOptions(agent.command("remove <id>"), "Admin password (or set FLAIR_ADMIN_PASS env)")
     .description("Remove an agent and all its data from Flair")
     .option("--keep-keys", "Do not delete key files from disk")
     .option("--port <port>", "Harper HTTP port")

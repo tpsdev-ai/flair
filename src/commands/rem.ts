@@ -842,7 +842,7 @@ export function register(program: Command): void {
   // populating. Per spec § 5: candidates are NEVER auto-promoted; this command
   // is the operator's review surface.
 
-  addAdminPassOptions(rem.command("candidates"))
+  addAdminPassOptions(rem.command("candidates"), "Admin password (or set FLAIR_ADMIN_PASS)")
     .description("List staged memory candidates from the FLAIR-NIGHTLY-REM cycle (pending review)")
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper operations API port")

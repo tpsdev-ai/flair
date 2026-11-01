@@ -2473,7 +2473,7 @@ export function register(program: Command): void {
       }
     });
 
-  addAdminPassOptions(federation.command("watch"))
+  addAdminPassOptions(federation.command("watch"), "Admin password")
     .description("Run federation sync in a loop (foreground daemon)")
     .option("--interval <seconds>", "Seconds between syncs", "30")
     .option("--port <port>", "Harper HTTP port")

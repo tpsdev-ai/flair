@@ -51,7 +51,7 @@ export function register(program: Command): void {
 // ─── flair export ────────────────────────────────────────────────────────────
 
 
-addAdminPassOptions(program.command("export <agent-id>"))
+addAdminPassOptions(program.command("export <agent-id>"), "Admin password (or set FLAIR_ADMIN_PASS env)")
   .description("Export a single agent's identity (soul + memories) to a portable file")
   .option("--output <path>", "Output file path")
   .option("--include-key", "Include private key in export (UNENCRYPTED — keep the output file secure)")

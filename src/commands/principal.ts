@@ -261,7 +261,7 @@ export function register(program: Command): void {
 
   const principal = program.command("principal").description("Manage principals (humans and agents)");
 
-  addAdminPassOptions(principal.command("add <id>"))
+  addAdminPassOptions(principal.command("add <id>"), "Admin password for registration")
     .description("Create a new principal")
     .option("--kind <kind>", "Principal kind: human or agent", "agent")
     .option("--name <name>", "Display name (defaults to id)")
@@ -474,7 +474,7 @@ export function register(program: Command): void {
       console.log(`   Private key: ${privPath}`);
     });
 
-  addAdminPassOptions(principal.command("list"))
+  addAdminPassOptions(principal.command("list"), "Admin password (or set FLAIR_ADMIN_PASS)")
     .description("List all principals")
     .option("--kind <kind>", "Filter by kind: human or agent")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
@@ -617,7 +617,7 @@ export function register(program: Command): void {
     "active",
   );
 
-  addAdminPassOptions(principal.command("promote <id> <tier>"))
+  addAdminPassOptions(principal.command("promote <id> <tier>"), "Admin password")
     .description("Change a principal's trust tier (endorsed, corroborated, unverified)")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")

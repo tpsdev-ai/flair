@@ -279,7 +279,7 @@ export function register(program: Command): void {
       console.log(memId);
     });
 
-  addAdminPassOptions(memory.command("search [query]"))
+  addAdminPassOptions(memory.command("search [query]"), "Admin password — sign as admin while --agent names whose memories to search (flair#1500: a flag-pinned agent with no key no longer falls back to FLAIR_ADMIN_PASS)")
     .description("Semantic search over an agent's memories (query via positional arg or --q)")
     .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
     .option("--q <query>", "search query (alias for positional arg)")
