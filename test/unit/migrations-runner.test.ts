@@ -568,7 +568,7 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
     expect(state["fake-clears"].unconfirmedIds).toBeUndefined();
   });
 
-  it("a failed re-read keeps the id: unknown evidence never clears the record", async () => {
+  it("a failed re-read keeps the id during re-check", async () => {
     const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", stamp: "not-yet" }]);
     const relationship = makeStore([]);
     writeMigrationStateEntry(defaultStatePath(dataDir), "fake-unknown", {
@@ -601,7 +601,7 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
     expect(progress?.unconfirmedIds).toEqual(["m2"]);
   });
 
-  it("an unrecognized verdict keeps the id and is logged (flair#2881)", async () => {
+  async function recheckWithAnswer(answer: unknown): Promise<string[]> {
     const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", stamp: "not-yet" }]);
     const relationship = makeStore([]);
     writeMigrationStateEntry(defaultStatePath(dataDir), "fake-unrecognized", {
@@ -614,12 +614,13 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
     });
     const calls = { detect: 0 };
     const migration = {
-       ...makeTargetMigration("fake-unrecognized", memory, calls),
+      ...makeTargetMigration("fake-unrecognized", memory, calls),
       async checkUnconfirmed() {
-        return "unrecognized-answer" as unknown as "pending";
+        return answer as "pending";
       },
     } satisfies Migration;
     const warn = spyOn(console, "warn").mockImplementation(() => {});
+    let warnings: string[];
     try {
       await runMigrationCycle({
         registry: buildRegistryWith(migration),
@@ -628,7 +629,9 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
         runningVersion: "0.1.0",
         sleep: fastSleep,
       });
-      expect(warn.mock.calls.some((c) => String(c[0]).includes("unrecognized-answer"))).toBe(true);
+      expect(warn.mock.calls).toHaveLength(1);
+      expect(warn.mock.calls[0]?.[0]).toBe("[flair-migrations] %s: checkUnconfirmed(%s) answered %s; re-check kept id");
+      warnings = warn.mock.calls.map((c) => c.map(String).join(" "));
     } finally {
       warn.mockRestore();
     }
@@ -637,6 +640,33 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
     expect(progress?.state).toBe("halted");
     expect(progress?.rowsUnconfirmed).toBe(1);
     expect(progress?.unconfirmedIds).toEqual(["m2"]);
+    const state = readMigrationState(defaultStatePath(dataDir));
+    expect(state["fake-unrecognized"].unconfirmedIds).toEqual(["m2"]);
+    return warnings;
+  }
+
+  it("logs an unrecognized string and keeps the id (flair#2881)", async () => {
+    expect(await recheckWithAnswer("unrecognized-answer")).toEqual([
+      expect.stringContaining('"unrecognized-answer"'),
+    ]);
+  });
+
+  it("logs an object's type without its content and keeps the id (flair#2881)", async () => {
+    const warnings = await recheckWithAnswer({ content: "private-content-sentinel" });
+    expect(warnings.join(" ")).not.toContain("private-content-sentinel");
+    expect(warnings).toEqual([expect.stringContaining(" object")]);
+  });
+
+  it("logs a circular object's type and keeps the id (flair#2881)", async () => {
+    const answer: Record<string, unknown> = {};
+    answer.self = answer;
+    expect(await recheckWithAnswer(answer)).toEqual([expect.stringContaining(" object")]);
+  });
+
+  it("logs at most 40 string characters and keeps the id (flair#2881)", async () => {
+    const warnings = await recheckWithAnswer("a".repeat(40) + "private-suffix");
+    expect(warnings).toEqual([expect.stringContaining(`"${"a".repeat(40)}"`)]);
+    expect(warnings.join(" ")).not.toContain("private-suffix");
   });
 });
 

@@ -1,1 +1,1 @@
-- The migration runner keeps an unconfirmed row's record when a migration's re-check answers something other than at-target, no-row or pending, and logs the answer, instead of clearing the record.
+- During re-check, the migration runner keeps an unconfirmed id for any answer other than at-target or no-row and logs a short string or a type for an unrecognized answer. A later verified batch can clear the id.
