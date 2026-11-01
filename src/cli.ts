@@ -4910,6 +4910,9 @@ program.configureHelp({ showGlobalOptions: true });
 // redundant noise on the one command whose whole job is this exact report.
 program.hook("preAction", async (_thisCommand, actionCommand) => {
   if (actionCommand.name() === "doctor") return;
+  // flair#2887: `help` only prints. Skip the handshake probe so showing help
+  // never reaches the server.
+  if (actionCommand.name() === "help") return;
   // flair#2034 §2: `status` reports the server's version itself, next to this
   // CLI's and the install tree that serves it, and decides the advice from
   // that one comparison — a second, tree-blind "run: flair restart" line here
@@ -9219,6 +9222,39 @@ bindAttentionCli({
   resolveSigningAgentId,
 });
 registerAttention(program);
+
+// ─── flair help ──────────────────────────────────────────────────────────────
+// flair#2887: commander's implicit `help` command forwards only its first
+// operand, so `flair help presence set` printed `flair presence`'s help. This
+// registered command resolves the whole path and prints the leaf's help, the
+// same bytes as `<path> --help`. Resolving help never invokes a command action.
+// Registered last so the root listing keeps the help entry at the bottom, where
+// the implicit one sat.
+program
+  .command("help")
+  .argument("[command...]")
+  .description("display help for command")
+  .action((path: string[]) => {
+    let target: Command = program;
+    let unknown: string | undefined;
+    for (const name of path) {
+      const next = target.commands.find(
+        (candidate: Command) =>
+          candidate.name() === name || candidate.aliases().includes(name),
+      );
+      if (!next) {
+        unknown = name;
+        break;
+      }
+      target = next;
+    }
+    target.outputHelp();
+    if (unknown !== undefined) {
+      // Same wording as commander's own unknown-command error, on stderr.
+      process.stderr.write(`error: unknown command '${unknown}'\n`);
+      process.exitCode = 1;
+    }
+  });
 
 // Parse argv and run the CLI. Exported so the CommonJS preflight shim
 // (cli-shim.cts → dist/cli-shim.cjs, the real bin entry) can invoke it after
