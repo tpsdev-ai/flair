@@ -74,6 +74,23 @@ const tarballStem = (pkg: string) => pkg.replace(/^@/, "").replace("/", "-");
 const prefixArgs = (prefixOf: (input: (typeof CONSUMER_INPUTS)[number]) => string) =>
   CONSUMER_INPUTS.flatMap((input) => [input.flag, prefixOf(input)]);
 
+/** Commits a fixture's allowlist so the gate can read the history it checks. */
+function commitAllowlistHistory(root: string, date = "2026-11-01T12:00:00Z") {
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "fixture",
+    GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+    GIT_COMMITTER_NAME: "fixture",
+    GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+    GIT_AUTHOR_DATE: date,
+    GIT_COMMITTER_DATE: date,
+  };
+  for (const args of [["init", "-q"], ["add", ".github/audit-allowlist.json"], ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "fixture allowlist"]]) {
+    const res = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", env, timeout: 20_000 });
+    if (res.status !== 0) throw new Error(`fixture git ${args[0]} failed (${res.status}): ${res.stderr}`);
+  }
+}
+
 /** The advisory the "advisory" registry answer lists for DEP. */
 const ADVISORY_ANSWER = {
   [DEP]: [
@@ -252,6 +269,7 @@ function makeFixture(opts: FixtureOptions): Fixture {
     join(root, ".github", "audit-allowlist.json"),
     JSON.stringify({ policy: ALLOWLIST_POLICY, entries: [] }),
   );
+  commitAllowlistHistory(root);
 
   writeFileSync(
     join(root, "package.json"),
@@ -570,6 +588,7 @@ describe("ADK uuid paths from real npm audit", () => {
           policy: ALLOWLIST_POLICY, entries: allowlist.entries.filter((entry: { package: string; introducedBy: string }) =>
             entry.package === "uuid" && entry.introducedBy === chain.join(" -> ")),
         }));
+        commitAllowlistHistory(f.root);
         const run = await runProcess(process.execPath, [
           join(f.root, "scripts/audit-gate.mjs"),
           ...prefixArgs((input) => (input.source === "npm-install-adk" ? adkPrefix : f.prefixes[input.source]!)),
@@ -640,6 +659,7 @@ describe("two ADK uuid copies from real npm audit, one allowlist entry per copy"
         const uuidEntries = allowlist.entries.filter((entry: { package: string }) => entry.package === "uuid");
         expect(uuidEntries.length).toBe(2);
         writeFileSync(join(f.root, ".github/audit-allowlist.json"), JSON.stringify({ policy: ALLOWLIST_POLICY, entries: uuidEntries }));
+        commitAllowlistHistory(f.root);
         const run = await runProcess(process.execPath, [
           join(f.root, "scripts/audit-gate.mjs"),
           ...prefixArgs((input) => (input.source === "npm-install-adk" ? adkPrefix : f.prefixes[input.source]!)),

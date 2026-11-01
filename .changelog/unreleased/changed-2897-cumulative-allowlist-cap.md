@@ -1,0 +1,1 @@
+- **The audit allowlist's severity cap now counts an advisory's whole allowlisted lifetime.** `added` is checked against the day the advisory first entered the file's git history, so a renewal, re-key or delete-then-re-add cannot restart the clock; an entry over its cap passes only with a dated `overCapApproval`, and the gate prints it as `OVER-CAP`.
