@@ -418,6 +418,7 @@ import {
   bindCli as bindAttentionCli,
   register as registerAttention,
 } from "./commands/attention.js";
+import { registerHelp } from "./commands/help.js";
 import {
   bindCli as bindBootstrapCli,
   register as registerBootstrap,
@@ -9224,37 +9225,8 @@ bindAttentionCli({
 registerAttention(program);
 
 // ─── flair help ──────────────────────────────────────────────────────────────
-// flair#2887: commander's implicit `help` command forwards only its first
-// operand, so `flair help presence set` printed `flair presence`'s help. This
-// registered command resolves the whole path and prints that command's help,
-// the same bytes as `<path> --help`. Resolving help never invokes a command action.
-// Registered last so the root listing keeps the help entry at the bottom, where
-// the implicit one sat.
-program
-  .command("help")
-  .argument("[command...]")
-  .description("display help for command")
-  .action((path: string[]) => {
-    let target: Command = program;
-    let unknown: string | undefined;
-    for (const name of path) {
-      const next = target.commands.find(
-        (candidate: Command) =>
-          candidate.name() === name || candidate.aliases().includes(name),
-      );
-      if (!next) {
-        unknown = name;
-        break;
-      }
-      target = next;
-    }
-    target.outputHelp();
-    if (unknown !== undefined) {
-      // Same wording as commander's own unknown-command error, on stderr.
-      process.stderr.write(`error: unknown command '${unknown}'\n`);
-      process.exitCode = 1;
-    }
-  });
+// Command registration lives in src/commands/help.ts (flair#2887).
+registerHelp(program);
 
 // Parse argv and run the CLI. Exported so the CommonJS preflight shim
 // (cli-shim.cts → dist/cli-shim.cjs, the real bin entry) can invoke it after
