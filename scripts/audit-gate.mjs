@@ -139,9 +139,7 @@ export function entryKey(entry) {
 
 /** How a diagnostic names an entry when its GHSA has more than one. */
 function entryLabel(entry, index) {
-  // Diagnostics name entries the schema check has already refused, so the
-  // label must not assume a valid shape: a throw here would replace every
-  // recorded problem with a stack trace.
+  // Formats a non-array `sources` value as text instead of joining it.
   const sources = Array.isArray(entry.sources) ? entry.sources.join(", ") : String(entry.sources ?? "");
   return `entry[${index}] (${entry.ghsa} / ${entry.package}, sources [${sources}], via ${entry.introducedBy})`;
 }
@@ -159,6 +157,20 @@ const VALID_CLASSES = new Set([
 
 const failures = [];
 const warnings = [];
+
+function reportFailuresAndExit() {
+  console.log(`  ${failures.length} problem(s) block this build:\n`);
+  for (const f of failures) {
+    console.log(`::error::audit-gate: ${f.split("\n")[0]}`);
+    console.log(`    - ${f}\n`);
+  }
+  console.log(
+    "  This gate is blocking by design. Do not add `continue-on-error` or `|| true` to it —\n" +
+      "  that is the exact defect it was written to remove. Either fix the advisory, or add a\n" +
+      "  justified, dated entry to .github/audit-allowlist.json that a reviewer has agreed to.\n",
+  );
+  process.exit(1);
+}
 const notes = [];
 
 const fail = (m) => failures.push(m);
@@ -542,9 +554,9 @@ export function validateAllowlist(allowlist, today) {
       if (v === undefined || v === null || String(v).trim() === "") {
         problems.push(`${where}: missing required field "${f}"`);
       } else if (f !== "sources" && typeof v !== "string") {
-        // String({}) is "[object Object]": presence alone admitted an object,
-        // and paths that never read the field (bun admission and introducedBy)
-        // then let the entry cover an advisory.
+        // String({}) is "[object Object]", so presence alone admitted an object,
+        // and the bun admission path, which does not check introducedBy, then let
+        // such an entry cover an advisory.
         problems.push(`${where}: "${f}" must be a string (found ${Array.isArray(v) ? "an array" : typeof v})`);
       }
     }
@@ -1327,6 +1339,12 @@ async function main() {
 
   const schemaProblems = validateAllowlist(allowlist, today);
   for (const p of schemaProblems) fail(`allowlist is malformed — ${p}`);
+  // Matching against a malformed allowlist can admit an entry the schema check
+  // refused, and the summary would count it as allowlisted. Report and stop.
+  if (schemaProblems.length) {
+    console.log("\n  The allowlist is malformed; no advisory was matched against it.\n");
+    reportFailuresAndExit();
+  }
 
   // Every entry for a GHSA, in file order. A GHSA with one entry is matched as
   // it always was; one with several is matched per source and per location.
@@ -1563,9 +1581,7 @@ async function main() {
   allowlist.entries.forEach((entry, index) => {
     if (!entry?.ghsa) return;
     const observed = coveredBy.get(index) ?? new Set();
-    // A non-array value is a schema problem already recorded; a string here would
-    // be split into characters and named as sources.
-    const declared = new Set(Array.isArray(entry.sources) ? entry.sources : []);
+    const declared = new Set(entry.sources ?? []);
     const siblings = (entriesByGhsa.get(String(entry.ghsa).toUpperCase()) ?? []).length > 1;
     if (siblings) {
       const label = `allowlist ${entryLabel(entry, index)}`;
@@ -1730,19 +1746,7 @@ async function main() {
   }
   if (warnings.length) console.log("");
 
-  if (failures.length) {
-    console.log(`  ${failures.length} problem(s) block this build:\n`);
-    for (const f of failures) {
-      console.log(`::error::audit-gate: ${f.split("\n")[0]}`);
-      console.log(`    - ${f}\n`);
-    }
-    console.log(
-      "  This gate is blocking by design. Do not add `continue-on-error` or `|| true` to it —\n" +
-        "  that is the exact defect it was written to remove. Either fix the advisory, or add a\n" +
-        "  justified, dated entry to .github/audit-allowlist.json that a reviewer has agreed to.\n",
-    );
-    process.exit(1);
-  }
+  if (failures.length) reportFailuresAndExit();
 
   console.log("  PASS — every reported advisory is enumerated, justified and dated.\n");
 }
@@ -1750,8 +1754,7 @@ async function main() {
 // Only run when executed directly, so the unit tests can import the helpers.
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   main().catch((e) => {
-    // A crash must not hide what the gate had already found: a diagnostic that
-    // assumes a valid shape can throw on an entry the schema check refused.
+    // A crash must not hide the problems the gate had already recorded.
     if (failures.length) {
       console.error(`audit-gate: ${failures.length} problem(s) were recorded before the crash:`);
       for (const m of failures) console.error(`::error::audit-gate: ${m}`);

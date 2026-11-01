@@ -1043,8 +1043,13 @@ describe("several allowlist entries for one advisory, per source and per locatio
     expectBlocked(res, `${UUID} (uuid): node "node_modules/uuid" in npm-install-adk is covered by no allowlist entry`);
   }, 12_000);
 
+  it("refuses an empty ADK chain beside a valid sibling before matching", () => {
+    const res = runMulti({ entries: [uuidEntry(VERTEXAI), uuidEntry("")], npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE) });
+    expectBlocked(res, 'missing required field "introducedBy"');
+    expect(res.stdout).not.toContain("allowlisted (justified + dated)");
+  }, 12_000);
+
   for (const [name, introducedBy, refusal] of [
-    ["empty", "", 'missing required field "introducedBy"'],
     ["prefix-only", "@tpsdev-ai/adk-flair -> @google/adk", "invalid @tpsdev-ai/adk-flair dependency chain"],
     ["broken-edge", "@tpsdev-ai/adk-flair -> @google/adk -> gtoken -> gaxios -> uuid", "@google/adk does not depend on gtoken"],
     ["wrong-copy", "@tpsdev-ai/adk-flair -> @google/adk -> @a2a-js/sdk -> uuid", "is STALE — it covers no reported advisory location"],
@@ -1062,17 +1067,14 @@ describe("several allowlist entries for one advisory, per source and per locatio
   }, 12_000);
 
   it("reports a non-array sources value beside a sibling entry instead of crashing", () => {
-    // The schema check records the problem and the gate goes on matching; naming
-    // that entry in a later diagnostic must not throw, or the crash handler
-    // prints a stack trace and the recorded schema problem is never shown.
+    // The gate stops before matching, so no later diagnostic names this entry.
     const res = runMulti({
       entries: [uuidEntry(VERTEXAI), uuidEntry(GTOKEN, { sources: "npm-install-adk" })],
       npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE),
     });
     expectBlocked(res, `entry[1] (${UUID} / uuid): "sources" must be a non-empty array`);
     expect(res.stderr).not.toContain("audit-gate crashed");
-    // The staleness diagnostic names no sources rather than the string's characters.
-    expect(res.stdout).toContain("in any source it declares (none)");
+    expect(res.stdout).not.toContain("allowlisted (justified + dated)");
   }, 12_000);
 
   it("refuses a required field that is not a string, and does not admit the advisory", () => {
@@ -1081,19 +1083,20 @@ describe("several allowlist entries for one advisory, per source and per locatio
     const objectChain = entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob", { introducedBy: {} });
     expect(validateAllowlist({ policy: ALLOWLIST.policy, entries: [objectChain] }, new Date("2026-10-01")).join("\n"))
       .toContain('"introducedBy" must be a string (found object)');
-    expectBlocked(runMulti({ entries: [objectChain], bun: bunReport(["glob"]) }), '"introducedBy" must be a string (found object)');
+    const res = runMulti({ entries: [objectChain], bun: bunReport(["glob"]) });
+    expectBlocked(res, '"introducedBy" must be a string (found object)');
+    expect(res.stdout).not.toContain("allowlisted (justified + dated)");
   }, 12_000);
 
-  it("prints the problems it had recorded when a later diagnostic crashes", () => {
-    // Some diagnostics still assume a valid shape after the schema check has
-    // recorded the entry (an array-valued class reaches string formatting). A
-    // crash there must not replace the recorded problems with a stack trace.
+  it("refuses an array-valued class before matching", () => {
+    // The gate stops before matching, so this entry is never counted as allowlisted.
     const arrayClass = entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob", { class: ["remediation-available"] });
     const res = runMulti({ entries: [arrayClass], bun: bunReport(["glob"]) });
     expect(res.error).toBeUndefined();
     expect(res.status).toBe(1);
-    expect(`${res.stdout}\n${res.stderr}`).toContain('"class" must be a string (found an array)');
-    expect(`${res.stdout}\n${res.stderr}`).not.toContain("PASS —");
+    expect(res.stdout).toContain('"class" must be a string (found an array)');
+    expect(res.stderr).not.toContain("audit-gate crashed");
+    expect(res.stdout).not.toContain("allowlisted (justified + dated)");
   }, 12_000);
 
   it("refuses vendor-pinned on the bun source and accepts remediation-available there", () => {
