@@ -12,6 +12,7 @@ import { loadApprovedArchive } from "../lib/backup-approval-store.js";
 import type { RestoreArchive } from "../lib/restore-archive.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { comparePreservedFields } from "../lib/restore-verify.js";
+import { SOUL_SCOPE_FIELDS_REFUSAL } from "../lib/soul-scope-fields.js";
 import * as render from "../render.js";
 import { existsSync } from "node:fs";
 
@@ -128,7 +129,7 @@ program
       return;
     }
 
-    async function adminWrite(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<number | undefined> {
+    async function adminWrite(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<{ status: number | undefined; error: string | undefined }> {
       try {
         const res = await fetch(`${baseUrl}${path}`, {
           method,
@@ -136,7 +137,25 @@ program
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: AbortSignal.timeout(10_000),
         });
-        return res.status;
+        // The refusal name is read from the body, never the outcome: a body
+        // that cannot be read keeps the status this write answered with.
+        let error: string | undefined;
+        try {
+          error = errorName(await res.text());
+        } catch {
+          error = undefined;
+        }
+        return { status: res.status, error };
+      } catch {
+        return { status: undefined, error: undefined };
+      }
+    }
+
+    /** The `error` name in a refusal body, when it carries one. */
+    function errorName(text: string): string | undefined {
+      try {
+        const error = (JSON.parse(text) as { error?: unknown })?.error;
+        return typeof error === "string" ? error : undefined;
       } catch {
         return undefined;
       }
@@ -151,7 +170,7 @@ program
       console.log("\nDeleting existing data (replace mode)...");
       for (const { name, rows } of collections.filter(({ name }) => name !== "Agent")) {
         for (const row of rows) {
-          const status = await adminWrite("DELETE", `/${name}/${encodeRecordId(row.id)}`);
+          const { status } = await adminWrite("DELETE", `/${name}/${encodeRecordId(row.id)}`);
           if (status === undefined || (status !== 404 && (status < 200 || status >= 300))) {
             failures.push(diagnostic(name, row, "DELETE", status));
           }
@@ -162,9 +181,11 @@ program
     for (const { name, rows } of collections) {
       console.log(`Restoring ${name} records...`);
       for (const row of rows) {
-        const status = await adminWrite("PUT", `/${name}/${encodeRecordId(row.id)}`, row);
+        const { status, error } = await adminWrite("PUT", `/${name}/${encodeRecordId(row.id)}`, row);
         if (status === undefined || status < 200 || status >= 300) {
-          failures.push(diagnostic(name, row, "PUT", status));
+          // A row the server refuses for supplying `tags`/`scopeTag` is
+          // reported with the row and the refusal's name (flair#1540).
+          failures.push(`${diagnostic(name, row, "PUT", status)}${error === SOUL_SCOPE_FIELDS_REFUSAL ? `: ${error}` : ""}`);
         }
       }
     }

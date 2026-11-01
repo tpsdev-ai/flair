@@ -9,9 +9,21 @@
 import { Command } from "commander";
 import { defaultKeysDir, resolveAdminUser } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { SOUL_SCOPE_FIELDS_REFUSAL } from "../lib/soul-scope-fields.js";
 import * as render from "../render.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import nacl from "tweetnacl";
+
+/** The `error` name of a refused response, when it carries one. */
+async function namedRefusal(res: Response): Promise<string | undefined> {
+  try {
+    const body = await res.json();
+    const error = (body as { error?: unknown })?.error;
+    return typeof error === "string" ? error : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export type ImportCli = {
   b64url: (...args: any[]) => any;
@@ -141,11 +153,21 @@ program
     let soulCount = 0;
     for (const soul of data.souls ?? []) {
       try {
-        await fetch(`${baseUrl}/Soul/${encodeRecordId(soul.id)}`, {
+        const res = await fetch(`${baseUrl}/Soul/${encodeRecordId(soul.id)}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json", Authorization: auth },
           body: JSON.stringify(soul),
         });
+        // A row the server refuses by name for supplying `tags`/`scopeTag` is
+        // reported with its id and left out of the count; the rest of the
+        // archive is imported as before (flair#1540).
+        if (!res.ok) {
+          const refusal = await namedRefusal(res);
+          if (refusal === SOUL_SCOPE_FIELDS_REFUSAL) {
+            console.log(`${render.icons.warn} Soul ${soul.id} refused: ${refusal}`);
+            continue;
+          }
+        }
         soulCount++;
       } catch { /* skip failures */ }
     }
