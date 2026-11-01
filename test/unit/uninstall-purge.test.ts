@@ -17,9 +17,11 @@ import {
   wireCodex,
   wireGemini,
   wireCursor,
+  wireAntigravity,
   wirePi,
   ALL_CLIENTS,
   clientConfigBackupPath,
+  clientConfigHasFlairEntry,
   piSettingsPath,
   piPackageEntrySource,
   isPiFlairNpmSource,
@@ -535,6 +537,148 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
     const report = formatPurgeReport(result);
     expect(report.lines.join("\n")).toContain("Not checked: ~/.cursor/mcp.json.bak");
     expect(report.claimedFullyPurged).toBe(false);
+  }, 30_000);
+
+  test("pi lookalikes that are not Flair's own are left and reported as not checked", () => {
+    mkdirSync(join(isoHome, ".pi", "agent"), { recursive: true });
+    const bak = clientConfigBackupPath("pi");
+    const lookalikes = [
+      JSON.stringify({ extensions: ["~/work/pi-flair/notes.js"] }, null, 2) + "\n",
+      JSON.stringify({ extensions: ["npm:@other/pi-flair"] }, null, 2) + "\n",
+      JSON.stringify({ packages: ["npm:@other/pi-flair"] }, null, 2) + "\n",
+    ];
+
+    for (const bakBytes of lookalikes) {
+      writeFileSync(bak, bakBytes);
+      const result = purgeFlairInstall({
+        homeDir: isoHome,
+        skipSchedulerUnload: true,
+        omitNpmLeftover: true,
+      });
+      expect(readFileSync(bak, "utf-8")).toBe(bakBytes);
+      expect(result.removed).not.toContain("~/.pi/agent/settings.json.bak");
+      expect(result.leftovers.filter((l) => l.kind === "unverified").map((l) => l.path))
+        .toContain("~/.pi/agent/settings.json.bak");
+    }
+  }, 30_000);
+
+  test("an undecidable pre-existing backup survives an unwire that rewrites the active config", () => {
+    withHome(isoHome, () => {
+      wireGemini(ENV);
+      wireCursor(ENV);
+      wireAntigravity(ENV);
+    });
+
+    // A dangling symlink: the read fails for every uid, root included.
+    const cursorBak = clientConfigBackupPath("cursor");
+    symlinkSync(join(isoHome, "gone.json"), cursorBak);
+    // Unparseable JSON.
+    const geminiBak = clientConfigBackupPath("gemini");
+    const geminiBytes = "{ not json\n";
+    writeFileSync(geminiBak, geminiBytes);
+    // Unreadable for every uid: a directory in the file's place.
+    const antigravityBak = clientConfigBackupPath("antigravity");
+    mkdirSync(antigravityBak, { recursive: true });
+
+    const result = purgeFlairInstall({
+      homeDir: isoHome,
+      skipSchedulerUnload: true,
+      omitNpmLeftover: true,
+    });
+
+    expect(purgeHadFailures(result)).toBe(true);
+    const unverified = result.leftovers.filter((l) => l.kind === "unverified").map((l) => l.path);
+    expect(unverified).toContain("~/.cursor/mcp.json.bak");
+    expect(unverified).toContain("~/.gemini/settings.json.bak");
+    expect(unverified).toContain("~/.gemini/config/mcp_config.json.bak");
+    expect(result.removed).not.toContain("~/.cursor/mcp.json.bak");
+    expect(result.removed).not.toContain("~/.gemini/settings.json.bak");
+    expect(result.removed).not.toContain("~/.gemini/config/mcp_config.json.bak");
+
+    expect(lstatSync(cursorBak).isSymbolicLink()).toBe(true);
+    expect(readFileSync(geminiBak, "utf-8")).toBe(geminiBytes);
+    expect(lstatSync(antigravityBak).isDirectory()).toBe(true);
+
+    // The active configs were rewritten, so these backups were held across a
+    // write that would otherwise have replaced them.
+    for (const path of [
+      join(isoHome, ".cursor", "mcp.json"),
+      join(isoHome, ".gemini", "settings.json"),
+      join(isoHome, ".gemini", "config", "mcp_config.json"),
+    ]) {
+      expect(JSON.parse(readFileSync(path, "utf-8")).mcpServers?.flair).toBeUndefined();
+    }
+  }, 30_000);
+
+  test("a JSON null client backup is not checked, not treated as absent", () => {
+    expect(clientConfigHasFlairEntry("gemini", Buffer.from("null\n"), "x").status).toBe("unknown");
+    mkdirSync(join(isoHome, ".gemini"), { recursive: true });
+    const bak = clientConfigBackupPath("gemini");
+    writeFileSync(bak, "null\n");
+
+    const result = purgeFlairInstall({
+      homeDir: isoHome,
+      skipSchedulerUnload: true,
+      omitNpmLeftover: true,
+    });
+
+    expect(readFileSync(bak, "utf-8")).toBe("null\n");
+    expect(result.leftovers.filter((l) => l.kind === "unverified").map((l) => l.path))
+      .toContain("~/.gemini/settings.json.bak");
+  }, 30_000);
+
+  test("purging a different home resolves pi there and ignores PI_CODING_AGENT_DIR", () => {
+    const target = mkdtempSync(join(tmpdir(), "flair-purge-pi-target-"));
+    const callerHome = mkdtempSync(join(tmpdir(), "flair-purge-pi-caller-"));
+    try {
+      seedWiredHome(target);
+      const callerPiDir = join(callerHome, "caller-pi");
+      mkdirSync(callerPiDir, { recursive: true });
+      const callerPi = join(callerPiDir, "settings.json");
+      const callerBytes = JSON.stringify({ packages: ["npm:@tpsdev-ai/pi-flair@9.9.9"] }, null, 2) + "\n";
+      writeFileSync(callerPi, callerBytes);
+
+      process.env.HOME = callerHome;
+      process.env.PI_CODING_AGENT_DIR = callerPiDir;
+      const result = purgeFlairInstall({
+        homeDir: target,
+        skipSchedulerUnload: true,
+        omitNpmLeftover: true,
+      });
+
+      const targetPi = join(target, ".pi", "agent", "settings.json");
+      expect(JSON.parse(readFileSync(targetPi, "utf-8")).packages)
+        .toEqual([{ source: "npm:some-other-package@1.0.0" }]);
+      expect(readFileSync(callerPi, "utf-8")).toBe(callerBytes);
+      expect((result.notes ?? []).join("\n")).toContain("PI_CODING_AGENT_DIR");
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+      rmSync(callerHome, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("purging the same home still honours PI_CODING_AGENT_DIR", () => {
+    const overrideDir = join(isoHome, "custom-pi-agent");
+    mkdirSync(overrideDir, { recursive: true });
+    const settings = join(overrideDir, "settings.json");
+    writeFileSync(settings, JSON.stringify({
+      packages: ["npm:@tpsdev-ai/pi-flair@9.9.9"],
+      extensions: ["~/notes.js"],
+    }, null, 2) + "\n");
+    const bak = `${settings}.bak`;
+    writeFileSync(bak, JSON.stringify({ packages: ["npm:@tpsdev-ai/pi-flair@9.9.9"] }, null, 2) + "\n");
+
+    process.env.HOME = isoHome;
+    process.env.PI_CODING_AGENT_DIR = overrideDir;
+    const result = purgeFlairInstall({
+      homeDir: isoHome,
+      skipSchedulerUnload: true,
+      omitNpmLeftover: true,
+    });
+
+    expect(JSON.parse(readFileSync(settings, "utf-8"))).toEqual({ packages: [], extensions: ["~/notes.js"] });
+    expect(existsSync(bak)).toBe(false);
+    expect(result.notes ?? []).toEqual([]);
   }, 30_000);
 
   test("plain uninstall keeps every client-config backup", async () => {

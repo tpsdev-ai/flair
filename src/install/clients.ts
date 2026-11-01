@@ -1074,12 +1074,12 @@ export function extractPiFlairPin(source: string): string | null {
 }
 
 /**
- * Does this `extensions` entry point at pi-flair BY PATH (the documented
+ * Does this `extensions` entry mention pi-flair at all (the documented
  * pre-0.49 workaround: a local path to the installed dist/index.js)? A
  * substring heuristic on the package/directory name — the entry is user-
  * written free text, so this is deliberately loose in the direction of
- * REPORTING (doctor names the entry it matched); it never gates anything
- * destructive.
+ * REPORTING (doctor names the entry it matched). It does not decide a
+ * removal: that needs `isFlairOwnedPiEntry`.
  */
 export function isPiFlairExtensionPath(entry: string): boolean {
   if (typeof entry !== "string" || entry.startsWith("npm:") || entry.startsWith("git:")) return false;
@@ -1389,9 +1389,9 @@ export function clientConfigBackupPath(id: ClientId): string {
 
 /**
  * What a client-config snapshot says about Flair wiring. `unknown` is a read
- * that could not be decided (malformed JSON in a JSON config, a non-object, or
- * a pi path that names pi-flair only loosely) — it is never "absent"
- * (flair#2886).
+ * that could not be decided (malformed JSON in a JSON config, a non-object,
+ * including JSON `null`, or a pi entry that mentions pi-flair without being
+ * Flair's own) — it is never "absent" (flair#2886).
  */
 export type ClientConfigFlairScan =
   | { status: "present" }
@@ -1403,9 +1403,9 @@ export type ClientConfigFlairScan =
  * copy of the config rather than the live file (purge's `.bak` sweep,
  * flair#2886). `present` and `absent` use the identification that client's
  * `unwire()` acts on. `unknown` is a read that could not decide the file —
- * never "absent": malformed JSON in a JSON config, a non-object, or a pi
- * `extensions` path that names pi-flair only by the loose substring test.
- * `path` only names the file in an `unknown` reason.
+ * never "absent": malformed JSON in a JSON config, a non-object (including
+ * JSON `null`), or a pi entry that mentions pi-flair without being Flair's
+ * own. `path` only names the file in an `unknown` reason.
  */
 export function clientConfigHasFlairEntry(
   id: ClientId,
@@ -1421,16 +1421,16 @@ export function clientConfigHasFlairEntry(
   }
   const read = parseSettingsBytes(bytes, path);
   if (read.parseError) return { status: "unknown", reason: read.parseError };
-  const config: any = read.parsed ?? {};
+  const config: any = read.parsed;
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     return { status: "unknown", reason: `not a JSON object: ${path}` };
   }
   if (id === "pi") {
     const scan = piConfigFlairEntryScan(config);
-    if (scan.status === "loose-path") {
+    if (scan.status === "unrecognized") {
       return {
         status: "unknown",
-        reason: `an extensions path names pi-flair only in its file name (${scan.entry}): ${path}`,
+        reason: `an entry mentions pi-flair without being Flair's own (${scan.entry}): ${path}`,
       };
     }
     return { status: scan.status };
@@ -1585,50 +1585,63 @@ function mcpConfigHasFlairEntry(config: any): boolean {
 }
 
 /**
- * Does this `extensions` entry point INSIDE the pi-flair package? Exact path
- * segment, so the documented workaround
- * `~/.pi/agent/npm/node_modules/@tpsdev-ai/pi-flair/dist/index.js` names it and
- * `~/dist/pi-flair-notes.js` does not (flair#2886). */
-function isPiFlairPackagePath(entry: string): boolean {
-  return entry.replace(/\\/g, "/").split("/").some((segment) => segment === "pi-flair");
+ * Is this pi entry Flair's OWN pi-flair entry? One rule, for an npm source and
+ * for an `extensions` file path:
+ *   - an npm source is `npm:@tpsdev-ai/pi-flair` or
+ *     `npm:@tpsdev-ai/pi-flair@<spec>` and nothing else;
+ *   - a file path contains the consecutive segments
+ *     `node_modules/@tpsdev-ai/pi-flair/` after backslash normalisation.
+ * Anything else that contains `pi-flair` is not Flair's: never removed.
+ */
+export function isFlairOwnedPiEntry(entry: string): boolean {
+  if (typeof entry !== "string") return false;
+  if (isPiFlairNpmSource(entry)) return true;
+  if (entry.startsWith("npm:") || entry.startsWith("git:")) return false;
+  const segments = entry.replace(/\\/g, "/").split("/");
+  for (let i = 0; i + 3 < segments.length; i++) {
+    if (segments[i] === "node_modules" && segments[i + 1] === "@tpsdev-ai" && segments[i + 2] === "pi-flair") {
+      return true;
+    }
+  }
+  return false;
 }
 
-/** What a pi settings object says about pi-flair. `loose-path` is an
- *  `extensions` path that `isPiFlairExtensionPath` matches on the substring
- *  only — that heuristic is for doctor's reporting, so it cannot decide
+/** What a pi settings object says about pi-flair. `unrecognized` is an entry
+ *  that mentions `pi-flair` without being Flair's own — it cannot decide
  *  whether a snapshot is safe to delete (flair#2886). */
 type PiFlairEntryScan =
   | { status: "present" }
   | { status: "absent" }
-  | { status: "loose-path"; entry: string };
+  | { status: "unrecognized"; entry: string };
 
 /**
- * The pi shape that counts as a Flair entry: a `packages` source naming
- * pi-flair, or an `extensions` entry naming it as an npm source or pointing
- * inside its package. An `extensions` path that only contains the string
- * `pi-flair` is `loose-path`. Shared with `_unwirePi` for the same reason as
- * `mcpConfigHasFlairEntry`.
+ * The pi shape that counts as a Flair entry: an exact pi-flair `packages`
+ * source, or an `extensions` entry that `isFlairOwnedPiEntry` accepts. Any
+ * other entry containing `pi-flair` is `unrecognized`. Shared with `_unwirePi`
+ * for the same reason as `mcpConfigHasFlairEntry`.
  */
 function piConfigFlairEntryScan(config: any): PiFlairEntryScan {
   const packages = Array.isArray(config.packages) ? config.packages : [];
-  if (packages.some((entry: unknown) => {
+  let unrecognized: string | null = null;
+  for (const entry of packages) {
     const source = piPackageEntrySource(entry);
-    return !!(source && isPiFlairNpmSource(source));
-  })) return { status: "present" };
+    if (!source) continue;
+    if (isPiFlairNpmSource(source)) return { status: "present" };
+    if (unrecognized === null && source.includes("pi-flair")) unrecognized = source;
+  }
   const extensions = Array.isArray(config.extensions) ? config.extensions : [];
-  let loose: string | null = null;
   for (const entry of extensions) {
     if (typeof entry !== "string") continue;
-    if (isPiFlairNpmSource(entry) || isPiFlairPackagePath(entry)) return { status: "present" };
-    if (loose === null && isPiFlairExtensionPath(entry)) loose = entry;
+    if (isFlairOwnedPiEntry(entry)) return { status: "present" };
+    if (unrecognized === null && entry.includes("pi-flair")) unrecognized = entry;
   }
-  return loose === null ? { status: "absent" } : { status: "loose-path", entry: loose };
+  return unrecognized === null ? { status: "absent" } : { status: "unrecognized", entry: unrecognized };
 }
 
-/** The unwire rewrites the file for a `loose-path` entry too, so it counts as
- *  an entry there. */
+/** The unwire removes only Flair-owned entries, so only `present` makes it
+ *  read the file. */
 function piConfigHasFlairEntry(config: any): boolean {
-  return piConfigFlairEntryScan(config).status !== "absent";
+  return piConfigFlairEntryScan(config).status === "present";
 }
 
 /**
@@ -1651,7 +1664,7 @@ function unwireJsonMcp(configPath: string, label: string): UnwireResult {
           outcome = { ok: false, removed: false, message: `${label}: could not unwire ${display}: ${jsonFailureReason(configPath, read.parseError)}` };
           return { hold: outcome.message };
         }
-        const config: any = read.parsed ?? {};
+        const config: any = read.parsed;
         if (!config || typeof config !== "object" || Array.isArray(config)) {
           outcome = { ok: false, removed: false, message: `${label}: refusing to modify a non-object config at ${display}` };
           return { hold: outcome.message };
@@ -1760,7 +1773,7 @@ function _unwirePi(): UnwireResult {
           settled = { ok: false, removed: false, message: `pi: could not unwire ${display}: ${jsonFailureReason(path, read.parseError)}` };
           return { hold: settled.message };
         }
-        const config: any = read.parsed ?? {};
+        const config: any = read.parsed;
         if (!config || typeof config !== "object" || Array.isArray(config)) {
           settled = { ok: false, removed: false, message: `pi: refusing to modify a non-object config at ${display}` };
           return { hold: settled.message };
@@ -1782,7 +1795,7 @@ function _unwirePi(): UnwireResult {
         }
         if (Array.isArray(config.extensions)) {
           const kept = config.extensions.filter((entry: unknown) => {
-            if (typeof entry === "string" && (isPiFlairNpmSource(entry) || isPiFlairExtensionPath(entry))) {
+            if (typeof entry === "string" && isFlairOwnedPiEntry(entry)) {
               return false;
             }
             return true;

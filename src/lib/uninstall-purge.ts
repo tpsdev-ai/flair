@@ -15,7 +15,7 @@
  * "fully purged" when anything remains.
  */
 
-import { existsSync, lstatSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { resolveHome, withHome } from "./home.js";
 import {
@@ -23,6 +23,7 @@ import {
   clientConfigBackupPath,
   clientConfigHasFlairEntry,
   type ClientId,
+  type UnwireResult,
 } from "../install/clients.js";
 import {
   uninstallContinuityHooks,
@@ -51,8 +52,9 @@ export const FLAIR_NPM_PACKAGE = "@tpsdev-ai/flair";
 
 export interface PurgeLeftover {
   path: string;
-  /** `unverified`: purge could not decide this path (an unreadable file, an
-   *  unparseable JSON config, or a pi path naming pi-flair only loosely). It is
+  /** `unverified`: purge could not decide this path (an unreadable file, a
+   *  JSON config that is malformed, `null` or otherwise not an object, or a pi
+   *  entry that mentions pi-flair without being Flair's own). It is
    *  left in place and reported by name — never claimed removed and never
    *  silently kept (flair#2886). */
   kind: "intentional" | "failed" | "unverified";
@@ -63,6 +65,9 @@ export interface PurgeLeftover {
 export interface PurgeResult {
   removed: string[];
   leftovers: PurgeLeftover[];
+  /** Operator notes that are neither removals nor leftovers (e.g. an ignored
+   *  environment override). */
+  notes?: string[];
 }
 
 export interface PurgeOptions {
@@ -200,7 +205,9 @@ function backupEntryAbsent(path: string): boolean {
  *
  * Call inside `withHome(homeDir, ...)`: `clientConfigBackupPath()` resolves `~`
  * at call time, so the sweep must run with the target home in the environment,
- * not the caller's (flair#2886).
+ * not the caller's (flair#2886). A pre-existing copy is held across the unwire
+ * first, so an undecidable one is still read and reported here rather than
+ * replaced.
  */
 function sweepClientConfigBackup(
   clientId: ClientId,
@@ -237,49 +244,85 @@ function sweepClientConfigBackup(
 
 interface HeldClientBackup {
   path: string;
+  heldPath: string;
   display: string;
-  bytes: Buffer;
 }
 
 /**
- * A `<config>.bak` that already exists with no Flair entry may be the user's
- * own copy, but the unwire's snapshot write replaces it with the pre-unwire
- * bytes. Hold those bytes so they can be put back before the sweep
- * (flair#2886). Call inside `withHome(homeDir, ...)`.
+ * A pre-existing `<config>.bak` is the user's copy until this purge decides
+ * otherwise, but the unwire's snapshot write renames over it. Move it aside
+ * first and put it back before the sweep, so its bytes — or, for a symlink,
+ * the link itself — survive the unwire. This covers a copy that cannot be
+ * read or parsed too: a failed read must never license its replacement.
+ * Call inside `withHome(homeDir, ...)`.
  */
-function holdCleanClientConfigBackups(homeDir: string): HeldClientBackup[] {
+function holdClientConfigBackups(homeDir: string, leftovers: PurgeLeftover[]): HeldClientBackup[] {
   const held: HeldClientBackup[] = [];
   for (const client of ALL_CLIENTS) {
     const backup = clientConfigBackupPath(client.id);
-    let bytes: Uint8Array;
     try {
-      bytes = readFileSync(backup);
-    } catch {
+      lstatSync(backup);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      const reason = err instanceof Error ? err.message : String(err);
+      leftovers.push({
+        path: displayUnderHome(homeDir, backup),
+        kind: "failed",
+        reason: `could not hold the backup across unwiring: ${reason}`,
+      });
       continue;
     }
-    const scan = clientConfigHasFlairEntry(client.id, bytes, displayUnderHome(homeDir, backup));
-    if (scan.status === "absent") {
-      held.push({ path: backup, display: displayUnderHome(homeDir, backup), bytes: Buffer.from(bytes) });
+    const heldPath = `${backup}.purge-hold-${process.pid}-${held.length}`;
+    try {
+      renameSync(backup, heldPath);
+      held.push({ path: backup, heldPath, display: displayUnderHome(homeDir, backup) });
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      leftovers.push({
+        path: displayUnderHome(homeDir, backup),
+        kind: "failed",
+        reason: `could not hold the backup across unwiring: ${reason}`,
+      });
     }
   }
   return held;
 }
 
-/** Put a held copy back over the snapshot this purge's unwire wrote. Call
- *  inside `withHome(homeDir, ...)`, before the sweep reads it. */
+/** Put a held entry back over the snapshot this purge's unwire wrote, then
+ *  let the sweep decide it. Call inside `withHome(homeDir, ...)`. */
 function restoreHeldClientConfigBackups(held: HeldClientBackup[], leftovers: PurgeLeftover[]): void {
   for (const item of held) {
     try {
-      writeFileSync(item.path, item.bytes, { mode: 0o600 });
+      rmSync(item.path, { force: true });
+      renameSync(item.heldPath, item.path);
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
       leftovers.push({
         path: item.display,
         kind: "failed",
-        reason: `could not restore the backup that carried no Flair entry: ${reason}`,
+        reason: `could not restore the backup held across unwiring: ${reason}`,
       });
     }
   }
+}
+
+/** Run client-config work with `HOME` set to the home being purged, and —
+ *  when that home is not the caller's — with `PI_CODING_AGENT_DIR` ignored, so
+ *  pi resolves under the target home instead of the caller's pi directory. */
+function withClientConfigHome(homeDir: string, ignorePiDirOverride: boolean, fn: () => void): void {
+  if (!ignorePiDirOverride) {
+    withHome(homeDir, fn);
+    return;
+  }
+  const prevPiDir = process.env.PI_CODING_AGENT_DIR;
+  withHome(homeDir, () => {
+    delete process.env.PI_CODING_AGENT_DIR;
+    try {
+      fn();
+    } finally {
+      if (prevPiDir !== undefined) process.env.PI_CODING_AGENT_DIR = prevPiDir;
+    }
+  });
 }
 
 /**
@@ -290,10 +333,18 @@ function restoreHeldClientConfigBackups(held: HeldClientBackup[], leftovers: Pur
  * package is listed as an intentional leftover unless `omitNpmLeftover` is set.
  */
 export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
-  const homeDir = opts.homeDir ?? resolveHome();
+  const callerHome = resolveHome();
+  const homeDir = opts.homeDir ?? callerHome;
+  const ignorePiDirOverride = homeDir !== callerHome && process.env.PI_CODING_AGENT_DIR !== undefined;
   const skipUnload = !!opts.skipSchedulerUnload;
   const removed: string[] = [];
   const leftovers: PurgeLeftover[] = [];
+  const notes: string[] = [];
+  if (ignorePiDirOverride) {
+    notes.push(
+      `ignored PI_CODING_AGENT_DIR while purging a different home: pi settings resolved under ${displayUnderHome(homeDir, join(homeDir, ".pi", "agent"))}`,
+    );
+  }
 
   disableAndSweepScheduler(homeDir, skipUnload, "rem", removed, leftovers);
   disableAndSweepScheduler(homeDir, skipUnload, "federation", removed, leftovers);
@@ -321,9 +372,15 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
     sweepHookBackup(hookSettingsPath(homeDir, harness), null, homeDir, removed, leftovers);
   }
 
-  const heldBackups = withHome(homeDir, () => holdCleanClientConfigBackups(homeDir));
+  const heldBackups: HeldClientBackup[] = [];
+  withClientConfigHome(homeDir, ignorePiDirOverride, () => {
+    heldBackups.push(...holdClientConfigBackups(homeDir, leftovers));
+  });
 
-  const unwireResults = withHome(homeDir, () => ALL_CLIENTS.map((c) => c.unwire()));
+  const unwireResults: UnwireResult[] = [];
+  withClientConfigHome(homeDir, ignorePiDirOverride, () => {
+    unwireResults.push(...ALL_CLIENTS.map((c) => c.unwire()));
+  });
   for (const u of unwireResults) {
     if (!u.ok) {
       leftovers.push({ path: u.message, kind: "failed", reason: u.message });
@@ -335,7 +392,7 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
   // The unwire above snapshots each config before writing it; sweep those
   // snapshots (and any older one) once the active configs are clean, under the
   // target home the unwire ran in.
-  withHome(homeDir, () => {
+  withClientConfigHome(homeDir, ignorePiDirOverride, () => {
     restoreHeldClientConfigBackups(heldBackups, leftovers);
     for (const client of ALL_CLIENTS) {
       sweepClientConfigBackup(client.id, homeDir, removed, leftovers);
@@ -362,11 +419,14 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
     });
   }
 
-  return { removed, leftovers };
+  return { removed, leftovers, notes };
 }
 
 export function formatPurgeReport(result: PurgeResult): { lines: string[]; claimedFullyPurged: boolean } {
   const lines: string[] = [];
+  for (const note of result.notes ?? []) {
+    lines.push(`ℹ️  ${note}`);
+  }
   for (const item of result.removed) {
     lines.push(`✅ Removed: ${item}`);
   }
