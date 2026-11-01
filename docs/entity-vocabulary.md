@@ -119,5 +119,3 @@ vocabulary; wiring that validation is a follow-up, not part of this foundation s
 - Automatic entity extraction/tagging on write (producers set `entities` themselves today,
   where they choose to; there's no NLP-derived auto-population yet).
 - Validating `Relationship.subject`/`object` against this vocabulary.
-
-These remain after the foundation slice ships.
