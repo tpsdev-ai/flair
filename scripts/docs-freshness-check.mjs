@@ -651,15 +651,7 @@ defineCheck("changelog-lede-length", "changelog fragment", () => {
   return { failures, scanned: fragments.length };
 });
 
-// ── Check 10: every .md a doc names ships in the package (flair#2888) ──────────
-// docs/ and README.md ship (package.json `files`), so a doc that names a .md the
-// tarball does not contain hands the reader a dead end. A name is a reference
-// when it is a Markdown link target or a backtick-quoted file name; a URL and an
-// in-page anchor are not package files, and a link with an anchor checks the
-// file part. A link target resolves against the referencing file; a
-// backtick-quoted name resolves against the referencing file or the repo root,
-// because prose names files either way. A pack that fails or prints no file
-// list fails the check: an empty list would report every reference as missing.
+// ── Check 10: non-exempt local Markdown references in shipped docs (flair#2888) ──
 function npmPackPaths() {
   const stdout = execFileSync("npm", ["pack", "--dry-run", "--json"], {
     cwd: ROOT,
@@ -684,9 +676,170 @@ function npmPackPaths() {
 function mdReferenceTarget(raw) {
   const token = raw.trim();
   if (!token || token.startsWith("#") || /^[a-z][a-z0-9+.-]*:/i.test(token)) return null;
-  const filePart = token.split("#")[0];
-  if (!/\.md$/i.test(filePart) || /\s/.test(filePart)) return null;
+  const filePart = token.split("#")[0].replace(/\\([ !"#$%&'()*+,./:;<=>?@[\\\]^_`{|}~-])/g, "$1");
+  if (!/\.md$/i.test(filePart)) return null;
   return filePart;
+}
+
+function hasDocLinkAllow(line) {
+  return /<!--\s*docs-freshness-allow:\s*\S[^\n]*?-->/.test(line);
+}
+
+function docMarkdown(text) {
+  const lines = text.split("\n");
+  const masked = [];
+  const ticks = [];
+  let fence = null;
+  let code = null;
+  let offset = 0;
+  for (let lineNo = 0; lineNo < lines.length; lineNo++) {
+    const line = lines[lineNo];
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (fence) {
+      masked.push(" ".repeat(line.length));
+      if (new RegExp(`^ {0,3}${fence.ch}{${fence.size},}[ \t]*$`).test(line)) fence = null;
+      offset += line.length + 1;
+      continue;
+    }
+    if (!code && marker && (marker[1][0] === "~" || !marker[2].includes("`"))) {
+      fence = { ch: marker[1][0], size: marker[1].length };
+      masked.push(" ".repeat(line.length));
+      offset += line.length + 1;
+      continue;
+    }
+    let out = "";
+    for (let i = 0; i < line.length;) {
+      if (line[i] === "`" && (i === 0 || line[i - 1] !== "\\")) {
+        const run = line.slice(i).match(/^`+/)[0];
+        if (code === null) {
+          const continuation = [line.slice(i + run.length)];
+          for (let next = lineNo + 1; next < lines.length; next++) {
+            if (!lines[next].trim() || /^ {0,3}(`{3,}|~{3,})/.test(lines[next])) break;
+            continuation.push(lines[next]);
+          }
+          const rest = continuation.join("\n");
+          if (!new RegExp(`(?<!\\\\)(?<!\x60)\x60{${run.length}}(?!\x60)`).test(rest)) {
+            out += run;
+            i += run.length;
+            continue;
+          }
+          code = { size: run.length, line: lineNo + 1, start: offset + i, value: "" };
+        } else if (run.length === code.size) {
+          if (!code.value.includes("\n")) ticks.push({ line: code.line, raw: code.value, start: code.start });
+          code = null;
+        } else {
+          code.value += run;
+        }
+        out += " ".repeat(run.length);
+        i += run.length;
+        continue;
+      }
+      if (code) {
+        code.value += line[i];
+        out += " ";
+        i++;
+        continue;
+      }
+      if (line.startsWith("<!--", i)) {
+        const end = line.indexOf("-->", i + 4);
+        if (end !== -1) {
+          out += " ".repeat(end + 3 - i);
+          i = end + 3;
+          continue;
+        }
+      }
+      out += line[i++];
+    }
+    masked.push(out);
+    if (code) code.value += "\n";
+    offset += line.length + 1;
+  }
+  return { masked: masked.join("\n"), ticks };
+}
+
+function referenceLabel(label) {
+  return label.replace(/\\([\\`*_[\]{}()#+.!<>])/g, "$1").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function markdownLinks(text) {
+  const { masked, ticks } = docMarkdown(text);
+  const definitions = new Map();
+  const definitionRanges = [];
+  const definitionRe = /^ {0,3}\[([^\]\n]+)\]:[ \t]*(?:\n[ \t]*)?(<[^>\n]*>|[^\s<>]+)/gm;
+  for (const m of masked.matchAll(definitionRe)) {
+    const label = referenceLabel(m[1]);
+    if (!definitions.has(label)) definitions.set(label, m[2].startsWith("<") ? m[2].slice(1, -1) : m[2]);
+    definitionRanges.push([m.index, m.index + m[0].length]);
+  }
+  const links = [];
+  const covered = [];
+  const lineAt = (at) => 1 + (masked.slice(0, at).match(/\n/g)?.length ?? 0);
+  for (let i = 0; i < masked.length; i++) {
+    if (masked[i] !== "[" || (i > 0 && masked[i - 1] === "\\")) continue;
+    if (definitionRanges.some(([a, b]) => i >= a && i < b)) continue;
+    let close = -1;
+    let bracketDepth = 0;
+    for (let j = i + 1; j < masked.length; j++) {
+      if (masked[j] === "\\") { j++; continue; }
+      if (masked[j] === "[") bracketDepth++;
+      if (masked[j] === "]" && bracketDepth-- === 0) { close = j; break; }
+    }
+    if (close < 0) continue;
+    const label = masked.slice(i + 1, close);
+    let end = close + 1;
+    let raw;
+    if (masked[end] === "(") {
+      let p = end + 1;
+      while (/\s/.test(masked[p] ?? "" ) && p < masked.length) p++;
+      if (masked[p] === "<") {
+        const to = masked.indexOf(">", p + 1);
+        if (to < 0 || masked.slice(p + 1, to).includes("\n")) continue;
+        raw = masked.slice(p + 1, to);
+        p = to + 1;
+      } else {
+        const start = p;
+        let depth = 0;
+        while (p < masked.length) {
+          const ch = masked[p];
+          if (ch === "\\") { p += 2; continue; }
+          if (ch === "(") depth++;
+          if (ch === ")" && depth-- === 0) break;
+          if (/\s/.test(ch)) break;
+          p++;
+        }
+        raw = masked.slice(start, p);
+      }
+      const beforeTitle = p;
+      while (/\s/.test(masked[p] ?? "") && p < masked.length) p++;
+      if (p > beforeTitle && /["'(]/.test(masked[p] ?? "")) {
+        const opener = masked[p++];
+        const closer = opener === "(" ? ")" : opener;
+        while (p < masked.length && masked[p] !== closer) {
+          if (masked[p] === "\\") p++;
+          p++;
+        }
+        if (masked[p] !== closer) continue;
+        p++;
+        while (/\s/.test(masked[p] ?? "") && p < masked.length) p++;
+      }
+      if (masked[p] !== ")") continue;
+      end = p + 1;
+    } else {
+      if (masked[end] === "[") {
+        const to = masked.indexOf("]", end + 1);
+        if (to < 0) continue;
+        const ref = masked.slice(end + 1, to) || label;
+        raw = definitions.get(referenceLabel(ref));
+        end = to + 1;
+      } else {
+        raw = definitions.get(referenceLabel(label));
+      }
+    }
+    if (raw !== undefined) links.push({ line: lineAt(i), raw });
+    if (raw !== undefined) covered.push([i, end]);
+    i = end - 1;
+  }
+  return { links, ticks: ticks.filter((tick) => !covered.some(([a, b]) => tick.start >= a && tick.start < b)) };
 }
 
 defineCheck("doc-link-pack-coverage", "shipped doc", () => {
@@ -716,8 +869,6 @@ defineCheck("doc-link-pack-coverage", "shipped doc", () => {
   }
 
   const failures = [];
-  const LINK_RE = /\[[^\]]*\]\(\s*<?([^)\s>]+)>?/g;
-  const TICK_RE = /`([^`\n]+)`/g;
   const considered = (doc, line, raw, rootRelative) => {
     const target = mdReferenceTarget(raw);
     if (target === null) return;
@@ -735,19 +886,13 @@ defineCheck("doc-link-pack-coverage", "shipped doc", () => {
 
   for (const doc of docs) {
     const lines = linesOf(doc);
-    lines.forEach((line, i) => {
-      if (hasAllow(lines, i)) return;
-      // Backticks inside a link are that link's label or target: the link pass
-      // already covers the target, and a label is prose, not a second reference.
-      const covered = [];
-      for (const m of line.matchAll(LINK_RE)) {
-        covered.push([m.index, m.index + m[0].length]);
-        considered(doc, i + 1, m[1], false);
-      }
-      const prose = [...line].map((ch, idx) =>
-        covered.some(([a, b]) => idx >= a && idx < b) ? " " : ch).join("");
-      for (const m of prose.matchAll(TICK_RE)) considered(doc, i + 1, m[1], true);
-    });
+    const { links, ticks } = markdownLinks(lines.join("\n"));
+    for (const link of links) {
+      if (!hasDocLinkAllow(lines[link.line - 1])) considered(doc, link.line, link.raw, false);
+    }
+    for (const tick of ticks) {
+      if (!hasDocLinkAllow(lines[tick.line - 1])) considered(doc, tick.line, tick.raw, true);
+    }
   }
   return { failures, scanned: docs.length };
 });

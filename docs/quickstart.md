@@ -177,7 +177,7 @@ Add `--explain` to see the ranking inputs per hit — the raw score, the composi
 
 ## 6. Give your agent context on boot
 
-With MCP wired (`flair init` does this for every client it detects), the recommended session-start is the `bootstrap` tool. In Claude Code that appears as `mcp__flair__bootstrap` (Claude Code's namespaced name for the server's `bootstrap` tool). Add this to your `CLAUDE.md`: <!-- docs-freshness-allow: names a file in the reader's project -->
+With MCP wired, the recommended session-start tool is `bootstrap`. In Claude Code that appears as `mcp__flair__bootstrap` (Claude Code's namespaced name for the server's `bootstrap` tool). Add this to your `CLAUDE.md`: <!-- docs-freshness-allow: names a file in the reader's project -->
 
 ```
 At the start of every session, run mcp__flair__bootstrap before responding.

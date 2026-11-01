@@ -1,4 +1,4 @@
-// Every .md a doc names must be in the package's `npm pack` file list (flair#2888).
+// Non-exempt local Markdown references in shipped docs are checked against the npm pack file list (flair#2888).
 //
 // These are behaviour tests: each fixture is a real package directory (its own
 // package.json `files` list, docs and, where the case needs one, a prepack that
@@ -87,13 +87,15 @@ function makeFixture(opts: {
   mkdirSync(join(dir, ".changelog", "unreleased"), { recursive: true });
 
   const g = (...args: string[]) =>
-    execFileSync("git", args, { cwd: dir, stdio: ["ignore", "ignore", "ignore"] });
+    execFileSync("git", args, { cwd: dir, stdio: ["ignore", "pipe", "pipe"] });
   g("init", "-q");
   g("config", "user.email", "fixture@example.invalid");
   g("config", "user.name", "Fixture");
   g("config", "commit.gpgsign", "false");
   g("add", "-A");
-  g("commit", "-qm", "chore: fixture");
+  const tree = g("write-tree").toString().trim();
+  const commit = g("commit-tree", tree, "-m", "chore: fixture").toString().trim();
+  g("update-ref", "HEAD", commit);
   g("tag", "v0.1.0");
 
   return dir;
@@ -119,6 +121,82 @@ afterAll(() => {
 });
 
 describe("doc-link-pack-coverage", () => {
+  const missingLinks = [
+    ["inline", "See [design](../notes/missing.md).", "../notes/missing.md", 3],
+    ["full reference", "See [design][target].\n\n[target]: ../notes/missing.md", "../notes/missing.md", 3],
+    ["collapsed reference", "See [target][].\n\n[target]: ../notes/missing.md", "../notes/missing.md", 3],
+    ["shortcut reference", "See [target].\n\n[target]: ../notes/missing.md", "../notes/missing.md", 3],
+    ["multiline inline destination", "See [design](\n  ../notes/missing.md).", "../notes/missing.md", 3],
+    ["multiline reference destination", "See [target].\n\n[target]:\n  ../notes/missing.md", "../notes/missing.md", 3],
+    ["angle destination with spaces", "See [design](<../notes/missing file.md>).", "../notes/missing file.md", 3],
+    ["inline title", "See [design](../notes/missing.md \"Design\").", "../notes/missing.md", 3],
+    ["nested label", "See [nested [design]](../notes/missing.md).", "../notes/missing.md", 3],
+    ["escaped space destination", "See [design](../notes/missing\\ file.md).", "../notes/missing file.md", 3],
+  ] as const;
+
+  for (const [form, reference, target, line] of missingLinks) {
+    test(`${form} missing target fails at the reference line`, () => {
+      const dir = makeFixture({ docs: { "docs/a.md": `# A\n\n${reference}\n` } });
+      const { status, out } = runGate(dir);
+      expect(status).toBe(1);
+      expect(out).toContain(`✗ docs/a.md:${line}`);
+      expect(out).toContain(`references '${target}'`);
+    }, 120_000);
+  }
+
+  test("fenced and inline code do not create links", () => {
+    const dir = makeFixture({ docs: { "docs/a.md": [
+      "# A", "", "```markdown", "[bad](missing.md)", "[target]: missing.md", "```",
+      "`[bad](missing.md)`", "`[bad](missing.md)", "still code`", "[target]", "", "~~~", "[bad](missing.md)", "~~~", "",
+    ].join("\n") } });
+    const { status, out } = runGate(dir);
+    expect(status).toBe(0);
+    expect(summaryLine(out)).toContain("✓ doc-link-pack-coverage");
+  }, 120_000);
+
+  test("an unmatched backtick does not hide a later link", () => {
+    const dir = makeFixture({ docs: { "docs/a.md": "# A\n\nAn unmatched ` marker.\n[broken](missing.md)\n\nLater `code`.\n" } });
+    const { status, out } = runGate(dir);
+    expect(status).toBe(1);
+    expect(out).toContain("✗ docs/a.md:4");
+    expect(out).toContain("references 'missing.md'");
+  }, 120_000);
+
+  test("same-line HTML comment exempts its mention but not the next line", () => {
+    const dir = makeFixture({ docs: { "docs/a.md": [
+      "# A", "", "See `host.md`. <!-- docs-freshness-allow: file belongs to the reader -->",
+      "See [broken](missing.md).", "",
+    ].join("\n") } });
+    const { status, out } = runGate(dir);
+    expect(status).toBe(1);
+    expect(out).not.toContain("references 'host.md'");
+    expect(out).toContain("✗ docs/a.md:4");
+    expect(out).toContain("references 'missing.md'");
+  }, 120_000);
+
+  test("prose mention of the marker does not exempt a link", () => {
+    const dir = makeFixture({ docs: { "docs/a.md": "# A\n\ndocs-freshness-allow: explanation [broken](missing.md).\n" } });
+    const { status, out } = runGate(dir);
+    expect(status).toBe(1);
+    expect(out).toContain("✗ docs/a.md:3");
+    expect(out).toContain("references 'missing.md'");
+  }, 120_000);
+
+  test("a marker comment without an explanation does not exempt a link", () => {
+    const dir = makeFixture({ docs: { "docs/a.md": "# A\n\n[broken](missing.md) <!-- docs-freshness-allow: -->\n" } });
+    const { status, out } = runGate(dir);
+    expect(status).toBe(1);
+    expect(out).toContain("✗ docs/a.md:3");
+    expect(out).toContain("references 'missing.md'");
+  }, 120_000);
+
+  test("backticks in a link label do not create a file-name reference", () => {
+    const dir = makeFixture({ docs: { "docs/a.md": "# A\n\nSee [`outside.md`](https://example.com/outside.md).\n" } });
+    const { status, out } = runGate(dir);
+    expect(status).toBe(0);
+    expect(summaryLine(out)).toContain("✓ doc-link-pack-coverage");
+  }, 120_000);
+
   test("a link to a shipped .md passes", () => {
     const dir = makeFixture({
       docs: {

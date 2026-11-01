@@ -415,7 +415,7 @@ bun run build        # compile TypeScript → dist/
 bun test             # unit + integration tests
 ```
 
-Integration tests spin up a real Harper instance on a random port and tear it down afterwards — no mocks for the database layer. Every commit runs unit tests, integration tests, type check, dependency audit, Semgrep and CodeQL SAST, and a from-scratch Docker validation. See [CONTRIBUTING.md](https://github.com/tpsdev-ai/flair/blob/main/CONTRIBUTING.md).
+Integration tests spin up a real Harper instance on a random port and tear it down afterwards — no mocks for the database layer. CI for pull requests to main and pushes to main runs unit and integration tests, type checks, dependency audit, Semgrep and CodeQL SAST. See [CONTRIBUTING.md](https://github.com/tpsdev-ai/flair/blob/main/CONTRIBUTING.md).
 
 ## Status
 

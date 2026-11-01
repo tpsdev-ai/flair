@@ -22,7 +22,7 @@ Where Flair already runs. Each integration can reach one shared Flair memory sto
 | **OpenClaw** | [`openclaw-flair`](#openclaw) | Ed25519 | Native plugin (context-engine slot left intact) |
 | **n8n** | [`n8n-nodes-flair`](#n8n) | Ed25519 with Agent Private Key selected; deprecated administrator Basic | Three nodes (chat memory, search, store) |
 | **Hermes Agent** | [`hermes-flair`](#hermes-agent) | Ed25519 | Python `MemoryProvider` |
-| **Pi agent** | [`pi-flair`](#pi-agent) | Ed25519 | Native pi extension (pi has no MCP support); with `--agent <id>` and wiring enabled, `flair init` attempts Pi wiring for `--client pi`, for detected Pi under `--client all`, or for detected Pi when `--client` is omitted; `--client none` and `--no-mcp` skip it. |
+| **Pi agent** | [`pi-flair`](#pi-agent) | Ed25519 | Native pi extension; with `--agent <id>` and wiring enabled, `flair init` attempts Pi wiring for `--client pi`, for detected Pi under `--client all`, or for detected Pi when `--client` is omitted; `--client none` and `--no-mcp` skip it. |
 | **Google ADK** (Python) | [`adk-flair`](https://github.com/tpsdev-ai/flair/blob/main/packages/adk-flair/README.md) | Ed25519 | `BaseMemoryService`; see [hosted auth](#hosted-flair-auth--your-agent-got-a-404) if you just got a 404 |
 | **Google ADK** (JS/TS) | [`@tpsdev-ai/adk-flair`](https://github.com/tpsdev-ai/flair/blob/main/packages/adk-flair-js/README.md) | Ed25519 | Same identity model as the Python package |
 
@@ -227,7 +227,7 @@ Auth: TPS-Ed25519 (the same model the rest of Flair uses) — writes are isolate
 
 ## Pi agent
 
-[`@tpsdev-ai/pi-flair`](https://www.npmjs.com/package/@tpsdev-ai/pi-flair) is the **native pi extension** for the [Pi coding agent](https://github.com/mariozechner/pi-coding-agent) — pi has no MCP client support, so this is a first-party plugin, not an MCP bridge. Memory + identity (`memory_search`, `memory_store`, `bootstrap`) for the pi runtime.
+[`@tpsdev-ai/pi-flair`](https://www.npmjs.com/package/@tpsdev-ai/pi-flair) is the **native pi extension** for the [Pi coding agent](https://github.com/mariozechner/pi-coding-agent). Memory + identity (`memory_search`, `memory_store`, `bootstrap`) for the pi runtime.
 
 To provision an agent and wire Pi, use the init command below; if the agent is already provisioned, install the extension with Pi's installer.
 

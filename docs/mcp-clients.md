@@ -351,7 +351,7 @@ The MCP server has no client-side flags beyond these env vars; everything else (
 
 ## What about pi?
 
-pi has no MCP client support, so Flair ships a **native pi extension** instead: [`@tpsdev-ai/pi-flair`](https://github.com/tpsdev-ai/flair/blob/main/packages/pi-flair/README.md). Same backend. With an ordinary signed identity, writes are owned by that agent. Reads follow each resource's policy: Memory uses owner/visibility scope with an additional current-authority check for retained closed skills, while Credential records are owner-only for non-admin callers. Zero MCP in the path.
+Flair ships a **native pi extension**: [`@tpsdev-ai/pi-flair`](https://github.com/tpsdev-ai/flair/blob/main/packages/pi-flair/README.md). Same backend. With an ordinary signed identity, writes are owned by that agent. Reads follow each resource's policy: Memory uses owner/visibility scope with an additional current-authority check for retained closed skills, while Credential records are owner-only for non-admin callers. Zero MCP in the path.
 
 Wiring is a `packages` entry in pi's own settings (`~/.pi/agent/settings.json`), not an `mcpServers` block:
 
