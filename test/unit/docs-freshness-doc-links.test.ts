@@ -59,6 +59,15 @@ function makeFixture(opts: {
 
   mkdirSync(join(dir, "schemas"), { recursive: true });
   mkdirSync(join(dir, "docs"), { recursive: true });
+  // A described command tree and a getting-started doc: with these the gate has
+  // every check it can run, so its exit code means "clean" or "a check failed"
+  // rather than "something did not run".
+  mkdirSync(join(dir, "dist"), { recursive: true });
+  writeFileSync(
+    join(dir, "dist", "cli.js"),
+    "export const program = { commands: [{ name: () => \"cmd0\", description: () => \"does thing 0\", commands: [] }] };\n",
+  );
+  writeFileSync(join(dir, "docs", "quickstart.md"), "# Quickstart\n\nInstall vX.Y.Z and go.\n");
   writeFileSync(
     join(dir, "schemas", "memory.graphql"),
     "type Memory @table(database: \"flair\") {\n  id: ID @primaryKey\n}\n",
@@ -117,7 +126,8 @@ describe("doc-link-pack-coverage", () => {
         "docs/b.md": "# B\n",
       },
     });
-    const { out } = runGate(dir);
+    const { status, out } = runGate(dir);
+    expect(status).toBe(0);
     expect(summaryLine(out)).toContain("✓ doc-link-pack-coverage");
     expect(out).not.toContain("references 'b.md'");
   }, 120_000);
@@ -132,7 +142,7 @@ describe("doc-link-pack-coverage", () => {
       },
     });
     const { status, out } = runGate(dir);
-    expect(status).not.toBe(0);
+    expect(status).toBe(1);
     expect(out).toContain("✗ docs/a.md:3");
     expect(out).toContain("../notes/design.md");
     expect(out).toContain("not in the package's npm pack file list");
@@ -145,7 +155,7 @@ describe("doc-link-pack-coverage", () => {
       },
     });
     const { status, out } = runGate(dir);
-    expect(status).not.toBe(0);
+    expect(status).toBe(1);
     expect(out).toContain("✗ docs/a.md:3");
     expect(out).toContain("missing-design.md");
   }, 120_000);
@@ -162,7 +172,8 @@ describe("doc-link-pack-coverage", () => {
         "docs/b.md": "# B\n\n## Details\n",
       },
     });
-    const { out } = runGate(dir);
+    const { status, out } = runGate(dir);
+    expect(status).toBe(0);
     expect(summaryLine(out)).toContain("✓ doc-link-pack-coverage");
     expect(out).not.toContain("example.com/guide.md");
   }, 120_000);
@@ -173,7 +184,7 @@ describe("doc-link-pack-coverage", () => {
       docs: { "docs/a.md": "# A\n\nSee [b](b.md).\n", "docs/b.md": "# B\n" },
     });
     const { status, out } = runGate(dir);
-    expect(status).not.toBe(0);
+    expect(status).toBe(1);
     expect(out).toContain("✗ package.json:1");
     expect(out).toContain("npm pack --dry-run --json");
     expect(summaryLine(out)).toContain("✗ doc-link-pack-coverage");
