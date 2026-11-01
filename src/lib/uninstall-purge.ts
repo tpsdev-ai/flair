@@ -51,9 +51,10 @@ export const FLAIR_NPM_PACKAGE = "@tpsdev-ai/flair";
 
 export interface PurgeLeftover {
   path: string;
-  /** `unverified`: the state of this path could not be decided (a read or
-   *  parse failed). It is left in place and reported by name — never claimed
-   *  removed and never silently kept (flair#2886). */
+  /** `unverified`: purge could not decide this path (an unreadable file, an
+   *  unparseable JSON config, or a pi path naming pi-flair only loosely). It is
+   *  left in place and reported by name — never claimed removed and never
+   *  silently kept (flair#2886). */
   kind: "intentional" | "failed" | "unverified";
   reason: string;
   remedy?: string;
@@ -192,10 +193,10 @@ function backupEntryAbsent(path: string): boolean {
  * Client configs get the same sibling snapshot as hook settings: every
  * `unwire()` write copies the pre-write bytes to `<config>.bak`, so after
  * unwiring the copy holds the pre-purge Flair wiring. Purge removes a copy
- * that carries a Flair entry (identified as the client's unwire identifies
- * it) and reports the path like a hook backup. A copy with no Flair entry may
- * be the user's own file and stays — as does one whose wiring could not be
- * decided, which is reported as not checked (flair#2886).
+ * that `clientConfigHasFlairEntry()` identifies as carrying a Flair entry and
+ * reports the path like a hook backup. A copy with no Flair entry may be the
+ * user's own file and stays — as does one whose wiring could not be decided,
+ * which is reported as not checked (flair#2886).
  *
  * Call inside `withHome(homeDir, ...)`: `clientConfigBackupPath()` resolves `~`
  * at call time, so the sweep must run with the target home in the environment,
@@ -241,10 +242,10 @@ interface HeldClientBackup {
 }
 
 /**
- * A `<config>.bak` that already exists with no Flair entry is the user's own
- * copy, but the unwire's snapshot write replaces it with the pre-unwire bytes.
- * Hold those bytes so they can be put back before the sweep (flair#2886).
- * Call inside `withHome(homeDir, ...)`.
+ * A `<config>.bak` that already exists with no Flair entry may be the user's
+ * own copy, but the unwire's snapshot write replaces it with the pre-unwire
+ * bytes. Hold those bytes so they can be put back before the sweep
+ * (flair#2886). Call inside `withHome(homeDir, ...)`.
  */
 function holdCleanClientConfigBackups(homeDir: string): HeldClientBackup[] {
   const held: HeldClientBackup[] = [];

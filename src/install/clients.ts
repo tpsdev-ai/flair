@@ -1389,8 +1389,9 @@ export function clientConfigBackupPath(id: ClientId): string {
 
 /**
  * What a client-config snapshot says about Flair wiring. `unknown` is a read
- * that could not be decided (unparseable, or a shape the unwire refuses to
- * touch) — it is never "absent" (flair#2886).
+ * that could not be decided (malformed JSON in a JSON config, a non-object, or
+ * a pi path that names pi-flair only loosely) — it is never "absent"
+ * (flair#2886).
  */
 export type ClientConfigFlairScan =
   | { status: "present" }
@@ -1594,8 +1595,8 @@ function isPiFlairPackagePath(entry: string): boolean {
 
 /** What a pi settings object says about pi-flair. `loose-path` is an
  *  `extensions` path that `isPiFlairExtensionPath` matches on the substring
- *  only — that heuristic is for doctor's reporting, so it cannot decide a
- *  delete (flair#2886). */
+ *  only — that heuristic is for doctor's reporting, so it cannot decide
+ *  whether a snapshot is safe to delete (flair#2886). */
 type PiFlairEntryScan =
   | { status: "present" }
   | { status: "absent" }
@@ -1604,7 +1605,8 @@ type PiFlairEntryScan =
 /**
  * The pi shape that counts as a Flair entry: a `packages` source naming
  * pi-flair, or an `extensions` entry naming it as an npm source or pointing
- * inside its package. Shared with `_unwirePi` for the same reason as
+ * inside its package. An `extensions` path that only contains the string
+ * `pi-flair` is `loose-path`. Shared with `_unwirePi` for the same reason as
  * `mcpConfigHasFlairEntry`.
  */
 function piConfigFlairEntryScan(config: any): PiFlairEntryScan {
