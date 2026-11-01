@@ -22,7 +22,11 @@
  * `_reindex` answers 409 stored_row_changed; a merge is skipped by
  * name (merge_target_changed). Harper has no compare-and-set on a table write, so
  * a change committed AFTER the final confirm read — taken inside the same
- * transaction, before its commit — is not seen (resources/write-back.ts).
+ * transaction, before its commit — is not seen by that read
+ * (resources/write-back.ts). `_reindex` owns its transaction and reads the
+ * committed row back after the commit (flair#2656): a row that does not show
+ * the re-PUT answers 409 stored_row_changed, a failed read 503
+ * write_outcome_unknown (the flair#2656 cases below).
  *
  * Test-only pause points (resources/txn-pause-point.ts, armed
  * through FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR) hold each
