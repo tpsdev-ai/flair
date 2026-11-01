@@ -4,8 +4,8 @@
  *
  * Ordinary owner row PUT/PATCH acquire the per-id lock before their first
  * stored read and commit their owned transaction before releasing it. Re-embed
- * PATCH uses an inner owned transaction. Composed promotion and an admin
- * `_reindex` joining an open transaction can commit after release.
+ * PATCH uses an inner owned transaction. Composed promotion can commit after
+ * release.
  * A same-id writer waits within its budget (200 attempts, 10 ms apart), then
  * acquires the lock or answers 503 memory_busy without writing, unless an attempt
  * observes an outcome-unknown marker (503 write_outcome_unknown; the fence test).

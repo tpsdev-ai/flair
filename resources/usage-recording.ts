@@ -120,7 +120,7 @@ export class UsageLedgerReadError extends Error {
  * without waiting. The count bump is then decided on a committed row that an
  * ordinary owner PUT or PATCH in the same Harper process, which holds the lock
  * until it commits, cannot change under it. Not serialized with it: a
- * composed or `_reindex` PUT that commits after releasing its lock, an owner
+ * composed PUT that commits after releasing its lock, an owner
  * DELETE (until #2787), and a raw operations write. A contribution that cannot
  * take that lock, or the ledger lock, writes nothing for that id and is logged
  * as skipped.

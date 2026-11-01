@@ -13,9 +13,9 @@
   memory id's lock before the usage-ledger lock, so the count bump's
   read-modify-write runs on a row that an ordinary owner PUT or PATCH in the
   same Harper process, which holds the lock until it commits, cannot change
-  under it. Not serialized with it: a composed or `_reindex` PUT that commits
-  after releasing its lock, an owner DELETE (until #2787), and a raw
-  operations write. The count bump writes `usageCount` and the helper's commit
+  under it. Not serialized with it: a composed PUT that commits after
+  releasing its lock, an owner DELETE (until #2787), and a raw operations
+  write. The count bump writes `usageCount` and the helper's commit
   marker.
 
   A run or contribution that cannot take the lock — a held id, an id whose
