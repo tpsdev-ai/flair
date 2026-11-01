@@ -1398,9 +1398,12 @@ export type ClientConfigFlairScan =
   | { status: "unknown"; reason: string };
 
 /**
- * Answer "does this client config carry a Flair entry?" with the SAME
- * detection the client's `unwire()` uses, for callers reading a copy of the
- * config rather than the live file (purge's `.bak` sweep, flair#2886).
+ * Answer "does this client config carry a Flair entry?" for callers reading a
+ * copy of the config rather than the live file (purge's `.bak` sweep,
+ * flair#2886). `present` and `absent` use the identification that client's
+ * `unwire()` acts on. `unknown` is a read that could not decide the file —
+ * never "absent": malformed JSON in a JSON config, a non-object, or a pi
+ * `extensions` path that names pi-flair only by the loose substring test.
  * `path` only names the file in an `unknown` reason.
  */
 export function clientConfigHasFlairEntry(
@@ -1409,7 +1412,8 @@ export function clientConfigHasFlairEntry(
   path: string,
 ): ClientConfigFlairScan {
   if (id === "codex") {
-    // config.toml is TEXT; its unwire tests the raw string, not JSON.
+    // config.toml is TEXT; its unwire tests the raw string, not JSON, so a
+    // malformed TOML file is still scanned for the header line.
     return codexConfigHasFlairSection(decodeText(bytes))
       ? { status: "present" }
       : { status: "absent" };
@@ -1420,8 +1424,17 @@ export function clientConfigHasFlairEntry(
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     return { status: "unknown", reason: `not a JSON object: ${path}` };
   }
-  const present = id === "pi" ? piConfigHasFlairEntry(config) : mcpConfigHasFlairEntry(config);
-  return present ? { status: "present" } : { status: "absent" };
+  if (id === "pi") {
+    const scan = piConfigFlairEntryScan(config);
+    if (scan.status === "loose-path") {
+      return {
+        status: "unknown",
+        reason: `an extensions path names pi-flair only in its file name (${scan.entry}): ${path}`,
+      };
+    }
+    return { status: scan.status };
+  }
+  return mcpConfigHasFlairEntry(config) ? { status: "present" } : { status: "absent" };
 }
 
 // ---- Internal wiring functions --------------------------------------------------
@@ -1571,19 +1584,49 @@ function mcpConfigHasFlairEntry(config: any): boolean {
 }
 
 /**
+ * Does this `extensions` entry point INSIDE the pi-flair package? Exact path
+ * segment, so the documented workaround
+ * `~/.pi/agent/npm/node_modules/@tpsdev-ai/pi-flair/dist/index.js` names it and
+ * `~/dist/pi-flair-notes.js` does not (flair#2886). */
+function isPiFlairPackagePath(entry: string): boolean {
+  return entry.replace(/\\/g, "/").split("/").some((segment) => segment === "pi-flair");
+}
+
+/** What a pi settings object says about pi-flair. `loose-path` is an
+ *  `extensions` path that `isPiFlairExtensionPath` matches on the substring
+ *  only — that heuristic is for doctor's reporting, so it cannot decide a
+ *  delete (flair#2886). */
+type PiFlairEntryScan =
+  | { status: "present" }
+  | { status: "absent" }
+  | { status: "loose-path"; entry: string };
+
+/**
  * The pi shape that counts as a Flair entry: a `packages` source naming
- * pi-flair, or an `extensions` entry naming/pointing at it. Shared with
- * `_unwirePi` for the same reason as `mcpConfigHasFlairEntry`.
+ * pi-flair, or an `extensions` entry naming it as an npm source or pointing
+ * inside its package. Shared with `_unwirePi` for the same reason as
+ * `mcpConfigHasFlairEntry`.
  */
-function piConfigHasFlairEntry(config: any): boolean {
+function piConfigFlairEntryScan(config: any): PiFlairEntryScan {
   const packages = Array.isArray(config.packages) ? config.packages : [];
   if (packages.some((entry: unknown) => {
     const source = piPackageEntrySource(entry);
     return !!(source && isPiFlairNpmSource(source));
-  })) return true;
+  })) return { status: "present" };
   const extensions = Array.isArray(config.extensions) ? config.extensions : [];
-  return extensions.some((entry: unknown) =>
-    typeof entry === "string" && (isPiFlairNpmSource(entry) || isPiFlairExtensionPath(entry)));
+  let loose: string | null = null;
+  for (const entry of extensions) {
+    if (typeof entry !== "string") continue;
+    if (isPiFlairNpmSource(entry) || isPiFlairPackagePath(entry)) return { status: "present" };
+    if (loose === null && isPiFlairExtensionPath(entry)) loose = entry;
+  }
+  return loose === null ? { status: "absent" } : { status: "loose-path", entry: loose };
+}
+
+/** The unwire rewrites the file for a `loose-path` entry too, so it counts as
+ *  an entry there. */
+function piConfigHasFlairEntry(config: any): boolean {
+  return piConfigFlairEntryScan(config).status !== "absent";
 }
 
 /**

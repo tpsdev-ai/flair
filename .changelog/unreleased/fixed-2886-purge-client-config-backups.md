@@ -1,6 +1,8 @@
 - **`flair uninstall --purge` removes the client-config `.bak` copies that still carried Flair's wiring.**
-  Unwiring each client snapshots its config to a sibling `<config>.bak`, and purge now deletes that
-  snapshot when it contains a Flair entry — tested with the same detection that client's unwire uses —
-  listing the path under `Removed`. A snapshot with no Flair entry may be the user's own copy and stays.
-  A snapshot that cannot be read or parsed is listed under `Not checked` and left in place, and the
-  run exits non-zero. Plain `flair uninstall` keeps every backup.
+  Unwiring each client snapshots its config to a sibling `<config>.bak`, and purge now deletes a
+  snapshot that carries Flair's entry — `mcpServers.flair`, pi's `npm:@tpsdev-ai/pi-flair` source or a
+  path inside the pi-flair package, or Codex's `[mcp_servers.flair]` header — listing the path under
+  `Removed`. A snapshot with no Flair entry may be the user's own copy and stays byte-identical.
+  A JSON snapshot that cannot be read or parsed, and a pi snapshot whose `extensions` entry only
+  contains the string `pi-flair` without naming the package, are listed under `Not checked` and left
+  in place; the run then exits non-zero. Plain `flair uninstall` keeps every backup.

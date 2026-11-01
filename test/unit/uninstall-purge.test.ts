@@ -28,6 +28,7 @@ import {
   codexConfigHasFlairSection,
 } from "../../src/install/clients.ts";
 import { installHook, installContinuityHooks, hookSettingsPath, hookBackupPath } from "../../src/hook-install.ts";
+import { withHome } from "../../src/lib/home.ts";
 import {
   purgeFlairInstall,
   formatPurgeReport,
@@ -328,26 +329,28 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
    * flair#2886: a home wired for Claude Code, Codex and pi through the real
    * client modules, with settings Flair does not own in every active config.
    */
-  function seedWiredHome() {
-    writeFileSync(join(isoHome, ".claude.json"), JSON.stringify({
+  function seedWiredHome(home: string = isoHome) {
+    writeFileSync(join(home, ".claude.json"), JSON.stringify({
       theme: "dark",
       mcpServers: { other: { command: "keep-me" } },
     }, null, 2) + "\n");
-    mkdirSync(join(isoHome, ".codex"), { recursive: true });
-    writeFileSync(join(isoHome, ".codex", "config.toml"), "[other]\nmodel = \"gpt-5\"\n");
-    mkdirSync(join(isoHome, ".pi", "agent"), { recursive: true });
-    writeFileSync(piSettingsPath(), JSON.stringify({
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    writeFileSync(join(home, ".codex", "config.toml"), "[other]\nmodel = \"gpt-5\"\n");
+    const pi = withHome(home, () => piSettingsPath());
+    mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+    writeFileSync(pi, JSON.stringify({
       theme: "light",
       packages: [{ source: "npm:some-other-package@1.0.0" }],
       extensions: [],
     }, null, 2) + "\n");
-    for (const wired of [wireClaudeCode(ENV), wireCodex(ENV), wirePi(ENV)]) {
-      expect(wired.ok).toBe(true);
+    const wired = withHome(home, () => [wireClaudeCode(ENV), wireCodex(ENV), wirePi(ENV)]);
+    for (const result of wired) {
+      expect(result.ok).toBe(true);
     }
     return {
-      claude: join(isoHome, ".claude.json"),
-      codex: join(isoHome, ".codex", "config.toml"),
-      pi: piSettingsPath(),
+      claude: join(home, ".claude.json"),
+      codex: join(home, ".codex", "config.toml"),
+      pi,
     };
   }
 
@@ -365,9 +368,17 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
     "~/.pi/agent/settings.json.bak",
   ];
 
+  /** A `.bak` that still carries Flair wiring, as an earlier unwire leaves it. */
+  function writeWiredBackups(paths: { claude: string; codex: string; pi: string }) {
+    writeFileSync(`${paths.claude}.bak`, readFileSync(paths.claude));
+    writeFileSync(`${paths.codex}.bak`, readFileSync(paths.codex));
+    writeFileSync(`${paths.pi}.bak`, readFileSync(paths.pi));
+  }
+
   test("purge removes client-config backups with a Flair entry and keeps unrelated settings", async () => {
     const paths = seedWiredHome();
     const before = snapshotConfigs(paths);
+    writeWiredBackups(paths);
     // A sibling backup that predates this purge and still carries old wiring.
     mkdirSync(join(isoHome, ".gemini"), { recursive: true });
     const geminiBak = clientConfigBackupPath("gemini");
@@ -406,10 +417,11 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
     expect(after.pi).toEqual(piExpected);
   }, 30_000);
 
-  test("a client backup with no Flair entry survives byte-identical and is not reported", () => {
-    seedWiredHome();
-    mkdirSync(join(isoHome, ".cursor"), { recursive: true });
-    const ownBak = clientConfigBackupPath("cursor");
+  test("a clean backup beside an existing active config survives unwiring byte-identical", () => {
+    const paths = seedWiredHome();
+    // The user's own copy, written before Flair ever ran: unwiring rewrites
+    // `.claude.json` and its snapshot write lands on this same path.
+    const ownBak = clientConfigBackupPath("claude-code");
     const ownBytes = JSON.stringify({ theme: "solarized" }, null, 2) + "\n";
     writeFileSync(ownBak, ownBytes);
 
@@ -421,9 +433,78 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
 
     expect(purgeHadFailures(result)).toBe(false);
     expect(readFileSync(ownBak, "utf-8")).toBe(ownBytes);
-    expect(result.removed).not.toContain("~/.cursor/mcp.json.bak");
-    expect(result.leftovers.some((l) => l.path === "~/.cursor/mcp.json.bak")).toBe(false);
-    expect(existsSync(clientConfigBackupPath("claude-code"))).toBe(false);
+    expect(result.removed).not.toContain("~/.claude.json.bak");
+    expect(result.leftovers.some((l) => l.path === "~/.claude.json.bak")).toBe(false);
+    // The active config itself was unwired, so the backup above was restored
+    // over a snapshot the unwire did write.
+    expect(JSON.parse(readFileSync(paths.claude, "utf-8")).mcpServers.flair).toBeUndefined();
+  }, 30_000);
+
+  test("purge sweeps the backups under homeDir, not the caller's HOME", () => {
+    const target = mkdtempSync(join(tmpdir(), "flair-purge-target-"));
+    const callerHome = mkdtempSync(join(tmpdir(), "flair-purge-caller-"));
+    try {
+      const targetPaths = seedWiredHome(target);
+      const callerPaths = seedWiredHome(callerHome);
+      writeWiredBackups(targetPaths);
+      writeWiredBackups(callerPaths);
+      const targetBak = withHome(target, () => clientConfigBackupPath("claude-code"));
+      const callerBak = withHome(callerHome, () => clientConfigBackupPath("claude-code"));
+      const callerBakBytes = readFileSync(callerBak);
+      const callerConfigBytes = readFileSync(join(callerHome, ".claude.json"));
+      expect(readFileSync(targetBak).includes("flair")).toBe(true);
+
+      process.env.HOME = callerHome;
+      const result = purgeFlairInstall({
+        homeDir: target,
+        skipSchedulerUnload: true,
+        omitNpmLeftover: true,
+      });
+
+      expect(result.removed).toContain("~/.claude.json.bak");
+      expect(existsSync(targetBak)).toBe(false);
+      expect(Buffer.compare(readFileSync(callerBak), callerBakBytes)).toBe(0);
+      expect(Buffer.compare(readFileSync(join(callerHome, ".claude.json")), callerConfigBytes)).toBe(0);
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+      rmSync(callerHome, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("a pi backup pointing inside the pi-flair package is removed", () => {
+    mkdirSync(join(isoHome, ".pi", "agent"), { recursive: true });
+    const bak = clientConfigBackupPath("pi");
+    writeFileSync(bak, JSON.stringify({
+      extensions: ["~/.pi/agent/npm/node_modules/@tpsdev-ai/pi-flair/dist/index.js"],
+    }, null, 2) + "\n");
+
+    const result = purgeFlairInstall({
+      homeDir: isoHome,
+      skipSchedulerUnload: true,
+      omitNpmLeftover: true,
+    });
+
+    expect(result.removed).toContain("~/.pi/agent/settings.json.bak");
+    expect(existsSync(bak)).toBe(false);
+  }, 30_000);
+
+  test("a pi backup whose path only contains pi-flair is left and reported as not checked", () => {
+    mkdirSync(join(isoHome, ".pi", "agent"), { recursive: true });
+    const bak = clientConfigBackupPath("pi");
+    const bakBytes = JSON.stringify({ extensions: ["~/dist/pi-flair-notes.js"] }, null, 2) + "\n";
+    writeFileSync(bak, bakBytes);
+
+    const result = purgeFlairInstall({
+      homeDir: isoHome,
+      skipSchedulerUnload: true,
+      omitNpmLeftover: true,
+    });
+
+    expect(readFileSync(bak, "utf-8")).toBe(bakBytes);
+    expect(result.removed).not.toContain("~/.pi/agent/settings.json.bak");
+    expect(result.leftovers.filter((l) => l.kind === "unverified").map((l) => l.path))
+      .toContain("~/.pi/agent/settings.json.bak");
+    expect(purgeHadFailures(result)).toBe(true);
   }, 30_000);
 
   test("an unreadable or unparseable client backup is reported as not checked and left", () => {

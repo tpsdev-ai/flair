@@ -15,7 +15,7 @@
  * "fully purged" when anything remains.
  */
 
-import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveHome, withHome } from "./home.js";
 import {
@@ -191,11 +191,15 @@ function backupEntryAbsent(path: string): boolean {
 /**
  * Client configs get the same sibling snapshot as hook settings: every
  * `unwire()` write copies the pre-write bytes to `<config>.bak`, so after
- * unwiring the copy still holds the pre-purge Flair wiring. Purge removes a
- * copy that contains a Flair entry (detected the way the client's unwire
- * decides it) and reports the path like a hook backup. A copy with no Flair
- * entry may be the user's own file and stays — as does one whose contents
- * cannot be read or parsed, which is reported as not checked (flair#2886).
+ * unwiring the copy holds the pre-purge Flair wiring. Purge removes a copy
+ * that carries a Flair entry (identified as the client's unwire identifies
+ * it) and reports the path like a hook backup. A copy with no Flair entry may
+ * be the user's own file and stays — as does one whose wiring could not be
+ * decided, which is reported as not checked (flair#2886).
+ *
+ * Call inside `withHome(homeDir, ...)`: `clientConfigBackupPath()` resolves `~`
+ * at call time, so the sweep must run with the target home in the environment,
+ * not the caller's (flair#2886).
  */
 function sweepClientConfigBackup(
   clientId: ClientId,
@@ -230,12 +234,59 @@ function sweepClientConfigBackup(
   if (scan.status === "present") rmPath(backup, removed, leftovers, display);
 }
 
+interface HeldClientBackup {
+  path: string;
+  display: string;
+  bytes: Buffer;
+}
+
+/**
+ * A `<config>.bak` that already exists with no Flair entry is the user's own
+ * copy, but the unwire's snapshot write replaces it with the pre-unwire bytes.
+ * Hold those bytes so they can be put back before the sweep (flair#2886).
+ * Call inside `withHome(homeDir, ...)`.
+ */
+function holdCleanClientConfigBackups(homeDir: string): HeldClientBackup[] {
+  const held: HeldClientBackup[] = [];
+  for (const client of ALL_CLIENTS) {
+    const backup = clientConfigBackupPath(client.id);
+    let bytes: Uint8Array;
+    try {
+      bytes = readFileSync(backup);
+    } catch {
+      continue;
+    }
+    const scan = clientConfigHasFlairEntry(client.id, bytes, displayUnderHome(homeDir, backup));
+    if (scan.status === "absent") {
+      held.push({ path: backup, display: displayUnderHome(homeDir, backup), bytes: Buffer.from(bytes) });
+    }
+  }
+  return held;
+}
+
+/** Put a held copy back over the snapshot this purge's unwire wrote. Call
+ *  inside `withHome(homeDir, ...)`, before the sweep reads it. */
+function restoreHeldClientConfigBackups(held: HeldClientBackup[], leftovers: PurgeLeftover[]): void {
+  for (const item of held) {
+    try {
+      writeFileSync(item.path, item.bytes, { mode: 0o600 });
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      leftovers.push({
+        path: item.display,
+        kind: "failed",
+        reason: `could not restore the backup that carried no Flair entry: ${reason}`,
+      });
+    }
+  }
+}
+
 /**
  * Remove Flair-owned state under `homeDir`: the `~/.flair` tree (data, keys,
  * admin-pass, backups, logs, snapshots, shims), REM + federation scheduler
  * units on both platforms, SessionStart/continuity hooks, MCP/native
- * client wiring, and the pre-unwire client-config snapshots. The npm package
- * is listed as an intentional leftover unless `omitNpmLeftover` is set.
+ * client wiring, and the client-config snapshots left by unwiring. The npm
+ * package is listed as an intentional leftover unless `omitNpmLeftover` is set.
  */
 export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
   const homeDir = opts.homeDir ?? resolveHome();
@@ -269,6 +320,8 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
     sweepHookBackup(hookSettingsPath(homeDir, harness), null, homeDir, removed, leftovers);
   }
 
+  const heldBackups = withHome(homeDir, () => holdCleanClientConfigBackups(homeDir));
+
   const unwireResults = withHome(homeDir, () => ALL_CLIENTS.map((c) => c.unwire()));
   for (const u of unwireResults) {
     if (!u.ok) {
@@ -279,10 +332,14 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
   }
 
   // The unwire above snapshots each config before writing it; sweep those
-  // snapshots (and any older one) once the active configs are clean.
-  for (const client of ALL_CLIENTS) {
-    sweepClientConfigBackup(client.id, homeDir, removed, leftovers);
-  }
+  // snapshots (and any older one) once the active configs are clean, under the
+  // target home the unwire ran in.
+  withHome(homeDir, () => {
+    restoreHeldClientConfigBackups(heldBackups, leftovers);
+    for (const client of ALL_CLIENTS) {
+      sweepClientConfigBackup(client.id, homeDir, removed, leftovers);
+    }
+  });
 
   const flairDir = join(homeDir, ".flair");
   rmPath(flairDir, removed, leftovers, "~/.flair");
