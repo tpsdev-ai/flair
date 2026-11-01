@@ -1074,16 +1074,28 @@ export function extractPiFlairPin(source: string): string | null {
 }
 
 /**
- * Does this `extensions` entry point at pi-flair BY PATH (the documented
+ * Does this `extensions` entry mention pi-flair at all (the documented
  * pre-0.49 workaround: a local path to the installed dist/index.js)? A
  * substring heuristic on the package/directory name — the entry is user-
- * written free text, so this is deliberately loose in the direction of
- * REPORTING (doctor names the entry it matched); it never gates anything
- * destructive.
+ * written free text, so this is deliberately loose and REPORTING only:
+ * doctor names the entry it matched, and `_unwirePi` reports the entries this
+ * matches but `isInsidePiFlairPackage` rejects. Removal is decided by
+ * `isPiFlairNpmSource` and `isInsidePiFlairPackage`, never here (flair#2908).
  */
 export function isPiFlairExtensionPath(entry: string): boolean {
   if (typeof entry !== "string" || entry.startsWith("npm:") || entry.startsWith("git:")) return false;
   return entry.includes("pi-flair");
+}
+
+/**
+ * Is this `extensions` entry a path inside the pi-flair package Flair wires
+ * (`<agent dir>/npm/node_modules/@tpsdev-ai/pi-flair/dist/index.js`)? A whole
+ * path SEGMENT must be `pi-flair`, so that path matches and a user file that
+ * merely carries the name (`~/dist/pi-flair-notes.js`) does not (flair#2908).
+ */
+export function isInsidePiFlairPackage(entry: string): boolean {
+  if (typeof entry !== "string" || entry.startsWith("npm:") || entry.startsWith("git:")) return false;
+  return entry.replace(/\\/g, "/").split("/").some((segment) => segment === "pi-flair");
 }
 
 /** What one pi settings file says about pi-flair. Pure — callers do the fs. */
@@ -1633,6 +1645,13 @@ function _unwirePi(): UnwireResult {
   }
   try {
     let settled: UnwireResult | null = null;
+    let written: UnwireResult | null = null;
+    // An `extensions` entry that merely carries "pi-flair" in its path is left
+    // in place and named in the result: a user file such as
+    // ~/dist/pi-flair-notes.js is not Flair's wiring (flair#2908).
+    const lookalikes: string[] = [];
+    const described = (): string =>
+      lookalikes.length === 0 ? "" : `; left ${lookalikes.join(", ")} in place (path is not inside the pi-flair package)`;
     const result = withConfigCriticalSection(
       path,
       (bytes) => {
@@ -1663,9 +1682,9 @@ function _unwirePi(): UnwireResult {
         }
         if (Array.isArray(config.extensions)) {
           const kept = config.extensions.filter((entry: unknown) => {
-            if (typeof entry === "string" && (isPiFlairNpmSource(entry) || isPiFlairExtensionPath(entry))) {
-              return false;
-            }
+            if (typeof entry !== "string") return true;
+            if (isPiFlairNpmSource(entry) || isInsidePiFlairPackage(entry)) return false;
+            if (isPiFlairExtensionPath(entry) && !lookalikes.includes(entry)) lookalikes.push(entry);
             return true;
           });
           if (kept.length !== config.extensions.length) {
@@ -1674,14 +1693,15 @@ function _unwirePi(): UnwireResult {
           }
         }
         if (!changed) {
-          settled = { ok: true, removed: false, message: `pi: no Flair extension in ${display}` };
+          settled = { ok: true, removed: false, message: `pi: no Flair extension in ${display}${described()}` };
           return { noop: settled.message };
         }
+        written = { ok: true, removed: true, message: `pi: unwired ${display}${described()}` };
         return { write: encodeConfig(config) };
       },
       { backup: (bytes) => backupBytesTo(path, bytes) },
     );
-    if (result.status === "written") return { ok: true, removed: true, message: `pi: unwired ${display}` };
+    if (result.status === "written") return written ?? { ok: true, removed: true, message: `pi: unwired ${display}` };
     const s = settled as UnwireResult | null;
     if (s) return s;
     return { ok: false, removed: false, message: `pi: could not unwire ${display}: ${result.message}` };
