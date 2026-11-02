@@ -8,11 +8,11 @@
  * `id: p.id`). The deletion therefore goes to `/Peer/{id}`, the admin-deletable
  * resource (`resources/Peer.ts`, `allowDelete() = allowAdmin`).
  *
- * Three rows are seeded as admin: a stale spoke, a fresh spoke and a stale hub.
- * `prune --apply` must remove only the stale spoke, report exactly one
- * deletion, keep the other two rows and exit 0. A non-admin credential is
- * refused by the admin-only peer read: exit 1, the rows survive, and the
- * refusal names its status.
+ * Four rows are seeded as admin: a stale spoke, a fresh spoke, a stale hub and
+ * a protected spoke. `prune --apply` must remove only the stale spoke, report
+ * exactly one deletion, keep the fresh spoke and the hub, and exit 0. A
+ * non-admin credential is refused by the admin-only peer list: exit 1, the
+ * rows survive, and the refusal names its error.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";

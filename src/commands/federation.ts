@@ -2600,7 +2600,7 @@ export function register(program: Command): void {
         }
 
         // 404 or a null body means absent; a row means it is still there. A
-        // read failure here is an unknown outcome for this peer.
+        // read failure after a successful DELETE is an unknown outcome.
         let present: boolean;
         try {
           const row = await api("GET", `/Peer/${encodeRecordId(p.id)}`, undefined, requestOptions);
