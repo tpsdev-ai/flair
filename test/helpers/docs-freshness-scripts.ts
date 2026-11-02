@@ -20,7 +20,9 @@ const ENTRY = "docs-freshness-check.mjs";
 const MAX_FILES = 200;
 
 /** `import ... from "./x.mjs"` and `export ... from "./x.mjs"`, however wrapped. */
-const RELATIVE_IMPORT = /^[ \t]*(?:import|export)\b[^;]*?\bfrom\s*["'](\.\.?\/[^"']+)["']/gm;
+const FROM_CLAUSE = /^[ \t]*(?:import|export)\b[^;]*?\bfrom\s*["'](\.\.?\/[^"']+)["']/gm;
+/** A side-effect import: `import "./x.mjs"`. */
+const BARE_IMPORT = /^[ \t]*import\s*["'](\.\.?\/[^"']+)["']/gm;
 
 export function docsFreshnessScriptFiles(repoRoot: string = REPO_ROOT): string[] {
   const scripts = join(repoRoot, "scripts");
@@ -34,8 +36,10 @@ export function docsFreshnessScriptFiles(repoRoot: string = REPO_ROOT): string[]
       throw new Error(`docsFreshnessScriptFiles: more than ${MAX_FILES} script files reachable from ${ENTRY}`);
     }
     const source = readFileSync(join(scripts, name), "utf8");
-    for (const match of source.matchAll(RELATIVE_IMPORT)) {
-      queue.push(relative(scripts, resolve(scripts, dirname(name), match[1])));
+    for (const pattern of [FROM_CLAUSE, BARE_IMPORT]) {
+      for (const match of source.matchAll(pattern)) {
+        queue.push(relative(scripts, resolve(scripts, dirname(name), match[1])));
+      }
     }
   }
   return [...seen].sort();
