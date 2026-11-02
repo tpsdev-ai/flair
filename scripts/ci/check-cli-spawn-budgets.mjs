@@ -41,6 +41,20 @@
 // an entry that no longer offends FAILS. New exception keys FAIL. There is
 // no skip flag and no whole-file skip.
 //
+// A RE-KEY IS NOT AN ADDED EXCEPTION (flair#2854). One kind's scope is derived
+// attribution, not something the test writes: `spawn-no-timeout`'s scope is the
+// enclosing helper or case the scanner picks for the call. Moving a spawn into
+// the helper that actually performs it changes the key although it is the same
+// call — file, fingerprint, kind and occurrence are unchanged — so refusing
+// that key as a new exception would reject the very fix that makes the
+// attribution right. Such an added key is therefore paired ONE-TO-ONE with a
+// removed baseline key of identical file, fingerprint, kind and occurrence, and
+// reported as RE-KEYED without failing. Pairing consumes both keys, so a second
+// added key with the same identity still fails as ADDED-EX. Only
+// `spawn-no-timeout` is re-keyable: a case-level kind's scope names the case
+// that owns the defect, and a fix in one case must never cover a regression in
+// another, so those keys keep strict identity.
+//
 // SCOPE — EVERY SPAWN FAMILY THIS REPO USES (flair#1825). The node
 // `child_process` family (spawn / spawnSync / exec / execFile / fork and their
 // Sync forms) — bare, or via a NAMED ALIAS import — AND `Bun.spawn` /
@@ -1385,6 +1399,45 @@ export function addedExceptions(baseEntries, prEntries) {
   return prEntries.filter((e) => !baseKeys.has(offenderKey(e)));
 }
 
+/** Identity of a call whose scope is derived, i.e. everything but the scope. */
+function rekeyIdentity(e) {
+  return [e.file, e.fingerprint, e.kind, String(e.occurrence ?? 0)].join(" | ");
+}
+
+/**
+ * Split the PR's added exception keys into re-keys and true additions
+ * (flair#2854).
+ *
+ * An added key is a re-key when it pairs one-to-one with a REMOVED baseline key
+ * (in the base, absent from the PR) of identical file, fingerprint, kind and
+ * occurrence: only the scope moved. Only `spawn-no-timeout` qualifies, because
+ * its scope is derived attribution; the case-level kinds keep strict identity.
+ * Pairing consumes both keys, so two added keys against one removed key are one
+ * re-key and one addition, never two re-keys.
+ */
+export function classifyAddedExceptions(baseEntries, prEntries) {
+  const baseKeys = new Set(baseEntries.map(offenderKey));
+  const prKeys = new Set(prEntries.map(offenderKey));
+  const addedEntries = prEntries.filter((e) => !baseKeys.has(offenderKey(e)));
+  const removedEntries = baseEntries.filter((e) => !prKeys.has(offenderKey(e)));
+  const pool = new Map();
+  for (const e of removedEntries) {
+    if (e.kind !== "spawn-no-timeout") continue;
+    const id = rekeyIdentity(e);
+    const list = pool.get(id);
+    if (list) list.push(e);
+    else pool.set(id, [e]);
+  }
+  const added = [];
+  const rekeyed = [];
+  for (const e of addedEntries) {
+    const list = e.kind === "spawn-no-timeout" ? pool.get(rekeyIdentity(e)) : undefined;
+    if (list && list.length > 0) rekeyed.push({ from: list.shift(), to: e });
+    else added.push(e);
+  }
+  return { added, rekeyed };
+}
+
 /**
  * End-to-end check: scan `root`, diff against the baseline read from `baseRef`.
  *
@@ -1417,8 +1470,9 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seed
   // dead code (a follow-up removes it — first slice of #1921).
   let anchored = false;
   let added;
+  let rekeyed = [];
   if (basePresent) {
-    added = addedExceptions(baseEntries, prEntries);
+    ({ added, rekeyed } = classifyAddedExceptions(baseEntries, prEntries));
   } else {
     let anchorSha;
     try {
@@ -1453,6 +1507,7 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seed
     baseEntries: baseEntries ?? [],
     errors,
     added,
+    rekeyed,
     ...diff,
     ok: errors.length === 0 && diff.ok && added.length === 0,
   };
@@ -1479,7 +1534,7 @@ if (isMain) {
     process.stderr.write(`check-cli-spawn-budgets: ${err.message}\n`);
     process.exit(1);
   }
-  const { files, spawnOffenders, caseOffenders, baseRef, baseSha, basePresent, defaulted, seedAccepted, allowEntries, errors, added, newOffenders, staleEntries, ok } = result;
+  const { files, spawnOffenders, caseOffenders, baseRef, baseSha, basePresent, defaulted, seedAccepted, allowEntries, errors, added, rekeyed, newOffenders, staleEntries, ok } = result;
   if (seedAccepted) {
     // Say EXACTLY what the predicate guarantees: the base is named by its own sha
     // and DESCENDS from the anchor — it does not "resolve to" it, and a descendant
@@ -1506,12 +1561,17 @@ if (isMain) {
   for (const o of staleEntries) {
     process.stdout.write(`  STALE    ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}\n`);
   }
+  for (const r of rekeyed) {
+    process.stdout.write(
+      `  RE-KEYED ${r.to.file}  ${r.from.scope} -> ${r.to.scope}  ${r.to.kind}  ${r.to.fingerprint.slice(0, 50)}\n`,
+    );
+  }
   for (const o of added) {
     process.stdout.write(`  ADDED-EX ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}  (new exception key)\n`);
   }
   process.stdout.write(
     `check-cli-spawn-budgets: ${spawnOffenders.length} spawn(s) with no timeout, ${caseOffenders.length} case(s) offending, ` +
-      `${allowEntries.length} allowed at ${baseRef} — ${newOffenders.length} new, ${staleEntries.length} stale, ${added.length} added-exception.\n`,
+      `${allowEntries.length} allowed at ${baseRef} — ${newOffenders.length} new, ${staleEntries.length} stale, ${added.length} added-exception, ${rekeyed.length} re-keyed.\n`,
   );
   process.exit(ok ? 0 : 1);
 }

@@ -91,6 +91,11 @@ export function loadBaselineAtRef(ref: string, root: string): BaselineEntry[] | 
 export function readPrBaseline(root: string): BaselineEntry[];
 /** Entries with exception keys absent from the trusted base. */
 export function addedExceptions(baseEntries: BaselineEntry[], prEntries: BaselineEntry[]): BaselineEntry[];
+/** Split added keys into re-keys (scope-only moves of a spawn-no-timeout call) and true additions (flair#2854). */
+export function classifyAddedExceptions(
+  baseEntries: BaselineEntry[],
+  prEntries: BaselineEntry[],
+): { added: BaselineEntry[]; rekeyed: Array<{ from: BaselineEntry; to: BaselineEntry }> };
 
 /** End-to-end check used by main() and the gate-level tests. */
 export function runGate(opts?: { root?: string; baseRef?: string; env?: Record<string, string | undefined>; seedBase?: string }): {
@@ -108,6 +113,7 @@ export function runGate(opts?: { root?: string; baseRef?: string; env?: Record<s
   baseEntries: BaselineEntry[];
   errors: string[];
   added: BaselineEntry[];
+  rekeyed: Array<{ from: BaselineEntry; to: BaselineEntry }>;
   newOffenders: SpawnOffender[];
   staleEntries: BaselineEntry[];
   ok: boolean;
