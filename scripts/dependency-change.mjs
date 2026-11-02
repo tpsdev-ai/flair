@@ -3,8 +3,8 @@
 // The PR-time waiver reads only the event login, never commit metadata.
 // Release-time eligibility reads the recorded author NAME. With merge commits
 // enabled, that name can be mis-attributed.
-// The PR-time gate evaluates the event login and changed paths independently of
-// the recorded commit author.
+// The PR-time waiver evaluates the event login and changed paths. The
+// since-tag exclusion in the docs-freshness gate reads the recorded author name.
 
 import { execFileSync } from "node:child_process";
 

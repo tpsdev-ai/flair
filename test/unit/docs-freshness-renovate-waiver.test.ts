@@ -140,6 +140,15 @@ function addDependencyOnlyCommit(dir: string, opts: { author?: "renovate"; type?
   }
 }
 
+/** One fix commit, recorded author renovate[bot], touching only root package.json. */
+function addRenovateRootManifestCommit(dir: string): void {
+  const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+  pkg.dependencies = { "left-pad": "1.3.0" };
+  writeFileSync(join(dir, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
+  git(dir, "add", "-A");
+  commitAs(dir, "renovate[bot]", "fixture@example.invalid", "fix(deps): update dependency left-pad to v1.3.0 (#42)");
+}
+
 describe("Git basename classification", () => {
   test.each([
     { paths: [" package.json"], accepted: false },
@@ -252,13 +261,37 @@ describe("PR author login and accepted JavaScript filenames", () => {
     expect(result.status).not.toBe(0);
   });
 
-  test.each(["merge-base", "diff"])("git %s failure leaves the fragment required", (command) => {
+  test.each(["merge-base", "diff"])("git %s failure still requires a fragment for a human-authored dependency commit", (command) => {
     const dir = makeRepo();
     addDependencyOnlyCommit(dir);
     const result = runGate(dir, "renovate[bot]", failingGitEnv(dir, command));
     expect(result.out).not.toContain("waived the per-PR fragment requirement");
     expect(result.out).toContain("no changelog fragments staged");
     expect(result.status).not.toBe(0);
+  });
+
+  test.each(["human-a", undefined])(
+    "unavailable merge base skips when the only fix commit was excluded as Renovate (login %p)",
+    (login) => {
+      const dir = makeRepo();
+      addRenovateRootManifestCommit(dir);
+      git(dir, "update-ref", "-d", "refs/remotes/origin/main");
+      const res = runGate(dir, login);
+      expect(res.status).not.toBe(0);
+      expect(res.out).toContain("DID NOT RUN");
+      expect(res.out).toContain("no merge base with origin/main");
+      expect(res.out).toContain("fetch-depth: 0");
+      expect(res.out).not.toContain("waived the per-PR fragment requirement");
+    },
+  );
+
+  test("a reachable merge base with a human login fails on the missing fragment", () => {
+    const dir = makeRepo();
+    addRenovateRootManifestCommit(dir);
+    const res = runGate(dir, "human-a");
+    expect(res.status).toBe(1);
+    expect(res.out).toContain("adds no changelog fragment");
+    expect(res.out).not.toContain("waived the per-PR fragment requirement");
   });
 
   test("Renovate fix renaming a source file to package.json requires a fragment", () => {
