@@ -751,6 +751,18 @@ describe("runFederationVerify", () => {
     expect(r.verdict.summary).not.toContain("no peers");
   });
 
+  test.each([undefined, null])("a body dependency throwing %s returns a failing verdict", async (value) => {
+    const deps = makeDeps({
+      sync: async () => { throw value; },
+    });
+    const r = await runFederationVerify(baseOpts(), deps);
+    expect(r.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
+    expect(r.verdict.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
+    expect(r.verdict.kind).toBe("verification-failed");
+    expect(r.verdict.summary).toContain(String(value));
+    expect(r.cleanedUp).toBe(true);
+  });
+
   test("a returned sync failure with a successful cleanup returns a failing verdict", async () => {
     const deps = makeDeps({
       sync: async () => ({ pushed: 0, skipped: 0, error: new Error("push exploded") }),

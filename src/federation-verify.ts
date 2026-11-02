@@ -696,15 +696,14 @@ export async function runFederationVerify(
   }
 
   // A failed verification — a thrown body, a returned sync error, or an
-  // unmatched --peer — reports its failure in the returned verdict. The
-  // "empty" kind is returned only for a genuinely empty peer set.
+  // unmatched --peer — reports its failure in the returned verdict.
   const cleanupUnknownCount = unknownCleanup.length;
   const failure = bodyFailed
     ? bodyError
     : syncFailure ?? (unmatchedPeer === null
       ? null
       : new Error(`--peer "${unmatchedPeer}" matched no listed peer`));
-  if (failure !== null && failure !== undefined) {
+  if (bodyFailed || (failure !== null && failure !== undefined)) {
     const failureMessage = failure instanceof Error ? failure.message : String(failure);
     result.verdict = describeVerificationFailure(failureMessage, cleanupUnknownCount);
     result.exitCode = result.verdict.exitCode;
