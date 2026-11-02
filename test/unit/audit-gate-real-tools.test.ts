@@ -5,6 +5,8 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { delimiter, dirname, join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
+// @ts-expect-error — plain .mjs helper, no type declarations by design.
+import { readAllowlistHistory, validateAllowlist, validateAllowlistHistory } from "../../scripts/audit-gate.mjs";
 
 /**
  * The dependency audit gate run against the real audit tools (flair#2278).
@@ -34,6 +36,11 @@ const TEST_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"
 /** The bun version the `audit` job installs with setup-bun. */
 const PINNED_BUN = /\n  audit:\n[\s\S]*?bun-version: "([^"]+)"/.exec(TEST_YML)?.[1];
 
+/**
+ * The day the fixture gate runs as "today": after the committed uuid entries'
+ * `added` (2026-10-09) and before their `expires` (2026-11-15).
+ */
+const FIXTURE_TODAY = "2026-10-10";
 /** Ports production Flair listens on; a fixture server must never hold one. */
 const RESERVED_PORTS = new Set([9925, 9926, 19925, 19926]);
 /** A fixture server drops a connection idle this long. */
@@ -74,8 +81,16 @@ const tarballStem = (pkg: string) => pkg.replace(/^@/, "").replace("/", "-");
 const prefixArgs = (prefixOf: (input: (typeof CONSUMER_INPUTS)[number]) => string) =>
   CONSUMER_INPUTS.flatMap((input) => [input.flag, prefixOf(input)]);
 
-/** Commits a fixture's allowlist so the gate can read the history it checks. */
-function commitAllowlistHistory(root: string, date = "2026-11-01T12:00:00Z") {
+/**
+ * Commits a fixture's allowlist so the gate can read the history it checks.
+ * The default commit day is the latest `added` day in the file, so the history
+ * boundary and the pinned today agree with the entries' dates.
+ */
+function commitAllowlistHistory(root: string, date?: string) {
+  const entries = JSON.parse(readFileSync(join(root, ".github/audit-allowlist.json"), "utf8")).entries ?? [];
+  const addedDays = entries.map((entry: { added?: string }) => entry.added)
+    .filter((day: unknown): day is string => typeof day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(day));
+  date ??= `${addedDays.sort().at(-1) ?? "2026-01-01"}T12:00:00Z`;
   const env = {
     ...process.env,
     GIT_AUTHOR_NAME: "fixture",
@@ -89,6 +104,16 @@ function commitAllowlistHistory(root: string, date = "2026-11-01T12:00:00Z") {
     const res = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", env, timeout: 20_000 });
     if (res.status !== 0) throw new Error(`fixture git ${args[0]} failed (${res.status}): ${res.stderr}`);
   }
+}
+
+/** The validator's problems for a fixture's allowlist on the pinned day. */
+function allowlistProblems(root: string, today = FIXTURE_TODAY): string[] {
+  const allowlist = JSON.parse(readFileSync(join(root, ".github/audit-allowlist.json"), "utf8"));
+  const day = new Date(`${today}T00:00:00Z`);
+  return [
+    ...validateAllowlist(allowlist, day),
+    ...validateAllowlistHistory(allowlist, readAllowlistHistory(root), day),
+  ];
 }
 
 /** The advisory the "advisory" registry answer lists for DEP. */
@@ -332,7 +357,7 @@ function makeFixture(opts: FixtureOptions): Fixture {
       npm_config_globalconfig: join(root, "npmrc-global"),
       npm_config_cache: join(root, "cache", "npm"),
       BUN_INSTALL_CACHE_DIR: join(root, "cache", "bun"),
-      AUDIT_GATE_TODAY: "2026-10-01",
+      AUDIT_GATE_TODAY: FIXTURE_TODAY,
     },
   };
 }
@@ -589,6 +614,7 @@ describe("ADK uuid paths from real npm audit", () => {
             entry.package === "uuid" && entry.introducedBy === chain.join(" -> ")),
         }));
         commitAllowlistHistory(f.root);
+        expect(allowlistProblems(f.root)).toEqual([]);
         const run = await runProcess(process.execPath, [
           join(f.root, "scripts/audit-gate.mjs"),
           ...prefixArgs((input) => (input.source === "npm-install-adk" ? adkPrefix : f.prefixes[input.source]!)),
@@ -660,6 +686,7 @@ describe("two ADK uuid copies from real npm audit, one allowlist entry per copy"
         expect(uuidEntries.length).toBe(2);
         writeFileSync(join(f.root, ".github/audit-allowlist.json"), JSON.stringify({ policy: ALLOWLIST_POLICY, entries: uuidEntries }));
         commitAllowlistHistory(f.root);
+        expect(allowlistProblems(f.root)).toEqual([]);
         const run = await runProcess(process.execPath, [
           join(f.root, "scripts/audit-gate.mjs"),
           ...prefixArgs((input) => (input.source === "npm-install-adk" ? adkPrefix : f.prefixes[input.source]!)),
