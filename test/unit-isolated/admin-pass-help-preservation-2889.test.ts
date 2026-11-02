@@ -1,14 +1,3 @@
-/**
- * admin-pass-help-preservation-2889.test.ts — flair#2889 fix round.
- *
- * The fixture holds, for every command that declared `--admin-pass` on
- * origin/main (b6a06807), that description, plus every command's ordered
- * option names. It was generated from main's built CLI by walking the
- * registered commander tree with the same `walkCliCommands` helper the
- * CLI-surface snapshot uses.
- *
- * Isolated: it imports src/cli.ts (registration only) in its own process.
- */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -52,7 +41,7 @@ describe("flair#2889 — --admin-pass descriptions", () => {
 });
 
 describe("flair#2889 — --admin-pass-file does not reorder options", () => {
-  test("every command's option list minus --admin-pass-file matches origin/main's order", () => {
+  test("option order matches the fixture after removing --admin-pass-file", () => {
     const walked = new Map<string, string[]>();
     for (const { path, cmd } of walkCliCommands(program)) walked.set(path, optionNames(cmd));
 

@@ -14,7 +14,7 @@ import { encodeRecordId } from "../lib/record-id-path.js";
 import { Command } from "commander";
 import { randomUUID } from "node:crypto";
 import * as render from "../render.js";
-import { resolveAdminUser, addAdminPassOptions, applyAdminPassFile } from "../lib/auth-resolve.js";
+import { resolveAdminUser, addAdminPassOptions, applyAdminPassFile, ApiHttpError } from "../lib/auth-resolve.js";
 
 export type IdpCli = {
   api: (...args: any[]) => Promise<any>;
@@ -186,6 +186,7 @@ export function register(program: Command): void {
     });
 
   addAdminPassOptions(idp.command("test <id>").description("Test IdP connectivity (fetches JWKS)"), "Admin password")
+    .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, opts) => {
       applyAdminPassFile(opts);
@@ -198,9 +199,13 @@ export function register(program: Command): void {
 
       let cfg: any;
       try {
-        cfg = await api("GET", `/IdpConfig/${encodeRecordId(id)}`);
-      } catch {
-        console.error(`IdP '${id}' not found`);
+        cfg = await api("GET", `/IdpConfig/${encodeRecordId(id)}`, undefined, {
+          explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null,
+        });
+      } catch (err: unknown) {
+        console.error(err instanceof ApiHttpError && err.status === 404
+          ? `IdP '${id}' not found`
+          : `Error: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(1);
       }
       console.log(`Testing IdP: ${cfg.name} (${cfg.issuer})`);

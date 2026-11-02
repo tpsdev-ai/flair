@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=149 options=702
+# commands=149 options=703
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -899,6 +899,9 @@ flair idp test
     --admin-pass-file <path>
       description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. Combining it with --admin-pass is a usage error.
       attr: adminPassFile
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
     --ops-port <port>
       description: Harper operations API port
       attr: opsPort
@@ -4071,6 +4074,8 @@ Options:
                             keeping it out of shell history and the process
                             list. Combining it with --admin-pass is a usage
                             error.
+  --admin-user <name>       Admin username for Basic auth (env:
+                            FLAIR_ADMIN_USER; default: admin)
   --ops-port <port>         Harper operations API port
   -h, --help                display help for command
 

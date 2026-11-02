@@ -359,6 +359,7 @@
   "flair idp test": {
     "options": [
       "--admin-pass",
+      "--admin-user",
       "--ops-port"
     ],
     "adminPass": "Admin password"
