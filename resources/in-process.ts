@@ -75,7 +75,7 @@
  *
  * These guards are runtime, not types, on purpose: an embedding application may
  * be plain JavaScript, where a `string` parameter annotation buys exactly
- * nothing. test/integration/in-process-agents.test.ts pins both the guards and
+ * nothing. test/integration-heavy/in-process-agents.test.ts pins both the guards and
  * the hazard they exist for, against a real Harper.
  *
  * ── Deliberately dependency-free ─────────────────────────────────────────────
@@ -229,10 +229,12 @@ export function internalContext(): CallContext {
  * argument left off reads in Harper's ambient context — a request's context
  * can follow a timer or a promise — and with no ambient context it resolves to
  * the same trusted `internal` verdict this module exists to keep out of reach.
- * The query still narrows the rows it returns, but no agent scope applies;
- * Harper consults the resource's `allowRead` only when a permission check is
- * requested (`query.checkPermission` or `context.authorize`). Pass the context
- * to every call, read or write (flair#936).
+ * The query still narrows the rows it returns. With no ambient context, no
+ * agent scope applies; under an inherited non-admin agent context, the read
+ * is scoped to that agent. Harper consults the resource's `allowRead` only
+ * when a permission check is requested (`query.checkPermission` or
+ * `context.authorize`). Pass the context to every call, read or write
+ * (flair#936).
  */
 export async function collectionResource<T = any>(Cls: any, context: CallContext): Promise<T> {
   if (context == null || typeof context !== "object") {

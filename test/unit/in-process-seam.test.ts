@@ -21,7 +21,7 @@
 //
 // The end-to-end proof against a real, two-component Harper — including the
 // escalation this API shape prevents — is
-// test/integration/in-process-agents.test.ts.
+// test/integration-heavy/in-process-agents.test.ts.
 import { describe, it, expect } from "bun:test";
 import {
   agentContext,
