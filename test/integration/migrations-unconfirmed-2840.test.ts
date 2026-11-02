@@ -35,8 +35,13 @@
  * runner's progress record as HealthDetail serves it, and through the durable
  * state file; the `.content`-suffix case asserts the record through
  * HealthDetail, not the state file.
+ *
+ * The third boot's first cycle is held at its start (`migration-cycle-start`,
+ * the runner's own pause point) so the entry boot seeding wrote is read before
+ * that cycle reads the state file.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { migrationCycleDone } from "../helpers/migration-cycle-done.ts";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -159,6 +164,39 @@ async function healthDetail(): Promise<any> {
   const res = await fetch(`${harper.httpURL}/HealthDetail`, { headers: { Authorization: authHeader } });
   if (!res.ok) return null;
   return res.json();
+}
+
+/** Waits for the marker file the test-only cycle hold creates. */
+async function waitForMarker(path: string, budgetMs: number): Promise<void> {
+  const deadline = Date.now() + budgetMs;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`migration cycle did not pause in time (${path})`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+/** Waits until the hold's release marker carries a verdict, and returns it. */
+async function waitForRelease(path: string, budgetMs: number): Promise<string> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    if (existsSync(path)) {
+      const content = readFileSync(path, "utf-8");
+      if (content.length > 0) return content;
+    }
+    if (Date.now() >= deadline) throw new Error(`migration cycle did not release in time (${path})`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+/** Waits for terminal `done`, rejecting a cycle error. */
+async function waitForCycleDone(budgetMs: number): Promise<any> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    const detail = await healthDetail();
+    if (migrationCycleDone(detail?.migrations)) return detail;
+    if (Date.now() >= deadline) throw new Error("migration cycle did not complete in time");
+    await new Promise((r) => setTimeout(r, 50));
+  }
 }
 
 function migration(detail: any, id: string): any {
@@ -297,7 +335,7 @@ describe("flair#2840 — an unconfirmed write is reported by id and not counted 
     expect(existsSync(join(faultDir, `fired.verify-miss.${ROW_CONTENT}`))).toBe(true);
   }, 150_000);
 
-  it("a no-pending cycle keeps the record, a second boot seeds it from the state file, and an id clears once its row is at the target", async () => {
+  it("a no-pending cycle keeps the record, the third boot seeds it from the state file, and an id clears once its row is at the target", async () => {
     // (a) The boot's follow-up cycle finds nothing pending. The two ids that
     // reached the target are cleared (ROW_MISS through the migration's own
     // write, ROW_COMPETING through the competing writer); the away row, still
@@ -319,10 +357,28 @@ describe("flair#2840 — an unconfirmed write is reported by id and not counted 
     expect(mig?.rowsUnconfirmed).toBe(1);
     expect(mig?.unconfirmedIds).toEqual([ROW_AWAY]);
 
-    // (b) A second boot from the same state file seeds the record from it, and
-    // the boot cycle re-reads the row, still short of the target.
-    await restartHarper();
-    mig = await syntheticProgress();
+    // (b) The third boot from the same state file seeds the record from it.
+    // Stop the previous server before arming the hold: a follow-up cycle it
+    // already scheduled could claim the pause first. stopHarper returns once
+    // the process has exited and its locks are free.
+    const installDir = harper.installDir;
+    await stopHarper(harper, { keepInstallDir: true });
+    writeFileSync(join(faultDir, "arm.migration-cycle-start"), "");
+    harper = await startHarper({ cwd: appDir, harperBinDir: process.cwd(), installDir, homeDir, serverEnv });
+    await waitForMarker(join(faultDir, "paused.migration-cycle-start"), 60_000);
+    const seeded = migration(await healthDetail(), SYNTHETIC_ID);
+    expect(seeded?.state, JSON.stringify(seeded)).toBe("halted");
+    expect(seeded?.rowsUnconfirmed).toBe(1);
+    expect(seeded?.unconfirmedIds).toEqual([ROW_AWAY]);
+
+    // Release, and prove the cycle resumed on the release rather than on the
+    // hold's own limit.
+    writeFileSync(join(faultDir, "go.migration-cycle-start"), "");
+    expect(await waitForRelease(join(faultDir, "released.migration-cycle-start"), 30_000)).toBe("go");
+
+    // Wait for terminal `done` without a cycle error before reading progress.
+    const completed = await waitForCycleDone(60_000);
+    mig = migration(completed, SYNTHETIC_ID);
     expect(mig?.state).toBe("halted");
     expect(mig?.rowsUnconfirmed).toBe(1);
     expect(mig?.unconfirmedIds).toEqual([ROW_AWAY]);
