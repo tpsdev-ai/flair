@@ -3428,9 +3428,10 @@ export class Memory extends (databases as any).flair.Memory {
       // refusal (writeResultResponse).
       if (reindexed instanceof Response) return writeResultResponse(reindexed);
       // embedding-space-guard slice 1 (see put()): the owned transaction has
-      // committed, so notify the guard of the stored stamp now, before the
-      // verification read: a refused or unknown verification still leaves the
-      // guard told about the stored vector.
+      // returned, so notify the guard of the ATTEMPTED stamp now, before the
+      // verification read; the read-back determines whether that stamp remains
+      // stored. A refused or unknown verification still leaves the guard told
+      // about the attempt.
       noteWriteStamp(reindexRow?.embeddingModel as string | null | undefined, reindexExisting);
       // flair#2478 slice 3c + flair#2656: read the committed row back after the
       // commit. A row that does not show the re-PUT answers 409

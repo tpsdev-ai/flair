@@ -1,18 +1,18 @@
 /**
  * reindex-guard-stamp-2932.test.ts — real Harper.
  *
- * The admin `_reindex` re-PUT owns its transaction and reads the committed row
- * back after the commit (flair#2656). A read-back refusal must not suppress the
- * embedding-space guard's notification: the write has already committed, so the
- * guard has to learn the stored stamp before that read, as the ordinary PUT
- * path does. Otherwise a reindex that commits a foreign embedding stamp and
- * whose read-back is refused leaves the latch reading `uniform` until some later
- * scan (the uniform fast path does not rescan on a timer).
+ * The admin `_reindex` re-PUT owns its transaction and reads the row back after
+ * that transaction returns (flair#2656). A read-back refusal must not suppress
+ * the embedding-space guard's notification: the guard has to learn the
+ * ATTEMPTED stamp before that read, as the ordinary PUT path does, and the
+ * read-back determines whether the stamp remains stored. Otherwise a reindex
+ * that attempts a foreign embedding stamp and whose read-back is refused leaves
+ * the latch reading `uniform` until some later scan (the uniform fast path does
+ * not rescan on a timer).
  *
- * Each case starts its own ephemeral Harper, so the latch begins at the boot
- * scan's `uniform` verdict. The `fail.memory-reindex-verify` fault point makes
- * the post-commit read throw. All traffic is loopback to the instance this file
- * started.
+ * Each case starts its own ephemeral Harper; the latch starts unverified, and
+ * the case waits for the boot scan to publish `uniform`. The
+ * `fail.memory-reindex-verify` fault point makes the post-commit read throw.
  */
 import { describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -134,7 +134,8 @@ describe("flair#2932 — the _reindex guard notification precedes the read-back 
       const text = await response.clone().text();
       expect(response.status, text.slice(0, 200)).toBe(503);
       expect(JSON.parse(text).error).toBe("write_outcome_unknown");
-      expect(await waitForGuardState(h, "mixed", 10_000), "the guard did not learn the committed foreign stamp").toBe("mixed");
+      expect((await readRow(h, id))?.embeddingModel, "the refused read-back hid that the re-PUT stored the foreign stamp").toBe(FOREIGN);
+      expect(await waitForGuardState(h, "mixed", 10_000), "the guard did not learn the attempted foreign stamp").toBe("mixed");
     });
   }, 240_000);
 
