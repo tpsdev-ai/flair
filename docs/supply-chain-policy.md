@@ -61,7 +61,6 @@ Some `dependencies` entries are exact-pinned (`harper@5.3.1`, `commander@14.0.3`
 Every `@tpsdev-ai/*` dep declared in any workspace package must match the version that workspace package ships. Enforced by `scripts/check-workspace-deps.mjs` in the test-unit CI job.
 
 - Why: prevents the v0.8.0 bug shape where `openclaw-flair@0.8.0` declared `@tpsdev-ai/flair-client@0.5.0`, shipping a 3-version-old client to consumers of the published tarball.
-- See `notes/dogfood-log.md` for the full incident.
 
 ### 4. Workspace `bun.lock` is the source of truth
 
@@ -166,7 +165,7 @@ Mirrors the CI test-unit gates locally so issues are caught at `git commit` time
 Runs three checks before each commit:
 - `check-workspace-deps.mjs` — workspace internal-dep version lockstep
 - `check-dep-ages.mjs` — supply-chain bake-time (≥7 days for the external dependency versions §2 describes)
-- `check-impl-term-leaks.sh` — no Bead refs / impl labels in user-facing docs, `CHANGELOG.md`, or `.changelog/`
+- `check-impl-term-leaks.sh` — no Bead refs / impl labels in user-facing docs, `CHANGELOG.md`, or `.changelog/` <!-- docs-freshness-allow: names the files the gate scans -->
 
 Bypass with `git commit --no-verify` when warranted (rare; CI will still catch you). Skip just the dep-ages check (the slowest one, ~2-5s of registry fetches) with `FLAIR_PRECOMMIT_SKIP_DEP_AGES=1 git commit`.
 
@@ -216,7 +215,6 @@ Add `packageRules` only for your own exceptions. The preset carries no `@tpsdev-
 
 ## See also
 
-- `notes/dogfood-log.md` — internal incidents that have shaped this policy
 - `scripts/check-workspace-deps.mjs` — the workspace-internal dep consistency gate
 - `scripts/check-dep-ages.mjs` — the bake-time dep guard
 - `ops/scripts/git-hooks/pre-commit-secret-guard.sh` — pre-commit secret blocker (cross-repo)

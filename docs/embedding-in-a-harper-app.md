@@ -404,4 +404,4 @@ Handlers return a `Response` for `401`/`403`/`400` rather than throwing — chec
 
 ## See also
 
-[Integrations](integrations.md) · [Deployment](deployment.md) · [Federation](federation.md) · [Auth](auth.md) · [Architecture](../DESIGN.md)
+[Integrations](integrations.md) · [Deployment](deployment.md) · [Federation](federation.md) · [Auth](auth.md) · [Architecture](https://github.com/tpsdev-ai/flair/blob/main/DESIGN.md)
