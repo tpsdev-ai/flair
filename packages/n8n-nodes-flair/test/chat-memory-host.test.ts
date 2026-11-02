@@ -17,11 +17,13 @@
  * packages/@n8n/nodes-langchain/utils/agent-execution/memoryManagement.ts:243-250
  * and :297-307). The Flair endpoint is a local HTTP stub.
  *
- * Pairs: floor @langchain/classic 1.0.0 with @langchain/core 1.0.0, and current
- * @langchain/classic 1.0.55 (published 2026-10-22, the newest release at least
- * seven days old on 2026-11-02) with @langchain/core 1.3.0 (published
- * 2026-10-22, likewise). Each classic release's @langchain/core peer range is
- * what the pair satisfies: 1.0.0 wants ^1.0.0, 1.0.55 wants ^1.3.0.
+ * Pairs: floor @langchain/classic 1.0.0 with @langchain/core 1.0.0, and
+ * @langchain/classic 1.0.55 (published 2026-10-22) with @langchain/core 1.3.0
+ * (published 2026-10-22). The install passes npm --before at seven days ago, so
+ * npm resolves no version published inside the bake window, and a pair pinned
+ * to a younger release fails to resolve. Each classic release's
+ * @langchain/core peer range is what the pair satisfies: 1.0.0 wants ^1.0.0,
+ * 1.0.55 wants ^1.3.0.
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -50,6 +52,9 @@ const BUILD_TIMEOUT_MS = 20_000;
 const INIT_TIMEOUT_MS = 10_000;
 const INSTALL_TIMEOUT_MS = 60_000;
 const INVOKE_TIMEOUT_MS = 30_000;
+// docs/supply-chain-policy.md §1 (7 days); --before enforces it for the whole tree.
+const DEPENDENCY_BAKE_DAYS = 7;
+
 // This file's setup hook runs the build, two packs, and two init + install
 // children: 20 + 2 x 20 + 2 x (10 + 60) = 200 s.
 const SETUP_TIMEOUT_MS = 240_000;
@@ -231,6 +236,7 @@ beforeAll(() => {
   }
   clientTarball = join(scratch, "packed", client[0]);
   nodeTarball = join(scratch, "packed", node[0]);
+  const before = new Date(Date.now() - DEPENDENCY_BAKE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
   for (const pair of PAIRS) {
     const prefix = join(scratch, `host-classic-${pair.classic}-core-${pair.core}`);
@@ -242,6 +248,7 @@ beforeAll(() => {
         "install",
         "--ignore-scripts",
         "--omit=dev",
+        `--before=${before}`,
         clientTarball,
         nodeTarball,
         `@langchain/classic@${pair.classic}`,
