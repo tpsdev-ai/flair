@@ -649,6 +649,7 @@ describe("runFederationVerify", () => {
     expect(r.exitCode).toBe(3);
     expect(r.verdict.kind).not.toBe("empty");
     expect(r.verdict.summary).toContain("push exploded");
+    expect(r.verdict.summary).toContain("cleanup");
     expect(r.verdict.summary).toContain("unknown outcome");
     expect(r.verdict.summary).not.toContain("no peers");
   });
