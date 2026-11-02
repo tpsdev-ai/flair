@@ -63,10 +63,10 @@
  * find. A NEGATED comparator does match them (`undefined !== "private"` is
  * true), so the pending condition here is `visibility not_equals "private"
  * AND visibility not_equals "shared"` — no separate `equals: null` leg
- * needed (unlike `embedding-stamp`, whose write path can leave an
- * intermediate explicit-null state on a failed HTTP regen; this migration's
- * write stages only `{ visibility }` through an incremental `update`, so
- * there is no intermediate explicit-null state to add a leg for). This exact
+ * needed (unlike `embedding-stamp`, whose pending condition carries an
+ * `equals: null` leg for rows whose `embeddingModel` is an explicit null; this
+ * migration's write stages only `{ visibility }` through an incremental
+ * `update`, so it creates no explicit-null state to add a leg for). This exact
  * `not_equal`-covers-
  * absent-and-null-and-nothing-else-with-the-value-itself semantics is
  * already relied on, in production, by `resources/memory-read-scope.ts`'s
@@ -95,9 +95,10 @@
  * happens, since a garbage `visibility` value is itself a bug worth seeing.
  *
  * THE WRITE PATH — a single-field incremental `update`, not
- * `embedding-stamp`'s loopback-HTTP `PUT /Memory/:id` trick. That mechanism
- * serves `embedding-stamp`'s need for `resources/Memory.ts`'s SUBCLASS
- * override (the `content.content && !content.embedding` regen branch): the raw
+ * `embedding-stamp`'s loopback HTTP request. For ordinary row ids,
+ * embedding-stamp sends a loopback `PATCH /Memory/:id` with
+ * `{ embedding: null, embeddingModel: null }`, invoking Memory.patch()'s
+ * re-embed path, because it needs `resources/Memory.ts`'s SUBCLASS logic: the raw
  * `databases.flair.Memory` reference (what this migration and that one both
  * get via their table accessor) resolves to the RAW underlying table, silently
  * skipping every subclass override — see that file's module doc for the full,
