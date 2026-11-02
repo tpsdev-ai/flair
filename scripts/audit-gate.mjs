@@ -553,7 +553,8 @@ function utcDay(value) {
 }
 
 /**
- * The first day each advisory id appears in the allowlist's followed git history.
+ * The first commit day each advisory id appears in parsed allowlist snapshots,
+ * oldest first, following file renames and comparing ids case-insensitively.
  * Dates are read as UTC calendar days, because a commit made late in a negative
  * offset is already the next day in UTC.
  *
@@ -589,39 +590,45 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
     );
   }
 
-  // Search a JSON ghsa field without trusting the casing of historical commits.
-  const ids = new Map();
+  const ids = new Set();
   for (const entry of parsed.entries) {
     const id = String(entry?.ghsa ?? "");
-    if (id) ids.set(id.toUpperCase(), `GHSA-${id.slice(5).toLowerCase()}`);
+    if (id) ids.add(id.toUpperCase());
   }
   if (ids.size > 1_000) throw new Error(`allowlist has ${ids.size} advisory ids; refusing to read history for more than 1000`);
 
-  // A -G filter hides rename commits, so discover prior paths before searching.
-  const paths = new Set([".github/audit-allowlist.json"]);
-  const names = runGit(["log", "--follow", "--name-status", "--format=", "--", ".github/audit-allowlist.json"]);
-  for (const line of names.split("\n")) {
-    const rename = /^R\d+\t(.+)\t(.+)$/.exec(line);
-    if (rename) paths.add(rename[1]);
+  let path = ".github/audit-allowlist.json";
+  const history = runGit(["log", "--follow", "--name-status", "--format=%x1e%H%x09%cI", "--", path]);
+  const snapshots = [];
+  for (const record of history.split("\x1e").filter((record) => record.trim())) {
+    const [header, ...changes] = record.trim().split("\n");
+    const [sha, timestamp] = header.split("\t");
+    const day = utcDayFromTimestamp(timestamp);
+    if (!day) throw new Error(`git returned an unparseable date for ${sha}: ${timestamp}`);
+    if (!changes.includes(`D\t${path}`)) snapshots.push({ sha, day, path });
+    for (const line of changes) {
+      const rename = /^R\d+\t(.+)\t(.+)$/.exec(line);
+      if (rename && rename[2] === path) path = rename[1];
+    }
   }
 
   const firstDays = new Map();
-  for (const [key, id] of ids) {
-    const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const out = runGit([
-      "log",
-      "--reverse",
-      "--regexp-ignore-case",
-      "--format=%cI",
-      `-G"ghsa"[[:space:]]*:[[:space:]]*"${escapedId}"`,
-      "--",
-      ...paths,
-    ]);
-    const first = out.split("\n").map((line) => line.trim()).find(Boolean);
-    if (!first) continue;
-    const day = utcDayFromTimestamp(first);
-    if (!day) throw new Error(`git returned an unparseable date for ${id}: ${first}`);
-    firstDays.set(key, day);
+  for (const { sha, day, path } of snapshots.reverse()) {
+    const contents = runGit(["show", `${sha}:${path}`]);
+    let snapshot;
+    try {
+      snapshot = JSON.parse(contents);
+    } catch (e) {
+      throw new Error(`cannot parse allowlist snapshot ${sha}:${path}: ${e.message}`);
+    }
+    if (!Array.isArray(snapshot?.entries)) {
+      throw new Error(`allowlist snapshot ${sha}:${path} must have an "entries" array`);
+    }
+    for (const entry of snapshot.entries) {
+      if (typeof entry?.ghsa !== "string") continue;
+      const id = entry.ghsa.toUpperCase();
+      if (!firstDays.has(id)) firstDays.set(id, day);
+    }
   }
   return firstDays;
 }
@@ -636,8 +643,7 @@ function utcDayFromTimestamp(value) {
 
 /**
  * Each entry's `added` must be a real calendar date no later than the first day its advisory id
- * appears in the allowlist history. Moving it earlier is permitted. An id with
- * no search result must have been added no later than today.
+ * appears in the parsed snapshots. An id absent from those snapshots uses today.
  */
 export function validateAllowlistHistory(allowlist, firstDays, today) {
   const problems = [];
@@ -664,11 +670,10 @@ export function validateAllowlistHistory(allowlist, firstDays, today) {
     if (entry.added <= boundary) return;
     const bound =
       firstDays.has(id)
-        ? `the first day this advisory appears in the allowlist history (${boundary})`
-        : `today (${boundary}), and the history search found no advisory id`;
+        ? `the first day this advisory appears in parsed allowlist history (${boundary})`
+        : `today (${boundary}), and no parsed snapshot contained this advisory id`;
     problems.push(
-      `entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"}): "added" (${entry.added}) is later than ${bound}. ` +
-        "A renewal, a re-key or a delete-then-re-add does not restart the lifetime.",
+      `entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"}): lifetime cap: "added" (${entry.added}) is later than ${bound}.`,
     );
   });
   return problems;

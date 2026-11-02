@@ -1317,12 +1317,12 @@ describe("cumulative allowlist lifetime (#2897)", () => {
   }
 
   /** A real repository with commits of the supplied allowlist snapshots. */
-  function historyRepo(commits: { date: string; entries: object[] }[]) {
+  function historyRepo(commits: { date: string; entries: object[]; raw?: string }[]) {
     const root = mkdtempSync(join(tmpdir(), "flair-audit-history-"));
     mkdirSync(join(root, ".github"), { recursive: true });
     gitAt(root, commits[0]!.date, ["init", "-q"]);
     commits.forEach((commit, i) => {
-      writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({ policy, entries: commit.entries }));
+      writeFileSync(join(root, ".github/audit-allowlist.json"), commit.raw ?? JSON.stringify({ policy, entries: commit.entries }));
       gitAt(root, commit.date, ["add", ".github/audit-allowlist.json"]);
       gitAt(root, commit.date, ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "--allow-empty", "-q", "-m", `fixture ${i}`]);
     });
@@ -1408,6 +1408,41 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       const firstDays = readAllowlistHistory(root);
       expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
       expect(validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21"))).not.toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a renewal after a split-line ghsa field is normalized", () => {
+    const original = entry({ added: "2026-09-01", expires: "2026-10-01" });
+    const renewed = entry({ added: "2026-09-20", expires: "2026-11-15" });
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [original], raw: JSON.stringify({ policy, entries: [original] }).replace('"ghsa":', '"ghsa":\n') },
+      { date: "2026-09-20T12:00:00Z", entries: [original] },
+      { date: "2026-09-21T12:00:00Z", entries: [renewed] },
+    ]);
+    try {
+      const firstDays = readAllowlistHistory(root);
+      expect(validateAllowlist({ policy, entries: [renewed] }, new Date("2026-09-21"))).toEqual([]);
+      const problems = validateAllowlistHistory({ policy, entries: [renewed] }, firstDays, new Date("2026-09-21"));
+      expect(problems.join("\n")).toContain("first day this advisory appears in parsed allowlist history (2026-09-01)");
+      expect(problems.join("\n")).toContain("lifetime cap:");
+      expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
+      expect(validateAllowlist({ policy, entries: [{ ...renewed, added: firstDays.get(GHSA.toUpperCase()) }] }, new Date("2026-09-21")).join("\n"))
+        .toContain('lifetime 75d exceeds the 60d cap');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("names an invalid JSON snapshot even when later history is valid", () => {
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [], raw: '{"entries":[' },
+      { date: "2026-09-20T12:00:00Z", entries: [entry()] },
+    ]);
+    try {
+      const sha = gitAt(root, "2026-09-21T12:00:00Z", ["rev-parse", "HEAD~1"]).trim();
+      expect(() => readAllowlistHistory(root)).toThrow(`cannot parse allowlist snapshot ${sha}:.github/audit-allowlist.json`);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1506,7 +1541,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       expect(
         validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21")).join("\n"),
       ).toContain(
-        '"added" (2026-09-20) is later than the first day this advisory appears in the allowlist history (2026-09-01)',
+        '"added" (2026-09-20) is later than the first day this advisory appears in parsed allowlist history (2026-09-01)',
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1527,7 +1562,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
           firstDays,
           new Date("2026-09-21"),
         ).join("\n"),
-      ).toContain("is later than the first day this advisory appears in the allowlist history (2026-09-01)");
+      ).toContain("is later than the first day this advisory appears in parsed allowlist history (2026-09-01)");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1544,7 +1579,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
       expect(
         validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21")).join("\n"),
-      ).toContain("delete-then-re-add does not restart the lifetime");
+      ).toContain("first day this advisory appears in parsed allowlist history (2026-09-01)");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1569,7 +1604,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       ).toEqual([]);
       expect(
         validateAllowlistHistory({ entries: [entry({ ghsa: NEW_GHSA, added: "2026-09-16" })] }, firstDays, new Date("2026-09-15")).join("\n"),
-      ).toContain("today (2026-09-15), and the history search found no advisory id");
+      ).toContain("today (2026-09-15), and no parsed snapshot contained this advisory id");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
