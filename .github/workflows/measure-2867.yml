@@ -1,33 +1,26 @@
 name: Measure 2867
 
-# TEMPORARY (flair#2867): a workflow_dispatch-only macOS lane that mirrors the
-# `test-darwin-gated` job's prefix up to its first test Harper, so the
-# standalone embedding warm-up step can be toggled on and off between fresh
-# runners. Removed before the final commit.
+# TEMPORARY (flair#2867): push-triggered measurement lane. Two jobs run the
+# `test-darwin-gated` job's prefix up to its first test Harper on fresh macOS
+# runners; they differ only in the standalone embedding warm-up step. Removed
+# before the final commit.
 
 on:
-  workflow_dispatch:
-    inputs:
-      warmup:
-        description: "Run the standalone embedding warm-up step"
-        type: choice
-        options:
-          - "true"
-          - "false"
-        default: "true"
+  push:
+    branches: [ci/2867-warmup-measurement]
 
-run-name: "measure-2867 warmup=${{ inputs.warmup }}"
+run-name: "measure-2867 ${{ github.sha }}"
 
 permissions:
   contents: read
 
 concurrency:
-  group: measure-2867-${{ github.run_id }}
+  group: measure-2867-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
-  measure-darwin:
-    name: Measure first Harper Metal load
+  measure-with-warmup:
+    name: First Harper Metal load (with warm-up)
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
@@ -52,7 +45,6 @@ jobs:
         timeout-minutes: 3
         run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
       - name: Load the embedding engine once before the test Harpers (flair#2824)
-        if: inputs.warmup == 'true'
         timeout-minutes: 5
         run: |
           node --input-type=module <<'JS'
@@ -63,6 +55,36 @@ jobs:
           await dispose();
           console.log(`Metal warm-up: the embedding engine loaded in ${loadedMs}ms`);
           JS
+      - name: using-flair seed acceptance (flair#2141)
+        env:
+          FLAIR_METAL_MEASURE: "1"
+        run: bun test test/integration/using-flair-seed-2141.test.ts test/integration/using-flair-seed-reserved-2141.test.ts
+
+  measure-without-warmup:
+    name: First Harper Metal load (without warm-up)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - name: Cache bun install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-cache-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+      - name: Build Flair resources and CLI
+        run: bun run build && bun run build:cli
+      - name: Pre-download embedding model
+        timeout-minutes: 3
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
       - name: using-flair seed acceptance (flair#2141)
         env:
           FLAIR_METAL_MEASURE: "1"
