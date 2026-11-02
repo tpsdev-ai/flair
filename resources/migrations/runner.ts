@@ -512,7 +512,7 @@ async function reverifyUnconfirmed(
       const verdict: unknown = await migration.checkUnconfirmed(id);
       if (verdict === "at-target" || verdict === "no-row") continue;
       if (verdict !== "pending") {
-        const answer = typeof verdict === "string" ? JSON.stringify(verdict.slice(0, 40)) : verdict === null ? "null" : typeof verdict;
+        const answer = typeof verdict === "string" ? `string (length ${verdict.length})` : typeof verdict;
         console.warn("[flair-migrations] %s: checkUnconfirmed(%s) answered %s; re-check kept id", migration.id, id, answer);
       }
       kept.push(id);
