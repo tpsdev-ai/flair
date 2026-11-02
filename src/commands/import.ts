@@ -25,7 +25,9 @@ import nacl from "tweetnacl";
 
 /** The fixed error names Flair's write guards return for a Soul or Memory
  *  write. A response body's `error` is displayed only when it is one of these;
- *  any other server-supplied text is not displayed. */
+ *  any other server-supplied text is not displayed by the import report. The
+ *  writes also withhold the response body from the FLAIR_DEBUG HTTP-error
+ *  line. */
 const WRITE_GUARD_ERROR_NAMES = new Set([
   // Soul write guards (resources/Soul.ts, resources/soul-write-policy.ts).
   "soul_owner_required",
@@ -66,7 +68,7 @@ const WRITE_GUARD_ERROR_NAMES = new Set([
 ]);
 
 /** A recognised error name from a refused response body; undefined for any
- *  other server-supplied text, which is never displayed. */
+ *  other server-supplied text, which the import report does not display. */
 function responseErrorName(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   try {
@@ -96,6 +98,7 @@ async function writeRow(
       row,
       auth,
       isLocalBase(baseUrl),
+      { withholdResponseBodyDebug: true },
     );
     return { kind: "imported" };
   } catch (err) {

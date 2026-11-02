@@ -239,6 +239,31 @@ describe("flair import counts a row as imported only on a 2xx write (#2900)", ()
     expect(await memoryRow(memId)).toMatchObject({ agentId: agent, content: "an accepted memory" });
   }, 300_000);
 
+  test("with FLAIR_DEBUG set, a refusal body echoing the row value is not printed", async () => {
+    const agent = "import-outcome-debug-a";
+    const home = tempDir("flair-2900-home-");
+    const soulId = `${agent}:refused-debug`;
+    const rowValue = "row-value-debug-xyz";
+    const credentialShape = "sk_live_debug123456";
+    const exportPath = writeExport("debug-refusal.json", {
+      agent: { id: agent, name: agent, role: "agent", createdAt: CREATED_AT },
+      souls: [{ id: soulId, agentId: agent, key: "refused-debug", value: "a soul write", durability: "permanent", createdAt: CREATED_AT }],
+    });
+
+    const result = await withFakeRest(
+      () => ({ status: 403, body: JSON.stringify({ error: `refused for ${rowValue} with key ${credentialShape}` }) }),
+      (url) => importFile(exportPath, home, { FLAIR_DEBUG: "1" }, url),
+    );
+
+    expect(result.code, `${result.stdout}${result.stderr}`).toBe(1);
+    expect(result.stderr).toContain(`Soul ${soulId} failed: HTTP 403`);
+    // The debug line still reports the status; only its body is withheld.
+    expect(result.stderr).toContain(`[flair] PUT /Soul/`);
+    expect(result.stderr).toContain("answered HTTP 403");
+    expect(result.stdout + result.stderr).not.toContain(rowValue);
+    expect(result.stdout + result.stderr).not.toContain(credentialShape);
+  }, 300_000);
+
   test("an unrecognised refusal body is not displayed; a recognised name still is", async () => {
     const agent = "import-outcome-raw-a";
     const home = tempDir("flair-2900-home-");
