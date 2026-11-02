@@ -13,7 +13,9 @@
  * archive/expiry action (resources/MemoryMaintenance.ts) and the usage-count
  * writer (resources/usage-recording.ts) (slice 3b part 1); the ordinary
  * (non-skill) feed write-back and the feed dedup repair
- * (resources/MemoryFeed.ts) and both `lastReflected` stamps
+ * (resources/MemoryFeed.ts), the skill-tagged feed write
+ * (resources/MemoryFeed.ts's skill branch, on the ids it addresses and closes)
+ * and both `lastReflected` stamps
  * (resources/Memory.ts's derivedFrom sources and resources/MemoryReflect.ts's
  * gathered sources) (slice 3b part 2); and the federation merge of an
  * incoming Memory row (resources/Federation.ts) and the batch reindex writer
@@ -64,7 +66,9 @@
  *    head. An automatic writer that takes the lock through
  *    {@link withMemoryWriteLockOnce} writes nothing to a marked id; the feed
  *    write-back and the feed dedup repair record the marker when storage
- *    withholds their write result, and the dedup repair also when its committed
+ *    withholds their write result, the skill-tagged feed write when storage
+ *    withholds its write result or its rollback could not be confirmed, and the dedup
+ *    repair also when its committed
  *    update's confirmation read fails or does not show the update, while the
  *    other automatic writers do not set it for their own unconfirmed write,
  *    which they report or log.
