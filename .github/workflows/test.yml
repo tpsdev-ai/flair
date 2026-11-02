@@ -403,6 +403,9 @@ jobs:
       # 60 s readiness wait, which spans its embedding engine's boot. This step
       # loads the engine once, before the steps below start their test Harpers,
       # so the job's first Metal library load happens here.
+      # Measured 2026-11-02 on fresh macOS runners (#2867, three runs each): the first
+      # test Harper's Metal load had a median of 0.018 s with this step and 13.662 s
+      # without. The load moves here, outside the readiness wait; it does not disappear.
       - name: Load the embedding engine once before the test Harpers (flair#2824)
         timeout-minutes: 5
         run: |
