@@ -20,8 +20,8 @@ import { walkCliCommands } from "../helpers/cli-surface";
  */
 const NOT_APPLIED_ON_INVOCATION = new Set(["flair rem nightly enable"]);
 
-describe("flair#2889 — --admin-pass-file is declared only through the wired helper", () => {
-  test("every command declaring --admin-pass-file is in the helper's registry", () => {
+describe("flair#2889 — the credential-reading --admin-pass-file commands are wired", () => {
+  test("every command applying --admin-pass-file is in the helper's registry, except the named path-only flag", () => {
     const nodes = walkCliCommands(program);
     const declaring = nodes.filter(({ cmd }) => cmd.options.some((o) => o.long === "--admin-pass-file"));
 
