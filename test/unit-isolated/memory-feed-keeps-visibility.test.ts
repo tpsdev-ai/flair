@@ -96,7 +96,7 @@ test("a withheld feed write result records the id outcome-unknown (flair#2857)",
   expect(memoryWriteOutcomeUnknown("owned")).toBe(true);
 });
 
-test("a feed write whose storage returns the row records no marker (control)", async () => {
+test("a confirmed feed write records no marker (control)", async () => {
   const response = await feed().post({ id: "owned", agentId: "alice", content: "submitted" });
   expect(response).not.toBeInstanceOf(Response);
   expect(memoryWriteOutcomeUnknown("owned")).toBe(false);
