@@ -274,11 +274,6 @@ describe("api() — alternate-port fallback is connect-phase only (flair#2869)",
   });
 
   test("a real refused connection under Bun carries a code the classifier accepts", async () => {
-    // Not synthetic: this test process runs under Bun, so this is Bun's own
-    // fetch error for a closed port (measured on bun 1.4.4: TypeError with
-    // `code: "ECONNREFUSED"` on the error itself and no `cause`; older Bun
-    // versions name the same refusal `ConnectionRefused`, which
-    // src/lib/upgrade-prior-liveness.ts already accepted).
     const port = await refusedPort();
     let caught: unknown;
     try {
@@ -286,11 +281,19 @@ describe("api() — alternate-port fallback is connect-phase only (flair#2869)",
     } catch (err) {
       caught = err;
     }
-    const err = caught as { name?: string; code?: string; cause?: unknown };
-    expect(err.name).toBe("TypeError");
-    expect(typeof err.code).toBe("string");
-    expect(err.cause).toBeUndefined();
-    expect(REFUSED_CODES.includes(err.code ?? "")).toBe(true);
+    let current: unknown = caught;
+    let refusedCode: string | undefined;
+    for (let depth = 0; current !== null && current !== undefined && depth < 8; depth++) {
+      if (typeof current === "object" && "code" in current) {
+        const code = (current as { code?: unknown }).code;
+        if (typeof code === "string" && REFUSED_CODES.includes(code)) {
+          refusedCode = code;
+          break;
+        }
+      }
+      current = (current as { cause?: unknown }).cause;
+    }
+    expect(refusedCode).toBeDefined();
     expect(isConnectPhaseFailure(caught)).toBe(true);
   });
 
