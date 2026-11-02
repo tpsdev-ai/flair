@@ -273,7 +273,7 @@ describe("applySnapshot — missing snapshot", () => {
 });
 
 describe("applySnapshot — a refused Soul row", () => {
-  it("reports the row id and the refusal the server answered with", async () => {
+  it("reports the row id and refusal from a simulated ApiHttpError", async () => {
     const snapshotPath = await makeTestSnapshot();
     const inner = statefulApi({ souls: [{ id: "current-soul", agentId: "test-agent" }] });
     const soulId = snapshotSoul.id;

@@ -1,6 +1,6 @@
 /**
  * Soul is scoped to an `agentId` and has no dedicated or enforced per-user
- * scope field (schemas/memory.graphql). A write request that supplies a
+ * scope field (schemas/memory.graphql).
  * A write request that supplies a non-empty `scopeTag` or a non-empty `tags`
  * array is refused by name when earlier guards permit the request, whatever
  * the tag's prefix, so this check does not depend on the `adk:` bridge
