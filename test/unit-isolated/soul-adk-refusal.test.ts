@@ -1,11 +1,13 @@
 /**
  * Soul content refusals after the vendor-tag bridge was removed (flair#1540).
  *
- * The generic checks refuse the cases the bridge covered: a request that
- * supplies a non-empty `scopeTag` or `tags` array, a value that exactly matches
- * stored learned text for the target agent, and a PATCH of a stored row that
- * carries either scope field. Those tagged-request and exact stored-text cases
- * remain refused.
+ * The bridge refused a request carrying an `adk:` scope tag and a value that
+ * exactly matched an `adk:`-tagged MemoryCandidate claim or Memory content row
+ * for the target agent. The generic checks refuse those cases and more: a
+ * request that supplies any non-empty `scopeTag` or `tags` array, a value that
+ * exactly matches any MemoryCandidate claim or Memory content for the target
+ * agent (no tag required), and a PATCH of a stored row that carries either
+ * scope field.
  * Isolated so the harper mock does not collide with the other Soul suites.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
