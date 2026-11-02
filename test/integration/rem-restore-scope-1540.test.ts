@@ -4,10 +4,12 @@
  * `scopeTag` and one ordinary Soul row (flair#1540).
  *
  * REM replay is a third writer next to `flair restore` and `flair import`. It
- * sends each snapshot row back whole, so the scoped row reaches the server's
- * scope-field refusal through REM's own `api()` call. The CLI must name the row
- * and the refusal in its diagnostic, report a failed run, leave that Soul out
- * of the restored count, and still restore the ordinary row.
+ * sends each snapshot row back whole, and the live Soul rows it would delete
+ * can carry those fields themselves. Since flair#2931 the CLI checks the
+ * snapshot rows and every live row captured in the pre-restore snapshot before
+ * any delete: a refused row stops the run with its id, sends no target DELETE
+ * or PUT, and leaves every live Soul row in place. A snapshot with no refused
+ * row still restores.
  *
  * Real snapshot file, isolated Harper, throwaway HOME, numeric ports.
  */

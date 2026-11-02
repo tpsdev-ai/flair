@@ -349,6 +349,8 @@ function parseJsonlSafe(text: string): any[] {
  *   3. Verify metadata.agentId matches opts.agentId (prevents accidental
  *      cross-agent restore — the file might have been hand-copied).
  *   4. Create a pre-restore snapshot of current state (skip in dry-run).
+ *   4b. Refuse before any delete when a snapshot Soul row or a live Soul row
+ *       captured in the pre-restore snapshot supplies scope fields (flair#2931).
  *   5. Fetch + delete current memories/souls/candidates for the agent (skip in dry-run).
  *   6. PUT snapshot souls, then memories (skip in dry-run).
  *   7. Return counts.
