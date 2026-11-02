@@ -681,10 +681,6 @@ function mdReferenceTarget(raw) {
   return filePart;
 }
 
-function hasDocLinkAllow(line) {
-  return /<!--\s*docs-freshness-allow:\s*\S[^\n]*?-->/.test(line);
-}
-
 function isClosingFence(line, fence) {
   let start = 0;
   while (line[start] === " ") start++;
@@ -715,6 +711,7 @@ function docMarkdown(text) {
   const lines = text.split("\n");
   const masked = [];
   const ticks = [];
+  const allowLines = new Set();
   let fence = null;
   let code = null;
   let offset = 0;
@@ -769,6 +766,7 @@ function docMarkdown(text) {
       if (line.startsWith("<!--", i)) {
         const end = line.indexOf("-->", i + 4);
         if (end !== -1) {
+          if (/^\s*docs-freshness-allow:\s*\S/.test(line.slice(i + 4, end))) allowLines.add(lineNo + 1);
           out += " ".repeat(end + 3 - i);
           i = end + 3;
           continue;
@@ -780,7 +778,7 @@ function docMarkdown(text) {
     if (code) code.value += "\n";
     offset += line.length + 1;
   }
-  return { masked: masked.join("\n"), ticks };
+  return { masked: masked.join("\n"), ticks, allowLines };
 }
 
 function referenceLabel(label) {
@@ -788,7 +786,7 @@ function referenceLabel(label) {
 }
 
 function markdownLinks(text) {
-  const { masked, ticks } = docMarkdown(text);
+  const { masked, ticks, allowLines } = docMarkdown(text);
   const definitions = new Map();
   const definitionRanges = [];
   const definitionRe = /^ {0,3}\[([^\]\n]+)\]:[ \t]*(?:\n[ \t]*)?(<[^>\n]*>|[^\s<>]+)/gm;
@@ -865,7 +863,7 @@ function markdownLinks(text) {
     if (raw !== undefined) covered.push([i, end]);
     i = end - 1;
   }
-  return { links, ticks: ticks.filter((tick) => !covered.some(([a, b]) => tick.start >= a && tick.start < b)) };
+  return { links, allowLines, ticks: ticks.filter((tick) => !covered.some(([a, b]) => tick.start >= a && tick.start < b)) };
 }
 
 defineCheck("doc-link-pack-coverage", "shipped doc", () => {
@@ -912,12 +910,12 @@ defineCheck("doc-link-pack-coverage", "shipped doc", () => {
 
   for (const doc of docs) {
     const lines = linesOf(doc);
-    const { links, ticks } = markdownLinks(lines.join("\n"));
+    const { links, ticks, allowLines } = markdownLinks(lines.join("\n"));
     for (const link of links) {
-      if (!hasDocLinkAllow(lines[link.line - 1])) considered(doc, link.line, link.raw, false);
+      if (!allowLines.has(link.line)) considered(doc, link.line, link.raw, false);
     }
     for (const tick of ticks) {
-      if (!hasDocLinkAllow(lines[tick.line - 1])) considered(doc, tick.line, tick.raw, true);
+      if (!allowLines.has(tick.line)) considered(doc, tick.line, tick.raw, true);
     }
   }
   return { failures, scanned: docs.length };

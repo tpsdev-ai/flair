@@ -144,7 +144,7 @@ describe("doc-link-pack-coverage", () => {
     }, 120_000);
   }
 
-  test("fenced and inline code do not create links", () => {
+  test("recognized fences and code spans mask fixture links", () => {
     const dir = makeFixture({ docs: { "docs/a.md": [
       "# A", "", "```markdown", "[bad](missing.md)", "[target]: missing.md", "```",
       "`[bad](missing.md)`", "`[bad](missing.md)", "still code`", "[target]", "", "~~~", "[bad](missing.md)", "~~~", "",
@@ -204,7 +204,7 @@ describe("doc-link-pack-coverage", () => {
     ["equal run on the next line", "\ncontinued ``", true],
   ] as const;
   for (const [form, closing, closes] of codeSpanCases) {
-    test(`code span with ${form} ${closes ? "hides" : "exposes"} its link`, () => {
+    test(`backtick scanner with ${form} ${closes ? "hides" : "exposes"} its link`, () => {
       const dir = makeFixture({ docs: {
         "docs/a.md": `# A\n\nOpening \`\` [bad](missing.md) ${closing}\n`,
       } });
@@ -246,6 +246,19 @@ describe("doc-link-pack-coverage", () => {
     expect(out).toContain("✗ docs/a.md:3");
     expect(out).toContain("references 'missing.md'");
   }, 120_000);
+
+  for (const [form, marker] of [
+    ["empty comment followed by another comment", "<!-- docs-freshness-allow: --><!-- unrelated -->"],
+    ["marker in inline code", "`<!-- docs-freshness-allow: example -->`"],
+  ]) {
+    test(`${form} does not exempt a link`, () => {
+      const dir = makeFixture({ docs: { "docs/a.md": `# A\n\n[bad](missing.md) ${marker}\n` } });
+      const { status, out } = runGate(dir);
+      expect(status).toBe(1);
+      expect(out).toContain("✗ docs/a.md:3");
+      expect(out).toContain("references 'missing.md'");
+    }, 120_000);
+  }
 
   test("backticks in a link label do not create a file-name reference", () => {
     const dir = makeFixture({ docs: { "docs/a.md": "# A\n\nSee [`outside.md`](https://example.com/outside.md).\n" } });
