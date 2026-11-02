@@ -231,10 +231,11 @@ export function internalContext(): CallContext {
  * the same trusted `internal` verdict this module exists to keep out of reach.
  * The query still narrows the rows it returns. With no ambient context, no
  * agent scope applies; under an inherited non-admin agent context, the read
- * is scoped to that agent. Harper consults the resource's `allowRead` only
- * when a permission check is requested (`query.checkPermission` or
- * `context.authorize`). Pass the context to every call, read or write
- * (flair#936).
+ * gets that agent's read scope, which for Memory is the agent's own records
+ * plus every other agent's non-private records (resources/memory-read-scope.ts).
+ * Harper consults the resource's `allowRead` only when a permission check is
+ * requested (`query.checkPermission` or `context.authorize`). Pass the context
+ * to every call, read or write (flair#936).
  */
 export async function collectionResource<T = any>(Cls: any, context: CallContext): Promise<T> {
   if (context == null || typeof context !== "object") {
