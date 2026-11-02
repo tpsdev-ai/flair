@@ -614,11 +614,15 @@ jobs:
     # (#2556). After the rebalance the shards ran 14-23 min on the three main
     # runs with completed integration jobs (3b040f1e, 6ab0d351, d6463b1e); the
     # slowest, shard 1/3, was 22m33s, so the cap below is 34 — 1.5x the slowest
-    # measured shard. Each shard runs the same steps on its share of
+    # measured shard. On 2026-11-02 the last 20 runs with completed shards took
+    # 18-33 min (most 27-33), and PR runs 41427491902 and 41463469623 had shard
+    # 4/4 cut at the 34-minute cap with no failing test; the cap below is again
+    # 1.5x the slowest measured shard (34 min) = 51.
+    # Each shard runs the same steps on its share of
     # test/integration/*.test.ts
     # (scripts/ci/integration-shards.mjs), and the final job named
     # `Integration Tests` (below) requires every shard to succeed.
-    timeout-minutes: 34
+    timeout-minutes: 51
     strategy:
       # fail-fast: false — one failed shard does not cancel the others; the
       # aggregate job below fails unless each one succeeded.

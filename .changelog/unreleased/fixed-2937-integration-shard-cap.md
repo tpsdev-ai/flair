@@ -1,0 +1,1 @@
+- **The integration shard jobs' timeout is 51 minutes instead of 34, 1.5x the slowest shard measured on 2026-11-02.** The last 20 runs with completed shards took 18-33 minutes (most 27-33); two PR runs had shard 4/4 cut at the old 34-minute cap with no failing test.
