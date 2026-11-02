@@ -6,8 +6,7 @@
 //     (`github.event.pull_request.user.login`), passed in as
 //     FLAIR_PR_AUTHOR_LOGIN. It is never inferred from commit metadata, which a
 //     branch can set to any value.
-//   * Every path against the merge base is package.json, bun.lock,
-//     package-lock.json, or npm-shrinkwrap.json.
+//   * Every changed Git path has an accepted basename.
 //     Other paths leave the ordinary fragment rules in effect.
 //
 // Release collection matches the recorded author name and changed filenames.
@@ -24,20 +23,16 @@ const DEPENDENCY_FILE_NAMES = new Set([
   "npm-shrinkwrap.json",
 ]);
 
-/** Whether a path has one of the four accepted basenames. */
+/** Match the Git basename exactly, splitting on "/" only. */
 export function isDependencyManifestPath(relPath) {
-  const p = String(relPath ?? "").replaceAll("\\", "/").replace(/^\.\//, "");
+  const p = String(relPath ?? "");
   if (!p) return false;
   return DEPENDENCY_FILE_NAMES.has(p.split("/").pop());
 }
 
-/**
- * Whether a non-empty path list uses only the four accepted basenames.
- */
+/** Match every path in a non-empty list. */
 export function isDependencyOnlyChange(relPaths) {
-  const paths = (relPaths ?? [])
-    .map((p) => String(p).trim())
-    .filter((p) => p !== "");
+  const paths = relPaths ?? [];
   return paths.length > 0 && paths.every(isDependencyManifestPath);
 }
 
@@ -61,7 +56,7 @@ function git(cwd, args) {
 
 /**
  * Whether the recorded author name matches renovate[bot] and the commit changes
- * only package.json, bun.lock, package-lock.json, or npm-shrinkwrap.json.
+ * only paths with accepted basenames.
  */
 export function isRenovateDependencyCommit(sha, cwd) {
   let meta;
@@ -70,9 +65,9 @@ export function isRenovateDependencyCommit(sha, cwd) {
   const name = meta.replace(/\n$/, "");
   if (!isRenovateCommitAuthor(name)) return false;
   let changed;
-  try { changed = git(cwd, ["diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", String(sha)]); }
+  try { changed = git(cwd, ["diff-tree", "--root", "--no-commit-id", "--no-renames", "--name-only", "-z", "-r", String(sha)]); }
   catch (err) { throw new Error(`could not read diff for commit ${sha}: ${err?.message ?? err}`); }
-  const paths = changed.split("\n").map((p) => p.trim()).filter((p) => p !== "");
+  const paths = changed.split("\0").filter((p) => p !== "");
   return isDependencyOnlyChange(paths);
 }
 

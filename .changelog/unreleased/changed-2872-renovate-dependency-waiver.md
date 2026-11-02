@@ -1,6 +1,5 @@
-- **The docs-freshness gate can waive a changelog fragment for a Renovate PR changing only `package.json`, `bun.lock`, `package-lock.json`, or `npm-shrinkwrap.json`.**
+- **The docs-freshness gate can waive a fragment when the PR event login matches `renovate[bot]` and every changed Git basename is `package.json`, `bun.lock`, `package-lock.json`, or `npm-shrinkwrap.json`.**
 
-  The gate reads the PR author login from the workflow event. During release PR preparation, `feat` and
-  `fix` commits since the tag selected by `git describe` enter Dependencies when
-  their recorded author name matches `renovate[bot]` and their changed paths use
-  those four basenames (#2872).
+  During release PR preparation, `feat` and `fix` commits since the tag selected by
+  `git describe` enter Dependencies when their recorded author name matches
+  `renovate[bot]` and every changed Git basename matches that list (#2872).

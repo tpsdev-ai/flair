@@ -5,6 +5,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { load } from "js-yaml";
+import { pathToFileURL } from "node:url";
 
 import { tempDir } from "../helpers/temp-dir.ts";
 
@@ -136,6 +137,25 @@ function addDependencyOnlyCommit(dir: string, opts: { author?: "renovate"; type?
   }
 }
 
+describe("Git basename classification", () => {
+  test.each([
+    { paths: [" package.json"], accepted: false },
+    { paths: ["package.json "], accepted: false },
+    { paths: ["packages\\package.json"], accepted: false },
+    { paths: ["packages/dep/ package.json"], accepted: false },
+    { paths: ["packages/dep/package.json "], accepted: false },
+    { paths: ["package.json", ""], accepted: false },
+    { paths: [], accepted: false },
+    { paths: ["packages/dep/package.json", "packages/dep/bun.lock", "packages/dep/package-lock.json", "packages/dep/npm-shrinkwrap.json"], accepted: true },
+  ])("classifies %j", ({ paths, accepted }) => {
+    const url = pathToFileURL(join(REPO_ROOT, "scripts", "dependency-change.mjs")).href;
+    const result = execFileSync(process.execPath, ["--input-type=module", "-e",
+      `import { isDependencyOnlyChange } from ${JSON.stringify(url)}; console.log(isDependencyOnlyChange(${JSON.stringify(paths)}));`,
+    ], { encoding: "utf8" });
+    expect(result.trim()).toBe(String(accepted));
+  });
+});
+
 describe("PR author login and accepted JavaScript filenames", () => {
   test("Renovate dependency-only fix without a fragment prints the waiver", () => {
     const dir = makeRepo();
@@ -144,6 +164,37 @@ describe("PR author login and accepted JavaScript filenames", () => {
     expect(res.out).toContain("waived the per-PR fragment requirement");
     expect(res.out).not.toContain("adds no changelog fragment");
     expect(res.status).toBe(0);
+  });
+
+  test.each([" package.json", "package.json ", "packages\\package.json"])(
+    "PR gate refuses the dependency waiver for %j",
+    (filename) => {
+      const dir = makeRepo();
+      writeFixtureFile(dir, filename, "{}\n");
+      git(dir, "add", "-A");
+      commitAs(dir, "renovate[bot]", "fixture@example.invalid", "fix(deps): add manifest lookalike");
+      const result = runGate(dir, "renovate[bot]");
+      expect(result.out).not.toContain("waived the per-PR fragment requirement");
+      expect(result.out).toContain("adds no changelog fragment");
+      expect(result.status).not.toBe(0);
+    },
+  );
+
+  test("nested accepted basenames waive the PR fragment and enter release notes", () => {
+    const dir = makeRepo();
+    for (const directory of ["packages/dep", "packages/line\nbreak"]) {
+      for (const filename of ["package.json", "bun.lock", "package-lock.json", "npm-shrinkwrap.json"]) {
+        writeFixtureFile(dir, `${directory}/${filename}`, "{}\n");
+      }
+    }
+    git(dir, "add", "-A");
+    commitAs(dir, "renovate[bot]", "fixture@example.invalid", "fix(deps): add nested manifests");
+    const result = runGate(dir, "renovate[bot]");
+    expect(result.status).toBe(0);
+    expect(result.out).toContain("waived the per-PR fragment requirement");
+    cpSync(join(REPO_ROOT, "scripts", "release-promote-changelog.sh"), join(dir, "scripts", "release-promote-changelog.sh"));
+    expect(runPromotion(dir).status).toBe(0);
+    expect(readFileSync(join(dir, "CHANGELOG.md"), "utf8")).toContain("- fix(deps): add nested manifests");
   });
 
   test("Renovate dependency-only chore prints no waiver", () => {
@@ -234,6 +285,49 @@ describe("PR author login and accepted JavaScript filenames", () => {
 });
 
 describe("release-time history", () => {
+  test.each([" package.json", "package.json ", "packages\\package.json"])(
+    "promotion excludes a commit adding %j",
+    (filename) => {
+      const dir = makeRepo();
+      writeFixtureFile(dir, filename, "{}\n");
+      git(dir, "add", "-A");
+      commitAs(dir, "renovate[bot]", "fixture@example.invalid", "fix(deps): add manifest lookalike");
+      cpSync(join(REPO_ROOT, "scripts", "release-promote-changelog.sh"), join(dir, "scripts", "release-promote-changelog.sh"));
+      const result = runPromotion(dir);
+      expect(result.status).not.toBe(0);
+      expect(result.out).toContain("no fragments");
+    },
+  );
+
+  test("a dependency-only root commit enters a no-tag release with explicit permission", () => {
+    const dir = tempDir("flair-renovate-root-");
+    git(dir, "init", "-q", "-b", "main");
+    git(dir, "config", "commit.gpgsign", "false");
+    writeFixtureFile(dir, "packages/dep/package.json", "{}\n");
+    git(dir, "add", "-A");
+    commitAs(dir, "renovate[bot]", "fixture@example.invalid", "fix(deps): initial dependency");
+    for (const file of [...SCRIPT_FILES, "release-promote-changelog.sh"]) {
+      writeFixtureFile(dir, `scripts/${file}`, readFileSync(join(REPO_ROOT, "scripts", file), "utf8"));
+    }
+    writeFixtureFile(dir, "CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n");
+    const refused = runPromotion(dir);
+    expect(refused.status).not.toBe(0);
+    expect(refused.out).toContain("pass --allow-no-release-tag");
+    const allowed = runPromotion(dir, ["--allow-no-release-tag"]);
+    expect(allowed.status).toBe(0);
+    expect(readFileSync(join(dir, "CHANGELOG.md"), "utf8")).toContain("### Dependencies\n\n- fix(deps): initial dependency");
+  });
+
+  test.each(["deletion", "mode change"])("promotion includes a dependency-only %s", (change) => {
+    const dir = makeRepo();
+    if (change === "deletion") git(dir, "rm", "-q", "package.json");
+    else git(dir, "update-index", "--chmod=+x", "package.json");
+    commitAs(dir, "renovate[bot]", "fixture@example.invalid", `fix(deps): manifest ${change}`);
+    cpSync(join(REPO_ROOT, "scripts", "release-promote-changelog.sh"), join(dir, "scripts", "release-promote-changelog.sh"));
+    expect(runPromotion(dir).status).toBe(0);
+    expect(readFileSync(join(dir, "CHANGELOG.md"), "utf8")).toContain(`- fix(deps): manifest ${change}`);
+  });
+
   test("an eligible recorded-name commit does not count as a missing-fragment commit", () => {
     const dir = makeRepo();
     addDependencyOnlyCommit(dir, { author: "renovate" });

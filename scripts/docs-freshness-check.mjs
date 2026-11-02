@@ -438,9 +438,9 @@ defineCheck("changelog-unreleased", null, () => {
     base = execFileSync("git", ["merge-base", "HEAD", baseRef],
       { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
     if (base) {
-      const changed = execFileSync("git", ["diff", "--no-renames", "--name-only", `${base}..HEAD`],
-        { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
-      changedPaths = changed ? changed.split("\n") : [];
+      const changed = execFileSync("git", ["diff", "--no-renames", "--name-only", "-z", `${base}..HEAD`],
+        { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString();
+      changedPaths = changed.split("\0").filter((p) => p !== "");
       thisChangeShips = changeTouchesPublished(changedPaths, ROOT);
     }
   } catch {
@@ -449,8 +449,7 @@ defineCheck("changelog-unreleased", null, () => {
 
   // ── Renovate dependency waiver (flair#2872) ──────────────────────────────────
   // Both halves must hold: the login supplied by the workflow, and
-  // a diff using only package.json, bun.lock, package-lock.json, or
-  // npm-shrinkwrap.json. The author is
+  // changed Git paths with accepted basenames. The author is
   // never read from commit metadata, which the branch controls; an empty or
   // missing value leaves the ordinary fragment rules in effect.
   const waiverApplies = isRenovateLogin(process.env.FLAIR_PR_AUTHOR_LOGIN) &&
@@ -495,7 +494,7 @@ defineCheck("changelog-unreleased", null, () => {
 
       if (thisChangeShips && changeCommits > 0 && addedCount === 0) {
         if (waiverApplies) {
-          console.log(`  ↷ changelog-unreleased: waived the per-PR fragment requirement — FLAIR_PR_AUTHOR_LOGIN matches ${RENOVATE_LOGIN} and changed paths use the four accepted JavaScript manifest or lockfile names.`);
+          console.log(`  ↷ changelog-unreleased: waived the per-PR fragment requirement — FLAIR_PR_AUTHOR_LOGIN matches ${RENOVATE_LOGIN} and every changed Git basename exactly matches package.json, bun.lock, package-lock.json, or npm-shrinkwrap.json.`);
         } else {
           failures.push({
             file: `${FRAGMENT_DIR_REL}/`, line: 1,
