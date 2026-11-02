@@ -114,10 +114,7 @@ describe("writeSecureFile — re-verifies at write time, not only creation", () 
 
 it("state fails with ENOENT when the candidate is removed after the probe", async () => {
   expect(probeMigrationDataDir(testRoot).ok).toBe(true);
-  // The proof lives in its own directory so it stays held while the state
-  // directory is removed; the write must still fail on the missing parent.
-  const lockRoot = mkdtempSync(join(tmpdir(), "flair-migration-dirsafety-lock-"));
-  const lock = acquireMigrationLock({ lockPath: join(lockRoot, "lock") });
+  const lock = acquireMigrationLock({ lockPath: join(testRoot, ".migrations", "lock") });
   if (!lock.acquired) throw new Error(`migration lock unavailable: ${lock.reason}`);
   try {
     rmSync(testRoot, { recursive: true });
@@ -131,7 +128,6 @@ it("state fails with ENOENT when the candidate is removed after the probe", asyn
     expect(existsSync(testRoot)).toBe(false);
   } finally {
     lock.release();
-    rmSync(lockRoot, { recursive: true, force: true });
   }
 });
 

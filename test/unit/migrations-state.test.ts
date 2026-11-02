@@ -81,8 +81,8 @@ describe("writeMigrationStateEntry / readMigrationState round-trip", () => {
   });
 });
 
-describe("writeMigrationStateEntry — lock proof (flair#2866)", () => {
-  it("refuses with a named error and writes nothing when no held lock is supplied", async () => {
+describe("writeMigrationStateEntry — lock handle (flair#2866)", () => {
+  it("refuses with a named error and writes nothing when no handle is supplied", async () => {
     let error: unknown;
     try {
       await (writeMigrationStateEntry as unknown as (...args: unknown[]) => Promise<void>)(statePath, "m", { lastOutcome: "success" });
@@ -93,7 +93,73 @@ describe("writeMigrationStateEntry — lock proof (flair#2866)", () => {
     expect(existsSync(statePath)).toBe(false);
   });
 
-  it("refuses with a named error when the lock file was replaced after the read", async () => {
+  it("refuses a forged object with matching fields", async () => {
+    const forged = {
+      acquired: true as const,
+      lockPath: join(root, ".migrations", "lock"),
+      holder: { pid: process.pid, hostname: "host-a", startedAt: "2026-01-01T00:00:00.000Z" },
+      release: () => {},
+      touch: () => {},
+    };
+    let error: unknown;
+    try {
+      await (writeMigrationStateEntry as unknown as (...args: unknown[]) => Promise<void>)(statePath, "m", { lastOutcome: "success" }, forged);
+    } catch (err) {
+      error = err;
+    }
+    expect((error as Error)?.name).toBe("MigrationStateWriteRefusedError");
+    expect((error as Error)?.message).toContain("no held migration lock handle");
+    expect(existsSync(statePath)).toBe(false);
+  });
+
+  it("refuses a released handle", async () => {
+    const lock = acquireMigrationLock({ lockPath: join(root, ".migrations", "lock") });
+    if (!lock.acquired) throw new Error(`migration lock unavailable: ${lock.reason}`);
+    lock.release();
+
+    let error: unknown;
+    try {
+      await writeMigrationStateEntry(statePath, "m", { lastOutcome: "success" }, lock);
+    } catch (err) {
+      error = err;
+    }
+    expect((error as Error)?.name).toBe("MigrationStateWriteRefusedError");
+    expect((error as Error)?.message).toContain("already released");
+    expect(existsSync(statePath)).toBe(false);
+  });
+
+  it("refuses a live handle for a different lock path", async () => {
+    const otherRoot = mkdtempSync(join(tmpdir(), "flair-migration-state-other-"));
+    const other = acquireMigrationLock({ lockPath: join(otherRoot, "lock") });
+    if (!other.acquired) throw new Error(`migration lock unavailable: ${other.reason}`);
+    try {
+      let error: unknown;
+      try {
+        await writeMigrationStateEntry(statePath, "m", { lastOutcome: "success" }, other);
+      } catch (err) {
+        error = err;
+      }
+      expect((error as Error)?.name).toBe("MigrationStateWriteRefusedError");
+      expect((error as Error)?.message).toContain("not the state file's lock");
+      expect(existsSync(statePath)).toBe(false);
+    } finally {
+      other.release();
+      rmSync(otherRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a live handle for the state file's designated lock", async () => {
+    const lock = acquireMigrationLock({ lockPath: join(root, ".migrations", "lock") });
+    if (!lock.acquired) throw new Error(`migration lock unavailable: ${lock.reason}`);
+    try {
+      await writeMigrationStateEntry(statePath, "m", { lastOutcome: "success" }, lock);
+      expect(readMigrationState(statePath)["m"].lastOutcome).toBe("success");
+    } finally {
+      lock.release();
+    }
+  });
+
+  it("refuses with a named error when the lock file was removed after acquisition, before the write", async () => {
     await seedMigrationStateEntry(statePath, "m", { lastOutcome: "halted", reason: "old" });
     const lock = acquireMigrationLock({ lockPath: join(root, ".migrations", "lock") });
     if (!lock.acquired) throw new Error(`migration lock unavailable: ${lock.reason}`);

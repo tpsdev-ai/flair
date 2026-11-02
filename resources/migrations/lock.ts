@@ -12,12 +12,13 @@
  *      portable flock() binding, so this uses exclusive file CREATE
  *      (O_CREAT|O_EXCL — atomic at the OS level, the same primitive flock
  *      ultimately reduces to for a single-host guard) instead. The lock file
- *      holds `{pid, hostname, startedAt}`. A lock is considered STALE (and
- *      is broken/removed before the new attempt) when either: the recorded
- *      pid is no longer alive on this host, OR the file is older than
- *      `staleMs` (covers a cross-host holder this process can't liveness-
- *      check by pid — Fabric-wide coordination is explicitly out of scope
- *      for this slice, so age is the only signal available for that case).
+ *      holds `{pid, hostname, startedAt}`. A lock whose recorded holder is on
+ *      THIS host is broken only when that pid is no longer alive; a live local
+ *      holder is held regardless of the file's age. A holder recorded on
+ *      ANOTHER host is judged by age alone (`staleMs`) and is never probed by
+ *      a local pid. The pid probe is therefore only used for a local holder.
+ *      The cross-host case keeps the takeover window: a remote holder is still
+ *      judged by age, which is out of scope for this single-host guard.
  *
  * This is a SINGLE-HOST guard, not a Fabric-wide one — multiple Flair
  * instances in a Fabric cluster each have their OWN data dir today, so this
@@ -36,11 +37,58 @@ export interface LockHolder {
   startedAt: string;
 }
 
-/** What a caller must present to prove it holds a lock: the lock file it
- *  acquired and the holder identity recorded there (flair#2866). */
-export interface MigrationLockProof {
-  lockPath: string;
-  holder: LockHolder;
+const liveHandles = new WeakSet<MigrationLockHandle>();
+const revokedHandles = new WeakSet<MigrationLockHandle>();
+const HANDLE_KEY = Symbol("migration-lock-handle");
+
+/**
+ * An acquired migration lock. Only {@link acquireMigrationLock} constructs a
+ * live one; {@link MigrationLockHandle.release} revokes it. The handle is
+ * bound to the lock path it acquired (flair#2866).
+ */
+export class MigrationLockHandle {
+  readonly acquired = true as const;
+  readonly lockPath: string;
+  readonly holder: LockHolder;
+  #release: () => void;
+  #touch: () => void;
+
+  constructor(key: symbol, lockPath: string, holder: LockHolder, release: () => void, touch: () => void) {
+    if (key !== HANDLE_KEY) {
+      throw new TypeError("MigrationLockHandle is created only by acquireMigrationLock");
+    }
+    this.lockPath = lockPath;
+    this.holder = holder;
+    this.#release = release;
+    this.#touch = touch;
+    liveHandles.add(this);
+  }
+
+  release(): void {
+    if (!liveHandles.has(this)) return;
+    liveHandles.delete(this);
+    revokedHandles.add(this);
+    this.#release();
+  }
+
+  touch(): void {
+    this.#touch();
+  }
+}
+
+export type MigrationLockHandleStatus = "live" | "released" | "unknown";
+
+/** Classify a value without exposing whether a forged object imitates a handle. */
+export function migrationLockHandleStatus(value: unknown): MigrationLockHandleStatus {
+  if (typeof value === "object" && value !== null) {
+    if (liveHandles.has(value as MigrationLockHandle)) return "live";
+    if (revokedHandles.has(value as MigrationLockHandle)) return "released";
+  }
+  return "unknown";
+}
+
+export function isLiveMigrationLockHandle(value: unknown): value is MigrationLockHandle {
+  return migrationLockHandleStatus(value) === "live";
 }
 
 export interface LockDeps {
@@ -80,21 +128,21 @@ export function _resetInProcessLockForTests(): void {
 }
 
 export type AcquireResult =
-  | ({ acquired: true; release: () => void; touch: () => void } & MigrationLockProof)
+  | MigrationLockHandle
   | { acquired: false; reason: string; holder?: LockHolder };
 
 /**
- * True only when `lockPath` still contains the holder identity this proof
- * recorded. Any read/parse failure answers false: an unknown lock state never
+ * True only when `lock.lockPath` still records the holder identity this handle
+ * acquired. Any read/parse failure answers false: an unknown lock state never
  * licenses a write (flair#2866).
  */
-export function migrationLockStillHeld(proof: MigrationLockProof): boolean {
-  const current = readHolder(proof.lockPath);
+export function migrationLockStillHeld(lock: MigrationLockHandle): boolean {
+  const current = readHolder(lock.lockPath);
   return (
     current !== null &&
-    current.pid === proof.holder.pid &&
-    current.hostname === proof.holder.hostname &&
-    current.startedAt === proof.holder.startedAt
+    current.pid === lock.holder.pid &&
+    current.hostname === lock.holder.hostname &&
+    current.startedAt === lock.holder.startedAt
   );
 }
 
@@ -139,19 +187,30 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
     } catch {
       /* vanished between existsSync and stat — fall through to acquire */
     }
-    const dead = !holder || !isProcessAlive(holder.pid) || ageMs > staleMs;
-    if (dead) {
+    const heldRefusal = (h: LockHolder): AcquireResult => ({
+      acquired: false,
+      reason: `held by pid ${h.pid} on ${h.hostname} since ${h.startedAt} (lock ${lockPath})`,
+      holder: h,
+    });
+    let breakable: boolean;
+    if (holder === null) {
+      // Unreadable/corrupt lock: no holder can be trusted, so break it.
+      breakable = true;
+    } else if (holder.hostname === osHostname()) {
+      // Local holder: pid liveness is the only signal; age never breaks it.
+      breakable = !isProcessAlive(holder.pid);
+    } else {
+      // Remote holder: age is the only signal; never probe a local pid.
+      breakable = ageMs > staleMs;
+    }
+    if (breakable) {
       try {
         unlinkSync(lockPath);
       } catch {
         /* another racer already broke it — fine, continue to the exclusive create below */
       }
-    } else {
-      return {
-        acquired: false,
-        reason: `held by pid ${holder.pid} on ${holder.hostname} since ${holder.startedAt}`,
-        holder,
-      };
+    } else if (holder !== null) {
+      return heldRefusal(holder);
     }
   }
 
@@ -177,26 +236,24 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
   }
 
   inProcessHeld = true;
-  let released = false;
-  return {
-    acquired: true,
+  const handle = new MigrationLockHandle(
+    HANDLE_KEY,
     lockPath,
-    holder: info,
-    release: () => {
-      if (released) return;
-      released = true;
+    info,
+    () => {
       inProcessHeld = false;
-      // Only remove the file this holder created: if another runner broke the
-      // lock and acquired its own, leaving that file in place is what keeps
-      // the new holder's single-flight intact (flair#2866).
-      if (!migrationLockStillHeld({ lockPath, holder: info })) return;
+      // Defence in depth, not the serialization guarantee: the acquisition
+      // rule above never breaks a live local holder, so a local successor
+      // cannot exist while this process runs. This guard also covers the
+      // cross-host residual, where an age-based takeover can replace the file.
+      if (!migrationLockStillHeld(handle)) return;
       try {
         unlinkSync(lockPath);
       } catch {
         /* already gone — fine */
       }
     },
-    touch: () => {
+    () => {
       const t = new Date(now());
       try {
         utimesSync(lockPath, t, t);
@@ -204,5 +261,6 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
         /* best-effort heartbeat — a failed touch must never break the migration */
       }
     },
-  };
+  );
+  return handle;
 }

@@ -1,20 +1,19 @@
 /**
- * migrations-state-writers-2866.test.ts — concurrent writers of the migration
- * state file must not drop each other's entries (flair#2866).
+ * migrations-state-writers-2866.test.ts — real writer processes on one real
+ * migration state file (flair#2866).
  *
- * Two real writer processes update DIFFERENT migration ids on the same real
- * state file. Writer A is paused by the state module's test-only pause point
- * between its read and its rename. While it is paused, writer B breaks A's
- * lock (as another runner does when it judges the file stale), acquires its
- * own, and writes. When A resumes, its proof no longer matches the lock file,
- * so it refuses with the named error and renames nothing: B's entry and the
- * entry already on disk both survive. Without the re-check A's rename would
- * publish its pre-B snapshot and B's entry would be gone.
+ * A lock held by a live process on this host is not broken by age, so a second
+ * local writer is refused while the holder runs. A dead holder's lock is
+ * broken by the next writer. The state writer accepts only a live handle for
+ * the state file's lock: a handle whose lock file was replaced refuses the
+ * write instead of publishing its read-modify-write snapshot, and releasing a
+ * former handle leaves the successor's lock file in place.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { acquireMigrationLock } from "../../resources/migrations/lock.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const WRITER = resolve(import.meta.dir, "../fixtures/migration-state-writer.ts");
@@ -45,7 +44,7 @@ async function waitFor(path: string, what: string, timeoutMs = 15_000): Promise<
   }
 }
 
-async function waitExit(proc: { exited: Promise<number>; kill: () => void }, what: string): Promise<number> {
+async function waitExit(proc: { exited: Promise<number>; kill: (code?: number) => void }, what: string): Promise<number> {
   const result = await Promise.race([
     proc.exited,
     new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), EXIT_TIMEOUT_MS)),
@@ -72,39 +71,85 @@ function readState(): Record<string, any> {
 }
 
 describe("concurrent migration state writers (flair#2866)", () => {
-  it("a writer whose lock was broken between read and rename refuses without dropping the winner's entry", async () => {
+  it("refuses a second local writer while the lock holder is alive, however old the file", async () => {
     writeFileSync(
       statePath,
-      JSON.stringify({ "mig-a": { lastOutcome: "halted", reason: "prior" } }, null, 2) + "\n",
+      JSON.stringify({ "mig-prior": { lastOutcome: "halted", reason: "prior" } }, null, 2) + "\n",
     );
     writeFileSync(join(pauseDir, `arm.${STATE_WRITE_PAUSE}`), "");
 
     const a = spawnWriter("mig-a");
     await waitFor(join(pauseDir, `paused.${STATE_WRITE_PAUSE}`), "writer A's state-write pause");
+
     const lockPath = join(dirname(statePath), "lock");
     expect(existsSync(lockPath)).toBe(true);
+    // A still holds the lock. Make the file look stale by age: the holder is
+    // on this host and its pid is alive, so age alone must not break it.
+    const old = new Date(Date.now() - 10 * 60 * 1000);
+    utimesSync(lockPath, old, old);
 
-    // Another runner judges the lock stale and breaks it, then takes its own.
-    unlinkSync(lockPath);
+    const b = spawnWriter("mig-b");
+    expect(await waitExit(b, "B")).toBe(3);
+    const refusal = readFileSync(join(pauseDir, "lock-failed.mig-b"), "utf-8");
+    expect(refusal).toContain(`held by pid ${a.pid}`);
+    expect(refusal).toContain(hostname());
+    expect(refusal).toContain(lockPath);
+
+    // A completes and publishes its own entry; every prior entry survives.
+    writeFileSync(join(pauseDir, `go.${STATE_WRITE_PAUSE}`), "");
+    expect(await waitExit(a, "A")).toBe(0);
+
+    const state = readState();
+    expect(state["mig-a"]).toMatchObject({ lastOutcome: "success", completedAtVersion: "writer-2866" });
+    expect(state["mig-prior"].lastOutcome).toBe("halted");
+    expect(state["mig-prior"].reason).toBe("prior");
+    expect(existsSync(join(pauseDir, "written.mig-a"))).toBe(true);
+  }, 25_000);
+
+  it("breaks a dead holder's lock and lets the successor write", async () => {
+    const lockPath = join(dirname(statePath), "lock");
+    const a = spawnWriter("mig-a", "release-a");
+    await waitFor(join(pauseDir, "written.mig-a"), "writer A's entry");
+    const aHolder = JSON.parse(readFileSync(lockPath, "utf-8"));
+    expect(aHolder.pid).toBe(a.pid);
+
+    a.kill(9);
+    await waitExit(a, "A");
+
     const b = spawnWriter("mig-b", "release-b");
     await waitFor(join(pauseDir, "written.mig-b"), "writer B's entry");
-
-    // A resumes with its stale proof and exits after refusing (or, with the
-    // re-check removed, after renaming its pre-B snapshot over B's entry).
-    writeFileSync(join(pauseDir, `go.${STATE_WRITE_PAUSE}`), "");
-    const aCode = await waitExit(a, "A");
+    const bHolder = JSON.parse(readFileSync(lockPath, "utf-8"));
+    expect(bHolder.pid).toBe(b.pid);
+    expect(bHolder.pid).not.toBe(aHolder.pid);
 
     writeFileSync(join(pauseDir, "release-b"), "");
     expect(await waitExit(b, "B")).toBe(0);
 
     const state = readState();
+    expect(state["mig-a"].lastOutcome).toBe("success");
     expect(state["mig-b"]).toMatchObject({ lastOutcome: "success", completedAtVersion: "writer-2866" });
-    expect(state["mig-a"].lastOutcome).toBe("halted");
-    expect(state["mig-a"].reason).toBe("prior");
-    expect(aCode).toBe(2);
-    expect(existsSync(join(pauseDir, "refused.mig-a"))).toBe(true);
-    expect(readFileSync(join(pauseDir, "refused.mig-a"), "utf-8")).toContain("MigrationStateWriteRefusedError");
-    expect(existsSync(join(pauseDir, "written.mig-a"))).toBe(false);
   }, 25_000);
 
+  it("releasing a former handle does not remove the successor's lock", async () => {
+    const lockPath = join(dirname(statePath), "lock");
+    const former = acquireMigrationLock({ lockPath });
+    if (!former.acquired) throw new Error(`migration lock unavailable: ${former.reason}`);
+
+    // The lock file is replaced as it would be after an age-based takeover.
+    unlinkSync(lockPath);
+    const b = spawnWriter("mig-b", "release-b");
+    await waitFor(join(pauseDir, "written.mig-b"), "writer B's entry");
+    const bHolder = JSON.parse(readFileSync(lockPath, "utf-8"));
+    expect(bHolder.pid).toBe(b.pid);
+
+    former.release();
+    expect(existsSync(lockPath)).toBe(true);
+    expect(JSON.parse(readFileSync(lockPath, "utf-8"))).toEqual(bHolder);
+
+    writeFileSync(join(pauseDir, "release-b"), "");
+    expect(await waitExit(b, "B")).toBe(0);
+    expect(readState()["mig-b"]).toMatchObject({ lastOutcome: "success", completedAtVersion: "writer-2866" });
+    // B's own release removed the file it still held.
+    expect(existsSync(lockPath)).toBe(false);
+  }, 25_000);
 });

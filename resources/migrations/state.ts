@@ -22,7 +22,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ensureSecureDir, writeSecureFile } from "./dir-safety.js";
-import { migrationLockStillHeld, type AcquireResult } from "./lock.js";
+import { migrationLockHandleStatus, migrationLockStillHeld, type MigrationLockHandle } from "./lock.js";
 import { txnPausePoint } from "../txn-pause-point.js";
 
 export type MigrationOutcome = "success" | "halted" | "failed";
@@ -79,8 +79,8 @@ export function readMigrationState(path: string): MigrationStateFile {
   }
 }
 
-/** The named refusal a state write makes when it has no held migration lock,
- *  or the one it was given is no longer the lock file on disk (flair#2866). */
+/** The named refusal a state write makes without a live handle for the state
+ *  file's migration lock (flair#2866). */
 export class MigrationStateWriteRefusedError extends Error {
   constructor(message: string) {
     super(message);
@@ -92,12 +92,23 @@ export async function writeMigrationStateEntry(
   path: string,
   id: string,
   entry: MigrationStateEntry,
-  lock: Extract<AcquireResult, { acquired: true }>,
+  lock: MigrationLockHandle,
 ): Promise<void> {
-  if (!lock || lock.acquired !== true || typeof lock.lockPath !== "string" || !lock.holder) {
-    throw new MigrationStateWriteRefusedError(`refusing to write ${path}: no held migration lock was supplied`);
-  }
   const dir = dirname(path);
+  const designatedLockPath = join(dir, "lock");
+  const status = migrationLockHandleStatus(lock);
+  if (status !== "live") {
+    throw new MigrationStateWriteRefusedError(
+      status === "released"
+        ? `refusing to write ${path}: the migration lock handle was already released`
+        : `refusing to write ${path}: no held migration lock handle was supplied`,
+    );
+  }
+  if (lock.lockPath !== designatedLockPath) {
+    throw new MigrationStateWriteRefusedError(
+      `refusing to write ${id} in ${path}: the lock handle is for ${lock.lockPath}, not the state file's lock at ${designatedLockPath}`,
+    );
+  }
   ensureSecureDir(dir);
   const current = readMigrationState(path);
   current[id] = entry;
@@ -105,9 +116,11 @@ export async function writeMigrationStateEntry(
   // second writer into that window deterministically (flair#2866).
   const pause = txnPausePoint("migration-state-write");
   if (pause) await pause;
-  // Re-check after the pause and before publishing: a lock this process no
-  // longer holds must refuse the write, never rename over another writer.
-  if (!migrationLockStillHeld(lock)) {
+  // Defence in depth, not the serialization guarantee: the acquisition rule
+  // refuses to break a live local holder, which is what keeps a local
+  // successor from reaching this check. This re-check also refuses the
+  // cross-host residual, where age can still replace the lock file.
+  if (migrationLockHandleStatus(lock) !== "live" || !migrationLockStillHeld(lock)) {
     throw new MigrationStateWriteRefusedError(
       `refusing to write ${id} in ${path}: the migration lock at ${lock.lockPath} is no longer held by pid ${lock.holder.pid} (started ${lock.holder.startedAt})`,
     );

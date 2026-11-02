@@ -4,9 +4,9 @@
  * on well-known path; dead-holder → break and proceed").
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { probeMigrationDataDir } from "../../resources/migrations/data-dir.ts";
 import { acquireMigrationLock, _resetInProcessLockForTests, DEFAULT_STALE_MS } from "../../resources/migrations/lock.ts";
 
@@ -64,6 +64,20 @@ describe("acquireMigrationLock — basic acquire/release", () => {
       expect(() => result.release()).not.toThrow();
     }
   });
+
+  it("release() leaves a successor's lock file in place", () => {
+    const first = acquireMigrationLock({ lockPath });
+    expect(first.acquired).toBe(true);
+    const successor = { pid: 424242, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z" };
+    // The successor's lock file replaced this holder's (the cross-host
+    // residual this guard covers as defence in depth).
+    writeFileSync(lockPath, JSON.stringify(successor));
+
+    if (first.acquired) first.release();
+
+    expect(existsSync(lockPath)).toBe(true);
+    expect(JSON.parse(readFileSync(lockPath, "utf-8"))).toEqual(successor);
+  });
 });
 
 describe("acquireMigrationLock — in-process mutex", () => {
@@ -96,6 +110,7 @@ describe("acquireMigrationLock — stale-tolerant file lock (dead-holder break)"
     const second = acquireMigrationLock({ lockPath, isProcessAlive: () => true });
     expect(second.acquired).toBe(false);
     if (!second.acquired) expect(second.reason).toContain("held by pid");
+    if (first.acquired) first.release();
   });
 
   it("breaks the lock when the recorded pid is dead, even if the file is fresh", () => {
@@ -105,19 +120,49 @@ describe("acquireMigrationLock — stale-tolerant file lock (dead-holder break)"
 
     const second = acquireMigrationLock({ lockPath, isProcessAlive: () => false });
     expect(second.acquired).toBe(true);
+    if (second.acquired) second.release();
   });
 
-  it("breaks the lock when the file is older than staleMs, even if isProcessAlive would say alive", () => {
+  it("does NOT break a live holder on this host when the file is older than staleMs", () => {
     const first = acquireMigrationLock({ lockPath });
     expect(first.acquired).toBe(true);
     _resetInProcessLockForTests();
 
-    // Backdate the lock file's mtime past the stale threshold.
+    // Backdate the lock file's mtime past the stale threshold. The recorded
+    // holder is this host and its pid is alive, so age alone must not break it.
     const old = new Date(Date.now() - DEFAULT_STALE_MS - 60_000);
     utimesSync(lockPath, old, old);
 
     const second = acquireMigrationLock({ lockPath, isProcessAlive: () => true });
-    expect(second.acquired).toBe(true);
+    expect(second.acquired).toBe(false);
+    if (!second.acquired) {
+      expect(second.reason).toContain(`held by pid ${process.pid}`);
+      expect(second.reason).toContain(hostname());
+      expect(second.reason).toContain(lockPath);
+    }
+    if (first.acquired) first.release();
+  });
+
+  it("does NOT probe a local pid for a holder recorded on another host", () => {
+    mkdirSync(join(testRoot, ".migrations"), { recursive: true });
+    writeFileSync(lockPath, JSON.stringify({ pid: 424242, hostname: "host-b", startedAt: "2026-01-01T00:00:00.000Z" }));
+
+    // Fresh file, and isProcessAlive would say dead: only age decides for a
+    // remote holder, so the lock is still held.
+    const result = acquireMigrationLock({ lockPath, isProcessAlive: () => false });
+    expect(result.acquired).toBe(false);
+    if (!result.acquired) expect(result.reason).toContain("on host-b");
+  });
+
+  it("breaks a holder recorded on another host by age alone", () => {
+    mkdirSync(join(testRoot, ".migrations"), { recursive: true });
+    writeFileSync(lockPath, JSON.stringify({ pid: 424242, hostname: "host-b", startedAt: "2026-01-01T00:00:00.000Z" }));
+    const old = new Date(Date.now() - DEFAULT_STALE_MS - 60_000);
+    utimesSync(lockPath, old, old);
+
+    const result = acquireMigrationLock({ lockPath, isProcessAlive: () => false });
+    expect(result.acquired).toBe(true);
+    if (result.acquired) result.release();
   });
 
   it("does NOT break a fresh lock even with a short staleMs override once re-acquired (regression: staleMs applies per-call)", () => {
@@ -130,6 +175,7 @@ describe("acquireMigrationLock — stale-tolerant file lock (dead-holder break)"
     // process) — must stay refused.
     const second = acquireMigrationLock({ lockPath, staleMs: 10_000, isProcessAlive: () => true });
     expect(second.acquired).toBe(false);
+    if (first.acquired) first.release();
   });
 
   it("a corrupt/unparseable lock file is treated as dead (breaks it)", () => {

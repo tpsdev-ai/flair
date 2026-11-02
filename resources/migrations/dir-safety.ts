@@ -90,8 +90,9 @@ export const secureFileFsync = { sync: (fd: number): void => fsyncSync(fd) };
  *
  * What this does NOT solve on its own: two concurrent WRITERS still race on
  * their read-modify-write cycles (last rename wins). A caller that needs
- * serialization must hold a lock across the read and the rename, as the
- * migration state writer does with the migration lock (flair#2866).
+ * serialization must hold a lock across the read and the rename; the migration
+ * state writer does this with the migration lock, whose single-host scope
+ * still leaves the age-based cross-host takeover window (flair#2866).
  */
 export function writeSecureFile(path: string, contents: string, dir: string): void {
   verifySecureDir(dir);

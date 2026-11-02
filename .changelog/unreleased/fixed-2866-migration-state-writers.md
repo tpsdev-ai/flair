@@ -1,7 +1,10 @@
-- **A migration state write refuses when another writer has taken its migration lock.**
+- **A migration state write requires a live handle for the state file's migration lock.**
 
-  Before renaming `<dataDir>/.migrations/state.json`, the writer re-checks that
-  the same holder still owns the lock file and otherwise fails with a named
-  error, so a pre-take read-modify-write snapshot is not published over the
-  other writer's entry. Releasing a lock no longer removes a lock file another
-  holder has since acquired (#2866).
+  The writer accepts only the handle returned by a successful migration-lock
+  acquisition and refuses a forged object, a released handle or a handle for a
+  different lock path with a named error. A lock held by a live process on the
+  same host is no longer broken by age, so a second local runner is refused
+  while the holder runs; a dead local holder's lock is still broken. Releasing
+  a lock removes the lock file only when it still records that holder. A holder
+  recorded on another host is still judged by age, so the cross-host case keeps
+  the takeover window (single-host guard, #2866).

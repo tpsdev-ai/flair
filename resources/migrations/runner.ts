@@ -418,7 +418,8 @@ async function haltMigration(
     unconfirmed?: UnconfirmedRecord;
   },
 ): Promise<void> {
-  const { deps, startedAt, rowsDone, rowsRemaining, hashEnvelopeMatch, state } = ctx;  const endedAt = deps.now().toISOString();
+  const { deps, startedAt, rowsDone, rowsRemaining, hashEnvelopeMatch, state } = ctx;
+  const endedAt = deps.now().toISOString();
   setMigrationProgress({
     id: migration.id, rowsDone, rowsRemaining, state: "halted", reason,
     ...unconfirmedProgress(ctx.unconfirmed),
