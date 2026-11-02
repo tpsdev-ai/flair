@@ -2399,18 +2399,27 @@ export class Memory extends (databases as any).flair.Memory {
     // tags: an untagged POST that names a skill row (by id or `supersedes`)
     // takes the lock, then inherits the tag (prepareSkillBody).
     const ids = isSkillWrite(content) ? [] : postLockIds(this, content);
-    if (ids.length === 0) return this.postLocked(content, context, false);
+    // Citation-on-write, queued by postLocked, runs after the per-id lock is
+    // released (flair#2858, as put() does): it tries each cited id's lock, and
+    // a POST that supersedes a row holds that predecessor's id until then.
+    const afterRelease: Array<() => Promise<void>> = [];
+    if (ids.length === 0) {
+      const result = await this.postLocked(content, context, false, afterRelease);
+      for (const step of afterRelease) await step();
+      return result;
+    }
     const outcome = await withMemoryWriteLock(
-      memoryWriteLockStore(), ids, () => this.postLocked(content, context, true), { phase: "post" });
-    if (outcome.kind === "done") return outcome.value;
-    return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
+      memoryWriteLockStore(), ids, () => this.postLocked(content, context, true, afterRelease), { phase: "post" });
+    if (outcome.kind !== "done") return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
+    for (const step of afterRelease) await step();
+    return outcome.value;
   }
 
   /** `locked`: the POST holds the per-id lock, so its provider calls take the
    *  bounded path putLocked's take (MEMORY_LOCKED_PROVIDER_TIMEOUT_MS): a call
    *  still pending at the bound, or answering after it, is refused once the
    *  event loop runs again; a provider that never yields it can prevent that. */
-  private async postLocked(content: any, context: any, locked: boolean) {
+  private async postLocked(content: any, context: any, locked: boolean, afterRelease: Array<() => Promise<void>>) {
     // flair#2612: a POST body that is not a single JSON object — an array, null,
     // a string or a number — is refused here with a named 400 before any write
     // path runs. Without it, an array reaches Harper's collection create, which
@@ -2883,12 +2892,17 @@ export class Memory extends (databases as any).flair.Memory {
     if (supersede.close?.granteeId === undefined) await closeSupersededIfNeeded(ctx, content, supersede.close, "post");
     await markDerivedSourcesReflected(content);
 
+    // flair#744 slice A: citation-on-write — queued here and run by post()
+    // after releasing this request's per-id lock, as put() does (flair#2858).
+    // Failure-isolated: the write's answer does not depend on crediting.
     if (usedMemoryIds !== undefined) {
-      try {
-        await recordCitations(ctx, auth, usedMemoryIds, new Date().toISOString());
-      } catch (err) {
-        console.error("Memory.post: citation recording failed", err);
-      }
+      afterRelease.push(async () => {
+        try {
+          await recordCitations(ctx, auth, usedMemoryIds, new Date().toISOString());
+        } catch (err) {
+          console.error("Memory.post: citation recording failed", err);
+        }
+      });
     }
 
     return buildWriteResponse(content, result, dedupMatch, redactedValues, postStaged, postRowId);

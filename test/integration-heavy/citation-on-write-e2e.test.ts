@@ -25,6 +25,9 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
@@ -73,6 +76,17 @@ async function putMemory(harper: HarperInstance, agent: TestAgent, id: string, b
   });
 }
 
+/** Signed POST to the /Memory collection — a create, which may carry
+ *  `supersedes` and `usedMemoryIds` (flair#2656 exercises this POST path). */
+async function postMemory(harper: HarperInstance, agent: TestAgent, body: Record<string, any>): Promise<Response> {
+  const path = "/Memory";
+  return fetch(`${harper.httpURL}${path}`, {
+    method: "POST",
+    headers: { Authorization: ed25519Header(agent, "POST", path), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 /** Signed GET /Memory/<id>. */
 async function getMemory(harper: HarperInstance, agent: TestAgent, id: string): Promise<Response> {
   const path = `/Memory/${id}`;
@@ -97,14 +111,69 @@ async function recordUsage(harper: HarperInstance, agent: TestAgent, body: Recor
 }
 
 let harper: HarperInstance;
+let pauseDir = "";
+
+/** Length of the captured Harper log; {@link logSince} returns what followed. */
+function logLength(): number {
+  return (harper.getLog?.() ?? "").length;
+}
+function logSince(offset: number): string {
+  return (harper.getLog?.() ?? "").slice(offset);
+}
+
+/** Wait up to `timeoutMs` for `line` to appear in the log after `offset`. */
+async function waitForLogSince(offset: number, line: string, timeoutMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (logSince(offset).includes(line)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return logSince(offset).includes(line);
+}
+
+async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return true;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return existsSync(path);
+}
+
+/** Arm a test-only pause point for one request (txn-pause-point.ts consumes the arm file). */
+function armPause(point: string): void {
+  for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
+  writeFileSync(join(pauseDir, `arm.${point}`), "");
+}
+function releasePause(point: string): void {
+  writeFileSync(join(pauseDir, `go.${point}`), "");
+}
+
+/** The id's ledger row, read through the admin ops API — the ground truth the
+ *  usage count derives from. */
+async function ledgerRows(memoryId: string): Promise<any[]> {
+  const res = await adminOp(harper, {
+    operation: "search_by_value", database: "flair", table: "MemoryUsage",
+    search_attribute: "memoryId", search_value: memoryId, get_attributes: ["id", "agentId", "memoryId"],
+  });
+  expect(res.status).toBe(200);
+  return await res.json() as any[];
+}
 
 describe("citation-on-write e2e (real Harper) — flair#744 slice A", () => {
   beforeAll(async () => {
-    harper = await startHarper();
+    if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
+    // Pause points let a test hold one memory id's write lock for the length of
+    // a controlled request (the "another request holds it" case).
+    pauseDir = mkdtempSync(join(tmpdir(), "flair-2858-pause-"));
+    harper = await startHarper({
+      serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir },
+    });
   }, 180_000);
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
+    if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
   }, HARPER_STOP_BUDGET_MS);
 
   test("citing a memory on write bumps its usageCount through the SAME shared ledger as POST /RecordUsage", async () => {
@@ -338,5 +407,124 @@ describe("citation-on-write e2e (real Harper) — flair#744 slice A", () => {
     });
     expect(ledger.status).toBe(200);
     expect(await ledger.json()).toEqual([]);
+  }, 60_000);
+
+  // ── flair#2858: a POST records its citations after it releases its locks ──
+  // As put() does (resources/Memory.ts: put()'s afterRelease queue is drained
+  // after withMemoryWriteLock returns; post() drains its own queue the same
+  // way). A POST that supersedes a predecessor holds that predecessor's id
+  // until its lock releases, so before this fix its own citation of the
+  // predecessor was skipped as busy.
+
+  test("a POST that supersedes a predecessor and cites it credits the predecessor once and logs NO busy skip (#2858)", async () => {
+    const agent = mkAgent(`cow-post-sup-${randomUUID()}`);
+    await registerAgent(harper, agent);
+
+    const predId = `${agent.id}-pred`;
+    const putPred = await putMemory(harper, agent, predId, {
+      agentId: agent.id,
+      content: "The predecessor memory a successor will cite, long enough for the dedup gate.",
+      durability: "standard",
+      visibility: "shared",
+    });
+    expect(putPred.status).toBe(200);
+
+    const logBefore = logLength();
+    const succId = `${agent.id}-succ`;
+    const res = await postMemory(harper, agent, {
+      id: succId,
+      agentId: agent.id,
+      content: "The successor memory, which supersedes the predecessor and cites it.",
+      durability: "standard",
+      visibility: "shared",
+      supersedes: predId,
+      usedMemoryIds: [predId],
+    });
+    const text = await res.text();
+    expect(res.status, `superseding POST returned ${res.status}: ${text.slice(0, 300)}`).toBe(201);
+    expect((JSON.parse(text) as any).written).toBe(true);
+
+    const rec: any = await (await getMemory(harper, agent, predId)).json();
+    expect(rec.validTo).toBeTruthy();
+    expect(rec.usageCount).toBe(1);
+
+    const rows = await ledgerRows(predId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].agentId).toBe(agent.id);
+
+    expect(logSince(logBefore)).not.toContain(`contribution skipped: busy for memory ${predId}`);
+  }, 60_000);
+
+  test("control: a POST citing an unrelated id still credits it once (#2858)", async () => {
+    const agent = mkAgent(`cow-post-ctl-${randomUUID()}`);
+    await registerAgent(harper, agent);
+
+    const citedId = `${agent.id}-cited`;
+    await putMemory(harper, agent, citedId, {
+      agentId: agent.id,
+      content: "An unrelated cited memory for the POST control, long enough for the gate.",
+      durability: "standard",
+      visibility: "shared",
+    });
+
+    const logBefore = logLength();
+    const res = await postMemory(harper, agent, {
+      agentId: agent.id,
+      content: "A POST with no supersede that cites an unrelated memory.",
+      durability: "standard",
+      usedMemoryIds: [citedId],
+    });
+    const text = await res.text();
+    expect(res.status, `citing POST returned ${res.status}: ${text.slice(0, 300)}`).toBe(201);
+
+    const rec: any = await (await getMemory(harper, agent, citedId)).json();
+    expect(rec.usageCount).toBe(1);
+    expect(await ledgerRows(citedId)).toHaveLength(1);
+    expect(logSince(logBefore)).not.toContain(`contribution skipped: busy for memory ${citedId}`);
+  }, 60_000);
+
+  test("a citation of an id another request holds is still skipped and logged, as on main (#2858)", async () => {
+    const agent = mkAgent(`cow-post-busy-${randomUUID()}`);
+    await registerAgent(harper, agent);
+
+    const heldId = `${agent.id}-held`;
+    const putHeld = await putMemory(harper, agent, heldId, {
+      agentId: agent.id,
+      content: "The memory another request will hold while a POST cites it.",
+      durability: "standard",
+      visibility: "shared",
+    });
+    expect(putHeld.status).toBe(200);
+
+    // An owner PUT that has committed and still holds the id's lock while a
+    // test-only pause keeps its request open.
+    armPause("memory-put-committed");
+    const holder = putMemory(harper, agent, heldId, {
+      agentId: agent.id,
+      content: "The holder request's replacement content.",
+      durability: "standard",
+      visibility: "shared",
+    });
+    expect(await waitFor(join(pauseDir, "paused.memory-put-committed"), 20_000)).toBe(true);
+
+    const logBefore = logLength();
+    let res: Response;
+    try {
+      res = await postMemory(harper, agent, {
+        agentId: agent.id,
+        content: "A POST citing the id another request holds.",
+        durability: "standard",
+        usedMemoryIds: [heldId],
+      });
+    } finally {
+      releasePause("memory-put-committed");
+    }
+    expect((await holder).status).toBe(200);
+    expect(res!.status).toBe(201);
+
+    const rec: any = await (await getMemory(harper, agent, heldId)).json();
+    expect(rec.usageCount ?? 0).toBe(0);
+    expect(await ledgerRows(heldId)).toEqual([]);
+    expect(await waitForLogSince(logBefore, `contribution skipped: busy for memory ${heldId}`)).toBe(true);
   }, 60_000);
 });
