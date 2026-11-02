@@ -8,7 +8,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { addAdminPassOptions, applyAdminPassFile } from "../lib/auth-resolve.js";
+import { addAdminPassOptions } from "../lib/auth-resolve.js";
 
 export type GrantCli = {
   resolveHttpPort: (...args: any[]) => any;
@@ -50,7 +50,6 @@ addAdminPassOptions(
   .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys (for from-agent Ed25519 auth)")
   .action(async (fromAgent: string, toAgent: string, opts) => {
-    applyAdminPassFile(opts);
     const httpPort = resolveHttpPort(opts);
     const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
@@ -108,7 +107,6 @@ addAdminPassOptions(
 )
   .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .action(async (fromAgent: string, toAgent: string, opts) => {
-    applyAdminPassFile(opts);
     const httpPort = resolveHttpPort(opts);
     const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";

@@ -926,22 +926,54 @@ export function defaultAdminPassPath(): string {
 export const ADMIN_PASS_FILE_FLAG = "--admin-pass-file <path>";
 export const ADMIN_PASS_FILE_HELP =
   "Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. " +
-  "Combining it with --admin-pass is a usage error.";
+  "An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.";
 export const ADMIN_PASS_FLAG = "--admin-pass <pass>";
 export const ADMIN_PASS_HELP =
   "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)";
 
+/** Commands whose admin-password pair `addAdminPassOptions` wired. A test walks
+ *  the registered tree and asserts every command that applies the credential
+ *  pair is in it (the path-only flag on `rem nightly enable` is the exception). */
+export const adminPassFileWired = new WeakSet<Command>();
+
+export interface AddAdminPassOptionsConfig {
+  adminPassFileHelp?: string;
+  /** Report a refusal instead of the default one-line error. Must not return. */
+  onAdminPassRefusal?: (err: unknown, actionCommand: Command) => never;
+}
+
 /**
  * Declare the admin-password pair on `cmd`: the argv form and the file form
- * together, in that order.
+ * together, in that order, and apply it in a preAction hook. The hook runs after
+ * option parsing and before the action body, so a refused file exits before any
+ * request, and no action can forget the call.
  */
 export function addAdminPassOptions(
   cmd: Command,
   adminPassHelp: string = ADMIN_PASS_HELP,
-  opts: { adminPassFileHelp?: string } = {},
+  opts: AddAdminPassOptionsConfig = {},
 ): Command {
   const adminPassFile = new Option(ADMIN_PASS_FILE_FLAG, opts.adminPassFileHelp ?? ADMIN_PASS_FILE_HELP);
-  return cmd.option(ADMIN_PASS_FLAG, adminPassHelp).addOption(adminPassFile);
+  cmd.option(ADMIN_PASS_FLAG, adminPassHelp).addOption(adminPassFile);
+  adminPassFileWired.add(cmd);
+  cmd.hook("preAction", (_thisCommand, actionCommand) => {
+    const actionOpts = actionCommand.opts() as {
+      adminPass?: string;
+      adminPassFile?: string;
+      inlineAdminPass?: string;
+    };
+    // Recorded before the file is applied: the warning keys on whether
+    // --admin-pass itself was given, not on the value that ends up in the slot.
+    actionOpts.inlineAdminPass =
+      actionCommand.getOptionValueSource("adminPass") === "cli" ? actionOpts.adminPass : undefined;
+    applyAdminPassFile(
+      actionOpts,
+      opts.onAdminPassRefusal
+        ? (err) => opts.onAdminPassRefusal!(err, actionCommand)
+        : undefined,
+    );
+  });
+  return cmd;
 }
 
 /**
@@ -949,7 +981,10 @@ export function addAdminPassOptions(
  * Refuse combined options and missing, empty or group-/world-accessible files.
  * Group/world permission refusals name the path and mode; missing and empty file errors name only the path.
  */
-export function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
+export function applyAdminPassFile(
+  opts: { adminPass?: string; adminPassFile?: string },
+  onRefusal?: (err: unknown) => never,
+): void {
   try {
     const pass = resolveAdminPassFromSources({
       adminPassFile: opts.adminPassFile,
@@ -957,6 +992,7 @@ export function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: s
     });
     if (pass) opts.adminPass = pass;
   } catch (err: any) {
+    if (onRefusal) onRefusal(err);
     console.error(`Error: ${err.message}`);
     process.exit(1);
   }

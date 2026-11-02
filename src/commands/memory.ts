@@ -46,7 +46,6 @@ export type MemoryCli = {
   api: (...args: any[]) => Promise<any>;
   resolveBaseUrl: (opts: { target?: string; url?: string; port?: string | number }) => string;
   resolveSigningAgentId: (opts: { agent?: string }, command?: string) => ResolvedSigningIdentity;
-  applyAdminPassFile: (opts: { adminPass?: string; adminPassFile?: string }) => void;
   addSharedCredentialOptions: (cmd: Command) => Command;
   addSharedIdentityOption: (cmd: Command) => Command;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
@@ -76,9 +75,6 @@ function resolveBaseUrl(opts: { target?: string; url?: string; port?: string | n
 }
 function resolveSigningAgentId(opts: { agent?: string }, command?: string): ResolvedSigningIdentity {
   return cli.resolveSigningAgentId(opts, command);
-}
-function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
-  cli.applyAdminPassFile(opts);
 }
 function addSharedCredentialOptions(cmd: Command): Command {
   return cli.addSharedCredentialOptions(cmd);
@@ -150,7 +146,6 @@ export function register(program: Command): void {
     .action(async (contentArg: string | undefined, opts: any) => {
       const content = contentArg ?? opts.content;
       if (!content) { console.error("error: content required (positional arg or --content)"); process.exit(1); }
-      applyAdminPassFile(opts);
       const { agentId, source } = resolveSigningAgentId(opts, "memory add");
       if (!agentId) {
         console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
@@ -295,7 +290,6 @@ export function register(program: Command): void {
     .option("--url <url>", "Flair base URL (overrides --port)")
     .option("--port <port>", "Harper HTTP port")
     .action(async (queryArg: string | undefined, opts: any) => {
-      applyAdminPassFile(opts);
       const { agentId, source } = resolveSigningAgentId(opts, "memory search");
       if (!agentId) {
         console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");

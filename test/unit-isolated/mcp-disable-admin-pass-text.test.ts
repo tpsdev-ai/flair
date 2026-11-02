@@ -31,7 +31,7 @@ describe("flair mcp disable remote admin password text", () => {
 
       expect(result.error).toBeUndefined();
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain("--admin-pass <pass> is required for a REMOTE target");
+      expect(result.stderr).toContain("--admin-pass <pass> or --admin-pass-file <path> is required for a REMOTE target");
       expect(result.stderr).toContain("Pass the target instance's admin password explicitly.");
       expect(result.stderr).not.toContain("FLAIR_ADMIN_PASS");
     } finally {

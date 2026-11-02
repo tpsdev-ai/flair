@@ -180,3 +180,59 @@ describe("flair#2889 — agent list reads --admin-pass-file", () => {
     expect(list.stdout).toBe("");
   }, CASE_BUDGET_MS);
 });
+
+describe("flair#2889 — agent list does not print the credential an endpoint echoes", () => {
+  test("a non-ok body is redacted with the values the request sent", async () => {
+    let seenAuth = "";
+    const stub = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        seenAuth = req.headers.get("authorization") ?? "";
+        return new Response(`endpoint echoed Authorization: ${seenAuth}`, { status: 500 });
+      },
+    });
+    const redactionHome = mkdtempSync(join(tmpdir(), "flair-2889-redact-"));
+    try {
+      mkdirSync(join(redactionHome, ".flair"));
+      writeFileSync(
+        join(redactionHome, ".flair", "config.yaml"),
+        `port: ${Number(stub.port) + 1}\nopsPort: ${Number(stub.port)}\n`,
+      );
+      const list = await runCli(
+        ["agent", "list", "--admin-pass-file", passFile0600],
+        { HOME: redactionHome },
+      );
+      expect(list.code).toBe(1);
+      expect(seenAuth).toContain("Basic ");
+      expect(list.stderr).toContain("[redacted]");
+      expect(list.stderr).not.toContain(harper.admin.password);
+      expect(list.stderr).not.toContain("passed inline");
+    } finally {
+      stub.stop(true);
+      rmSync(redactionHome, { recursive: true, force: true });
+    }
+  }, CASE_BUDGET_MS);
+});
+
+describe("flair#2889 — the inline warning keys on --admin-pass, not the file", () => {
+  test("an inline --admin-pass still warns and a file form does not", async () => {
+    const secret = "inline-admin-pass-fixture-2889";
+    const home = mkdtempSync(join(tmpdir(), "flair-2889-inline-"));
+    const file = join(home, "admin-pass");
+    writeFileSync(file, secret + "\n", "utf-8");
+    chmodSync(file, 0o600);
+    const stub = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("no", { status: 500 }) });
+    try {
+      mkdirSync(join(home, ".flair"));
+      writeFileSync(join(home, ".flair", "config.yaml"), `port: ${Number(stub.port) + 1}\nopsPort: ${Number(stub.port)}\n`);
+      const inline = await runCli(["agent", "list", "--admin-pass", secret], { HOME: home });
+      expect(inline.stderr).toContain("--admin-pass passed inline");
+      const fromFile = await runCli(["agent", "list", "--admin-pass-file", file], { HOME: home });
+      expect(fromFile.stderr).not.toContain("--admin-pass passed inline");
+    } finally {
+      stub.stop(true);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, CASE_BUDGET_MS);
+});

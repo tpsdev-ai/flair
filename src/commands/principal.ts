@@ -30,7 +30,6 @@ import {
   resolveLocalAdminPass,
   resolveAdminUser,
   addAdminPassOptions,
-  applyAdminPassFile,
 } from "../lib/auth-resolve.js";
 import { resolveOpsUrl } from "../lib/mcp-enable.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
@@ -228,10 +227,7 @@ function registerPrincipalStatusCommand(command: Command, status: "active" | "de
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port (local target)")
     .option("--instance <url>", "Remote Flair instance (else FLAIR_URL); its ops API is derived as in mcp enable")
-    .action(async (id: string, opts) => {
-      applyAdminPassFile(opts);
-      return setPrincipalStatus(id, status, opts);
-    });
+    .action(async (id: string, opts) => setPrincipalStatus(id, status, opts));
 }
 
 // ─── flair principal ─────────────────────────────────────────────────────────
@@ -311,7 +307,6 @@ export function register(program: Command): void {
       const trustTier: string = opts.trust ?? (isAdmin ? "endorsed" : "unverified");
       const runtime: string | undefined = opts.runtime;
 
-      applyAdminPassFile(opts);
       let adminPass: string | undefined;
       try {
         adminPass = resolveLocalAdminPass(opts.adminPass);
@@ -490,7 +485,6 @@ export function register(program: Command): void {
     .option("--ops-port <port>", "Harper operations API port")
     .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (opts) => {
-      applyAdminPassFile(opts);
       const opsPort = resolveOpsPort(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       if (!adminPass) {
@@ -629,7 +623,6 @@ export function register(program: Command): void {
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, tier: string, opts) => {
-      applyAdminPassFile(opts);
       const validTiers = ["endorsed", "corroborated", "unverified"];
       if (!validTiers.includes(tier)) {
         console.error(`Error: tier must be one of: ${validTiers.join(", ")}`);
@@ -720,7 +713,6 @@ export function register(program: Command): void {
   )
     .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
     .action(async (principalId: string, opts) => {
-      applyAdminPassFile(opts);
       if (!opts.idpSubject) {
         console.error("Error: --idp-subject <login> is required — it is the login the identity provider reports for this person.");
         process.exit(1);
@@ -760,7 +752,6 @@ export function register(program: Command): void {
         console.error("Error: --idp-subject <login> is required — it is the login the identity provider reports for this person.");
         process.exit(1);
       }
-      applyAdminPassFile(opts);
       const target = mappingTarget(opts, "flair principal unlink");
       try {
         const result = await unlinkPrincipalMapping({
@@ -789,7 +780,6 @@ export function register(program: Command): void {
   )
     .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
     .action(async (principalId: string, opts) => {
-      applyAdminPassFile(opts);
       const target = mappingTarget(opts, "flair principal links");
       try {
         const result = await listPrincipalMappings({

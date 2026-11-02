@@ -18,7 +18,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { dirname, join } from "node:path";
 import nacl from "tweetnacl";
 import * as render from "../render.js";
-import { defaultKeysDir, resolveAdminUser, resolveLocalAdminPass, addAdminPassOptions, applyAdminPassFile } from "../lib/auth-resolve.js";
+import { defaultKeysDir, resolveAdminUser, resolveLocalAdminPass, addAdminPassOptions } from "../lib/auth-resolve.js";
 import {
   resolveAgentKeyPath,
   loadEd25519PrivateKeyFromFile,
@@ -695,7 +695,6 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      applyAdminPassFile(opts);
       const adminPass = resolveLocalAdminPass(opts.adminPass);
       if (!adminPass) {
         console.error(
@@ -764,7 +763,6 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      applyAdminPassFile(opts);
       const adminPass = resolveLocalAdminPass(opts.adminPass);
       if (!adminPass) {
         console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required for `flair mcp revoke`.");
@@ -884,11 +882,10 @@ export function register(program: Command): void {
       }
 
       const dryRun = Boolean(opts.dryRun);
-      applyAdminPassFile(opts);
       const adminPass = dryRun ? (opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "") : resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
       if (!dryRun && !adminPass) {
         console.error(
-          "Error: --admin-pass <pass> is required for a REMOTE target " +
+          "Error: --admin-pass <pass> or --admin-pass-file <path> is required for a REMOTE target " +
             "(the command authenticates to the target instance's operations API with it).\n" +
             "  FLAIR_ADMIN_PASS and ~/.flair/admin-pass are deliberately NOT used here: they are THIS machine's " +
             "local admin credentials, and sending them to another instance is how a local secret ends up on someone " +
@@ -1019,10 +1016,9 @@ export function register(program: Command): void {
         console.error("Error: --instance is required (or set FLAIR_URL).");
         process.exit(1);
       }
-      applyAdminPassFile(opts);
       const adminPass = resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
       if (!adminPass) {
-        console.error("Error: --admin-pass <pass> is required for a REMOTE target. Pass the target instance's admin password explicitly.");
+        console.error("Error: --admin-pass <pass> or --admin-pass-file <path> is required for a REMOTE target. Pass the target instance's admin password explicitly.");
         process.exit(1);
       }
 

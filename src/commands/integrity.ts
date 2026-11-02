@@ -10,7 +10,7 @@
  * way the other extracted command groups are.
  */
 import { Command } from "commander";
-import { addAdminPassOptions, applyAdminPassFile } from "../lib/auth-resolve.js";
+import { addAdminPassOptions } from "../lib/auth-resolve.js";
 import { readExactCountSince, readExactTableCount } from "../lib/ops-table-count.js";
 import { InconsistentReadError, readTableByIdPaged } from "../memory-id-checkpoint.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
@@ -355,7 +355,6 @@ export function register(program: Command): void {
   )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .action(async (opts) => {
-      applyAdminPassFile(opts);
       const opsPort = cli.resolveOpsPort(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const adminUser = cli.resolveAdminUser(opts.adminUser);
@@ -431,7 +430,6 @@ export function register(program: Command): void {
   )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .action(async (opts) => {
-      applyAdminPassFile(opts);
       const opsPort = cli.resolveOpsPort(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const adminUser = cli.resolveAdminUser(opts.adminUser);

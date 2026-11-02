@@ -101,7 +101,6 @@ const { bindCli, register } = await import(${JSON.stringify(modulePath)});
 const { resolveOpsTarget } = await import(${JSON.stringify(join(import.meta.dirname, "../../src/cli.ts"))});
 bindCli({
   addSharedCredentialOptions(command) { return command.option("--admin-pass <pass>").option("--admin-user <user>"); },
-  applyAdminPassFile() {},
   resolveHttpPort() { throw new Error("unexpected local port resolution"); },
   resolveOpsPort() { throw new Error("unexpected local ops port resolution"); },
   resolveOpsTarget,

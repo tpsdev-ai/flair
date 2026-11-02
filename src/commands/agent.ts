@@ -24,10 +24,10 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync, unlinkSy
 import { join } from "node:path";
 import * as render from "../render.js";
 import {
-  resolveAdminPassFromSources,
   addAdminPassOptions,
-  applyAdminPassFile,
+  credentialsInHeader,
   defaultKeysDir,
+  describeHttpFailure,
   resolveLocalAdminPass,
   resolveAdminUser,
   resolveKeyPath,
@@ -309,13 +309,18 @@ export function register(program: Command): void {
 
   const agent = program.command("agent").description("Manage Flair agents");
 
-  agent
-    .command("add <id>")
-    .description("Register a new agent. Refuses an id whose Agent record already exists")
-    .option("--name <name>", "Display name (defaults to id)")
-    .option("--port <port>", "Harper HTTP port")
-    .option("--admin-pass <pass>", "Admin password for registration")
-    .option("--admin-pass-file <path>", "Read the admin password from a file (chmod 600 enforced). Preferred over inline --admin-pass — keeps the secret out of ps and shell history; works for remote targets too (an explicit flag is operator intent).")
+  addAdminPassOptions(
+    agent
+      .command("add <id>")
+      .description("Register a new agent. Refuses an id whose Agent record already exists")
+      .option("--name <name>", "Display name (defaults to id)")
+      .option("--port <port>", "Harper HTTP port"),
+    "Admin password for registration",
+    {
+      adminPassFileHelp:
+        "Read the admin password from a file (chmod 600 enforced). Preferred over inline --admin-pass — keeps the secret out of ps and shell history; works for remote targets too (an explicit flag is operator intent).",
+    },
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .option("--ops-port <port>", "Harper operations API port")
@@ -341,29 +346,13 @@ export function register(program: Command): void {
         resolveEffectiveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget }) ?? opsPort;
       const isRemoteTarget = typeof seedOpsTarget === "string";
 
-      // flair#1259 / #1910 — --admin-pass-file and --admin-pass resolve through
-      // the ONE resolver (resolveAdminPassFromSources), the file read in-process
-      // via readAdminPassFileSecure so the secret never appears in ps or shell
-      // history. Combining the file and the flag is a usage error (the flag used
-      // to silently win). This does NOT weaken the #1085 remote guard below: an
-      // explicit flag naming a file IS operator intent toward this target,
-      // exactly like an explicit inline --admin-pass — what the guard blocks is
-      // the AMBIENT env/local-file fallbacks silently traveling to a third-party
-      // host.
-      let explicitPass: string | undefined;
-      try {
-        explicitPass =
-          resolveAdminPassFromSources({
-            adminPassFile: opts.adminPassFile,
-            adminPass: opts.adminPass,
-            envPass: undefined,
-          }) || undefined;
-      } catch (err: any) {
-        console.error(`Error: ${err.message}`);
-        process.exit(1);
-      }
-      opts.adminPass = explicitPass;
-
+      // flair#1259 / #1910 — the pair is resolved by addAdminPassOptions' preAction
+      // hook, before this action runs. This does NOT weaken the #1085 remote guard
+      // below: an explicit flag naming a file IS operator intent toward this
+      // target, exactly like an explicit inline --admin-pass — what the guard
+      // blocks is the AMBIENT env/local-file fallbacks silently traveling to a
+      // third-party host.
+      //
       // #590 — local convenience fallback: FLAIR_ADMIN_PASS env, then the secure
       // ~/.flair/admin-pass file `flair init` already writes (mode 0600). Never
       // applied for a remote target — see resolveLocalAdminPass.
@@ -453,10 +442,8 @@ export function register(program: Command): void {
     .option("--port <port>", "Harper HTTP port")
     .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (opts) => {
-      const inlineAdminPass = opts.adminPass;
-      applyAdminPassFile(opts);
       const port = resolveHttpPort(opts);
-      if (shouldShowInlineSecretWarning(inlineAdminPass, false, new Set(["--admin-pass"]), "--admin-pass")) {
+      if (shouldShowInlineSecretWarning(opts.inlineAdminPass, false, new Set(["--admin-pass"]), "--admin-pass")) {
         console.error(INLINE_ADMIN_PASS_WARNING);
       }
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
@@ -478,7 +465,8 @@ export function register(program: Command): void {
         });
         if (!res.ok) {
           const text = await res.text().catch(() => "");
-          console.error(`${render.icons.error} ${res.status} ${text}`);
+          const sent = credentialsInHeader(`Basic ${auth}`);
+          console.error(`${render.icons.error} ${describeHttpFailure(res.status, text, sent.values, sent.withhold)}`);
           process.exit(1);
         }
         agents = await res.json() as any[];
@@ -582,11 +570,9 @@ export function register(program: Command): void {
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .action(async (id: string, opts) => {
-      const inlineAdminPass = opts.adminPass;
-      applyAdminPassFile(opts);
       const httpPort = resolveHttpPort(opts);
       const opsPort = resolveOpsPort(opts);
-      if (shouldShowInlineSecretWarning(inlineAdminPass, false, new Set(["--admin-pass"]), "--admin-pass")) {
+      if (shouldShowInlineSecretWarning(opts.inlineAdminPass, false, new Set(["--admin-pass"]), "--admin-pass")) {
         console.error(INLINE_ADMIN_PASS_WARNING);
       }
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
@@ -679,7 +665,6 @@ export function register(program: Command): void {
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .option("--force", "Skip interactive confirmation (required when stdin is not a TTY)")
     .action(async (id: string, opts) => {
-      applyAdminPassFile(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const adminUser = resolveAdminUser(opts.adminUser);
       const keysDir: string = opts.keysDir ?? defaultKeysDir();
@@ -837,13 +822,15 @@ export function register(program: Command): void {
       console.log(`\n✅ Agent '${id}' removed successfully`);
     });
 
-  agent
-    .command("stamp-home")
-    .description("Back-fill the home instance (originatorInstanceId) on home-less Agent rows with no federation-sync provenance")
-    .option("--port <port>", "Harper HTTP port")
-    .option("--ops-port <port>", "Harper operations API port")
-    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
-    .option("--admin-pass-file <path>", "Read the admin password from a file (chmod 600 enforced)")
+  addAdminPassOptions(
+    agent
+      .command("stamp-home")
+      .description("Back-fill the home instance (originatorInstanceId) on home-less Agent rows with no federation-sync provenance")
+      .option("--port <port>", "Harper HTTP port")
+      .option("--ops-port <port>", "Harper operations API port"),
+    "Admin password (or set FLAIR_ADMIN_PASS)",
+    { adminPassFileHelp: "Read the admin password from a file (chmod 600 enforced)" },
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--apply", "Write the home; without it the command is a dry run and writes nothing")
     .action(async (opts) => {
@@ -860,21 +847,9 @@ export function register(program: Command): void {
       }
       const opsPort = target.opsPort;
       const adminUser = resolveAdminUser(opts.adminUser);
-      let explicitPass: string | undefined;
-      try {
-        explicitPass =
-          resolveAdminPassFromSources({
-            adminPassFile: opts.adminPassFile,
-            adminPass: opts.adminPass,
-            envPass: undefined,
-          }) || undefined;
-      } catch (err: any) {
-        console.error(`Error: ${err.message}`);
-        process.exit(1);
-      }
       let adminPass: string | undefined;
       try {
-        adminPass = resolveLocalAdminPass(explicitPass);
+        adminPass = resolveLocalAdminPass(opts.adminPass);
       } catch (err: any) {
         console.error(`Error: ${err.message}`);
         process.exit(1);

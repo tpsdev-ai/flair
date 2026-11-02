@@ -14,7 +14,7 @@ import { encodeRecordId } from "../lib/record-id-path.js";
 import { Command } from "commander";
 import { randomUUID } from "node:crypto";
 import * as render from "../render.js";
-import { resolveAdminUser, addAdminPassOptions, applyAdminPassFile, ApiHttpError } from "../lib/auth-resolve.js";
+import { resolveAdminUser, addAdminPassOptions, ApiHttpError } from "../lib/auth-resolve.js";
 
 export type IdpCli = {
   api: (...args: any[]) => Promise<any>;
@@ -58,7 +58,6 @@ export function register(program: Command): void {
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (opts) => {
-      applyAdminPassFile(opts);
       const opsPort = resolveOpsPort(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       if (!adminPass) {
@@ -108,7 +107,6 @@ export function register(program: Command): void {
     .option("--ops-port <port>", "Harper operations API port")
     .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (opts) => {
-      applyAdminPassFile(opts);
       const opsPort = resolveOpsPort(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       if (!adminPass) {
@@ -162,7 +160,6 @@ export function register(program: Command): void {
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, opts) => {
-      applyAdminPassFile(opts);
       const opsPort = resolveOpsPort(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       if (!adminPass) {
@@ -189,7 +186,6 @@ export function register(program: Command): void {
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, opts) => {
-      applyAdminPassFile(opts);
       const opsPort = resolveOpsPort(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       if (!adminPass) {

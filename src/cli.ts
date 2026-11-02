@@ -130,7 +130,6 @@ import {
   defaultAdminPassPath,
   defaultKeysDir,
   resolveLocalAdminPass,
-  applyAdminPassFile,
   addAdminPassOptions,
   DEFAULT_ADMIN_USER,
   resolveAdminUser,
@@ -5065,7 +5064,6 @@ bindFederationCli({
   resolveBaseUrl,
   resolveEffectiveOpsUrl,
   resolveOpsPort,
-  applyAdminPassFile,
   addSharedCredentialOptions,
   addSharedIdentityOption,
   shouldShowInlineSecretWarning,
@@ -5078,7 +5076,6 @@ registerFederation(program);
 bindRemCli({
   api,
   resolveOpsPort,
-  applyAdminPassFile,
   addSharedCredentialOptions,
   readPortFromConfig,
   resolveHttpPort,
@@ -9016,7 +9013,6 @@ bindMemoryCli({
   api,
   resolveBaseUrl,
   resolveSigningAgentId,
-  applyAdminPassFile,
   addSharedCredentialOptions,
   addSharedIdentityOption,
   resolveOpsPort,
@@ -9061,7 +9057,6 @@ registerRelationship(program);
 bindSoulCli({
   api,
   resolveSigningAgentId,
-  applyAdminPassFile,
   addSharedCredentialOptions,
 });
 registerSoul(program);
@@ -9081,7 +9076,6 @@ registerBridge(program);
 // Bind shared cli-locals first so the extracted module never imports this file.
 bindBackupCli({
   addSharedCredentialOptions,
-  applyAdminPassFile,
   resolveHttpPort,
   resolveOpsPort,
   resolveOpsTarget,
@@ -9102,7 +9096,6 @@ registerRestore(program);
 // Bind shared cli-locals first so the extracted module never imports this file.
 bindBackupApprovalCli({
   addSharedCredentialOptions,
-  applyAdminPassFile,
   resolveOpsPort,
 });
 registerBackupApproval(program);
