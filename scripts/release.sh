@@ -217,7 +217,7 @@ if [[ "$MODE" == "--publish" ]]; then
 
   # Verify every package.json is at the declared version — catches running
   # --publish before the release PR was actually merged.
-  for pj in "${PACKAGE_JSONS[@]}"; do
+  for pj in ${PACKAGE_JSONS[@]+"${PACKAGE_JSONS[@]}"}; do
     name="$(node -e "console.log(require('$pj').name)")"
     pv="$(node -e "console.log(require('$pj').version)")"
     if [[ "$pv" != "$VERSION" ]]; then
@@ -280,7 +280,7 @@ if [[ "$MODE" == "--publish" ]]; then
   if (( ${#SOFT_FAILED[@]} > 0 )); then
     echo ""
     echo "❌ ${#SOFT_FAILED[@]} package(s) did NOT publish:"
-    for p in "${SOFT_FAILED[@]}"; do echo "     - $p"; done
+    for p in ${SOFT_FAILED[@]+"${SOFT_FAILED[@]}"}; do echo "     - $p"; done
     echo ""
     echo "   NOT tagging v${VERSION}. A tag asserts that this version shipped; it did not."
     echo "   The core packages above ARE published — this is a partial release."
@@ -358,7 +358,7 @@ echo "📰 Assembling changelog fragments..."
 (cd "$ROOT" && node scripts/changelog-fragments.mjs check-fixed) || {
   echo "❌ A 'fixed' fragment overstates a harper-pinned advisory — fix it before releasing."; exit 1;
 }
-(cd "$ROOT" && bash scripts/release-promote-changelog.sh "$VERSION" "${RELEASE_TAG_ARGS[@]}") || {
+(cd "$ROOT" && bash scripts/release-promote-changelog.sh "$VERSION" ${RELEASE_TAG_ARGS[@]+"${RELEASE_TAG_ARGS[@]}"}) || {
   echo "❌ Changelog assembly failed."; exit 1;
 }
 
@@ -370,7 +370,7 @@ echo "📰 Rendered GitHub release notes:"
 
 # 2. Bump versions in all package.json files
 echo "📦 Bumping all packages to v${VERSION}..."
-for pkg in "${PACKAGES[@]}"; do
+for pkg in ${PACKAGES[@]+"${PACKAGES[@]}"}; do
   name="$(node -e "console.log(require('$pkg/package.json').name)")"
   node -e "
     const fs = require('fs');

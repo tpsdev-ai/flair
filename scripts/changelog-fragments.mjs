@@ -463,6 +463,9 @@ if (isMain) {
     } else if (cmd === "promote") {
       const version = process.argv[3];
       const dateArg = process.argv.find((a) => a.startsWith("--date="));
+      if (process.argv.includes("--allow-no-release-tag") && !process.argv.includes("--with-dependencies")) {
+        throw new FragmentError("promote: --allow-no-release-tag requires --with-dependencies");
+      }
       const dependencies = process.argv.includes("--with-dependencies")
         ? collectRenovateDependencyCommits({ cwd: ROOT, allowNoReleaseTag: process.argv.includes("--allow-no-release-tag") })
         : [];

@@ -1,15 +1,9 @@
 // JavaScript manifest and lockfile changes (flair#2872).
 //
-// The waiver has two conditions:
-//
-//   * At pull-request time the author comes from the workflow event
-//     (`github.event.pull_request.user.login`), passed in as
-//     FLAIR_PR_AUTHOR_LOGIN. It is never inferred from commit metadata, which a
-//     branch can set to any value.
-//   * Every changed Git path has an accepted basename.
-//     Other paths leave the ordinary fragment rules in effect.
-//
-// Release collection matches the recorded author name and changed filenames.
+// The PR-time waiver reads only the event login, never commit metadata.
+// Release-time eligibility reads the recorded author NAME. With merge commits
+// enabled, that name can be mis-attributed; this does not bypass the PR fragment
+// gate, which already required the fragment.
 
 import { execFileSync } from "node:child_process";
 
@@ -19,6 +13,7 @@ export const RENOVATE_LOGIN = "renovate[bot]";
 const DEPENDENCY_FILE_NAMES = new Set([
   "package.json",
   "bun.lock",
+  "bun.lockb",
   "package-lock.json",
   "npm-shrinkwrap.json",
 ]);

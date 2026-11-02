@@ -494,7 +494,7 @@ defineCheck("changelog-unreleased", null, () => {
 
       if (thisChangeShips && changeCommits > 0 && addedCount === 0) {
         if (waiverApplies) {
-          console.log(`  ↷ changelog-unreleased: waived the per-PR fragment requirement — FLAIR_PR_AUTHOR_LOGIN matches ${RENOVATE_LOGIN} and every changed Git basename exactly matches package.json, bun.lock, package-lock.json, or npm-shrinkwrap.json.`);
+          console.log(`  ↷ changelog-unreleased: waived the per-PR fragment requirement — FLAIR_PR_AUTHOR_LOGIN matches ${RENOVATE_LOGIN} and every changed Git basename exactly matches package.json, bun.lock, bun.lockb, package-lock.json, or npm-shrinkwrap.json.`);
         } else {
           failures.push({
             file: `${FRAGMENT_DIR_REL}/`, line: 1,
