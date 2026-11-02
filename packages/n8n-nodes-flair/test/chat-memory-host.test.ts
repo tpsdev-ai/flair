@@ -44,7 +44,7 @@ const PAIRS: VersionPair[] = [
   { classic: "1.0.55", core: "1.3.0" },
 ];
 
-// Same child bounds as host-parser.test.ts. The floor install measured 12 s on
+// The floor install measured 12 s on
 // 2026-11-02; 60 s is five times that.
 const BUILD_TIMEOUT_MS = 20_000;
 const INIT_TIMEOUT_MS = 10_000;

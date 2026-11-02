@@ -24,8 +24,8 @@ Full setup walkthrough, subject/sessionId patterns, and security guidance are in
 
 The declared LangChain peer ranges apply to two nodes:
 
-- **Flair Search** needs `@langchain/core` `>=0.3.0 <2`, the range across which the search tool's schema passed the host's parser (table below).
-- **Flair Chat Memory** needs `@langchain/classic` `>=1.0.0 <2`, tested with the packed node at 1.0.0 and 1.0.55 (table below). Those classic releases declare `@langchain/core` peer ranges `^1.0.0` and `^1.3.0`; the memory node runs where the host's core satisfies the installed classic's range.
+- **Flair Search** needs `@langchain/core` `>=0.3.0 <2`; its schema passed the host's parser at the listed versions (table below).
+- **Flair Chat Memory** needs `@langchain/classic` `>=1.0.0 <2`, tested with the packed node at the classic/core pairs below. Those classic releases require `@langchain/core` `^1.0.0` and `^1.3.0`, respectively.
 
 Both tests pack the built node and install it with its host packages in a scratch prefix (no workspace overrides). The chat-memory test installs `@langchain/classic`, `@langchain/core` and `n8n-workflow` without `--legacy-peer-deps`, builds the memory through the node's `supplyData`, then runs `saveContext` and `loadMemoryVariables` against a stub Flair endpoint:
 
