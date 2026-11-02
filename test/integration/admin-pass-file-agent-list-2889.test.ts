@@ -13,7 +13,7 @@
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { spawnCli } from "../helpers/build-cli-once.js";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,7 +28,6 @@ import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 const CHILD_DEADLINE_MS = 20_000;
 const CASE_BUDGET_MS = 30_000;
 const AGENT_ID = "agent-a";
-const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
 
 let harper: HarperInstance;
 let cliHome: string;
@@ -45,18 +44,20 @@ interface RunResult {
 function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const child = spawnCli(args, {
-      env: {
-        ...process.env,
-        HOME: cliHome,
-        FLAIR_URL: harper.httpURL,
-        FLAIR_OPS_PORT: new URL(harper.opsURL).port,
-        // Defensive: no ambient credential may stand in for the flag under test.
-        FLAIR_TOKEN: "",
-        FLAIR_ADMIN_PASS: "",
-        HDB_ADMIN_PASSWORD: "",
-        ...extraEnv,
-      },
+    const env: NodeJS.ProcessEnv = {
+      ...Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+        !/^(FLAIR_|HARPER_|HDB_|FABRIC_)/.test(key) && key !== "ROOTPATH")),
+      HOME: cliHome,
+      ...extraEnv,
+    };
+    for (const key of ["FLAIR_TARGET", "FLAIR_OPS_TARGET", "FLAIR_URL", "FLAIR_OPS_PORT", "FLAIR_HTTP_BIND", "FLAIR_OPS_BIND", "FLAIR_MCP_ISSUER", "FLAIR_PUBLIC_URL", "ROOTPATH"]) {
+      expect(env).not.toHaveProperty(key);
+    }
+    for (const key of ["FLAIR_AGENT_ID", "FLAIR_KEY_DIR", "FLAIR_TOKEN", "FLAIR_ADMIN_PASS", "FLAIR_ADMIN_USER", "HDB_ADMIN_PASSWORD"]) {
+      if (!(key in extraEnv)) expect(env).not.toHaveProperty(key);
+    }
+    const child = spawnCli([...args, "--admin-user", harper.admin.username], {
+      env,
       timeout: 20_000,
     });
     let stdout = "";
@@ -85,10 +86,9 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
 }
 
 beforeAll(async () => {
+  if (process.env.HARPER_HTTP_URL) throw new Error("admin-pass-file-agent-list-2889 requires an isolated Harper instance; unset HARPER_HTTP_URL");
   harper = await startHarper();
-  // Every request this suite makes goes to the instance just started: the
-  // helper binds loopback on OS-assigned ports, and both URLs are passed to the
-  // CLI as numeric ports below.
+  expect(harper.external).toBe(false);
   const http = new URL(harper.httpURL);
   const ops = new URL(harper.opsURL);
   expect(http.hostname).toBe("127.0.0.1");
@@ -97,12 +97,14 @@ beforeAll(async () => {
   expect(Number(ops.port)).toBeGreaterThan(0);
 
   cliHome = mkdtempSync(join(tmpdir(), "flair-2889-home-"));
+  mkdirSync(join(cliHome, ".flair"));
+  writeFileSync(join(cliHome, ".flair", "config.yaml"), `port: ${http.port}\nopsPort: ${ops.port}\n`);
   passFile0600 = join(cliHome, "admin-pass-0600");
   passFile0644 = join(cliHome, "admin-pass-0644");
   missingPassFile = join(cliHome, "admin-pass-missing");
-  writeFileSync(passFile0600, `${ADMIN_PASS}\n`, "utf-8");
+  writeFileSync(passFile0600, `${harper.admin.password}\n`, "utf-8");
   chmodSync(passFile0600, 0o600);
-  writeFileSync(passFile0644, `${ADMIN_PASS}\n`, "utf-8");
+  writeFileSync(passFile0644, `${harper.admin.password}\n`, "utf-8");
   chmodSync(passFile0644, 0o644);
 }, HARPER_START_BUDGET_MS);
 
@@ -118,7 +120,7 @@ describe("flair#2889 — agent list reads --admin-pass-file", () => {
 
     const add = await runCli([
       "agent", "add", AGENT_ID,
-      "--admin-pass", ADMIN_PASS,
+      "--admin-pass", harper.admin.password,
       "--port", httpPort,
       "--ops-port", opsPort,
     ]);
@@ -170,7 +172,7 @@ describe("flair#2889 — agent list reads --admin-pass-file", () => {
       ],
       // An ambient password is present. If the missing file were mistaken for
       // "no password", this would succeed and print the agent list.
-      { FLAIR_ADMIN_PASS: ADMIN_PASS },
+      { FLAIR_ADMIN_PASS: harper.admin.password },
     );
 
     expect(list.code).toBe(1);

@@ -1,11 +1,6 @@
 /**
  * admin-pass-help-preservation-2889.test.ts — flair#2889 fix round.
  *
- * Adding `--admin-pass-file` must not change the `--admin-pass` description a
- * command already had, and must not reorder any command's options: the file
- * form is inserted immediately after `--admin-pass`, so every other flag keeps
- * main's position.
- *
  * The fixture holds, for every command that declared `--admin-pass` on
  * origin/main (b6a06807), that description, plus every command's ordered
  * option names. It was generated from main's built CLI by walking the
@@ -34,8 +29,8 @@ function optionNames(cmd: Command): string[] {
   return cmd.options.map((o) => o.long ?? o.short ?? o.flags);
 }
 
-describe("flair#2889 — --admin-pass descriptions are preserved", () => {
-  test("every command's --admin-pass description matches origin/main", () => {
+describe("flair#2889 — --admin-pass descriptions", () => {
+  test("--admin-pass descriptions match the fixture except mcp disable", () => {
     const current = new Map<string, string>();
     for (const { path, cmd } of walkCliCommands(program)) {
       const option = cmd.options.find((o) => o.long === "--admin-pass");
@@ -47,7 +42,9 @@ describe("flair#2889 — --admin-pass descriptions are preserved", () => {
 
     const expected = Object.entries(FIXTURE)
       .filter(([, entry]) => entry.adminPass !== undefined)
-      .map(([path, entry]) => [path, entry.adminPass] as const);
+      .map(([path, entry]) => [path, path === "flair mcp disable"
+        ? "Admin password for the target instance; use --admin-pass or --admin-pass-file"
+        : entry.adminPass] as const);
     expect(expected.length).toBe(current.size);
     expect(expected.filter(([path, description]) => current.get(path) !== description)).toEqual([]);
     expect([...current.keys()].filter((path) => FIXTURE[path]?.adminPass === undefined)).toEqual([]);

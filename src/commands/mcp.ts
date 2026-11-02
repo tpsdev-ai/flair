@@ -1002,16 +1002,13 @@ export function register(program: Command): void {
       for (const line of enableSuccessLines(result)) console.log(line);
     });
 
-  // `mcp disable` always targets a remote instance, so its file-form help says
-  // so: the shared text names FLAIR_ADMIN_PASS, a local credential this command
-  // never consults.
   addAdminPassOptions(
     mcp
       .command("disable")
       .description("Flag off + restart = byte-identical boot (Model-2 contract) — removes the /mcp OAuth surface.")
-      .option("--instance <url>", "Remote flair instance to disable against (else FLAIR_URL)"),
-    "Admin password for the remote target instance; pass it explicitly with --admin-pass",
-    { adminPassFileHelp: "Read the remote target instance's admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted)" },
+      .option("--instance <url>", "Flair instance to disable against (else FLAIR_URL)"),
+    "Admin password for the target instance; use --admin-pass or --admin-pass-file",
+    { adminPassFileHelp: "Read the target instance's admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted)" },
   )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-flag-off", "Confirm FLAIR_MCP_OAUTH is already unset on the target instance's environment (skips the interactive confirm)")
@@ -1022,8 +1019,6 @@ export function register(program: Command): void {
         console.error("Error: --instance is required (or set FLAIR_URL).");
         process.exit(1);
       }
-      // --instance is always remote for this command — see the matching
-      // comment in `mcp enable` above.
       applyAdminPassFile(opts);
       const adminPass = resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
       if (!adminPass) {
