@@ -142,7 +142,7 @@ export interface RetryRowMalformedness {
  * The rules are the ones the sender already uses: `retryRowProblem`
  * (src/lib/federation-retry-row.ts) with the sender's pending-reason list, and
  * `retryRowConfirmation` for the terminal fields a pending row must leave
- * null (flair#2882). A row the read-back calls unconfirmed is malformed here.
+ * null (flair#2882).
  */
 export function retryRowMalformedness(row: Record<string, unknown>): RetryRowMalformedness | null {
   const isKnownReason = (value: unknown) => typeof value === "string" && MEMORY_PENDING_REASONS.has(value);

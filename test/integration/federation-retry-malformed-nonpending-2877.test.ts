@@ -184,7 +184,7 @@ afterAll(async () => {
 }, HARPER_STOP_BUDGET_MS + 30_000);
 
 describe("flair#2877 — a malformed non-pending retry row is left as stored and reported", () => {
-  it("a terminal row with a stray bound survives byte-identical and is reported with its id and field", async () => {
+  it("a terminal row with a stray bound is unchanged on read-back and is reported with its id and field", async () => {
     const id = "memory-terminal-malformed";
     const before = await seedOne(id, { state: "terminal", resolution: "merged", bound: "attempts", completedAt: new Date().toISOString() });
     expect(before.state).toBe("terminal");

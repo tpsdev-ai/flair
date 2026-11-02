@@ -1,2 +1,2 @@
-- **A federation retry row outside `pending` is no longer overwritten without a report when an outcome write reaches it.**
+- **A malformed non-pending row observed by the pre-outcome read is reported and left as stored.**
   Before the outcome writes for a sent Memory batch, the sender reads each stored retry row whatever its state. A row that breaks a sender convention is reported with its id and the malformed field and left as stored; the outcome write is skipped for it. The sender's offer check treats a pending row with a non-null `resolution`, `completedAt` or `bound` as malformed too, matching the write read-back (#2877).
