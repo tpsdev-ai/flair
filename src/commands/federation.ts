@@ -2577,8 +2577,8 @@ export function register(program: Command): void {
         }
 
         // A success status is not proof: read the row back. 404 or a null body
-        // means absent; a row means it is still there; a failed read-back is
-        // unknown for this peer, never deleted.
+        // means absent; a row means it is still there; a failed read-back after
+        // a successful DELETE is unknown for this peer, never deleted.
         let present: boolean;
         try {
           const row = await api("GET", `/Peer/${encodeRecordId(p.id)}`, undefined, requestOptions);

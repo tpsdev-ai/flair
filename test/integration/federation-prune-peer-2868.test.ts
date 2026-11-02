@@ -262,7 +262,7 @@ describe("flair#2868 — federation prune --apply deletes and confirms the Peer 
     }
   }, 60_000);
 
-  test("a failed read-back after the DELETE is unknown (exit 3), never deleted", async () => {
+  test("a failed read-back after a successful DELETE is unknown (exit 3), never deleted", async () => {
     const stub = await startStub({ deleteStatus: 200, readBack: "fail" });
     try {
       const res = await runCli(
