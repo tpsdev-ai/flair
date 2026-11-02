@@ -187,6 +187,17 @@ async function waitForRelease(path: string, budgetMs: number): Promise<string> {
   }
 }
 
+/** Waits until this boot's migration cycle reports the `done` phase. */
+async function waitForCycleDone(budgetMs: number): Promise<any> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    const detail = await healthDetail();
+    if (detail?.migrations?.cyclePhase === "done") return detail;
+    if (Date.now() >= deadline) throw new Error("migration cycle did not complete in time");
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 function migration(detail: any, id: string): any {
   return detail?.migrations?.migrations?.find((m: any) => m.id === id);
 }
@@ -346,10 +357,13 @@ describe("flair#2840 — an unconfirmed write is reported by id and not counted 
     expect(mig?.unconfirmedIds).toEqual([ROW_AWAY]);
 
     // (b) The third boot from the same state file seeds the record from it.
-    // Hold that boot's first cycle at its entry — after it takes the lock,
-    // before it reads the state file — and read the entry while it is held.
+    // Stop the previous server before arming the hold: a follow-up cycle it
+    // already scheduled could claim the pause first. stopHarper returns once
+    // the process has exited and its locks are free.
+    const installDir = harper.installDir;
+    await stopHarper(harper, { keepInstallDir: true });
     writeFileSync(join(faultDir, "arm.migration-cycle-start"), "");
-    await restartHarper();
+    harper = await startHarper({ cwd: appDir, harperBinDir: process.cwd(), installDir, homeDir, serverEnv });
     await waitForMarker(join(faultDir, "paused.migration-cycle-start"), 60_000);
     const seeded = migration(await healthDetail(), SYNTHETIC_ID);
     expect(seeded?.state, JSON.stringify(seeded)).toBe("halted");
@@ -361,8 +375,11 @@ describe("flair#2840 — an unconfirmed write is reported by id and not counted 
     writeFileSync(join(faultDir, "go.migration-cycle-start"), "");
     expect(await waitForRelease(join(faultDir, "released.migration-cycle-start"), 30_000)).toBe("go");
 
-    // The boot cycle re-reads the row, still short of the target.
-    mig = await syntheticProgress();
+    // Wait for the held cycle to COMPLETE — progress.ts's `done` phase —
+    // before reading its result: the boot-seeded entry is already `halted`
+    // with the same ids, so the row alone does not show the cycle re-read it.
+    const completed = await waitForCycleDone(60_000);
+    mig = migration(completed, SYNTHETIC_ID);
     expect(mig?.state).toBe("halted");
     expect(mig?.rowsUnconfirmed).toBe(1);
     expect(mig?.unconfirmedIds).toEqual([ROW_AWAY]);
