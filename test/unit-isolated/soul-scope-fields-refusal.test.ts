@@ -1,10 +1,10 @@
 /**
- * A Soul write whose request supplies a non-empty `scopeTag` or a non-empty
- * `tags` array is refused with `soul_scope_fields_not_writable` when earlier
- * guards permit the request, whatever the tag's prefix and from either write
- * source, with nothing written. Soul has no dedicated or enforced per-user
- * scope field. Isolated so the harper mock does not collide with the other Soul
- * suites.
+ * A Soul write that would store a non-empty `scopeTag` or a non-empty `tags`
+ * array is refused with `soul_scope_fields_not_writable` when earlier guards
+ * permit the request, whatever the tag's prefix and from either write source,
+ * with nothing written. POST and PUT check the request body; PATCH checks the
+ * merged row. Soul has no dedicated or enforced per-user scope field. Isolated
+ * so the harper mock does not collide with the other Soul suites.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
 
@@ -154,18 +154,20 @@ describe("a Soul write that supplies scope fields is refused by name", () => {
   }
 });
 
-describe("the refusal reads only the fields the request supplies", () => {
+describe("the refusal reads the row this write would store", () => {
   test("a refused POST creates no row", async () => {
     const res: any = await makeSoul("operator").post({ agentId: "app-a", key: "role", value: "fresh", scopeTag: "team:alpha" });
     expect(res.status).toBe(403);
     expect(soulStore.size).toBe(0);
     expect(versionStore.size).toBe(0);
   });
-  test("a PATCH whose stored row carries tags but whose patch does not is allowed", async () => {
+  test("a PATCH of a stored row that carries tags is refused even when the patch sets neither field", async () => {
     soulStore.set(ROW_ID, { ...STORED, tags: ["team-alpha"], scopeTag: "team:alpha" });
     const res: any = await makeSoul("operator", ROW_ID).patch({ value: "replacement" });
-    expect(res).not.toBeInstanceOf(Response);
-    expect(soulStore.get(ROW_ID).value).toBe("replacement");
+    expect(res).toBeInstanceOf(Response);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: SOUL_SCOPE_FIELDS_REFUSAL });
+    expect(soulStore.get(ROW_ID)).toEqual({ ...STORED, tags: ["team-alpha"], scopeTag: "team:alpha" });
   });
 
   test("a PATCH that sets tags is refused even when the stored row carries none", async () => {

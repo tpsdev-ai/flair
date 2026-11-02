@@ -1,10 +1,11 @@
 /**
  * Soul content refusals after the vendor-tag bridge was removed (flair#1540).
  *
- * Stored ADK-tagged content is refused by the generic learned-content check,
- * and a request that supplies a non-empty `scopeTag` or `tags` array is refused
- * by the vendor-neutral scope-field check. Neither check matches a connector
- * string, so ADK-sourced writes are still refused, now by one of those checks.
+ * The generic checks refuse the cases the bridge covered: a request that
+ * supplies a non-empty `scopeTag` or `tags` array, a value that exactly matches
+ * stored learned text for the target agent, and a PATCH of a stored row that
+ * carries either scope field. Neither check matches a connector string, so
+ * ADK-sourced writes are still refused, now by one of those checks.
  * Isolated so the harper mock does not collide with the other Soul suites.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
@@ -202,6 +203,36 @@ describe("a Soul request that supplies scope fields is refused by name", () => {
       }
     }
   }
+});
+
+describe("a PATCH of a stored row that carries scope fields is refused by the merged row", () => {
+  const STORED_SCOPES = [
+    ["an adk tags entry", { tags: ["adk:app:alice"] }],
+    ["a non-adk tags entry", { tags: ["team-alpha"] }],
+    ["an adk scopeTag", { scopeTag: "adk:app:alice" }],
+  ] as const;
+
+  for (const source of ["operator", "internal"] as const) {
+    for (const [label, scope] of STORED_SCOPES) {
+      test(`${source} PATCH of a stored row carrying ${label} is 403 soul_scope_fields_not_writable and writes nothing`, async () => {
+        const stored = { ...STORED, ...scope };
+        soulStore.set(ROW_ID, stored);
+        const res: any = await makeSoul(source, ROW_ID).patch({ value: "replacement" });
+        expect(res instanceof Response).toBe(true);
+        expect(res.status).toBe(403);
+        expect(await res.json()).toEqual({ error: SOUL_SCOPE_FIELDS_REFUSAL });
+        expect(soulStore.get(ROW_ID)).toEqual(stored);
+        expect(versionStore.size).toBe(0);
+      });
+    }
+  }
+
+  test("an untagged stored row still patches", async () => {
+    soulStore.set(ROW_ID, { ...STORED });
+    const res: any = await makeSoul("operator", ROW_ID).patch({ value: "replacement" });
+    expect(res).not.toBeInstanceOf(Response);
+    expect(soulStore.get(ROW_ID).value).toBe("replacement");
+  });
 });
 
 describe("stored ADK-tagged content is refused by the generic learned-content check", () => {

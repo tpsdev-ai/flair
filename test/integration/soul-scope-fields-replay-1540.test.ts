@@ -7,16 +7,16 @@
  * This test exercises two CLI writers, each replaying a stored row whole:
  *
  *   - `flair restore` over a real backup archive whose Soul rows were edited to
- *     carry the fields: the scoped row is reported with its id and the
- *     refusal's name, the `adk:`-tagged row with its id and HTTP status alone,
- *     the rest of the archive still restores, and restore exits non-zero.
+ *     carry the fields: each scoped row is reported with its id and the
+ *     refusal's name, the rest of the archive still restores, and restore
+ *     exits non-zero.
  *   - `flair import` over a real agent-export file carrying the same row: the
  *     refused row is named with its id and the refusal's name, the ordinary
  *     Soul row still lands, and import exits zero.
  *
- * The same instance also takes operator POST and PATCH writes carrying those
- * fields, so the refusal is exercised through Harper's own routing rather than
- * a mock.
+ * The same instance also takes operator POST and PATCH writes, including a
+ * PATCH of a seeded stored row that carries those fields, so the refusal is
+ * exercised through Harper's own routing rather than a mock.
  *
  * Real files: the archive and export are real temporary files, and the CLI runs
  * under a separate throwaway HOME.
@@ -238,6 +238,43 @@ describe("flair import refuses an exported Soul row that carries scope fields (f
     expect(await soulRow(plainId)).toMatchObject({ agentId: IMPORT_AGENT, value: "The row the export brings back" });
     expect(await soulRow(scopedId)).toBeUndefined();
   }, 300_000);
+});
+
+describe("operator PATCH of a stored scoped row on the real instance (flair#1540)", () => {
+  // Seeded through the admin OPS upsert, the way the restore test above seeds
+  // its target row, so the row carries the fields without a policy-checked write.
+  async function seed(key: string, scope: Record<string, unknown>): Promise<string> {
+    const id = `${AGENT}:${key}`;
+    await op({
+      operation: "upsert", database: "flair", table: "Soul",
+      records: [{ id, agentId: AGENT, key, value: "stored", durability: "permanent", createdAt: CREATED_AT, ...scope }],
+    });
+    return id;
+  }
+
+  for (const [label, key, scope] of [
+    ["an adk tags entry", "legacy-adk-tags", { tags: ["adk:app:alice"] }],
+    ["a non-adk tags entry", "legacy-plain-tags", { tags: ["team-alpha"] }],
+    ["an adk scopeTag", "legacy-adk-scope", { scopeTag: "adk:app:alice" }],
+  ] as const) {
+    test(`a PATCH of a stored row carrying ${label} is 403 and leaves the row and its version count unchanged`, async () => {
+      const id = await seed(key, scope);
+      const before = await soulRow(id);
+      const versionsBefore = await versionCount(id);
+      const res = await operatorSend("PATCH", `/Soul/${encodeURIComponent(id)}`, { value: "after" });
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: REFUSAL });
+      expect(await soulRow(id)).toEqual(before);
+      expect(await versionCount(id)).toBe(versionsBefore);
+    }, 120_000);
+  }
+
+  test("a PATCH of an ordinary untagged stored row still lands", async () => {
+    const id = await seed("legacy-plain", {});
+    const res = await operatorSend("PATCH", `/Soul/${encodeURIComponent(id)}`, { value: "after" });
+    expect(res.status).toBeLessThan(300);
+    expect((await soulRow(id)).value).toBe("after");
+  }, 120_000);
 });
 
 describe("operator POST and PATCH on the real instance (flair#1540)", () => {

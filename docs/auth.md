@@ -373,9 +373,10 @@ claimed or missing provenance does not exempt them. Lookup failure aborts the
 write. This is an exact-match backstop, not semantic detection of paraphrases.
 Existing Soul records remain readable without a migration.
 
-A write request that supplies a non-empty `scopeTag` or a non-empty `tags`
+A write that would store a non-empty `scopeTag` or a non-empty `tags`
 array is refused with `soul_scope_fields_not_writable` after source
-authorization and before any write, whatever the tag's prefix. Runtime denial
+authorization and before any write, whatever the tag's prefix. POST and PUT
+check the request body; PATCH checks the merged row. Runtime denial
 does not depend on connector names — Soul writes are deny-by-default, and Flair
 stamps `sourceClass` from the authenticated credential, not from a body field.
 Do not grow a per-connector blacklist in Soul.

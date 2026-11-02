@@ -66,22 +66,20 @@ export async function refuseLearnedSoulWrite(content: any): Promise<Response | n
   return null;
 }
 
-/** Refuse a write whose request supplies a non-empty `scopeTag` or a non-empty
+/** Refuse a write that would store a non-empty `scopeTag` or a non-empty
  *  `tags` array: Soul has no dedicated or enforced per-user scope field (flair#1540). */
-export function refuseSoulScopeFields(supplied: any): Response | null {
-  return suppliesSoulScopeFields(supplied) ? FORBIDDEN(SOUL_SCOPE_FIELDS_REFUSAL) : null;
+export function refuseSoulScopeFields(content: any): Response | null {
+  return suppliesSoulScopeFields(content) ? FORBIDDEN(SOUL_SCOPE_FIELDS_REFUSAL) : null;
 }
 
 /** Content guards after source authorization: the vendor-neutral scope-field
  *  refusal, then the generic learned-content backstop. New connectors need no
  *  Soul-side branch.
  *
- *  `content` is the row this write would store (for PATCH, the merged row);
- *  `supplied` is the fields the request supplies (for PATCH, the patch body).
- *  The scope-field refusal reads only `supplied`, so a stored row's fields can
- *  never decide it. */
-export async function refuseSoulWriteContent(content: any, supplied: any = content): Promise<Response | null> {
-  const scope = refuseSoulScopeFields(supplied);
+ *  `content` is the row this write would store: POST and PUT pass the request
+ *  body, PATCH the merged row, so a stored row's scope fields decide a PATCH. */
+export async function refuseSoulWriteContent(content: any): Promise<Response | null> {
+  const scope = refuseSoulScopeFields(content);
   if (scope) return scope;
   return refuseLearnedSoulWrite(content);
 }
