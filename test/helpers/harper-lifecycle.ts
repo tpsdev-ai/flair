@@ -879,6 +879,16 @@ async function waitForHealth(
       console.log(`[harper-lifecycle] waitForHealth: attempt ${attempt} → HTTP ${res.status} (${elapsed}ms elapsed)`);
       if (res.status > 0) {
         console.log(`[harper-lifecycle] waitForHealth: server alive after ${elapsed}ms`);
+        // TEMPORARY (flair#2867 measurement): print the captured Metal load
+        // lines so a CI run exposes the first test Harper's load time.
+        if (process.env.FLAIR_METAL_MEASURE === "1") {
+          const metalLines = (getLog?.() ?? "")
+            .split("\n")
+            .filter((line) => line.includes("ggml_metal_library_init:"));
+          console.log(`[metal-measure] first Harper healthy at ${elapsed}ms; captured Metal lines:`);
+          for (const line of metalLines) console.log(`[metal-measure] ${line.trim()}`);
+          if (metalLines.length === 0) console.log("[metal-measure] (none)");
+        }
         return;
       }
     } catch (err: any) {
