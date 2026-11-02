@@ -132,7 +132,7 @@ const SCOPE_BODIES = [
   ["a non-adk tags entry", { tags: ["team-alpha"] }],
 ] as const;
 
-describe("a Soul write that supplies scope fields is refused by name", () => {
+describe("a Soul write that supplies a non-empty scopeTag or tags array is refused by name", () => {
   for (const source of ["operator", "internal"] as const) {
     for (const method of ["post", "put", "patch"] as const) {
       for (const [label, scope] of SCOPE_BODIES) {
@@ -161,7 +161,7 @@ describe("the refusal reads the row this write would store", () => {
     expect(soulStore.size).toBe(0);
     expect(versionStore.size).toBe(0);
   });
-  test("a PATCH of a stored row that carries tags is refused even when the patch sets neither field", async () => {
+  test("a PATCH of a stored row that carries a non-empty tags array is refused even when the patch sets neither field", async () => {
     soulStore.set(ROW_ID, { ...STORED, tags: ["team-alpha"], scopeTag: "team:alpha" });
     const res: any = await makeSoul("operator", ROW_ID).patch({ value: "replacement" });
     expect(res).toBeInstanceOf(Response);

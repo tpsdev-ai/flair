@@ -4,10 +4,10 @@
  * The bridge refused a request carrying an `adk:` scope tag and a value that
  * exactly matched an `adk:`-tagged MemoryCandidate claim or Memory content row
  * for the target agent. The generic checks refuse those cases and more: a
- * request that supplies any non-empty `scopeTag` or `tags` array, a value that
- * exactly matches any MemoryCandidate claim or Memory content for the target
- * agent (no tag required), and a PATCH of a stored row that carries either
- * scope field.
+ * request that supplies any non-empty `scopeTag` or `tags` array, a non-empty
+ * value that exactly matches any MemoryCandidate claim or Memory content for
+ * the target agent (no tag required), and a PATCH whose merged row retains or
+ * adds a non-empty `scopeTag` or non-empty `tags` array.
  * Isolated so the harper mock does not collide with the other Soul suites.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
@@ -181,7 +181,7 @@ beforeEach(() => {
   };
 });
 
-describe("a Soul request that supplies scope fields is refused by name", () => {
+describe("a Soul request that supplies a non-empty scopeTag or tags array is refused by name", () => {
   const SCOPE_BODIES = [
     ["an adk scopeTag", { scopeTag: "adk:app:alice" }],
     ["an adk tags entry", { tags: ["ADK:app:alice"] }],
@@ -207,7 +207,7 @@ describe("a Soul request that supplies scope fields is refused by name", () => {
   }
 });
 
-describe("a PATCH of a stored row that carries scope fields is refused by the merged row", () => {
+describe("a PATCH whose merged row carries a non-empty scopeTag or tags array is refused", () => {
   const STORED_SCOPES = [
     ["an adk tags entry", { tags: ["adk:app:alice"] }],
     ["a non-adk tags entry", { tags: ["team-alpha"] }],
