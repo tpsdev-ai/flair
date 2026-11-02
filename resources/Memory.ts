@@ -2908,8 +2908,7 @@ export class Memory extends (databases as any).flair.Memory {
     const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async () => {
       const result = await this.patchLocked(content, query);
       // Test-only: the verb body has returned and the lock is still held. A body
-      // that owned its transaction has committed it; a composed or `_reindex` put
-      // that joined another transaction has not.
+      // that owned its transaction has committed it.
       const committed = txnPausePoint("memory-patch-committed");
       if (committed) await committed;
       return result;
@@ -3286,10 +3285,9 @@ export class Memory extends (databases as any).flair.Memory {
    * flair#2478 slice 1 — the owner PUT runs under the per-id memory write lock
    * and its ordinary row write owns its transaction, so the read, the decision
    * and the COMMIT all happen before the lock releases (the protocol's rule).
-   * Two puts can join a transaction they do not own, which then commits after
-   * the lock releases: one composed into its caller's transaction (manual
-   * promotion; see putLocked), and the admin `_reindex` re-PUT when the request
-   * carries an open transaction. A PUT
+   * A put composed into its caller's transaction (manual promotion; see
+   * putLocked) joins a transaction it does not own, which then commits after
+   * the lock releases. A PUT
    * that names no id is refused 400 before the lock; a store with no lock is
    * refused 503 `memory_lock_unavailable`. See resources/memory-write-lock.ts.
    */
@@ -3302,8 +3300,8 @@ export class Memory extends (databases as any).flair.Memory {
     const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async () => {
       const result = await this.putLocked(content, query, afterRelease);
       // Test-only: the verb body has returned and the lock is still held. A body
-      // that owned its transaction has committed it; a composed or `_reindex` put
-      // that joined another transaction has not.
+      // that owned its transaction has committed it; a composed put that joined
+      // another transaction has not.
       const committed = txnPausePoint("memory-put-committed");
       if (committed) await committed;
       return result;
@@ -3381,15 +3379,17 @@ export class Memory extends (databases as any).flair.Memory {
       // one — before the row is staged, and again before the commit
       // (confirmCommittedRow: the transaction is aborted and the staged row
       // discarded). A missing row or an identity change seen by either read is
-      // refused with the named 409 stored_row_changed; a change committed after
-      // the final confirm read is not seen. Both reads use an explicit
+      // refused with the named 409 stored_row_changed. Both reads use an explicit
       // fresh context, never a contextless one (see resources/write-back.ts).
-      const reindexJoinsRequestTxn = isJoinableTransaction(ctx);
+      // flair#2656: the re-PUT owns its transaction even when the request
+      // carries one (it writes one row and no pointer), so its commit has
+      // settled when withOwnedTransaction returns and the read-back below runs
+      // after it.
       const beforeReindex = txnPausePoint("memory-reindex-pre");
       if (beforeReindex) await beforeReindex;
       let reindexed: any;
       try {
-        reindexed = await withSharedWriteTransaction(ctx, async (c) => {
+        reindexed = await withOwnedTransaction(ctx, async (c) => {
           const confirmPause = txnPausePoint("memory-reindex");
           if (confirmPause) await confirmPause;
           const confirmed = await (databases as any).flair.Memory.get(reindexExisting!.id, {});
@@ -3400,12 +3400,11 @@ export class Memory extends (databases as any).flair.Memory {
           // purge or a same-id replace can commit in that window.
           const stagedPause = txnPausePoint("memory-reindex-staged");
           if (stagedPause) await stagedPause;
-          try {
-            await confirmCommittedRow((databases as any).flair.Memory, reindexExisting!.id, (committed) => sameStoredRow(committed, reindexExisting));
-          } catch (err) {
-            if (err instanceof CommittedRowChanged && reindexJoinsRequestTxn) abortRequestTransaction(c);
-            throw err;
-          }
+          await confirmCommittedRow((databases as any).flair.Memory, reindexExisting!.id, (committed) => sameStoredRow(committed, reindexExisting));
+          // Test-only: holds the re-PUT after its final pre-commit confirmation,
+          // before its transaction commits.
+          const confirmedPause = txnPausePoint("memory-reindex-confirmed");
+          if (confirmedPause) await confirmedPause;
           return r;
         });
       } catch (err) {
@@ -3416,28 +3415,22 @@ export class Memory extends (databases as any).flair.Memory {
       // successful Response is replaced by the write_response_withheld
       // refusal (writeResultResponse).
       if (reindexed instanceof Response) return writeResultResponse(reindexed);
-      // flair#2478 slice 3c: confirm the committed row after the commit. A
-      // re-PUT that joined a request transaction has not committed yet (the
-      // caller owns that commit); every other re-PUT owns and has settled its
-      // transaction here. For a re-PUT that owns its transaction, an
-      // unreadable or mismatching committed row is never reported as success.
-      if (!reindexJoinsRequestTxn) {
-        // Test-only: a fault-injection switch makes this confirmation read
-        // throw.
-        const verifyTable = txnFault("memory-reindex-verify")
-          ? { get: async (): Promise<any> => { throw new Error("injected post-commit read failure"); } }
-          : (databases as any).flair.Memory;
-        const committedVerdict = await verifyCommittedFields(
-          verifyTable,
-          reindexRow.id,
-          reindexRow,
-          withoutHarperManagedFields(reindexRow),
-        );
-        if (committedVerdict !== "shown") {
-          markMemoryWriteOutcomeUnknown(reindexRow.id);
-          return writeOutcomeUnknownResponse();
-        }
-      }
+      // flair#2478 slice 3c + flair#2656: read the committed row back after the
+      // commit. A row that does not show the re-PUT answers 409
+      // stored_row_changed; a failed read marks the id and answers 503
+      // write_outcome_unknown.
+      // Test-only: a fault-injection switch makes this read throw.
+      const verifyTable = txnFault("memory-reindex-verify")
+        ? { get: async (): Promise<any> => { throw new Error("injected post-commit read failure"); } }
+        : (databases as any).flair.Memory;
+      const committedVerdict = await verifyCommittedFields(
+        verifyTable,
+        reindexRow.id,
+        reindexRow,
+        withoutHarperManagedFields(reindexRow),
+      );
+      if (committedVerdict === "unreadable") return writeOutcomeUnknownFor(reindexRow.id);
+      if (committedVerdict !== "shown") return storedRowChangedRefusal("Memory");
       noteMemoryUpsert(content);
       noteWriteStamp(reindexRow?.embeddingModel as string | null | undefined, reindexExisting); // embedding-space-guard slice 1 (see post())
       return rowWriteResponse(reindexed, reindexRow?.id, 0);
@@ -3460,8 +3453,7 @@ export class Memory extends (databases as any).flair.Memory {
     // is no post-commit verification here (manual promotion's stamp reads the
     // row in that transaction and refuses when there is none; it does not
     // compare the written identity). Every other ordinary put owns its
-    // transaction; the `_reindex` re-PUT above joins a request transaction when
-    // one is open, as it did before the lock.
+    // transaction, as the `_reindex` re-PUT above does.
     const composed = !locked && composesCallerWrite(ctx);
     let putResult: any;
     // flair#2467: the post-redaction text fields this write stages, for the response.
