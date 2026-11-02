@@ -225,10 +225,10 @@ function soulWrite(opts: RestoreOpts): ApiCall {
 /**
  * Ids of Soul rows a whole-row replay would send that supply a non-empty
  * `scopeTag` or `tags` array. The server refuses each such write (flair#1540),
- * so a restore that deletes before writing them makes the refused row and a
- * rollback to the pre-restore snapshot unrecoverable (flair#2931). Rows the
- * DELETE and PUT loops skip (no usable id) are not written or deleted, so they
- * are not checked here.
+ * so a restore that deletes before writing one can leave a live row absent and
+ * a rollback to the pre-restore snapshot refused (flair#2931). Rows the DELETE
+ * and PUT loops skip (no usable id) are not written or deleted, so they are not
+ * checked here.
  */
 function refusedSoulReplayIds(rows: readonly any[]): string[] {
   const ids: string[] = [];
@@ -492,9 +492,10 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   // 4b. Scope-field preflight (flair#2931), before any DELETE: refuse when a
   // snapshot Soul row this run would PUT, or a live Soul row captured in the
   // pre-restore snapshot, supplies a non-empty `scopeTag` or `tags` array.
-  // The server refuses that write, so deleting the live rows would leave the
-  // refused row absent and its rollback refused too. Merge mode does not
-  // exist here; this restore always replaces the agent's rows.
+  // The server refuses that write, so the replay cannot restore the row. When
+  // the row is live, deleting it first also makes the pre-restore rollback
+  // refuse it. Merge mode does not exist here; this restore always replaces
+  // the agent's rows.
   const refusedSouls = refusedSoulReplayIds([...souls, ...currentSouls]);
   if (refusedSouls.length > 0) {
     for (const id of refusedSouls) {
