@@ -24,7 +24,6 @@ const AGENT_ID = "rem-scope-agent";
 const SCOPED_ID = `${AGENT_ID}:scoped`;
 const ORDINARY_ID = `${AGENT_ID}:identity`;
 const ORDINARY_VALUE = "the ordinary Soul row";
-const REFUSAL = "soul_scope_fields_not_writable";
 
 let harper: HarperInstance;
 let home: string;
@@ -32,6 +31,19 @@ let passDir: string;
 let snapshotStem: string;
 
 const createdAt = new Date().toISOString();
+
+/** Create a snapshot for `agent` in the test HOME and return its date stem. */
+async function makeSnapshot(agent: string, souls: any[]): Promise<string> {
+  const created = await createSnapshot({
+    agentId: agent,
+    flairVersion: "0.0.0-test",
+    memories: [],
+    soul: souls as any,
+    pendingCandidateCount: null,
+    rootOverride: join(home, ".flair", "snapshots"),
+  });
+  return basename(created.path).replace(/\.tar\.gz$/, "");
+}
 
 function assertOwnInstance(h: HarperInstance): void {
   for (const raw of [h.httpURL, h.opsURL]) {
@@ -66,7 +78,7 @@ async function soulRow(h: HarperInstance, id: string): Promise<any> {
   return (rows as any[])[0];
 }
 
-function runRestore(): Promise<{ code: number; stdout: string; stderr: string }> {
+function runRestore(stem: string = snapshotStem, agent = AGENT_ID): Promise<{ code: number; stdout: string; stderr: string }> {
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
     HOME: home,
@@ -88,9 +100,9 @@ function runRestore(): Promise<{ code: number; stdout: string; stderr: string }>
       CLI,
       "rem",
       "restore",
-      snapshotStem,
+      stem,
       "--agent",
-      AGENT_ID,
+      agent,
       "--apply",
       "--admin-pass-file",
       join(passDir, "restore-admin-pass"),
@@ -138,18 +150,84 @@ afterAll(async () => {
   }
 }, HARPER_STOP_BUDGET_MS * 2);
 
-describe("flair#1540 — rem restore refuses a scoped Soul row and restores the ordinary row", () => {
-  test("the diagnostic names the row and the refusal, the run fails, and only the ordinary Soul is restored", async () => {
+describe("flair#1540 — rem restore refuses a scoped Soul row before deleting anything", () => {
+  test("case (3): the preflight names the row, the run fails, and every live Soul row is unchanged", async () => {
+    const liveRows = [
+      { id: `${AGENT_ID}:live-a`, agentId: AGENT_ID, key: "live-a", value: "live row A", durability: "permanent", createdAt },
+      { id: `${AGENT_ID}:live-b`, agentId: AGENT_ID, key: "live-b", value: "live row B", durability: "permanent", createdAt },
+    ];
+    await op(harper, { operation: "upsert", database: "flair", table: "Soul", records: liveRows });
+    const before = await Promise.all(liveRows.map((row) => soulRow(harper, row.id)));
+
     const result = await runRestore();
     const output = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
 
+    for (const [index, row] of liveRows.entries()) {
+      expect(await soulRow(harper, row.id), output).toEqual(before[index]);
+    }
     expect(result.code, output).toBe(1);
     expect(result.stdout).toContain("Status:       failed");
-    expect(result.stdout).toContain(`put-soul ${SCOPED_ID}: HTTP 403: ${REFUSAL}`);
-    expect(result.stdout).toContain("Restored:     0 memories, 1 souls");
-    expect(result.stdout).toContain(`post-restore-verify: 1 soul rows missing (e.g. ${SCOPED_ID})`);
+    expect(result.stdout).toContain(`soul-scope-preflight: Soul ${SCOPED_ID}`);
+    expect(result.stdout).toContain("Deleted:      0 memories, 0 souls");
+    expect(result.stdout).toContain("Restored:     0 memories, 0 souls");
 
-    expect(await soulRow(harper, ORDINARY_ID)).toMatchObject({ agentId: AGENT_ID, value: ORDINARY_VALUE });
+    expect(await soulRow(harper, ORDINARY_ID)).toBeUndefined();
     expect(await soulRow(harper, SCOPED_ID)).toBeUndefined();
-  }, 180_000);
+  }, 300_000);
+
+  test("a live Soul row supplying scope fields stops a clean snapshot's replay before any delete", async () => {
+    const agent = "rem-live-tag-agent";
+    const snapshotId = `${agent}:identity`;
+    const taggedId = `${agent}:tagged`;
+    const plainId = `${agent}:plain`;
+    const stem = await makeSnapshot(agent, [
+      { id: snapshotId, agentId: agent, key: "identity", value: "snapshot content", durability: "permanent", createdAt },
+    ]);
+    await op(harper, {
+      operation: "upsert", database: "flair", table: "Soul",
+      records: [
+        { id: taggedId, agentId: agent, key: "tagged", value: "live tagged", durability: "permanent", createdAt, tags: ["team-alpha"] },
+        { id: plainId, agentId: agent, key: "plain", value: "live plain", durability: "permanent", createdAt },
+      ],
+    });
+    const beforeTagged = await soulRow(harper, taggedId);
+    const beforePlain = await soulRow(harper, plainId);
+
+    const result = await runRestore(stem, agent);
+    const output = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+
+    expect(await soulRow(harper, taggedId)).toEqual(beforeTagged);
+    expect(await soulRow(harper, plainId)).toEqual(beforePlain);
+    expect(result.code, output).toBe(1);
+    expect(result.stdout).toContain("Status:       failed");
+    expect(result.stdout).toContain(`soul-scope-preflight: Soul ${taggedId}`);
+    expect(result.stdout).toContain("Deleted:      0 memories, 0 souls");
+    expect(await soulRow(harper, snapshotId)).toBeUndefined();
+  }, 300_000);
+
+  test("a snapshot with no refused Soul row still restores as before", async () => {
+    const agent = "rem-clean-agent";
+    const snapshotId = `${agent}:identity`;
+    const stem = await makeSnapshot(agent, [
+      { id: snapshotId, agentId: agent, key: "identity", value: "snapshot content", durability: "permanent", createdAt },
+    ]);
+    await op(harper, {
+      operation: "upsert", database: "flair", table: "Soul",
+      records: [
+        { id: `${agent}:old-a`, agentId: agent, key: "old-a", value: "old A", durability: "permanent", createdAt },
+        { id: `${agent}:old-b`, agentId: agent, key: "old-b", value: "old B", durability: "permanent", createdAt },
+      ],
+    });
+
+    const result = await runRestore(stem, agent);
+    const output = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+
+    expect(result.code, output).toBe(0);
+    expect(result.stdout).toContain("Status:       completed");
+    expect(result.stdout).toContain("Deleted:      0 memories, 2 souls");
+    expect(result.stdout).toContain("Restored:     0 memories, 1 souls");
+    expect(await soulRow(harper, `${agent}:old-a`)).toBeUndefined();
+    expect(await soulRow(harper, `${agent}:old-b`)).toBeUndefined();
+    expect(await soulRow(harper, snapshotId)).toMatchObject({ agentId: agent, value: "snapshot content" });
+  }, 300_000);
 });

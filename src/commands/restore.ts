@@ -12,7 +12,7 @@ import { loadApprovedArchive } from "../lib/backup-approval-store.js";
 import type { RestoreArchive } from "../lib/restore-archive.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { comparePreservedFields } from "../lib/restore-verify.js";
-import { SOUL_SCOPE_FIELDS_REFUSAL } from "../lib/soul-scope-fields.js";
+import { SOUL_SCOPE_FIELDS_REFUSAL, suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
 import * as render from "../render.js";
 import { existsSync } from "node:fs";
 
@@ -167,6 +167,23 @@ program
       `${label(name, row)}: ${method} failed (HTTP ${status ?? "unavailable"})`;
 
     if (mode === "replace") {
+      // A replace replay sends every archived Soul row back whole after
+      // deleting the archived ids. The server refuses a Soul write that
+      // supplies a non-empty `scopeTag` or `tags` array (flair#1540), so a
+      // row it would refuse must stop the replay before the deletes, or the
+      // refused row's live copy is gone (flair#2931). Merge mode deletes
+      // nothing and is not checked here.
+      const refusedSouls = souls.filter((row) => suppliesSoulScopeFields(row)).map((row) => row.id);
+      if (refusedSouls.length > 0) {
+        for (const id of refusedSouls) {
+          console.error(
+            `Error: Soul ${id}: supplies a non-empty scopeTag or tags array, `
+              + "which the Soul scope-field rule refuses; no rows were deleted",
+          );
+        }
+        process.exitCode = 1;
+        return;
+      }
       console.log("\nDeleting existing data (replace mode)...");
       for (const { name, rows } of collections.filter(({ name }) => name !== "Agent")) {
         for (const row of rows) {

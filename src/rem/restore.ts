@@ -23,6 +23,7 @@
  * Cross-agent restore is a 1.1+ feature.
  */
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
 import { ApiHttpError, ApiRequestOutcomeUnknown, apiErrorRawBody } from "../lib/auth-resolve.js";
 import { readFileSync, existsSync, rmSync, mkdtempSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
@@ -219,6 +220,23 @@ function asArray(raw: unknown): any[] {
 
 function soulWrite(opts: RestoreOpts): ApiCall {
   return opts.soulApiCall ?? opts.apiCall;
+}
+
+/**
+ * Ids of Soul rows a whole-row replay would send that supply a non-empty
+ * `scopeTag` or `tags` array. The server refuses each such write (flair#1540),
+ * so a restore that deletes before writing them makes the refused row and a
+ * rollback to the pre-restore snapshot unrecoverable (flair#2931). Rows the
+ * DELETE and PUT loops skip (no usable id) are not written or deleted, so they
+ * are not checked here.
+ */
+function refusedSoulReplayIds(rows: readonly any[]): string[] {
+  const ids: string[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || Array.isArray(row) || !row.id) continue;
+    if (suppliesSoulScopeFields(row)) ids.push(String(row.id));
+  }
+  return [...new Set(ids)];
 }
 
 function isCandidateRoute404(err: unknown): boolean {
@@ -464,6 +482,25 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     result.preRestoreSnapshotPath = preRestore.path;
   } catch (err: any) {
     errors.push(`pre-restore-snapshot: ${err?.message ?? String(err)}`);
+    result.status = "failed";
+    rmSync(tmp, { recursive: true, force: true });
+    return result;
+  }
+
+  // 4b. Scope-field preflight (flair#2931), before any DELETE: refuse when a
+  // snapshot Soul row this run would PUT, or a live Soul row captured in the
+  // pre-restore snapshot, supplies a non-empty `scopeTag` or `tags` array.
+  // The server refuses that write, so deleting the live rows would leave the
+  // refused row absent and its rollback refused too. Merge mode does not
+  // exist here; this restore always replaces the agent's rows.
+  const refusedSouls = refusedSoulReplayIds([...souls, ...currentSouls]);
+  if (refusedSouls.length > 0) {
+    for (const id of refusedSouls) {
+      errors.push(
+        `soul-scope-preflight: Soul ${id} supplies a non-empty scopeTag or tags array, `
+          + "which the Soul scope-field rule refuses; no target rows were deleted or written.",
+      );
+    }
     result.status = "failed";
     rmSync(tmp, { recursive: true, force: true });
     return result;
