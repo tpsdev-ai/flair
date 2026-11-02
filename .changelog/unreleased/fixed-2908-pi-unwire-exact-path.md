@@ -1,6 +1,5 @@
-- **Unwiring pi leaves an `extensions` entry that is not Flair's own in place.**
-  An entry is removed only when it is exactly `npm:@tpsdev-ai/pi-flair`
-  (`@<spec>` allowed), or a file path containing the consecutive segments
-  `node_modules/@tpsdev-ai/pi-flair/`. Anything else carrying the name, such as
-  `npm:@other/pi-flair`, `~/work/pi-flair/notes.js` or `~/dist/pi-flair-notes.js`,
-  survives and is named in the unwire result (#2908).
+- **Unwiring pi preserves lookalike package and extension entries (#2908).**
+  Npm ownership requires literal `npm:@tpsdev-ai/pi-flair` or its `@` suffix
+  with a nonempty spec and no surrounding whitespace. Paths use a lexical
+  `node_modules/@tpsdev-ai/pi-flair/` segment match; filesystem targets are not resolved.
+  In successful unwire/no-op results, entries are identified by their position, not their value.
