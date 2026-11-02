@@ -272,6 +272,25 @@ describe("api() — alternate-port fallback is connect-phase only (flair#2869)",
     expect((caught as Error).message).toContain("was not sent");
   });
 
+  test("a falsy body that cannot be serialized (0n) is refused without sending a request", async () => {
+    const server = await serve(answerOk);
+    let caught: unknown;
+    try {
+      await authedRequest("POST", "/PromoteMemoryCandidate", 0n, {
+        baseUrl: server.baseUrl,
+        agentId: "agent-a",
+        explicitAdminPass: "stub-pass",
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(server.requests).toEqual([]);
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught instanceof ApiRequestOutcomeUnknown).toBe(false);
+    expect((caught as Error).message).toContain("could not be serialized to JSON");
+    expect((caught as Error).message).toContain("was not sent");
+  });
+
   test("a function body is refused as a serialization error without sending a request", async () => {
     const server = await serve(answerOk);
     let caught: unknown;
@@ -317,7 +336,7 @@ describe("api() — alternate-port fallback is connect-phase only (flair#2869)",
 
   test("a bare fetch failed with no recognised code is not a connect-phase failure", () => {
     // What the classification must treat as unknown: no code at all, or a
-    // post-send code. No server can produce a bare `fetch failed` on demand, so
+    // code that can also occur after send. No server can produce a bare `fetch failed` on demand, so
     // the predicate is exercised directly on the shapes undici and Bun raise.
     expect(isConnectPhaseFailure(new TypeError("fetch failed"))).toBe(false);
     const socketClosed = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });

@@ -1286,11 +1286,14 @@ export async function sendJsonRequest(
   const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
   // Serialize before the transport call: a body that cannot be serialized was
   // never sent, so it is a serialization failure, not a delivery failure.
+  // Every supplied body is checked (a falsy one such as 0n can still fail to
+  // serialize); a falsy body that does serialize is still omitted, as before.
   let serializedBody: string | undefined;
-  if (body) {
+  if (body !== undefined) {
     try {
-      serializedBody = JSON.stringify(body);
-      if (serializedBody === undefined) throw new Error("JSON.stringify returned undefined");
+      const serialized = JSON.stringify(body);
+      if (serialized === undefined) throw new Error("JSON.stringify returned undefined");
+      if (body) serializedBody = serialized;
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(`${method} ${url.pathname} was not sent: the request body could not be serialized to JSON (${reason}).`);

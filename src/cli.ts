@@ -2915,10 +2915,11 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
 }
 
 /**
- * Turn undici/Node's bare `TypeError: fetch failed` into a sentence naming the
- * actor (the Flair instance URL), the state (no HTTP response) and a remedy
- * the operator can act on — flair#1719 requirement 3. Only a connect-phase
- * failure gets this sentence; sendJsonRequest reports other write transport
+ * Turn undici/Node's `TypeError: fetch failed` carrying a recognised
+ * connect-phase code into a sentence naming the actor (the Flair instance URL),
+ * the state (no HTTP response) and a remedy the operator can act on —
+ * flair#1719 requirement 3. A bare `fetch failed` with no recognised code is
+ * returned unchanged; only a connect-phase failure gets this sentence; sendJsonRequest reports other write transport
  * failures itself (flair#2869). Non-connect errors (HTTP 401/403/5xx, auth
  * failures) pass through unchanged so callers keep their own handling. The
  * `flairFriendly` marker lets the top-level CLI entry print just the message
