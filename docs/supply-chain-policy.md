@@ -103,7 +103,7 @@ Both mechanisms independently forced a pass (`|| echo` made the shell exit 0, so
 | `class` | `no-patch-published`, `vendor-pinned`, or `remediation-available` |
 | `introducedBy` | the dependency edge that pulls it in |
 | `reason` | why it cannot be fixed here, specifically |
-| `added`, `expires` | hard dates. The cap is cumulative: lifetime is `expires − added`, and `added` must be on or before the first UTC day the id appears in this file's followed git history |
+| `added`, `expires` | each must be a real calendar date. The cap is cumulative: lifetime is `expires − added`, and `added` must be on or before the first UTC day the id appears in this file's followed git history |
 | `overCapApproval` | an over-cap entry's approval: `approvedBy`, `reason`, `approvedOn` and `expires`. `approvedBy` records a name; the gate does not verify that name. Approval is reviewed in the PR |
 | `removeWhen` | the concrete condition that retires the entry |
 

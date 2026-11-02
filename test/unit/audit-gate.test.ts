@@ -1230,6 +1230,13 @@ describe("several allowlist entries for one advisory, per source and per locatio
     );
   }, 24_000);
 
+  it("rejects a nonexistent added date before advisory matching with real Git history", () => {
+    const res = runMulti({ entries: [uuidEntry(VERTEXAI, { added: "2026-02-30" })], npm: uuidAt(VERTEXAI_NODE) });
+    expectBlocked(res, '"added" must be a real calendar date (YYYY-MM-DD)');
+    expect(res.stdout).toContain("no advisory was matched against it");
+    expect(res.stdout).not.toContain("NOT allowlisted");
+  }, 12_000);
+
   it("prints an over-cap entry without --explain", () => {
     const entries = [uuidEntry(VERTEXAI, {
       added: "2025-01-01",
@@ -1321,6 +1328,66 @@ describe("cumulative allowlist lifetime (#2897)", () => {
     });
     return root;
   }
+
+  for (const date of ["2026-02-30", "2026-04-31", "2025-02-29", "2026-13-01"]) {
+    for (const field of ["added", "expires"]) {
+      it(`rejects nonexistent ${field} ${date} with a calendar-date problem`, () => {
+        expect(validateAllowlist({ policy, entries: [entry({ [field]: date })] }, new Date("2026-09-21")).join("\n"))
+          .toContain(`"${field}" must be a real calendar date (YYYY-MM-DD)`);
+      });
+    }
+    for (const field of ["approvedOn", "expires"]) {
+      it(`rejects nonexistent overCapApproval.${field} ${date} with a calendar-date problem`, () => {
+        const candidate = entry({
+          overCapApproval: { approvedBy: "fixture", reason: "Fixture approval.", approvedOn: "2026-09-01", expires: "2026-10-01", [field]: date },
+        });
+        expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-09-21")).join("\n"))
+          .toContain(`"overCapApproval.${field}" must be a real calendar date (YYYY-MM-DD)`);
+      });
+    }
+    it(`rejects nonexistent first history day ${date} with a calendar-date problem`, () => {
+      const firstDays = new Map([[GHSA.toUpperCase(), date]]);
+      expect(validateAllowlistHistory({ entries: [entry()] }, firstDays, new Date("2026-09-21")).join("\n"))
+        .toContain("first history day must be a real calendar date (YYYY-MM-DD)");
+    });
+    it(`rejects nonexistent AUDIT_GATE_TODAY ${date} before reading inputs`, () => {
+      const res = spawnSync(process.execPath, [join(REPO_ROOT, "scripts/audit-gate.mjs")], {
+        encoding: "utf8", env: { ...process.env, AUDIT_GATE_TODAY: date }, timeout: 12_000,
+      });
+      expect(res.status).toBe(2);
+      expect(res.stderr).toContain("AUDIT_GATE_TODAY must be a real calendar date (YYYY-MM-DD)");
+      expect(res.stderr).not.toContain("missing --npm-install-prefix");
+    });
+  }
+
+  for (const [date, nextDay] of [["2024-02-29", "2024-03-01"], ["2026-09-01", "2026-09-02"]]) {
+    it(`accepts calendar date ${date} in entries, approvals and history`, () => {
+      const candidate = entry({
+        added: date, expires: nextDay,
+        overCapApproval: { approvedBy: "fixture", reason: "Fixture approval.", approvedOn: date, expires: nextDay },
+      });
+      expect(validateAllowlist({ policy, entries: [candidate] }, new Date(date!))).toEqual([]);
+      expect(validateAllowlistHistory({ entries: [candidate] }, new Map([[GHSA.toUpperCase(), date]]), new Date(date!))).toEqual([]);
+    });
+  }
+
+  it("rejects a nonexistent added date that normalizes to a shorter lifetime than the Git history", () => {
+    const root = historyRepo([{ date: "2026-03-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      const firstDays = readAllowlistHistory(root);
+      const firstDay = firstDays.get(GHSA.toUpperCase());
+      expect(firstDay).toBe("2026-03-01");
+      const candidate = entry({ added: "2026-02-30", expires: "2026-05-01" });
+      expect((Date.parse(candidate.expires) - Date.parse(candidate.added)) / 86_400_000).toBe(60);
+      expect((Date.parse(candidate.expires) - Date.parse(firstDay!)) / 86_400_000).toBe(61);
+      expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-03-01")).join("\n"))
+        .toContain('"added" must be a real calendar date (YYYY-MM-DD)');
+      expect(validateAllowlistHistory({ entries: [candidate] }, firstDays, new Date("2026-03-01")).join("\n"))
+        .toContain('"added" must be a real calendar date (YYYY-MM-DD)');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   it("refuses a non-canonical GHSA even when history used that casing", () => {
     const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA.toUpperCase() }] }]);

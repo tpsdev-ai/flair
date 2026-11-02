@@ -32,8 +32,8 @@
  *   3. Every allowlist entry must be well-formed: advisory id, package, the
  *      reason it cannot be fixed here, an expiry date, and the condition that
  *      removes it. Missing any field BLOCKS.
- *   4. Expiry is capped by severity (see the allowlist's `policy` block). You
- *      cannot park a critical for a year. Writing an over-long expiry BLOCKS.
+ *   4. Lifetime is capped by severity (see the allowlist's `policy` block).
+ *      An over-cap entry requires a valid overCapApproval.
  *   5. An expired entry BLOCKS. That is the point of the mechanism, not a flaw:
  *      the build stops and a human re-decides.
  *   6. STALENESS — an allowlist entry whose advisory no longer appears BLOCKS
@@ -538,7 +538,14 @@ function loadAllowlist() {
  * ------------------------------------------------------------------ */
 
 const DAY_MS = 86_400_000;
-const isIsoDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s ?? "")) && !Number.isNaN(Date.parse(s));
+/** A real calendar date: the UTC year, month and day round-trip. */
+function isCalendarDate(s) {
+  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [year, month, day] = s.split("-").map(Number);
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
 
 /** The UTC calendar day of a Date or a parseable date string. */
 function utcDay(value) {
@@ -620,12 +627,15 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
 }
 
 function utcDayFromTimestamp(value) {
+  if (!isCalendarDate(value.slice(0, 10))) return null;
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
+  if (Number.isNaN(date.getTime())) return null;
+  const day = date.toISOString().slice(0, 10);
+  return isCalendarDate(day) ? day : null;
 }
 
 /**
- * Each entry's `added` may not be later than the first day its advisory id
+ * Each entry's `added` must be a real calendar date no later than the first day its advisory id
  * appears in the allowlist history. Moving it earlier is permitted. An id with
  * no search result must have been added no later than today.
  */
@@ -633,9 +643,18 @@ export function validateAllowlistHistory(allowlist, firstDays, today) {
   const problems = [];
   const todayDay = utcDay(today);
   (allowlist?.entries ?? []).forEach((entry, i) => {
-    if (typeof entry?.ghsa !== "string" || !isIsoDate(entry?.added)) return;
+    if (typeof entry?.ghsa !== "string") return;
+    const where = `entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"})`;
+    if (!isCalendarDate(entry?.added)) {
+      problems.push(`${where}: "added" must be a real calendar date (YYYY-MM-DD)`);
+      return;
+    }
     const id = entry.ghsa.toUpperCase();
     const boundary = firstDays.get(id) ?? todayDay;
+    if (!isCalendarDate(boundary)) {
+      problems.push(`${where}: first history day must be a real calendar date (YYYY-MM-DD)`);
+      return;
+    }
     if (firstDays.has(id) && boundary > todayDay) {
       problems.push(`entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"}): first history day (${boundary}) is after today (${todayDay})`);
     }
@@ -653,12 +672,6 @@ export function validateAllowlistHistory(allowlist, firstDays, today) {
     );
   });
   return problems;
-}
-
-/** A real calendar date: the parsed day formats back to the same string. */
-function isCalendarDate(s) {
-  if (!isIsoDate(s)) return false;
-  return new Date(Date.parse(s)).toISOString().slice(0, 10) === s;
 }
 
 /**
@@ -774,9 +787,9 @@ export function validateAllowlist(allowlist, today) {
         );
       }
     }
-    if (!isIsoDate(entry.added)) problems.push(`${where}: "added" must be YYYY-MM-DD`);
-    if (!isIsoDate(entry.expires)) problems.push(`${where}: "expires" must be YYYY-MM-DD`);
-    if (!isIsoDate(entry.added) || !isIsoDate(entry.expires)) return;
+    if (!isCalendarDate(entry.added)) problems.push(`${where}: "added" must be a real calendar date (YYYY-MM-DD)`);
+    if (!isCalendarDate(entry.expires)) problems.push(`${where}: "expires" must be a real calendar date (YYYY-MM-DD)`);
+    if (!isCalendarDate(entry.added) || !isCalendarDate(entry.expires)) return;
     if (entry.added > utcDay(today)) problems.push(`${where}: "added" (${entry.added}) is after today (${utcDay(today)})`);
 
     // An exception with no meaningful deadline is the defect this gate exists
@@ -1423,6 +1436,10 @@ function canonicalPrefix(prefix) {
 const SEVERITY_ORDER = { critical: 0, high: 1, moderate: 2, low: 3, info: 4, unknown: 5 };
 
 async function main() {
+  if (process.env.AUDIT_GATE_TODAY && !isCalendarDate(process.env.AUDIT_GATE_TODAY)) {
+    console.error("AUDIT_GATE_TODAY must be a real calendar date (YYYY-MM-DD)");
+    process.exit(2);
+  }
   const today = new Date(process.env.AUDIT_GATE_TODAY || Date.now());
   if (Number.isNaN(today.getTime())) {
     console.error("AUDIT_GATE_TODAY is not a parseable date");
@@ -1902,7 +1919,7 @@ async function main() {
   const caps = allowlist.policy?.maxLifetimeDaysBySeverity ?? {};
   const overCap = allowlist.entries.filter((entry) => {
     const cap = caps[entry?.severity];
-    if (typeof cap !== "number" || !isIsoDate(entry?.added) || !isIsoDate(entry?.expires)) return false;
+    if (typeof cap !== "number" || !isCalendarDate(entry?.added) || !isCalendarDate(entry?.expires)) return false;
     return Math.round((Date.parse(entry.expires) - Date.parse(entry.added)) / DAY_MS) > cap;
   });
   for (const entry of overCap) {
