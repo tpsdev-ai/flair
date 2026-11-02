@@ -236,8 +236,9 @@ export class FeedMemories extends Resource {
       // successor, the row it addresses and the row it closes — so it takes
       // the same per-id Memory write lock (and marker check) as the ordinary
       // write-back below. The successor's id is fresh, but locking it keeps
-      // one rule for the branch: every row this write touches is held. It is
-      // one acquisition, taken before the version writer's instruction lock.
+      // one rule for the branch: every Memory row this write touches is held.
+      // It is one acquisition, taken before the version writer's instruction
+      // lock.
       const lockIds = [successorId, addressedId, predecessor ? String(predecessor.id) : null]
         .filter((id): id is string => typeof id === "string" && id.length > 0);
       const locked = await withMemoryWriteLock(memoryLockStore(), lockIds, async () => {
