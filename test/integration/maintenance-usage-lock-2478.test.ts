@@ -170,6 +170,28 @@ async function waitForLog(line: string, timeoutMs = 30_000): Promise<boolean> {
   }
   return serverLog().includes(line);
 }
+interface LogMark { length: number; tail: string }
+/** A snapshot of the server's captured output: a later search reads only the
+ *  text appended after it, so a line another test wrote before this test
+ *  started cannot match. */
+function logMark(): LogMark {
+  const text = harper.getLog?.() ?? "";
+  return { length: text.length, tail: text.slice(Math.max(0, text.length - 64)) };
+}
+async function waitForLogSince(mark: LogMark, line: string, timeoutMs = 30_000): Promise<boolean> {
+  const appended = (): string => {
+    const text = harper.getLog?.() ?? "";
+    if (text.length < mark.length) return "";
+    if (text.slice(Math.max(0, mark.length - 64), mark.length) !== mark.tail) return "";
+    return text.slice(mark.length);
+  };
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (appended().includes(line)) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return appended().includes(line);
+}
 /** The exact `memory_busy` body: the code and the caller id, nothing else. */
 async function expectBusy(res: Response): Promise<void> {
   const body = await res.json() as any;
@@ -339,6 +361,7 @@ describe("flair#2478 slice 3b — the maintenance expiry writer (real Harper)", 
 
   it("a second run while the id is held skips the delete and reports it", async () => {
     const id = "mul-exp-miss";
+    const log = logMark();
     await seed(id, { durability: "ephemeral", visibility: "private", expiresAt: PAST });
     const point = "maintenance-expiry-staged";
     arm(point);
@@ -350,7 +373,7 @@ describe("flair#2478 slice 3b — the maintenance expiry writer (real Harper)", 
     release(point);
     await held;
     await assertReleased(point);
-    expect(await waitForLog("[MemoryMaintenance] row skipped: busy"), "the skipped row was not reported").toBe(true);
+    expect(await waitForLogSince(log, `[MemoryMaintenance] row skipped: busy (id ${id})`), "the skipped row was not reported").toBe(true);
   }, 120_000);
 
   it("owner first: the run reads the owner's committed row and skips the delete", async () => {
@@ -446,6 +469,7 @@ describe("flair#2478 slice 3b — the usage-count writer (real Harper)", () => {
 
   it("owner first: an owner PUT holding the id makes the contribution skip, and the owner's fields are stored", async () => {
     const id = "mul-use-ownerfirst";
+    const log = logMark();
     await seed(id);
     const point = "memory-put-committed";
     arm(point);
@@ -456,7 +480,7 @@ describe("flair#2478 slice 3b — the usage-count writer (real Harper)", () => {
     release(point);
     expect((await put).status).toBeLessThan(300);
     await assertReleased(point);
-    expect(await waitForLog("[usage-recording] contribution skipped: busy")).toBe(true);
+    expect(await waitForLogSince(log, `[usage-recording] contribution skipped: busy for memory ${id}`)).toBe(true);
     const row = await readRow(id);
     expect(row?.content).toBe("owner text holding the id");
     expect(row?.visibility).toBe("private");
