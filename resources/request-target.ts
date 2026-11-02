@@ -13,7 +13,7 @@
  * Everything else is canonical, including `%2F` and `%5C` inside a segment, a
  * dot inside a segment (`a.b`), and any query string.
  *
- * PURE: string logic only, imports nothing.
+ * PURE: no imports and no I/O; the comparisons use the global `URL`.
  */
 
 /** The named error a non-canonical request target is refused with. */
