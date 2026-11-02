@@ -30,6 +30,38 @@ export function requestPath(rawTarget: string): string {
   return q === -1 ? rawTarget : rawTarget.slice(0, q);
 }
 
+/** The query part of a raw request target: everything after the first `?` ("" when none). */
+export function requestQuery(rawTarget: string): string {
+  const q = rawTarget.indexOf("?");
+  return q === -1 ? "" : rawTarget.slice(q + 1);
+}
+
+/**
+ * True when WHATWG URL parsing of `rawTarget` derives the same path and query
+ * as Harper's raw-target parse: the path is everything before the first `?`
+ * (a raw `#` and the text after it stay in the path), and the query follows.
+ */
+export function whatwgUrlMatchesRawTarget(rawTarget: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(rawTarget, "http://localhost");
+  } catch {
+    return false;
+  }
+  return url.pathname + url.search === rawTarget;
+}
+
+/** True when WHATWG URL parsing of `rawTarget` derives the same query as Harper's raw-target parse. */
+export function whatwgQueryMatchesRawTarget(rawTarget: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(rawTarget, "http://localhost");
+  } catch {
+    return false;
+  }
+  return url.search.slice(1) === requestQuery(rawTarget);
+}
+
 /** True when a raw request target is in canonical form (see the module header). */
 export function isCanonicalRequestTarget(rawTarget: string): boolean {
   const path = requestPath(rawTarget);

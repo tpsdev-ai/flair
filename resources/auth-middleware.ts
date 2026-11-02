@@ -26,6 +26,7 @@ import {
   routedResourceAndRemainder,
   routedIdAfterPropertyRule,
   routedResourcePath,
+  whatwgUrlMatchesRawTarget,
 } from "./request-target.js";
 
 // --- Non-admin Memory read: ignore the caller's selection --------------------
@@ -772,6 +773,15 @@ server.http(async (request: any, nextLayer: any) => {
   }
 
   const { agentId, tsRaw, nonce, signatureB64 } = parsed;
+
+  // A signed request is verified over exactly the target the route serves. The
+  // payload below is built from the WHATWG pathname and search; a target a
+  // WHATWG parse would rewrite (a raw `#` stays in Harper's path and query) is
+  // refused before verification. See request-target.ts.
+  if (!whatwgUrlMatchesRawTarget(rawTarget)) {
+    return nonCanonicalRequestTargetRefusal(String(request.method ?? ""));
+  }
+
   const ts = Number(tsRaw);
   const now = Date.now();
 
