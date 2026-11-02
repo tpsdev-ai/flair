@@ -188,4 +188,4 @@ The hard boundary in this model is the **federation edge** — a separate Flair 
 
 - [`docs/auth.md`](auth.md) — full auth scheme and signature format
 - [`docs/mcp-clients.md`](mcp-clients.md) — wiring the flair-mcp server into Claude Code / Gemini CLI / Codex CLI
-- [`packages/hermes-flair/README.md`](../packages/hermes-flair/README.md) — Hermes-specific plugin auth notes
+- [`packages/hermes-flair/README.md`](https://github.com/tpsdev-ai/flair/blob/main/packages/hermes-flair/README.md) — Hermes-specific plugin auth notes
