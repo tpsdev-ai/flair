@@ -51,7 +51,12 @@ export interface FederationPeerResult {
 export const FED_VERIFY_EXIT_OK = 0;
 export const FED_VERIFY_EXIT_DIVERGED = 1;
 
-export type FederationVerifyKind = "ok" | "diverged" | "unverifiable-only" | "empty";
+export type FederationVerifyKind =
+  | "ok"
+  | "diverged"
+  | "unverifiable-only"
+  | "empty"
+  | "verification-failed";
 
 export interface FederationVerifyVerdict {
   kind: FederationVerifyKind;
@@ -226,7 +231,8 @@ export function decideFederationVerifyExitCode(results: FederationPeerResult[]):
   return describeFederationVerify(results).exitCode;
 }
 
-/** A verification that could not complete: not an empty peer set. */
+/** A verification that could not complete: not an empty peer set, and not a
+ *  peer that was verified missing the memory (that is "diverged"). */
 function describeVerificationFailure(
   message: string,
   cleanupUnknownCount: number,
@@ -235,7 +241,7 @@ function describeVerificationFailure(
     ? `; ${cleanupUnknownCount} cleanup request(s) had an unknown outcome`
     : "";
   return {
-    kind: "diverged",
+    kind: "verification-failed",
     exitCode: FED_VERIFY_EXIT_DIVERGED,
     failedCount: 0,
     unverifiableCount: 0,
@@ -257,6 +263,8 @@ export function renderFederationVerifyVerdict(verdict: FederationVerifyVerdict):
     lines.push("  flair federation reachability  # confirm peers are HTTP-reachable");
     lines.push("  flair federation sync       # push now (verify also does this itself)");
     lines.push("  curl <peer-endpoint>/Health  # raw probe");
+  } else if (verdict.kind === "verification-failed") {
+    lines.push(`── FAIL: ${verdict.summary} ──`);
   } else if (verdict.kind !== "empty") {
     lines.push(`── ${verdict.summary} ──`);
   }
@@ -390,7 +398,7 @@ export async function runFederationVerify(
     return {
       exitCode: FED_VERIFY_EXIT_DIVERGED,
       verdict: {
-        kind: "diverged",
+        kind: "verification-failed",
         exitCode: FED_VERIFY_EXIT_DIVERGED,
         failedCount: 0,
         unverifiableCount: 0,
@@ -415,6 +423,11 @@ export async function runFederationVerify(
   const unknownCleanup: ApiRequestOutcomeUnknown[] = [];
   let bodyFailed = false;
   let bodyError: unknown;
+  // runFederationSyncOnce reports an ordinary failure by RETURNING { error },
+  // so a returned error is the common failure path (a throw is the exception).
+  let syncFailure: Error | null = null;
+  // A --peer that matched no listed row: the requested check never ran.
+  let unmatchedPeer: string | null = null;
   let result: FederationVerifyResult = {
     exitCode: FED_VERIFY_EXIT_OK,
     verdict: describeFederationVerify([]),
@@ -431,7 +444,10 @@ export async function runFederationVerify(
     log("   Pushing canary via federation sync…");
     const syncResult = await deps.syncOnce(opts.syncOpts);
     if (syncResult.error) {
-      log(`   Push: FAILED (${syncResult.error.message}) — probing with lastSyncAt freshness`);
+      // The canary never left this instance, so there is nothing to probe:
+      // the verification failed, and that failure belongs in the verdict.
+      syncFailure = syncResult.error;
+      break verifyBody;
     } else if (syncResult.pushed > 0) {
       // A no-change sync ({ pushed: 0 }) did not inject the canary — do not
       // treat that as a successful push or a missing-canary probe becomes
@@ -477,6 +493,13 @@ export async function runFederationVerify(
     const revokedRows = skippedRevoked.map(revokedAsUnverifiable);
     for (const row of revokedRows) {
       log(`   ${row.id}  UNVERIFIABLE (${row.detail})`);
+    }
+
+    if (opts.peerId && toProbe.length === 0 && revokedRows.length === 0) {
+      // A requested peer that matches no listed row is not an empty peer set:
+      // the check the operator asked for did not run.
+      unmatchedPeer = opts.peerId;
+      break verifyBody;
     }
 
     if (toProbe.length === 0) {
@@ -672,21 +695,27 @@ export async function runFederationVerify(
     result.cleanedUp = cleanedUp;
   }
 
-  // A failed verification body reports its failure in the returned verdict;
-  // the empty verdict means the peer set was genuinely empty.
+  // A failed verification — a thrown body, a returned sync error, or an
+  // unmatched --peer — reports its failure in the returned verdict. The
+  // "empty" kind is returned only for a genuinely empty peer set.
   const cleanupUnknownCount = unknownCleanup.length;
-  if (bodyFailed) {
-    const failureMessage = bodyError instanceof Error ? bodyError.message : String(bodyError);
+  const failure = bodyFailed
+    ? bodyError
+    : syncFailure ?? (unmatchedPeer === null
+      ? null
+      : new Error(`--peer "${unmatchedPeer}" matched no listed peer`));
+  if (failure !== null && failure !== undefined) {
+    const failureMessage = failure instanceof Error ? failure.message : String(failure);
     result.verdict = describeVerificationFailure(failureMessage, cleanupUnknownCount);
     result.exitCode = result.verdict.exitCode;
-  }
-
-  // The unknown outcome outranks a definite failure from the body: both are
-  // printed and the command exits 3.
-  if (bodyFailed && bodyError instanceof ApiRequestOutcomeUnknown) {
-    unknownCleanup.unshift(bodyError);
-  } else if (bodyFailed) {
-    err(`Error: ${bodyError instanceof Error ? bodyError.message : String(bodyError)}`);
+    log(renderFederationVerifyVerdict(result.verdict));
+    // The unknown outcome outranks a definite failure: both are printed and
+    // the command exits 3.
+    if (failure instanceof ApiRequestOutcomeUnknown) {
+      unknownCleanup.unshift(failure);
+    } else {
+      err(`Error: ${failureMessage}`);
+    }
   }
   if (unknownCleanup.length > 0) {
     for (const unknown of unknownCleanup) {
