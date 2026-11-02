@@ -144,6 +144,42 @@ describe("doc-link-pack-coverage", () => {
     }, 120_000);
   }
 
+  for (const suffix of ["", "[]", "[unknown]"]) {
+    test(`an unresolved outer bracket${suffix} reports a nested missing link`, () => {
+      const dir = makeFixture({ docs: { "docs/a.md": `# A\n\n[Optional: see [guide](missing.md)]${suffix}\n` } });
+      const { status, out } = runGate(dir);
+      expect(status).toBe(1);
+      expect(out).toContain("✗ docs/a.md:3");
+      expect(out).toContain("references 'missing.md'");
+    }, 120_000);
+
+    test(`an unresolved outer bracket${suffix} with a nested packed link passes`, () => {
+      const dir = makeFixture({ docs: {
+        "docs/a.md": `# A\n\n[Optional: see [guide](guide.md)]${suffix}\n`,
+        "docs/guide.md": "# Guide\n",
+      } });
+      const { status, out } = runGate(dir);
+      expect(status).toBe(0);
+      expect(summaryLine(out)).toContain("✓ doc-link-pack-coverage");
+    }, 120_000);
+  }
+
+  for (const [suffix, definition] of [
+    ["(guide.md)", ""],
+    ["[target]", "[target]: guide.md\n"],
+  ]) {
+    test(`a resolved outer bracket${suffix} covers its nested label`, () => {
+      const dir = makeFixture({ docs: {
+        "docs/a.md": `# A\n\n[Optional: see [guide](missing.md)]${suffix}\n\n${definition}`,
+        "docs/guide.md": "# Guide\n",
+      } });
+      const { status, out } = runGate(dir);
+      expect(status).toBe(0);
+      expect(summaryLine(out)).toContain("✓ doc-link-pack-coverage");
+      expect(out).not.toContain("references 'missing.md'");
+    }, 120_000);
+  }
+
   test("recognized fences and code spans mask fixture links", () => {
     const dir = makeFixture({ docs: { "docs/a.md": [
       "# A", "", "```markdown", "[bad](missing.md)", "[target]: missing.md", "```",

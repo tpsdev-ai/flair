@@ -859,8 +859,9 @@ function markdownLinks(text) {
         raw = definitions.get(referenceLabel(label));
       }
     }
-    if (raw !== undefined) links.push({ line: lineAt(i), raw });
-    if (raw !== undefined) covered.push([i, end]);
+    if (raw === undefined) continue;
+    links.push({ line: lineAt(i), raw });
+    covered.push([i, end]);
     i = end - 1;
   }
   return { links, allowLines, ticks: ticks.filter((tick) => !covered.some(([a, b]) => tick.start >= a && tick.start < b)) };
