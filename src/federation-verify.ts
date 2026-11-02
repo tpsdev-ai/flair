@@ -226,6 +226,25 @@ export function decideFederationVerifyExitCode(results: FederationPeerResult[]):
   return describeFederationVerify(results).exitCode;
 }
 
+/** A verification that could not complete: not an empty peer set. */
+function describeVerificationFailure(
+  message: string,
+  cleanupUnknownCount: number,
+): FederationVerifyVerdict {
+  const cleanup = cleanupUnknownCount > 0
+    ? `; ${cleanupUnknownCount} cleanup request(s) had an unknown outcome`
+    : "";
+  return {
+    kind: "diverged",
+    exitCode: FED_VERIFY_EXIT_DIVERGED,
+    failedCount: 0,
+    unverifiableCount: 0,
+    okCount: 0,
+    summary: `verification failed: ${message}${cleanup}`,
+    warning: null,
+  };
+}
+
 export function renderFederationVerifyVerdict(verdict: FederationVerifyVerdict): string {
   const lines: string[] = [];
   if (verdict.warning) {
@@ -653,12 +672,20 @@ export async function runFederationVerify(
     result.cleanedUp = cleanedUp;
   }
 
+  // A failed verification body reports its failure in the returned verdict;
+  // the empty verdict means the peer set was genuinely empty.
+  const cleanupUnknownCount = unknownCleanup.length;
+  if (bodyFailed) {
+    const failureMessage = bodyError instanceof Error ? bodyError.message : String(bodyError);
+    result.verdict = describeVerificationFailure(failureMessage, cleanupUnknownCount);
+    result.exitCode = result.verdict.exitCode;
+  }
+
   // The unknown outcome outranks a definite failure from the body: both are
   // printed and the command exits 3.
   if (bodyFailed && bodyError instanceof ApiRequestOutcomeUnknown) {
     unknownCleanup.unshift(bodyError);
   } else if (bodyFailed) {
-    if (unknownCleanup.length === 0) throw bodyError;
     err(`Error: ${bodyError instanceof Error ? bodyError.message : String(bodyError)}`);
   }
   if (unknownCleanup.length > 0) {
@@ -667,6 +694,7 @@ export async function runFederationVerify(
       err("The request may or may not have taken effect; inspect the target before re-running.");
     }
     result.exitCode = 3;
+    if (bodyFailed) result.verdict.exitCode = result.exitCode;
   }
   return result;
 }

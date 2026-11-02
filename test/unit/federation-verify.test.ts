@@ -647,5 +647,38 @@ describe("runFederationVerify", () => {
     expect(printed).toContain("Error: push exploded");
     expect(printed).toContain("Unknown outcome: DELETE /Memory/");
     expect(r.exitCode).toBe(3);
+    expect(r.verdict.kind).not.toBe("empty");
+    expect(r.verdict.summary).toContain("push exploded");
+    expect(r.verdict.summary).toContain("unknown outcome");
+    expect(r.verdict.summary).not.toContain("no peers");
+  });
+
+  test("a body failure with a successful cleanup returns a failing verdict", async () => {
+    const deps = makeDeps({
+      sync: async () => { throw new Error("push exploded"); },
+    });
+    const r = await runFederationVerify(baseOpts(), deps);
+    expect(r.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
+    expect(r.verdict.kind).toBe("diverged");
+    expect(r.verdict.summary).toContain("push exploded");
+    expect(r.verdict.summary).not.toContain("unknown");
+    expect(r.verdict.summary).not.toContain("no peers");
+  });
+
+  test("a genuinely empty peer set still reports no peers to probe", async () => {
+    let fetches = 0;
+    const deps = makeDeps({
+      peers: [],
+      fetchImpl: async () => {
+        fetches += 1;
+        return jsonRes(200, { results: [] });
+      },
+    });
+    const r = await runFederationVerify(baseOpts(), deps);
+    expect(fetches).toBe(0);
+    expect(r.peers).toEqual([]);
+    expect(r.exitCode).toBe(FED_VERIFY_EXIT_OK);
+    expect(r.verdict.kind).toBe("empty");
+    expect(r.verdict.summary).toBe("no peers to probe.");
   });
 });
