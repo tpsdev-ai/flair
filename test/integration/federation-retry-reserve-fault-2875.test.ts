@@ -6,10 +6,10 @@
  * reserved carry their reserved attempt, and the rows the run had not reached
  * keep the attempts and lastAttemptAt they had stored.
  *
- * There is no existing fault-injection seam for the sender's operations-API
- * writes (the composed probe in federation-retry-probe-component.ts patches the
- * resource's own `put`/`patch`, and an operations-API upsert reaches the table
- * through the data layer). This test puts a loopback proxy in front of the
+ * No existing fault-injection seam covers the sender's operations-API writes:
+ * the composed probe in federation-retry-probe-component.ts patches the
+ * resource's own `put`, while an operations-API upsert of an existing row
+ * reaches the table through the data layer. This test puts a loopback proxy in front of the
  * sender's ops endpoint and fails the second FederationRetry write of the run;
  * the proxy is test-only and nothing in the product enables it.
  */
