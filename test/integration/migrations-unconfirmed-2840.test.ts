@@ -41,6 +41,7 @@
  * that cycle reads the state file.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { migrationCycleDone } from "../helpers/migration-cycle-done.ts";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -187,12 +188,12 @@ async function waitForRelease(path: string, budgetMs: number): Promise<string> {
   }
 }
 
-/** Waits until this boot's migration cycle reports the `done` phase. */
+/** Waits for terminal `done`, rejecting a cycle error. */
 async function waitForCycleDone(budgetMs: number): Promise<any> {
   const deadline = Date.now() + budgetMs;
   for (;;) {
     const detail = await healthDetail();
-    if (detail?.migrations?.cyclePhase === "done") return detail;
+    if (migrationCycleDone(detail?.migrations)) return detail;
     if (Date.now() >= deadline) throw new Error("migration cycle did not complete in time");
     await new Promise((r) => setTimeout(r, 50));
   }
@@ -375,9 +376,7 @@ describe("flair#2840 — an unconfirmed write is reported by id and not counted 
     writeFileSync(join(faultDir, "go.migration-cycle-start"), "");
     expect(await waitForRelease(join(faultDir, "released.migration-cycle-start"), 30_000)).toBe("go");
 
-    // Wait for the held cycle to COMPLETE — progress.ts's `done` phase —
-    // before reading its result: the boot-seeded entry is already `halted`
-    // with the same ids, so the row alone does not show the cycle re-read it.
+    // Wait for terminal `done` without a cycle error before reading progress.
     const completed = await waitForCycleDone(60_000);
     mig = migration(completed, SYNTHETIC_ID);
     expect(mig?.state).toBe("halted");
