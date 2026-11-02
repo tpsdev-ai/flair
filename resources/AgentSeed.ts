@@ -208,14 +208,11 @@ export class AgentSeed extends Resource {
 
       const memories: any[] = [];
       const stagedMemories: any[] = [];
-      // A prior starter memory for this agent is recognized by the marker the
-      // seed persists on every starter row (`source: "seed"`, written below), or
-      // by the onboarding tag, so a retry whose starter memories carry custom
-      // tags still sees the stored rows instead of writing duplicates
-      // (flair#2890).
+      // Matching `source: "seed"` or the onboarding tag is a seeding heuristic
+      // over caller-writable fields (flair#2890).
       const isSeededMemory = (m: any) =>
         m.agentId === agentId && (m.source === "seed" || (m.tags ?? []).includes("onboarding"));
-      // Only seed memories if this is a first-time seed (no starter memory stored yet)
+      // Stage starter memories only if no row matches.
       const hasSeededMemory = await (async () => {
         for await (const m of (databases as any).flair.Memory.search()) {
           if (isSeededMemory(m)) return true;
@@ -223,7 +220,7 @@ export class AgentSeed extends Resource {
         return false;
       })();
       if (hasSeededMemory) {
-        // Re-seed: return existing starter memories without writing new ones
+        // Return matching rows without staging starter memories.
         for await (const m of (databases as any).flair.Memory.search()) {
           if (isSeededMemory(m)) memories.push(m);
         }
