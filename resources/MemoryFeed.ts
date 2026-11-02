@@ -28,12 +28,16 @@ import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { stripInlinePointerFields } from "./host-source-visibility.js";
 import { applyPromotionBinding } from "./promotion-binding.js";
-import { markMemoryWriteOutcomeUnknown, memoryBusyResponse, memoryLockUnavailableResponse, withMemoryWriteLock, withMemoryWriteLockOnce, writeOutcomeUnknownResponse } from "./memory-write-lock.js";
+import { markMemoryWriteOutcomeUnknown, memoryBusyResponse, memoryLockUnavailableResponse, withMemoryWriteLock, withMemoryWriteLockOnce, writeOutcomeUnknownResponse, type MemoryLockOutcome } from "./memory-write-lock.js";
 
 /** The per-id Memory write-lock store (flair#2478). */
 function memoryLockStore(): unknown {
   return (databases as any)?.flair?.Memory?.primaryStore;
 }
+
+/** How many times a skill feed write re-resolves its live head and acquires the
+ *  per-id locks with the new head included (flair#2927). */
+const SKILL_HEAD_LOCK_ATTEMPTS = 3;
 
 /** Suppress an absent or mismatched promotion binding on a fed event's row
  *  value (flair#2478 slice 2). Non-object values and events pass through. */
@@ -235,76 +239,99 @@ export class FeedMemories extends Resource {
       // flair#2927: a skill-tagged feed write writes Memory rows too — the
       // successor, the row it addresses and the row it closes — so it takes
       // the same per-id Memory write lock (and marker check) as the ordinary
-      // write-back below. The successor's id is fresh, but locking it keeps
-      // one rule for the branch: every Memory row this write touches is held.
-      // It is one acquisition, taken before the version writer's instruction
-      // lock.
-      const lockIds = [successorId, addressedId, predecessor ? String(predecessor.id) : null]
+      // write-back below. Locking the successor id as well keeps one rule
+      // for the branch: every Memory row this write writes is held.
+      // The live head is resolved before the acquisition and its id joins the
+      // lock set, because it is the row the write closes when the addressed id
+      // is absent. Under the locks the head is resolved again; a head that is
+      // not one of the held ids releases and retries with the new head, and
+      // after SKILL_HEAD_LOCK_ATTEMPTS the write is refused skill_head_moved.
+      // One acquisition per attempt, taken before the version writer's
+      // instruction lock.
+      const baseLockIds = [successorId, addressedId, predecessor ? String(predecessor.id) : null]
         .filter((id): id is string => typeof id === "string" && id.length > 0);
-      const locked = await withMemoryWriteLock(memoryLockStore(), lockIds, async () => {
-        const outcome = await runSkillVersionWrite({
-          ctx,
-          subjectId,
-          agentId,
-          head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
-          plan: async (head, shared) => {
-            const stale = await validateSkillSnapshots(addressed, predecessor, content.id ?? null, shared);
-            if (stale) return stale;
-            const denied = await authorizeSkillOwners(ctx, auth, [addressed, predecessor, head ?? content], shared);
-            if (denied) return denied;
-            if ((addressed || predecessor) && !head) return skillWriteConflict("skill_head_missing");
-            if (predecessor && (!addressed || content.supersedes !== addressed.supersedes) && head?.id !== predecessor.id) return skillWriteConflict("skill_predecessor_stale");
-            if (addressed && head?.id !== addressed.id) return skillWriteConflict("skill_target_stale");
-            const successor = buildSkillSuccessorRow({
-              auth,
-              base: { ...content, agentId: head?.agentId ?? agentId }, predecessorRow: head, successorId, subjectId,
-              supersedes: head ? String(head.id) : null, now,
-            });
-            successor.provenance = buildProvenance(auth, successor.createdAt, content);
-            stripAuthorityFields(successor, "Memory");
-            await applyOriginatorInstanceId(successor, head);
-            applyFederationBookkeeping(successor, head);
-            captured.row = successor;
-            captured.closed = head;
-            const value = typeof successor.content === "string" ? successor.content : null;
-            const visibility = skillVersionVisibility(successor);
-            if (!head) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility, grantedClose: null };
-            // flair#2511: a grant-authorized cross-agent close of `head` stands on the "write" grant
-            // authorizeSkillOwners read above; the writer re-checks it after the
-            // close is staged.
-            return { kind: "update", predecessor: head, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility, grantedClose: grantedSkillClose(head, ctx, auth) };
-          },
-          hooks: {
-            ...defaultSkillHooks,
-            authorizeClose: (row, shared) => authorizeSkillOwners(ctx, auth, [row], shared),
-            pointer: async (shared) => {
-              if (captured.closed) await deletePointerRowViaTable(String(captured.closed.id), shared);
-              return null;
+      const HEAD_MOVED = Symbol("skill-head-moved");
+      let locked: MemoryLockOutcome<{ response: Response } | typeof HEAD_MOVED> | undefined;
+      for (let attempt = 0; attempt < SKILL_HEAD_LOCK_ATTEMPTS; attempt++) {
+        const preHead = await resolveSkillHead(subjectId, addressedId, {});
+        const attemptIds = preHead && !baseLockIds.includes(String(preHead.id))
+          ? [...baseLockIds, String(preHead.id)]
+          : [...baseLockIds];
+        const heldIds = new Set(attemptIds);
+        locked = await withMemoryWriteLock(memoryLockStore(), attemptIds, async () => {
+          let headMoved = false;
+          const outcome = await runSkillVersionWrite({
+            ctx,
+            subjectId,
+            agentId,
+            head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
+            plan: async (head, shared) => {
+              if (head && !heldIds.has(String(head.id))) {
+                headMoved = true;
+                return skillWriteConflict("skill_head_moved");
+              }
+              const stale = await validateSkillSnapshots(addressed, predecessor, content.id ?? null, shared);
+              if (stale) return stale;
+              const denied = await authorizeSkillOwners(ctx, auth, [addressed, predecessor, head ?? content], shared);
+              if (denied) return denied;
+              if ((addressed || predecessor) && !head) return skillWriteConflict("skill_head_missing");
+              if (predecessor && (!addressed || content.supersedes !== addressed.supersedes) && head?.id !== predecessor.id) return skillWriteConflict("skill_predecessor_stale");
+              if (addressed && head?.id !== addressed.id) return skillWriteConflict("skill_target_stale");
+              const successor = buildSkillSuccessorRow({
+                auth,
+                base: { ...content, agentId: head?.agentId ?? agentId }, predecessorRow: head, successorId, subjectId,
+                supersedes: head ? String(head.id) : null, now,
+              });
+              successor.provenance = buildProvenance(auth, successor.createdAt, content);
+              stripAuthorityFields(successor, "Memory");
+              await applyOriginatorInstanceId(successor, head);
+              applyFederationBookkeeping(successor, head);
+              captured.row = successor;
+              captured.closed = head;
+              const value = typeof successor.content === "string" ? successor.content : null;
+              const visibility = skillVersionVisibility(successor);
+              if (!head) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility, grantedClose: null };
+              // flair#2511: a grant-authorized cross-agent close of `head` stands on the "write" grant
+              // authorizeSkillOwners read above; the writer re-checks it after the
+              // close is staged.
+              return { kind: "update", predecessor: head, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility, grantedClose: grantedSkillClose(head, ctx, auth) };
             },
-          },
-        });
-        if (!outcome.ok) {
-          // flair#2927: record the id outcome-unknown for the outcomes the
-          // ordinary write-back records it for — storage withheld the write
-          // result, or the committed state could not be confirmed (the skill
-          // writer's `skill_update_compensation_failed`, whose undo was not
-          // confirmed either). A refusal the writer rolled back and confirmed
-          // is not one of them; a body that cannot be read is the same unknown
-          // outcome, never a pass.
-          const code = await responseErrorCode(outcome.response);
-          if (code === null || code === WRITE_RESPONSE_WITHHELD || code === "skill_update_compensation_failed") {
-            for (const id of lockIds) markMemoryWriteOutcomeUnknown(id);
+            hooks: {
+              ...defaultSkillHooks,
+              authorizeClose: (row, shared) => authorizeSkillOwners(ctx, auth, [row], shared),
+              pointer: async (shared) => {
+                if (captured.closed) await deletePointerRowViaTable(String(captured.closed.id), shared);
+                return null;
+              },
+            },
+          });
+          if (!outcome.ok) {
+            if (headMoved) return HEAD_MOVED;
+            // flair#2927: record the id outcome-unknown for the outcomes the
+            // ordinary write-back records it for — storage withheld the write
+            // result, or the committed state could not be confirmed (the skill
+            // writer's `skill_update_compensation_failed`, whose undo was not
+            // confirmed either). A refusal the writer rolled back and confirmed
+            // is not one of them; a body that cannot be read is the same unknown
+            // outcome, never a pass.
+            const code = await responseErrorCode(outcome.response);
+            if (code === null || code === WRITE_RESPONSE_WITHHELD || code === "skill_update_compensation_failed") {
+              for (const id of attemptIds) markMemoryWriteOutcomeUnknown(id);
+            }
+            return { response: outcome.response };
           }
-          return { response: outcome.response };
-        }
-        const written = captured.row;
-        if (captured.closed) noteMemoryDelete(String(captured.closed.id));
-        if (written) noteMemoryUpsert(written);
-        return { response: feedWriteResponse(written ?? { id: successorId, written: true, durability: "persistent" }, redactedValues, supplied) };
-      }, { phase: "feed-skill-ingest" });
+          const written = captured.row;
+          if (captured.closed) noteMemoryDelete(String(captured.closed.id));
+          if (written) noteMemoryUpsert(written);
+          return { response: feedWriteResponse(written ?? { id: successorId, written: true, durability: "persistent" }, redactedValues, supplied) };
+        }, { phase: "feed-skill-ingest" });
+        if (locked.kind !== "done" || locked.value !== HEAD_MOVED) break;
+      }
+      if (!locked) return skillWriteConflict("skill_head_moved");
       if (locked.kind === "busy") return memoryBusyResponse(agentId);
       if (locked.kind === "unknown") return writeOutcomeUnknownResponse();
       if (locked.kind === "unavailable") return memoryLockUnavailableResponse();
+      if (locked.value === HEAD_MOVED) return skillWriteConflict("skill_head_moved");
       return locked.value.response;
     }
 

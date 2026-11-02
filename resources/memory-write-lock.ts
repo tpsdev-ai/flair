@@ -14,7 +14,8 @@
  * writer (resources/usage-recording.ts) (slice 3b part 1); the ordinary
  * (non-skill) feed write-back and the feed dedup repair
  * (resources/MemoryFeed.ts), the skill-tagged feed write
- * (resources/MemoryFeed.ts's skill branch, on the ids it addresses and closes)
+ * (resources/MemoryFeed.ts's skill branch, on the ids it addresses and closes
+ * and the live head it resolves)
  * and both `lastReflected` stamps
  * (resources/Memory.ts's derivedFrom sources and resources/MemoryReflect.ts's
  * gathered sources) (slice 3b part 2); and the federation merge of an
