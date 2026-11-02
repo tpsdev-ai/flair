@@ -1,0 +1,1 @@
+- **An admin `_reindex` re-PUT notifies the embedding-space guard of its committed stamp before its post-commit read-back.** A read-back refusal no longer leaves a committed foreign `embeddingModel` stamp unrecorded, so the guard reads `mixed` as it does after the same write without the fault (#2932).
