@@ -74,6 +74,9 @@ import { join } from "node:path";
 import { createPrivateKey, randomUUID, sign as nodeCryptoSign } from "node:crypto";
 import type { SigningIdentitySource } from "./signing-identity.js";
 import { resolveHome } from "./home.js";
+import { isConnectPhaseFailure } from "./connect-phase.js";
+
+export { isConnectPhaseFailure, REFUSED_CODES } from "./connect-phase.js";
 
 // ─── Failure classification ─────────────────────────────────────────────────
 
@@ -295,17 +298,18 @@ export class ApiRequestTimeout extends Error {
 }
 
 /**
- * Thrown when a request on any other method crosses the whole-request deadline.
- * Expiry cannot establish delivery: the request may not have reached the server,
- * or it may have taken effect. The message says the outcome is unknown, and no
- * caller may retry the write blindly.
+ * Thrown when a write crossed the whole-request deadline, or a write's
+ * transport failed without a readable response. Neither establishes delivery:
+ * the request may not have reached the server, or it may have taken effect.
+ * The message says the outcome is unknown, and no caller may retry the write
+ * blindly.
  */
 export class ApiRequestOutcomeUnknown extends Error {
   readonly method: string;
   readonly path: string;
   /** The deadline that expired, or undefined for a transport failure. */
   readonly deadlineMs: number | undefined;
-  /** The status line that arrived before the failure fired, when one did. */
+  /** The status line that arrived before the deadline expired or the response read failed, when one did. */
   readonly status: number | undefined;
   constructor(method: string, path: string, deadlineMs: number | undefined, status: number | undefined, source: RequestDeadlineSource, detail?: string) {
     const envName = deadlineEnvName(source);
@@ -323,56 +327,21 @@ export class ApiRequestOutcomeUnknown extends Error {
   }
 
   /**
-   * A write's connection failed after the request was sent and before any
-   * response arrived. The request may have been applied, so this is an unknown
-   * outcome: name the instance, say the outcome is unknown, and tell the
-   * operator to check before retrying (flair#2869).
+   * A write's transport failed without a readable response. Whether the write
+   * was applied is unknown, so name the instance, say so, and tell the
+   * operator to check before retrying (flair#2869). `status` is set when the
+   * instance's status line arrived and the response body could not be read.
    */
-  static fromTransportFailure(method: string, path: string, url: string, cause: unknown): ApiRequestOutcomeUnknown {
-    const err = new ApiRequestOutcomeUnknown(
-      method,
-      path,
-      undefined,
-      undefined,
-      "explicit",
-      `${method} ${path} may or may not have been applied on ${url}: the connection failed after the request was sent, so no response arrived. ` +
-        `Check the instance's state before retrying; do not resend it.`,
-    );
+  static fromTransportFailure(method: string, path: string, url: string, cause: unknown, status?: number): ApiRequestOutcomeUnknown {
+    const detail = status === undefined
+      ? `${method} ${path} may or may not have been applied on ${url}: the connection failed before any response arrived, so delivery is unknown. ` +
+        `Check the instance's state before retrying; do not resend it.`
+      : `${method} ${path} may or may not have been applied on ${url}: the instance answered HTTP ${status}, but the connection failed while the response was being read, so the outcome is unknown. ` +
+        `Check the instance's state before retrying; do not resend it.`;
+    const err = new ApiRequestOutcomeUnknown(method, path, undefined, status, "explicit", detail);
     (err as { cause?: unknown }).cause = cause;
     return err;
   }
-}
-
-/**
- * The errno and undici codes that only a connection-establishment failure can
- * carry — the request never left. Node's undici wraps the errno in the
- * `fetch failed` TypeError's `cause`; Bun puts `code` on the TypeError itself,
- * so the chain starts at the error. Anything else (ECONNRESET, EPIPE,
- * UND_ERR_SOCKET, UND_ERR_CLOSED, a bare `fetch failed` with no code) may have
- * been sent before the connection failed and is NOT eligible for a retry on a
- * different instance (flair#2869).
- */
-const CONNECT_PHASE_FAILURE_CODES: ReadonlySet<string> = new Set([
-  "ECONNREFUSED",
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "EHOSTUNREACH",
-  "ENETUNREACH",
-  "EADDRNOTAVAIL",
-  "UND_ERR_CONNECT_TIMEOUT",
-]);
-
-/** True when `err` or a `cause` in its chain carries a connect-phase code. */
-export function isConnectPhaseFailure(err: unknown): boolean {
-  let current: unknown = err;
-  for (let depth = 0; current !== null && current !== undefined && depth < 8; depth++) {
-    if (typeof current === "object" && "code" in current) {
-      const code = (current as { code?: unknown }).code;
-      if (typeof code === "string" && CONNECT_PHASE_FAILURE_CODES.has(code)) return true;
-    }
-    current = (current as { cause?: unknown }).cause;
-  }
-  return false;
 }
 
 /**
@@ -1322,15 +1291,35 @@ export async function sendJsonRequest(
   const deadlineSource: RequestDeadlineSource =
     transport.deadlineSource ?? (transport.deadlineMs === undefined ? "env" : "explicit");
   const deadlineMs = resolveRequestDeadlineMs(transport.deadlineMs);
+  const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
+  // Serialize before the transport call: a body that cannot be serialized was
+  // never sent, so it is a serialization failure, not a delivery failure.
+  let serializedBody: string | undefined;
+  if (body) {
+    try {
+      serializedBody = JSON.stringify(body);
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`${method} ${url.pathname} was not sent: the request body could not be serialized to JSON (${reason}).`);
+    }
+  }
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
   }, deadlineMs);
-  const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
   let res: Response | undefined;
   let fetchRejected = false;
+  let bodyReadFailed = false;
+  const readBody = async (): Promise<string> => {
+    try {
+      return await res!.text();
+    } catch (err: unknown) {
+      bodyReadFailed = true;
+      throw err;
+    }
+  };
   try {
     try {
       res = await fetch(url.href, {
@@ -1339,7 +1328,7 @@ export async function sendJsonRequest(
           "content-type": "application/json",
           ...(authHeader ? { authorization: authHeader } : {}),
         },
-        body: body ? JSON.stringify(body) : undefined,
+        body: serializedBody,
         signal: controller.signal,
         // "manual" hands back the 3xx itself, so the refusal can name its status;
         // the location it names is never requested.
@@ -1358,7 +1347,7 @@ export async function sendJsonRequest(
     // before the empty-body shortcut below, so a zero-length 403 gets the same
     // hint and noCredentials as one with a body (flair#2749).
     if (res.status === 403 && !authHeader) {
-      await res.text();
+      await readBody();
       const hint = noCredentialsHint(isLocal, transport.signedOnly);
       throw new ApiHttpError(403, `HTTP 403: no credentials sent. ${hint}`, /* noCredentials */ true);
     }
@@ -1367,7 +1356,7 @@ export async function sendJsonRequest(
       if (!res.ok) throw ApiHttpError.fromResponse(res.status, "");
       return { ok: true };
     }
-    const text = await res.text();
+    const text = await readBody();
     if (!res.ok) {
       // The FLAIR_DEBUG line's path and body, the message's reason and `body`
       // are redacted with the credential values credentialsInHeader reads from
@@ -1395,6 +1384,13 @@ export async function sendJsonRequest(
     // for a write the outcome is unknown, never a clean failure (flair#2869).
     if (fetchRejected && !readOnly && !isConnectPhaseFailure(err)) {
       throw ApiRequestOutcomeUnknown.fromTransportFailure(method, url.pathname, url.origin, err);
+    }
+    // The status line arrived but the body could not be read. A write's 2xx
+    // response leaves the outcome unknown, and the message names the status
+    // received; a non-2xx status is reported by that status.
+    if (bodyReadFailed && res !== undefined && !readOnly) {
+      if (res.ok) throw ApiRequestOutcomeUnknown.fromTransportFailure(method, url.pathname, url.origin, err, res.status);
+      throw ApiHttpError.fromResponse(res.status, "");
     }
     throw err;
   } finally {

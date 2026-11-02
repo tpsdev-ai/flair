@@ -1,15 +1,15 @@
 /**
  * api-connect-phase-2869.test.ts — the CLI's alternate-configured-port
  * fallback (src/cli.ts `api()`) engages only for a connect-phase failure, and a
- * write whose connection drops after the request was sent is reported as an
- * unknown outcome instead of being replayed on the alternate port
- * (flair#2869).
+ * write that may have been delivered is reported as an unknown outcome instead
+ * of being replayed on the alternate port (flair#2869).
  *
- * Every case here drives the built CLI against a real node:http server on an
- * ephemeral port; fetch is never mocked. The CLI runs under Node, so the
- * transport failures are undici's. The scratch HOME names the primary port in
- * harper-config.yaml and the alternate in config.yaml, with no explicit base
- * URL, which is the shape `api()` falls back from.
+ * The CLI cases drive the built CLI against real node:http servers on ephemeral
+ * ports, so the CLI's transport is Node's undici; the classifier's Bun case is a
+ * real refused connection made by this test process, which runs under Bun. The
+ * scratch HOME names the primary port in harper-config.yaml and the alternate
+ * in config.yaml, with no explicit base URL, which is the shape `api()` falls
+ * back from.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
@@ -17,7 +17,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { isConnectPhaseFailure } from "../../src/lib/auth-resolve.ts";
+import { ApiRequestOutcomeUnknown, authedRequest, isConnectPhaseFailure, REFUSED_CODES } from "../../src/lib/auth-resolve.ts";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 import { nodeBin } from "../helpers/node-runtime.js";
@@ -70,6 +70,27 @@ const answerOk = (_req: IncomingMessage, res: ServerResponse) => {
 const readThenDrop = (req: IncomingMessage, _res: ServerResponse) => {
   req.on("data", () => { /* drain */ });
   req.on("end", () => req.socket.destroy());
+};
+
+/** Read the whole request, then answer 307 to `location`. */
+function readThenRedirect(location: string) {
+  return (req: IncomingMessage, res: ServerResponse) => {
+    req.on("data", () => { /* drain */ });
+    req.on("end", () => {
+      res.writeHead(307, { location });
+      res.end();
+    });
+  };
+}
+
+/** Read the whole request, answer 200 with a body, then cut the body short. */
+const readThenTruncateBody = (req: IncomingMessage, res: ServerResponse) => {
+  req.on("data", () => { /* drain */ });
+  req.on("end", () => {
+    res.writeHead(200, { "content-type": "application/json", "content-length": "100" });
+    res.write("{\"ok\":");
+    setTimeout(() => res.socket?.destroy(), 10);
+  });
 };
 
 /** A port nothing listens on: a connection there is refused. */
@@ -192,6 +213,87 @@ describe("api() — alternate-port fallback is connect-phase only (flair#2869)",
     }
   }, 30_000);
 
+  test("a write the primary redirects is refused by name and the alternate receives no request", async () => {
+    ensureCliBuild();
+    const refused = await refusedPort();
+    const primary = await serve(readThenRedirect(`http://127.0.0.1:${refused}/PromoteMemoryCandidate`));
+    const alternate = await serve(answerOk);
+    const home = scratchHome(Number(new URL(primary.baseUrl).port), Number(new URL(alternate.baseUrl).port));
+    try {
+      const result = await runCli(writeCommand, { HOME: home, ...identityEnv });
+      const detail = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+      expect(primary.requests, detail).toEqual([{ method: "POST", path: "/PromoteMemoryCandidate" }]);
+      expect(alternate.requests, detail).toEqual([]);
+      expect(result.code, detail).toBe(1);
+      expect(result.stderr, detail).toContain("HTTP 307");
+      expect(result.stderr, detail).toContain("redirect");
+      expect(result.stderr, detail).not.toContain("Unknown outcome:");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("a write whose response body is cut off is an unknown outcome naming the status and the alternate receives no request", async () => {
+    ensureCliBuild();
+    const primary = await serve(readThenTruncateBody);
+    const alternate = await serve(answerOk);
+    const home = scratchHome(Number(new URL(primary.baseUrl).port), Number(new URL(alternate.baseUrl).port));
+    try {
+      const result = await runCli(writeCommand, { HOME: home, ...identityEnv });
+      const detail = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+      expect(primary.requests, detail).toEqual([{ method: "POST", path: "/PromoteMemoryCandidate" }]);
+      expect(alternate.requests, detail).toEqual([]);
+      expect(result.code, detail).toBe(3);
+      expect(result.stderr, detail).toContain("Unknown outcome:");
+      expect(result.stderr, detail).toContain("answered HTTP 200");
+      expect(result.stderr, detail).toContain("may or may not have been applied");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("a body that cannot be serialized sends no request and is not an unknown outcome", async () => {
+    const server = await serve(answerOk);
+    const body: Record<string, unknown> = { agentId: "agent-a" };
+    body.self = body;
+    let caught: unknown;
+    try {
+      await authedRequest("POST", "/PromoteMemoryCandidate", body, {
+        baseUrl: server.baseUrl,
+        agentId: "agent-a",
+        explicitAdminPass: "stub-pass",
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(server.requests).toEqual([]);
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught instanceof ApiRequestOutcomeUnknown).toBe(false);
+    expect((caught as Error).message).toContain("could not be serialized to JSON");
+    expect((caught as Error).message).toContain("was not sent");
+  });
+
+  test("a real refused connection under Bun carries a code the classifier accepts", async () => {
+    // Not synthetic: this test process runs under Bun, so this is Bun's own
+    // fetch error for a closed port (measured on bun 1.4.4: TypeError with
+    // `code: "ECONNREFUSED"` on the error itself and no `cause`; older Bun
+    // versions name the same refusal `ConnectionRefused`, which
+    // src/lib/upgrade-prior-liveness.ts already accepted).
+    const port = await refusedPort();
+    let caught: unknown;
+    try {
+      await fetch(`http://127.0.0.1:${port}/Health`);
+    } catch (err) {
+      caught = err;
+    }
+    const err = caught as { name?: string; code?: string; cause?: unknown };
+    expect(err.name).toBe("TypeError");
+    expect(typeof err.code).toBe("string");
+    expect(err.cause).toBeUndefined();
+    expect(REFUSED_CODES.includes(err.code ?? "")).toBe(true);
+    expect(isConnectPhaseFailure(caught)).toBe(true);
+  });
+
   test("a bare fetch failed with no recognised code is not a connect-phase failure", () => {
     // What the classification must treat as unknown: no code at all, or a
     // post-send code. No server can produce a bare `fetch failed` on demand, so
@@ -208,6 +310,9 @@ describe("api() — alternate-port fallback is connect-phase only (flair#2869)",
     const refused = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1"), { code: "ECONNREFUSED" });
     expect(isConnectPhaseFailure(new TypeError("fetch failed", { cause: refused }))).toBe(true);
     expect(isConnectPhaseFailure(Object.assign(new TypeError("fetch failed"), { code: "ECONNREFUSED" }))).toBe(true);
+    // The other refusal spelling Bun uses, already recognized by
+    // src/lib/upgrade-prior-liveness.ts's REFUSED_TOKENS.
+    expect(isConnectPhaseFailure(Object.assign(new TypeError("fetch failed"), { code: "ConnectionRefused" }))).toBe(true);
     for (const code of ["ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "EADDRNOTAVAIL", "UND_ERR_CONNECT_TIMEOUT"]) {
       expect(isConnectPhaseFailure(new TypeError("fetch failed", { cause: Object.assign(new Error(code), { code }) })), code).toBe(true);
     }

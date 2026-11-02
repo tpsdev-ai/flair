@@ -2876,6 +2876,18 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     deadlineSource: options?.deadlineSource,
   };
 
+  // The port the operator wrote in ~/.flair/config.yaml, when it differs from
+  // the resolved one and no explicit base was given: the only port a
+  // connect-phase failure may fall back to (flair#1719).
+  const altPort = hasExplicitBase ? null : alternateConfiguredLocalPort({});
+  const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
+  // A write that could fall back must not follow a redirect: fetch would send
+  // the write to the Location, and a connect failure there would look like a
+  // connect-phase failure of this request and be replayed on the alternate.
+  // Refusing it (redirect: "manual") yields a named HTTP 3xx error, which is
+  // never fallback-eligible because it is not a connect-phase failure.
+  if (altPort !== null && !readOnly) requestOptions.refuseRedirects = true;
+
   try {
     return await authedRequest(method, path, body, requestOptions);
   } catch (err) {
@@ -2890,7 +2902,6 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     // connect-phase failure qualifies: any other transport failure may have
     // sent the request before the connection dropped, so replaying it on
     // another instance could apply a write twice (flair#2869).
-    const altPort = hasExplicitBase ? null : alternateConfiguredLocalPort({});
     if (altPort !== null && isConnectPhaseFailure(err)) {
       const altUrl = `http://127.0.0.1:${altPort}`;
       try {
@@ -2907,9 +2918,8 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
  * Turn undici/Node's bare `TypeError: fetch failed` into a sentence naming the
  * actor (the Flair instance URL), the state (no HTTP response) and a remedy
  * the operator can act on — flair#1719 requirement 3. Only a connect-phase
- * failure (see isConnectPhaseFailure) is described this way; a transport
- * failure after the request was sent is not a connection failure and passes
- * through unchanged (flair#2869). Non-connect errors (HTTP 401/403/5xx, auth
+ * failure gets this sentence; sendJsonRequest reports other write transport
+ * failures itself (flair#2869). Non-connect errors (HTTP 401/403/5xx, auth
  * failures) pass through unchanged so callers keep their own handling. The
  * `flairFriendly` marker lets the top-level CLI entry print just the message
  * instead of a stack.
