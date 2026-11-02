@@ -365,18 +365,20 @@ Federation remains an authenticated instance-to-instance replication path and
 preserves the originating record; it does not reclassify a runtime request as
 an operator edit. Raw Harper OPS access remains administrator infrastructure.
 
-An operator write is refused if its value exactly matches stored Memory or
-MemoryCandidate text for the target agent, including legacy or untagged records.
+A learned-text refusal reports `soul_value_is_learned_content` for a non-empty
+exact value match with stored Memory or MemoryCandidate text for the target
+agent, including legacy or untagged records.
 The owner-scoped lookup prevents another agent from blocking edits by copying
 known Soul text into its own memories. Learned artifacts are not an operator-authored Soul source;
 claimed or missing provenance does not exempt them. Lookup failure aborts the
 write. This is an exact-match backstop, not semantic detection of paraphrases.
 Existing Soul records remain readable without a migration.
 
-A write that would store a non-empty `scopeTag` or a non-empty `tags`
-array is refused with `soul_scope_fields_not_writable` after source
-authorization and before any write, whatever the tag's prefix. POST and PUT
-check the request body; PATCH checks the merged row. Runtime denial
+Authorized Soul resource POST/PUT with a non-empty `scopeTag` or non-empty
+`tags` array in the request body, and authorized PATCH with those fields in
+the merged row after its stored-row checks, receive
+`soul_scope_fields_not_writable`. Runtime denial
 does not depend on connector names — Soul writes are deny-by-default, and Flair
-stamps `sourceClass` from the authenticated credential, not from a body field.
+stamps `sourceClass` from verified Basic credentials or a deliberate internal
+context, never a body field.
 Do not grow a per-connector blacklist in Soul.

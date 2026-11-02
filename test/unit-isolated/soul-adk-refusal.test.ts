@@ -4,8 +4,8 @@
  * The generic checks refuse the cases the bridge covered: a request that
  * supplies a non-empty `scopeTag` or `tags` array, a value that exactly matches
  * stored learned text for the target agent, and a PATCH of a stored row that
- * carries either scope field. Neither check matches a connector string, so
- * ADK-sourced writes are still refused, now by one of those checks.
+ * carries either scope field. Those tagged-request and exact stored-text cases
+ * remain refused.
  * Isolated so the harper mock does not collide with the other Soul suites.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";

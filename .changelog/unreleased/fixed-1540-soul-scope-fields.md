@@ -1,4 +1,4 @@
-- **Soul writes that would store a non-empty `scopeTag` or a non-empty `tags` array are refused, and the replay writers report the refused row.**
+- **Soul replay writers report the refused row.**
 
   Soul has no dedicated or enforced per-user scope field. A write that would
   store a non-empty `scopeTag` or a non-empty `tags` array is refused by name,
