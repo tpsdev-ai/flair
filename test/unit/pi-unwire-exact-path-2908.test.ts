@@ -95,7 +95,7 @@ describe("pi unwire ownership", () => {
   });
 
   for (const changed of [true, false]) {
-    it(`preserves malformed npm sources and reports positions on the ${changed ? "changed" : "no-op"} path`, () => {
+    it(`preserves whitespace-containing and empty-suffix npm sources and reports positions on the ${changed ? "changed" : "no-op"} path`, () => {
       const retained = [
         "npm: @tpsdev-ai/pi-flair", "npm:@tpsdev-ai/pi-flair ", "npm:@tpsdev-ai/pi-flair@",
         "npm:@tpsdev-ai/pi-flair@ leading", "npm:@tpsdev-ai/pi-flair@1.0 x",
