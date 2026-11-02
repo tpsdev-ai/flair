@@ -125,6 +125,7 @@ import {
 import {
   ApiHttpError,
   ApiRequestOutcomeUnknown,
+  isConnectPhaseFailure,
   readSecretFileSecure,
   readAdminPassFileSecure,
   defaultAdminPassPath,
@@ -2885,9 +2886,12 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     if (err instanceof ApiRequestOutcomeUnknown) throw err;
     // flair#1719: the resolved port came from Harper's boot record, which can
     // be stale for the default install. Before surfacing a connect failure,
-    // try the port the operator actually wrote in ~/.flair/config.yaml.
+    // try the port the operator actually wrote in ~/.flair/config.yaml. Only a
+    // connect-phase failure qualifies: any other transport failure may have
+    // sent the request before the connection dropped, so replaying it on
+    // another instance could apply a write twice (flair#2869).
     const altPort = hasExplicitBase ? null : alternateConfiguredLocalPort({});
-    if (altPort !== null && isFederationStatusConnectFailure(err)) {
+    if (altPort !== null && isConnectPhaseFailure(err)) {
       const altUrl = `http://127.0.0.1:${altPort}`;
       try {
         return await authedRequest(method, path, body, { ...requestOptions, baseUrl: altUrl });
@@ -2902,13 +2906,16 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
 /**
  * Turn undici/Node's bare `TypeError: fetch failed` into a sentence naming the
  * actor (the Flair instance URL), the state (no HTTP response) and a remedy
- * the operator can act on — flair#1719 requirement 3. Non-connect errors
- * (HTTP 401/403/5xx, auth failures) pass through unchanged so callers keep
- * their own handling. The `flairFriendly` marker lets the top-level CLI entry
- * print just the message instead of a stack.
+ * the operator can act on — flair#1719 requirement 3. Only a connect-phase
+ * failure (see isConnectPhaseFailure) is described this way; a transport
+ * failure after the request was sent is not a connection failure and passes
+ * through unchanged (flair#2869). Non-connect errors (HTTP 401/403/5xx, auth
+ * failures) pass through unchanged so callers keep their own handling. The
+ * `flairFriendly` marker lets the top-level CLI entry print just the message
+ * instead of a stack.
  */
 function describeApiConnectFailure(err: unknown, url: string): unknown {
-  if (!isFederationStatusConnectFailure(err)) return err;
+  if (!isConnectPhaseFailure(err)) return err;
   const friendly = new Error(
     `Cannot reach the Flair instance at ${url} — the connection failed (no HTTP response).\n`
     + `  Start it with \`flair start\`, or point this command at the right instance with `

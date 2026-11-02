@@ -303,15 +303,17 @@ export class ApiRequestTimeout extends Error {
 export class ApiRequestOutcomeUnknown extends Error {
   readonly method: string;
   readonly path: string;
-  readonly deadlineMs: number;
-  /** The status line that arrived before the deadline fired, when one did. */
+  /** The deadline that expired, or undefined for a transport failure. */
+  readonly deadlineMs: number | undefined;
+  /** The status line that arrived before the failure fired, when one did. */
   readonly status: number | undefined;
-  constructor(method: string, path: string, deadlineMs: number, status: number | undefined, source: RequestDeadlineSource) {
+  constructor(method: string, path: string, deadlineMs: number | undefined, status: number | undefined, source: RequestDeadlineSource, detail?: string) {
     const envName = deadlineEnvName(source);
     super(
-      `${method} ${path} may or may not have taken effect: no complete response within ${deadlineMs} ms` +
-        (envName === undefined ? "" : ` (${envName})`) +
-        `${deadlineStatusClause(status)}. Expiry does not show whether the request was delivered or took effect; do not retry it blindly. ${deadlineRemedy(source)}`,
+      detail ??
+        `${method} ${path} may or may not have taken effect: no complete response within ${deadlineMs} ms` +
+          (envName === undefined ? "" : ` (${envName})`) +
+          `${deadlineStatusClause(status)}. Expiry does not show whether the request was delivered or took effect; do not retry it blindly. ${deadlineRemedy(source)}`,
     );
     this.name = "ApiRequestOutcomeUnknown";
     this.method = method;
@@ -319,6 +321,58 @@ export class ApiRequestOutcomeUnknown extends Error {
     this.deadlineMs = deadlineMs;
     this.status = status;
   }
+
+  /**
+   * A write's connection failed after the request was sent and before any
+   * response arrived. The request may have been applied, so this is an unknown
+   * outcome: name the instance, say the outcome is unknown, and tell the
+   * operator to check before retrying (flair#2869).
+   */
+  static fromTransportFailure(method: string, path: string, url: string, cause: unknown): ApiRequestOutcomeUnknown {
+    const err = new ApiRequestOutcomeUnknown(
+      method,
+      path,
+      undefined,
+      undefined,
+      "explicit",
+      `${method} ${path} may or may not have been applied on ${url}: the connection failed after the request was sent, so no response arrived. ` +
+        `Check the instance's state before retrying; do not resend it.`,
+    );
+    (err as { cause?: unknown }).cause = cause;
+    return err;
+  }
+}
+
+/**
+ * The errno and undici codes that only a connection-establishment failure can
+ * carry — the request never left. Node's undici wraps the errno in the
+ * `fetch failed` TypeError's `cause`; Bun puts `code` on the TypeError itself,
+ * so the chain starts at the error. Anything else (ECONNRESET, EPIPE,
+ * UND_ERR_SOCKET, UND_ERR_CLOSED, a bare `fetch failed` with no code) may have
+ * been sent before the connection failed and is NOT eligible for a retry on a
+ * different instance (flair#2869).
+ */
+const CONNECT_PHASE_FAILURE_CODES: ReadonlySet<string> = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EADDRNOTAVAIL",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+/** True when `err` or a `cause` in its chain carries a connect-phase code. */
+export function isConnectPhaseFailure(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; current !== null && current !== undefined && depth < 8; depth++) {
+    if (typeof current === "object" && "code" in current) {
+      const code = (current as { code?: unknown }).code;
+      if (typeof code === "string" && CONNECT_PHASE_FAILURE_CODES.has(code)) return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 /**
@@ -1276,19 +1330,25 @@ export async function sendJsonRequest(
   }, deadlineMs);
   const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
   let res: Response | undefined;
+  let fetchRejected = false;
   try {
-    res = await fetch(url.href, {
-      method,
-      headers: {
-        "content-type": "application/json",
-        ...(authHeader ? { authorization: authHeader } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: controller.signal,
-      // "manual" hands back the 3xx itself, so the refusal can name its status;
-      // the location it names is never requested.
-      ...(transport.refuseRedirects ? { redirect: "manual" as const } : {}),
-    });
+    try {
+      res = await fetch(url.href, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          ...(authHeader ? { authorization: authHeader } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+        // "manual" hands back the 3xx itself, so the refusal can name its status;
+        // the location it names is never requested.
+        ...(transport.refuseRedirects ? { redirect: "manual" as const } : {}),
+      });
+    } catch (err: unknown) {
+      fetchRejected = true;
+      throw err;
+    }
     if (transport.refuseRedirects && res.status >= 300 && res.status < 400) {
       throw new ApiHttpError(res.status, `HTTP ${res.status}: the instance answered with a redirect, which this request does not follow`);
     }
@@ -1328,6 +1388,13 @@ export async function sendJsonRequest(
       const status = res?.status;
       if (readOnly) throw new ApiRequestTimeout(method, url.pathname, deadlineMs, status, deadlineSource);
       throw new ApiRequestOutcomeUnknown(method, url.pathname, deadlineMs, status, deadlineSource);
+    }
+    // Only a connect-phase failure proves the request was never sent, so only
+    // it can be retried on another configured instance. Any other transport
+    // failure may have delivered the request before the connection dropped:
+    // for a write the outcome is unknown, never a clean failure (flair#2869).
+    if (fetchRejected && !readOnly && !isConnectPhaseFailure(err)) {
+      throw ApiRequestOutcomeUnknown.fromTransportFailure(method, url.pathname, url.origin, err);
     }
     throw err;
   } finally {
