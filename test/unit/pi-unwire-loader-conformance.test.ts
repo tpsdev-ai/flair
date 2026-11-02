@@ -3,15 +3,13 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ALL_CLIENTS, isFlairOwnedPiEntry, piSettingsPath, resolvePiExtensionPath } from "../../src/install/clients.ts";
-import { withHome } from "../../src/lib/home.ts";
 
 const workspace = join(import.meta.dir, "../../packages/pi-flair");
-const piClient = ALL_CLIENTS.find(client => client.id === "pi")!;
+const clientsUrl = pathToFileURL(join(import.meta.dir, "../../src/install/clients.ts")).href;
 let fixture: string | undefined;
 const previousPiDir = process.env.PI_CODING_AGENT_DIR;
 
-function readPiSettings(home: string, project: string, sources: string[] = []): { packages: unknown[]; extensions: string[]; resolved: { source: string; type: string; name?: string; path?: string }[] } {
+function readPiSettings(home: string, project: string, sources: string[] = [], unwire = false): { settingsPath: string; result?: { ok: boolean; removed: boolean }; packages: unknown[]; extensions: string[]; resolved: { source: string; type: string; name?: string; path?: string; localCandidate: boolean; flairOwned: boolean; flairPath?: string }[] } {
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, USERPROFILE: home };
   if (process.env.PI_CODING_AGENT_DIR === undefined) delete env.PI_CODING_AGENT_DIR;
   const script = `
@@ -20,13 +18,22 @@ function readPiSettings(home: string, project: string, sources: string[] = []): 
     const entry = Bun.resolveSync("@earendil-works/pi-coding-agent", ${JSON.stringify(workspace)});
     const { SettingsManager } = await import(pathToFileURL(join(dirname(entry), "core/settings-manager.js")).href);
     const { DefaultPackageManager } = await import(pathToFileURL(join(dirname(entry), "core/package-manager.js")).href);
+    const { getAgentDir } = await import(pathToFileURL(join(dirname(entry), "config.js")).href);
+    const { isLocalPath } = await import(pathToFileURL(join(dirname(entry), "utils/paths.js")).href);
+    const { ALL_CLIENTS, isFlairOwnedPiEntry, piSettingsPath, resolvePiExtensionPath } = await import(${JSON.stringify(clientsUrl)});
+    const settingsPath = piSettingsPath();
+    const result = ${unwire} ? ALL_CLIENTS.find(client => client.id === "pi").unwire() : undefined;
     const loader = SettingsManager.create(${JSON.stringify(project)});
-    const manager = new DefaultPackageManager({ cwd: ${JSON.stringify(project)}, agentDir: ${JSON.stringify(process.env.PI_CODING_AGENT_DIR ?? join(home, ".pi/agent"))}, settingsManager: loader });
+    const manager = new DefaultPackageManager({ cwd: ${JSON.stringify(project)}, agentDir: getAgentDir(), settingsManager: loader });
     const resolved = ${JSON.stringify(sources)}.map(source => {
       const parsed = manager.parseSource(source);
-      return { source, type: parsed.type, name: parsed.name, path: parsed.type === "local" ? manager.resolvePathFromBase(parsed.path, manager.getBaseDirForScope("user")) : undefined };
+      const base = manager.getBaseDirForScope("user");
+      return { source, type: parsed.type, name: parsed.name, localCandidate: isLocalPath(source),
+        path: parsed.type === "local" ? manager.resolvePathFromBase(parsed.path, base) : undefined,
+        flairOwned: isFlairOwnedPiEntry(source),
+        flairPath: parsed.type === "local" ? resolvePiExtensionPath(source, ${JSON.stringify(home)}, base) : undefined };
     });
-    console.log(JSON.stringify({ packages: loader.getPackages(), extensions: loader.getExtensionPaths(), resolved }));
+    console.log(JSON.stringify({ settingsPath, result, packages: loader.getPackages(), extensions: loader.getExtensionPaths(), resolved }));
   `;
   let child: ReturnType<typeof Bun.spawnSync>;
   try {
@@ -53,8 +60,8 @@ afterEach(() => {
 });
 
 describe("pi settings loader conformance", () => {
-  for (const override of [false, true]) {
-    it(`reads unwire results through pi's file loader ${override ? "with the agent-directory override" : "in the default agent directory"}`, () => {
+  for (const override of ["default", "absolute", "tilde", "home", "file-url"]) {
+    it(`reads unwire results through pi's file loader with the ${override} agent directory`, () => {
       const manifest = JSON.parse(readFileSync(join(workspace, "package.json"), "utf8"));
       const library = "@earendil-works/pi-coding-agent";
       expect(manifest.devDependencies[library]).toBeDefined();
@@ -63,8 +70,9 @@ describe("pi settings loader conformance", () => {
       const project = join(fixture, "project");
       mkdirSync(home);
       mkdirSync(project);
-      if (override) process.env.PI_CODING_AGENT_DIR = join(fixture, "agent-override");
-      else delete process.env.PI_CODING_AGENT_DIR;
+      const agentDir = override === "default" ? join(home, ".pi/agent") : override === "home" ? home : join(home, "alt");
+      if (override === "default") delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = override === "tilde" ? "~/alt" : override === "home" ? "~" : override === "file-url" ? pathToFileURL(agentDir).href : agentDir;
       const canonical = "npm:@tpsdev-ai/pi-flair";
       const documented = "~/.pi/agent/npm/node_modules/@tpsdev-ai/pi-flair/dist/index.js";
       const lookalikes = [
@@ -85,27 +93,53 @@ describe("pi settings loader conformance", () => {
       ];
       const packages = [...owned, { source: `${canonical}@latest`, extensions: ["dist/index.js"] }, ...lookalikes];
       const extensions = [documented, ...owned, ...lookalikes];
-      const path = withHome(home, () => piSettingsPath());
-      expect(path).toBe(join(override ? process.env.PI_CODING_AGENT_DIR! : join(home, ".pi/agent"), "settings.json"));
+      const path = join(agentDir, "settings.json");
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, JSON.stringify({ packages, extensions }));
       const cases = [...owned, ...lookalikes.filter(source => !source.includes("@ leading") && !source.includes("@1.0 x"))];
       const before = readPiSettings(home, project, cases);
+      expect(before.settingsPath).toBe(path);
       for (const answer of before.resolved) {
         const segments = answer.path?.split(sep) ?? [];
         const inside = segments.some((segment, index) => segment === "node_modules" && segments[index + 1] === "@tpsdev-ai" && segments[index + 2] === "pi-flair" && index + 3 < segments.length);
-        const ownedByPi = answer.type === "npm" ? answer.name === "@tpsdev-ai/pi-flair" : inside;
-        expect(withHome(home, () => isFlairOwnedPiEntry(answer.source))).toBe(ownedByPi);
-        if (answer.path) expect(resolvePiExtensionPath(answer.source, home, dirname(path))).toBe(answer.path);
+        const ownedByPi = answer.type === "npm" ? answer.name === "@tpsdev-ai/pi-flair" : answer.localCandidate && inside;
+        expect(answer.flairOwned).toBe(ownedByPi);
+        if (answer.path) expect(answer.flairPath).toBe(answer.path);
       }
       expect(before.packages).toEqual(packages);
       expect(before.extensions).toEqual(extensions);
-      const result = withHome(home, () => piClient.unwire());
-      expect(result.ok).toBe(true);
-      expect(result.removed).toBe(true);
-      const after = readPiSettings(home, project);
+      const after = readPiSettings(home, project, [], true);
+      expect(after.result?.ok).toBe(true);
+      expect(after.result?.removed).toBe(true);
       expect(after.packages).toEqual(lookalikes);
       expect(after.extensions).toEqual(lookalikes);
     });
+  }
+
+  for (const prefix of ["https:", "http:", "ssh:", "github:", "git:", "npm:"]) {
+    for (const whitespace of ["", " "]) {
+      it(`preserves bytes for ${JSON.stringify(whitespace + prefix)} sources containing package-path segments`, () => {
+        fixture = mkdtempSync(join(tmpdir(), "flair-pi-loader-"));
+        const home = join(fixture, "home");
+        const project = join(fixture, "project");
+        mkdirSync(home);
+        mkdirSync(project);
+        process.env.PI_CODING_AGENT_DIR = join(home, "alt");
+        const source = `${whitespace}${prefix}//example.test/owner/repo/node_modules/@tpsdev-ai/pi-flair/index.js`;
+        const path = join(process.env.PI_CODING_AGENT_DIR, "settings.json");
+        mkdirSync(dirname(path), { recursive: true });
+        const bytes = JSON.stringify({ packages: [source, { source }], extensions: [source] }, null, 4) + "\n";
+        writeFileSync(path, bytes);
+        const after = readPiSettings(home, project, [source], true);
+        const answer = after.resolved[0];
+        expect(readFileSync(path, "utf8")).toBe(bytes);
+        expect(answer.localCandidate).toBe(false);
+        const piType = prefix === "npm:" && !whitespace ? "npm" : ["github:", "git:", "npm:"].includes(prefix) ? "local" : "git";
+        expect(answer.type).toBe(piType);
+        expect(answer.flairOwned).toBe(false);
+        expect(after.result?.ok).toBe(true);
+        expect(after.result?.removed).toBe(false);
+      });
+    }
   }
 });
