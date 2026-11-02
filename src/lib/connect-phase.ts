@@ -1,8 +1,6 @@
 /**
- * One classifier for transport failures that can only happen while the
- * connection is being established, before any request bytes are written.
- * A caller may replay such a request on another configured instance; any other
- * transport failure may have delivered it, so it must not be replayed.
+ * A connect-phase code identifies failure of the current connection attempt.
+ * Replay on another configured instance requires no earlier redirect.
  *
  * Node's undici wraps the errno in the `fetch failed` TypeError's `cause`; Bun
  * puts `code` on the TypeError itself, and Bun may also name a refusal

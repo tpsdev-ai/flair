@@ -298,11 +298,8 @@ export class ApiRequestTimeout extends Error {
 }
 
 /**
- * Thrown when a write crossed the whole-request deadline, or a write's
- * transport failed without a readable response. Neither establishes delivery:
- * the request may not have reached the server, or it may have taken effect.
- * The message says the outcome is unknown, and no caller may retry the write
- * blindly.
+ * Thrown for a write's deadline expiry, non-connect-phase fetch failure, or
+ * failed 2xx body read. No caller may retry the write blindly.
  */
 export class ApiRequestOutcomeUnknown extends Error {
   readonly method: string;
@@ -326,12 +323,7 @@ export class ApiRequestOutcomeUnknown extends Error {
     this.status = status;
   }
 
-  /**
-   * A write's transport failed without a readable response. Whether the write
-   * was applied is unknown, so name the instance, say so, and tell the
-   * operator to check before retrying (flair#2869). `status` is set when the
-   * instance's status line arrived and the response body could not be read.
-   */
+  /** Name the instance and warn against retrying a write with an unknown outcome. */
   static fromTransportFailure(method: string, path: string, url: string, cause: unknown, status?: number): ApiRequestOutcomeUnknown {
     const detail = status === undefined
       ? `${method} ${path} may or may not have been applied on ${url}: the connection failed before any response arrived, so delivery is unknown. ` +
@@ -1298,6 +1290,7 @@ export async function sendJsonRequest(
   if (body) {
     try {
       serializedBody = JSON.stringify(body);
+      if (serializedBody === undefined) throw new Error("JSON.stringify returned undefined");
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(`${method} ${url.pathname} was not sent: the request body could not be serialized to JSON (${reason}).`);
@@ -1378,10 +1371,8 @@ export async function sendJsonRequest(
       if (readOnly) throw new ApiRequestTimeout(method, url.pathname, deadlineMs, status, deadlineSource);
       throw new ApiRequestOutcomeUnknown(method, url.pathname, deadlineMs, status, deadlineSource);
     }
-    // Only a connect-phase failure proves the request was never sent, so only
-    // it can be retried on another configured instance. Any other transport
-    // failure may have delivered the request before the connection dropped:
-    // for a write the outcome is unknown, never a clean failure (flair#2869).
+    // A connect-phase code identifies failure of the current connection attempt;
+    // it proves unsent delivery only if no earlier redirect was followed.
     if (fetchRejected && !readOnly && !isConnectPhaseFailure(err)) {
       throw ApiRequestOutcomeUnknown.fromTransportFailure(method, url.pathname, url.origin, err);
     }

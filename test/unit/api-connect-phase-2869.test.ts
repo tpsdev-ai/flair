@@ -1,8 +1,7 @@
 /**
  * api-connect-phase-2869.test.ts — the CLI's alternate-configured-port
- * fallback (src/cli.ts `api()`) engages only for a connect-phase failure, and a
- * write that may have been delivered is reported as an unknown outcome instead
- * of being replayed on the alternate port (flair#2869).
+ * fallback (src/cli.ts `api()`) engages only for a connect-phase failure
+ * (flair#2869).
  *
  * The CLI cases drive the built CLI against real node:http servers on ephemeral
  * ports, so the CLI's transport is Node's undici; the classifier's Bun case is a
@@ -233,7 +232,7 @@ describe("api() — alternate-port fallback is connect-phase only (flair#2869)",
     }
   }, 30_000);
 
-  test("a write whose response body is cut off is an unknown outcome naming the status and the alternate receives no request", async () => {
+  test("a write whose 200 response body is cut off is an unknown outcome naming the status and the alternate receives no request", async () => {
     ensureCliBuild();
     const primary = await serve(readThenTruncateBody);
     const alternate = await serve(answerOk);
@@ -259,6 +258,25 @@ describe("api() — alternate-port fallback is connect-phase only (flair#2869)",
     let caught: unknown;
     try {
       await authedRequest("POST", "/PromoteMemoryCandidate", body, {
+        baseUrl: server.baseUrl,
+        agentId: "agent-a",
+        explicitAdminPass: "stub-pass",
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(server.requests).toEqual([]);
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught instanceof ApiRequestOutcomeUnknown).toBe(false);
+    expect((caught as Error).message).toContain("could not be serialized to JSON");
+    expect((caught as Error).message).toContain("was not sent");
+  });
+
+  test("a function body is refused as a serialization error without sending a request", async () => {
+    const server = await serve(answerOk);
+    let caught: unknown;
+    try {
+      await authedRequest("POST", "/PromoteMemoryCandidate", () => {}, {
         baseUrl: server.baseUrl,
         agentId: "agent-a",
         explicitAdminPass: "stub-pass",
