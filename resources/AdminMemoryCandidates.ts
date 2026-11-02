@@ -87,9 +87,7 @@ export class AdminMemoryCandidates extends Resource {
     if (rewritten) return rewritten;
 
     const target = requestTarget(this);
-    // The listing reads the query Harper parsed. A raw `#` makes a WHATWG
-    // parse drop a query after it or shorten a query value, so a target whose
-    // parsed query would differ is refused instead.
+    // Refuse a target whose parsed query differs from its raw query.
     if (target && !whatwgQueryMatchesRawTarget(target.raw)) return nonCanonicalRequestTargetRefusal();
     const params = target?.url.searchParams;
     const rawLimit = params?.get("limit") ?? null;

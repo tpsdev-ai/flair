@@ -1,2 +1,2 @@
-- **A signed request is verified over the request target its route serves, and `/AdminMemoryCandidates/{agentId}` reads the query the raw target carries (#2861).**
-  When a signed request reaches signature verification, a target WHATWG URL parsing would rewrite is answered `400 non_canonical_request_target` instead. The candidate listing answers a target whose parsed query would differ the same way before it reads that query. A target the parser derives unchanged, including an encoded `#`, `%2F` and `%5C`, is handled as before.
+- **Refuse signed requests whose raw target WHATWG URL parsing would rewrite before verification (#2861).**
+  The signature is verified over the target exactly as received. The candidate listing refuses a target whose parsed query would differ before reading that query.

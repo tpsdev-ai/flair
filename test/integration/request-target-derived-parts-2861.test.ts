@@ -1,12 +1,10 @@
 /**
- * request-target-derived-parts-2861.test.ts — on real Harper, the listing at
- * `/AdminMemoryCandidates/{agentId}` reads the query the raw target carries, and
- * a signed request is verified over the target its route serves.
+ * request-target-derived-parts-2861.test.ts — real Harper.
  *
- * A target a WHATWG parse would rewrite (a raw `#` stays in Harper's path and
- * query) is refused with the named 400 `non_canonical_request_target`; encoded
- * forms, duplicate query keys and a raw `#` that changes no query keep working.
- * Every REST request under test goes over a raw socket.
+ * Signed requests whose raw target WHATWG URL parsing would rewrite are refused
+ * before verification, so the signature covers the target exactly as received.
+ * The candidate listing refuses a target whose parsed query would differ; it
+ * accepts a raw `#` that leaves the query unchanged.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -187,7 +185,7 @@ describe("GET /AdminMemoryCandidates reads the query the raw target carries", ()
   }, 30_000);
 });
 
-describe("a signed request is verified over the target the route serves", () => {
+describe("signed requests refuse rewritten raw targets before verification", () => {
   it("a raw `#` in the path is refused before verification", async () => {
     expectNonCanonical(await signedGet(`/Memory/${AGENT}#x`), "path #x");
     expectNonCanonical(await signedGet(`/Memory/${AGENT}#x?x=1`), "path #x with query");

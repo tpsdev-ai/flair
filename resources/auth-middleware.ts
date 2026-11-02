@@ -774,10 +774,8 @@ server.http(async (request: any, nextLayer: any) => {
 
   const { agentId, tsRaw, nonce, signatureB64 } = parsed;
 
-  // A signed request is verified over exactly the target the route serves. The
-  // payload below is built from the WHATWG pathname and search; a target a
-  // WHATWG parse would rewrite (a raw `#` stays in Harper's path and query) is
-  // refused before verification. See request-target.ts.
+  // Refuse a signed request whose raw target WHATWG URL parsing would rewrite
+  // before verification, so the signature covers the target exactly as received.
   if (!whatwgUrlMatchesRawTarget(rawTarget)) {
     return nonCanonicalRequestTargetRefusal(String(request.method ?? ""));
   }

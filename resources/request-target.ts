@@ -36,11 +36,7 @@ export function requestQuery(rawTarget: string): string {
   return q === -1 ? "" : rawTarget.slice(q + 1);
 }
 
-/**
- * True when WHATWG URL parsing of `rawTarget` derives the same path and query
- * as Harper's raw-target parse: the path is everything before the first `?`
- * (a raw `#` and the text after it stay in the path), and the query follows.
- */
+/** True when the serialized WHATWG `pathname + search` equals `rawTarget`. */
 export function whatwgUrlMatchesRawTarget(rawTarget: string): boolean {
   let url: URL;
   try {
@@ -51,7 +47,7 @@ export function whatwgUrlMatchesRawTarget(rawTarget: string): boolean {
   return url.pathname + url.search === rawTarget;
 }
 
-/** True when WHATWG URL parsing of `rawTarget` derives the same query as Harper's raw-target parse. */
+/** True when the serialized WHATWG `search` without its leading `?` equals `requestQuery(rawTarget)`. */
 export function whatwgQueryMatchesRawTarget(rawTarget: string): boolean {
   let url: URL;
   try {
