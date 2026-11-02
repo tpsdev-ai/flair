@@ -75,3 +75,16 @@ describe("flair#2889 — --admin-pass-file does not reorder options", () => {
     expect(Object.keys(FIXTURE).filter((path) => !walked.has(path))).toEqual([]);
   });
 });
+
+for (const path of ["agent list", "mcp enable"]) {
+  test(`${path} file help describes the file and option conflict`, () => {
+    const cmd = walkCliCommands(program).find((entry) => entry.path === `flair ${path}`)?.cmd;
+    expect(cmd).toBeDefined();
+    const help = cmd!.options.find((option) => option.long === "--admin-pass-file")!.description;
+    expect(help).toBe(
+      "Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. " +
+      "Combining it with --admin-pass is a usage error.",
+    );
+    expect(cmd!.helpInformation().replace(/\s+/g, " ")).toContain(help);
+  });
+}

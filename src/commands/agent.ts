@@ -453,11 +453,10 @@ export function register(program: Command): void {
     .option("--port <port>", "Harper HTTP port")
     .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (opts) => {
+      const inlineAdminPass = opts.adminPass;
       applyAdminPassFile(opts);
       const port = resolveHttpPort(opts);
-      // fromEnv is true ONLY when the resolved value came from env (no inline override).
-      const adminPassFromEnv = !opts.adminPass && (!!process.env.FLAIR_ADMIN_PASS || !!process.env.HDB_ADMIN_PASSWORD);
-      if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
+      if (shouldShowInlineSecretWarning(inlineAdminPass, false, new Set(["--admin-pass"]), "--admin-pass")) {
         console.error(INLINE_ADMIN_PASS_WARNING);
       }
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
@@ -583,12 +582,11 @@ export function register(program: Command): void {
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .action(async (id: string, opts) => {
+      const inlineAdminPass = opts.adminPass;
       applyAdminPassFile(opts);
       const httpPort = resolveHttpPort(opts);
       const opsPort = resolveOpsPort(opts);
-      // fromEnv is true ONLY when the resolved value came from env (no inline override).
-      const adminPassFromEnv = !opts.adminPass && !!process.env.FLAIR_ADMIN_PASS;
-      if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
+      if (shouldShowInlineSecretWarning(inlineAdminPass, false, new Set(["--admin-pass"]), "--admin-pass")) {
         console.error(INLINE_ADMIN_PASS_WARNING);
       }
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";

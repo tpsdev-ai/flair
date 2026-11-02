@@ -926,7 +926,7 @@ export function defaultAdminPassPath(): string {
 export const ADMIN_PASS_FILE_FLAG = "--admin-pass-file <path>";
 export const ADMIN_PASS_FILE_HELP =
   "Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. " +
-  "An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.";
+  "Combining it with --admin-pass is a usage error.";
 export const ADMIN_PASS_FLAG = "--admin-pass <pass>";
 export const ADMIN_PASS_HELP =
   "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)";
@@ -948,29 +948,12 @@ export function addAdminPassOptions(
 }
 
 /**
- * Resolve the admin password for the commands that declare the shared
- * credential flags, through the ONE resolver (`resolveAdminPassFromSources` —
- * the same one `federation token`/`pair` use, flair#1873/#1910). The resolved
- * value is written back into the `adminPass` slot every call site reads.
- *
- * Precedence, as the usage text states: an explicit `--admin-pass-file` or
- * `--admin-pass` over the ambient `FLAIR_ADMIN_PASS`/`HDB_ADMIN_PASSWORD`.
- * Supplying BOTH the file and the flag is a usage error (it used to let the
- * flag silently win); a file that is missing, empty or group-/world-readable
- * is refused naming the path and its mode. Never prints the value.
+ * Copy a nonempty explicit password into `opts.adminPass`; callers own environment fallback.
+ * Refuse combined options and missing, empty or group-/world-accessible files.
+ * Group/world permission refusals name the path and mode; missing and empty file errors name only the path.
  */
 export function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
   try {
-    // envPass is DELIBERATELY omitted: this wrapper folds an explicit
-    // `--admin-pass-file` (or `--admin-pass`) into `opts.adminPass`, and each
-    // call site keeps its own `opts.adminPass ?? FLAIR_ADMIN_PASS` fallback —
-    // exactly main's shape. Resolving the ambient env HERE would pre-fill
-    // `opts.adminPass`, and a call site that threads it as `explicitAdminPass`
-    // (memory add, soul, …) would then send ambient admin Basic auth where it
-    // used to send nothing and let the `--agent`/env tier decide (flair#1910
-    // round 2: `federation sync` merged nothing in the mixed-version compat
-    // lane because `memory add --agent X` with FLAIR_ADMIN_PASS set signed as
-    // admin, not as X).
     const pass = resolveAdminPassFromSources({
       adminPassFile: opts.adminPassFile,
       adminPass: opts.adminPass,
