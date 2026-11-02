@@ -20,8 +20,13 @@
  * Pairs: floor @langchain/classic 1.0.0 with @langchain/core 1.0.0, and
  * @langchain/classic 1.0.55 (published 2026-10-22) with @langchain/core 1.3.0
  * (published 2026-10-22). The install passes npm --before at seven days ago, so
- * npm resolves no version published inside the bake window, and a pair pinned
- * to a younger release fails to resolve. Each classic release's
+ * npm resolves no REGISTRY package (pinned specs and transitives alike)
+ * published inside the bake window, and a pair pinned to a younger release
+ * fails to resolve. The two repo-built local tarballs are not registry
+ * packages, so the cutoff does not apply to them. npm's user and global config
+ * files are replaced by empty scratch files and the peer-check overrides are
+ * pinned off; npm's built-in config is not replaced, so setup refuses to
+ * install while npm reports any effective min-release-age-exclude (any source). Each classic release's
  * @langchain/core peer range is what the pair satisfies: 1.0.0 wants ^1.0.0,
  * 1.0.55 wants ^1.3.0.
  */
@@ -52,11 +57,12 @@ const BUILD_TIMEOUT_MS = 20_000;
 const INIT_TIMEOUT_MS = 10_000;
 const INSTALL_TIMEOUT_MS = 60_000;
 const INVOKE_TIMEOUT_MS = 30_000;
-// docs/supply-chain-policy.md §1 (7 days); --before enforces it for the whole tree.
+// docs/supply-chain-policy.md §1 (7 days); --before enforces it for every registry-resolved package
+// (not the two local tarballs); setup refuses to install while any age exclusion is effective.
 const DEPENDENCY_BAKE_DAYS = 7;
 
-// This file's setup hook runs the build, two packs, and two init + install
-// children: 20 + 2 x 20 + 2 x (10 + 60) = 200 s.
+// This file's setup hook runs the build, two packs, and two init + age-check +
+// install children: 20 + 2 x 20 + 2 x (10 + 10 + 60) = 220 s.
 const SETUP_TIMEOUT_MS = 240_000;
 setDefaultTimeout(SETUP_TIMEOUT_MS);
 
@@ -74,6 +80,12 @@ function hostEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   env.HOME = join(scratch, "home");
   env.npm_config_cache = join(scratch, "npm-cache");
   env.npm_config_userconfig = join(scratch, "npmrc");
+  // Global config too: a global npmrc could carry min-release-age-exclude (which
+  // exempts packages from --before) or a peer-check override. Both config files
+  // point at empty scratch files, and the peer-check overrides are pinned off.
+  env.npm_config_globalconfig = join(scratch, "global-npmrc");
+  env.npm_config_legacy_peer_deps = "false";
+  env.npm_config_force = "false";
   env.npm_config_audit = "false";
   env.npm_config_fund = "false";
   return { ...env, ...overrides };
@@ -102,6 +114,22 @@ function run(
     );
   }
   return result.stdout;
+}
+
+/**
+ * Refuse to install while npm reports any effective min-release-age-exclude,
+ * from ANY config source (npm's built-in config included): an excluded package
+ * is resolved without the --before cutoff. npm prints "" for an empty list and
+ * "undefined" for a key it does not know (no exclusion feature at all).
+ */
+function assertNoAgeExclusion(cwd: string, env: NodeJS.ProcessEnv = hostEnv()): void {
+  const effective = run("npm", ["config", "get", "min-release-age-exclude"], cwd, INIT_TIMEOUT_MS, env).trim();
+  if (effective !== "" && effective !== "undefined" && effective !== "[]") {
+    throw new Error(
+      `npm has an effective min-release-age-exclude (${effective}) in ${cwd}; the --before cutoff ` +
+        "would not apply to those packages. Remove the exclusion from the npm config that sets it.",
+    );
+  }
 }
 
 /**
@@ -211,6 +239,8 @@ beforeAll(() => {
   scratch = mkdtempSync(join(tmpdir(), "flair-n8n-chat-memory-"));
   mkdirSync(join(scratch, "home"));
   mkdirSync(join(scratch, "packed"));
+  writeFileSync(join(scratch, "npmrc"), "");
+  writeFileSync(join(scratch, "global-npmrc"), "");
 
   // The test loads the built node, not src. The shared unit lane builds
   // flair-client before package tests; this build makes the node's dist.
@@ -242,6 +272,7 @@ beforeAll(() => {
     const prefix = join(scratch, `host-classic-${pair.classic}-core-${pair.core}`);
     mkdirSync(prefix);
     run("npm", ["init", "-y"], prefix, INIT_TIMEOUT_MS);
+    assertNoAgeExclusion(prefix);
     run(
       "npm",
       [
@@ -265,6 +296,37 @@ beforeAll(() => {
 
 afterAll(() => {
   if (scratch) rmSync(scratch, { recursive: true, force: true });
+});
+
+describe("the host install's npm config cannot exempt packages from the cutoff", () => {
+  // npm's DEFAULT global config file ($PREFIX/etc/npmrc) and its built-in
+  // config are ambient. hostEnv points npm at empty scratch user and global
+  // config files and pins the peer-check overrides off; setup also refuses to
+  // install while any min-release-age-exclude is effective (any source).
+  function npmGet(key: string, env: NodeJS.ProcessEnv): string {
+    return run("npm", ["config", "get", key], scratch, INIT_TIMEOUT_MS, env).trim();
+  }
+
+  test("control: without the override npm selects a different global config path", () => {
+    const env = hostEnv();
+    delete env.npm_config_globalconfig;
+    expect(npmGet("globalconfig", env)).not.toBe(join(scratch, "global-npmrc"));
+  });
+
+  test("with hostEnv, npm's global config is the empty scratch file and peer-check overrides read false", () => {
+    const env = hostEnv();
+    expect(npmGet("globalconfig", env)).toBe(join(scratch, "global-npmrc"));
+    expect(npmGet("userconfig", env)).toBe(join(scratch, "npmrc"));
+    expect(npmGet("legacy-peer-deps", env)).toBe("false");
+    expect(npmGet("force", env)).toBe("false");
+  });
+
+  test("the setup guard refuses an effective age exclusion and passes an empty one", () => {
+    expect(() => assertNoAgeExclusion(scratch)).not.toThrow();
+    expect(() =>
+      assertNoAgeExclusion(scratch, hostEnv({ npm_config_min_release_age_exclude: "@langchain/*" })),
+    ).toThrow(/effective min-release-age-exclude/);
+  });
 });
 
 describe("the built FlairChatMemory through a real host @langchain/classic", () => {
