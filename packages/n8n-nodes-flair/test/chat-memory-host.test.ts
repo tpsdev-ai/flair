@@ -7,8 +7,8 @@
  * into a scratch prefix, without --legacy-peer-deps, at the declared floor and
  * at a current release. The pack and isolated-install harness follows
  * host-parser.test.ts (pack at lines 180-208, install at 214-228, host env at
- * 79-90); this file differs only in the versions it installs and the node it
- * drives.
+ * 79-90); this file reuses that harness and changes the installed versions and
+ * the node it drives.
  *
  * The driver constructs the node's memory through supplyData and runs the two
  * calls n8n makes on a Memory port: n8n's saveToMemory calls
@@ -44,8 +44,8 @@ const PAIRS: VersionPair[] = [
   { classic: "1.0.55", core: "1.3.0" },
 ];
 
-// Same child bounds as host-parser.test.ts. The floor install measured 12 s and
-// the current install 13 s on 2026-11-02; 60 s is over four times the slowest.
+// Same child bounds as host-parser.test.ts. The floor install measured 12 s on
+// 2026-11-02; 60 s is five times that.
 const BUILD_TIMEOUT_MS = 20_000;
 const INIT_TIMEOUT_MS = 10_000;
 const INSTALL_TIMEOUT_MS = 60_000;
