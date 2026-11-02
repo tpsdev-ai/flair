@@ -424,7 +424,7 @@ export async function runFederationVerify(
   let bodyFailed = false;
   let bodyError: unknown;
   // runFederationSyncOnce reports an ordinary failure by RETURNING { error },
-  // so a returned error is the common failure path (a throw is the exception).
+  // so handling a returned error is the ordinary path.
   let syncFailure: Error | null = null;
   // A --peer that matched no listed row: the requested check never ran.
   let unmatchedPeer: string | null = null;
@@ -444,8 +444,8 @@ export async function runFederationVerify(
     log("   Pushing canary via federation sync…");
     const syncResult = await deps.syncOnce(opts.syncOpts);
     if (syncResult.error) {
-      // The canary never left this instance, so there is nothing to probe:
-      // the verification failed, and that failure belongs in the verdict.
+      // A sync error means the check could not complete; that failure belongs
+      // in the verdict rather than being probed past.
       syncFailure = syncResult.error;
       break verifyBody;
     } else if (syncResult.pushed > 0) {
