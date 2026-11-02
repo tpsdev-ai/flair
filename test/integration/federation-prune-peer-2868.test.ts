@@ -121,9 +121,9 @@ async function peerIds(): Promise<string[]> {
   return ((JSON.parse(text).peers ?? []) as any[]).map((p) => String(p.id));
 }
 
-/** A local listener for the outcome branches a real Harper cannot reach: a
- *  2xx DELETE whose row survives, a read-back that fails, and a refused
- *  DELETE. It answers the peer list as admin and ignores credentials. */
+/** A local listener for the outcome branches the real-Harper cases do not
+ *  exercise: a 2xx DELETE whose row survives, a read-back that fails, and a
+ *  refused DELETE. It answers the peer list as admin and ignores credentials. */
 async function startStub(opts: { deleteStatus: number; readBack: "present" | "fail" }): Promise<{ url: string; id: string; close: () => Promise<void> }> {
   const id = `stub-spoke-2868-${sfx}`;
   const stale = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
