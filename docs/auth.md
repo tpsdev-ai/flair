@@ -373,11 +373,9 @@ claimed or missing provenance does not exempt them. Lookup failure aborts the
 write. This is an exact-match backstop, not semantic detection of paraphrases.
 Existing Soul records remain readable without a migration.
 
-The legacy `adk:` body-tag and stored-tag refusal is a compatibility bridge
-whose removal deadline is **2026-11-30** (`ADK_SOUL_REFUSE_KILL_DATE` in
-`resources/soul-adk-guard.ts`, checked by tests; the runtime refusal does
-not read it). Runtime denial itself never depends on
-connector names — Soul writes are deny-by-default, and Flair stamps
-`sourceClass` from the authenticated credential, not from a body field.
-Removal of the vendor-string bridge is #1540; do not grow a per-connector
-blacklist in Soul.
+A write request that supplies a non-empty `scopeTag` or a non-empty `tags`
+array is refused with `soul_scope_fields_not_writable` after source
+authorization and before any write, whatever the tag's prefix. Runtime denial
+does not depend on connector names — Soul writes are deny-by-default, and Flair
+stamps `sourceClass` from the authenticated credential, not from a body field.
+Do not grow a per-connector blacklist in Soul.

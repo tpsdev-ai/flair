@@ -172,7 +172,7 @@ afterAll(async () => {
 }, HARPER_STOP_BUDGET_MS);
 
 describe("flair restore refuses an archived Soul row that carries scope fields (flair#1540)", () => {
-  test("the row is refused by name and out of the restore; an adk-tagged row gets today's handling; the rest of the archive restores", async () => {
+  test("the row is refused by name and out of the restore; an adk-tagged row is refused the same way; the rest of the archive restores", async () => {
     const home = tempDir("flair-1540-real-home-");
     const archive = await backup(home, "scoped-soul.json");
     const parsed = JSON.parse(readFileSync(archive, "utf8"));
@@ -196,7 +196,7 @@ describe("flair restore refuses an archived Soul row that carries scope fields (
     expect(restored.stdout).not.toContain("Restore complete");
     expect(restored.stderr.trimEnd().split("\n").sort()).toEqual([
       `Error: Soul ${SCOPE_SOUL_ID} (agent ${AGENT}): PUT failed (HTTP 403): ${REFUSAL}`,
-      `Error: Soul ${ADK_SOUL_ID} (agent ${AGENT}): PUT failed (HTTP 403)`,
+      `Error: Soul ${ADK_SOUL_ID} (agent ${AGENT}): PUT failed (HTTP 403): ${REFUSAL}`,
       `Error: Soul ${SCOPE_SOUL_ID} (agent ${AGENT}): GET failed (HTTP 404): verification failed`,
       `Error: Soul ${ADK_SOUL_ID} (agent ${AGENT}): GET failed (HTTP 404): verification failed`,
     ].sort());

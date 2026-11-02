@@ -3,8 +3,7 @@
  * scope field (schemas/memory.graphql).
  * A write request that supplies a non-empty `scopeTag` or a non-empty `tags`
  * array is refused by name when earlier guards permit the request, whatever
- * the tag's prefix, so this check does not depend on the `adk:` bridge
- * (flair#1540).
+ * the tag's prefix (flair#1540).
  *
  * The predicate runs in the server's write policy. The refusal name is
  * imported by `flair import` and `flair restore`, which report a row refused
