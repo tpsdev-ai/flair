@@ -226,12 +226,13 @@ export function internalContext(): CallContext {
  *
  * **They do still need the CONTEXT.** Only the collection binding is
  * unnecessary for a read, not the identity. `Cls.search(query)` with the second
- * argument left off does not read "as nobody" — outside a Harper request scope
- * (a boot hook, a timer, a queue worker, a detached promise) it resolves to the
- * same trusted `internal` verdict this module exists to keep out of reach, and
- * returns every agent's private records unfiltered. On that path the resource's
- * own `allow*` gate is not consulted at all, so nothing else stands in the way.
- * Pass the context to every call, read or write (flair#936).
+ * argument left off reads in Harper's ambient context — a request's context
+ * can follow a timer or a promise — and with no ambient context it resolves to
+ * the same trusted `internal` verdict this module exists to keep out of reach.
+ * The query still narrows the rows it returns, but no agent scope applies;
+ * Harper consults the resource's `allowRead` only when a permission check is
+ * requested (`query.checkPermission` or `context.authorize`). Pass the context
+ * to every call, read or write (flair#936).
  */
 export async function collectionResource<T = any>(Cls: any, context: CallContext): Promise<T> {
   if (context == null || typeof context !== "object") {

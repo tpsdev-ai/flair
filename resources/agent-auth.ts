@@ -376,8 +376,8 @@ export function isDeliberateInternalCall(context: any): boolean {
 
 /** The advisory text, exported so its content is pinned without tripping the latch. */
 export const INTERNAL_BY_OMISSION_WARNING =
-  "[flair-auth] a resource was invoked with NO caller context and resolved to the trusted " +
-  "`internal` verdict: reads are UNFILTERED across every agent, writes are unattributed, and " +
+  "[flair-auth] a resource resolved a call to the trusted `internal` verdict without the " +
+  "deliberate-call marker: reads are UNFILTERED across every agent, writes are unattributed, and " +
   "the admin-only gate (allowAdmin) refuses it. If this is your application's code, pass agentContext(<id>) from " +
   "@tpsdev-ai/flair's in-process seam so the call is scoped and attributed. If the elevated " +
   "authority is genuinely intended, say so with internalContext() and this warning will stop. " +
