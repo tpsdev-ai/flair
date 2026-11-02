@@ -1,0 +1,1 @@
+- **Federation reserves pending Memory retry attempts per batch.** Later batches not reached because an earlier batch failed leave their rows' attempts and last attempt time as stored.
