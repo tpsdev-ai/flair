@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, statSync, uti
 import { join } from "node:path";
 import { hostname, tmpdir } from "node:os";
 import { probeMigrationDataDir } from "../../resources/migrations/data-dir.ts";
-import { acquireMigrationLock, _resetInProcessLockForTests, DEFAULT_STALE_MS } from "../../resources/migrations/lock.ts";
+import { acquireMigrationLock, _resetInProcessLockForTests, DEFAULT_STALE_MS, defaultIsProcessAlive } from "../../resources/migrations/lock.ts";
 
 let testRoot: string;
 let lockPath: string;
@@ -65,7 +65,7 @@ describe("acquireMigrationLock — basic acquire/release", () => {
     }
   });
 
-  it("release() leaves a successor's lock file in place", () => {
+  it("release() does not remove a successor's lock file", () => {
     const first = acquireMigrationLock({ lockPath });
     expect(first.acquired).toBe(true);
     const successor = { pid: 424242, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z" };
@@ -178,13 +178,66 @@ describe("acquireMigrationLock — stale-tolerant file lock (dead-holder break)"
     if (first.acquired) first.release();
   });
 
-  it("a corrupt/unparseable lock file is treated as dead (breaks it)", () => {
-    const { mkdirSync, writeFileSync } = require("node:fs");
+  it("refuses a corrupt/unparseable lock file instead of breaking it", () => {
     mkdirSync(join(testRoot, ".migrations"), { recursive: true });
     writeFileSync(lockPath, "not json");
 
     const result = acquireMigrationLock({ lockPath });
-    expect(result.acquired).toBe(true);
+    expect(result.acquired).toBe(false);
+    if (!result.acquired) expect(result.reason).toContain("MigrationLockUnreadableError");
+    expect(readFileSync(lockPath, "utf-8")).toBe("not json");
+  });
+
+  it("refuses an incomplete holder record instead of breaking it", () => {
+    mkdirSync(join(testRoot, ".migrations"), { recursive: true });
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid }));
+
+    const result = acquireMigrationLock({ lockPath });
+    expect(result.acquired).toBe(false);
+    if (!result.acquired) expect(result.reason).toContain("MigrationLockUnreadableError");
+    expect(existsSync(lockPath)).toBe(true);
+  });
+});
+
+describe("defaultIsProcessAlive — probe classification (flair#2866)", () => {
+  it("answers false when the probe reports ESRCH", () => {
+    const proc = Bun.spawnSync(["true"]);
+    expect(defaultIsProcessAlive(proc.pid)).toBe(false);
+  });
+
+  it("answers true when the probe reports EPERM (the process exists)", () => {
+    const original = process.kill;
+    (process as unknown as { kill: unknown }).kill = () => {
+      const err = new Error("operation not permitted") as NodeJS.ErrnoException;
+      err.code = "EPERM";
+      throw err;
+    };
+    try {
+      expect(defaultIsProcessAlive(1234)).toBe(true);
+    } finally {
+      (process as unknown as { kill: unknown }).kill = original;
+    }
+  });
+
+  it("refuses acquisition by name when the probe fails for another reason", () => {
+    mkdirSync(join(testRoot, ".migrations"), { recursive: true });
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ pid: process.pid, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z" }),
+    );
+    const original = process.kill;
+    (process as unknown as { kill: unknown }).kill = () => {
+      const err = new Error("invalid argument") as NodeJS.ErrnoException;
+      err.code = "EINVAL";
+      throw err;
+    };
+    try {
+      const result = acquireMigrationLock({ lockPath });
+      expect(result.acquired).toBe(false);
+      if (!result.acquired) expect(result.reason).toContain("MigrationLockProbeError");
+    } finally {
+      (process as unknown as { kill: unknown }).kill = original;
+    }
   });
 });
 

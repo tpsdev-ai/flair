@@ -22,7 +22,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ensureSecureDir, writeSecureFile } from "./dir-safety.js";
-import { migrationLockHandleStatus, migrationLockStillHeld, type MigrationLockHandle } from "./lock.js";
+import { migrationLockHandleStatus, migrationLockIdentity, migrationLockStillHeld, type MigrationLockHandle } from "./lock.js";
 import { txnPausePoint } from "../txn-pause-point.js";
 
 export type MigrationOutcome = "success" | "halted" | "failed";
@@ -97,16 +97,17 @@ export async function writeMigrationStateEntry(
   const dir = dirname(path);
   const designatedLockPath = join(dir, "lock");
   const status = migrationLockHandleStatus(lock);
-  if (status !== "live") {
+  const identity = migrationLockIdentity(lock);
+  if (status !== "live" || identity === null) {
     throw new MigrationStateWriteRefusedError(
       status === "released"
         ? `refusing to write ${path}: the migration lock handle was already released`
         : `refusing to write ${path}: no held migration lock handle was supplied`,
     );
   }
-  if (lock.lockPath !== designatedLockPath) {
+  if (identity.lockPath !== designatedLockPath) {
     throw new MigrationStateWriteRefusedError(
-      `refusing to write ${id} in ${path}: the lock handle is for ${lock.lockPath}, not the state file's lock at ${designatedLockPath}`,
+      `refusing to write ${id} in ${path}: the lock handle is for ${identity.lockPath}, not the state file's lock at ${designatedLockPath}`,
     );
   }
   ensureSecureDir(dir);
@@ -116,13 +117,15 @@ export async function writeMigrationStateEntry(
   // second writer into that window deterministically (flair#2866).
   const pause = txnPausePoint("migration-state-write");
   if (pause) await pause;
-  // Defence in depth, not the serialization guarantee: the acquisition rule
-  // refuses to break a live local holder, which is what keeps a local
-  // successor from reaching this check. This re-check also refuses the
-  // cross-host residual, where age can still replace the lock file.
+  // This re-check detects a lock replaced only if the replacement happened
+  // before this point. writeSecureFile then creates its temporary file,
+  // flushes it and renames it over the state file; a replacement that lands
+  // during that write is not detected again. The local acquisition rule keeps
+  // a live local holder from being replaced; the cross-host age-based takeover
+  // is the schedule where this window remains (flair#2866).
   if (migrationLockHandleStatus(lock) !== "live" || !migrationLockStillHeld(lock)) {
     throw new MigrationStateWriteRefusedError(
-      `refusing to write ${id} in ${path}: the migration lock at ${lock.lockPath} is no longer held by pid ${lock.holder.pid} (started ${lock.holder.startedAt})`,
+      `refusing to write ${id} in ${path}: the migration lock at ${identity.lockPath} is no longer held by pid ${identity.holder.pid} (started ${identity.holder.startedAt})`,
     );
   }
   writeSecureFile(path, JSON.stringify(current, null, 2) + "\n", dir);
