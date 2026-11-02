@@ -1,8 +1,8 @@
 /**
  * request-target-derived-parts-2861.test.ts — real Harper.
  *
- * Signed requests whose raw target WHATWG URL parsing would rewrite are refused
- * before verification, so the signature covers the target exactly as received.
+ * Requests reaching TPS-Ed25519 authentication whose raw targets WHATWG URL
+ * parsing would rewrite receive `400 non_canonical_request_target`.
  * The candidate listing refuses a target whose parsed query would differ; it
  * accepts a raw `#` that leaves the query unchanged.
  */
@@ -185,7 +185,7 @@ describe("GET /AdminMemoryCandidates reads the query the raw target carries", ()
   }, 30_000);
 });
 
-describe("signed requests refuse rewritten raw targets before verification", () => {
+describe("requests reaching TPS-Ed25519 authentication receive 400 non_canonical_request_target for raw targets WHATWG URL parsing would rewrite", () => {
   it("a raw `#` in the path is refused before verification", async () => {
     expectNonCanonical(await signedGet(`/Memory/${AGENT}#x`), "path #x");
     expectNonCanonical(await signedGet(`/Memory/${AGENT}#x?x=1`), "path #x with query");
