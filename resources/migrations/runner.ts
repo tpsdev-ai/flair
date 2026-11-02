@@ -127,10 +127,15 @@ function resolveDeps(deps: RunnerDeps): ResolvedDeps {
  * `/HealthDetail` (progress.ts's state-file status, cleared on the next
  * successful write).
  */
-function recordMigrationStateEntry(path: string, id: string, entry: MigrationStateEntry): void {
+async function recordMigrationStateEntry(
+  path: string,
+  id: string,
+  entry: MigrationStateEntry,
+  lock: Extract<AcquireResult, { acquired: true }>,
+): Promise<void> {
   noteStateWriteAttempt(path);
   try {
-    writeMigrationStateEntry(path, id, entry);
+    await writeMigrationStateEntry(path, id, entry, lock);
     noteStateWriteSuccess();
   } catch (err) {
     const message = (err as Error)?.message ?? String(err);
@@ -258,7 +263,7 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
         ...unconfirmedProgress(survived),
       });
       if (entry && record && recordChanged) {
-        recordMigrationStateEntry(deps.statePath, migration.id, withUnconfirmedRecord(entry, record));
+        await recordMigrationStateEntry(deps.statePath, migration.id, withUnconfirmedRecord(entry, record), lock);
       }
       continue;
     }
@@ -297,7 +302,7 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
           ...unconfirmedProgress(survived),
         });
         if (entry && recordChanged) {
-          recordMigrationStateEntry(deps.statePath, migration.id, withUnconfirmedRecord(entry, survived));
+          await recordMigrationStateEntry(deps.statePath, migration.id, withUnconfirmedRecord(entry, survived), lock);
         }
         continue;
       }
@@ -305,13 +310,13 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
       if (entry && record) {
         // The record's count reached zero and no work is pending: the record
         // can now say this migration completed.
-        recordMigrationStateEntry(deps.statePath, migration.id, {
+        await recordMigrationStateEntry(deps.statePath, migration.id, {
           completedAtVersion: deps.runningVersion,
           completedAt: deps.now().toISOString(),
           lastOutcome: "success",
           rowsProcessed: entry.rowsProcessed ?? 0,
           rowsRemaining: 0,
-        });
+        }, lock);
       }
       continue;
     }
@@ -409,11 +414,11 @@ async function haltMigration(
     rowsRemaining: number;
     hashEnvelopeMatch: boolean | null;
     state: ReturnType<typeof readMigrationState>;
+    lock: Extract<AcquireResult, { acquired: true }>;
     unconfirmed?: UnconfirmedRecord;
   },
 ): Promise<void> {
-  const { deps, startedAt, rowsDone, rowsRemaining, hashEnvelopeMatch, state } = ctx;
-  const endedAt = deps.now().toISOString();
+  const { deps, startedAt, rowsDone, rowsRemaining, hashEnvelopeMatch, state } = ctx;  const endedAt = deps.now().toISOString();
   setMigrationProgress({
     id: migration.id, rowsDone, rowsRemaining, state: "halted", reason,
     ...unconfirmedProgress(ctx.unconfirmed),
@@ -446,13 +451,13 @@ async function haltMigration(
   // on lastOutcome === "success", so a halted migration is retried on every
   // subsequent boot until it clears, never permanently stuck. A failed write
   // is logged + surfaced (flair#1800), still best-effort.
-  recordMigrationStateEntry(deps.statePath, migration.id, {
+  await recordMigrationStateEntry(deps.statePath, migration.id, {
     lastOutcome: "halted",
     reason,
     rowsProcessed: rowsDone,
     rowsRemaining,
     ...unconfirmedState(ctx.unconfirmed),
-  });
+  }, ctx.lock);
 }
 
 /** Unconfirmed row ids plus the count they belong to. A state entry the runner
@@ -570,6 +575,7 @@ async function runOneMigration(
   } catch (err) {
     await haltMigration(migration, `countPending() threw: ${(err as Error)?.message ?? String(err)}`, {
       deps,
+      lock,
       startedAt,
       rowsDone: 0,
       rowsRemaining: 0,
@@ -600,6 +606,7 @@ async function runOneMigration(
     // ── Ladder step 5: no safe path → halt-don't-brick ──
     await haltMigration(migration, `blocked on disk: ${space.reason}`, {
       deps,
+      lock,
       startedAt,
       rowsDone: 0,
       rowsRemaining: initialRemaining,
@@ -638,7 +645,7 @@ async function runOneMigration(
       await haltMigration(
         migration,
         `snapshot failed (${(snapErr as Error)?.message ?? String(snapErr)}) and the content-only export fallback also failed (${(expErr as Error)?.message ?? String(expErr)})`,
-        { deps, startedAt, rowsDone: 0, rowsRemaining: initialRemaining, hashEnvelopeMatch: null, state, unconfirmed: carried ?? undefined },
+        { deps, lock, startedAt, rowsDone: 0, rowsRemaining: initialRemaining, hashEnvelopeMatch: null, state, unconfirmed: carried ?? undefined },
       );
       return false; // halted before any write
     }
@@ -697,6 +704,7 @@ async function runOneMigration(
     }
     await haltMigration(migration, `run() threw mid-batch: ${(err as Error)?.message ?? String(err)}`, {
       deps,
+      lock,
       startedAt,
       rowsDone,
       rowsRemaining: Math.max(0, initialRemaining - rowsDone),
@@ -718,6 +726,7 @@ async function runOneMigration(
   } catch (err) {
     await haltMigration(migration, `post-batch countPending() threw: ${(err as Error)?.message ?? String(err)}`, {
       deps,
+      lock,
       startedAt,
       rowsDone,
       rowsRemaining: 0,
@@ -780,6 +789,7 @@ async function runOneMigration(
       gateOk = false;
       await haltMigration(migration, `post-hash computation failed: ${(err as Error)?.message ?? String(err)}`, {
         deps,
+        lock,
         startedAt,
         rowsDone,
         rowsRemaining: finalRemaining,
@@ -822,6 +832,7 @@ async function runOneMigration(
     if (hashEnvelopeMatch === false) reasonParts.push("hash envelope mismatch");
     await haltMigration(migration, `completion gate failed: ${reasonParts.join(", ")}`, {
       deps,
+      lock,
       startedAt,
       rowsDone,
       rowsRemaining: finalRemaining,
@@ -857,14 +868,14 @@ async function runOneMigration(
   // /HealthDetail. Worst case this migration's detect() runs (cheaply) again
   // next boot — and /HealthDetail still says "completed" while state.json
   // never got the entry. That failure must be visible, not swallowed.
-  recordMigrationStateEntry(deps.statePath, migration.id, {
+  await recordMigrationStateEntry(deps.statePath, migration.id, {
     completedAtVersion: deps.runningVersion,
     completedAt: endedAt,
     lastOutcome: "success",
     rowsProcessed: rowsDone,
     rowsRemaining: 0,
     ...unconfirmedState(unconfirmedRecord()),
-  });
+  }, lock);
 
   pruneMigrationSnapshots(deps.snapshotRoot);
   // State stays "completed" when the gate passes, even with a non-empty

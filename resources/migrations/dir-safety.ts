@@ -88,9 +88,10 @@ export const secureFileFsync = { sync: (fd: number): void => fsyncSync(fd) };
  * is not left empty or truncated. The rename's directory entry itself is NOT
  * fsynced.
  *
- * What this does NOT solve: two concurrent WRITERS still race on their
- * read-modify-write cycles (last rename wins, the other writer's entry is
- * lost). Serializing writers is a separate follow-up, not done here.
+ * What this does NOT solve on its own: two concurrent WRITERS still race on
+ * their read-modify-write cycles (last rename wins). A caller that needs
+ * serialization must hold a lock across the read and the rename, as the
+ * migration state writer does with the migration lock (flair#2866).
  */
 export function writeSecureFile(path: string, contents: string, dir: string): void {
   verifySecureDir(dir);

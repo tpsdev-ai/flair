@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { probeMigrationDataDir } from "../../resources/migrations/data-dir.ts";
 import { writeMigrationStateEntry } from "../../resources/migrations/state.ts";
+import { acquireMigrationLock } from "../../resources/migrations/lock.ts";
 import { createMigrationSnapshot } from "../../resources/migrations/snapshot.ts";
 import { createContentOnlyExport } from "../../resources/migrations/export.ts";
 import { ensureSecureDir, verifySecureDir, writeSecureFile, UnsafeDirectoryError } from "../../resources/migrations/dir-safety.ts";
@@ -111,8 +112,30 @@ describe("writeSecureFile — re-verifies at write time, not only creation", () 
   });
 });
 
+it("state fails with ENOENT when the candidate is removed after the probe", async () => {
+  expect(probeMigrationDataDir(testRoot).ok).toBe(true);
+  // The proof lives in its own directory so it stays held while the state
+  // directory is removed; the write must still fail on the missing parent.
+  const lockRoot = mkdtempSync(join(tmpdir(), "flair-migration-dirsafety-lock-"));
+  const lock = acquireMigrationLock({ lockPath: join(lockRoot, "lock") });
+  if (!lock.acquired) throw new Error(`migration lock unavailable: ${lock.reason}`);
+  try {
+    rmSync(testRoot, { recursive: true });
+    let error: unknown;
+    try {
+      await writeMigrationStateEntry(join(testRoot, ".migrations", "state.json"), "test", { lastOutcome: "success" }, lock);
+    } catch (err) {
+      error = err;
+    }
+    expect((error as NodeJS.ErrnoException)?.code).toBe("ENOENT");
+    expect(existsSync(testRoot)).toBe(false);
+  } finally {
+    lock.release();
+    rmSync(lockRoot, { recursive: true, force: true });
+  }
+});
+
 for (const [name, create] of [
-  ["state", () => writeMigrationStateEntry(join(testRoot, ".migrations", "state.json"), "test", { lastOutcome: "success" })],
   ["snapshot", () => createMigrationSnapshot({ migrationId: "test", scope: "metadata-only", fromVersion: "old", toVersion: "new", rowCounts: {} }, { snapshotRoot: join(testRoot, ".migrations", "snapshots"), now: () => new Date() })],
   ["export", () => createContentOnlyExport({ migrationId: "test", table: "Memory", rows: [], fromVersion: "old" }, { exportRoot: join(testRoot, ".migrations", "exports"), now: () => new Date() })],
 ] as const) {

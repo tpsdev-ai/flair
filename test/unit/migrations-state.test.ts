@@ -5,7 +5,7 @@
  * currently running version (Kern's detect() short-circuit fallback).
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -14,6 +14,8 @@ import {
   isShortCircuited,
   defaultStatePath,
 } from "../../resources/migrations/state.ts";
+import { acquireMigrationLock } from "../../resources/migrations/lock.ts";
+import { seedMigrationStateEntry } from "../helpers/migration-state.ts";
 
 let root: string;
 let statePath: string;
@@ -41,8 +43,8 @@ describe("readMigrationState", () => {
 });
 
 describe("writeMigrationStateEntry / readMigrationState round-trip", () => {
-  it("writes and reads back an entry, at 0700 dir / 0600 file", () => {
-    writeMigrationStateEntry(statePath, "embedding-stamp", {
+  it("writes and reads back an entry, at 0700 dir / 0600 file", async () => {
+    await seedMigrationStateEntry(statePath, "embedding-stamp", {
       completedAtVersion: "0.22.0",
       completedAt: "2026-01-01T00:00:00.000Z",
       lastOutcome: "success",
@@ -60,9 +62,9 @@ describe("writeMigrationStateEntry / readMigrationState round-trip", () => {
     expect(statSync(join(root, ".migrations")).mode & 0o777).toBe(0o700);
   });
 
-  it("preserves OTHER migrations' entries when writing a new one (read-merge-write, not overwrite)", () => {
-    writeMigrationStateEntry(statePath, "migration-a", { lastOutcome: "success", completedAtVersion: "0.1.0" });
-    writeMigrationStateEntry(statePath, "migration-b", { lastOutcome: "halted", reason: "blocked on disk" });
+  it("preserves OTHER migrations' entries when writing a new one (read-merge-write, not overwrite)", async () => {
+    await seedMigrationStateEntry(statePath, "migration-a", { lastOutcome: "success", completedAtVersion: "0.1.0" });
+    await seedMigrationStateEntry(statePath, "migration-b", { lastOutcome: "halted", reason: "blocked on disk" });
 
     const state = readMigrationState(statePath);
     expect(state["migration-a"].lastOutcome).toBe("success");
@@ -70,12 +72,44 @@ describe("writeMigrationStateEntry / readMigrationState round-trip", () => {
     expect(state["migration-b"].reason).toBe("blocked on disk");
   });
 
-  it("overwrites a migration's OWN prior entry (latest write wins for that id)", () => {
-    writeMigrationStateEntry(statePath, "m", { lastOutcome: "halted", reason: "first halt" });
-    writeMigrationStateEntry(statePath, "m", { lastOutcome: "success", completedAtVersion: "0.2.0" });
+  it("overwrites a migration's OWN prior entry (latest write wins for that id)", async () => {
+    await seedMigrationStateEntry(statePath, "m", { lastOutcome: "halted", reason: "first halt" });
+    await seedMigrationStateEntry(statePath, "m", { lastOutcome: "success", completedAtVersion: "0.2.0" });
     const state = readMigrationState(statePath);
     expect(state["m"].lastOutcome).toBe("success");
     expect(state["m"].reason).toBeUndefined();
+  });
+});
+
+describe("writeMigrationStateEntry — lock proof (flair#2866)", () => {
+  it("refuses with a named error and writes nothing when no held lock is supplied", async () => {
+    let error: unknown;
+    try {
+      await (writeMigrationStateEntry as unknown as (...args: unknown[]) => Promise<void>)(statePath, "m", { lastOutcome: "success" });
+    } catch (err) {
+      error = err;
+    }
+    expect((error as Error)?.name).toBe("MigrationStateWriteRefusedError");
+    expect(existsSync(statePath)).toBe(false);
+  });
+
+  it("refuses with a named error when the lock file was replaced after the read", async () => {
+    await seedMigrationStateEntry(statePath, "m", { lastOutcome: "halted", reason: "old" });
+    const lock = acquireMigrationLock({ lockPath: join(root, ".migrations", "lock") });
+    if (!lock.acquired) throw new Error(`migration lock unavailable: ${lock.reason}`);
+    try {
+      unlinkSync(lock.lockPath);
+      let error: unknown;
+      try {
+        await writeMigrationStateEntry(statePath, "m", { lastOutcome: "success" }, lock);
+      } catch (err) {
+        error = err;
+      }
+      expect((error as Error)?.name).toBe("MigrationStateWriteRefusedError");
+      expect(readMigrationState(statePath)["m"].lastOutcome).toBe("halted");
+    } finally {
+      lock.release();
+    }
   });
 });
 

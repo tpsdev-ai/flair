@@ -17,7 +17,7 @@ mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => nu
 
 const { runMigrationCycle } = await import("../../resources/migrations/runner.ts");
 const { MigrationRegistry } = await import("../../resources/migrations/registry.ts");
-const { readMigrationState, writeMigrationStateEntry, defaultStatePath } = await import("../../resources/migrations/state.ts");
+const { readMigrationState, defaultStatePath } = await import("../../resources/migrations/state.ts");
 const { listMigrationProgress, _resetProgressForTests, getCycleStatus } = await import("../../resources/migrations/progress.ts");
 const { getMigrationStatusSnapshot } = await import("../../resources/migrations/status.ts");
 const { _resetInProcessLockForTests } = await import("../../resources/migrations/lock.ts");
@@ -26,6 +26,7 @@ const { createEmbeddingStampMigration } = await import("../../resources/migratio
 const { BatchOutcomeError } = await import("../../resources/migrations/types.ts");
 
 import type { Migration, RunBatchResult } from "../../resources/migrations/types.ts";
+import { seedMigrationStateEntry } from "../helpers/migration-state.ts";
 
 // ─── fake table infra ───────────────────────────────────────────────────────
 
@@ -500,7 +501,7 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
   it("a no-pending cycle keeps the count, the ids and the halted status", async () => {
     const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", stamp: "not-yet" }]);
     const relationship = makeStore([]);
-    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-record", {
+    await seedMigrationStateEntry(defaultStatePath(dataDir), "fake-record", {
       lastOutcome: "halted",
       reason: "completion gate failed: rowsRemaining=0, hash envelope mismatch",
       rowsProcessed: 1,
@@ -535,7 +536,7 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
   it("clears an id once a later cycle reads the row at the target, then reports completed", async () => {
     const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", stamp: "not-yet" }]);
     const relationship = makeStore([]);
-    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-clears", {
+    await seedMigrationStateEntry(defaultStatePath(dataDir), "fake-clears", {
       lastOutcome: "halted",
       reason: "completion gate failed: rowsRemaining=0",
       rowsProcessed: 1,
@@ -572,7 +573,7 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
   it("a failed re-read keeps the id during re-check", async () => {
     const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", stamp: "not-yet" }]);
     const relationship = makeStore([]);
-    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-unknown", {
+    await seedMigrationStateEntry(defaultStatePath(dataDir), "fake-unknown", {
       lastOutcome: "halted",
       reason: "completion gate failed: rowsRemaining=0",
       rowsProcessed: 1,
@@ -605,7 +606,7 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
   async function recheckWithAnswer(answer: unknown): Promise<{ warnings: string[]; output: string }> {
     const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", createdAt: "2026-01-01T00:00:00.000Z", stamp: "not-yet" }]);
     const relationship = makeStore([]);
-    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-unrecognized", {
+    await seedMigrationStateEntry(defaultStatePath(dataDir), "fake-unrecognized", {
       lastOutcome: "halted",
       reason: "completion gate failed: rowsRemaining=0",
       rowsProcessed: 1,
@@ -693,7 +694,7 @@ describe("runMigrationCycle — a recorded unconfirmed row survives a countPendi
   it("keeps the record in progress, the status snapshot and the state file when countPending throws", async () => {
     const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
     const relationship = makeStore([]);
-    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-preflight-record", {
+    await seedMigrationStateEntry(defaultStatePath(dataDir), "fake-preflight-record", {
       lastOutcome: "halted",
       reason: "completion gate failed: rowsRemaining=0",
       rowsProcessed: 1,
@@ -745,7 +746,7 @@ describe("runMigrationCycle — a recorded unconfirmed row survives a countPendi
   it("keeps the record in progress when detect() throws", async () => {
     const memory = makeStore([{ id: "m9", content: "a", agentId: "a1" }]);
     const relationship = makeStore([]);
-    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-detect-record", {
+    await seedMigrationStateEntry(defaultStatePath(dataDir), "fake-detect-record", {
       lastOutcome: "halted",
       reason: "completion gate failed: rowsRemaining=0",
       rowsProcessed: 1,

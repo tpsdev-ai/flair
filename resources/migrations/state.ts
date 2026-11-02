@@ -22,6 +22,8 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ensureSecureDir, writeSecureFile } from "./dir-safety.js";
+import { migrationLockStillHeld, type AcquireResult } from "./lock.js";
+import { txnPausePoint } from "../txn-pause-point.js";
 
 export type MigrationOutcome = "success" | "halted" | "failed";
 
@@ -77,11 +79,39 @@ export function readMigrationState(path: string): MigrationStateFile {
   }
 }
 
-export function writeMigrationStateEntry(path: string, id: string, entry: MigrationStateEntry): void {
+/** The named refusal a state write makes when it has no held migration lock,
+ *  or the one it was given is no longer the lock file on disk (flair#2866). */
+export class MigrationStateWriteRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MigrationStateWriteRefusedError";
+  }
+}
+
+export async function writeMigrationStateEntry(
+  path: string,
+  id: string,
+  entry: MigrationStateEntry,
+  lock: Extract<AcquireResult, { acquired: true }>,
+): Promise<void> {
+  if (!lock || lock.acquired !== true || typeof lock.lockPath !== "string" || !lock.holder) {
+    throw new MigrationStateWriteRefusedError(`refusing to write ${path}: no held migration lock was supplied`);
+  }
   const dir = dirname(path);
   ensureSecureDir(dir);
   const current = readMigrationState(path);
   current[id] = entry;
+  // Test-only pause between the read and the rename, so a test can force a
+  // second writer into that window deterministically (flair#2866).
+  const pause = txnPausePoint("migration-state-write");
+  if (pause) await pause;
+  // Re-check after the pause and before publishing: a lock this process no
+  // longer holds must refuse the write, never rename over another writer.
+  if (!migrationLockStillHeld(lock)) {
+    throw new MigrationStateWriteRefusedError(
+      `refusing to write ${id} in ${path}: the migration lock at ${lock.lockPath} is no longer held by pid ${lock.holder.pid} (started ${lock.holder.startedAt})`,
+    );
+  }
   writeSecureFile(path, JSON.stringify(current, null, 2) + "\n", dir);
 }
 

@@ -36,6 +36,13 @@ export interface LockHolder {
   startedAt: string;
 }
 
+/** What a caller must present to prove it holds a lock: the lock file it
+ *  acquired and the holder identity recorded there (flair#2866). */
+export interface MigrationLockProof {
+  lockPath: string;
+  holder: LockHolder;
+}
+
 export interface LockDeps {
   lockPath: string;
   staleMs: number;
@@ -73,8 +80,23 @@ export function _resetInProcessLockForTests(): void {
 }
 
 export type AcquireResult =
-  | { acquired: true; release: () => void; touch: () => void }
+  | ({ acquired: true; release: () => void; touch: () => void } & MigrationLockProof)
   | { acquired: false; reason: string; holder?: LockHolder };
+
+/**
+ * True only when `lockPath` still contains the holder identity this proof
+ * recorded. Any read/parse failure answers false: an unknown lock state never
+ * licenses a write (flair#2866).
+ */
+export function migrationLockStillHeld(proof: MigrationLockProof): boolean {
+  const current = readHolder(proof.lockPath);
+  return (
+    current !== null &&
+    current.pid === proof.holder.pid &&
+    current.hostname === proof.holder.hostname &&
+    current.startedAt === proof.holder.startedAt
+  );
+}
 
 function readHolder(lockPath: string): LockHolder | null {
   try {
@@ -146,8 +168,9 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
     throw err;
   }
 
+  let info: LockHolder;
   try {
-    const info: LockHolder = { pid: process.pid, hostname: osHostname(), startedAt: new Date(now()).toISOString() };
+    info = { pid: process.pid, hostname: osHostname(), startedAt: new Date(now()).toISOString() };
     writeSync(fd, JSON.stringify(info));
   } finally {
     closeSync(fd);
@@ -157,10 +180,16 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
   let released = false;
   return {
     acquired: true,
+    lockPath,
+    holder: info,
     release: () => {
       if (released) return;
       released = true;
       inProcessHeld = false;
+      // Only remove the file this holder created: if another runner broke the
+      // lock and acquired its own, leaving that file in place is what keeps
+      // the new holder's single-flight intact (flair#2866).
+      if (!migrationLockStillHeld({ lockPath, holder: info })) return;
       try {
         unlinkSync(lockPath);
       } catch {
