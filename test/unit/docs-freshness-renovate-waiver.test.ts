@@ -8,17 +8,10 @@ import { load } from "js-yaml";
 import { pathToFileURL } from "node:url";
 
 import { tempDir } from "../helpers/temp-dir.ts";
+import { docsFreshnessScriptFiles } from "../helpers/docs-freshness-scripts.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT_REL = join("scripts", "docs-freshness-check.mjs");
-const SCRIPT_FILES = [
-  "docs-freshness-check.mjs",
-  "changelog-fragments.mjs",
-  "changelog-release-notes.mjs",
-  "changelog-extract.mjs",
-  "published-paths.mjs",
-  "dependency-change.mjs",
-];
 
 function fakeCli(n: number): string {
   const cmds = Array.from({ length: n }, (_, i) =>
@@ -55,7 +48,7 @@ function makeRepo(): string {
   const origin = tempDir("flair-renovate-waiver-origin-");
 
   mkdirSync(join(dir, "scripts"), { recursive: true });
-  for (const f of SCRIPT_FILES) {
+  for (const f of docsFreshnessScriptFiles(REPO_ROOT)) {
     cpSync(join(REPO_ROOT, "scripts", f), join(dir, "scripts", f));
   }
 
@@ -373,7 +366,7 @@ describe("release-time history", () => {
     writeFixtureFile(dir, "packages/dep/package.json", "{}\n");
     git(dir, "add", "-A");
     commitAs(dir, "renovate[bot]", "fixture@example.invalid", "fix(deps): initial dependency");
-    for (const file of [...SCRIPT_FILES, "release-promote-changelog.sh"]) {
+    for (const file of [...docsFreshnessScriptFiles(REPO_ROOT), "release-promote-changelog.sh"]) {
       writeFixtureFile(dir, `scripts/${file}`, readFileSync(join(REPO_ROOT, "scripts", file), "utf8"));
     }
     writeFixtureFile(dir, "CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n");
@@ -529,7 +522,7 @@ describe("release wiring", () => {
 
   test("promote refuses --allow-no-release-tag without --with-dependencies", () => {
     const dir = tempDir("flair-promote-flags-");
-    for (const file of SCRIPT_FILES) {
+    for (const file of docsFreshnessScriptFiles(REPO_ROOT)) {
       writeFixtureFile(dir, `scripts/${file}`, readFileSync(join(REPO_ROOT, "scripts", file), "utf8"));
     }
     writeFixtureFile(dir, "CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n");

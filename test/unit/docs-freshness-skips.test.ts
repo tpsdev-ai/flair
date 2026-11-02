@@ -18,6 +18,8 @@ import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { docsFreshnessScriptFiles } from "../helpers/docs-freshness-scripts.ts";
+
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT_REL = join("scripts", "docs-freshness-check.mjs");
 
@@ -36,7 +38,7 @@ function makeFixture(opts: {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "flair-docs-freshness-")));
 
   mkdirSync(join(dir, "scripts"), { recursive: true });
-  for (const f of ["docs-freshness-check.mjs", "changelog-fragments.mjs", "changelog-release-notes.mjs", "changelog-extract.mjs", "published-paths.mjs", "dependency-change.mjs"]) {
+  for (const f of docsFreshnessScriptFiles(REPO_ROOT)) {
     cpSync(join(REPO_ROOT, "scripts", f), join(dir, "scripts", f));
   }
 

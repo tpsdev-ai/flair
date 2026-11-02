@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { publishedEntryNames as deployPublishedEntryNames } from "../../src/deploy.js";
+import { docsFreshnessScriptFiles } from "../helpers/docs-freshness-scripts.ts";
 import {
   changeTouchesPublished,
   pathTouchesPublished,
@@ -26,7 +27,6 @@ import {
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT_REL = join("scripts", "docs-freshness-check.mjs");
-const SCRIPT_FILES = ["docs-freshness-check.mjs", "changelog-fragments.mjs", "changelog-release-notes.mjs", "changelog-extract.mjs", "published-paths.mjs", "dependency-change.mjs"];
 
 const created: string[] = [];
 function track(dir: string): string {
@@ -67,7 +67,7 @@ function makePathAwareRepo(opts: {
   const origin = track(mkdtempSync(join(tmpdir(), "flair-docs-freshness-origin-")));
 
   mkdirSync(join(dir, "scripts"), { recursive: true });
-  for (const f of SCRIPT_FILES) {
+  for (const f of docsFreshnessScriptFiles(REPO_ROOT)) {
     cpSync(join(REPO_ROOT, "scripts", f), join(dir, "scripts", f));
   }
 
