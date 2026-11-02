@@ -1,1 +1,1 @@
-- **Renovate no longer converts dependency ranges to exact pins.** A pin update is exempt from `minimumReleaseAge`, so it could select a release younger than the 7-day cooldown and fail bun's install gate. The shared preset now uses `rangeStrategy: "replace"`, which leaves declared ranges in place (flair#2871).
+- **The shared Renovate preset uses `rangeStrategy: "replace"`.** This preserves declared ranges; a `pin` update is exempt from `minimumReleaseAge` (flair#2871).
