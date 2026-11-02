@@ -2399,10 +2399,8 @@ export class Memory extends (databases as any).flair.Memory {
     // tags: an untagged POST that names a skill row (by id or `supersedes`)
     // takes the lock, then inherits the tag (prepareSkillBody).
     const ids = isSkillWrite(content) ? [] : postLockIds(this, content);
-    // Citation-on-write, queued by postLocked, runs after this request's
-    // per-id lock is released, or straight after a lock-free POST's body
-    // (flair#2858, as put() does): it tries each cited id's lock, and a POST
-    // that supersedes a row holds that predecessor's id until then.
+    // flair#2858: release an ordinary superseding POST's predecessor lock
+    // before processing its queued citations.
     const afterRelease: Array<() => Promise<void>> = [];
     if (ids.length === 0) {
       const result = await this.postLocked(content, context, false, afterRelease);
@@ -2893,10 +2891,8 @@ export class Memory extends (databases as any).flair.Memory {
     if (supersede.close?.granteeId === undefined) await closeSupersededIfNeeded(ctx, content, supersede.close, "post");
     await markDerivedSourcesReflected(content);
 
-    // flair#744 slice A: citation-on-write — queued here and run by post()
-    // after this request's per-id lock is released, or straight after a
-    // lock-free POST's body, as put() does (flair#2858).
-    // Failure-isolated: the write's answer does not depend on crediting.
+    // flair#744: queue citation-on-write for post() (flair#2858).
+    // A completed credit error is logged without changing the response payload.
     if (usedMemoryIds !== undefined) {
       afterRelease.push(async () => {
         try {

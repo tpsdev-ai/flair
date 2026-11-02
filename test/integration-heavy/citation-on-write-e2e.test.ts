@@ -149,8 +149,7 @@ function releasePause(point: string): void {
   writeFileSync(join(pauseDir, `go.${point}`), "");
 }
 
-/** The id's ledger row, read through the admin ops API — the ground truth the
- *  usage count derives from. */
+/** Read the id's contribution dedup records through the admin ops API. */
 async function ledgerRows(memoryId: string): Promise<any[]> {
   const res = await adminOp(harper, {
     operation: "search_by_value", database: "flair", table: "MemoryUsage",
@@ -409,12 +408,8 @@ describe("citation-on-write e2e (real Harper) — flair#744 slice A", () => {
     expect(await ledger.json()).toEqual([]);
   }, 60_000);
 
-  // ── flair#2858: a POST records its citations after it releases its locks ──
-  // As put() does (resources/Memory.ts: put()'s afterRelease queue is drained
-  // after withMemoryWriteLock returns; post() drains its own queue the same
-  // way). A POST that supersedes a predecessor holds that predecessor's id
-  // until its lock releases, so before this fix its own citation of the
-  // predecessor was skipped as busy.
+  // flair#2858: an ordinary superseding POST releases its predecessor lock
+  // before citation processing, removing the self-held-lock skip.
 
   test("a POST that supersedes a predecessor and cites it credits the predecessor once and logs NO busy skip (#2858)", async () => {
     const agent = mkAgent(`cow-post-sup-${randomUUID()}`);
