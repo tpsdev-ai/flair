@@ -991,8 +991,9 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     }
 
     /**
-     * Reserve one attempt for each Memory record in `batch` that has a
-     * pending retry row. Called immediately before that batch is sent, so a
+     * Reserve one attempt for each Memory record in `batch` that selection recorded
+     * in `reservationTargets` (a record with a valid pending retry row).
+     * Called immediately before that batch is sent, so a
      * batch the run never reaches leaves its rows' attempts and lastAttemptAt
      * as stored. A reservation write that fails throws here, before the send.
      */
