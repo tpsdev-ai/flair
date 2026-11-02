@@ -171,9 +171,8 @@ async function waitForLog(line: string, timeoutMs = 30_000): Promise<boolean> {
   return serverLog().includes(line);
 }
 interface LogMark { length: number; tail: string }
-/** A snapshot of the server's captured output: a later search reads only the
- *  text appended after it, so a line another test wrote before this test
- *  started cannot match. */
+/** Marks the current captured stdout/stderr; later searches inspect only
+ *  text appended to that capture after this mark. */
 function logMark(): LogMark {
   const text = harper.getLog?.() ?? "";
   return { length: text.length, tail: text.slice(Math.max(0, text.length - 64)) };
