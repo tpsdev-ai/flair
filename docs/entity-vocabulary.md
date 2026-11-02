@@ -14,10 +14,9 @@ and the new `entities` fields on `WorkspaceState`/`OrgEvent`/`Memory`), plus the
 query and bootstrap collision surfacing (both shipped in later slices) and any future MCP
 scope field — retrofitting a divergent vocabulary later is expensive.
 
-> This doc covers the vocabulary and validator only — the foundation slice of the attention
-> plane (flair#675). The attention query ("what touches entity E in the last N days") and
-> bootstrap collision surfacing are separate, later slices. See `FLAIR-ATTENTION-PLANE.md`
-> for the full design.
+> This doc covers the vocabulary and validator, the foundation slice of the attention
+> plane (flair#675). The attention query (flair#677) and bootstrap collision surfacing
+> (flair#681) build on it.
 
 ## The form
 
@@ -120,5 +119,3 @@ vocabulary; wiring that validation is a follow-up, not part of this foundation s
 - Automatic entity extraction/tagging on write (producers set `entities` themselves today,
   where they choose to; there's no NLP-derived auto-population yet).
 - Validating `Relationship.subject`/`object` against this vocabulary.
-
-These are tracked as follow-ups in `FLAIR-ATTENTION-PLANE.md`.
