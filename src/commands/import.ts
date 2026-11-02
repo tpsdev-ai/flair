@@ -18,17 +18,60 @@ import {
   sendJsonRequest,
 } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
-import { SOUL_SCOPE_FIELDS_REFUSAL } from "../lib/soul-scope-fields.js";
+import { SOUL_SCOPE_FIELDS_REFUSAL, suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
 import * as render from "../render.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import nacl from "tweetnacl";
 
-/** The `error` name a response body carries, when it carries one. */
+/** The fixed error names Flair's write guards return for a Soul or Memory
+ *  write. A response body's `error` is displayed only when it is one of these;
+ *  any other server-supplied text is not displayed. */
+const WRITE_GUARD_ERROR_NAMES = new Set([
+  // Soul write guards (resources/Soul.ts, resources/soul-write-policy.ts).
+  "soul_owner_required",
+  "soul_scope_fields_not_writable",
+  "soul_value_is_learned_content",
+  "soul_write_requires_one_record",
+  // Memory write guards (resources/Memory.ts and the guards it runs).
+  "content_safety_violation",
+  "derived_from_self",
+  "embedding_unavailable",
+  "id_target_mismatch",
+  "invalid_durability",
+  "invalid_expiry",
+  "invalid_visibility",
+  "invalid_visibility_for_durability",
+  "memory_id_required",
+  "owner_lookup_failed",
+  "reembed_no_text",
+  "reembed_row_changed",
+  "skill_durability",
+  "skill_lineage_tag_removed",
+  "skill_metadata_duplicate_key",
+  "skill_opt_out_not_boolean",
+  "skill_source_not_durable",
+  "skill_state_requires_delete",
+  "skill_update_compensation_failed",
+  "skill_update_not_closed",
+  "skill_update_not_confirmed",
+  "skill_update_unconfirmed",
+  "skill_write_path",
+  "storage_quota_exceeded",
+  "stored_row_changed",
+  "stored_row_lookup_failed",
+  "stored_row_read_failed",
+  "unresolved_request_target",
+  "write_body_unreadable",
+  "write_id_not_addressed",
+]);
+
+/** A recognised error name from a refused response body; undefined for any
+ *  other server-supplied text, which is never displayed. */
 function responseErrorName(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   try {
     const body = JSON.parse(raw) as { error?: unknown };
-    return typeof body?.error === "string" ? body.error : undefined;
+    return typeof body?.error === "string" && WRITE_GUARD_ERROR_NAMES.has(body.error) ? body.error : undefined;
   } catch {
     return undefined;
   }
@@ -69,7 +112,7 @@ async function writeRow(
   }
 }
 
-/** The per-row failure text: an HTTP status and the server's error name, or
+/** The per-row failure text: an HTTP status and a recognised error name, or
  *  the thrown error. Never the row's content. */
 function failureText(row: { status: number | undefined; error: string | undefined }): string {
   if (row.status === undefined) return row.error ?? "no response";
@@ -212,10 +255,16 @@ program
         soulCount++;
         continue;
       }
-      // A row the server refuses by name for supplying a non-empty `scopeTag`
-      // or a non-empty `tags` array is reported with its id and left out of
-      // the count; the rest of the export is imported as before (flair#1540).
-      if (outcome.kind === "failed" && outcome.error === SOUL_SCOPE_FIELDS_REFUSAL) {
+      // A row the server refuses with HTTP 403 for supplying a non-empty
+      // `scopeTag` or a non-empty `tags` array is reported with its id and
+      // left out of the count; the rest of the export is imported as before
+      // (flair#1540).
+      if (
+        outcome.kind === "failed" &&
+        outcome.status === 403 &&
+        outcome.error === SOUL_SCOPE_FIELDS_REFUSAL &&
+        suppliesSoulScopeFields(soul)
+      ) {
         console.log(`${render.icons.warn} Soul ${soul.id} refused: ${outcome.error}`);
         continue;
       }

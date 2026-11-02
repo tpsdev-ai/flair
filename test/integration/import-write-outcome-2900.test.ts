@@ -59,6 +59,34 @@ function runCli(args: string[], home: string, extraEnv: Record<string, string> =
 
 const adminAuth = () => `Basic ${btoa(`${harper.admin.username}:${harper.admin.password}`)}`;
 
+interface FakeReply { status: number; body: string }
+
+/** Run `run` against a local REST target that answers each PUT from `reply`. */
+async function withFakeRest(
+  reply: (path: string) => FakeReply,
+  run: (url: string) => Promise<RunResult>,
+): Promise<RunResult> {
+  const seen: string[] = [];
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      seen.push(req.url ?? "");
+      const answer = reply(req.url ?? "");
+      res.writeHead(answer.status, { "Content-Type": "application/json" });
+      res.end(answer.body);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address() as AddressInfo;
+  try {
+    return await run(`http://127.0.0.1:${address.port}`);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    expect(seen.length).toBeGreaterThan(0);
+  }
+}
+
 async function op(body: Record<string, unknown>): Promise<any> {
   const res = await fetch(harper.opsURL, {
     method: "POST",
@@ -209,5 +237,106 @@ describe("flair import counts a row as imported only on a 2xx write (#2900)", ()
     expect(result.stderr).toBe("");
     expect(await soulRow(soulId)).toMatchObject({ agentId: agent, value: "accepted soul" });
     expect(await memoryRow(memId)).toMatchObject({ agentId: agent, content: "an accepted memory" });
+  }, 300_000);
+
+  test("an unrecognised refusal body is not displayed; a recognised name still is", async () => {
+    const agent = "import-outcome-raw-a";
+    const home = tempDir("flair-2900-home-");
+    const soulId = `${agent}:refused-raw`;
+    const memId = `${agent}:mem-named`;
+    const rowValue = "row-value-xyz";
+    const credentialShape = "sk_live_abcdef123456";
+    const exportPath = writeExport("raw-refusal.json", {
+      agent: { id: agent, name: agent, role: "agent", createdAt: CREATED_AT },
+      souls: [{ id: soulId, agentId: agent, key: "refused-raw", value: "a soul write", durability: "permanent", createdAt: CREATED_AT }],
+      memories: [{ id: memId, agentId: agent, content: "a memory write", visibility: "private", durability: "standard", createdAt: CREATED_AT }],
+    });
+
+    const result = await withFakeRest(
+      (path) => path.includes("/Soul/")
+        ? { status: 403, body: JSON.stringify({ error: `refused for ${rowValue} with key ${credentialShape}` }) }
+        : { status: 400, body: JSON.stringify({ error: "invalid_durability" }) },
+      (url) => importFile(exportPath, home, {}, url),
+    );
+
+    expect(result.code, `${result.stdout}${result.stderr}`).toBe(1);
+    expect(result.stderr).toContain(`Soul ${soulId} failed: HTTP 403`);
+    expect(result.stderr).toContain("Memory " + memId + " failed: HTTP 400 invalid_durability");
+    expect(result.stdout + result.stderr).not.toContain(rowValue);
+    expect(result.stdout + result.stderr).not.toContain(credentialShape);
+  }, 300_000);
+
+  test("a refusal with an empty body reports the status and no name", async () => {
+    const agent = "import-outcome-empty-a";
+    const home = tempDir("flair-2900-home-");
+    const soulId = `${agent}:refused-empty`;
+    const exportPath = writeExport("empty-refusal.json", {
+      agent: { id: agent, name: agent, role: "agent", createdAt: CREATED_AT },
+      souls: [{ id: soulId, agentId: agent, key: "refused-empty", value: "a soul write", durability: "permanent", createdAt: CREATED_AT }],
+    });
+
+    const result = await withFakeRest(
+      () => ({ status: 403, body: "" }),
+      (url) => importFile(exportPath, home, {}, url),
+    );
+
+    expect(result.code, `${result.stdout}${result.stderr}`).toBe(1);
+    expect(result.stderr).toMatch(new RegExp(`Soul ${soulId} failed: HTTP 403$`, "m"));
+  }, 300_000);
+
+  test("a scope-field refusal name on a 500 is a failed row, exit 1", async () => {
+    const agent = "import-outcome-500-a";
+    const home = tempDir("flair-2900-home-");
+    const soulId = `${agent}:refused-500`;
+    const exportPath = writeExport("scope-500.json", {
+      agent: { id: agent, name: agent, role: "agent", createdAt: CREATED_AT },
+      souls: [{ id: soulId, agentId: agent, key: "refused-500", value: "a scoped soul write", scopeTag: "agent:other", durability: "permanent", createdAt: CREATED_AT }],
+    });
+
+    const result = await withFakeRest(
+      () => ({ status: 500, body: JSON.stringify({ error: "soul_scope_fields_not_writable" }) }),
+      (url) => importFile(exportPath, home, {}, url),
+    );
+
+    expect(result.code, `${result.stdout}${result.stderr}`).toBe(1);
+    expect(result.stderr).toContain(`Soul ${soulId} failed: HTTP 500 soul_scope_fields_not_writable`);
+    expect(result.stdout).not.toMatch(/refused/);
+  }, 300_000);
+
+  test("a scope-field refusal name on a 403 for a row without scope fields is a failed row, exit 1", async () => {
+    const agent = "import-outcome-403-plain-a";
+    const home = tempDir("flair-2900-home-");
+    const soulId = `${agent}:refused-plain`;
+    const exportPath = writeExport("scope-403-plain.json", {
+      agent: { id: agent, name: agent, role: "agent", createdAt: CREATED_AT },
+      souls: [{ id: soulId, agentId: agent, key: "refused-plain", value: "a plain soul write", durability: "permanent", createdAt: CREATED_AT }],
+    });
+
+    const result = await withFakeRest(
+      () => ({ status: 403, body: JSON.stringify({ error: "soul_scope_fields_not_writable" }) }),
+      (url) => importFile(exportPath, home, {}, url),
+    );
+
+    expect(result.code, `${result.stdout}${result.stderr}`).toBe(1);
+    expect(result.stderr).toContain(`Soul ${soulId} failed: HTTP 403 soul_scope_fields_not_writable`);
+    expect(result.stdout).not.toMatch(/refused/);
+  }, 300_000);
+
+  test("the real scoped-row refusal still skips the row", async () => {
+    const agent = "import-outcome-scoped-a";
+    const home = tempDir("flair-2900-home-");
+    const soulId = `${agent}:scoped`;
+    const exportPath = writeExport("scoped-skip.json", {
+      agent: { id: agent, name: agent, role: "agent", createdAt: CREATED_AT },
+      souls: [{ id: soulId, agentId: agent, key: "scoped", value: "a scoped soul write", scopeTag: "agent:other", durability: "permanent", createdAt: CREATED_AT }],
+    });
+
+    const result = await importFile(exportPath, home);
+    expect(result.code, `${result.stdout}${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(`Soul ${soulId} refused: soul_scope_fields_not_writable`);
+    expect(result.stdout).toMatch(/Souls\s+0\/1/);
+    expect(result.stdout).not.toMatch(/Failed/);
+    expect(result.stderr).toBe("");
+    expect(await soulRow(soulId)).toBeUndefined();
   }, 300_000);
 });
