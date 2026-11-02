@@ -590,8 +590,6 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
     expect(markerExists(`claimed.${MERGE_PAUSE}`), "the pause never claimed the arm").toBe(true);
 
     await resetPauseMarkers();
-    // Cleanup released the pause and only then removed the markers; the merge
-    // it held can now finish.
     expect((await holder).status).toBe(200);
     expect(markerExists(`released.${MERGE_PAUSE}`), "cleanup left the released marker").toBe(false);
 
@@ -603,10 +601,13 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
     const pending = resetPauseMarkers().then(() => {
       settled = true;
     });
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    expect(settled, "cleanup resolved while the release was unacknowledged").toBe(false);
-    writeFileSync(join(pauseDir, `released.${MERGE_PAUSE}`), "go");
-    await pending;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(settled, "cleanup resolved while the release was unacknowledged").toBe(false);
+    } finally {
+      writeFileSync(join(pauseDir, `released.${MERGE_PAUSE}`), "go");
+      await pending;
+    }
     expect(markerExists(`released.${MERGE_PAUSE}`), "cleanup left the released marker").toBe(false);
 
     // Cleanup fails when it cannot observe the release acknowledgement. The
@@ -663,19 +664,21 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
     const cleanup = resetPauseMarkers().then(() => {
       settled = true;
     });
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-    expect(settled, "cleanup resolved while the merge was unfinished").toBe(false);
-    expect(
-      markerExists(`paused.${MERGE_PAUSE}-commit`),
-      "the held merge is not parked at its pre-commit pause",
-    ).toBe(true);
-    expect(
-      markerExists(`claimed.${MERGE_PAUSE}`),
-      "cleanup removed the pause markers while the merge was unfinished",
-    ).toBe(true);
-
-    writeFileSync(join(pauseDir, `go.${MERGE_PAUSE}-commit`), "");
-    await cleanup;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      expect(settled, "cleanup resolved while the merge was unfinished").toBe(false);
+      expect(
+        markerExists(`paused.${MERGE_PAUSE}-commit`),
+        "the held merge is not parked at its pre-commit pause",
+      ).toBe(true);
+      expect(
+        markerExists(`claimed.${MERGE_PAUSE}`),
+        "cleanup removed the pause markers while the merge was unfinished",
+      ).toBe(true);
+    } finally {
+      writeFileSync(join(pauseDir, `go.${MERGE_PAUSE}-commit`), "");
+      await cleanup;
+    }
     expect(markerExists(`released.${MERGE_PAUSE}`), "cleanup left the first pause's released marker").toBe(false);
     expect(markerExists(`released.${MERGE_PAUSE}-commit`), "cleanup left the pre-commit pause's released marker").toBe(false);
   }, 240_000);
