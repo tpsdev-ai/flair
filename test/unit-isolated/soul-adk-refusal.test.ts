@@ -4,9 +4,8 @@
  * Stored ADK-tagged content is refused by the generic learned-content check,
  * and a request that supplies a non-empty `scopeTag` or `tags` array is refused
  * by the vendor-neutral scope-field check. Neither check matches a connector
- * string, so ADK-sourced content keeps the same refusal it had under the
- * bridge. Isolated so the harper mock does not collide with the other Soul
- * suites.
+ * string, so ADK-sourced writes are still refused, now by one of those checks.
+ * Isolated so the harper mock does not collide with the other Soul suites.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
 
