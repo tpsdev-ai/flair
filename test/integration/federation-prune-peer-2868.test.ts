@@ -19,6 +19,7 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
@@ -33,6 +34,7 @@ const PREFIX = `prune-2868-${sfx}-`;
 const STALE_SPOKE = `${PREFIX}stale-spoke`;
 const FRESH_SPOKE = `${PREFIX}fresh-spoke`;
 const STALE_HUB = `${PREFIX}stale-hub`;
+const PROTECTED_PEER = `${PREFIX}protected-peer`;
 const NON_ADMIN = `${PREFIX}non-admin-agent`;
 
 let harper: HarperInstance;
@@ -68,6 +70,14 @@ async function adminGet(path: string): Promise<Response> {
     headers: { Authorization: adminAuth() },
     signal: AbortSignal.timeout(30_000),
   });
+}
+
+function signedHeader(agentId: string, secretKey: Uint8Array, method: string, path: string): string {
+  const ts = Date.now().toString();
+  const nonce = randomUUID();
+  const payload = `${agentId}:${ts}:${nonce}:${method}:${path}`;
+  const sig = nacl.sign.detached(new TextEncoder().encode(payload), secretKey);
+  return `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${Buffer.from(sig).toString("base64")}`;
 }
 
 function cliEnv(extra: Record<string, string | undefined>): Record<string, string> {
@@ -122,11 +132,14 @@ async function peerIds(): Promise<string[]> {
 }
 
 /** A local listener for the outcome branches the real-Harper cases do not
- *  exercise: a 2xx DELETE whose row survives, a read-back that fails, and a
- *  refused DELETE. It answers the peer list as admin and ignores credentials. */
-async function startStub(opts: { deleteStatus: number; readBack: "present" | "fail" }): Promise<{ url: string; id: string; close: () => Promise<void> }> {
+ *  exercise: a 2xx DELETE whose row survives, a 2xx DELETE with an empty or
+ *  non-JSON body, a read-back that fails, and a refused DELETE. It answers the
+ *  peer list as admin, refuses a DELETE with no credential (401), and records
+ *  the credential each DELETE carried. */
+async function startStub(opts: { deleteStatus: number; deleteBody?: string; readBack: "present" | "absent" | "fail" }): Promise<{ url: string; id: string; deleteAuth: string[]; close: () => Promise<void> }> {
   const id = `stub-spoke-2868-${sfx}`;
   const stale = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+  const deleteAuth: string[] = [];
   const server = createServer((req, res) => {
     req.resume();
     req.on("end", () => {
@@ -137,14 +150,26 @@ async function startStub(opts: { deleteStatus: number; readBack: "present" | "fa
         return;
       }
       if (req.method === "DELETE" && path === `/Peer/${encodeURIComponent(id)}`) {
+        const auth = req.headers.authorization;
+        if (!auth) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "authentication_required" }));
+          return;
+        }
+        deleteAuth.push(auth);
         res.writeHead(opts.deleteStatus, { "Content-Type": "application/json" });
-        res.end(opts.deleteStatus === 403 ? JSON.stringify({ error: "forbidden" }) : "{}");
+        res.end(opts.deleteStatus === 204 ? undefined : (opts.deleteBody ?? (opts.deleteStatus === 403 ? JSON.stringify({ error: "forbidden" }) : "{}")));
         return;
       }
       if (req.method === "GET" && path === `/Peer/${encodeURIComponent(id)}`) {
         if (opts.readBack === "fail") {
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "read-back failed" }));
+          return;
+        }
+        if (opts.readBack === "absent") {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end("");
           return;
         }
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -157,7 +182,7 @@ async function startStub(opts: { deleteStatus: number; readBack: "present" | "fa
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  return { url, id, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+  return { url, id, deleteAuth, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
 }
 
 beforeAll(async () => {
@@ -180,6 +205,7 @@ beforeAll(async () => {
       { id: STALE_SPOKE, publicKey, role: "spoke", status: "paired", lastSyncAt: stale, pairedAt: stale, createdAt: stale },
       { id: FRESH_SPOKE, publicKey, role: "spoke", status: "paired", lastSyncAt: now, pairedAt: now, createdAt: now },
       { id: STALE_HUB, publicKey, role: "hub", status: "paired", lastSyncAt: stale, pairedAt: stale, createdAt: stale },
+      { id: PROTECTED_PEER, publicKey, role: "spoke", status: "paired", lastSyncAt: now, pairedAt: now, createdAt: now },
     ],
   });
   await ops({
@@ -242,9 +268,63 @@ describe("flair#2868 — federation prune --apply deletes and confirms the Peer 
     );
 
     expect(res.code, `stdout: ${res.stdout}\nstderr: ${res.stderr}`).toBe(1);
-    expect(`${res.stdout}${res.stderr}`).toContain("403");
+    // The named error proves a signed non-admin credential reached Harper: an
+    // anonymous request is refused with "no credentials sent" (or a 401), not
+    // an AccessViolation on a verified agent.
+    expect(`${res.stdout}${res.stderr}`).toContain("AccessViolation");
     expect(await peerRow(STALE_SPOKE), "the refused row survives").not.toBeNull();
   }, 180_000);
+
+  test("a signed non-admin agent's direct DELETE /Peer/{id} is refused 403 AccessViolation and the row survives", async () => {
+    expect(await peerRow(PROTECTED_PEER), "precondition: the protected peer exists").not.toBeNull();
+    const path = `/Peer/${encodeURIComponent(PROTECTED_PEER)}`;
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "DELETE",
+      headers: { Authorization: signedHeader(NON_ADMIN, nonAdminKeyPair.secretKey, "DELETE", path) },
+      signal: AbortSignal.timeout(30_000),
+    });
+    expect(res.status, `expected 403, got ${res.status}: ${await res.clone().text()}`).toBe(403);
+    const body = await res.json() as any;
+    expect(body.code, JSON.stringify(body)).toBe("AccessViolation");
+    expect(await peerRow(PROTECTED_PEER), "the refused row survives").not.toBeNull();
+  }, 60_000);
+
+  test("a 204 or non-JSON 200 DELETE followed by a 404 read-back counts as deleted", async () => {
+    for (const variant of [
+      { label: "204 empty", deleteStatus: 204, deleteBody: undefined },
+      { label: "200 non-JSON", deleteStatus: 200, deleteBody: "not json at all" },
+    ]) {
+      const stub = await startStub({ deleteStatus: variant.deleteStatus, deleteBody: variant.deleteBody, readBack: "absent" });
+      try {
+        const res = await runCli(
+          ["federation", "prune", "--older-than", "1h", "--include", `stub-spoke-2868-${sfx}`, "--apply", "--target", stub.url],
+          cliEnv({ FLAIR_ADMIN_PASS: "stub-not-checked", FLAIR_OUTPUT: "human" }),
+        );
+        expect(res.code, `${variant.label}: stdout: ${res.stdout}\nstderr: ${res.stderr}`).toBe(0);
+        expect(res.stdout, variant.label).toContain(`Deleted ${stub.id}`);
+        expect(res.stdout, variant.label).toContain("1 peer(s) deleted; 0 error(s); 0 unknown outcome(s).");
+        expect(stub.deleteAuth, variant.label).toHaveLength(1);
+      } finally {
+        await stub.close();
+      }
+    }
+  }, 90_000);
+
+  test("a non-JSON 200 DELETE followed by a present read-back counts as failed, not deleted", async () => {
+    const stub = await startStub({ deleteStatus: 200, deleteBody: "<html>ok</html>", readBack: "present" });
+    try {
+      const res = await runCli(
+        ["federation", "prune", "--older-than", "1h", "--include", `stub-spoke-2868-${sfx}`, "--apply", "--target", stub.url],
+        cliEnv({ FLAIR_ADMIN_PASS: "stub-not-checked", FLAIR_OUTPUT: "human" }),
+      );
+      expect(res.code, `stdout: ${res.stdout}\nstderr: ${res.stderr}`).toBe(1);
+      expect(res.stdout).toContain(`Failed to delete ${stub.id}: the row is still present after the DELETE.`);
+      expect(res.stdout).toContain("0 peer(s) deleted; 1 error(s); 0 unknown outcome(s).");
+      expect(res.stdout).not.toContain("Deleted stub-spoke");
+    } finally {
+      await stub.close();
+    }
+  }, 60_000);
 
   test("a 2xx DELETE whose row is still readable counts as failed, not deleted", async () => {
     const stub = await startStub({ deleteStatus: 200, readBack: "present" });
@@ -287,6 +367,10 @@ describe("flair#2868 — federation prune --apply deletes and confirms the Peer 
       expect(res.code, `stdout: ${res.stdout}\nstderr: ${res.stderr}`).toBe(1);
       expect(res.stdout).toContain(`Failed to delete ${stub.id}: HTTP 403`);
       expect(res.stdout).toContain("0 peer(s) deleted; 1 error(s); 0 unknown outcome(s).");
+      // The stub refuses a credential-less DELETE, so this result also proves
+      // the CLI sent the configured credential.
+      expect(stub.deleteAuth).toHaveLength(1);
+      expect(stub.deleteAuth[0]).toStartWith("Basic ");
     } finally {
       await stub.close();
     }

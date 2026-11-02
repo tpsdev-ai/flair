@@ -2573,10 +2573,13 @@ export function register(program: Command): void {
       let errors = 0;
       let unknown = 0;
       const requestOptions = baseUrl ? { baseUrl } : undefined;
+      // The DELETE's own body is not evidence, so a 2xx whose body is empty or
+      // not JSON must not throw: the server may already have deleted the row.
+      const deleteOptions = { ...(requestOptions ?? {}), tolerateUnparsedSuccessBody: true };
       for (const p of candidates) {
         let refusal: ApiHttpError | undefined;
         try {
-          await api("DELETE", `/Peer/${encodeRecordId(p.id)}`, undefined, requestOptions);
+          await api("DELETE", `/Peer/${encodeRecordId(p.id)}`, undefined, deleteOptions);
         } catch (e: any) {
           if (e instanceof ApiRequestOutcomeUnknown) {
             // An expired request is reported as an unknown outcome, like every
@@ -2596,9 +2599,8 @@ export function register(program: Command): void {
           }
         }
 
-        // A success status is not proof: read the row back. 404 or a null body
-        // means absent; a row means it is still there; a failed read-back after
-        // a successful DELETE is unknown for this peer, never deleted.
+        // 404 or a null body means absent; a row means it is still there. A
+        // read failure here is an unknown outcome for this peer.
         let present: boolean;
         try {
           const row = await api("GET", `/Peer/${encodeRecordId(p.id)}`, undefined, requestOptions);

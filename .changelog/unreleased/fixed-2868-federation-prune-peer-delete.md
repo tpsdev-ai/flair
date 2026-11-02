@@ -1,6 +1,5 @@
-- **`flair federation prune --apply` deletes the Peer row and confirms it is gone.**
+- **`flair federation prune --apply` now deletes the Peer row.**
   It previously sent the delete to the admin view's GET-only route, so no peer
   was removed. Each delete now targets the admin-only `/Peer/{id}` resource and
-  is followed by a read-back: a peer is reported deleted after a successful
-  DELETE only when the read-back shows the row absent. A refused DELETE is an
-  error; a read-back that fails after a successful DELETE is an unknown outcome.
+  is confirmed by reading the row back: absent is deleted, present is an error.
+  A refused DELETE is an error; a failed read-back is an unknown outcome.
