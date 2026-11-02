@@ -2547,38 +2547,65 @@ export function register(program: Command): void {
         return;
       }
 
-      // Apply path. Delete each peer via the Harper ops API. We use the
-      // domain-socket form when local; otherwise we fall back to the resource
-      // DELETE which requires admin auth.
+      // Apply path: delete each peer's `flair.Peer` row through the admin-only
+      // `/Peer/{id}` REST resource and read it back to confirm it is gone.
       let deleted = 0;
       let errors = 0;
       let unknown = 0;
+      const requestOptions = baseUrl ? { baseUrl } : undefined;
       for (const p of candidates) {
+        let refusal: ApiHttpError | undefined;
         try {
-          const res = await api("DELETE", `/FederationPeers/${encodeRecordId(p.id)}`, undefined, baseUrl ? { baseUrl } : undefined);
-          const ok = res?.ok ?? res?.deleted ?? true;
-          if (ok) {
-            deleted++;
-            const ts = p.lastSyncAt ?? p.pairedAt ?? "never";
-            console.log(`Deleted ${p.id} (last seen ${ts}).`);
-          } else {
-            errors++;
-            console.log(`Failed to delete ${p.id}: ${JSON.stringify(res)}`);
-          }
+          await api("DELETE", `/Peer/${encodeRecordId(p.id)}`, undefined, requestOptions);
         } catch (e: any) {
           if (e instanceof ApiRequestOutcomeUnknown) {
             // An expired request is reported as an unknown outcome, like every
             // other non-GET/HEAD request through the shared REST sender: the client cannot tell
             // whether the server acted. Count it apart from a definite failure
             // and exit 3 for it (unknown outranks a known failure, as rem's
-            // `unresolved` does). The route this DELETE targets cannot accept
-            // it; that route defect is #2868, outside this change.
+            // `unresolved` does).
             unknown++;
             console.log(`Unknown outcome for ${p.id}: ${e.message}`);
             continue;
           }
+          if (e instanceof ApiHttpError) refusal = e;
+          else {
+            errors++;
+            console.log(`Failed to delete ${p.id}: ${e.message}`);
+            continue;
+          }
+        }
+
+        // A success status is not proof: read the row back. 404 or a null body
+        // means absent; a row means it is still there; a failed read-back is
+        // unknown for this peer, never deleted.
+        let present: boolean;
+        try {
+          const row = await api("GET", `/Peer/${encodeRecordId(p.id)}`, undefined, requestOptions);
+          present = row != null;
+        } catch (e: any) {
+          if (e instanceof ApiHttpError && e.status === 404) present = false;
+          else if (refusal) {
+            errors++;
+            console.log(`Failed to delete ${p.id}: ${refusal.message}`);
+            continue;
+          } else {
+            unknown++;
+            console.log(`Unknown outcome for ${p.id}: the delete returned, but reading the row back failed: ${e.message}`);
+            continue;
+          }
+        }
+
+        if (refusal) {
           errors++;
-          console.log(`Failed to delete ${p.id}: ${e.message}`);
+          console.log(`Failed to delete ${p.id}: ${refusal.message}`);
+        } else if (!present) {
+          deleted++;
+          const ts = p.lastSyncAt ?? p.pairedAt ?? "never";
+          console.log(`Deleted ${p.id} (last seen ${ts}).`);
+        } else {
+          errors++;
+          console.log(`Failed to delete ${p.id}: the row is still present after the DELETE.`);
         }
       }
       console.log(`${deleted} peer(s) deleted; ${errors} error(s); ${unknown} unknown outcome(s).`);
