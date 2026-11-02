@@ -123,6 +123,49 @@ const MERGE_PAUSE = "federation-merge";
 const RELEASE_ACK_BOUND_MS = 10_000;
 
 /**
+ * How long cleanup waits for a released receiver push to finish. Fixed, so a
+ * push still pending at the bound fails cleanup by name rather than hanging.
+ */
+const OUTSTANDING_PUSH_BOUND_MS = 60_000;
+
+/** The named failure a push still pending at {@link OUTSTANDING_PUSH_BOUND_MS} raises. */
+class OutstandingPushTimeoutError extends Error {
+  constructor(pending: number) {
+    super(`${pending} receiver push(es) still pending after ${OUTSTANDING_PUSH_BOUND_MS}ms`);
+    this.name = "OutstandingPushTimeoutError";
+  }
+}
+
+/** The signed pushes whose response has not arrived yet. */
+const outstandingPushes = new Set<Promise<Response>>();
+
+/**
+ * How long cleanup waits for a signed probe of an affected id to report a
+ * completed merge. Fixed, so a merge still unfinished at the bound fails
+ * cleanup by name rather than hanging.
+ */
+const MERGE_PROBE_BOUND_MS = 60_000;
+
+/** The named failure an affected id's merge could not be proven finished at {@link MERGE_PROBE_BOUND_MS}. */
+class UnconfirmedMergeError extends Error {
+  constructor(detail: string) {
+    super(`receiver merge not proven finished within ${MERGE_PROBE_BOUND_MS}ms: ${detail}`);
+    this.name = "UnconfirmedMergeError";
+  }
+}
+
+/**
+ * The Memory ids this case's own signed pushes affected. A push's response can
+ * arrive while its receiver merge is still writing (the receiver races each
+ * merge against its own deadline), so an id leaves this set only when cleanup
+ * has positive evidence its merge finished.
+ */
+const unconfirmedMergeIds = new Set<string>();
+
+/** Distinguished probe content and timestamps, so consecutive probes do not collide. */
+let probeSequence = 0;
+
+/**
  * The result the pause point recorded for `point`: `"go"` or `"timeout"` once
  * its wait has ended, null before that. It creates `released.<point>` empty
  * before waiting and writes the result afterwards
@@ -170,16 +213,11 @@ function markerExists(name: string): boolean {
 }
 
 /**
- * Release a pause an earlier case may still hold and remove every marker this
- * file arms. Both Harpers share one pause directory, and the pause point opens
- * its `claimed`/`paused`/`released` files with O_EXCL: a leftover marker makes
- * the next arm inert, while a leftover arm pauses the next push.
- *
- * A pause the case claimed may still be waiting, so `go` stays in place until
- * the pause point records its result in `released`; only then are the markers
- * removed.
+ * Write `go` for the merge pause. A pause the case claimed may still be
+ * waiting, so this stays in place until the pause point records its result in
+ * `released`.
  */
-async function resetPauseMarkers(): Promise<void> {
+async function releaseMergePause(): Promise<void> {
   writeFileSync(join(pauseDir, `go.${MERGE_PAUSE}`), "");
   if (markerExists(`claimed.${MERGE_PAUSE}`) && pauseResult(MERGE_PAUSE) === null) {
     const deadline = Date.now() + RELEASE_ACK_BOUND_MS;
@@ -190,16 +228,59 @@ async function resetPauseMarkers(): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
   }
+}
+
+/**
+ * Wait, bounded, for the pushes tracked at call time to settle. A settled
+ * response is not proof the receiver's write landed: the receiver answers
+ * `indeterminate` while its merge continues, so the affected ids are confirmed
+ * separately by {@link confirmAffectedMergesFinished}.
+ */
+async function awaitOutstandingPushes(): Promise<void> {
+  const pending = [...outstandingPushes];
+  if (pending.length === 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<"bound">((resolve) => {
+    timer = setTimeout(() => resolve("bound"), OUTSTANDING_PUSH_BOUND_MS);
+  });
+  const settled = Promise.allSettled(pending).then(() => "settled" as const);
+  const outcome = await Promise.race([settled, bound]);
+  clearTimeout(timer);
+  if (outcome === "bound") throw new OutstandingPushTimeoutError(outstandingPushes.size);
+}
+
+/** The marker names this file arms. */
+function removePauseMarkers(): void {
   for (const name of [
     `arm.${MERGE_PAUSE}`,
     `claimed.${MERGE_PAUSE}`,
     `paused.${MERGE_PAUSE}`,
     `go.${MERGE_PAUSE}`,
     `released.${MERGE_PAUSE}`,
+    `arm.${MERGE_PAUSE}-commit`,
+    `claimed.${MERGE_PAUSE}-commit`,
+    `paused.${MERGE_PAUSE}-commit`,
+    `go.${MERGE_PAUSE}-commit`,
+    `released.${MERGE_PAUSE}-commit`,
     "fail.federation-synclog",
   ]) {
     rmSync(join(pauseDir, name), { force: true });
   }
+}
+
+/**
+ * Release a pause an earlier case may still hold, wait for its push, prove
+ * every affected id's merge finished, then remove every marker this file arms.
+ * Both Harpers share one pause directory, and the pause point opens its
+ * `claimed`/`paused`/`released` files with O_EXCL: a leftover marker makes the
+ * next arm inert, while a leftover arm pauses the next push. Markers go only
+ * after a signed probe of each affected id reported a completed merge.
+ */
+async function resetPauseMarkers(): Promise<void> {
+  await releaseMergePause();
+  await awaitOutstandingPushes();
+  await confirmAffectedMergesFinished();
+  removePauseMarkers();
 }
 
 function retryRow(recordId: string, lastReason: string, over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -231,7 +312,7 @@ async function sync(): Promise<{ pushed: number; skipped: number; error?: Error 
 }
 
 /** One signed push of one Memory row, as the spoke. */
-function push(memory: Record<string, unknown>): Promise<Response> {
+function signedPush(memory: Record<string, unknown>, timeoutMs = 120_000): Promise<Response> {
   const body = signBodyFresh(
     {
       instanceId: PEER,
@@ -246,12 +327,79 @@ function push(memory: Record<string, unknown>): Promise<Response> {
     },
     senderKp.secretKey,
   );
-  return fetch(`${receiver.httpURL}/FederationSync`, {
+  const request = fetch(`${receiver.httpURL}/FederationSync`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
+  return request;
+}
+
+/**
+ * One signed push of one Memory row, as the spoke, recording the id as
+ * affected until cleanup proves its merge finished.
+ */
+function push(memory: Record<string, unknown>): Promise<Response> {
+  unconfirmedMergeIds.add(String(memory.id));
+  const request = signedPush(memory);
+  outstandingPushes.add(request);
+  const forget = () => {
+    outstandingPushes.delete(request);
+  };
+  request.then(forget, forget);
+  return request;
+}
+
+/**
+ * Prove, bounded, that `id`'s receiver merge has finished, with a signed push
+ * of the same id. The receiver takes the id's Memory write lock around the
+ * merge and holds it across the merge's pause and its write-back, and it
+ * reports `merge_target_busy` rather than wait for it. So a probe that reports
+ * a completed merge for this id did so after acquiring that lock, which the
+ * earlier merge releases only once its write-back has finished.
+ *
+ * An `indeterminate` answer, a rejected push or this bound expiring is a
+ * failure, never a pass.
+ */
+async function probeMergeFinished(id: string): Promise<void> {
+  const deadline = Date.now() + MERGE_PROBE_BOUND_MS;
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new UnconfirmedMergeError(`no completed merge for ${id}`);
+    probeSequence += 1;
+    let response: Response;
+    try {
+      response = await signedPush(
+        memoryRow(id, `cleanup-probe-${probeSequence}`, new Date(Date.now() + probeSequence).toISOString()),
+        Math.min(remaining, 15_000),
+      );
+    } catch (error) {
+      throw new UnconfirmedMergeError(`the probe push for ${id} was rejected: ${String(error)}`);
+    }
+    let body: any;
+    try {
+      body = await response.json();
+    } catch (error) {
+      throw new UnconfirmedMergeError(`the probe push for ${id} returned an unreadable response: ${String(error)}`);
+    }
+    if (!response.ok) {
+      throw new UnconfirmedMergeError(`the probe push for ${id} returned status ${response.status}`);
+    }
+    if (Array.isArray(body?.indeterminate) && body.indeterminate.some((entry: any) => entry?.id === id)) {
+      throw new UnconfirmedMergeError(`the probe push for ${id} returned indeterminate`);
+    }
+    if (body?.merged === 1) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+/** Prove every affected id's merge finished, retiring each id it confirms. */
+async function confirmAffectedMergesFinished(): Promise<void> {
+  for (const id of [...unconfirmedMergeIds]) {
+    await probeMergeFinished(id);
+    unconfirmedMergeIds.delete(id);
+  }
 }
 
 /** Wait until a direct push of this id is not refused merge_target_busy. */
@@ -442,8 +590,6 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
     expect(markerExists(`claimed.${MERGE_PAUSE}`), "the pause never claimed the arm").toBe(true);
 
     await resetPauseMarkers();
-    // Cleanup released the pause and only then removed the markers; the merge
-    // it held can now finish.
     expect((await holder).status).toBe(200);
     expect(markerExists(`released.${MERGE_PAUSE}`), "cleanup left the released marker").toBe(false);
 
@@ -455,10 +601,13 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
     const pending = resetPauseMarkers().then(() => {
       settled = true;
     });
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    expect(settled, "cleanup resolved while the release was unacknowledged").toBe(false);
-    writeFileSync(join(pauseDir, `released.${MERGE_PAUSE}`), "go");
-    await pending;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(settled, "cleanup resolved while the release was unacknowledged").toBe(false);
+    } finally {
+      writeFileSync(join(pauseDir, `released.${MERGE_PAUSE}`), "go");
+      await pending;
+    }
     expect(markerExists(`released.${MERGE_PAUSE}`), "cleanup left the released marker").toBe(false);
 
     // Cleanup fails when it cannot observe the release acknowledgement. The
@@ -485,16 +634,53 @@ describe("flair#2797 — a merge_target_busy refusal is re-offered after the loc
       expect(failedAfter).toBeLessThan(RELEASE_ACK_BOUND_MS + 6_000);
       expect((await stuck).status).toBe(200);
     } finally {
-      for (const name of [
-        `arm.${MERGE_PAUSE}`,
-        `claimed.${MERGE_PAUSE}`,
-        `paused.${MERGE_PAUSE}`,
-        `go.${MERGE_PAUSE}`,
-        `released.${MERGE_PAUSE}`,
-      ]) {
-        rmSync(join(pauseDir, name), { force: true });
-      }
+      // The release acknowledgement above is unobservable once `released` was
+      // removed, so this writes `go` without waiting for it and waits for the
+      // push, then probes its id: the probe merges only after that merge's
+      // write-back released the id's lock.
+      writeFileSync(join(pauseDir, `go.${MERGE_PAUSE}`), "");
+      await awaitOutstandingPushes();
+      await confirmAffectedMergesFinished();
+      removePauseMarkers();
     }
+  }, 240_000);
+
+  it("cleanup waits for a merge whose response was indeterminate", async () => {
+    const id = "memory-indeterminate-hold";
+    const at = new Date(Date.now() - 30_000).toISOString();
+
+    // The receiver answers at its record deadline while the merge still waits
+    // at `federation-merge`; the armed pre-commit pause then keeps that merge
+    // unfinished after cleanup releases the first pause.
+    writeFileSync(join(pauseDir, `arm.${MERGE_PAUSE}`), "");
+    writeFileSync(join(pauseDir, `arm.${MERGE_PAUSE}-commit`), "");
+    const held = push(memoryRow(id, "indeterminate-holder", at));
+    const response = await held;
+    const body = await response.json() as any;
+    expect(response.status, JSON.stringify(body)).toBe(200);
+    expect(body.indeterminate, JSON.stringify(body)).toEqual([{ table: "Memory", id }]);
+
+    let settled = false;
+    const cleanup = resetPauseMarkers().then(() => {
+      settled = true;
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      expect(settled, "cleanup resolved while the merge was unfinished").toBe(false);
+      expect(
+        markerExists(`paused.${MERGE_PAUSE}-commit`),
+        "the held merge is not parked at its pre-commit pause",
+      ).toBe(true);
+      expect(
+        markerExists(`claimed.${MERGE_PAUSE}`),
+        "cleanup removed the pause markers while the merge was unfinished",
+      ).toBe(true);
+    } finally {
+      writeFileSync(join(pauseDir, `go.${MERGE_PAUSE}-commit`), "");
+      await cleanup;
+    }
+    expect(markerExists(`released.${MERGE_PAUSE}`), "cleanup left the first pause's released marker").toBe(false);
+    expect(markerExists(`released.${MERGE_PAUSE}-commit`), "cleanup left the pre-commit pause's released marker").toBe(false);
   }, 240_000);
 
   it("a failed SyncLog write is reported in the response, not only logged", async () => {

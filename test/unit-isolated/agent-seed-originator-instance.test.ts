@@ -52,6 +52,7 @@ mock.module("harper", () => ({
         put: async (r: any) => { soulStore.set(r.id, { ...r }); return r; },
       },
       Memory: {
+        get: async (id: string) => memStore.get(id) ?? null,
         search: () => gen(() => memStore.values()),
         put: async (r: any) => {
           for (const field of ["agentId", "content", "createdAt"]) expect(typeof r[field]).toBe("string");
