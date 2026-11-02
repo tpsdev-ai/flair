@@ -81,26 +81,31 @@ describe("pi unwire ownership", () => {
     for (const source of LOOKALIKES) expect(JSON.stringify(res)).not.toContain(source);
   });
 
-  it("matches canonical npm sources and lexical package-path segments", () => {
+  it("matches canonical npm sources and resolved package-path segments", () => {
     expect(isFlairOwnedPiEntry(`npm:${PI_FLAIR_PACKAGE}`)).toBe(true);
     expect(isFlairOwnedPiEntry(`npm:${PI_FLAIR_PACKAGE}@0.50.0`)).toBe(true);
     expect(isFlairOwnedPiEntry(FLAIR_ENTRY)).toBe(true);
-    expect(isFlairOwnedPiEntry("~/node_modules/@tpsdev-ai/pi-flair/../../../notes.js")).toBe(true);
+    expect(isFlairOwnedPiEntry("~/node_modules/@tpsdev-ai/pi-flair/../../../notes.js")).toBe(false);
     expect(
       isFlairOwnedPiEntry("C:\\Users\\agent\\.pi\\agent\\npm\\node_modules\\@tpsdev-ai\\pi-flair\\dist\\index.js"),
-    ).toBe(true);
+    ).toBe(process.platform === "win32");
     for (const lookalike of LOOKALIKES) expect(isFlairOwnedPiEntry(lookalike)).toBe(false);
     expect(isFlairOwnedPiEntry(`npm:${PI_FLAIR_PACKAGE}-extras`)).toBe(false);
     expect(isFlairOwnedPiEntry("~/node_modules/@tpsdev-ai/pi-flair")).toBe(false);
   });
 
   for (const changed of [true, false]) {
-    it(`preserves whitespace-containing and empty-suffix npm sources and reports positions on the ${changed ? "changed" : "no-op"} path`, () => {
+    it(`preserves empty suffixes, internal spec whitespace and whitespace before npm: and reports positions on the ${changed ? "changed" : "no-op"} path`, () => {
       const retained = [
-        "npm: @tpsdev-ai/pi-flair", "npm:@tpsdev-ai/pi-flair ", "npm:@tpsdev-ai/pi-flair@",
+        "npm:", "npm:   ", "npm:@tpsdev-ai/pi-flair@", " npm:@tpsdev-ai/pi-flair",
+        "npm:@tpsdev-ai/pi flair", "npm: @other/pi-flair ",
         "npm:@tpsdev-ai/pi-flair@ leading", "npm:@tpsdev-ai/pi-flair@1.0 x",
       ];
-      const owned = [`npm:${PI_FLAIR_PACKAGE}`, `npm:${PI_FLAIR_PACKAGE}@latest`];
+      const owned = [
+        `npm:${PI_FLAIR_PACKAGE}`, `npm:${PI_FLAIR_PACKAGE}@latest`,
+        "npm: @tpsdev-ai/pi-flair", "npm:@tpsdev-ai/pi-flair ",
+        "npm: @tpsdev-ai/pi-flair@0.50.0", "npm:@tpsdev-ai/pi-flair@0.50.0 ",
+      ];
       const entries = changed ? [...retained, ...owned] : retained;
       const path = writePiSettings({ packages: entries.map(source => ({ source })), extensions: entries });
       const before = readFileSync(path, "utf-8");
@@ -112,8 +117,10 @@ describe("pi unwire ownership", () => {
       for (const [index, source] of retained.entries()) {
         expect(isPiFlairNpmSource(source)).toBe(false);
         expect(isFlairOwnedPiEntry(source)).toBe(false);
-        expect(res.message).toContain(`packages[${index}]`);
-        expect(res.message).toContain(`extensions[${index}]`);
+        if (source.includes("pi-flair")) {
+          expect(res.message).toContain(`packages[${index}]`);
+          expect(res.message).toContain(`extensions[${index}]`);
+        }
       }
       for (const source of owned) {
         expect(isPiFlairNpmSource(source)).toBe(true);

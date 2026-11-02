@@ -83,7 +83,8 @@ export interface UnwireResult {
 // ---- Detection helpers ----------------------------------------------------------
 
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolveHome } from "../lib/home.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, isResolvedVersion, mcpServerSpec } from "../lib/mcp-spec.js";
 import { decodeWiringSpec, wiringPinString } from "../lib/wiring-spec.js";
@@ -1052,12 +1053,13 @@ export function piPackageEntrySource(entry: unknown): string | null {
   return null;
 }
 
-/** Bare pi-flair npm source, or an @ suffix with a nonempty spec containing no whitespace. */
+/** Pi trims the npm spec after the literal `npm:` prefix. */
 export function isPiFlairNpmSource(source: string): boolean {
   if (typeof source !== "string") return false;
-  const bare = `npm:${PI_FLAIR_PACKAGE}`;
-  const prefix = `${bare}@`;
-  return source === bare || (source.startsWith(prefix) && source.length > prefix.length && !/\s/.test(source));
+  if (!source.startsWith("npm:")) return false;
+  const spec = source.slice("npm:".length).trim();
+  const prefix = `${PI_FLAIR_PACKAGE}@`;
+  return spec === PI_FLAIR_PACKAGE || (spec.startsWith(prefix) && spec.length > prefix.length && !/\s/.test(spec));
 }
 
 /**
@@ -1084,21 +1086,27 @@ export function isPiFlairExtensionPath(entry: string): boolean {
 
 const PI_FLAIR_PACKAGE_SEGMENTS = ["node_modules", "@tpsdev-ai", "pi-flair"];
 
-/** Lexical segment match after normalising backslashes; filesystem targets are not resolved. */
-export function isInsidePiFlairPackage(entry: string): boolean {
+/** Package-segment match after pi path resolution. */
+export function isInsidePiFlairPackage(entry: string, homeDir = resolveHome(), baseDir = piAgentDir()): boolean {
   if (typeof entry !== "string" || entry.startsWith("npm:") || entry.startsWith("git:")) return false;
-  const segments = entry.replace(/\\/g, "/").split("/");
+  let resolved: string;
+  try {
+    resolved = resolvePiExtensionPath(entry, homeDir, baseDir);
+  } catch {
+    return false;
+  }
+  const segments = resolved.split(sep);
   for (let i = 0; i + PI_FLAIR_PACKAGE_SEGMENTS.length < segments.length; i++) {
     if (PI_FLAIR_PACKAGE_SEGMENTS.every((segment, offset) => segments[i + offset] === segment)) return true;
   }
   return false;
 }
 
-/** Shared pi ownership rule: npm source or lexical package-path segment match. */
-export function isFlairOwnedPiEntry(entry: unknown): boolean {
+/** Shared pi ownership rule: npm source or resolved package-path segments. */
+export function isFlairOwnedPiEntry(entry: unknown, homeDir = resolveHome(), baseDir = piAgentDir()): boolean {
   if (typeof entry !== "string") return false;
   if (entry.startsWith("npm:")) return isPiFlairNpmSource(entry);
-  return isInsidePiFlairPackage(entry);
+  return isInsidePiFlairPackage(entry, homeDir, baseDir);
 }
 
 /** What one pi settings file says about pi-flair. Pure — callers do the fs. */
@@ -1154,16 +1162,19 @@ export function scanPiSettings(raw: string | null): PiSettingsScan {
   return { parsed: true, packagesSpec, pinnedVersion, extensionFilePaths, misconfiguredNpmUnderExtensions };
 }
 
-/**
- * Resolve a pi `extensions` path entry the way pi's loader will: `~/` against
- * the home dir, a relative path against the settings file's own base dir, an
- * absolute path as-is. `baseDir` is the directory pi treats as the scope's
- * base (user scope: the agent dir).
- */
+/** Resolve local entries against pi's settings scope base. */
 export function resolvePiExtensionPath(entry: string, homeDir: string, baseDir: string): string {
-  if (entry.startsWith("~/") || entry === "~") return join(homeDir, entry.slice(1));
-  if (entry.startsWith("/")) return entry;
-  return join(baseDir, entry);
+  const normalize = (input: string): string => {
+    let path = input;
+    if (process.platform === "win32" && path.startsWith("/") && !path.startsWith("//") && !path.includes("\\")) {
+      const match = path.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
+      if (match) path = `${match[1].toUpperCase()}:\\${match[2]?.replaceAll("/", "\\") ?? ""}`;
+    }
+    if (path === "~") return homeDir;
+    if (path.startsWith("~/") || (process.platform === "win32" && path.startsWith("~\\"))) return join(homeDir, path.slice(2));
+    return path.startsWith("file://") ? fileURLToPath(path) : path;
+  };
+  return resolve(normalize(baseDir), normalize(entry.trim()));
 }
 
 /** Pretty-printed minimal settings snippet for copy-paste fallbacks. */
@@ -1676,7 +1687,7 @@ function _unwirePi(): UnwireResult {
         if (Array.isArray(config.packages)) {
           const kept = config.packages.filter((entry: unknown, index: number) => {
             const source = piPackageEntrySource(entry);
-            if (source && isFlairOwnedPiEntry(source)) {
+            if (source && isFlairOwnedPiEntry(source, resolveHome(), dirname(path))) {
               removed.push(`packages[${index}]`);
               return false;
             }
@@ -1691,7 +1702,7 @@ function _unwirePi(): UnwireResult {
         if (Array.isArray(config.extensions)) {
           const kept = config.extensions.filter((entry: unknown, index: number) => {
             if (typeof entry !== "string") return true;
-            if (isFlairOwnedPiEntry(entry)) {
+            if (isFlairOwnedPiEntry(entry, resolveHome(), dirname(path))) {
               removed.push(`extensions[${index}]`);
               return false;
             }
