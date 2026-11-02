@@ -277,6 +277,7 @@ describe("flair restore --replace stops before any delete when a Soul replay wou
     })).toBeLessThan(300);
     const archive = await backup(home, "replace-clean.json", agent);
     await op({ operation: "upsert", database: "flair", table: "Soul", records: [{ id, value: "changed after the backup" }] });
+    const beforeCreatedAt = (await soulRow(id)).createdAt;
 
     const restored = await runCli(["restore", archive, "--replace", "--url", harper.httpURL], home, { FLAIR_ADMIN_PASS: harper.admin.password });
 
@@ -286,7 +287,13 @@ describe("flair restore --replace stops before any delete when a Soul replay wou
     // the replayed row, not the exit code.
     expect(restored.stdout).toContain("Deleting existing data");
     expect(restored.stderr).not.toContain("scope-field");
-    expect(await soulRow(id)).toMatchObject({ agentId: agent, value: "archived content" });
+    const after = await soulRow(id);
+    expect(after).toMatchObject({ agentId: agent, value: "archived content" });
+    // The DELETE is observable: with the archived row gone, the PUT runs
+    // Harper's create path, which stamps `createdAt` to the write time. A PUT
+    // over the live row keeps its stored `createdAt`.
+    expect(after.createdAt).not.toBe(beforeCreatedAt);
+    expect(Date.parse(after.createdAt)).toBeGreaterThan(Date.parse(beforeCreatedAt));
   }, 300_000);
 });
 

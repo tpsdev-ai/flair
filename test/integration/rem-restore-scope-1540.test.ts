@@ -8,8 +8,8 @@
  * can carry those fields themselves. Since flair#2931 the CLI checks the
  * snapshot rows and every live row captured in the pre-restore snapshot before
  * any delete: a refused row stops the run with its id, sends no target DELETE
- * or PUT, and leaves every live Soul row in place. A snapshot with no refused
- * row still restores.
+ * or PUT, and leaves every live Soul row in place. A snapshot whose rows and
+ * whose live rows all pass the check still restores.
  *
  * Real snapshot file, isolated Harper, throwaway HOME, numeric ports.
  */
