@@ -685,6 +685,32 @@ function hasDocLinkAllow(line) {
   return /<!--\s*docs-freshness-allow:\s*\S[^\n]*?-->/.test(line);
 }
 
+function isClosingFence(line, fence) {
+  let start = 0;
+  while (line[start] === " ") start++;
+  if (start > 3) return false;
+  let end = start;
+  while (line[end] === fence.ch) end++;
+  if (end - start < fence.size) return false;
+  for (let i = end; i < line.length; i++) {
+    if (line[i] !== " " && line[i] !== "\t") return false;
+  }
+  return true;
+}
+
+function hasClosingBackticks(text, size) {
+  for (let i = 0; i < text.length;) {
+    if (text[i] !== "`") {
+      i++;
+      continue;
+    }
+    const start = i;
+    while (text[i] === "`") i++;
+    if (i - start === size && (start === 0 || text[start - 1] !== "\\")) return true;
+  }
+  return false;
+}
+
 function docMarkdown(text) {
   const lines = text.split("\n");
   const masked = [];
@@ -697,7 +723,7 @@ function docMarkdown(text) {
     const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
       masked.push(" ".repeat(line.length));
-      if (new RegExp(`^ {0,3}${fence.ch}{${fence.size},}[ \t]*$`).test(line)) fence = null;
+      if (isClosingFence(line, fence)) fence = null;
       offset += line.length + 1;
       continue;
     }
@@ -718,7 +744,7 @@ function docMarkdown(text) {
             continuation.push(lines[next]);
           }
           const rest = continuation.join("\n");
-          if (!new RegExp(`(?<!\\\\)(?<!\x60)\x60{${run.length}}(?!\x60)`).test(rest)) {
+          if (!hasClosingBackticks(rest, run.length)) {
             out += run;
             i += run.length;
             continue;

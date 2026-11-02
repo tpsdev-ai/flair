@@ -162,6 +162,63 @@ describe("doc-link-pack-coverage", () => {
     expect(out).toContain("references 'missing.md'");
   }, 120_000);
 
+  for (const ch of ["`", "~"]) {
+    const fenceCases = [
+      ["equal length", ch.repeat(3), true],
+      ["longer", ch.repeat(4), true],
+      ["shorter", ch.repeat(2), false],
+      ["other marker", (ch === "`" ? "~" : "`").repeat(3), false],
+      ["three leading spaces", `   ${ch.repeat(3)}`, true],
+      ["four leading spaces", `    ${ch.repeat(3)}`, false],
+      ["leading tab", `\t${ch.repeat(3)}`, false],
+      ["trailing text", `${ch.repeat(3)} text`, false],
+      ["trailing spaces and tabs", `${ch.repeat(3)} \t `, true],
+      ["trailing carriage return", `${ch.repeat(3)}\r`, false],
+    ] as const;
+    for (const [form, closing, closes] of fenceCases) {
+      test(`${ch} fence with ${form} ${closes ? "closes" : "stays open"}`, () => {
+        const dir = makeFixture({ docs: { "docs/a.md": [
+          "# A", "", ch.repeat(3), closing, "[bad](missing.md)", "",
+        ].join("\n") } });
+        const { status, out } = runGate(dir);
+        expect(status).toBe(closes ? 1 : 0);
+        if (closes) {
+          expect(out).toContain("✗ docs/a.md:5");
+          expect(out).toContain("references 'missing.md'");
+        } else {
+          expect(summaryLine(out)).toContain("✓ doc-link-pack-coverage");
+        }
+      }, 120_000);
+    }
+  }
+
+  const codeSpanCases = [
+    ["equal-length run", "``", true],
+    ["longer run", "```", false],
+    ["shorter run", "`", false],
+    ["backslash-preceded run", "\\``", false],
+    ["two-backslash-preceded run", "\\\\``", false],
+    ["equal run after a longer run", "``` then ``", true],
+    ["equal run after a shorter run", "` then ``", true],
+    ["equal run after an escaped run", "\\`` then ``", true],
+    ["equal run on the next line", "\ncontinued ``", true],
+  ] as const;
+  for (const [form, closing, closes] of codeSpanCases) {
+    test(`code span with ${form} ${closes ? "hides" : "exposes"} its link`, () => {
+      const dir = makeFixture({ docs: {
+        "docs/a.md": `# A\n\nOpening \`\` [bad](missing.md) ${closing}\n`,
+      } });
+      const { status, out } = runGate(dir);
+      expect(status).toBe(closes ? 0 : 1);
+      if (closes) {
+        expect(summaryLine(out)).toContain("✓ doc-link-pack-coverage");
+      } else {
+        expect(out).toContain("✗ docs/a.md:3");
+        expect(out).toContain("references 'missing.md'");
+      }
+    }, 120_000);
+  }
+
   test("same-line HTML comment exempts its mention but not the next line", () => {
     const dir = makeFixture({ docs: { "docs/a.md": [
       "# A", "", "See `host.md`. <!-- docs-freshness-allow: file belongs to the reader -->",
