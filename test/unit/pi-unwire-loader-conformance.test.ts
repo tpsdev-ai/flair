@@ -63,6 +63,7 @@ describe("pi settings loader conformance", () => {
       const lookalikes = [
         "npm:@other/pi-flair", "~/work/pi-flair/notes.js", "~/dist/pi-flair-notes.js",
         "npm: @tpsdev-ai/pi-flair", "npm:@tpsdev-ai/pi-flair ", "npm:@tpsdev-ai/pi-flair@",
+        "npm:@tpsdev-ai/pi-flair@ leading", "npm:@tpsdev-ai/pi-flair@1.0 x",
       ];
       const packages = [canonical, { source: `${canonical}@latest`, extensions: ["dist/index.js"] }, ...lookalikes];
       const extensions = [documented, canonical, ...lookalikes];

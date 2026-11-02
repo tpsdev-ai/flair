@@ -96,7 +96,10 @@ describe("pi unwire ownership", () => {
 
   for (const changed of [true, false]) {
     it(`preserves malformed npm sources and reports positions on the ${changed ? "changed" : "no-op"} path`, () => {
-      const retained = ["npm: @tpsdev-ai/pi-flair", "npm:@tpsdev-ai/pi-flair ", "npm:@tpsdev-ai/pi-flair@"];
+      const retained = [
+        "npm: @tpsdev-ai/pi-flair", "npm:@tpsdev-ai/pi-flair ", "npm:@tpsdev-ai/pi-flair@",
+        "npm:@tpsdev-ai/pi-flair@ leading", "npm:@tpsdev-ai/pi-flair@1.0 x",
+      ];
       const owned = [`npm:${PI_FLAIR_PACKAGE}`, `npm:${PI_FLAIR_PACKAGE}@latest`];
       const entries = changed ? [...retained, ...owned] : retained;
       const path = writePiSettings({ packages: entries.map(source => ({ source })), extensions: entries });

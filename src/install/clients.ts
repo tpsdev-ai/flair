@@ -1052,12 +1052,12 @@ export function piPackageEntrySource(entry: unknown): string | null {
   return null;
 }
 
-/** Bare pi-flair npm source, or an @ suffix with a nonempty spec and no surrounding whitespace. */
+/** Bare pi-flair npm source, or an @ suffix with a nonempty spec containing no whitespace. */
 export function isPiFlairNpmSource(source: string): boolean {
   if (typeof source !== "string") return false;
   const bare = `npm:${PI_FLAIR_PACKAGE}`;
   const prefix = `${bare}@`;
-  return source === bare || (source.startsWith(prefix) && source.length > prefix.length && !/\s$/.test(source));
+  return source === bare || (source.startsWith(prefix) && source.length > prefix.length && !/\s/.test(source));
 }
 
 /**
