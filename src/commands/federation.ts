@@ -51,8 +51,10 @@ import {
   retryRowConfirmation,
   retryRowForAttempt,
   retryRowForRefusal,
+  retryRowMalformedness,
   terminalRetryRow,
   type RetryQueueRow,
+  type RetryRowMalformedness,
 } from "../lib/federation-retry-queue.js";
 import {
   presenceCursorMs,
@@ -860,6 +862,14 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const reservedOffers = new Set<string>();
     /** Pending retry rows to reserve when their batch is reached. */
     const reservationTargets = new Map<string, RetryQueueRow>();
+    /** Retry row ids already reported malformed in this run. */
+    const reportedMalformedRetries = new Set<string>();
+
+    function reportMalformedRetryRow(id: string, malformed: RetryRowMalformedness): void {
+      if (reportedMalformedRetries.has(id)) return;
+      reportedMalformedRetries.add(id);
+      console.warn(`⚠️  FederationRetry row ${id} is malformed (${malformed.problem}: ${malformed.field}); left as stored.`);
+    }
 
     async function loadPendingRetries(): Promise<void> {
       const res = await fetch(`${opsEndpoint}/`, {
@@ -883,6 +893,25 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       const list = await res.json() as unknown;
       if (!Array.isArray(list)) throw new Error("FederationRetry read failed: body is not a row list");
       for (const row of list as RetryQueueRow[]) pendingRetries.set(row.id, row);
+    }
+
+    /** Read the stored retry rows for `keys`, whatever their state. */
+    async function readStoredRetryRows(keys: string[]): Promise<Map<string, Record<string, unknown>>> {
+      const out = new Map<string, Record<string, unknown>>();
+      if (keys.length === 0) return out;
+      const res = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: retryHeaders,
+        body: JSON.stringify({ operation: "search_by_hash", database: "flair", table: "FederationRetry", hash_values: keys, get_attributes: ["*"] }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`FederationRetry read failed (${res.status})`);
+      const rows = await res.json() as unknown;
+      if (!Array.isArray(rows)) throw new Error("FederationRetry read failed: body is not a row list");
+      for (const row of rows as Array<Record<string, unknown>>) {
+        if (typeof row.id === "string") out.set(row.id, row);
+      }
+      return out;
     }
 
     /** Read one retry row back and check it with retryRowConfirmation. */
@@ -957,11 +986,24 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       const refused = new Map(result.refused.map((r) => [keyOf(r.table, r.id), r.reason]));
       const undecided = new Set(result.indeterminate.map((r) => keyOf(r.table, r.id)));
       const nowIso = new Date().toISOString();
+      // Read what is stored for this batch whatever each row's state: a
+      // malformed row is left as stored and its outcome write is skipped.
+      const storedRows = await readStoredRetryRows(
+        batch.filter((record) => record.table === "Memory").map((record) => retryEntryKey(hub.id, "Memory", record.id)),
+      );
       for (const record of batch) {
         if (record.table !== "Memory") continue;
         const key = retryEntryKey(hub.id, "Memory", record.id);
         const attemptReserved = reservedOffers.delete(key);
         const prior = pendingRetries.get(key) ?? null;
+        const stored = storedRows.get(key) ?? null;
+        if (stored !== null) {
+          const malformed = retryRowMalformedness(stored);
+          if (malformed !== null) {
+            reportMalformedRetryRow(key, malformed);
+            continue;
+          }
+        }
         // A row the shared validator names malformed is reported before the
         // offer and left as stored: the outcome does not transition it.
         if (prior !== null && retryOfferProblem(prior) !== null) continue;
@@ -1178,10 +1220,8 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         // that is gone or has become private ends its obligation here.
         const seen = new Set(rows.map((r: any) => r.id));
         for (const pending of pendingRetries.values()) {
-          const problem = retryOfferProblem(pending);
-          if (problem !== null) {
-            console.warn(`⚠️  FederationRetry row ${pending.id} is malformed (${problem}); left as stored.`);
-          }
+          const malformed = retryRowMalformedness(pending as Record<string, unknown>);
+          if (malformed !== null) reportMalformedRetryRow(pending.id, malformed);
         }
         // A source the cursor selects that also has a valid pending row is
         // offered now — a new change is not a retry, so the backoff does not
