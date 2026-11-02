@@ -452,12 +452,9 @@ defineCheck("changelog-unreleased", null, () => {
   // a diff using only package.json, bun.lock, package-lock.json, or
   // npm-shrinkwrap.json. The author is
   // never read from commit metadata, which the branch controls; an empty or
-  // missing value keeps the requirement (fail closed).
+  // missing value leaves the ordinary fragment rules in effect.
   const waiverApplies = isRenovateLogin(process.env.FLAIR_PR_AUTHOR_LOGIN) &&
     changedPaths !== null && isDependencyOnlyChange(changedPaths);
-  if (waiverApplies) {
-    console.log(`  ↷ changelog-unreleased: waived the per-PR fragment requirement — FLAIR_PR_AUTHOR_LOGIN matches ${RENOVATE_LOGIN} and changed paths use the four accepted JavaScript manifest or lockfile names.`);
-  }
 
   if (commitsSinceTag !== null && commitsSinceTag > 0 && !hasContent && thisChangeShips && !waiverApplies) {
     failures.push({
@@ -496,11 +493,15 @@ defineCheck("changelog-unreleased", null, () => {
         { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
       const addedCount = added ? added.split("\n").filter((p) => !/\/README\.md$/.test(p)).length : 0;
 
-      if (thisChangeShips && changeCommits > 0 && addedCount === 0 && !waiverApplies) {
-        failures.push({
-          file: `${FRAGMENT_DIR_REL}/`, line: 1,
-          msg: `this change has ${changeCommits} feat/fix commit(s) since ${baseRef} but adds no changelog fragment. The directory being non-empty is not enough — an entry already there belongs to someone else's change. Add ${FRAGMENT_DIR_REL}/<category>-<slug>.md (categories: ${CATEGORIES.join(", ")}).`,
-        });
+      if (thisChangeShips && changeCommits > 0 && addedCount === 0) {
+        if (waiverApplies) {
+          console.log(`  ↷ changelog-unreleased: waived the per-PR fragment requirement — FLAIR_PR_AUTHOR_LOGIN matches ${RENOVATE_LOGIN} and changed paths use the four accepted JavaScript manifest or lockfile names.`);
+        } else {
+          failures.push({
+            file: `${FRAGMENT_DIR_REL}/`, line: 1,
+            msg: `this change has ${changeCommits} feat/fix commit(s) since ${baseRef} but adds no changelog fragment. The directory being non-empty is not enough — an entry already there belongs to someone else's change. Add ${FRAGMENT_DIR_REL}/<category>-<slug>.md (categories: ${CATEGORIES.join(", ")}).`,
+          });
+        }
       }
     }
   } catch {

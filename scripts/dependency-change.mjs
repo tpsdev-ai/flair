@@ -8,7 +8,7 @@
 //     branch can set to any value.
 //   * Every path against the merge base is package.json, bun.lock,
 //     package-lock.json, or npm-shrinkwrap.json.
-//     A change to anything else keeps the normal fragment requirement.
+//     Other paths leave the ordinary fragment rules in effect.
 //
 // Release collection matches the recorded author name and changed filenames.
 

@@ -349,7 +349,7 @@ git -C "$ROOT" checkout -b "$RELEASE_BRANCH"
 # 1a. Assemble the changelog fragments into this version's section.
 # Fragment files under .changelog/unreleased/ (flair#835) become a
 # `## [$VERSION] - <date>` section and are deleted; released
-# history above it is untouched. It refuses an empty release section or a hand-written entry in
+# history below it is untouched. It refuses an empty release section or a hand-written entry in
 # `## [Unreleased]` that this step would otherwise overwrite.
 echo "📰 Assembling changelog fragments..."
 # 1a-pre. Refuse to cut if a changelog fragment claims "fixed" for an

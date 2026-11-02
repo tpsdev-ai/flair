@@ -122,7 +122,7 @@ function failingGitEnv(dir: string, command: string): NodeJS.ProcessEnv {
   return { ...process.env, PATH: `${bin}:${process.env.PATH}` };
 }
 
-function addDependencyOnlyCommit(dir: string, opts: { author?: "renovate" } = {}): void {
+function addDependencyOnlyCommit(dir: string, opts: { author?: "renovate"; type?: "chore" | "fix" } = {}): void {
   writeFixtureFile(dir, join("packages", "dep", "package.json"), JSON.stringify({
     name: "@example/dep",
     version: "1.0.0",
@@ -130,23 +130,42 @@ function addDependencyOnlyCommit(dir: string, opts: { author?: "renovate" } = {}
   writeFixtureFile(dir, "bun.lock", "# fixture lockfile\n# left-pad 1.3.0\n");
   git(dir, "add", "-A");
   if (opts.author === "renovate") {
-    commitAs(dir, "renovate[bot]", "fixture@example.invalid", "fix(deps): update dependency left-pad to v1.3.0 (#42)");
+    commitAs(dir, "renovate[bot]", "fixture@example.invalid", `${opts.type ?? "fix"}(deps): update dependency left-pad to v1.3.0 (#42)`);
   } else {
-    commitAs(dir, "Fixture", "fixture@example.invalid", "fix(deps): update dependency left-pad to v1.3.0 (#42)");
+    commitAs(dir, "Fixture", "fixture@example.invalid", `${opts.type ?? "fix"}(deps): update dependency left-pad to v1.3.0 (#42)`);
   }
 }
 
 describe("PR author login and accepted JavaScript filenames", () => {
-  test("Renovate login + package.json and bun.lock changes are waived", () => {
+  test("Renovate dependency-only fix without a fragment prints the waiver", () => {
     const dir = makeRepo();
-    addDependencyOnlyCommit(dir);
+    addDependencyOnlyCommit(dir, { author: "renovate" });
     const res = runGate(dir, "renovate[bot]");
     expect(res.out).toContain("waived the per-PR fragment requirement");
     expect(res.out).not.toContain("adds no changelog fragment");
     expect(res.status).toBe(0);
   });
 
-  test("Renovate event login + a source file still requires a fragment", () => {
+  test("Renovate dependency-only chore prints no waiver", () => {
+    const dir = makeRepo();
+    addDependencyOnlyCommit(dir, { author: "renovate", type: "chore" });
+    const res = runGate(dir, "renovate[bot]");
+    expect(res.out).not.toContain("waived the per-PR fragment requirement");
+    expect(res.status).toBe(0);
+  });
+
+  test("Renovate fix adding a fragment prints no waiver", () => {
+    const dir = makeRepo();
+    addDependencyOnlyCommit(dir, { author: "renovate" });
+    writeFixtureFile(dir, ".changelog/unreleased/fixed-dependency.md", "- **Update the dependency.**\n");
+    git(dir, "add", "-A");
+    commitAs(dir, "renovate[bot]", "fixture@example.invalid", "chore: add fragment");
+    const res = runGate(dir, "renovate[bot]");
+    expect(res.out).not.toContain("waived the per-PR fragment requirement");
+    expect(res.status).toBe(0);
+  });
+
+  test("Renovate fix adding a source file requires a fragment", () => {
     const dir = makeRepo();
     addDependencyOnlyCommit(dir);
     writeFixtureFile(dir, join("packages", "dep", "src", "index.ts"), "export const n = 1;\n");
@@ -157,7 +176,7 @@ describe("PR author login and accepted JavaScript filenames", () => {
     expect(res.status).not.toBe(0);
   });
 
-  test("a source file renamed to package.json retains the fragment requirement", () => {
+  test("Renovate fix renaming a source file to package.json requires a fragment", () => {
     const dir = makeRepo();
     writeFixtureFile(dir, "src/manifest.json", "{\"name\":\"example\"}\n");
     git(dir, "add", "-A");
@@ -177,7 +196,7 @@ describe("PR author login and accepted JavaScript filenames", () => {
     expect(promotion.out).toContain("no fragments");
   });
 
-  test("a human login + accepted filenames still requires a fragment", () => {
+  test("dependency-only fix with a human event login requires a fragment", () => {
     const dir = makeRepo();
     addDependencyOnlyCommit(dir);
     const res = runGate(dir, "human-a");
@@ -186,7 +205,7 @@ describe("PR author login and accepted JavaScript filenames", () => {
     expect(res.status).not.toBe(0);
   });
 
-  test("a missing author keeps the requirement", () => {
+  test("dependency-only fix without an event login requires a fragment", () => {
     const dir = makeRepo();
     addDependencyOnlyCommit(dir);
     const res = runGate(dir);
@@ -195,7 +214,7 @@ describe("PR author login and accepted JavaScript filenames", () => {
     expect(res.status).not.toBe(0);
   });
 
-  test("an empty author keeps the requirement", () => {
+  test("dependency-only fix with an empty event login requires a fragment", () => {
     const dir = makeRepo();
     addDependencyOnlyCommit(dir);
     const res = runGate(dir, "");
@@ -204,7 +223,7 @@ describe("PR author login and accepted JavaScript filenames", () => {
     expect(res.status).not.toBe(0);
   });
 
-  test("a commit author named renovate[bot] does not waive without the event author", () => {
+  test("Renovate-named fix with a human event login requires a fragment", () => {
     const dir = makeRepo();
     addDependencyOnlyCommit(dir, { author: "renovate" });
     const res = runGate(dir, "human-a");
@@ -304,7 +323,7 @@ describe("release-time history", () => {
     expect(result.out).toContain("could not resolve release tag with git describe");
   });
 
-  test("first release needs an explicit no-tag flag", () => {
+  test("release helper without a tag needs an explicit no-tag flag", () => {
     const dir = makeRepo();
     addDependencyOnlyCommit(dir, { author: "renovate" });
     git(dir, "tag", "-d", "v0.1.0");
