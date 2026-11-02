@@ -241,19 +241,35 @@ function lineNumberAt(src, index) {
  * text-based walks and swallows the closing paren of the call or case around
  * it. Each `JsxText` node is masked from `pos` to `end`, replacing every
  * character except the four in `LINE_BREAK_CHARS` with a space, so lengths and
- * line/column positions stay aligned. A JSX attribute's string value is a
- * TypeScript string literal, which the literal masker already blanks.
+ * line/column positions stay aligned. A JSX attribute's string value is blanked
+ * the same way (its quotes are kept, so the masked source still parses): JSX
+ * attribute strings have no escape sequences, so the text walks must not read a
+ * trailing backslash as escaping the closing quote (flair#2854).
  */
 export function maskJsxText(src, fileName = UNNAMED_SOURCE) {
   if (!isJsxFileName(fileName)) return src;
   const sf = parseSourceFile(src, fileName);
   const out = src.split("");
   let masked = false;
+  const blank = (from, to) => {
+    for (let j = from; j < to && j < src.length; j++) if (!LINE_BREAK_CHARS.has(src[j])) out[j] = " ";
+  };
   const visit = (node) => {
     if (node.kind === ts.SyntaxKind.JsxText) {
       masked = true;
-      for (let j = node.pos; j < node.end && j < src.length; j++) {
-        if (!LINE_BREAK_CHARS.has(src[j])) out[j] = " ";
+      blank(node.pos, node.end);
+      return;
+    }
+    // A JSX attribute string has no escape sequences: its value ends at the next
+    // matching quote, so a trailing backslash is part of the value (flair#2854).
+    // The value is a StringLiteral in the AST; blank its interior so the
+    // text-based walks never read that backslash as an escaping backslash.
+    // The quotes stay, so the masked source still parses as JSX.
+    if (node.kind === ts.SyntaxKind.StringLiteral && node.parent && node.parent.kind === ts.SyntaxKind.JsxAttribute) {
+      const start = node.getStart(sf);
+      if (src[start] === '"' && src[node.end - 1] === '"' && node.end - 1 > start + 1) {
+        masked = true;
+        blank(start + 1, node.end - 1);
       }
       return;
     }
@@ -732,10 +748,11 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
     if (!args) continue;
     const argvText = BUN_ARGV_ARG_INDICES.map((i) => textAt(args.spans[i])).join(" ");
     const optText = textAt(resolveOptSpan(args.spans[BUN_OPTIONS_ARG_INDEX]));
+    const callStart = m.index + (m[1]?.length ?? 0);
     const call = {
       fn,
-      index: m.index,
-      line: lineOf(m.index),
+      index: callStart,
+      line: lineOf(callStart),
       text: `${argvText} ; ${optText}`,
       isCliEntry: textNamesCliEntry(argvText, ids),
     };
@@ -752,10 +769,11 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
     if (!args) continue;
     const argvText = (ARGV_ARG_INDICES.get(fn) ?? [0, 1]).map((i) => textAt(args.spans[i])).join(" ");
     const optText = textAt(resolveOptSpan(args.spans[OPTIONS_ARG_INDEX.get(fn)]));
+    const callStart = m.index + (m[1]?.length ?? 0);
     const call = {
       fn: raw,
-      index: m.index,
-      line: lineOf(m.index),
+      index: callStart,
+      line: lineOf(callStart),
       text: `${argvText} ; ${optText}`,
       isCliEntry: textNamesCliEntry(argvText, ids),
     };
@@ -838,7 +856,12 @@ export function functionBodies(source) {
       bodies.push({ name: m[1], start: bodyOpen, end: bodyClose });
     } else {
       const lineEnd = indexOfLineBreak(src, arrowEnd);
-      bodies.push({ name: m[1], start: arrowEnd, end: lineEnd === -1 ? src.length : lineEnd });
+      const end = lineEnd === -1 ? src.length : lineEnd;
+      // An expression body starts at its first token, not at the whitespace
+      // (or the `=>`'s last character) before it (flair#2842).
+      let start = arrowEnd;
+      while (start < end && /\s/.test(src[start])) start++;
+      bodies.push({ name: m[1], start, end });
     }
   }
   return bodies;
@@ -856,7 +879,7 @@ export function localHelpersThatSpawn(source, calls) {
     added = false;
     for (const body of bodies) {
       const text = src.slice(body.start, body.end);
-      const direct = spawnIdx.some((i) => i > body.start && i < body.end);
+      const direct = spawnIdx.some((i) => i >= body.start && i < body.end);
       const via = [...helpers].some((h) => identifierCalled(text, h));
       if ((direct || via) && !helpers.has(body.name)) {
         helpers.add(body.name);
@@ -903,7 +926,7 @@ export function sumWaitsMs(body, calls, open, close, extraBodies = []) {
   let sum = 0;
   for (const c of calls) {
     if (!c.timeoutMs) continue;
-    const inside = (c.index > open && c.index < close) || extraBodies.some((b) => c.index > b.start && c.index < b.end);
+    const inside = (c.index > open && c.index < close) || extraBodies.some((b) => c.index >= b.start && c.index < b.end);
     if (inside) sum += c.timeoutMs;
   }
   for (const m of body.matchAll(/AbortSignal\.timeout\s*\(\s*([^\s)]+)/g)) {
@@ -1049,12 +1072,12 @@ export function findCases(source, calls, helpers, bodies = []) {
     const waitsText = caseBody + "\n" + reach.map((b) => src.slice(b.start, b.end)).join("\n");
     // The CLI-entry calls this case reaches (directly, or through a helper).
     const reached = calls.filter(
-      (c) => c.isCliEntry && ((c.index > open && c.index < args.close) || reach.some((b) => c.index > b.start && c.index < b.end)),
+      (c) => c.isCliEntry && ((c.index > open && c.index < args.close) || reach.some((b) => c.index >= b.start && c.index < b.end)),
     );
     const budgetText = args.spans[2]?.text ?? "";
     cases.push({
       fn: m[2],
-      line: lineNumberAt(src, m.index),
+      line: lineNumberAt(src, m.index + (m[1]?.length ?? 0)),
       name: (args.spans[0]?.text.trim() ?? "").replace(/^["'`]|["'`]$/g, ""),
       argCount: args.spans.length,
       reachesSpawn: reaches,
@@ -1101,7 +1124,7 @@ export function offenderKey(o) {
 function scopeOf(index, bodies, cases) {
   let best = null;
   for (const b of bodies) {
-    if (index > b.start && index < b.end && (!best || b.start >= best.start)) best = b;
+    if (index >= b.start && index < b.end && (!best || b.start >= best.start)) best = b;
   }
   if (best) return best.name;
   let bestCase = null;
