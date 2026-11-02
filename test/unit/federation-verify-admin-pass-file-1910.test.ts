@@ -43,8 +43,6 @@ beforeEach(() => {
         auth: req.headers.get("authorization") ?? "",
       });
       if (url.pathname === "/FederationPeers") {
-        // No peers to probe: verify's sync push finds no hub, then lists an
-        // empty peer set and returns without waiting.
         return Response.json({ peers: [] });
       }
       return Response.json({ ok: true });

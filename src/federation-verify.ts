@@ -723,7 +723,7 @@ export async function runFederationVerify(
       err("The request may or may not have taken effect; inspect the target before re-running.");
     }
     result.exitCode = 3;
-    if (bodyFailed) result.verdict.exitCode = result.exitCode;
+    result.verdict.exitCode = result.exitCode;
   }
   return result;
 }

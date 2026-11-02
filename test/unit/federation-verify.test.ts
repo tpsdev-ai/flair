@@ -683,6 +683,8 @@ describe("runFederationVerify", () => {
     });
     const r = await runFederationVerify(baseOpts(), deps);
     expect(r.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
+    expect(r.verdict.kind).toBe("verification-failed");
+    expect(r.verdict.summary).toContain("local write failed: disk full");
     expect(r.memId).toBeNull();
     expect(fetches).toBe(0);
     expect(deps.deletes.length).toBe(0);
@@ -741,6 +743,7 @@ describe("runFederationVerify", () => {
     expect(printed).toContain("Error: push exploded");
     expect(printed).toContain("Unknown outcome: DELETE /Memory/");
     expect(r.exitCode).toBe(3);
+    expect(r.verdict.exitCode).toBe(3);
     expect(r.verdict.kind).toBe("verification-failed");
     expect(r.verdict.summary).toContain("push exploded");
     expect(r.verdict.summary).toContain("cleanup");
@@ -761,7 +764,7 @@ describe("runFederationVerify", () => {
     expect(r.verdict.summary).not.toContain("no peers");
   });
 
-  test("a genuinely empty peer set still reports no peers to probe", async () => {
+  test("an empty peer listing after a successful canary push reports no peers to probe", async () => {
     let fetches = 0;
     const deps = makeDeps({
       peers: [],
