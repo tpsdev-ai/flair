@@ -8,6 +8,7 @@ import { beforeEach, expect, mock, test } from "bun:test";
 let agents = new Map<string, any>();
 let staged = new Map<string, any>();
 let souls = new Map<string, any>();
+let memories = new Map<string, any>();
 let beforeCommit: () => Promise<void>;
 
 mock.module("harper", () => ({
@@ -24,8 +25,9 @@ mock.module("harper", () => ({
         put: async (row: any) => { souls.set(row.id, { ...row }); },
       },
       Memory: {
+        get: async (id: string) => memories.get(id),
         search: async function* () {},
-        put: async () => {},
+        put: async (row: any) => { memories.set(row.id, { ...row }); },
       },
       Instance: { search: async function* () {} },
     },
@@ -56,6 +58,7 @@ beforeEach(() => {
   agents = new Map();
   staged = new Map();
   souls = new Map();
+  memories = new Map();
   _resetLocalInstanceIdCacheForTests();
 });
 
