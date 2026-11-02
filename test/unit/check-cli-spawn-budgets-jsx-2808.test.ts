@@ -296,6 +296,18 @@ test("jsx attribute ends in a backslash", () => {
 });
 `;
 
+// The same value in single quotes: JSX accepts either quote, so the masker
+// takes the quote character from the `StringLiteral` node rather than assuming
+// a double quote (flair#2854).
+const SINGLE_QUOTED_ATTRIBUTE_FIXTURE = `import { test, expect } from "bun:test";
+
+test("jsx attribute is single-quoted and ends in a backslash", () => {
+  const el = <p title='one\\'>plain</p>;
+  Bun.spawn(["bun", "src/cli.ts"], { timeout: 1000 });
+  expect(el).toBeDefined();
+});
+`;
+
 // The same case with an ordinary attribute value.
 const ORDINARY_ATTRIBUTE_FIXTURE = `import { test, expect } from "bun:test";
 
@@ -306,7 +318,15 @@ test("jsx attribute is ordinary", () => {
 });
 `;
 
-describe("a JSX attribute string is skipped by JSX's rules (flair#2854)", () => {
+describe("a JSX attribute string is skipped in either quote style (flair#2854)", () => {
+  it("keeps the case around a single-quoted backslash-ended attribute", () => {
+    const { spawnOffenders, caseOffenders } = scanFixture("jsx-attribute-backslash-single.test.tsx", SINGLE_QUOTED_ATTRIBUTE_FIXTURE);
+    expect(spawnOffenders).toEqual([]);
+    expect(caseOffenders.map((o) => [o.kind, o.scope])).toEqual([
+      ["case-no-budget", "jsx attribute is single-quoted and ends in a backslash"],
+    ]);
+  });
+
   for (const ext of ["tsx", "js"] as const) {
     it(`keeps the case around a backslash-ended attribute (.${ext})`, () => {
       const { spawnOffenders, caseOffenders } = scanFixture(`jsx-attribute-backslash.test.${ext}`, BACKSLASH_ATTRIBUTE_FIXTURE);
@@ -327,5 +347,11 @@ describe("a JSX attribute string is skipped by JSX's rules (flair#2854)", () => 
     expect(masked).not.toContain("\\");
     expect(masked).toContain('title="');
     expect(masked).toContain('">');
+    const single = "const el = <p title='one\\\\'>plain</p>;\n";
+    const maskedSingle = maskJsxText(single, "fixture.tsx");
+    expect(maskedSingle.length).toBe(single.length);
+    expect(maskedSingle).not.toContain("\\");
+    expect(maskedSingle).toContain("title='");
+    expect(maskedSingle).toContain("'>");
   });
 });

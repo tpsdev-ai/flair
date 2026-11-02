@@ -70,8 +70,8 @@ export function maskComments(source: string): string;
 
 /** Throws, naming `fileName`, when TypeScript's parser reports a syntax error in `source` (flair#2774). */
 export function findSpawnCalls(source: string, fileName?: string): { calls: SpawnCall[]; ids: Set<string> };
-export function functionBodies(source: string): Array<{ name: string; start: number; end: number }>;
-export function localHelpersThatSpawn(source: string, calls: SpawnCall[]): Set<string>;
+export function functionBodies(source: string, fileName?: string): Array<{ name: string; start: number; end: number }>;
+export function localHelpersThatSpawn(source: string, calls: SpawnCall[], fileName?: string): Set<string>;
 export function findCases(source: string, calls: SpawnCall[], helpers: Set<string>): CaseRecord[];
 export function analyzeTestFile(source: string, fileName?: string): { calls: SpawnCall[]; ids: Set<string>; helpers: Set<string>; cases: CaseRecord[]; bodies: Array<{ name: string; start: number; end: number }> };
 export function normalizeFingerprint(text: string): string;

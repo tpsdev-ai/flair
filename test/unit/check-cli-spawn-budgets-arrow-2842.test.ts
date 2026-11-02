@@ -1,9 +1,10 @@
 // check-cli-spawn-budgets-arrow-2842.test.ts — the spawn-budget gate attributes
-// a spawn that begins an expression-bodied arrow to that arrow (flair#2842), and
-// reports a case's line as the line its `test(`/`it(` starts on. Each fixture is
-// written to a real `test/` tree and scanned through `scanTree`, so the gate
-// sees the same file name (and therefore the same TypeScript script kind) as a
-// test file.
+// a spawn in an expression-bodied arrow to that arrow (flair#2842), however the
+// body is laid out: on the `=>` line, on the next line, or parenthesized across
+// lines. It also reports a case's line as the line its `test(`/`it(` starts on.
+// Each fixture is written to a real `test/` tree and scanned through `scanTree`,
+// so the gate sees the same file name (and therefore the same TypeScript script
+// kind) as a test file.
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -61,6 +62,29 @@ test("calls a block-bodied arrow", () => {
 });
 `;
 
+// The same helper with its body on the line after the `=>`.
+const NEXT_LINE_ARROW_FIXTURE = `import { test } from "bun:test";
+
+const f = () =>
+  Bun.spawn(["bun", "src/cli.ts"]);
+
+test("calls a next-line arrow", () => {
+  f();
+});
+`;
+
+// The same helper with a parenthesized body spanning lines.
+const PARENTHESIZED_ARROW_FIXTURE = `import { test } from "bun:test";
+
+const f = () => (
+  Bun.spawn(["bun", "src/cli.ts"])
+);
+
+test("calls a parenthesized arrow", () => {
+  f();
+});
+`;
+
 // The same helper with a `void` expression before the spawn.
 const VOID_ARROW_FIXTURE = `import { test } from "bun:test";
 
@@ -71,11 +95,23 @@ test("calls a void arrow", () => {
 });
 `;
 
-describe("a spawn that starts an expression-bodied arrow belongs to it (flair#2842)", () => {
-  it("attributes the spawn to the arrow and reports the case that calls it", () => {
+describe("a spawn in an expression-bodied arrow belongs to it (flair#2842)", () => {
+  it("attributes a same-line spawn to the arrow and reports the case that calls it", () => {
     const { spawnOffenders, caseOffenders } = scanFixture("arrow-expression.test.ts", EXPRESSION_ARROW_FIXTURE);
     expect(spawnOffenders.map((o) => [o.kind, o.scope])).toEqual([["spawn-no-timeout", "f"]]);
     expect(caseOffenders.map((o) => [o.kind, o.scope])).toEqual([["case-no-budget", "calls an expression-bodied arrow"]]);
+  });
+
+  it("attributes a next-line spawn to the arrow and reports the case that calls it", () => {
+    const { spawnOffenders, caseOffenders } = scanFixture("arrow-next-line.test.ts", NEXT_LINE_ARROW_FIXTURE);
+    expect(spawnOffenders.map((o) => [o.kind, o.scope])).toEqual([["spawn-no-timeout", "f"]]);
+    expect(caseOffenders.map((o) => [o.kind, o.scope])).toEqual([["case-no-budget", "calls a next-line arrow"]]);
+  });
+
+  it("attributes a parenthesized multi-line spawn to the arrow and reports the case that calls it", () => {
+    const { spawnOffenders, caseOffenders } = scanFixture("arrow-parenthesized.test.ts", PARENTHESIZED_ARROW_FIXTURE);
+    expect(spawnOffenders.map((o) => [o.kind, o.scope])).toEqual([["spawn-no-timeout", "f"]]);
+    expect(caseOffenders.map((o) => [o.kind, o.scope])).toEqual([["case-no-budget", "calls a parenthesized arrow"]]);
   });
 
   it("still attributes a block-bodied arrow's spawn", () => {

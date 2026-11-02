@@ -242,9 +242,11 @@ function lineNumberAt(src, index) {
  * it. Each `JsxText` node is masked from `pos` to `end`, replacing every
  * character except the four in `LINE_BREAK_CHARS` with a space, so lengths and
  * line/column positions stay aligned. A JSX attribute's string value is blanked
- * the same way (its quotes are kept, so the masked source still parses): JSX
- * attribute strings have no escape sequences, so the text walks must not read a
- * trailing backslash as escaping the closing quote (flair#2854).
+ * the same way (its quotes are kept, so the masked source still parses) in
+ * either quote style: JSX attribute strings have no escape sequences, so the
+ * text walks must not read a trailing backslash as escaping the closing quote
+ * (flair#2854). The value's range is TypeScript's `StringLiteral`, so its quote
+ * style is the parser's, not a scan's.
  */
 export function maskJsxText(src, fileName = UNNAMED_SOURCE) {
   if (!isJsxFileName(fileName)) return src;
@@ -262,12 +264,13 @@ export function maskJsxText(src, fileName = UNNAMED_SOURCE) {
     }
     // A JSX attribute string has no escape sequences: its value ends at the next
     // matching quote, so a trailing backslash is part of the value (flair#2854).
-    // The value is a StringLiteral in the AST; blank its interior so the
-    // text-based walks never read that backslash as an escaping backslash.
-    // The quotes stay, so the masked source still parses as JSX.
+    // The value is a StringLiteral in the AST in either quote style; blank its
+    // interior so the text-based walks never read that backslash as an escaping
+    // backslash. The quotes stay, so the masked source still parses as JSX.
     if (node.kind === ts.SyntaxKind.StringLiteral && node.parent && node.parent.kind === ts.SyntaxKind.JsxAttribute) {
       const start = node.getStart(sf);
-      if (src[start] === '"' && src[node.end - 1] === '"' && node.end - 1 > start + 1) {
+      const quote = src[start];
+      if ((quote === '"' || quote === "'") && src[node.end - 1] === quote && node.end - 1 > start + 1) {
         masked = true;
         blank(start + 1, node.end - 1);
       }
@@ -819,8 +822,25 @@ function bodyBraceFrom(src, from) {
 }
 
 /** File-local function/arrow bodies `{ name, start, end }` (for scope attribution). */
-export function functionBodies(source) {
+export function functionBodies(source, fileName = UNNAMED_SOURCE) {
   const src = maskComments(source);
+  // Parse the source itself (the walks read the comment-masked copy): masking
+  // comments is a text walk, and re-parsing its output can trip on a nested
+  // template literal. Indices are shared, so the AST and `src` line up.
+  const sf = parseSourceFile(source, fileName);
+  const arrowFunctions = [];
+  const collectArrows = (node) => {
+    if (
+      node.kind === ts.SyntaxKind.ArrowFunction &&
+      node.parent &&
+      ts.isVariableDeclaration(node.parent) &&
+      ts.isIdentifier(node.parent.name)
+    ) {
+      arrowFunctions.push({ name: node.parent.name.text, node });
+    }
+    ts.forEachChild(node, collectArrows);
+  };
+  collectArrows(sf);
   const bodies = [];
   for (const m of src.matchAll(/(?:^|[\n\r\u2028\u2029])\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
     const open = src.indexOf("(", m.index);
@@ -848,32 +868,33 @@ export function functionBodies(source) {
   for (const m of src.matchAll(
     /(?:^|[\n\r\u2028\u2029])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/g,
   )) {
-    const arrowEnd = m.index + m[0].length;
-    const bodyOpen = bodyBraceFrom(src, arrowEnd);
-    if (bodyOpen !== -1 && src.slice(arrowEnd, bodyOpen).trim() === "") {
-      const bodyClose = matchBrace(src, bodyOpen);
-      if (bodyClose === -1) continue;
-      bodies.push({ name: m[1], start: bodyOpen, end: bodyClose });
-    } else {
-      const lineEnd = indexOfLineBreak(src, arrowEnd);
-      const end = lineEnd === -1 ? src.length : lineEnd;
-      // An expression body starts at its first token, not at the whitespace
-      // (or the `=>`'s last character) before it (flair#2842).
-      let start = arrowEnd;
-      while (start < end && /\s/.test(src[start])) start++;
-      bodies.push({ name: m[1], start, end });
-    }
+    // The body's real extent is the AST's: an expression body may continue
+    // past the `=>`'s line (a spawn on the next line, or a parenthesized body
+    // spanning lines), and a line break is not its end (flair#2842).
+    const arrow = arrowFunctions.find(
+      (a) => a.name === m[1] && a.node.getStart(sf) >= m.index && a.node.getStart(sf) < m.index + m[0].length,
+    );
+    if (!arrow) continue;
+    const body = arrow.node.body;
+    // A block body keeps the brace-to-brace range (the closing brace is
+    // excluded, as the text walks expect); an expression body ends after its
+    // last token (flair#2842).
+    bodies.push({
+      name: m[1],
+      start: body.getStart(sf),
+      end: ts.isBlock(body) ? body.getEnd() - 1 : body.getEnd(),
+    });
   }
   return bodies;
 }
 
 /** File-local functions whose body contains a CLI-entry spawn, transitively. */
-export function localHelpersThatSpawn(source, calls) {
+export function localHelpersThatSpawn(source, calls, fileName = UNNAMED_SOURCE) {
   const src = maskComments(source);
   const spawnIdx = calls.filter((c) => c.isCliEntry).map((c) => c.index);
   const helpers = new Set();
   if (spawnIdx.length === 0) return helpers;
-  const bodies = functionBodies(source);
+  const bodies = functionBodies(source, fileName);
   let added = true;
   while (added) {
     added = false;
@@ -1141,8 +1162,8 @@ export function analyzeTestFile(source, fileName = UNNAMED_SOURCE) {
   // js/mjs/cjs); the mask keeps length and line breaks, so every index still
   // points at the original character.
   const jsxSafe = maskJsxText(source, fileName);
-  const helpers = localHelpersThatSpawn(jsxSafe, calls);
-  const bodies = functionBodies(jsxSafe);
+  const helpers = localHelpersThatSpawn(jsxSafe, calls, fileName);
+  const bodies = functionBodies(jsxSafe, fileName);
   const cases = findCases(jsxSafe, calls, helpers, bodies);
   for (const call of calls) call.scope = scopeOf(call.index, bodies, cases);
   return { calls, ids, helpers, cases, bodies };
