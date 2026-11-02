@@ -362,7 +362,7 @@ describe("flair#2868 — federation prune --apply deletes and confirms the Peer 
     try {
       const res = await runCli(
         ["federation", "prune", "--older-than", "1h", "--include", `stub-spoke-2868-${sfx}`, "--apply", "--target", stub.url],
-        cliEnv({ FLAIR_ADMIN_PASS: "stub-not-checked", FLAIR_OUTPUT: "human" }),
+        cliEnv({ FLAIR_ADMIN_USER: "stub-admin", FLAIR_ADMIN_PASS: "stub-not-checked", FLAIR_OUTPUT: "human" }),
       );
       expect(res.code, `stdout: ${res.stdout}\nstderr: ${res.stderr}`).toBe(1);
       expect(res.stdout).toContain(`Failed to delete ${stub.id}: HTTP 403`);
@@ -370,7 +370,7 @@ describe("flair#2868 — federation prune --apply deletes and confirms the Peer 
       // The stub refuses a credential-less DELETE, so this result also proves
       // the CLI sent the configured credential.
       expect(stub.deleteAuth).toHaveLength(1);
-      expect(stub.deleteAuth[0]).toStartWith("Basic ");
+      expect(stub.deleteAuth[0]).toBe(`Basic ${Buffer.from("stub-admin:stub-not-checked").toString("base64")}`);
     } finally {
       await stub.close();
     }
