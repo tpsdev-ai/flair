@@ -1429,8 +1429,8 @@ export function clientConfigBackupPath(id: ClientId): string {
 /**
  * What a client-config snapshot says about Flair wiring. `unknown` is a read
  * that could not be decided (malformed JSON in a JSON config, a non-object,
- * including JSON `null`, or a pi entry that mentions pi-flair without being
- * Flair's own) — it is never "absent" (flair#2886).
+ * including JSON `null`, or a pi `packages`/`extensions` entry that mentions
+ * pi-flair without being Flair's own) — it is never "absent" (flair#2886).
  */
 export type ClientConfigFlairScan =
   | { status: "present" }
@@ -1444,7 +1444,8 @@ export type ClientConfigFlairScan =
  * `unwire()` acts on. `unknown` is a read that could not decide the file —
  * never "absent": malformed JSON in a JSON config, a non-object (including
  * JSON `null`), or a pi entry that mentions pi-flair without being Flair's
- * own. `path` only names the file in an `unknown` reason.
+ * own. `path` only names the file in an `unknown` reason (a malformed-JSON
+ * reason is fixed text plus that path, never the parser's message).
  */
 export function clientConfigHasFlairEntry(
   id: ClientId,
@@ -1459,13 +1460,14 @@ export function clientConfigHasFlairEntry(
       : { status: "absent" };
   }
   const read = parseSettingsBytes(bytes, path);
-  if (read.parseError) return { status: "unknown", reason: read.parseError };
+  if (read.parseError) return { status: "unknown", reason: `malformed JSON: ${path}` };
   const config: any = read.parsed;
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     return { status: "unknown", reason: `not a JSON object: ${path}` };
   }
   if (id === "pi") {
-    const scan = piConfigFlairEntryScan(config);
+    // The same home and agent-dir context `_unwirePi` uses for both fields.
+    const scan = piConfigFlairEntryScan(config, piLocalHome(), dirname(piSettingsPath()));
     if (scan.status === "unrecognized") {
       return {
         status: "unknown",
@@ -1633,25 +1635,27 @@ type PiFlairEntryScan =
   | { status: "unrecognized" };
 
 /**
- * The pi shape that counts as a Flair entry: an exact pi-flair `packages`
- * source, or an `extensions` entry that `isFlairOwnedPiEntry` accepts. Any
- * other entry containing `pi-flair`, when no Flair-owned entry is also
- * present, is `unrecognized`. The entry value is not retained: the purge
- * report names the file, not its contents. Shared with `_unwirePi` for the
- * same reason as `mcpConfigHasFlairEntry`.
+ * The pi shape that counts as a Flair entry: a `packages` source or an
+ * `extensions` entry that `isFlairOwnedPiEntry` accepts — an npm pi-flair
+ * source or a local path inside the pi-flair package, resolved with the same
+ * home and agent-dir context `_unwirePi` uses. Any other entry containing
+ * `pi-flair`, in either field and when no Flair-owned entry is also present,
+ * is `unrecognized`. The entry value is not retained: the purge report names
+ * the file, not its contents. Shared with `_unwirePi` for the same reason as
+ * `mcpConfigHasFlairEntry`.
  */
-function piConfigFlairEntryScan(config: any): PiFlairEntryScan {
+function piConfigFlairEntryScan(config: any, homeDir: string, baseDir: string): PiFlairEntryScan {
   const packages = Array.isArray(config.packages) ? config.packages : [];
   let unrecognized = false;
   for (const source of packages.map(piPackageEntrySource)) {
     if (!source) continue;
-    if (isPiFlairNpmSource(source)) return { status: "present" };
+    if (isFlairOwnedPiEntry(source, homeDir, baseDir)) return { status: "present" };
     if (source.includes("pi-flair")) unrecognized = true;
   }
   const extensions = Array.isArray(config.extensions) ? config.extensions : [];
   for (const entry of extensions) {
     if (typeof entry !== "string") continue;
-    if (isFlairOwnedPiEntry(entry)) return { status: "present" };
+    if (isFlairOwnedPiEntry(entry, homeDir, baseDir)) return { status: "present" };
     if (entry.includes("pi-flair")) unrecognized = true;
   }
   return unrecognized ? { status: "unrecognized" } : { status: "absent" };

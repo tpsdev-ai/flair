@@ -151,44 +151,50 @@ describe("pi settings loader conformance", () => {
   }
 });
 
-describe("purge keeps a pi snapshot exactly when pi's loader does not read it as Flair's", () => {
+describe("purge agrees with pi's package-manager verdict, per settings field", () => {
   const cases: [string, string][] = [
     ["the documented npm source", "npm:@tpsdev-ai/pi-flair"],
-    ["a package path", "~/.pi/agent/npm/node_modules/@tpsdev-ai/pi-flair/dist/index.js"],
+    ["a local package path inside the pi-flair package", "~/.pi/agent/npm/node_modules/@tpsdev-ai/pi-flair/dist/index.js"],
     ["an unrelated path", "~/dist/pi-flair-notes.js"],
     ["another package named pi-flair", "npm:@other/pi-flair"],
     ["a leading-whitespace npm source", " npm:@tpsdev-ai/pi-flair"],
     ["an empty-spec npm source", "npm:@tpsdev-ai/pi-flair@"],
   ];
 
-  for (const [label, source] of cases) {
-    it(`purge and the loader agree on ${label}`, () => {
-      fixture = mkdtempSync(join(tmpdir(), "flair-pi-loader-"));
-      const home = join(fixture, "home");
-      const project = join(fixture, "project");
-      mkdirSync(home);
-      mkdirSync(project);
-      // The directory override: pi's loader and purge must read the same file.
-      process.env.PI_CODING_AGENT_DIR = join(home, "alt-agent");
-      const path = join(process.env.PI_CODING_AGENT_DIR, "settings.json");
-      mkdirSync(dirname(path), { recursive: true });
-      const bytes = JSON.stringify({ packages: [source], extensions: [source] }, null, 4) + "\n";
-      writeFileSync(path, bytes);
-      writeFileSync(`${path}.bak`, bytes);
+  for (const field of ["packages", "extensions"] as const) {
+    for (const [label, source] of cases) {
+      it(`purge and pi's package manager agree on ${label} in ${field} only`, () => {
+        fixture = mkdtempSync(join(tmpdir(), "flair-pi-loader-"));
+        const home = join(fixture, "home");
+        const project = join(fixture, "project");
+        mkdirSync(home);
+        mkdirSync(project);
+        // The directory override: pi's loader and purge must read the same file.
+        process.env.PI_CODING_AGENT_DIR = join(home, "alt-agent");
+        const path = join(process.env.PI_CODING_AGENT_DIR, "settings.json");
+        mkdirSync(dirname(path), { recursive: true });
+        // ONE field per case: a field-specific ownership gap cannot hide behind
+        // the other field, and the assertion covers only this field's source.
+        const settings = field === "packages" ? { packages: [source] } : { extensions: [source] };
+        const bytes = JSON.stringify(settings, null, 4) + "\n";
+        writeFileSync(path, bytes);
+        writeFileSync(`${path}.bak`, bytes);
 
-      const after = readPiSettings(home, project, [source], false, true);
-      const answer = after.resolved[0]!;
-      const segments = answer.path?.split(sep) ?? [];
-      const inside = segments.some((segment, index) =>
-        segment === "node_modules" && segments[index + 1] === "@tpsdev-ai" &&
-        segments[index + 2] === "pi-flair" && index + 3 < segments.length);
-      const loaderOwns = answer.type === "npm"
-        ? answer.name === "@tpsdev-ai/pi-flair"
-        : answer.localCandidate && inside;
+        const after = readPiSettings(home, project, [source], false, true);
+        const answer = after.resolved[0]!;
+        const segments = answer.path?.split(sep) ?? [];
+        const inside = segments.some((segment, index) =>
+          segment === "node_modules" && segments[index + 1] === "@tpsdev-ai" &&
+          segments[index + 2] === "pi-flair" && index + 3 < segments.length);
+        const loaderOwns = answer.type === "npm"
+          ? answer.name === "@tpsdev-ai/pi-flair"
+          : answer.localCandidate && inside;
 
-      expect(after.settingsPath).toBe(path);
-      // Purge removes the snapshot when the loader reads the entry as Flair's.
-      expect(after.backupPresent).toBe(!loaderOwns);
-    }, 15_000);
+        expect(after.settingsPath).toBe(path);
+        // Purge removes the snapshot when pi's package manager resolves the
+        // source as Flair's; otherwise the snapshot stays.
+        expect(after.backupPresent).toBe(!loaderOwns);
+      }, 15_000);
+    }
   }
 });

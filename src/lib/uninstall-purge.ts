@@ -15,8 +15,8 @@
  * "fully purged" when anything remains.
  */
 
-import { existsSync, lstatSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { resolveHome, withHome } from "./home.js";
 import {
   ALL_CLIENTS,
@@ -54,9 +54,9 @@ export interface PurgeLeftover {
   path: string;
   /** `unverified`: purge could not decide this path (an unreadable file, a
    *  JSON config that is malformed, `null` or otherwise not an object, or a pi
-   *  entry that mentions pi-flair without being Flair's own). It is
-   *  left in place and reported by name — never claimed removed and never
-   *  silently kept (flair#2886). */
+   *  `packages`/`extensions` entry that mentions pi-flair without being
+   *  Flair's own). It is left in place and reported by name — never claimed
+   *  removed and never silently kept (flair#2886). */
   kind: "intentional" | "failed" | "unverified";
   reason: string;
   remedy?: string;
@@ -245,6 +245,8 @@ export interface HeldClientBackup {
   clientId: ClientId;
   path: string;
   heldPath: string;
+  /** The private hold directory this purge created for the move. */
+  heldDir: string;
   display: string;
 }
 
@@ -255,16 +257,48 @@ export interface ClientBackupHold {
   skipped: Set<ClientId>;
 }
 
-/** Pick a hold path no other entry occupies. The name is verified absent
- *  with `lstat` and carries this process's pid and a per-client sequence, so a
- *  user file already at a candidate is never overwritten. */
-function reserveHoldPath(backup: string, seq: number): string {
+/** A hold directory reserved and created by this purge, and the moved file
+ *  inside it. */
+interface HoldReservation {
+  dir: string;
+  path: string;
+}
+
+/**
+ * TEST-ONLY pause between choosing a hold directory name and creating it, so
+ * a fixture can occupy the name. Inert unless
+ * `FLAIR_TEST_PURGE_HOLD_BARRIER` names a directory; self-releases after 15 s.
+ */
+function holdSelectionBarrier(candidate: string): void {
+  const barrierDir = process.env.FLAIR_TEST_PURGE_HOLD_BARRIER;
+  if (!barrierDir) return;
+  try {
+    writeFileSync(join(barrierDir, `${process.pid}.hold-select`), candidate);
+  } catch { /* inert */ }
+  const release = join(barrierDir, `${process.pid}.go`);
+  const deadline = Date.now() + 15_000;
+  while (!existsSync(release) && Date.now() < deadline) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+  }
+}
+
+/**
+ * Select a hold directory name and create it exclusively. `mkdir` without
+ * `recursive` fails with `EEXIST` when any entry already occupies the name,
+ * so a user file or directory there is never adopted or overwritten. The name
+ * carries this process's pid and a per-client sequence; the directory is
+ * created by this purge, mode 0700, and removed by `restoreHeldClientConfigBackups`
+ * or the failed-rename cleanup below.
+ */
+function reserveHoldPath(backup: string, seq: number): HoldReservation {
   for (let attempt = 0; attempt < 16; attempt++) {
     const candidate = `${backup}.purge-hold-${process.pid}-${seq}${attempt === 0 ? "" : `-${attempt}`}`;
+    holdSelectionBarrier(candidate);
     try {
-      lstatSync(candidate);
+      mkdirSync(candidate, { mode: 0o700 });
+      return { dir: candidate, path: join(candidate, basename(backup)) };
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return candidate;
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
       throw err;
     }
   }
@@ -277,10 +311,10 @@ function reserveHoldPath(backup: string, seq: number): string {
  * first and put it back before the sweep, so its bytes — or, for a symlink,
  * the link itself — survive the unwire. This covers a copy that cannot be
  * read or parsed too: a failed read must never license its replacement. The
- * hold name is verified absent, so a file already there is never overwritten;
- * when no free name can be reserved, or the rename fails, the client is
- * reported and its unwire and sweep are skipped. Call inside
- * `withHome(homeDir, ...)`.
+ * hold directory is created exclusively, so a file or directory already at
+ * its name is never overwritten; when no free name can be reserved, or the
+ * rename fails, the client is reported and its unwire and sweep are skipped.
+ * Call inside `withHome(homeDir, ...)`.
  */
 function holdClientConfigBackups(homeDir: string, leftovers: PurgeLeftover[]): ClientBackupHold {
   const held: HeldClientBackup[] = [];
@@ -300,9 +334,9 @@ function holdClientConfigBackups(homeDir: string, leftovers: PurgeLeftover[]): C
       skipped.add(client.id);
       continue;
     }
-    let heldPath: string;
+    let hold: HoldReservation;
     try {
-      heldPath = reserveHoldPath(backup, held.length);
+      hold = reserveHoldPath(backup, held.length);
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
       leftovers.push({
@@ -314,10 +348,10 @@ function holdClientConfigBackups(homeDir: string, leftovers: PurgeLeftover[]): C
       continue;
     }
     try {
-      renameSync(backup, heldPath);
-      held.push({ clientId: client.id, path: backup, heldPath, display: displayUnderHome(homeDir, backup) });
+      renameSync(backup, hold.path);
+      held.push({ clientId: client.id, path: backup, heldPath: hold.path, heldDir: hold.dir, display: displayUnderHome(homeDir, backup) });
     } catch (err: unknown) {
-      rmSync(heldPath, { force: true });
+      rmSync(hold.dir, { recursive: true, force: true });
       const reason = err instanceof Error ? err.message : String(err);
       leftovers.push({
         path: displayUnderHome(homeDir, backup),
@@ -332,8 +366,9 @@ function holdClientConfigBackups(homeDir: string, leftovers: PurgeLeftover[]): C
 
 /** Put a held entry back over the snapshot this purge's unwire attempts to
  *  write, then let the sweep decide it. A client whose restore fails is
- *  returned so its sweep is skipped and the reported path names the held
- *  copy that remains. Call inside `withHome(homeDir, ...)`. */
+ *  returned so its sweep is skipped; the REASON names the held copy, and
+ *  after a failed restore that copy may remain only at the hold path. Call
+ *  inside `withHome(homeDir, ...)`. */
 export function restoreHeldClientConfigBackups(
   homeDir: string,
   held: HeldClientBackup[],
@@ -353,14 +388,19 @@ export function restoreHeldClientConfigBackups(
         reason: `could not restore the backup held across unwiring: ${reason}; skipped this backup's sweep; ` +
           `the held copy remains at ${displayUnderHome(homeDir, item.heldPath)}`,
       });
+      continue;
     }
+    // Empty now; remove only the directory this purge created. Its loss is
+    // not a restore failure — the copy is already back at the config path.
+    try { rmSync(item.heldDir, { recursive: true, force: true }); } catch { /* empty hold dir left */ }
   }
   return unrestored;
 }
 
 /** Restore every held snapshot, then sweep the clients whose hold and restore
- *  succeeded. A client skipped at the hold, or whose restore failed, keeps its
- *  `.bak` and is reported instead (flair#2886). */
+ *  succeeded. An absent backup is not held, and its client proceeds. A client
+ *  skipped at the hold, or whose restore failed, keeps its `.bak` and is
+ *  reported instead (flair#2886). */
 export function restoreAndSweepClientConfigBackups(
   homeDir: string,
   hold: ClientBackupHold,
@@ -462,7 +502,8 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
   // The unwire above snapshots each config before writing it; sweep those
   // snapshots (and any older one) after the unwire attempts, under the target
   // home the unwire ran in. A client whose backup was not held or not restored
-  // keeps its entry and is skipped.
+  // keeps its entry and is skipped. An absent backup is not held, and its
+  // client proceeds.
   withClientConfigHome(homeDir, ignorePiDirOverride, () => {
     restoreAndSweepClientConfigBackups(homeDir, hold, removed, leftovers);
   });

@@ -380,7 +380,7 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
     writeFileSync(`${paths.pi}.bak`, readFileSync(paths.pi));
   }
 
-  test("purge removes client-config backups with a Flair entry and keeps unrelated settings", async () => {
+  test("purge removes a client-config backup whose entry is Flair's own and keeps unrelated settings", async () => {
     const paths = seedWiredHome();
     const before = snapshotConfigs(paths);
     writeWiredBackups(paths);
@@ -562,20 +562,71 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
     expect(existsSync(`${bak}.purge-hold-${process.pid}-0-1`)).toBe(false);
   }, 30_000);
 
+  test("a file created at the selected hold name survives and the backup is held under another name", async () => {
+    const paths = seedWiredHome();
+    const bak = clientConfigBackupPath("claude-code");
+    writeFileSync(bak, readFileSync(paths.claude));
+    const barrier = mkdtempSync(join(tmpdir(), "flair-purge-hold-barrier-"));
+    const shimBin = mkdtempSync(join(tmpdir(), "flair-purge-shim-"));
+    writeFileSync(join(shimBin, "launchctl"), `#!/bin/sh\nexit 0\n`, { mode: 0o755 });
+    writeFileSync(join(shimBin, "systemctl"), `#!/bin/sh\nexit 0\n`, { mode: 0o755 });
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      HOME: isoHome,
+      PATH: `${shimBin}:${process.env.PATH ?? ""}`,
+      FLAIR_TEST_PURGE_HOLD_BARRIER: barrier,
+    };
+    delete env.FLAIR_URL;
+    delete env.FLAIR_TARGET;
+    const proc = Bun.spawn(["bun", cliPath, "uninstall", "--purge"], { env, stdout: "pipe", stderr: "pipe" });
+    try {
+      const marker = join(barrier, `${proc.pid}.hold-select`);
+      const deadline = Date.now() + 12_000;
+      let candidate: string | undefined;
+      while (Date.now() < deadline) {
+        try {
+          candidate = readFileSync(marker, "utf-8");
+          if (candidate) break;
+        } catch { /* not selected yet */ }
+        await Bun.sleep(10);
+      }
+      expect(candidate).toBeDefined();
+      // The purge paused between choosing the name and creating it; a user
+      // file lands there first and must never be overwritten.
+      const sentinel = "user-file-at-selected-hold-name\n";
+      writeFileSync(candidate!, sentinel);
+      writeFileSync(join(barrier, `${proc.pid}.go`), "go\n");
+      const exitCode = await proc.exited;
+      const stdout = await new Response(proc.stdout).text();
+      const stderr = await new Response(proc.stderr).text();
+
+      expect(exitCode).toBe(0);
+      expect(readFileSync(candidate!, "utf-8")).toBe(sentinel);
+      expect(existsSync(`${candidate!}-1`)).toBe(false);
+      expect(existsSync(bak)).toBe(false);
+      expect(stdout + stderr).toContain("Removed: ~/.claude.json.bak");
+    } finally {
+      try { proc.kill(); } catch { /* already exited */ }
+      rmSync(barrier, { recursive: true, force: true });
+      rmSync(shimBin, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("a failed restore skips that backup's sweep and names the held copy", () => {
     const bak = clientConfigBackupPath("claude-code");
     // The restore's removal fails for every uid: a non-empty directory where
     // the unwire's snapshot would be. The held copy is a real file.
     mkdirSync(bak, { recursive: true });
     writeFileSync(join(bak, "keep.txt"), "user data\n");
-    const heldPath = `${bak}.purge-hold-${process.pid}-real`;
+    const heldDir = mkdtempSync(join(isoHome, "hold-"));
+    const heldPath = join(heldDir, "settings.json.bak");
     const heldBytes = "the user's pre-purge snapshot\n";
     writeFileSync(heldPath, heldBytes);
     const removed: string[] = [];
     const leftovers: PurgeLeftover[] = [];
 
     restoreAndSweepClientConfigBackups(isoHome, {
-      held: [{ clientId: "claude-code", path: bak, heldPath, display: "~/.claude.json.bak" }],
+      held: [{ clientId: "claude-code", path: bak, heldPath, heldDir, display: "~/.claude.json.bak" }],
       skipped: new Set(),
     }, removed, leftovers);
 
@@ -586,7 +637,7 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
     expect(leftovers[0]!.kind).toBe("failed");
     expect(leftovers[0]!.path).toBe("~/.claude.json.bak");
     expect(leftovers[0]!.reason).toContain("skipped this backup's sweep");
-    expect(leftovers[0]!.reason).toContain(`the held copy remains at ~/.claude.json.bak.purge-hold-${process.pid}-real`);
+    expect(leftovers[0]!.reason).toContain(`the held copy remains at ~${heldPath.slice(isoHome.length)}`);
   }, 30_000);
 
   test("pi sources that are not Flair's own are kept: leading whitespace and an empty spec", () => {
@@ -628,6 +679,22 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
     expect(out).toContain("an entry mentions pi-flair without being Flair's own: ~/.pi/agent/settings.json.bak");
     expect(out).not.toContain("canary-purge-credential");
     expect(out).not.toContain(source);
+  }, 30_000);
+
+  test("a malformed backup's parser message never reaches the report", async () => {
+    mkdirSync(join(isoHome, ".gemini"), { recursive: true });
+    const bak = clientConfigBackupPath("gemini");
+    const canary = "canaryPurgeParserToken";
+    writeFileSync(bak, `{ "a": ${canary} }\n`);
+
+    const { stdout, stderr, exitCode } = await runCli(["uninstall", "--purge"]);
+    const out = stdout + stderr;
+
+    expect(exitCode).toBe(1);
+    expect(out).toContain("Not checked: ~/.gemini/settings.json.bak");
+    expect(out).not.toContain(canary);
+    expect(out).toContain("malformed JSON: ~/.gemini/settings.json.bak");
+    expect(readFileSync(bak, "utf-8")).toContain(canary);
   }, 30_000);
 
   test("an unreadable or unparseable client backup is reported as not checked and left", () => {
