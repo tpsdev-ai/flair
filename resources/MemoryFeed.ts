@@ -28,7 +28,7 @@ import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { stripInlinePointerFields } from "./host-source-visibility.js";
 import { applyPromotionBinding } from "./promotion-binding.js";
-import { markMemoryWriteOutcomeUnknown, memoryBusyResponse, memoryLockUnavailableResponse, withMemoryWriteLock, withMemoryWriteLockOnce, writeOutcomeUnknownResponse, type MemoryLockOutcome } from "./memory-write-lock.js";
+import { markMemoryWriteOutcomeUnknown, memoryLockRefusal, memoryBusyResponse, memoryLockUnavailableResponse, withMemoryWriteLock, withMemoryWriteLockOnce, writeOutcomeUnknownResponse, type MemoryLockOutcome } from "./memory-write-lock.js";
 
 /** The per-id Memory write-lock store (flair#2478). */
 function memoryLockStore(): unknown {
@@ -272,6 +272,7 @@ export class FeedMemories extends Resource {
           : [...baseLockIds];
         const heldIds = new Set(attemptIds);
         locked = await withMemoryWriteLock(memoryLockStore(), attemptIds, async () => {
+          const attemptedWriteIds = new Set<string>();
           let headMoved = false;
           const outcome = await runSkillVersionWrite({
             ctx,
@@ -311,6 +312,14 @@ export class FeedMemories extends Resource {
             },
             hooks: {
               ...defaultSkillHooks,
+              createSuccessor: (successor, shared) => {
+                attemptedWriteIds.add(String(successor.id));
+                return defaultSkillHooks.createSuccessor!(successor, shared);
+              },
+              closePredecessor: (predecessor, patch, shared) => {
+                attemptedWriteIds.add(String(predecessor.id));
+                return defaultSkillHooks.closePredecessor!(predecessor, patch, shared);
+              },
               authorizeClose: (row, shared) => authorizeSkillOwners(ctx, auth, [row], shared),
               pointer: async (shared) => {
                 if (captured.closed) await deletePointerRowViaTable(String(captured.closed.id), shared);
@@ -329,7 +338,7 @@ export class FeedMemories extends Resource {
             // outcome, never a pass.
             const code = await responseErrorCode(outcome.response);
             if (code === null || code === WRITE_RESPONSE_WITHHELD || code === "skill_update_compensation_failed") {
-              for (const id of attemptIds) markMemoryWriteOutcomeUnknown(id);
+              for (const id of attemptedWriteIds) markMemoryWriteOutcomeUnknown(id);
             }
             return { response: outcome.response };
           }
@@ -341,10 +350,8 @@ export class FeedMemories extends Resource {
         if (locked.kind !== "done" || locked.value !== HEAD_MOVED) break;
       }
       if (preLockDenial) return preLockDenial;
-      if (!locked) return skillWriteConflict("skill_head_moved");
-      if (locked.kind === "busy") return memoryBusyResponse(agentId);
-      if (locked.kind === "unknown") return writeOutcomeUnknownResponse();
-      if (locked.kind === "unavailable") return memoryLockUnavailableResponse();
+      if (!locked) return memoryLockUnavailableResponse();
+      if (locked.kind !== "done") return memoryLockRefusal(locked, agentId)!;
       if (locked.value === HEAD_MOVED) return skillWriteConflict("skill_head_moved");
       return locked.value.response;
     }

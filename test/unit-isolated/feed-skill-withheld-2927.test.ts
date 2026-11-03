@@ -3,10 +3,10 @@
  *
  * A skill-tagged POST /FeedMemories write takes the per-id Memory write lock
  * (resources/MemoryFeed.ts) and can record the id outcome-unknown. This suite
- * tests one marker case: storage withholding the write result. Isolated
+ * tests withheld write results and an unreadable refusal body. Isolated
  * process: owns the harper mock for MemoryFeed.ts.
  */
-import { beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import {
   databasesMock, harnessState, installMemoryHarperMock, resetHarnessState,
 } from "../helpers/memory-search-harness";
@@ -34,11 +34,18 @@ const { _resetLocalInstanceIdCacheForTests } = await installMemoryHarperMock();
 
 /** Storage withholds these ids' write result (returns a Response, flair#2857). */
 let withholdIds = new Set<string>();
+let withholdSuccessor = false;
+let attemptedPutIds: string[] = [];
+const markedIds = new Set<string>();
 const memoryTable: any = databasesMock.flair.Memory;
 const realPut = memoryTable.put;
 memoryTable.put = async (row: any, shared?: any) => {
+  const id = String(row?.id);
+  attemptedPutIds.push(id);
+  markedIds.add(id);
   const result = await realPut(row, shared);
-  return withholdIds.has(String(row?.id)) ? Response.json({ id: row?.id }) : result;
+  return withholdIds.has(id) || (withholdSuccessor && id !== "skill-withheld")
+    ? Response.json({ id }) : result;
 };
 
 const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
@@ -63,6 +70,10 @@ beforeEach(() => {
   versions.clear();
   locks.clear();
   withholdIds = new Set();
+  withholdSuccessor = false;
+  attemptedPutIds = [];
+  for (const id of markedIds) resetMemoryWriteOutcomeUnknownForTest(id);
+  markedIds.clear();
   _resetLocalInstanceIdCacheForTests();
   resetMemoryWriteOutcomeUnknownForTest("skill-withheld");
 });
@@ -87,4 +98,65 @@ test("a skill feed write whose storage result is withheld records the id outcome
   expect(next.status).toBe(503);
   expect(await next.json()).toMatchObject({ error: "write_outcome_unknown" });
   expect(harnessState.memoryStore.has("skill-withheld"), "the refused write left a row").toBe(false);
+});
+
+afterEach(() => {
+  for (const id of markedIds) resetMemoryWriteOutcomeUnknownForTest(id);
+});
+
+async function seedHead(): Promise<void> {
+  expect(await feed().post(skillBody("skill-withheld"))).not.toBeInstanceOf(Response);
+  attemptedPutIds = [];
+}
+
+test("a withheld successor put marks the successor and leaves the unattempted head writable", async () => {
+  await seedHead();
+  withholdSuccessor = true;
+  const response = await feed().post(skillBody("skill-withheld", "updated procedure"));
+  expect(response.status).toBe(500);
+  expect((await response.json()).error).toBe(WRITE_RESPONSE_WITHHELD);
+  expect(attemptedPutIds).toHaveLength(1);
+  const [successorId] = attemptedPutIds;
+  expect(successorId).not.toBe("skill-withheld");
+  expect(memoryWriteOutcomeUnknown(successorId)).toBe(true);
+  expect(memoryWriteOutcomeUnknown("skill-withheld"), "the unattempted head was marked").toBe(false);
+
+  withholdSuccessor = false;
+  expect(await feed().post(skillBody("skill-withheld", "following write to the head"))).not.toBeInstanceOf(Response);
+});
+
+test("a withheld close marks both the attempted successor and head", async () => {
+  await seedHead();
+  withholdIds.add("skill-withheld");
+  const response = await feed().post(skillBody("skill-withheld", "updated procedure"));
+  expect(response.status).toBe(500);
+  expect((await response.json()).error).toBe(WRITE_RESPONSE_WITHHELD);
+  expect(attemptedPutIds).toHaveLength(2);
+  const [successorId, headId] = attemptedPutIds;
+  expect(successorId).not.toBe("skill-withheld");
+  expect(headId).toBe("skill-withheld");
+  expect(memoryWriteOutcomeUnknown(successorId)).toBe(true);
+  expect(memoryWriteOutcomeUnknown(headId)).toBe(true);
+});
+
+test("an unreadable refusal after only the successor put marks only the successor", async () => {
+  await seedHead();
+  withholdSuccessor = true;
+  const clone = spyOn(Response.prototype, "clone").mockImplementation(() => {
+    throw new Error("refusal body unreadable");
+  });
+  let response: Response;
+  try {
+    response = await feed().post(skillBody("skill-withheld", "updated procedure"));
+    expect(clone).toHaveBeenCalled();
+  } finally {
+    clone.mockRestore();
+  }
+  expect(response.status).toBe(500);
+  expect((await response.json()).error).toBe(WRITE_RESPONSE_WITHHELD);
+  expect(attemptedPutIds).toHaveLength(1);
+  const [successorId] = attemptedPutIds;
+  expect(successorId).not.toBe("skill-withheld");
+  expect(memoryWriteOutcomeUnknown(successorId)).toBe(true);
+  expect(memoryWriteOutcomeUnknown("skill-withheld")).toBe(false);
 });

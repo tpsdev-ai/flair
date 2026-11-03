@@ -13,9 +13,7 @@
  * archive/expiry action (resources/MemoryMaintenance.ts) and the usage-count
  * writer (resources/usage-recording.ts) (slice 3b part 1); the ordinary
  * (non-skill) feed write-back and the feed dedup repair
- * (resources/MemoryFeed.ts), the skill-tagged feed write
- * (resources/MemoryFeed.ts's skill branch, on the ids it addresses and closes
- * and the live head it resolves)
+ * (resources/MemoryFeed.ts), skill-tagged `POST /FeedMemories` writes
  * and both `lastReflected` stamps
  * (resources/Memory.ts's derivedFrom sources and resources/MemoryReflect.ts's
  * gathered sources) (slice 3b part 2); and the federation merge of an
@@ -562,4 +560,12 @@ export function memoryLockUnavailableResponse(): Response {
     }),
     { status: 503, headers: { "content-type": "application/json" } },
   );
+}
+
+/** Map a lock outcome to its refusal `Response`, or `null` when the verb ran. */
+export function memoryLockRefusal(outcome: MemoryLockOutcome<unknown>, callerId: string): Response | null {
+  if (outcome.kind === "busy") return memoryBusyResponse(callerId);
+  if (outcome.kind === "unknown") return writeOutcomeUnknownResponse();
+  if (outcome.kind === "unavailable") return memoryLockUnavailableResponse();
+  return null;
 }
