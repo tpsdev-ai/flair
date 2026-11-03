@@ -2,8 +2,8 @@
  * federation-sync-inherited-admin-pass-file-2889.test.ts — flair#2889
  *
  * `federation sync status` and `sync disable` inherit the admin-password pair
- * from `flair federation sync`, so commander stores the values on the parent
- * and the leaf's opts() is empty. These cases drive the built CLI against a
+ * from `flair federation sync`, so commander stores the values on the parent.
+ * These cases drive the built CLI against a
  * counting stub: an explicitly supplied bad file is refused before the action
  * runs, and a valid file's password is sent on `status`'s /FederationPeers
  * request instead of the ambient environment password.
@@ -132,7 +132,7 @@ describe("flair#2889 — federation sync status/disable apply the inherited admi
     );
   }, 60_000);
 
-  test("disable refuses a 0644 file and leaves the installed unit in place", async () => {
+  test("disable refuses a 0644 file and leaves the pre-existing timer fixture untouched", async () => {
     const home = tempHome("flair-2889-sync-home-");
     const unitDir = join(home, ".config", "systemd", "user");
     mkdirSync(unitDir, { recursive: true });

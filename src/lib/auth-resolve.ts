@@ -966,9 +966,9 @@ export function addAdminPassOptions(
   cmd.hook("preAction", (_thisCommand, actionCommand) => {
     // A subcommand that inherits the pair (`federation sync status`) stores the
     // values on this command, not on itself; the leaves that read an inherited
-    // pair apply it in their own hook. Reading the leaf's empty opts() here
-    // would silently ignore an explicit file and copy the ambient env password
-    // into it.
+    // pair apply it in their own hook. Reading only the leaf's opts() would ignore
+    // the inherited pair, leaving `status` able to send its request with the
+    // ambient admin password.
     if (!actionCommand.options.some((o) => o.long === "--admin-pass-file")) return;
     const actionOpts = actionCommand.opts() as {
       adminPass?: string;

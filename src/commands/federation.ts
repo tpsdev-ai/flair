@@ -152,7 +152,7 @@ function shouldShowInlineSecretWarning(
 /**
  * Apply the admin-password pair inherited by `federation sync status` and
  * `federation sync disable`. The parent (`flair federation sync`) declares the
- * pair, so commander stores the values there and the leaf's opts() is empty.
+ * pair, so commander stores the values there.
  * Resolve an explicitly supplied pair before the action body runs and store the
  * password on the leaf, where `status` reads it for its request. `enable`
  * stores the path only and does not call this.
