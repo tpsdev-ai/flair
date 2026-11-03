@@ -40,9 +40,9 @@
  *      remote instance; see `resolveLocalAdminPass`).
  *   5. THE FLOOR (flair#747, generalizing flair#742's upgrade-only
  *      fallback) — when NOTHING above resolved to anything sendable at
- *      all, sign the SAME request with every candidate key file under
- *      `~/.flair/keys` (sorted, deterministic order), first one the server
- *      accepts wins. This is the credential every headless/agent machine
+ *      all, tries candidate key files under `~/.flair/keys` in order (sorted,
+ *      deterministic) until one succeeds or an answer is final. This is the
+ *      credential every headless/agent machine
  *      actually has, and is exactly the flair#741 incident's fix: an agent
  *      key existed the whole time, nothing tried it.
  *

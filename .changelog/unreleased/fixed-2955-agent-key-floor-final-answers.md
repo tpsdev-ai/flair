@@ -1,4 +1,4 @@
-- **A server answer to an agent-key fallback attempt is now final, and the fallback refuses redirects.**
+- **A non-credential server answer to an agent-key fallback attempt is now final, and the fallback refuses redirects.**
   In `src/lib/auth-resolve.ts`, every tier-5 attempt is sent with redirects
   refused, so a 3xx is that attempt's final answer. The floor moves to the next
   candidate key file only when the Ed25519 authentication middleware refused
