@@ -124,12 +124,12 @@ function runPromotion(dir: string, extraArgs: string[] = [], env: NodeJS.Process
   return { status: r.status, out: `${r.stdout}${r.stderr}` };
 }
 
-function failingGitEnv(dir: string, command: string): NodeJS.ProcessEnv {
+function failingGitEnv(dir: string, command: string, argument?: string): NodeJS.ProcessEnv {
   const bin = join(dir, "fake-bin");
   mkdirSync(bin);
   const realGit = execFileSync("which", ["git"], { encoding: "utf8", env: fixtureGitEnv() }).trim();
   const shim = join(bin, "git");
-  writeFileSync(shim, `#!/bin/sh\nif [ "$1" = "${command}" ]; then echo forced-${command}-failure >&2; exit 1; fi\nexec "${realGit}" "$@"\n`);
+  writeFileSync(shim, `#!/bin/sh\nif [ "$1" = "${command}" ]${argument ? ` && [ "$2" = "${argument}" ]` : ""}; then echo forced-${command}-failure >&2; exit 1; fi\nexec "${realGit}" "$@"\n`);
   chmodSync(shim, 0o755);
   const env = fixtureGitEnv();
   return { ...env, PATH: `${bin}:${env.PATH}` };
@@ -293,6 +293,37 @@ describe("PR author login and accepted JavaScript filenames", () => {
       expect(res.out).not.toContain("waived the per-PR fragment requirement");
     },
   );
+
+  test.each([false, true])("unavailable per-change rule with fragment content %p", (withFragment) => {
+    const dir = makeRepo();
+    addRenovateRootManifestCommit(dir);
+    if (withFragment) {
+      writeFixtureFile(dir, ".changelog/unreleased/fixed-fixture.md", "- **Fixture fix.**\n");
+      git(dir, "add", "-A");
+      commitAs(dir, "Fixture", "fixture@example.invalid", "chore: add fragment");
+    }
+    git(dir, "update-ref", "-d", "refs/remotes/origin/main");
+    const result = runGate(dir, "human-a");
+    expect(result.status).toBe(withFragment ? 0 : 2);
+    if (withFragment) expect(result.out).not.toContain("DID NOT RUN");
+    else {
+      expect(result.out).toContain("DID NOT RUN");
+      expect(result.out).toContain("fetch the full history");
+      expect(result.out).toContain("git fetch --unshallow");
+    }
+  });
+
+  test.each(["log", "diff"])("per-change git %s failure skips after a Renovate exclusion", (command) => {
+    const dir = makeRepo();
+    addRenovateRootManifestCommit(dir);
+    const argument = command === "log" ? `${gitOut(dir, "merge-base", "HEAD", "origin/main").trim()}..HEAD` : "--diff-filter=A";
+    const result = runGate(dir, "human-a", failingGitEnv(dir, command, argument));
+    expect(result.status).toBe(2);
+    expect(result.out).toContain("DID NOT RUN");
+    expect(result.out).toContain("the per-change fragment rule did not run (git read failed:");
+    expect(result.out).toContain("1 feat/fix commit(s) were excluded");
+    expect(result.out).not.toContain("waived the per-PR fragment requirement");
+  });
 
   test("a reachable merge base with a human login fails on the missing fragment", () => {
     const dir = makeRepo();

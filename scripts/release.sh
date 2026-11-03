@@ -359,7 +359,7 @@ echo "📰 Assembling changelog fragments..."
   echo "❌ A 'fixed' fragment overstates a harper-pinned advisory — fix it before releasing."; exit 1;
 }
 (cd "$ROOT" && bash scripts/release-promote-changelog.sh "$VERSION" ${RELEASE_TAG_ARGS[@]+"${RELEASE_TAG_ARGS[@]}"}) || {
-  echo "❌ Changelog assembly failed."; exit 1;
+  echo "❌ Changelog assembly failed — fix the reported fragments or dependency commits before releasing."; exit 1;
 }
 
 # Preview published release notes.

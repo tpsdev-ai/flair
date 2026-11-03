@@ -1,10 +1,5 @@
-// A docs-freshness fixture must copy the gate and every module it imports
-// (flair#2905: a hand-written copy list omitted a new import and 60 doc-link
-// tests failed with "Cannot find module").
-//
-// This test holds the derived set closed: every relative import in every file
-// the set copies must itself be in the set, so a module the walk misses is a
-// failure here rather than in each fixture that copies the gate.
+// A docs-freshness fixture copies the gate and its relative import literals.
+// Each scanned target must belong to the copied set.
 
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -16,15 +11,16 @@ import { tempDir } from "../helpers/temp-dir.ts";
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPTS = join(REPO_ROOT, "scripts");
 
-/** Independent of the helper's parser: every relative specifier in a static import. */
+/** Independent scanner for relative import literals. */
 function relativeImportTargets(source: string): string[] {
   const fromClauses = [...source.matchAll(/\bfrom\s+["'](\.\.?\/[^"']+)["']/g)];
   const bareImports = [...source.matchAll(/^[ \t]*import\s+["'](\.\.?\/[^"']+)["']/gm)];
-  return [...fromClauses, ...bareImports].map((match) => match[1]);
+  const dynamicImports = [...source.matchAll(/\bimport\s*\(\s*["'](\.\.?\/[^"']+)["']\s*\)/g)];
+  return [...fromClauses, ...bareImports, ...dynamicImports].map((match) => match[1]);
 }
 
 describe("docs-freshness fixture scripts", () => {
-  test("the copied set closes over every relative import", () => {
+  test("the copied set closes over relative import literals", () => {
     const files = docsFreshnessScriptFiles(REPO_ROOT);
     expect(files).toContain("docs-freshness-check.mjs");
 
@@ -40,6 +36,20 @@ describe("docs-freshness fixture scripts", () => {
     // Canary: the gate has relative imports, so a scanner matching nothing
     // cannot report this set as closed.
     expect(scanned).toBeGreaterThan(0);
+  });
+
+  test.each(['"./dynamic.mjs"', "'../dynamic.mjs'"])("scanners follow literal import(%s)", (specifier) => {
+    const dir = tempDir("docs-freshness-dynamic-");
+    mkdirSync(join(dir, "scripts"), { recursive: true });
+    const source = `const loaded = import(${specifier});\n`;
+    writeFileSync(join(dir, "scripts", "docs-freshness-check.mjs"), source);
+    const target = specifier.slice(1, -1);
+    writeFileSync(resolve(dir, "scripts", target), "export {};\n");
+    expect(relativeImportTargets(source)).toEqual([target]);
+    expect(docsFreshnessScriptFiles(dir)).toEqual([
+      relative(join(dir, "scripts"), resolve(dir, "scripts", target)),
+      "docs-freshness-check.mjs",
+    ].sort());
   });
 
   test("follows from clauses, side-effect imports and indirect hops", () => {

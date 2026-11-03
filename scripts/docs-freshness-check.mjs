@@ -518,14 +518,12 @@ defineCheck("changelog-unreleased", null, () => {
     perChangeRuleError = err;
   }
 
-  // The since-tag rule excludes Renovate dependency commits, and the per-change
-  // rule is the only other rule that sees them. If it could not run, those
-  // commits were checked by neither rule — report a skip rather than a pass.
+  // With no fragments, excluded Renovate commits need the per-change rule.
   // (The release-PR exception above returns before this point.)
-  if (!perChangeRuleRan && excludedRenovateCommits > 0) {
+  if (!hasContent && !perChangeRuleRan && excludedRenovateCommits > 0) {
     return { failures, scanned: null, skips: [skip(
       `the per-change fragment rule did not run (${perChangeRuleError ? `git read failed: ${perChangeRuleError?.message ?? perChangeRuleError}` : `no merge base with ${baseRef}`}), and ${excludedRenovateCommits} feat/fix commit(s) were excluded from the since-tag count as Renovate dependency commits, so no rule checked them.`,
-      "git fetch --unshallow, and check that the workflow uses actions/checkout with fetch-depth: 0",
+      "Locally, fetch the full history (git fetch --unshallow for a shallow checkout); in CI, use actions/checkout with fetch-depth: 0",
     )] };
   }
 

@@ -3,9 +3,9 @@
  *
  * The gate runs as a subprocess against a throwaway package, so the fixture
  * needs scripts/docs-freshness-check.mjs and every module it reaches through a
- * relative import, transitively. A hand-written list of names goes stale as
+ * relative import literal, transitively. A hand-written list of names goes stale as
  * soon as the gate imports one more module, so the set is derived from the
- * gate's own import statements.
+ * gate's relative import literals.
  *
  * Copy-ready names are relative to scripts/ and sorted for a stable order. A
  * file that cannot be read, or a walk past MAX_FILES, throws: a short set would
@@ -23,6 +23,7 @@ const MAX_FILES = 200;
 const FROM_CLAUSE = /^[ \t]*(?:import|export)\b[^;]*?\bfrom\s*["'](\.\.?\/[^"']+)["']/gm;
 /** A side-effect import: `import "./x.mjs"`. */
 const BARE_IMPORT = /^[ \t]*import\s*["'](\.\.?\/[^"']+)["']/gm;
+const DYNAMIC_IMPORT = /\bimport\s*\(\s*["'](\.\.?\/[^"']+)["']\s*\)/g;
 
 export function docsFreshnessScriptFiles(repoRoot: string = REPO_ROOT): string[] {
   const scripts = join(repoRoot, "scripts");
@@ -36,7 +37,7 @@ export function docsFreshnessScriptFiles(repoRoot: string = REPO_ROOT): string[]
       throw new Error(`docsFreshnessScriptFiles: more than ${MAX_FILES} script files reachable from ${ENTRY}`);
     }
     const source = readFileSync(join(scripts, name), "utf8");
-    for (const pattern of [FROM_CLAUSE, BARE_IMPORT]) {
+    for (const pattern of [FROM_CLAUSE, BARE_IMPORT, DYNAMIC_IMPORT]) {
       for (const match of source.matchAll(pattern)) {
         queue.push(relative(scripts, resolve(scripts, dirname(name), match[1])));
       }
