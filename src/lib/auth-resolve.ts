@@ -1560,8 +1560,9 @@ function isEd25519CredentialRejection(err: unknown): boolean {
  * sent, not to the key: a 500, 409, policy 403, refused redirect or GET 404 is
  * FINAL and is thrown as itself, with the server's status and code, so it is
  * never replayed as a different agent and never hidden behind the caller's
- * "no credentials sent". When every key is refused as a credential, the last
- * such answer is thrown for the same reason (something WAS sent).
+ * "no credentials sent". When every key is refused as a credential, the floor
+ * returns `undefined`, so the caller rethrows its original no-credentials
+ * hint, which carries the operator's remedy.
  */
 export async function tryAgentKeyFloor(
   url: URL,
@@ -1582,7 +1583,6 @@ export async function tryAgentKeyFloor(
     // No keys dir at all — nothing to fall back to.
   }
   const isLocal = isLocalBase(url.origin);
-  let lastCredentialRejection: unknown;
   for (const kf of keyFiles) {
     const agentId = kf.replace(/\.key$/, "");
     const keyPath = join(keysDir, kf);
@@ -1597,10 +1597,7 @@ export async function tryAgentKeyFloor(
       // The server rejected THIS credential (unregistered agent, bad
       // signature, expired timestamp, deactivated principal): another key may
       // authenticate.
-      if (isEd25519CredentialRejection(err)) {
-        lastCredentialRejection = err;
-        continue;
-      }
+      if (isEd25519CredentialRejection(err)) continue;
       // A connection refused or DNS failure before any byte was sent is the
       // existing network-blip case: the request provably never left this host.
       if (isConnectPhaseFailure(err)) continue;
@@ -1609,10 +1606,8 @@ export async function tryAgentKeyFloor(
       throw err;
     }
   }
-  // Every key the server was asked about was refused as a credential. Report
-  // the server's answer, not the caller's "no credentials sent" for a request
-  // that was sent with credentials.
-  if (lastCredentialRejection !== undefined) throw lastCredentialRejection;
+  // No key authenticated. Returning `undefined` lets the caller rethrow its
+  // original no-credentials hint, which carries the operator's remedy.
   return undefined;
 }
 

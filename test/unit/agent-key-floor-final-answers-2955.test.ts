@@ -247,7 +247,7 @@ describe("flair#2955 — the agent-key floor treats an answered request as final
     }
   });
 
-  test("every key refused as a credential surfaces the last server answer, never the caller's no-credentials error", async () => {
+  test("every key refused as a credential returns undefined, so the caller's original no-credentials hint surfaces", async () => {
     const server = await startFloorServer(() => ({ status: 401, body: { error: "unknown_agent" } }));
     try {
       let caught: unknown;
@@ -258,9 +258,33 @@ describe("flair#2955 — the agent-key floor treats an answered request as final
       }
       expect(signedRequests(server).map((r) => agentOf(r.authorization))).toEqual(["agent-first", "agent-second"]);
       expect(caught).toBeInstanceOf(ApiHttpError);
-      expect((caught as ApiHttpError).status).toBe(401);
+      const httpError = caught as ApiHttpError;
+      expect(httpError.status).toBe(403);
+      expect(httpError.noCredentials).toBe(true);
+      expect(httpError.message).toMatch(/no credentials sent/);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("a credential rejection followed by a final answer from the next key throws that answer", async () => {
+    const server = await startFloorServer((signedIndex) =>
+      signedIndex === 0
+        ? { status: 401, body: { error: "unknown_agent" } }
+        : { status: 500, body: { error: "internal_error" } },
+    );
+    try {
+      let caught: unknown;
+      try {
+        await authedRequest("GET", "/HealthDetail", undefined, { baseUrl: server.url, keysDir });
+      } catch (err) {
+        caught = err;
+      }
+      expect(signedRequests(server).map((r) => agentOf(r.authorization))).toEqual(["agent-first", "agent-second"]);
+      expect(caught).toBeInstanceOf(ApiHttpError);
+      expect((caught as ApiHttpError).status).toBe(500);
       expect((caught as ApiHttpError).noCredentials).toBe(false);
-      expect(errorCodeOf(caught)).toBe("unknown_agent");
+      expect(errorCodeOf(caught)).toBe("internal_error");
     } finally {
       await server.close();
     }

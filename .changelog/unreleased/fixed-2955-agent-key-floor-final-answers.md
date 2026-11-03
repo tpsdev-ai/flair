@@ -4,5 +4,4 @@
   codes) or when a connect-phase failure shows the request never left the host.
   Any other answer — such as a 500, 409, policy 403, refused redirect or a GET
   404 — is thrown as itself, with the server's status and any error code its
-  body carries, and a request that was sent with credentials no longer
-  surfaces the caller's "no credentials sent" message (#2955).
+  body carries (#2955).
