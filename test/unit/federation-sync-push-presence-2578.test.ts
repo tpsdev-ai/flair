@@ -63,6 +63,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     syncIndeterminate = [];
     syncResponse = undefined;
     genericRows = [];
+    const retryRows = new Map<string, any>();
     globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
       const url = typeof urlInput === "string" ? urlInput : urlInput.toString();
       const method = init?.method ?? "GET";
@@ -78,11 +79,22 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
         return res(true, 200, { id: INSTANCE_ID, publicKey: publicKeyB64url, role: "spoke" });
       }
       if (body?.operation === "search_by_conditions") {
+        if (body.table === "FederationRetry") {
+          return res(true, 200, [...retryRows.values()].filter((row) => row.state === "pending" && row.peerId === HUB && row.table === "Memory"));
+        }
         return res(true, 200, body.conditions[0].search_type === "greater_than" ? genericRows : []);
+      }
+      if (body?.operation === "search_by_hash" && body.table === "FederationRetry") {
+        const hashes: string[] = body.hash_values ?? [];
+        return res(true, 200, hashes.map((id) => retryRows.get(id)).filter(Boolean));
       }
       if (body?.operation === "sql") return res(true, 200, presenceRows);
       if (body?.operation === "search_by_value") return res(true, 200, []);
       if (body?.operation === "update" || body?.operation === "upsert") {
+        if (body.table === "FederationRetry") {
+          for (const row of body.records ?? []) retryRows.set(row.id, { ...retryRows.get(row.id), ...row });
+          return res(true, 200, { update_hashes: (body.records ?? []).map((r: any) => r.id) });
+        }
         return res(true, 200, { update_hashes: [body.records?.[0]?.id].filter(Boolean) });
       }
       if (method === "POST" && url.includes("/FederationSync")) {
