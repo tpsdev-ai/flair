@@ -113,16 +113,15 @@ export async function writeMigrationStateEntry(
   ensureSecureDir(dir);
   const current = readMigrationState(path);
   current[id] = entry;
-  // Test-only pause between the read and the rename, so a test can force a
-  // second writer into that window deterministically (flair#2866).
+  // Test-only pause between the read and the rename (flair#2866).
   const pause = txnPausePoint("migration-state-write");
   if (pause) await pause;
-  // This re-check detects a lock replaced only if the replacement happened
-  // before this point. writeSecureFile then creates its temporary file,
-  // flushes it and renames it over the state file; a replacement that lands
-  // during that write is not detected again. The local acquisition rule keeps
-  // a live local holder from being replaced; the cross-host age-based takeover
-  // is the schedule where this window remains (flair#2866).
+  // This re-check detects a lock replaced before this point.
+  // writeSecureFile then creates its temporary file, flushes it and renames it
+  // over the state file; a replacement that lands during that write is not
+  // detected again. The local acquisition rule keeps a live local holder from
+  // being displaced; the cross-host age-based takeover is the schedule where
+  // this window remains (flair#2866).
   if (migrationLockHandleStatus(lock) !== "live" || !migrationLockStillHeld(lock)) {
     throw new MigrationStateWriteRefusedError(
       `refusing to write ${id} in ${path}: the migration lock at ${identity.lockPath} is no longer held by pid ${identity.holder.pid} (started ${identity.holder.startedAt})`,

@@ -4,7 +4,7 @@
  * on well-known path; dead-holder → break and proceed").
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, existsSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { hostname, tmpdir } from "node:os";
 import { probeMigrationDataDir } from "../../resources/migrations/data-dir.ts";
@@ -254,5 +254,69 @@ describe("acquireMigrationLock — touch()", () => {
 
     result.touch();
     expect(statSync(lockPath).mtimeMs).toBeGreaterThan(past.getTime());
+  });
+});
+
+describe("acquireMigrationLock — directory mutex (flair#2866)", () => {
+  const generation = "0123456789abcdef";
+  const guardPath = () => `${lockPath}.guard`;
+
+  function writeGuard(holder: Record<string, unknown>): void {
+    mkdirSync(join(testRoot, ".migrations"), { recursive: true, mode: 0o700 });
+    mkdirSync(guardPath(), { mode: 0o700 });
+    writeFileSync(join(guardPath(), `owner-${generation}.json`), JSON.stringify(holder));
+  }
+
+  it("leaves the mutex directory empty while the handle is held and after release", () => {
+    const result = acquireMigrationLock({ lockPath });
+    expect(result.acquired).toBe(true);
+    expect(existsSync(guardPath())).toBe(true);
+    expect(readdirSync(guardPath())).toEqual([]);
+    if (result.acquired) result.release();
+    expect(readdirSync(guardPath())).toEqual([]);
+  });
+
+  it("refuses to change the lock while a live local mutex owner holds it", () => {
+    writeGuard({ pid: process.pid, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z", generation });
+
+    const result = acquireMigrationLock({ lockPath, isProcessAlive: () => true });
+    expect(result.acquired).toBe(false);
+    if (!result.acquired) expect(result.reason).toContain("mutex is held by pid");
+    expect(readdirSync(guardPath())).toEqual([`owner-${generation}.json`]);
+  });
+
+  it("recovers a dead mutex generation by removing only its owner entry", () => {
+    writeGuard({ pid: 424242, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z", generation });
+
+    const result = acquireMigrationLock({ lockPath, isProcessAlive: () => false });
+    expect(result.acquired).toBe(true);
+    if (result.acquired) {
+      expect(readdirSync(guardPath())).toEqual([]);
+      result.release();
+    }
+    expect(readdirSync(guardPath())).toEqual([]);
+  });
+
+  it("refuses a mutex directory with an unexpected entry", () => {
+    mkdirSync(join(testRoot, ".migrations"), { recursive: true, mode: 0o700 });
+    mkdirSync(guardPath(), { mode: 0o700 });
+    writeFileSync(join(guardPath(), "junk.txt"), "not an owner record");
+
+    const result = acquireMigrationLock({ lockPath });
+    expect(result.acquired).toBe(false);
+    if (!result.acquired) expect(result.reason).toContain("MigrationLockMutexError");
+  });
+
+  it("refuses an owner entry whose generation does not match its filename", () => {
+    mkdirSync(join(testRoot, ".migrations"), { recursive: true, mode: 0o700 });
+    mkdirSync(guardPath(), { mode: 0o700 });
+    writeFileSync(
+      join(guardPath(), `owner-${generation}.json`),
+      JSON.stringify({ pid: process.pid, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z", generation: "fedcba9876543210" }),
+    );
+
+    const result = acquireMigrationLock({ lockPath });
+    expect(result.acquired).toBe(false);
+    if (!result.acquired) expect(result.reason).toContain("MigrationLockMutexError");
   });
 });

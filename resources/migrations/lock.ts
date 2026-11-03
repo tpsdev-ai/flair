@@ -1,55 +1,75 @@
 /**
- * lock.ts — single-flight guard (Kern verdict, 2026-07-12):
- * "Single-flight v1 = in-process mutex + stale-tolerant file lock (flock on
- * well-known path; dead-holder → break and proceed). Fabric-wide ordering =
- * follow-on with its own review, NOT this slice."
+ * lock.ts — single-flight guard for migration cycles.
  *
  * Two layers:
- *   1. An in-process mutex (module-scope flag) — cheapest guard against two
- *      concurrent async callers inside the SAME Node process (e.g. a
- *      duplicate boot-trigger firing twice).
+ *   1. An in-process flag — cheapest guard against two concurrent async
+ *      callers inside the SAME process.
  *   2. A file lock at a well-known path under the data dir. Node has no
  *      portable flock() binding, so a contender publishes a complete holder
  *      record to a unique temporary file in the same directory, flushes it,
  *      and hard-links it to the lock path (`link(2)`, which fails with EEXIST
- *      when a lock exists). A reader therefore sees either no lock file or a
- *      complete record, never a partial one. The lock file holds
- *      `{pid, hostname, startedAt}`. A lock whose recorded holder is on THIS
- *      host is reclaimed only when that pid is no longer alive; a live local
- *      holder is held regardless of the file's age. A holder recorded on
- *      ANOTHER host is judged by age alone (`staleMs`) and is never probed by
- *      a local pid. The pid probe is therefore only used for a local holder.
- *      A holder record that cannot be read or parsed is not treated as stale:
- *      acquisition refuses with a named error. The cross-host case keeps the
- *      takeover window: a remote holder is still judged by age, which is out
- *      of scope for this single-host guard.
+ *      when a lock exists). A reader sees no lock file, a complete record, or
+ *      a record this module refuses as unreadable; it never treats a partial
+ *      or unknown record as stale.
+ *
+ * Every migration-lock transition is serialized by a sibling directory mutex
+ * (`<lock>.guard`). A process publishes that mutex by renaming an
+ * already-populated directory over the guard path: replacing an empty
+ * directory succeeds, replacing a non-empty one fails with ENOTEMPTY. The
+ * mutex is released by unlinking only the owner entry of the generation it
+ * published, which leaves the directory empty. A dead owner is recovered by
+ * unlinking that same generation-specific entry; the recovering process must
+ * then win publication of its own directory, so recovery never grants
+ * ownership by itself.
+ *
+ * The lock file holds `{pid, hostname, startedAt}`. A lock whose recorded
+ * holder is on THIS host is reclaimed only when that pid is no longer alive;
+ * a live local holder is held regardless of the file's age. A holder
+ * recorded on ANOTHER host is judged by age alone (`staleMs`) and is never
+ * probed by a local pid. The pid probe is therefore only used for a local
+ * holder. A holder record that cannot be read or parsed is not treated as
+ * stale: acquisition refuses with a named error.
  *
  * This is a SINGLE-HOST guard, not a Fabric-wide one — multiple Flair
- * instances in a Fabric cluster each have their OWN data dir today, so this
- * is sufficient for v1. Fabric-wide ordering (one lock across a cluster
- * sharing storage) is explicitly deferred, per the verdict above.
+ * instances in a Fabric cluster each have their OWN data dir today. Fabric-
+ * wide ordering (one lock across a cluster sharing storage) is deferred.
+ *
+ * Known windows: a holder recorded on another host is still judged by age,
+ * for the mutex as well as the migration record, so a remote holder that
+ * resumes after takeover is not fenced. A process killed while preparing a
+ * record leaves an unpublished temporary file; one killed after publication
+ * leaves a complete owner record that another process can recover after
+ * establishing death.
  */
 import {
   closeSync,
   constants as fsConstants,
   fstatSync,
   fsyncSync,
+  futimesSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
-  statSync,
+  rmSync,
   unlinkSync,
-  utimesSync,
-  writeSync,
+  writeFileSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { hostname as osHostname } from "node:os";
+import { ensureSecureDir } from "./dir-safety.js";
 import { txnPausePointSync } from "../txn-pause-point.js";
 
 export const DEFAULT_STALE_MS = 5 * 60 * 1000; // 5 minutes with no heartbeat touch = stale
+
+/** Bounds every acquisition loop; contention settles between attempts. */
+const GUARD_ACQUISITION_ATTEMPTS = 24;
+const LOCK_ACQUISITION_ROUNDS = 8;
+const CONTENTION_SETTLE_MS = 2;
 
 export interface LockHolder {
   pid: number;
@@ -68,6 +88,13 @@ interface LockIdentity extends MigrationLockIdentity {
   readonly ino: number;
   release(): void;
   touch(): void;
+}
+
+interface GuardHolder {
+  pid: number;
+  hostname: string;
+  startedAt: string;
+  generation: string;
 }
 
 const liveHandles = new WeakSet<MigrationLockHandle>();
@@ -179,6 +206,17 @@ export class MigrationLockUnreadableError extends Error {
   }
 }
 
+/** The named refusal when the directory mutex cannot be trusted. */
+export class MigrationLockMutexError extends Error {
+  constructor(guardPath: string, detail: string) {
+    super(
+      `refusing to change the migration lock at ${guardPath}: ${detail}. Inspect ${guardPath}; ` +
+        `if no process on this host still holds the mutex, stop every writer and remove it by hand, then retry`,
+    );
+    this.name = "MigrationLockMutexError";
+  }
+}
+
 /**
  * True when the pid is alive. ESRCH means dead; EPERM means alive (the process
  * exists but is not ours to signal); every other probe error refuses
@@ -270,7 +308,7 @@ function parseHolder(raw: unknown): LockHolder | null {
  * Read the lock's holder, device and inode from one open file descriptor, so
  * the three facts describe the same file even if the name is replaced while
  * the read runs. A missing file is absent; anything else that prevents a
- * complete record is unreadable and never breakable.
+ * complete regular-file record is unreadable and never breakable.
  */
 function inspectLock(lockPath: string): LockInspection {
   let fd: number;
@@ -282,6 +320,7 @@ function inspectLock(lockPath: string): LockInspection {
   }
   try {
     const st = fstatSync(fd);
+    if (!st.isFile()) return { state: "unreadable", detail: "it is not a regular file" };
     const text = readFileSync(fd, "utf-8");
     let raw: unknown;
     try {
@@ -301,21 +340,14 @@ function inspectLock(lockPath: string): LockInspection {
   }
 }
 
-function holderRecordAt(path: string): LockHolder | null {
-  try {
-    return parseHolder(JSON.parse(readFileSync(path, "utf-8")));
-  } catch {
-    return null;
-  }
-}
-
 type PublishResult = { published: true; dev: number; ino: number } | { published: false };
 
 /**
  * Write the complete holder record to a unique temporary file in the lock's
  * directory, flush it, then hard-link it to the lock path. `link` is atomic
  * and fails with EEXIST when a lock already exists, so a reader never sees a
- * partial record. The temporary name is removed on every path.
+ * partial record. The temporary name is removed best-effort; a cleanup
+ * failure leaves an extra temporary file and does not affect a published lock.
  */
 function publishLock(lockPath: string, holder: LockHolder): PublishResult {
   const temp = join(
@@ -329,7 +361,7 @@ function publishLock(lockPath: string, holder: LockHolder): PublishResult {
   try {
     fd = openSync(temp, "wx", 0o600);
     created = true;
-    writeSync(fd, JSON.stringify(holder));
+    writeFileSync(fd, JSON.stringify(holder));
     fsyncSync(fd);
     const st = fstatSync(fd);
     dev = st.dev;
@@ -346,6 +378,7 @@ function publishLock(lockPath: string, holder: LockHolder): PublishResult {
       if ((err as NodeJS.ErrnoException)?.code === "EEXIST") return { published: false };
       throw err;
     }
+    txnPausePointSync("migration-lock-published", process.env, undefined, { lockPath });
     return { published: true, dev, ino };
   } finally {
     if (fd !== undefined) {
@@ -358,156 +391,440 @@ function publishLock(lockPath: string, holder: LockHolder): PublishResult {
     try {
       if (created) unlinkSync(temp);
     } catch {
-      /* the temporary name is best-effort cleanup; the lock (if linked) is unaffected */
+      /* best-effort cleanup: an extra temporary name does not affect the lock */
     }
   }
 }
 
-type ReclaimResult = { reclaimed: true } | { reclaimed: false; reason: string };
+/** A prepared complete holder record in a unique sibling file, flushed and closed. */
+type PreparedRecord = { temp: string; dev: number; ino: number };
+
+function prepareLockRecord(lockPath: string, holder: LockHolder): PreparedRecord {
+  const temp = join(
+    dirname(lockPath),
+    `.${basename(lockPath)}.${process.pid}.${randomBytes(8).toString("hex")}.reclaim.tmp`,
+  );
+  const fd = openSync(temp, "wx", 0o600);
+  try {
+    writeFileSync(fd, JSON.stringify(holder));
+    fsyncSync(fd);
+    const st = fstatSync(fd);
+    return { temp, dev: st.dev, ino: st.ino };
+  } catch (err) {
+    try {
+      unlinkSync(temp);
+    } catch {
+      /* best-effort cleanup of our own unpublished record */
+    }
+    throw err;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// ─── directory mutex ────────────────────────────────────────────────────────
+
+function guardPathFor(lockPath: string): string {
+  return `${lockPath}.guard`;
+}
+
+function ownerEntryName(generation: string): string {
+  return `owner-${generation}.json`;
+}
+
+const GENERATION_PATTERN = /^[0-9a-f]{16}$/;
+const OWNER_ENTRY_PATTERN = /^owner-([0-9a-f]{16})\.json$/;
+
+type GuardInspection =
+  | { state: "absent" }
+  | { state: "empty" }
+  | { state: "occupied"; holder: GuardHolder; name: string; mtimeMs: number }
+  | { state: "unreadable"; detail: string };
+
+function parseGuardHolder(raw: unknown, nameGeneration: string): GuardHolder | null {
+  if (
+    typeof raw === "object" &&
+    raw !== null &&
+    Number.isInteger((raw as GuardHolder).pid) &&
+    (raw as GuardHolder).pid > 0 &&
+    typeof (raw as GuardHolder).hostname === "string" &&
+    (raw as GuardHolder).hostname.length > 0 &&
+    typeof (raw as GuardHolder).startedAt === "string" &&
+    (raw as GuardHolder).startedAt.length > 0 &&
+    typeof (raw as GuardHolder).generation === "string" &&
+    (raw as GuardHolder).generation === nameGeneration
+  ) {
+    return {
+      pid: (raw as GuardHolder).pid,
+      hostname: (raw as GuardHolder).hostname,
+      startedAt: (raw as GuardHolder).startedAt,
+      generation: (raw as GuardHolder).generation,
+    };
+  }
+  return null;
+}
 
 /**
- * Remove the inspected dead holder's lock. The lock is renamed to a unique
- * sibling and the moved file is compared by device and inode with the one
- * inspected: a match is the dead holder's lock and is removed; a mismatch is
- * a successor's lock, which is linked back and left in place. When it cannot
- * be linked back, both paths are named and nothing is deleted (flair#2866).
+ * Inspect the mutex directory without accepting a symlink or unexpected type.
+ * It is either absent, empty, or holds exactly one owner entry whose record
+ * and filename name the same generation. Everything else refuses.
  */
-function reclaimDeadLock(
-  lockPath: string,
-  inspected: Extract<LockInspection, { state: "held" }>,
-): ReclaimResult {
-  const moved = `${lockPath}.reclaim-${process.pid}-${randomBytes(8).toString("hex")}`;
+function inspectGuard(guardPath: string): GuardInspection {
+  let st: ReturnType<typeof lstatSync>;
   try {
-    renameSync(lockPath, moved);
+    st = lstatSync(guardPath);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { reclaimed: true };
-    throw err;
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { state: "absent" };
+    return { state: "unreadable", detail: `the mutex cannot be inspected (${(err as NodeJS.ErrnoException)?.code ?? String(err)})` };
   }
-  let st: ReturnType<typeof statSync>;
+  if (!st.isDirectory()) return { state: "unreadable", detail: "it is not a directory" };
+
+  let entries: string[];
   try {
-    st = statSync(moved);
+    entries = readdirSync(guardPath);
   } catch (err) {
+    return { state: "unreadable", detail: `its entries cannot be listed (${(err as NodeJS.ErrnoException)?.code ?? String(err)})` };
+  }
+  if (entries.length === 0) return { state: "empty" };
+  if (entries.length !== 1) {
+    return { state: "unreadable", detail: `it contains ${entries.length} entries instead of none or one` };
+  }
+  const name = entries[0];
+  const match = OWNER_ENTRY_PATTERN.exec(name);
+  if (match === null) return { state: "unreadable", detail: `it contains an unexpected entry ${name}` };
+
+  let fd: number;
+  try {
+    fd = openSync(join(guardPath, name), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (err) {
+    return { state: "unreadable", detail: `its owner entry cannot be opened (${(err as NodeJS.ErrnoException)?.code ?? String(err)})` };
+  }
+  try {
+    const entryStat = fstatSync(fd);
+    if (!entryStat.isFile()) return { state: "unreadable", detail: "its owner entry is not a regular file" };
+    const text = readFileSync(fd, "utf-8");
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      return { state: "unreadable", detail: "its owner entry is not valid JSON" };
+    }
+    const holder = parseGuardHolder(raw, match[1]);
+    if (holder === null) {
+      return { state: "unreadable", detail: "its owner entry does not name the generation in its filename or lacks a holder field" };
+    }
+    return { state: "occupied", holder, name, mtimeMs: entryStat.mtimeMs };
+  } catch (err) {
+    return { state: "unreadable", detail: `its owner entry cannot be read (${(err as NodeJS.ErrnoException)?.code ?? String(err)})` };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+type GuardPublishResult =
+  | { published: true }
+  | { published: false; contention: true }
+  | { published: false; contention: false; code: string | undefined };
+
+function publishGuard(guardPath: string, holder: GuardHolder): GuardPublishResult {
+  const staging = join(
+    dirname(guardPath),
+    `.${basename(guardPath)}.${process.pid}.${randomBytes(8).toString("hex")}.stage`,
+  );
+  try {
+    mkdirSync(staging, { mode: 0o700 });
+    const fd = openSync(join(staging, ownerEntryName(holder.generation)), "wx", 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify(holder));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    // Test-only pause after the populated staging directory is complete and
+    // before the rename that publishes it (flair#2866).
+    txnPausePointSync("migration-lock-guard-publish", process.env, undefined, {
+      guardPath,
+      generation: holder.generation,
+    });
+    try {
+      renameSync(staging, guardPath);
+      return { published: true };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "EEXIST" || code === "ENOTEMPTY") return { published: false, contention: true };
+      return { published: false, contention: false, code };
+    }
+  } catch (err) {
+    return { published: false, contention: false, code: (err as NodeJS.ErrnoException)?.code };
+  } finally {
+    try {
+      rmSync(staging, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup of our own staging directory */
+    }
+  }
+}
+
+function releaseGuard(guardPath: string, generation: string): { ok: true } | { ok: false; reason: string } {
+  try {
+    unlinkSync(join(guardPath, ownerEntryName(generation)));
+    return { ok: true };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { ok: true };
     return {
-      reclaimed: false,
-      reason:
-        `refusing to acquire ${lockPath}: the lock moved while reclaiming a dead holder and the moved file ` +
-        `${moved} cannot be inspected (${(err as NodeJS.ErrnoException)?.code ?? String(err)}); inspect both paths`,
+      ok: false,
+      reason: `its owner entry ${ownerEntryName(generation)} cannot be removed (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`,
     };
   }
-  const movedHolder = holderRecordAt(moved);
-  if (
-    movedHolder === null ||
-    st.dev !== inspected.dev ||
-    st.ino !== inspected.ino ||
-    !sameHolder(movedHolder, inspected.holder)
-  ) {
-    try {
-      linkSync(moved, lockPath);
-    } catch (err) {
+}
+
+function settleContention(): void {
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(sleeper, 0, 0, CONTENTION_SETTLE_MS);
+}
+
+type GuardResult = { acquired: true; generation: string } | { acquired: false; reason: string };
+
+function makeGuardHolder(now: () => number): GuardHolder {
+  return {
+    pid: process.pid,
+    hostname: osHostname(),
+    startedAt: new Date(now()).toISOString(),
+    generation: randomBytes(8).toString("hex"),
+  };
+}
+
+/**
+ * Acquire the directory mutex, recovering a dead generation at most as often
+ * as the bounded loop allows. A live local owner is held regardless of age;
+ * a remote owner uses the same age policy as the migration record.
+ */
+function acquireGuard(guardPath: string, deps: LockDeps): GuardResult {
+  for (let attempt = 0; attempt < GUARD_ACQUISITION_ATTEMPTS; attempt++) {
+    const holder = makeGuardHolder(deps.now);
+    const published = publishGuard(guardPath, holder);
+    if (published.published) {
+      txnPausePointSync("migration-lock-guard-published", process.env, undefined, {
+        guardPath,
+        generation: holder.generation,
+      });
+      return { acquired: true, generation: holder.generation };
+    }
+    if (!published.contention) {
       return {
-        reclaimed: false,
-        reason:
-          `refusing to acquire ${lockPath}: the lock changed after the dead holder was inspected and another ` +
-          `lock now exists there; the moved lock is at ${moved} ` +
-          `(${(err as NodeJS.ErrnoException)?.code ?? String(err)}); inspect both paths`,
+        acquired: false,
+        reason: `${MigrationLockMutexError.name}: the mutex at ${guardPath} cannot be published (${published.code ?? "unknown error"})`,
       };
     }
-    try {
-      unlinkSync(moved);
-    } catch {
-      /* the successor's lock is restored at lockPath; the extra name is left rather than deleting it */
+
+    const inspected = inspectGuard(guardPath);
+    if (inspected.state === "unreadable") {
+      return { acquired: false, reason: `${MigrationLockMutexError.name}: ${inspected.detail}` };
     }
+    if (inspected.state !== "occupied") {
+      settleContention();
+      continue;
+    }
+
+    let breakable: boolean;
+    try {
+      breakable = guardHolderIsBreakable(inspected.holder, inspected.mtimeMs, deps);
+    } catch (err) {
+      if (err instanceof MigrationLockProbeError) {
+        return { acquired: false, reason: `${err.name}: ${err.message}` };
+      }
+      throw err;
+    }
+    if (!breakable) {
+      return {
+        acquired: false,
+        reason:
+          `the migration-lock mutex is held by pid ${inspected.holder.pid} on ${inspected.holder.hostname} ` +
+          `since ${inspected.holder.startedAt} (${guardPath})`,
+      };
+    }
+
+    // Test-only pause after the dead generation is inspected and before its
+    // owner entry is unlinked, so a test can let a successor recover and
+    // publish before this process resumes its old cleanup (flair#2866).
+    txnPausePointSync("migration-lock-guard-reclaim", process.env, undefined, {
+      guardPath,
+      generation: inspected.holder.generation,
+    });
+    try {
+      // Unlink only the entry this inspection named; never a fresh listing.
+      unlinkSync(join(guardPath, inspected.name));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        return {
+          acquired: false,
+          reason: `${MigrationLockMutexError.name}: ${inspected.name} cannot be removed (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`,
+        };
+      }
+      settleContention();
+      continue;
+    }
+    txnPausePointSync("migration-lock-guard-reclaimed", process.env, undefined, {
+      guardPath,
+      generation: inspected.holder.generation,
+    });
+    settleContention();
+  }
+  return { acquired: false, reason: `lost the race to acquire the migration-lock mutex (${guardPath})` };
+}
+
+function guardHolderIsBreakable(holder: GuardHolder, mtimeMs: number, deps: LockDeps): boolean {
+  if (holder.hostname === osHostname()) return !deps.isProcessAlive(holder.pid);
+  return deps.now() - mtimeMs > deps.staleMs;
+}
+
+// ─── migration lock protocol ────────────────────────────────────────────────
+
+type UnderGuardOutcome =
+  | { kind: "handle"; holder: LockHolder; dev: number; ino: number }
+  | { kind: "held"; holder: LockHolder }
+  | { kind: "retry" }
+  | { kind: "refused"; reason: string };
+
+/**
+ * One inspection-and-transition inside the mutex. The lock is inspected
+ * afresh here: an inspection made before the mutex was acquired never
+ * authorizes replacement.
+ */
+function transitionUnderGuard(lockPath: string, deps: LockDeps, staleMs: number, now: () => number): UnderGuardOutcome {
+  const inspected = inspectLock(lockPath);
+
+  if (inspected.state === "absent") {
+    const holder = makeHolder(now);
+    const published = publishLock(lockPath, holder);
+    if (!published.published) return { kind: "retry" };
+    return { kind: "handle", holder, dev: published.dev, ino: published.ino };
+  }
+
+  if (inspected.state === "unreadable") {
+    const err = new MigrationLockUnreadableError(lockPath, inspected.detail);
+    return { kind: "refused", reason: `${err.name}: ${err.message}` };
+  }
+
+  const holder = inspected.holder;
+  let breakable: boolean;
+  try {
+    if (holder.hostname === osHostname()) {
+      breakable = !deps.isProcessAlive(holder.pid);
+    } else {
+      breakable = now() - inspected.mtimeMs > staleMs;
+    }
+  } catch (err) {
+    if (err instanceof MigrationLockProbeError) {
+      return { kind: "refused", reason: `${err.name}: ${err.message}` };
+    }
+    throw err;
+  }
+  if (!breakable) return { kind: "held", holder };
+
+  // Test-only pause between the dead-holder inspection and the rename-over
+  // replacement, so a test can put a second contender into that window
+  // deterministically (flair#2866).
+  txnPausePointSync("migration-lock-reclaim", process.env, undefined, { lockPath });
+
+  const fresh = makeHolder(now);
+  let prepared: PreparedRecord;
+  try {
+    prepared = prepareLockRecord(lockPath, fresh);
+  } catch (err) {
     return {
-      reclaimed: false,
-      reason:
-        `refusing to acquire ${lockPath}: the lock changed after the dead holder was inspected ` +
-        `(a successor's lock was moved aside and restored)`,
+      kind: "refused",
+      reason: `refusing to reclaim ${lockPath}: a new holder record cannot be prepared (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`,
     };
   }
   try {
-    unlinkSync(moved);
+    // Atomic replacement: the old record occupies the name before, the new
+    // one after. There is no unlink-first window and no restore step.
+    renameSync(prepared.temp, lockPath);
   } catch (err) {
+    try {
+      unlinkSync(prepared.temp);
+    } catch {
+      /* best-effort cleanup of our own unpublished record */
+    }
     return {
-      reclaimed: false,
-      reason:
-        `refusing to acquire ${lockPath}: the dead holder's lock was moved to ${moved} but cannot be removed ` +
-        `(${(err as NodeJS.ErrnoException)?.code ?? String(err)}); inspect that path`,
+      kind: "refused",
+      reason: `refusing to reclaim ${lockPath}: the new holder record cannot be renamed over it (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`,
     };
   }
-  return { reclaimed: true };
+  txnPausePointSync("migration-lock-reclaimed", process.env, undefined, { lockPath });
+  return { kind: "handle", holder: fresh, dev: prepared.dev, ino: prepared.ino };
 }
 
 /**
  * Attempts to acquire the migration lock. On success, returns a handle whose
- * `release()` removes the lock file and clears the in-process flag, and whose
- * `touch()` (updates the lock file's mtime — the runner calls this
- * periodically during a long-running migration so ANOTHER process's staleness
- * check doesn't mistake a genuinely-still-running holder for dead).
+ * `release()` removes the lock file only when it still holds this handle's
+ * record, and whose `touch()` updates the mtime of the verified descriptor.
  */
 export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: string }): AcquireResult {
   const resolved: LockDeps = { ...defaultLockDeps(deps.lockPath), ...deps };
-  const { lockPath, staleMs, isProcessAlive, now } = resolved;
+  const { lockPath, staleMs, now } = resolved;
+  const guardPath = guardPathFor(lockPath);
 
   if (inProcessHeld) {
     return { acquired: false, reason: "already held in-process (another async caller in this process holds it)" };
   }
+  inProcessHeld = true;
+
+  const abort = (reason: string, holder?: LockHolder): AcquireResult => {
+    inProcessHeld = false;
+    return holder === undefined ? { acquired: false, reason } : { acquired: false, reason, holder };
+  };
 
   try {
-    mkdirSync(dirname(lockPath), { mode: 0o700 });
+    ensureSecureDir(dirname(lockPath));
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    inProcessHeld = false;
+    throw err;
   }
 
-  const heldRefusal = (h: LockHolder): AcquireResult => ({
-    acquired: false,
-    reason: `held by pid ${h.pid} on ${h.hostname} since ${h.startedAt} (lock ${lockPath})`,
-    holder: h,
-  });
+  for (let round = 0; round < LOCK_ACQUISITION_ROUNDS; round++) {
+    const guard = acquireGuard(guardPath, resolved);
+    if (!guard.acquired) return abort(guard.reason);
 
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const inspected = inspectLock(lockPath);
-
-    if (inspected.state === "absent") {
-      const info = makeHolder(now);
-      const published = publishLock(lockPath, info);
-      if (published.published) return issueHandle(lockPath, info, published.dev, published.ino, now);
-      continue; // another contender published between the inspection and the link
-    }
-
-    if (inspected.state === "unreadable") {
-      const err = new MigrationLockUnreadableError(lockPath, inspected.detail);
-      return { acquired: false, reason: `${err.name}: ${err.message}` };
-    }
-
-    const holder = inspected.holder;
-    let breakable: boolean;
-    if (holder.hostname === osHostname()) {
-      let alive: boolean;
-      try {
-        alive = isProcessAlive(holder.pid);
-      } catch (err) {
-        if (err instanceof MigrationLockProbeError) {
-          return { acquired: false, reason: `${err.name}: ${err.message}` };
-        }
-        throw err;
+    let outcome: UnderGuardOutcome;
+    try {
+      outcome = transitionUnderGuard(lockPath, resolved, staleMs, now);
+    } catch (err) {
+      const released = releaseGuard(guardPath, guard.generation);
+      if (!released.ok) {
+        console.warn(`[flair-migrations] migration-lock mutex cleanup failed for ${guardPath}: ${released.reason}`);
       }
-      breakable = !alive;
-    } else {
-      breakable = now() - inspected.mtimeMs > staleMs;
+      inProcessHeld = false;
+      throw err;
     }
 
-    if (!breakable) return heldRefusal(holder);
+    const released = releaseGuard(guardPath, guard.generation);
+    if (!released.ok) {
+      if (outcome.kind === "handle") {
+        return abort(
+          `refusing to return the migration lock at ${lockPath}: the mutex could not be released ` +
+            `(${released.reason}); the lock file remains`,
+        );
+      }
+      console.warn(`[flair-migrations] migration-lock mutex cleanup failed for ${guardPath}: ${released.reason}`);
+    }
 
-    // Test-only pause between the dead-holder inspection above and the
-    // rename/unlink below, so a test can put a second contender into the
-    // reclaim window deterministically (flair#2866).
-    txnPausePointSync("migration-lock-reclaim", process.env, undefined, { lockPath });
-
-    const reclaimed = reclaimDeadLock(lockPath, inspected);
-    if (!reclaimed.reclaimed) return { acquired: false, reason: reclaimed.reason };
+    if (outcome.kind === "retry") {
+      settleContention();
+      continue;
+    }
+    if (outcome.kind === "refused") return abort(outcome.reason);
+    if (outcome.kind === "held") {
+      return abort(
+        `held by pid ${outcome.holder.pid} on ${outcome.holder.hostname} since ${outcome.holder.startedAt} (lock ${lockPath})`,
+        outcome.holder,
+      );
+    }
+    return issueHandle(lockPath, outcome.holder, outcome.dev, outcome.ino, now);
   }
 
-  return { acquired: false, reason: `lost the race to acquire the lock file (${lockPath})` };
+  return abort(`lost the race to acquire the lock file (${lockPath})`);
 }
 
 function makeHolder(now: () => number): LockHolder {
@@ -522,55 +839,91 @@ function issueHandle(
   now: () => number,
 ): MigrationLockHandle {
   Object.freeze(holder);
-  inProcessHeld = true;
+  const guardPath = guardPathFor(lockPath);
   const identity: LockIdentity = {
     lockPath,
     holder,
     dev,
     ino,
     release: () => {
-      inProcessHeld = false;
-      // Move the lock aside, then confirm the moved file is the one this
-      // handle published (device, inode and holder record). A file that does
-      // not match belongs to a successor: link it back and leave it.
-      const moved = `${lockPath}.release-${process.pid}-${randomBytes(8).toString("hex")}`;
+      // The public handle was revoked before this runs. End protected work
+      // first, then serialize the identity-checked unlink with the mutex.
+      txnPausePointSync("migration-lock-release-revoked", process.env, undefined, { lockPath });
+      let cleanupFailure: string | null = null;
       try {
-        renameSync(lockPath, moved);
-      } catch {
-        return; // already gone
-      }
-      let st: ReturnType<typeof statSync>;
-      try {
-        st = statSync(moved);
-      } catch {
-        return;
-      }
-      const record = holderRecordAt(moved);
-      const own = st.dev === dev && st.ino === ino && record !== null && sameHolder(record, holder);
-      if (own) {
-        try {
-          unlinkSync(moved);
-        } catch {
-          /* the lock is released; a leftover name is harmless */
+        const guard = acquireGuard(guardPath, defaultLockDeps(lockPath));
+        if (!guard.acquired) {
+          cleanupFailure = `the mutex could not be acquired: ${guard.reason}`;
+        } else {
+          txnPausePointSync("migration-lock-release-guard", process.env, undefined, { lockPath, guardPath });
+          try {
+            const inspected = inspectLock(lockPath);
+            if (
+              inspected.state === "held" &&
+              inspected.dev === dev &&
+              inspected.ino === ino &&
+              sameHolder(inspected.holder, holder)
+            ) {
+              txnPausePointSync("migration-lock-release-verified", process.env, undefined, { lockPath });
+              try {
+                unlinkSync(lockPath);
+                txnPausePointSync("migration-lock-release-unlinked", process.env, undefined, { lockPath });
+              } catch (err) {
+                if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+                  cleanupFailure = `the lock file cannot be removed (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`;
+                }
+              }
+            }
+            // An absent or different record belongs to someone else: leave it.
+          } catch (err) {
+            cleanupFailure = `the lock file cannot be inspected (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`;
+          }
+          const released = releaseGuard(guardPath, guard.generation);
+          if (!released.ok && cleanupFailure === null) cleanupFailure = released.reason;
         }
-        return;
+      } catch (err) {
+        cleanupFailure = `the mutex could not be used (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`;
+      } finally {
+        inProcessHeld = false;
       }
-      try {
-        linkSync(moved, lockPath);
-        unlinkSync(moved);
-      } catch {
-        // A concurrent lock now occupies lockPath: leave the moved file in
-        // place rather than deleting a successor's lock record.
+      if (cleanupFailure !== null) {
+        // Release runs in the runner's finally: it must not throw, but an
+        // uncertain cleanup is reported rather than silently ignored.
+        console.warn(
+          `[flair-migrations] migration lock cleanup failed for ${lockPath}: ${cleanupFailure}. ` +
+            `The record is left in place; inspect it before the next migration cycle`,
+        );
       }
     },
     touch: () => {
       const t = new Date(now());
+      let fd: number | undefined;
       try {
-        const st = statSync(lockPath);
-        if (st.dev !== dev || st.ino !== ino) return;
-        utimesSync(lockPath, t, t);
+        fd = openSync(lockPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+        const st = fstatSync(fd);
+        if (!st.isFile() || st.dev !== dev || st.ino !== ino) return;
+        let raw: unknown;
+        try {
+          raw = JSON.parse(readFileSync(fd, "utf-8"));
+        } catch {
+          return;
+        }
+        const record = parseHolder(raw);
+        if (record === null || !sameHolder(record, holder)) return;
+        txnPausePointSync("migration-lock-touch-verified", process.env, undefined, { lockPath });
+        // Same still-open descriptor: a later pathname replacement cannot
+        // redirect this update to a successor's file.
+        futimesSync(fd, t, t);
       } catch {
         /* best-effort heartbeat — a failed touch must never break the migration */
+      } finally {
+        if (fd !== undefined) {
+          try {
+            closeSync(fd);
+          } catch {
+            /* best-effort close */
+          }
+        }
       }
     },
   };
