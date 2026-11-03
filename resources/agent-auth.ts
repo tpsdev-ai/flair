@@ -326,12 +326,7 @@ export async function allowAdmin(context: any): Promise<boolean> {
 }
 
 /**
- * flair#936 — the `internal` verdict is TRUSTED and UNFILTERED, and it is also
- * what a caller gets for supplying no context at all. Nothing distinguishes
- * "I am flair's own maintenance code" from "I am an application developer who
- * did not know a context was required": both spell it `new Memory()`, both
- * succeed, and both return plausible data. It surfaces months later as memories
- * that were never scoped.
+ * flair#936 — the `internal` verdict is TRUSTED and UNFILTERED.
  *
  * This does not change the verdict. noteInternalVerdict skips a context that
  * carries the `__flairInternal` marker, which `internalContext()`
@@ -376,8 +371,8 @@ export function isDeliberateInternalCall(context: any): boolean {
 
 /** The advisory text, exported so its content is pinned without tripping the latch. */
 export const INTERNAL_BY_OMISSION_WARNING =
-  "[flair-auth] a resource was invoked with NO caller context and resolved to the trusted " +
-  "`internal` verdict: reads are UNFILTERED across every agent, writes are unattributed, and " +
+  "[flair-auth] a resource resolved a call to the trusted `internal` verdict without the " +
+  "deliberate-call marker: reads are UNFILTERED across every agent, writes are unattributed, and " +
   "the admin-only gate (allowAdmin) refuses it. If this is your application's code, pass agentContext(<id>) from " +
   "@tpsdev-ai/flair's in-process seam so the call is scoped and attributed. If the elevated " +
   "authority is genuinely intended, say so with internalContext() and this warning will stop. " +

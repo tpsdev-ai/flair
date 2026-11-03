@@ -125,6 +125,7 @@ import {
 import {
   ApiHttpError,
   ApiRequestOutcomeUnknown,
+  isConnectPhaseFailure,
   readSecretFileSecure,
   readAdminPassFileSecure,
   defaultAdminPassPath,
@@ -2838,7 +2839,7 @@ function b64url(bytes: Uint8Array): string {
  * / disabling authorizeLocal there) is tracked separately in flair#654 and is
  * out of scope for this HTTP/REST auth path.
  */
-async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string; signedOnly?: boolean; refuseRedirects?: boolean; deadlineMs?: number; deadlineSource?: RequestDeadlineSource }): Promise<any> {
+async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string; signedOnly?: boolean; refuseRedirects?: boolean; deadlineMs?: number; deadlineSource?: RequestDeadlineSource; tolerateUnparsedSuccessBody?: boolean }): Promise<any> {
   // Resolve port via the canonical path (flair#1129): options.baseUrl > FLAIR_URL > resolveHttpPort.
   // api() callers mean the default install, so resolveHttpPort({}) with no --data-dir is correct.
   const hasExplicitBase = !!(options?.baseUrl || process.env.FLAIR_URL);
@@ -2873,7 +2874,19 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     refuseRedirects: options?.refuseRedirects,
     deadlineMs: options?.deadlineMs,
     deadlineSource: options?.deadlineSource,
+    tolerateUnparsedSuccessBody: options?.tolerateUnparsedSuccessBody,
   };
+
+  // The port the operator wrote in ~/.flair/config.yaml, when it differs from
+  // the resolved one and no explicit base was given: the only port a
+  // connect-phase failure may fall back to (flair#1719).
+  const altPort = hasExplicitBase ? null : alternateConfiguredLocalPort({});
+  const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
+  // Following a redirect can start another connection attempt; a connect-phase
+  // failure there could cause the original write to be replayed on the alternate.
+  // Refusing it (redirect: "manual") yields a named HTTP 3xx error, which is
+  // never fallback-eligible because it is not a connect-phase failure.
+  if (altPort !== null && !readOnly) requestOptions.refuseRedirects = true;
 
   try {
     return await authedRequest(method, path, body, requestOptions);
@@ -2885,9 +2898,9 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     if (err instanceof ApiRequestOutcomeUnknown) throw err;
     // flair#1719: the resolved port came from Harper's boot record, which can
     // be stale for the default install. Before surfacing a connect failure,
-    // try the port the operator actually wrote in ~/.flair/config.yaml.
-    const altPort = hasExplicitBase ? null : alternateConfiguredLocalPort({});
-    if (altPort !== null && isFederationStatusConnectFailure(err)) {
+    // try the port the operator actually wrote in ~/.flair/config.yaml. Only a
+    // connect-phase failure qualifies (flair#2869).
+    if (altPort !== null && isConnectPhaseFailure(err)) {
       const altUrl = `http://127.0.0.1:${altPort}`;
       try {
         return await authedRequest(method, path, body, { ...requestOptions, baseUrl: altUrl });
@@ -2900,15 +2913,11 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
 }
 
 /**
- * Turn undici/Node's bare `TypeError: fetch failed` into a sentence naming the
- * actor (the Flair instance URL), the state (no HTTP response) and a remedy
- * the operator can act on — flair#1719 requirement 3. Non-connect errors
- * (HTTP 401/403/5xx, auth failures) pass through unchanged so callers keep
- * their own handling. The `flairFriendly` marker lets the top-level CLI entry
- * print just the message instead of a stack.
+ * Give connect-phase errors a URL and remedy; pass other errors through.
+ * `flairFriendly` prints the message without a stack.
  */
 function describeApiConnectFailure(err: unknown, url: string): unknown {
-  if (!isFederationStatusConnectFailure(err)) return err;
+  if (!isConnectPhaseFailure(err)) return err;
   const friendly = new Error(
     `Cannot reach the Flair instance at ${url} — the connection failed (no HTTP response).\n`
     + `  Start it with \`flair start\`, or point this command at the right instance with `

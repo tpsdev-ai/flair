@@ -26,6 +26,7 @@ import {
   routedResourceAndRemainder,
   routedIdAfterPropertyRule,
   routedResourcePath,
+  whatwgUrlMatchesRawTarget,
 } from "./request-target.js";
 
 // --- Non-admin Memory read: ignore the caller's selection --------------------
@@ -772,6 +773,13 @@ server.http(async (request: any, nextLayer: any) => {
   }
 
   const { agentId, tsRaw, nonce, signatureB64 } = parsed;
+
+  // Refuse a signed request whose raw target WHATWG URL parsing would rewrite
+  // before verification, so the signature covers the target exactly as received.
+  if (!whatwgUrlMatchesRawTarget(rawTarget)) {
+    return nonCanonicalRequestTargetRefusal(String(request.method ?? ""));
+  }
+
   const ts = Number(tsRaw);
   const now = Date.now();
 
