@@ -323,13 +323,13 @@ export class ApiRequestOutcomeUnknown extends Error {
     this.status = status;
   }
 
-  /** Name the instance and warn against retrying a write with an unknown outcome. */
+  /** Name the requested origin and warn against retrying. */
   static fromTransportFailure(method: string, path: string, url: string, cause: unknown, status?: number): ApiRequestOutcomeUnknown {
     const detail = status === undefined
-      ? `${method} ${path} may or may not have been applied on ${url}: the connection failed before any response arrived, so delivery is unknown. ` +
-        `Check the instance's state before retrying; do not resend it.`
-      : `${method} ${path} may or may not have been applied on ${url}: the instance answered HTTP ${status}, but the connection failed while the response was being read, so the outcome is unknown. ` +
-        `Check the instance's state before retrying; do not resend it.`;
+      ? `${method} ${path} to ${url}: no final response; outcome unknown, write may have been applied. ` +
+        `Check the server (or the origin it redirected to) before retrying.`
+      : `${method} ${path} to ${url}: the successful response body could not be read (HTTP ${status}); outcome unknown, write may have been applied. ` +
+        `Check the server (or the origin it redirected to) before retrying.`;
     const err = new ApiRequestOutcomeUnknown(method, path, undefined, status, "explicit", detail);
     (err as { cause?: unknown }).cause = cause;
     return err;

@@ -2898,9 +2898,7 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     // flair#1719: the resolved port came from Harper's boot record, which can
     // be stale for the default install. Before surfacing a connect failure,
     // try the port the operator actually wrote in ~/.flair/config.yaml. Only a
-    // connect-phase failure qualifies: any other transport failure may have
-    // sent the request before the connection dropped, so replaying it on
-    // another instance could apply a write twice (flair#2869).
+    // connect-phase failure qualifies (flair#2869).
     if (altPort !== null && isConnectPhaseFailure(err)) {
       const altUrl = `http://127.0.0.1:${altPort}`;
       try {
@@ -2914,15 +2912,8 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
 }
 
 /**
- * Turn undici/Node's `TypeError: fetch failed` carrying a recognised
- * connect-phase code into a sentence naming the actor (the Flair instance URL),
- * the state (no HTTP response) and a remedy the operator can act on —
- * flair#1719 requirement 3. A bare `fetch failed` with no recognised code is
- * returned unchanged; only a connect-phase failure gets this sentence; sendJsonRequest reports other write transport
- * failures itself (flair#2869). Non-connect errors (HTTP 401/403/5xx, auth
- * failures) pass through unchanged so callers keep their own handling. The
- * `flairFriendly` marker lets the top-level CLI entry print just the message
- * instead of a stack.
+ * Give connect-phase errors a URL and remedy; pass other errors through.
+ * `flairFriendly` prints the message without a stack.
  */
 function describeApiConnectFailure(err: unknown, url: string): unknown {
   if (!isConnectPhaseFailure(err)) return err;

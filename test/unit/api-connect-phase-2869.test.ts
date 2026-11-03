@@ -185,8 +185,8 @@ describe("api() — alternate-port fallback is connect-phase only (flair#2869)",
       expect(alternate.requests, detail).toEqual([]);
       expect(result.code, detail).toBe(3);
       expect(result.stderr, detail).toContain("Unknown outcome:");
-      expect(result.stderr, detail).toContain(`may or may not have been applied on ${primary.baseUrl}`);
-      expect(result.stderr, detail).toContain("Check the instance's state before retrying");
+      expect(result.stderr, detail).toContain(`to ${primary.baseUrl}: no final response`);
+      expect(result.stderr, detail).toContain("Check the server (or the origin it redirected to) before retrying");
       expect(result.stderr, detail).not.toContain("stub-pass");
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -244,8 +244,8 @@ describe("api() — alternate-port fallback is connect-phase only (flair#2869)",
       expect(alternate.requests, detail).toEqual([]);
       expect(result.code, detail).toBe(3);
       expect(result.stderr, detail).toContain("Unknown outcome:");
-      expect(result.stderr, detail).toContain("answered HTTP 200");
-      expect(result.stderr, detail).toContain("may or may not have been applied");
+      expect(result.stderr, detail).toContain("the successful response body could not be read (HTTP 200)");
+      expect(result.stderr, detail).toContain("may have been applied");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

@@ -6,10 +6,6 @@
  * puts `code` on the TypeError itself, and Bun may also name a refusal
  * `ConnectionRefused`. So the chain starts at the error and both refusal
  * spellings are accepted.
- *
- * Anything else (ECONNRESET, EPIPE, UND_ERR_SOCKET, UND_ERR_CLOSED, a bare
- * `fetch failed` with no code) may have been sent before the connection failed
- * and is NOT connect-phase (flair#2869).
  */
 
 /** The refusal spellings, shared with daemon-liveness and upgrade-prior-liveness. */
