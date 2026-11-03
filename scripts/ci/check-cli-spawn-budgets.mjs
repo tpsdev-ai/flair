@@ -41,15 +41,16 @@
 // an entry that no longer offends FAILS. New exception keys FAIL. There is
 // no skip flag and no whole-file skip.
 //
-// A RE-KEY IS NOT AN ADDED EXCEPTION (flair#2854). One kind's scope is derived
-// attribution, not something the test writes: `spawn-no-timeout`'s scope is the
-// enclosing helper or case the scanner picks for the call. Moving a spawn into
-// the helper that actually performs it changes the key although it is the same
-// call — file, fingerprint, kind and occurrence are unchanged — so refusing
-// that key as a new exception would reject the very fix that makes the
-// attribution right. Such an added key is therefore paired ONE-TO-ONE with a
-// removed baseline key of identical file, fingerprint, kind and occurrence, and
-// reported as RE-KEYED without failing. Pairing consumes both keys, so a second
+// A RE-KEY IS NOT AN ADDED EXCEPTION (flair#2854). `spawn-no-timeout`'s scope is
+// derived attribution: the enclosing helper or case the scanner picks for the
+// call. Moving a spawn into the helper that actually performs it changes the key
+// although it is the same call — file, fingerprint, kind and occurrence are
+// unchanged. Such an added key is paired ONE-TO-ONE with a removed baseline key
+// of identical file, fingerprint, kind and occurrence, and reported as RE-KEYED
+// without failing, ONLY when that test file is byte-identical at the trusted
+// base ref and the PR head: in a changed file identical call text can be a
+// different call (a bounded helper whose spawn gains a timeout while another
+// helper gains an unbounded spawn). Pairing consumes both keys, so a second
 // added key with the same identity still fails as ADDED-EX. Only
 // `spawn-no-timeout` is re-keyable: a case-level kind's scope names the case
 // that owns the defect, and a fix in one case must never cover a regression in
@@ -1393,6 +1394,26 @@ export function readPrBaseline(root) {
   return JSON.parse(readFileSync(join(root, BASELINE_REL), "utf8"));
 }
 
+/** True only when `file` in the PR working tree is byte-identical to its blob at `baseSha`.
+ *
+ * FAIL CLOSED: a missing blob, an unreadable blob or an unreadable file answers
+ * false, so the addition stays ADDED-EX.
+ */
+function fileByteIdenticalAtBase(root, baseSha, file, cache) {
+  if (cache.has(file)) return cache.get(file);
+  const res = spawnSync("git", ["-C", root, "show", `${baseSha}:${file}`], { encoding: "buffer" });
+  let same = false;
+  if (res.status === 0 && Buffer.isBuffer(res.stdout)) {
+    try {
+      same = readFileSync(join(root, file)).equals(res.stdout);
+    } catch {
+      same = false;
+    }
+  }
+  cache.set(file, same);
+  return same;
+}
+
 /** Entries with exception keys absent from the trusted base. */
 export function addedExceptions(baseEntries, prEntries) {
   const baseKeys = new Set(baseEntries.map(offenderKey));
@@ -1410,12 +1431,15 @@ function rekeyIdentity(e) {
  *
  * An added key is a re-key when it pairs one-to-one with a REMOVED baseline key
  * (in the base, absent from the PR) of identical file, fingerprint, kind and
- * occurrence: only the scope moved. Only `spawn-no-timeout` qualifies, because
- * its scope is derived attribution; the case-level kinds keep strict identity.
- * Pairing consumes both keys, so two added keys against one removed key are one
- * re-key and one addition, never two re-keys.
+ * occurrence, AND that test file is byte-identical at the base and the PR head:
+ * only the scope moved. Only `spawn-no-timeout` qualifies, because its scope is
+ * derived attribution; the case-level kinds keep strict identity. Pairing
+ * consumes both keys, so two added keys against one removed key are one re-key
+ * and one addition, never two re-keys. `fileUnchanged` must answer true only
+ * for a file it has verified unchanged; an unreadable or missing blob answers
+ * false, so the addition stays ADDED-EX.
  */
-export function classifyAddedExceptions(baseEntries, prEntries) {
+export function classifyAddedExceptions(baseEntries, prEntries, fileUnchanged = () => false) {
   const baseKeys = new Set(baseEntries.map(offenderKey));
   const prKeys = new Set(prEntries.map(offenderKey));
   const addedEntries = prEntries.filter((e) => !baseKeys.has(offenderKey(e)));
@@ -1431,7 +1455,8 @@ export function classifyAddedExceptions(baseEntries, prEntries) {
   const added = [];
   const rekeyed = [];
   for (const e of addedEntries) {
-    const list = e.kind === "spawn-no-timeout" ? pool.get(rekeyIdentity(e)) : undefined;
+    const eligible = e.kind === "spawn-no-timeout" && fileUnchanged(e.file);
+    const list = eligible ? pool.get(rekeyIdentity(e)) : undefined;
     if (list && list.length > 0) rekeyed.push({ from: list.shift(), to: e });
     else added.push(e);
   }
@@ -1472,7 +1497,10 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seed
   let added;
   let rekeyed = [];
   if (basePresent) {
-    ({ added, rekeyed } = classifyAddedExceptions(baseEntries, prEntries));
+    const fileCache = new Map();
+    ({ added, rekeyed } = classifyAddedExceptions(baseEntries, prEntries, (file) =>
+      fileByteIdenticalAtBase(root, baseSha, file, fileCache),
+    ));
   } else {
     let anchorSha;
     try {

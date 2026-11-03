@@ -91,10 +91,11 @@ export function loadBaselineAtRef(ref: string, root: string): BaselineEntry[] | 
 export function readPrBaseline(root: string): BaselineEntry[];
 /** Entries with exception keys absent from the trusted base. */
 export function addedExceptions(baseEntries: BaselineEntry[], prEntries: BaselineEntry[]): BaselineEntry[];
-/** Split added keys into re-keys (scope-only moves of a spawn-no-timeout call) and true additions (flair#2854). */
+/** Split added keys into re-keys (scope-only moves of a spawn-no-timeout call in a test file that is byte-identical at the base and the PR head) and true additions (flair#2854). */
 export function classifyAddedExceptions(
   baseEntries: BaselineEntry[],
   prEntries: BaselineEntry[],
+  fileUnchanged?: (file: string) => boolean,
 ): { added: BaselineEntry[]; rekeyed: Array<{ from: BaselineEntry; to: BaselineEntry }> };
 
 /** End-to-end check used by main() and the gate-level tests. */

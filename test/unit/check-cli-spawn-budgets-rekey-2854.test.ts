@@ -1,8 +1,9 @@
 // check-cli-spawn-budgets-rekey-2854.test.ts — GATE-LEVEL tests for the
 // re-key rule (flair#2854): `spawn-no-timeout`'s scope is derived attribution,
-// so moving a call into the helper that performs it changes only the scope and
-// must be reported as RE-KEYED rather than refused as ADDED-EX. Case-level
-// kinds keep strict identity.
+// so a scope re-attribution in a test file that is byte-identical at the base
+// and the PR head must be reported as RE-KEYED rather than refused as
+// ADDED-EX. A changed file is never a re-key. Case-level kinds keep strict
+// identity.
 //
 // Each test drives the real gate (`runGate`, and the CLI for the exit codes)
 // against a fixture git repo with a base commit and a PR working tree.
@@ -90,12 +91,6 @@ function repo(baseline: unknown[], files: Record<string, string>): { dir: string
   return r;
 }
 
-const CASE_SCOPED_SPAWN = `import { spawnSync } from "node:child_process";
-test("end to end: a value is set and read back", () => {
-  spawnSync(process.execPath, ["src/cli.ts", "init"], { encoding: "utf8" });
-}, 40_000);
-`;
-
 const HELPER_SPAWN = `import { spawnSync } from "node:child_process";
 function runInit() {
   return spawnSync(process.execPath, ["src/cli.ts", "init"], { encoding: "utf8" });
@@ -105,11 +100,11 @@ test("end to end: a value is set and read back", () => {
 }, 40_000);
 `;
 
-describe("re-key: a scope-only move of a spawn-no-timeout call (flair#2854)", () => {
-  it("(a) a call moved from the case body into a helper is RE-KEYED and passes", () => {
+describe("re-key: a scope re-attribution of a spawn-no-timeout call in a byte-identical file (flair#2854)", () => {
+  it("(a) a scope re-attribution in a byte-identical file is RE-KEYED and passes", () => {
     const oldScope = "end to end: a value is set and read back";
     const { dir, baseSha } = repo([entry(oldScope, "spawn-no-timeout")], {
-      "test/fixture.test.ts": CASE_SCOPED_SPAWN,
+      "test/fixture.test.ts": HELPER_SPAWN,
     });
     pr(dir, [entry("runInit", "spawn-no-timeout")], {
       "test/fixture.test.ts": HELPER_SPAWN,
@@ -150,18 +145,19 @@ test("a budgeted case", () => {
     expect(cli.stdout).toContain("1 added-exception");
   });
 
-  it("(c) a scope move whose fingerprint differs is ADDED-EX", () => {
+  it("(c) a scope re-attribution whose fingerprint differs is ADDED-EX", () => {
     const oldScope = "end to end: a value is set and read back";
-    const { dir, baseSha } = repo([entry(oldScope, "spawn-no-timeout")], { "test/fixture.test.ts": CASE_SCOPED_SPAWN });
-    pr(dir, [entry("runInit", "spawn-no-timeout", FP_STATUS)], {
-      "test/fixture.test.ts": `import { spawnSync } from "node:child_process";
+    const statusFile = `import { spawnSync } from "node:child_process";
 function runInit() {
   return spawnSync(process.execPath, ["src/cli.ts", "status"], { encoding: "utf8" });
 }
 test("end to end: a value is set and read back", () => {
   runInit();
 }, 40_000);
-`,
+`;
+    const { dir, baseSha } = repo([entry(oldScope, "spawn-no-timeout")], { "test/fixture.test.ts": statusFile });
+    pr(dir, [entry("runInit", "spawn-no-timeout", FP_STATUS)], {
+      "test/fixture.test.ts": statusFile,
     });
 
     const r = runGate({ root: dir, baseRef: baseSha });
@@ -172,18 +168,7 @@ test("end to end: a value is set and read back", () => {
 
   it("(d) two added keys against one removed key are one RE-KEYED and one ADDED-EX", () => {
     const caseScope = "two helpers";
-    const { dir, baseSha } = repo([entry(caseScope, "spawn-no-timeout")], {
-      "test/fixture.test.ts": `import { spawnSync } from "node:child_process";
-test("two helpers", () => {
-  spawnSync(process.execPath, ["src/cli.ts", "init"], { encoding: "utf8" });
-}, 40_000);
-`,
-    });
-    pr(
-      dir,
-      [entry("helperA", "spawn-no-timeout"), entry("helperB", "spawn-no-timeout")],
-      {
-        "test/fixture.test.ts": `import { spawnSync } from "node:child_process";
+    const helperFile = `import { spawnSync } from "node:child_process";
 function helperA() {
   spawnSync(process.execPath, ["src/cli.ts", "init"], { encoding: "utf8" });
 }
@@ -194,7 +179,15 @@ test("two helpers", () => {
   helperA();
   helperB();
 }, 40_000);
-`,
+`;
+    const { dir, baseSha } = repo([entry(caseScope, "spawn-no-timeout")], {
+      "test/fixture.test.ts": helperFile,
+    });
+    pr(
+      dir,
+      [entry("helperA", "spawn-no-timeout"), entry("helperB", "spawn-no-timeout")],
+      {
+        "test/fixture.test.ts": helperFile,
       },
     );
 
@@ -231,5 +224,52 @@ test("the new case name", () => {
     expect(r.added.length).toBe(1);
     expect(r.added[0]?.kind).toBe("case-no-budget");
     expect(r.ok).toBe(false);
+  });
+
+  it("(f) a bounded helper and a different unbounded helper with the same spawn text is ADDED-EX", () => {
+    const oldScope = "oldHelper";
+    const newScope = "newHelper";
+    const baseFile = `import { spawnSync } from "node:child_process";
+function oldHelper() {
+  return spawnSync(process.execPath, ["src/cli.ts", "init"], { encoding: "utf8" });
+}
+function newHelper() {
+  return spawnSync(process.execPath, ["src/cli.ts", "init"], { encoding: "utf8", timeout: 20_000 });
+}
+test("calls both helpers", () => {
+  oldHelper();
+  newHelper();
+}, 40_000);
+`;
+    const headFile = `import { spawnSync } from "node:child_process";
+function oldHelper() {
+  return spawnSync(process.execPath, ["src/cli.ts", "init"], { encoding: "utf8", timeout: 20_000 });
+}
+function newHelper() {
+  return spawnSync(process.execPath, ["src/cli.ts", "init"], { encoding: "utf8" });
+}
+test("calls both helpers", () => {
+  oldHelper();
+  newHelper();
+}, 40_000);
+`;
+    const { dir, baseSha } = repo([entry(oldScope, "spawn-no-timeout")], {
+      "test/fixture.test.ts": baseFile,
+    });
+    pr(dir, [entry(newScope, "spawn-no-timeout")], {
+      "test/fixture.test.ts": headFile,
+    });
+
+    const r = runGate({ root: dir, baseRef: baseSha });
+    expect(r.rekeyed.length).toBe(0);
+    expect(r.added.length).toBe(1);
+    expect(r.added[0]?.scope).toBe(newScope);
+    expect(r.ok).toBe(false);
+
+    const cli = runCli(dir, baseSha);
+    expect(cli.status).toBe(1);
+    expect(cli.stdout).toContain("ADDED-EX");
+    expect(cli.stdout).toContain("1 added-exception, 0 re-keyed");
+    expect(cli.stdout).not.toContain("RE-KEYED");
   });
 });
