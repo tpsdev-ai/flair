@@ -68,7 +68,7 @@ import { txnPausePointSync } from "../txn-pause-point.js";
 
 export const DEFAULT_STALE_MS = 5 * 60 * 1000; // 5 minutes with no heartbeat touch = stale
 
-/** Bounds every acquisition loop; contention settles between attempts. */
+/** Bounds every acquisition loop; each failed attempt settles briefly, and the loop can end while contention continues. */
 const GUARD_ACQUISITION_ATTEMPTS = 24;
 const LOCK_ACQUISITION_ROUNDS = 8;
 const CONTENTION_SETTLE_MS = 2;
@@ -260,10 +260,12 @@ export type AcquireResult =
   | { acquired: false; reason: string; holder?: LockHolder };
 
 /**
- * True only when this module issued the handle and the lock file still
- * records that handle's holder at the device and inode recorded when the lock
- * was published. Any read or parse failure answers false: an unknown lock
- * state never licenses a write (flair#2866).
+ * True only when this module issued the handle and the file it opens at the
+ * lock pathname records that handle's holder at the device and inode recorded
+ * when the lock was published. The inspection describes the file opened, not
+ * the pathname afterwards: a replacement during that descriptor read can
+ * occur before this returns. Any read or parse failure answers false: an
+ * unknown lock state never licenses a write (flair#2866).
  */
 export function migrationLockStillHeld(lock: MigrationLockHandle): boolean {
   const identity = identities.get(lock);
@@ -761,7 +763,10 @@ function transitionUnderGuard(lockPath: string, deps: LockDeps, staleMs: number,
 /**
  * Attempts to acquire the migration lock. On success, returns a handle whose
  * `release()` removes the lock file only when it still holds this handle's
- * record, and whose `touch()` updates the mtime of the verified descriptor.
+ * record, for cooperating holders under the mutex. The cross-host takeover is
+ * unfenced, so a replacement between that inspection and the pathname unlink
+ * is outside the guarantee. `touch()` updates the mtime of the verified
+ * descriptor.
  */
 export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: string }): AcquireResult {
   const resolved: LockDeps = { ...defaultLockDeps(deps.lockPath), ...deps };
@@ -852,6 +857,9 @@ function issueHandle(
       // first, then serialize the identity-checked unlink with the mutex.
       txnPausePointSync("migration-lock-release-revoked", process.env, undefined, { lockPath });
       let cleanupFailure: string | null = null;
+      // What this release did to the record, so a later failure describes the
+      // state it actually left rather than assuming the record remains.
+      let recordOutcome: "removed" | "absent" | "present" | "unknown" = "unknown";
       try {
         const guard = acquireGuard(guardPath, defaultLockDeps(lockPath));
         if (!guard.acquired) {
@@ -860,7 +868,9 @@ function issueHandle(
           txnPausePointSync("migration-lock-release-guard", process.env, undefined, { lockPath, guardPath });
           try {
             const inspected = inspectLock(lockPath);
-            if (
+            if (inspected.state === "unreadable") {
+              cleanupFailure = `the lock file cannot be inspected: ${inspected.detail}`;
+            } else if (
               inspected.state === "held" &&
               inspected.dev === dev &&
               inspected.ino === ino &&
@@ -869,14 +879,23 @@ function issueHandle(
               txnPausePointSync("migration-lock-release-verified", process.env, undefined, { lockPath });
               try {
                 unlinkSync(lockPath);
+                recordOutcome = "removed";
                 txnPausePointSync("migration-lock-release-unlinked", process.env, undefined, { lockPath });
               } catch (err) {
-                if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+                if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+                  recordOutcome = "absent";
+                } else {
+                  recordOutcome = "present";
                   cleanupFailure = `the lock file cannot be removed (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`;
                 }
               }
+            } else if (inspected.state === "absent") {
+              recordOutcome = "absent";
+            } else {
+              recordOutcome = "present";
             }
-            // An absent or different record belongs to someone else: leave it.
+            // A different record belongs to someone else and an absent record
+            // belongs to nobody: leave both.
           } catch (err) {
             cleanupFailure = `the lock file cannot be inspected (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`;
           }
@@ -891,9 +910,17 @@ function issueHandle(
       if (cleanupFailure !== null) {
         // Release runs in the runner's finally: it must not throw, but an
         // uncertain cleanup is reported rather than silently ignored.
+        const recordState =
+          recordOutcome === "removed"
+            ? "The lock record was removed by this release"
+            : recordOutcome === "absent"
+              ? "No lock record was present"
+              : recordOutcome === "present"
+                ? "The lock record is left in place"
+                : "The lock record's state is unknown";
         console.warn(
           `[flair-migrations] migration lock cleanup failed for ${lockPath}: ${cleanupFailure}. ` +
-            `The record is left in place; inspect it before the next migration cycle`,
+            `${recordState}; inspect the lock and its mutex before the next migration cycle`,
         );
       }
     },

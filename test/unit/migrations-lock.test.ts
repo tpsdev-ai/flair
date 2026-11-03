@@ -4,7 +4,7 @@
  * on well-known path; dead-holder → break and proceed").
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, existsSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, renameSync, rmSync, existsSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { hostname, tmpdir } from "node:os";
 import { probeMigrationDataDir } from "../../resources/migrations/data-dir.ts";
@@ -65,18 +65,20 @@ describe("acquireMigrationLock — basic acquire/release", () => {
     }
   });
 
-  it("release() does not remove a successor's lock file", () => {
+  it("release() does not remove a lock record replaced under its pathname", () => {
     const first = acquireMigrationLock({ lockPath });
     expect(first.acquired).toBe(true);
-    const successor = { pid: 424242, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z" };
-    // The successor's lock file replaced this holder's (the cross-host
-    // residual this guard covers as defence in depth).
-    writeFileSync(lockPath, JSON.stringify(successor));
+    const replacement = { pid: 424242, hostname: "host-b", startedAt: "2026-01-01T00:00:00.000Z" };
+    // A sibling file renamed over the lock pathname gives the lock a new
+    // inode and a different holder, so every comparison in release differs.
+    const temp = join(testRoot, ".migrations", `.replacement.${process.pid}.tmp`);
+    writeFileSync(temp, JSON.stringify(replacement));
+    renameSync(temp, lockPath);
 
     if (first.acquired) first.release();
 
     expect(existsSync(lockPath)).toBe(true);
-    expect(JSON.parse(readFileSync(lockPath, "utf-8"))).toEqual(successor);
+    expect(JSON.parse(readFileSync(lockPath, "utf-8"))).toEqual(replacement);
   });
 });
 

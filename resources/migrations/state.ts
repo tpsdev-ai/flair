@@ -116,7 +116,10 @@ export async function writeMigrationStateEntry(
   // Test-only pause between the read and the rename (flair#2866).
   const pause = txnPausePoint("migration-state-write");
   if (pause) await pause;
-  // This re-check detects a lock replaced before this point.
+  // This re-check reads the lock pathname and detects a replacement that
+  // landed before the read. It inspects the file it opened, so a pathname
+  // replacement during that descriptor read can occur before the check
+  // returns.
   // writeSecureFile then creates its temporary file, flushes it and renames it
   // over the state file; a replacement that lands during that write is not
   // detected again. The local acquisition rule keeps a live local holder from

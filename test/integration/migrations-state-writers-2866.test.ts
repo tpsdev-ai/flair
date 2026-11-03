@@ -12,7 +12,7 @@
  * module-private identity.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { acquireMigrationLock } from "../../resources/migrations/lock.ts";
@@ -39,6 +39,7 @@ interface Child {
   pid: number;
   exited: Promise<number>;
   kill: (code?: number) => void;
+  stderrText: () => Promise<string>;
 }
 
 let root: string;
@@ -118,7 +119,12 @@ function spawnWriter(
       stderr: "pipe",
     },
   );
-  const child: Child = { pid: proc.pid, exited: proc.exited, kill: (code?: number) => proc.kill(code) };
+  const child: Child = {
+    pid: proc.pid,
+    exited: proc.exited,
+    kill: (code?: number) => proc.kill(code),
+    stderrText: () => (proc.stderr === undefined ? Promise.resolve("") : new Response(proc.stderr).text()),
+  };
   children.push(child);
   return child;
 }
@@ -232,7 +238,9 @@ describe("concurrent migration state writers (flair#2866)", () => {
     const former = acquireMigrationLock({ lockPath: lockPath() });
     if (!former.acquired) throw new Error(`migration lock unavailable: ${former.reason}`);
 
-    // The lock file is removed as it would be after an age-based takeover.
+    // A simulated out-of-protocol replacement: the lock pathname is removed
+    // outside the mutex. An age-based takeover renames a prepared record over
+    // it instead.
     unlinkSync(lockPath());
     const b = spawnWriter("mig-b", { holdUntil: "go.release-b" });
     await waitFor(join(pauseDir, "written.mig-b"), "writer B's entry");
@@ -574,6 +582,51 @@ describe("release under the mutex (flair#2866)", () => {
     setGo("release-b2");
     expect(await waitExit(b2, "B2")).toBe(0);
   }, 40_000);
+
+  it("an unreadable record during release is reported and left in place", async () => {
+    arm(RELEASE_GUARD_PAUSE);
+    const a = spawnWriter("mig-a", { holdUntil: "go.release-now", mode: "release" });
+    await waitFor(join(pauseDir, "written.mig-a"), "A's entry");
+    setGo("release-now");
+    await waitFor(paused(RELEASE_GUARD_PAUSE), "A's mutex-acquisition pause");
+
+    // A dangling symlink at the lock pathname makes the inspection fail for
+    // every uid: opening it with O_NOFOLLOW returns ELOOP.
+    unlinkSync(lockPath());
+    symlinkSync(join(dirname(lockPath()), "absent-target"), lockPath());
+    setGo(RELEASE_GUARD_PAUSE);
+    expect(await waitExit(a, "A")).toBe(0);
+
+    expect(lstatSync(lockPath()).isSymbolicLink()).toBe(true);
+    const warning = await a.stderrText();
+    expect(warning).toContain("the lock file cannot be inspected");
+    expect(warning).toContain("the lock file cannot be opened (ELOOP)");
+    expect(warning).toContain("The lock record's state is unknown");
+  }, 30_000);
+
+  it("a failed mutex cleanup after the lock unlink reports the record as removed", async () => {
+    arm(RELEASE_UNLINKED_PAUSE);
+    const a = spawnWriter("mig-a", { holdUntil: "go.release-now", mode: "release" });
+    await waitFor(join(pauseDir, "written.mig-a"), "A's entry");
+    setGo("release-now");
+    await waitFor(paused(RELEASE_UNLINKED_PAUSE), "A's unlink pause");
+
+    expect(existsSync(lockPath())).toBe(false);
+    // A directory at the owner entry's name cannot be unlinked, so release's
+    // mutex cleanup fails after the lock file is already gone.
+    const owners = ownerEntries();
+    expect(owners.length).toBe(1);
+    unlinkSync(join(guardPath(), owners[0]));
+    mkdirSync(join(guardPath(), owners[0]));
+
+    setGo(RELEASE_UNLINKED_PAUSE);
+    expect(await waitExit(a, "A")).toBe(0);
+
+    expect(existsSync(lockPath())).toBe(false);
+    const warning = await a.stderrText();
+    expect(warning).toContain("migration lock cleanup failed");
+    expect(warning).toContain("The lock record was removed by this release");
+  }, 30_000);
 
   it("after the lock file is unlinked, the mutex still excludes a writer until release ends", async () => {
     arm(RELEASE_UNLINKED_PAUSE);
