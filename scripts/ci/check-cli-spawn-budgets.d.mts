@@ -70,8 +70,8 @@ export function maskComments(source: string): string;
 
 /** Throws, naming `fileName`, when TypeScript's parser reports a syntax error in `source` (flair#2774). */
 export function findSpawnCalls(source: string, fileName?: string): { calls: SpawnCall[]; ids: Set<string> };
-export function functionBodies(source: string): Array<{ name: string; start: number; end: number }>;
-export function localHelpersThatSpawn(source: string, calls: SpawnCall[]): Set<string>;
+export function functionBodies(source: string, fileName?: string): Array<{ name: string; start: number; end: number }>;
+export function localHelpersThatSpawn(source: string, calls: SpawnCall[], fileName?: string): Set<string>;
 export function findCases(source: string, calls: SpawnCall[], helpers: Set<string>): CaseRecord[];
 export function analyzeTestFile(source: string, fileName?: string): { calls: SpawnCall[]; ids: Set<string>; helpers: Set<string>; cases: CaseRecord[]; bodies: Array<{ name: string; start: number; end: number }> };
 export function normalizeFingerprint(text: string): string;
@@ -91,6 +91,12 @@ export function loadBaselineAtRef(ref: string, root: string): BaselineEntry[] | 
 export function readPrBaseline(root: string): BaselineEntry[];
 /** Entries with exception keys absent from the trusted base. */
 export function addedExceptions(baseEntries: BaselineEntry[], prEntries: BaselineEntry[]): BaselineEntry[];
+/** Re-keys pair added spawn-no-timeout keys one-to-one with removed keys of identical file, fingerprint, kind and occurrence when the scanned working-tree file is byte-identical to the trusted base blob (flair#2854). */
+export function classifyAddedExceptions(
+  baseEntries: BaselineEntry[],
+  prEntries: BaselineEntry[],
+  fileUnchanged?: (file: string) => boolean,
+): { added: BaselineEntry[]; rekeyed: Array<{ from: BaselineEntry; to: BaselineEntry }> };
 
 /** End-to-end check used by main() and the gate-level tests. */
 export function runGate(opts?: { root?: string; baseRef?: string; env?: Record<string, string | undefined>; seedBase?: string }): {
@@ -108,6 +114,7 @@ export function runGate(opts?: { root?: string; baseRef?: string; env?: Record<s
   baseEntries: BaselineEntry[];
   errors: string[];
   added: BaselineEntry[];
+  rekeyed: Array<{ from: BaselineEntry; to: BaselineEntry }>;
   newOffenders: SpawnOffender[];
   staleEntries: BaselineEntry[];
   ok: boolean;

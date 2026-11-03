@@ -74,6 +74,9 @@ import { join } from "node:path";
 import { createPrivateKey, randomUUID, sign as nodeCryptoSign } from "node:crypto";
 import type { SigningIdentitySource } from "./signing-identity.js";
 import { resolveHome } from "./home.js";
+import { isConnectPhaseFailure } from "./connect-phase.js";
+
+export { isConnectPhaseFailure, REFUSED_CODES } from "./connect-phase.js";
 
 // ─── Failure classification ─────────────────────────────────────────────────
 
@@ -295,29 +298,41 @@ export class ApiRequestTimeout extends Error {
 }
 
 /**
- * Thrown when a request on any other method crosses the whole-request deadline.
- * Expiry cannot establish delivery: the request may not have reached the server,
- * or it may have taken effect. The message says the outcome is unknown, and no
- * caller may retry the write blindly.
+ * Thrown for a write's deadline expiry, non-connect-phase fetch failure, or
+ * failed 2xx body read. No caller may retry the write blindly.
  */
 export class ApiRequestOutcomeUnknown extends Error {
   readonly method: string;
   readonly path: string;
-  readonly deadlineMs: number;
-  /** The status line that arrived before the deadline fired, when one did. */
+  /** The deadline that expired, or undefined for a transport failure. */
+  readonly deadlineMs: number | undefined;
+  /** The status line that arrived before the deadline expired or the response read failed, when one did. */
   readonly status: number | undefined;
-  constructor(method: string, path: string, deadlineMs: number, status: number | undefined, source: RequestDeadlineSource) {
+  constructor(method: string, path: string, deadlineMs: number | undefined, status: number | undefined, source: RequestDeadlineSource, detail?: string) {
     const envName = deadlineEnvName(source);
     super(
-      `${method} ${path} may or may not have taken effect: no complete response within ${deadlineMs} ms` +
-        (envName === undefined ? "" : ` (${envName})`) +
-        `${deadlineStatusClause(status)}. Expiry does not show whether the request was delivered or took effect; do not retry it blindly. ${deadlineRemedy(source)}`,
+      detail ??
+        `${method} ${path} may or may not have taken effect: no complete response within ${deadlineMs} ms` +
+          (envName === undefined ? "" : ` (${envName})`) +
+          `${deadlineStatusClause(status)}. Expiry does not show whether the request was delivered or took effect; do not retry it blindly. ${deadlineRemedy(source)}`,
     );
     this.name = "ApiRequestOutcomeUnknown";
     this.method = method;
     this.path = path;
     this.deadlineMs = deadlineMs;
     this.status = status;
+  }
+
+  /** Name the requested origin and warn against retrying. */
+  static fromTransportFailure(method: string, path: string, url: string, cause: unknown, status?: number): ApiRequestOutcomeUnknown {
+    const detail = status === undefined
+      ? `${method} ${path} to ${url}: no final response; outcome unknown, write may have been applied. ` +
+        `Check the server (or the origin it redirected to) before retrying.`
+      : `${method} ${path} to ${url}: the successful response body could not be read (HTTP ${status}); outcome unknown, write may have been applied. ` +
+        `Check the server (or the origin it redirected to) before retrying.`;
+    const err = new ApiRequestOutcomeUnknown(method, path, undefined, status, "explicit", detail);
+    (err as { cause?: unknown }).cause = cause;
+    return err;
   }
 }
 
@@ -1259,6 +1274,15 @@ export async function sendJsonRequest(
     signedOnly?: SignedOnlyHintContext;
     deadlineMs?: number;
     deadlineSource?: RequestDeadlineSource;
+    /** Withhold the response body from the FLAIR_DEBUG HTTP-error line. */
+    withholdResponseBodyDebug?: boolean;
+    /**
+     * Treat a 2xx whose body is not JSON as a success instead of throwing.
+     * For a caller that has its own confirmation step (prune's DELETE, which
+     * reads the row back): the server may have acted before the client parsed
+     * the body, so a parse failure must not become a definite failure.
+     */
+    tolerateUnparsedSuccessBody?: boolean;
   } = {},
 ): Promise<any> {
   // The deadline covers the request AND the response body read: a server that
@@ -1268,27 +1292,57 @@ export async function sendJsonRequest(
   const deadlineSource: RequestDeadlineSource =
     transport.deadlineSource ?? (transport.deadlineMs === undefined ? "env" : "explicit");
   const deadlineMs = resolveRequestDeadlineMs(transport.deadlineMs);
+  const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
+  // Serialize before the transport call: a body that cannot be serialized was
+  // never sent, so it is a serialization failure, not a delivery failure.
+  // Every supplied body is checked (a falsy one such as 0n can still fail to
+  // serialize); a falsy body that does serialize is still omitted, as before.
+  let serializedBody: string | undefined;
+  if (body !== undefined) {
+    try {
+      const serialized = JSON.stringify(body);
+      if (serialized === undefined) throw new Error("JSON.stringify returned undefined");
+      if (body) serializedBody = serialized;
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`${method} ${url.pathname} was not sent: the request body could not be serialized to JSON (${reason}).`);
+    }
+  }
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
   }, deadlineMs);
-  const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
   let res: Response | undefined;
+  let fetchRejected = false;
+  let bodyReadFailed = false;
+  const readBody = async (): Promise<string> => {
+    try {
+      return await res!.text();
+    } catch (err: unknown) {
+      bodyReadFailed = true;
+      throw err;
+    }
+  };
   try {
-    res = await fetch(url.href, {
-      method,
-      headers: {
-        "content-type": "application/json",
-        ...(authHeader ? { authorization: authHeader } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: controller.signal,
-      // "manual" hands back the 3xx itself, so the refusal can name its status;
-      // the location it names is never requested.
-      ...(transport.refuseRedirects ? { redirect: "manual" as const } : {}),
-    });
+    try {
+      res = await fetch(url.href, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          ...(authHeader ? { authorization: authHeader } : {}),
+        },
+        body: serializedBody,
+        signal: controller.signal,
+        // "manual" hands back the 3xx itself, so the refusal can name its status;
+        // the location it names is never requested.
+        ...(transport.refuseRedirects ? { redirect: "manual" as const } : {}),
+      });
+    } catch (err: unknown) {
+      fetchRejected = true;
+      throw err;
+    }
     if (transport.refuseRedirects && res.status >= 300 && res.status < 400) {
       throw new ApiHttpError(res.status, `HTTP ${res.status}: the instance answered with a redirect, which this request does not follow`);
     }
@@ -1298,7 +1352,7 @@ export async function sendJsonRequest(
     // before the empty-body shortcut below, so a zero-length 403 gets the same
     // hint and noCredentials as one with a body (flair#2749).
     if (res.status === 403 && !authHeader) {
-      await res.text();
+      await readBody();
       const hint = noCredentialsHint(isLocal, transport.signedOnly);
       throw new ApiHttpError(403, `HTTP 403: no credentials sent. ${hint}`, /* noCredentials */ true);
     }
@@ -1307,7 +1361,7 @@ export async function sendJsonRequest(
       if (!res.ok) throw ApiHttpError.fromResponse(res.status, "");
       return { ok: true };
     }
-    const text = await res.text();
+    const text = await readBody();
     if (!res.ok) {
       // The FLAIR_DEBUG line's path and body, the message's reason and `body`
       // are redacted with the credential values credentialsInHeader reads from
@@ -1315,11 +1369,23 @@ export async function sendJsonRequest(
       // and the server's text is withheld when it sets `withhold`; classifiers
       // read the unredacted text through apiErrorRawBody.
       const sent = credentialsInHeader(authHeader);
-      emitHttpErrorBodyDebug(method, url.pathname, res.status, text, sent.values, sent.withhold);
+      emitHttpErrorBodyDebug(
+        method,
+        url.pathname,
+        res.status,
+        text,
+        sent.values,
+        sent.withhold || transport.withholdResponseBodyDebug === true,
+      );
       throw ApiHttpError.fromResponse(res.status, text, sent.values, sent.withhold);
     }
     if (!text) return { ok: true };
-    return JSON.parse(text);
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      if (transport.tolerateUnparsedSuccessBody) return { ok: true };
+      throw err;
+    }
   } catch (err: unknown) {
     // A fired deadline is reported by the deadline, not by the abort error
     // fetch raised: a non-GET/HEAD request may have committed, so it is an
@@ -1328,6 +1394,18 @@ export async function sendJsonRequest(
       const status = res?.status;
       if (readOnly) throw new ApiRequestTimeout(method, url.pathname, deadlineMs, status, deadlineSource);
       throw new ApiRequestOutcomeUnknown(method, url.pathname, deadlineMs, status, deadlineSource);
+    }
+    // A connect-phase code identifies failure of the current connection attempt;
+    // it proves unsent delivery only if no earlier redirect was followed.
+    if (fetchRejected && !readOnly && !isConnectPhaseFailure(err)) {
+      throw ApiRequestOutcomeUnknown.fromTransportFailure(method, url.pathname, url.origin, err);
+    }
+    // The status line arrived but the body could not be read. A write's 2xx
+    // response leaves the outcome unknown, and the message names the status
+    // received; a non-2xx status is reported by that status.
+    if (bodyReadFailed && res !== undefined && !readOnly) {
+      if (res.ok) throw ApiRequestOutcomeUnknown.fromTransportFailure(method, url.pathname, url.origin, err, res.status);
+      throw ApiHttpError.fromResponse(res.status, "");
     }
     throw err;
   } finally {
@@ -1348,7 +1426,12 @@ export async function tryAgentKeyFloor(
   method: string,
   body: unknown,
   keysDir: string,
-  transport: { refuseRedirects?: boolean; deadlineMs?: number; deadlineSource?: RequestDeadlineSource } = {},
+  transport: {
+    refuseRedirects?: boolean;
+    deadlineMs?: number;
+    deadlineSource?: RequestDeadlineSource;
+    tolerateUnparsedSuccessBody?: boolean;
+  } = {},
 ): Promise<any> {
   let keyFiles: string[] = [];
   try {
@@ -1534,6 +1617,12 @@ export interface AuthedRequestOptions {
    * the variable that overrides that route's deadline.
    */
   deadlineSource?: RequestDeadlineSource;
+  /**
+   * Treat a 2xx whose body is not JSON as a success instead of throwing. Only
+   * pass this from a caller that confirms the write independently; the default
+   * keeps every other caller's behaviour (an unparseable success body throws).
+   */
+  tolerateUnparsedSuccessBody?: boolean;
 }
 
 /** The Authorization scheme of an Ed25519 agent signature (buildEd25519Auth). */
@@ -1675,6 +1764,7 @@ export async function authedRequest(
       refuseRedirects: opts.refuseRedirects,
       deadlineMs: opts.deadlineMs,
       deadlineSource: opts.deadlineSource,
+      tolerateUnparsedSuccessBody: opts.tolerateUnparsedSuccessBody,
       ...(opts.signedOnly ? { signedOnly: { agentId: opts.agentId, keysDir } } : {}),
     });
   } catch (err: unknown) {
@@ -1686,6 +1776,7 @@ export async function authedRequest(
         refuseRedirects: opts.refuseRedirects,
         deadlineMs: opts.deadlineMs,
         deadlineSource: opts.deadlineSource,
+        tolerateUnparsedSuccessBody: opts.tolerateUnparsedSuccessBody,
       });
       if (floorResult !== undefined) return floorResult;
     }

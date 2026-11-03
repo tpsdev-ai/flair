@@ -18,6 +18,7 @@ import {
   retryRowConfirmation,
   retryRowForAttempt,
   retryRowForRefusal,
+  retryRowMalformedness,
   terminalRetryRow,
   type RetryQueueRow,
 } from "../../src/lib/federation-retry-queue.js";
@@ -219,5 +220,39 @@ describe("flair#2874 — a row reopened after a terminal outcome", () => {
     expect(retryRowConfirmation(written, { ...written })).toBeNull();
     const terminal = terminalRetryRow(pending(), "merged", NOW);
     expect(retryRowConfirmation(terminal, { ...terminal })).toBeNull();
+  });
+});
+
+describe("flair#2877 — a stored row is malformed in any state", () => {
+  test("a well-formed pending or terminal row is not malformed", () => {
+    expect(retryRowMalformedness(pending())).toBeNull();
+    expect(retryRowMalformedness(pending({ lastReason: "retry_unknown" }))).toBeNull();
+    expect(retryRowMalformedness(terminalRetryRow(pending(), "merged", NOW))).toBeNull();
+    expect(retryRowMalformedness({ ...terminalRetryRow(pending(), "retry_exhausted", NOW), bound: "attempts" })).toBeNull();
+  });
+
+  test("each sender-convention break names its problem and field", () => {
+    expect(retryRowMalformedness(pending({ id: retryEntryKey(PEER, "Memory", "another") }))).toEqual({ problem: "id_mismatch", field: "id" });
+    expect(retryRowMalformedness(pending({ state: "paused" }))).toEqual({ problem: "unknown_state", field: "state" });
+    expect(retryRowMalformedness(pending({ lastReason: "not_a_reason" }))).toEqual({ problem: "unknown_reason", field: "lastReason" });
+    expect(retryRowMalformedness(pending({ lastReason: undefined }))).toEqual({ problem: "unknown_reason", field: "lastReason" });
+    expect(retryRowMalformedness(pending({ resolution: "merged" }))).toEqual({ problem: "outcome_mismatch", field: "resolution" });
+    expect(retryRowMalformedness(pending({ bound: "attempts" }))).toEqual({ problem: "outcome_mismatch", field: "bound" });
+  });
+
+  test("a pending row carrying any terminal field is malformed, as the write read-back says (#2882)", () => {
+    for (const field of RETRY_TERMINAL_FIELDS) {
+      const row = { ...pending(), [field]: field === "bound" ? "attempts" : field === "resolution" ? "merged" : NOW };
+      expect(retryRowMalformedness(row), field).toEqual({ problem: "outcome_mismatch", field });
+      // The sender's offer check agrees with the read-back now.
+      expect(retryOfferProblem(row as unknown as RetryQueueRow), field).toBe("outcome_mismatch");
+    }
+  });
+
+  test("a terminal row breaks the outcome rule on its resolution or its bound", () => {
+    const terminal = terminalRetryRow(pending(), "merged", NOW);
+    expect(retryRowMalformedness({ ...terminal, resolution: "not_a_resolution" })).toEqual({ problem: "outcome_mismatch", field: "resolution" });
+    expect(retryRowMalformedness({ ...terminal, bound: "attempts" })).toEqual({ problem: "outcome_mismatch", field: "bound" });
+    expect(retryRowMalformedness({ ...terminalRetryRow(pending(), "retry_exhausted", NOW), bound: null })).toEqual({ problem: "outcome_mismatch", field: "bound" });
   });
 });

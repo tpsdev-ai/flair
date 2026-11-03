@@ -107,10 +107,10 @@ export interface AutoPromoteCandidateInput {
 // src/rem/promote-policy.ts. This gate imports structuralImbalance from it; the
 // CLI flag path (src/commands/rem.ts) uses hasTerminalPunctuation from the same
 // module. A server file importing a PURE helper from src/ is established practice
-// in this repo (resources/PromoteMemoryCandidate.ts and resources/soul-adk-guard.ts
-// both import that module); what does not survive npm packaging is a CLI file
-// importing FROM resources/. One definition lets the CLI and this gate share a
-// single implementation rather than a hand-kept pair.
+// in this repo (resources/PromoteMemoryCandidate.ts imports that module); what
+// does not survive npm packaging is a CLI file importing FROM resources/. One
+// definition lets the CLI and this gate share a single implementation rather
+// than a hand-kept pair.
 //
 // Slice 1 handled a generation the backend LABELLED incomplete (finishReason
 // `length` / `content_filter`). This handles the other case: a claim reaches

@@ -336,9 +336,10 @@ export class FeedMemories extends Resource {
     // waits its budget and can answer `503 memory_busy`; a marked id answers
     // `503 write_outcome_unknown` at once; a store with no lock answers
     // `503 memory_lock_unavailable`. The write-back confirms its committed row
-    // as before; when its read-back of that row fails or does not show the
-    // write (409 `feed_write_unconfirmed`), it records the id outcome-unknown
-    // before the lock is released (flair#2806). An omitted id is generated; a
+    // as before; when storage withholds the write result (flair#2857), or its
+    // read-back of that row fails or does not show the write (409
+    // `feed_write_unconfirmed`), it records the id outcome-unknown before the
+    // lock is released (flair#2806). An omitted id is generated; a
     // caller-supplied id can contend.
     // The skill branch above returns before this lock; its conversion is
     // deferred.
@@ -356,7 +357,14 @@ export class FeedMemories extends Resource {
               put: async (row, shared) => {
                 normalizeEmptyEmbedding(row);
                 const result = storageResult(await table.put(row, shared));
-                if (result instanceof Response) refusal = result;
+                if (result instanceof Response) {
+                  // flair#2857: storage withheld this write's result (a Response
+                  // instead of the row), so whether the row holds the write is
+                  // unconfirmed. Record the id's outcome-unknown marker inside
+                  // its lock, as the failed or mismatching read-back below does.
+                  markMemoryWriteOutcomeUnknown(record.id);
+                  refusal = result;
+                }
               },
             },
             record.id,
@@ -692,8 +700,10 @@ function feedWriteResponse(result: any, redactedValues: number, supplied: Readon
  * committed read must equal the transaction's read before the write, else the
  * repair starts over (FEED_DEDUP_REPAIR_ATTEMPTS attempts, then the 409). A
  * change committed after that read and before the commit follows Harper's
- * timestamp order. After the commit, an owned read that shows the match with
- * the written expiry returns that row; a read that does not show it is refused
+ * timestamp order. A storage result that withholds the update's result records
+ * the id outcome-unknown and returns that result (500 write_response_withheld)
+ * (flair#2857). After the commit, an owned read that shows the match with the
+ * written expiry returns that row; a read that does not show it is refused
  * (409 FEED_DEDUP_TARGET_CHANGED_ERROR), and a read that fails rethrows, so the
  * request answers 500. Returned rows carry no inline pointer fields
  * (stripInlinePointerFields).
@@ -746,7 +756,14 @@ async function repairDeduplicatedExpiryLocked(ctx: unknown, match: any, id: stri
         // Only `expiresAt`: an incremental update, never a
         // full-row put of the row read above (flair#2470).
         const result = storageResult(await (databases as any).flair.Memory.update(id, { expiresAt: row.expiresAt }, c));
-        if (result instanceof Response) return { kind: "withheld" as const, response: result };
+        if (result instanceof Response) {
+          // flair#2857: storage withheld the update's result (a Response instead
+          // of the row), so whether the row holds the expiry is unconfirmed.
+          // Record the id's outcome-unknown marker inside its lock, as the
+          // confirmation branches below do.
+          markMemoryWriteOutcomeUnknown(id);
+          return { kind: "withheld" as const, response: result };
+        }
         // Test-only: the update is staged and the lock is still held.
         const staged = txnPausePoint("feed-dedup-repair-staged");
         if (staged) await staged;
