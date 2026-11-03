@@ -247,7 +247,7 @@ describe("flair import counts a row as imported only on a 2xx write (#2900)", ()
     const credentialShape = "sk_live_debug123456";
     const exportPath = writeExport("debug-refusal.json", {
       agent: { id: agent, name: agent, role: "agent", createdAt: CREATED_AT },
-      souls: [{ id: soulId, agentId: agent, key: "refused-debug", value: "a soul write", durability: "permanent", createdAt: CREATED_AT }],
+      souls: [{ id: soulId, agentId: agent, key: "refused-debug", value: rowValue, durability: "permanent", createdAt: CREATED_AT }],
     });
 
     const result = await withFakeRest(
