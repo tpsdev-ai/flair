@@ -7,15 +7,26 @@
 // Each test drives the real gate (`runGate`, and the CLI for the exit codes)
 // against a fixture git repo with a base commit and a PR working tree.
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
+import * as childProcess from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runGate } from "../../scripts/ci/check-cli-spawn-budgets.mjs";
 
 const GATE = join(import.meta.dir, "..", "..", "scripts", "ci", "check-cli-spawn-budgets.mjs");
-const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+const GIT_ENV = {
+  PATH: process.env.PATH,
+  HOME: "",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_TERMINAL_PROMPT: "0",
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@t",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@t",
+};
 const FP = `process.execPath ["src/cli.ts","init"] ; { encoding: "utf8" }`;
 const FP_STATUS = `process.execPath ["src/cli.ts","status"] ; { encoding: "utf8" }`;
 const BASELINE = "scripts/ci/cli-spawn-budgets.baseline.json";
@@ -37,7 +48,7 @@ function mkRepo(files: Record<string, string>): { dir: string; baseSha: string }
   git(dir, ["init", "-q"]);
   writeTree(dir, files);
   git(dir, ["add", "-A"]);
-  git(dir, ["commit", "-q", "-m", "base"]);
+  git(dir, ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"]);
   return { dir, baseSha: git(dir, ["rev-parse", "HEAD"]).trim() };
 }
 
@@ -54,16 +65,30 @@ function pr(dir: string, baseline: unknown[], files: Record<string, string>): vo
 }
 
 function runCli(dir: string, baseSha: string): { status: number | null; stdout: string; stderr: string } {
-  const env: Record<string, string | undefined> = { ...process.env };
-  delete env.CLI_SPAWN_BUDGETS_BASE_REF;
-  delete env.CLI_SPAWN_BUDGET_BASE_REF;
   const r = spawnSync(process.execPath, [GATE, "--root", dir, "--base", baseSha], {
     cwd: join(import.meta.dir, "..", ".."),
-    env,
+    env: GIT_ENV,
     encoding: "utf8",
     timeout: 120_000,
   });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+
+function runIsolatedGate(dir: string, baseSha: string): ReturnType<typeof runGate> {
+  const saved = { ...process.env };
+  const realSpawnSync = childProcess.spawnSync;
+  const spawn = spyOn(childProcess, "spawnSync").mockImplementation(((command, args, options) =>
+    realSpawnSync(command, args, { ...options, env: options?.env ?? process.env })
+  ) as typeof spawnSync);
+  try {
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    Object.assign(process.env, GIT_ENV);
+    return runGate({ root: dir, baseRef: baseSha });
+  } finally {
+    spawn.mockRestore();
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    Object.assign(process.env, saved);
+  }
 }
 
 function entry(scope: string, kind: string, fingerprint = FP): Record<string, unknown> {
@@ -72,7 +97,8 @@ function entry(scope: string, kind: string, fingerprint = FP): Record<string, un
 
 let repos: string[] = [];
 beforeEach(() => {
-  repos = [];
+  GIT_ENV.HOME = mkdtempSync(join(tmpdir(), "spawn-rekey-home-2854-"));
+  repos = [GIT_ENV.HOME];
 });
 afterEach(() => {
   for (const d of repos.splice(0)) {
@@ -109,7 +135,7 @@ describe("re-key: a scope re-attribution of a spawn-no-timeout call in a byte-id
       "test/fixture.test.ts": HELPER_SPAWN,
     });
 
-    const r = runGate({ root: dir, baseRef: baseSha });
+    const r = runIsolatedGate(dir, baseSha);
     expect(r.rekeyed.length).toBe(1);
     expect(r.rekeyed[0]?.from.scope).toBe(oldScope);
     expect(r.rekeyed[0]?.to.scope).toBe("runInit");
@@ -133,7 +159,7 @@ test("a budgeted case", () => {
 `,
     });
 
-    const r = runGate({ root: dir, baseRef: baseSha });
+    const r = runIsolatedGate(dir, baseSha);
     expect(r.added.length).toBe(1);
     expect(r.rekeyed.length).toBe(0);
     expect(r.ok).toBe(false);
@@ -159,7 +185,7 @@ test("end to end: a value is set and read back", () => {
       "test/fixture.test.ts": statusFile,
     });
 
-    const r = runGate({ root: dir, baseRef: baseSha });
+    const r = runIsolatedGate(dir, baseSha);
     expect(r.rekeyed.length).toBe(0);
     expect(r.added.length).toBe(1);
     expect(r.ok).toBe(false);
@@ -190,7 +216,7 @@ test("two helpers", () => {
       },
     );
 
-    const r = runGate({ root: dir, baseRef: baseSha });
+    const r = runIsolatedGate(dir, baseSha);
     expect(r.rekeyed.length).toBe(1);
     expect(r.added.length).toBe(1);
     expect(r.added[0]?.scope).toBe("helperB");
@@ -218,7 +244,7 @@ test("the new case name", () => {
 `,
     });
 
-    const r = runGate({ root: dir, baseRef: baseSha });
+    const r = runIsolatedGate(dir, baseSha);
     expect(r.rekeyed.length).toBe(0);
     expect(r.added.length).toBe(1);
     expect(r.added[0]?.kind).toBe("case-no-budget");
@@ -259,7 +285,7 @@ test("calls both helpers", () => {
       "test/fixture.test.ts": headFile,
     });
 
-    const r = runGate({ root: dir, baseRef: baseSha });
+    const r = runIsolatedGate(dir, baseSha);
     expect(r.rekeyed.length).toBe(0);
     expect(r.added.length).toBe(1);
     expect(r.added[0]?.scope).toBe(newScope);
