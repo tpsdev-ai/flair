@@ -24,15 +24,14 @@
  * then win publication of its own directory, so recovery never grants
  * ownership by itself.
  *
- * The lock file holds `{pid, hostname, startedAt}`. A lock whose recorded
- * holder is on THIS host is reclaimed only when that pid is no longer alive;
- * a live local holder is held regardless of the file's age. A holder
- * recorded on ANOTHER host is judged by age alone (`staleMs`) and is never
- * probed by a local pid. Same host is decided by comparing the recorded
+ * The lock file holds `{pid, hostname, startedAt}`. Another live local pid
+ * is held regardless of age. After abandoned-record cleanup, this process's
+ * own pid is judged by heartbeat age unless this module holds it, because the pid probe cannot
+ * distinguish an earlier process with that pid from this one. A holder on
+ * another host is also judged by age (`staleMs`). Same host compares the
  * hostname string: the discriminator is a name, not an identity, so two
- * hosts sharing a hostname and a data dir judge a remote holder by a local
- * pid probe. The pid probe is therefore only used for a local holder. A
- * holder record that cannot be read or parsed is not treated as stale:
+ * hosts sharing a hostname and a data dir can misclassify a remote holder as
+ * local. A holder record that cannot be read or parsed is not treated as stale:
  * acquisition refuses with a named error.
  *
  * This is a SINGLE-HOST guard, not a Fabric-wide one — multiple Flair
@@ -41,11 +40,12 @@
  *
  * Known windows: a holder recorded on another host is still judged by age,
  * for the mutex as well as the migration record, so a remote holder that
- * resumes after takeover is not fenced. A process killed while preparing a
+ * resumes after takeover is not fenced. A same-pid holder that stops
+ * heartbeating for longer than staleMs while alive is treated as stale unless
+ * this module holds it. A process killed while preparing a
  * record leaves an unpublished staging directory or temporary file; one
  * killed after publication and before that record is cleaned up leaves a
- * complete owner record that another process can recover after establishing
- * death.
+ * complete owner record that another process may recover.
  */
 import {
   closeSync,
@@ -111,6 +111,7 @@ const HANDLE_KEY = Symbol("migration-lock-handle");
 
 /** Holder identities this process currently has a live handle for, per lock path. */
 const liveHolderKeys = new Set<string>();
+const ownedGuardGenerations = new Map<string, string>();
 
 /**
  * A record this process wrote whose release could not take the mutex. A later
@@ -600,6 +601,8 @@ function releaseGuard(guardPath: string, generation: string): { ok: true } | { o
       ok: false,
       reason: `its owner entry ${ownerEntryName(generation)} cannot be removed (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`,
     };
+  } finally {
+    if (ownedGuardGenerations.get(guardPath) === generation) ownedGuardGenerations.delete(guardPath);
   }
 }
 
@@ -620,15 +623,15 @@ function makeGuardHolder(now: () => number): GuardHolder {
 }
 
 /**
- * Acquire the directory mutex, recovering a dead generation at most as often
- * as the bounded loop allows. A live local owner is held regardless of age;
- * a remote owner uses the same age policy as the migration record.
+ * Acquire the directory mutex, recovering a generation at most as often
+ * as the bounded loop allows.
  */
 function acquireGuard(guardPath: string, deps: LockDeps): GuardResult {
   for (let attempt = 0; attempt < GUARD_ACQUISITION_ATTEMPTS; attempt++) {
     const holder = makeGuardHolder(deps.now);
     const published = publishGuard(guardPath, holder);
     if (published.published) {
+      ownedGuardGenerations.set(guardPath, holder.generation);
       txnPausePointSync("migration-lock-guard-published", process.env, undefined, {
         guardPath,
         generation: holder.generation,
@@ -653,7 +656,7 @@ function acquireGuard(guardPath: string, deps: LockDeps): GuardResult {
 
     let breakable: boolean;
     try {
-      breakable = guardHolderIsBreakable(inspected.holder, inspected.mtimeMs, deps);
+      breakable = guardHolderIsBreakable(guardPath, inspected.holder, inspected.mtimeMs, deps);
     } catch (err) {
       if (err instanceof MigrationLockProbeError) {
         return { acquired: false, reason: `${err.name}: ${err.message}` };
@@ -669,7 +672,7 @@ function acquireGuard(guardPath: string, deps: LockDeps): GuardResult {
       };
     }
 
-    // Test-only pause after the dead generation is inspected and before its
+    // Test-only pause after the breakable generation is inspected and before its
     // owner entry is unlinked, so a test can let a successor recover and
     // publish before this process resumes its old cleanup (flair#2866).
     txnPausePointSync("migration-lock-guard-reclaim", process.env, undefined, {
@@ -698,8 +701,13 @@ function acquireGuard(guardPath: string, deps: LockDeps): GuardResult {
   return { acquired: false, reason: `lost the race to acquire the migration-lock mutex (${guardPath})` };
 }
 
-function guardHolderIsBreakable(holder: GuardHolder, mtimeMs: number, deps: LockDeps): boolean {
-  if (holder.hostname === osHostname()) return !deps.isProcessAlive(holder.pid);
+function guardHolderIsBreakable(guardPath: string, holder: GuardHolder, mtimeMs: number, deps: LockDeps): boolean {
+  if (holder.hostname === osHostname()) {
+    if (holder.pid === process.pid) {
+      return ownedGuardGenerations.get(guardPath) !== holder.generation && deps.now() - mtimeMs > deps.staleMs;
+    }
+    return !deps.isProcessAlive(holder.pid);
+  }
   return deps.now() - mtimeMs > deps.staleMs;
 }
 
@@ -778,7 +786,9 @@ function transitionUnderGuard(lockPath: string, deps: LockDeps, staleMs: number,
   let breakable: boolean;
   try {
     if (holder.hostname === osHostname()) {
-      breakable = !deps.isProcessAlive(holder.pid);
+      breakable = holder.pid === process.pid
+        ? !liveHolderKeys.has(holderKey(lockPath, holder)) && now() - inspected.mtimeMs > staleMs
+        : !deps.isProcessAlive(holder.pid);
     } else {
       breakable = now() - inspected.mtimeMs > staleMs;
     }
@@ -790,7 +800,7 @@ function transitionUnderGuard(lockPath: string, deps: LockDeps, staleMs: number,
   }
   if (!breakable) return { kind: "held", holder };
 
-  // Test-only pause between the dead-holder inspection and the rename-over
+  // Test-only pause between the holder inspection and the rename-over
   // replacement, so a test can put a second contender into that window
   // deterministically (flair#2866).
   txnPausePointSync("migration-lock-reclaim", process.env, undefined, { lockPath });

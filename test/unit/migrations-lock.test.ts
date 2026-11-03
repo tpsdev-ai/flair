@@ -115,23 +115,20 @@ describe("acquireMigrationLock — stale-tolerant file lock (dead-holder break)"
     if (first.acquired) first.release();
   });
 
-  it("breaks the lock when the recorded pid is dead, even if the file is fresh", () => {
-    const first = acquireMigrationLock({ lockPath });
-    expect(first.acquired).toBe(true);
-    _resetInProcessLockForTests();
-
+  it("breaks the lock when another local pid is dead, even if the file is fresh", () => {
+    mkdirSync(join(testRoot, ".migrations"), { recursive: true });
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid + 1, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z" }));
     const second = acquireMigrationLock({ lockPath, isProcessAlive: () => false });
     expect(second.acquired).toBe(true);
     if (second.acquired) second.release();
   });
 
-  it("does NOT break a live holder on this host when the file is older than staleMs", () => {
+  it("does NOT break this module's live handle when the file is older than staleMs", () => {
     const first = acquireMigrationLock({ lockPath });
     expect(first.acquired).toBe(true);
     _resetInProcessLockForTests();
 
-    // Backdate the lock file's mtime past the stale threshold. The recorded
-    // holder is this host and its pid is alive, so age alone must not break it.
+    // The live handle protects this module's record despite its old mtime.
     const old = new Date(Date.now() - DEFAULT_STALE_MS - 60_000);
     utimesSync(lockPath, old, old);
 
@@ -225,7 +222,7 @@ describe("defaultIsProcessAlive — probe classification (flair#2866)", () => {
     mkdirSync(join(testRoot, ".migrations"), { recursive: true });
     writeFileSync(
       lockPath,
-      JSON.stringify({ pid: process.pid, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z" }),
+      JSON.stringify({ pid: process.pid + 1, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z" }),
     );
     const original = process.kill;
     (process as unknown as { kill: unknown }).kill = () => {

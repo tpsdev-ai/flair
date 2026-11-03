@@ -92,8 +92,8 @@ export const secureFileFsync = { sync: (fd: number): void => fsyncSync(fd) };
  * their read-modify-write cycles (last rename wins). A caller that needs
  * serialization must hold the lock across the read and the rename. The
  * migration state writer does this with the migration lock: acquisition,
- * replacement and release are serialized by a directory mutex, a live local
- * holder is not displaced by age, and a dead local holder's record is replaced
+ * replacement and release are serialized by a directory mutex, and a dead
+ * local holder's record is replaced
  * atomically under that mutex. A holder recorded on another host is still
  * judged by age alone (flair#2866).
  */

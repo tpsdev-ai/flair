@@ -122,9 +122,7 @@ export async function writeMigrationStateEntry(
   // returns.
   // writeSecureFile then creates its temporary file, flushes it and renames it
   // over the state file; a replacement that lands during that write is not
-  // detected again. The local acquisition rule keeps a live local holder from
-  // being displaced; the cross-host age-based takeover is the schedule where
-  // this window remains (flair#2866).
+  // detected again (flair#2866).
   if (migrationLockHandleStatus(lock) !== "live" || !migrationLockStillHeld(lock)) {
     throw new MigrationStateWriteRefusedError(
       `refusing to write ${id} in ${path}: the migration lock at ${identity.lockPath} is no longer held by pid ${identity.holder.pid} (started ${identity.holder.startedAt})`,

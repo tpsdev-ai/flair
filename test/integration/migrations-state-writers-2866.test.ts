@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { acquireMigrationLock } from "../../resources/migrations/lock.ts";
+import { acquireMigrationLock, _resetInProcessLockForTests, DEFAULT_STALE_MS } from "../../resources/migrations/lock.ts";
 import { MigrationStateWriteRefusedError, writeMigrationStateEntry } from "../../resources/migrations/state.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
@@ -202,7 +202,7 @@ async function seedDeadHolder(id: string): Promise<{ pid: number; holder: Record
 }
 
 describe("concurrent migration state writers (flair#2866)", () => {
-  it("refuses a second local writer while the lock holder is alive, however old the file", async () => {
+  it("refuses a writer with another live local pid, however old the file", async () => {
     writeFileSync(
       statePath,
       JSON.stringify({ "mig-prior": { lastOutcome: "halted", reason: "prior" } }, null, 2) + "\n",
@@ -786,7 +786,7 @@ describe("abandoned release cleanup (flair#2866)", () => {
     expect(readFileSync(lockPath(), "utf-8")).toBe(otherBytes);
   }, 30_000);
 
-  it("a record with this pid but a different startedAt is still refused", async () => {
+  it("a fresh record with this pid but a different startedAt is still refused", async () => {
     await abandonRelease();
 
     const forged = { pid: process.pid, hostname: hostname(), startedAt: "2000-01-01T00:00:00.000Z" };
@@ -797,6 +797,100 @@ describe("abandoned release cleanup (flair#2866)", () => {
     if (!next.acquired) expect(next.reason).toContain(`held by pid ${process.pid}`);
     expect(JSON.parse(readFileSync(lockPath(), "utf-8"))).toEqual(forged);
   }, 30_000);
+
+  it("reclaims a stale record with this pid but a different startedAt", async () => {
+    await abandonRelease();
+    const previous = { pid: process.pid, hostname: hostname(), startedAt: "2000-01-01T00:00:00.000Z" };
+    writeFileSync(lockPath(), JSON.stringify(previous));
+    const old = new Date(Date.now() - DEFAULT_STALE_MS - 60_000);
+    utimesSync(lockPath(), old, old);
+
+    const next = acquireMigrationLock({ lockPath: lockPath() });
+    expect(next.acquired).toBe(true);
+    if (!next.acquired) return;
+    try {
+      expect(JSON.parse(readFileSync(lockPath(), "utf-8"))).toEqual(next.holder);
+      expect(next.holder).not.toEqual(previous);
+    } finally {
+      next.release();
+    }
+  }, 30_000);
+
+  it("reclaims a stale mutex owner entry naming this pid", () => {
+    const generation = "0123456789abcdef";
+    mkdirSync(guardPath(), { mode: 0o700 });
+    const ownerPath = join(guardPath(), `owner-${generation}.json`);
+    writeFileSync(ownerPath, JSON.stringify({
+      pid: process.pid, hostname: hostname(), startedAt: "2000-01-01T00:00:00.000Z", generation,
+    }));
+    const old = new Date(Date.now() - DEFAULT_STALE_MS - 60_000);
+    utimesSync(ownerPath, old, old);
+
+    const next = acquireMigrationLock({ lockPath: lockPath() });
+    expect(next.acquired).toBe(true);
+    if (!next.acquired) return;
+    try {
+      expect(JSON.parse(readFileSync(lockPath(), "utf-8"))).toEqual(next.holder);
+      expect(ownerEntries()).toEqual([]);
+    } finally {
+      next.release();
+    }
+  });
+
+  it("refuses to break this module's live handle even with an old mtime", () => {
+    const first = acquireMigrationLock({ lockPath: lockPath() });
+    expect(first.acquired).toBe(true);
+    if (!first.acquired) return;
+    try {
+      const before = readFileSync(lockPath(), "utf-8");
+      const old = new Date(Date.now() - DEFAULT_STALE_MS - 60_000);
+      utimesSync(lockPath(), old, old);
+      _resetInProcessLockForTests();
+      const next = acquireMigrationLock({ lockPath: lockPath() });
+      try {
+        expect(next.acquired).toBe(false);
+        if (!next.acquired) expect(next.reason).toContain(`held by pid ${process.pid}`);
+        expect(readFileSync(lockPath(), "utf-8")).toBe(before);
+      } finally {
+        if (next.acquired) next.release();
+      }
+    } finally {
+      first.release();
+    }
+  });
+
+  it("refuses to break a mutex this module owns even with an old mtime", () => {
+    let checked = false;
+    const next = acquireMigrationLock({
+      lockPath: lockPath(),
+      now: () => {
+        if (!checked && ownerEntries().length === 1) {
+          checked = true;
+          const ownerPath = join(guardPath(), ownerEntries()[0]);
+          const before = readFileSync(ownerPath, "utf-8");
+          const old = new Date(Date.now() - DEFAULT_STALE_MS - 60_000);
+          utimesSync(ownerPath, old, old);
+          _resetInProcessLockForTests();
+          const contender = acquireMigrationLock({ lockPath: lockPath() });
+          try {
+            expect(contender.acquired).toBe(false);
+            if (!contender.acquired) expect(contender.reason).toContain("mutex is held");
+            expect(readFileSync(ownerPath, "utf-8")).toBe(before);
+          } finally {
+            if (contender.acquired) contender.release();
+          }
+        }
+        return Date.now();
+      },
+    });
+    try {
+      expect(checked).toBe(true);
+      expect(next.acquired).toBe(true);
+    } finally {
+      if (next.acquired) next.release();
+    }
+  });
+
 });
 
 describe("descriptor heartbeat (flair#2866)", () => {
