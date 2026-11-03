@@ -83,7 +83,9 @@ export interface UnwireResult {
 // ---- Detection helpers ----------------------------------------------------------
 
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolveHome } from "../lib/home.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, isResolvedVersion, mcpServerSpec } from "../lib/mcp-spec.js";
 import { decodeWiringSpec, wiringPinString } from "../lib/wiring-spec.js";
@@ -1034,7 +1036,7 @@ export function piFlairSpec(version: string = flairCliVersion()): string {
 /** pi's agent config dir: $PI_CODING_AGENT_DIR, else ~/.pi/agent (pi config.js). */
 function piAgentDir(): string {
   const envDir = process.env.PI_CODING_AGENT_DIR;
-  if (envDir) return envDir;
+  if (envDir) return normalizePiPath(envDir, resolveHome());
   return join(resolveHome(), ".pi", "agent");
 }
 
@@ -1052,12 +1054,13 @@ export function piPackageEntrySource(entry: unknown): string | null {
   return null;
 }
 
-/** Does this source string name the pi-flair package as an npm source
- *  (bare `npm:@tpsdev-ai/pi-flair` or any `npm:@tpsdev-ai/pi-flair@<spec>`)? */
+/** Pi trims the npm spec after the literal `npm:` prefix. */
 export function isPiFlairNpmSource(source: string): boolean {
-  if (typeof source !== "string" || !source.startsWith("npm:")) return false;
+  if (typeof source !== "string") return false;
+  if (!source.startsWith("npm:")) return false;
   const spec = source.slice("npm:".length).trim();
-  return spec === PI_FLAIR_PACKAGE || spec.startsWith(`${PI_FLAIR_PACKAGE}@`);
+  const prefix = `${PI_FLAIR_PACKAGE}@`;
+  return spec === PI_FLAIR_PACKAGE || (spec.startsWith(prefix) && spec.length > prefix.length && !/\s/.test(spec));
 }
 
 /**
@@ -1074,16 +1077,48 @@ export function extractPiFlairPin(source: string): string | null {
 }
 
 /**
- * Does this `extensions` entry mention pi-flair at all (the documented
- * pre-0.49 workaround: a local path to the installed dist/index.js)? A
- * substring heuristic on the package/directory name — the entry is user-
- * written free text, so this is deliberately loose in the direction of
- * REPORTING (doctor names the entry it matched). It does not decide a
- * removal: that needs `isFlairOwnedPiEntry`.
+ * Matches non-npm:/git: extension strings containing pi-flair for reporting
+ * and existing file-path wiring detection. Unwire uses isFlairOwnedPiEntry.
  */
 export function isPiFlairExtensionPath(entry: string): boolean {
   if (typeof entry !== "string" || entry.startsWith("npm:") || entry.startsWith("git:")) return false;
   return entry.includes("pi-flair");
+}
+
+const PI_FLAIR_PACKAGE_SEGMENTS = ["node_modules", "@tpsdev-ai", "pi-flair"];
+
+function isPiLocalSource(source: string): boolean {
+  const trimmed = source.trim();
+  // Preserve these prefixes even when pi's Git parser falls back to local.
+  return !["npm:", "git:", "github:", "http:", "https:", "ssh:"].some(prefix => trimmed.startsWith(prefix));
+}
+
+// Windows split-home rules mirror pi's source; not exercised by a test.
+function piLocalHome(): string {
+  return process.env.HOME || homedir();
+}
+
+/** Match package segments in pi-local sources. */
+export function isInsidePiFlairPackage(entry: string, homeDir = piLocalHome(), baseDir = piAgentDir()): boolean {
+  if (typeof entry !== "string" || !isPiLocalSource(entry)) return false;
+  let resolved: string;
+  try {
+    resolved = resolvePiExtensionPath(entry, homeDir, baseDir);
+  } catch {
+    return false;
+  }
+  const segments = resolved.split(sep);
+  for (let i = 0; i + PI_FLAIR_PACKAGE_SEGMENTS.length < segments.length; i++) {
+    if (PI_FLAIR_PACKAGE_SEGMENTS.every((segment, offset) => segments[i + offset] === segment)) return true;
+  }
+  return false;
+}
+
+/** Shared pi ownership rule: npm source or resolved package-path segments. */
+export function isFlairOwnedPiEntry(entry: unknown, homeDir = piLocalHome(), baseDir = piAgentDir()): boolean {
+  if (typeof entry !== "string") return false;
+  if (entry.startsWith("npm:")) return isPiFlairNpmSource(entry);
+  return isInsidePiFlairPackage(entry, homeDir, baseDir);
 }
 
 /** What one pi settings file says about pi-flair. Pure — callers do the fs. */
@@ -1139,16 +1174,20 @@ export function scanPiSettings(raw: string | null): PiSettingsScan {
   return { parsed: true, packagesSpec, pinnedVersion, extensionFilePaths, misconfiguredNpmUnderExtensions };
 }
 
-/**
- * Resolve a pi `extensions` path entry the way pi's loader will: `~/` against
- * the home dir, a relative path against the settings file's own base dir, an
- * absolute path as-is. `baseDir` is the directory pi treats as the scope's
- * base (user scope: the agent dir).
- */
+function normalizePiPath(input: string, homeDir: string): string {
+  let path = input;
+  if (process.platform === "win32" && path.startsWith("/") && !path.startsWith("//") && !path.includes("\\")) {
+    const match = path.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
+    if (match) path = `${match[1].toUpperCase()}:\\${match[2]?.replaceAll("/", "\\") ?? ""}`;
+  }
+  if (path === "~") return homeDir;
+  if (path.startsWith("~/") || (process.platform === "win32" && path.startsWith("~\\"))) return join(homeDir, path.slice(2));
+  return path.startsWith("file://") ? fileURLToPath(path) : path;
+}
+
+/** Resolve local entries against pi's settings scope base. */
 export function resolvePiExtensionPath(entry: string, homeDir: string, baseDir: string): string {
-  if (entry.startsWith("~/") || entry === "~") return join(homeDir, entry.slice(1));
-  if (entry.startsWith("/")) return entry;
-  return join(baseDir, entry);
+  return resolve(normalizePiPath(baseDir, homedir()), normalizePiPath(entry.trim(), homeDir));
 }
 
 /** Pretty-printed minimal settings snippet for copy-paste fallbacks. */
@@ -1184,7 +1223,7 @@ function _wirePi(env: WireEnv): { ok: boolean; message: string } {
   // atomic rename, with a 0600 `.bak` of the in-lock bytes. The pure helpers are
   // unchanged, so the bytes written are exactly today's.
   const path = piSettingsPath();
-  const home = resolveHome();
+  const home = piLocalHome();
   const display = displayUnderHome(path);
   const spec = piFlairSpec();
   const envHint = `pi settings carry no env — export FLAIR_AGENT_ID=${env.FLAIR_AGENT_ID} in the shell that launches pi`;
@@ -1430,7 +1469,7 @@ export function clientConfigHasFlairEntry(
     if (scan.status === "unrecognized") {
       return {
         status: "unknown",
-        reason: `an entry mentions pi-flair without being Flair's own (${scan.entry}): ${path}`,
+        reason: `an entry mentions pi-flair without being Flair's own: ${path}`,
       };
     }
     return { status: scan.status };
@@ -1584,64 +1623,38 @@ function mcpConfigHasFlairEntry(config: any): boolean {
   return !!servers && typeof servers === "object" && !Array.isArray(servers) && "flair" in servers;
 }
 
-/**
- * Is this pi entry Flair's OWN pi-flair entry? One rule, for an npm source and
- * for an `extensions` file path:
- *   - an npm source is `npm:@tpsdev-ai/pi-flair` or
- *     `npm:@tpsdev-ai/pi-flair@<spec>` and nothing else;
- *   - a file path contains the consecutive segments
- *     `node_modules/@tpsdev-ai/pi-flair/` after backslash normalisation.
- * Anything else that contains `pi-flair` is not Flair's: never removed.
- */
-export function isFlairOwnedPiEntry(entry: string): boolean {
-  if (typeof entry !== "string") return false;
-  if (isPiFlairNpmSource(entry)) return true;
-  if (entry.startsWith("npm:") || entry.startsWith("git:")) return false;
-  const segments = entry.replace(/\\/g, "/").split("/");
-  for (let i = 0; i + 3 < segments.length; i++) {
-    if (segments[i] === "node_modules" && segments[i + 1] === "@tpsdev-ai" && segments[i + 2] === "pi-flair") {
-      return true;
-    }
-  }
-  return false;
-}
-
 /** What a pi settings object says about pi-flair. `unrecognized` is an entry
- *  that mentions `pi-flair` without being Flair's own — it cannot decide
- *  whether a snapshot is safe to delete (flair#2886). */
+ *  that mentions `pi-flair` without being Flair's own and appears when no
+ *  Flair-owned entry is also present — it cannot decide whether a snapshot is
+ *  safe to delete (flair#2886). */
 type PiFlairEntryScan =
   | { status: "present" }
   | { status: "absent" }
-  | { status: "unrecognized"; entry: string };
+  | { status: "unrecognized" };
 
 /**
  * The pi shape that counts as a Flair entry: an exact pi-flair `packages`
  * source, or an `extensions` entry that `isFlairOwnedPiEntry` accepts. Any
- * other entry containing `pi-flair` is `unrecognized`. Shared with `_unwirePi`
- * for the same reason as `mcpConfigHasFlairEntry`.
+ * other entry containing `pi-flair`, when no Flair-owned entry is also
+ * present, is `unrecognized`. The entry value is not retained: the purge
+ * report names the file, not its contents. Shared with `_unwirePi` for the
+ * same reason as `mcpConfigHasFlairEntry`.
  */
 function piConfigFlairEntryScan(config: any): PiFlairEntryScan {
   const packages = Array.isArray(config.packages) ? config.packages : [];
-  let unrecognized: string | null = null;
-  for (const entry of packages) {
-    const source = piPackageEntrySource(entry);
+  let unrecognized = false;
+  for (const source of packages.map(piPackageEntrySource)) {
     if (!source) continue;
     if (isPiFlairNpmSource(source)) return { status: "present" };
-    if (unrecognized === null && source.includes("pi-flair")) unrecognized = source;
+    if (source.includes("pi-flair")) unrecognized = true;
   }
   const extensions = Array.isArray(config.extensions) ? config.extensions : [];
   for (const entry of extensions) {
     if (typeof entry !== "string") continue;
     if (isFlairOwnedPiEntry(entry)) return { status: "present" };
-    if (unrecognized === null && entry.includes("pi-flair")) unrecognized = entry;
+    if (entry.includes("pi-flair")) unrecognized = true;
   }
-  return unrecognized === null ? { status: "absent" } : { status: "unrecognized", entry: unrecognized };
-}
-
-/** The unwire removes only Flair-owned entries, so only `present` makes it
- *  rewrite the file. */
-function piConfigHasFlairEntry(config: any): boolean {
-  return piConfigFlairEntryScan(config).status === "present";
+  return unrecognized ? { status: "unrecognized" } : { status: "absent" };
 }
 
 /**
@@ -1761,6 +1774,13 @@ function _unwirePi(): UnwireResult {
   }
   try {
     let settled: UnwireResult | null = null;
+    let written: UnwireResult | null = null;
+    // Successful unwire/no-op entries are identified by their position, not their value.
+    const lookalikes: string[] = [];
+    const removed: string[] = [];
+    const described = (): string =>
+      (removed.length ? `; removed ${removed.join(", ")}` : "") +
+      (lookalikes.length ? `; left ${lookalikes.join(", ")} in place` : "");
     const result = withConfigCriticalSection(
       path,
       (bytes) => {
@@ -1778,15 +1798,16 @@ function _unwirePi(): UnwireResult {
           settled = { ok: false, removed: false, message: `pi: refusing to modify a non-object config at ${display}` };
           return { hold: settled.message };
         }
-        if (!piConfigHasFlairEntry(config)) {
-          settled = { ok: true, removed: false, message: `pi: no Flair extension in ${display}` };
-          return { noop: settled.message };
-        }
         let changed = false;
         if (Array.isArray(config.packages)) {
-          const kept = config.packages.filter((entry: unknown) => {
+          const kept = config.packages.filter((entry: unknown, index: number) => {
             const source = piPackageEntrySource(entry);
-            return !(source && isPiFlairNpmSource(source));
+            if (source && isFlairOwnedPiEntry(source, piLocalHome(), dirname(path))) {
+              removed.push(`packages[${index}]`);
+              return false;
+            }
+            if (source?.includes("pi-flair")) lookalikes.push(`packages[${index}]`);
+            return true;
           });
           if (kept.length !== config.packages.length) {
             config.packages = kept;
@@ -1794,10 +1815,13 @@ function _unwirePi(): UnwireResult {
           }
         }
         if (Array.isArray(config.extensions)) {
-          const kept = config.extensions.filter((entry: unknown) => {
-            if (typeof entry === "string" && isFlairOwnedPiEntry(entry)) {
+          const kept = config.extensions.filter((entry: unknown, index: number) => {
+            if (typeof entry !== "string") return true;
+            if (isFlairOwnedPiEntry(entry, piLocalHome(), dirname(path))) {
+              removed.push(`extensions[${index}]`);
               return false;
             }
+            if (entry.includes("pi-flair")) lookalikes.push(`extensions[${index}]`);
             return true;
           });
           if (kept.length !== config.extensions.length) {
@@ -1806,14 +1830,15 @@ function _unwirePi(): UnwireResult {
           }
         }
         if (!changed) {
-          settled = { ok: true, removed: false, message: `pi: no Flair extension in ${display}` };
+          settled = { ok: true, removed: false, message: `pi: no Flair extension in ${display}${described()}` };
           return { noop: settled.message };
         }
+        written = { ok: true, removed: true, message: `pi: unwired ${display}${described()}` };
         return { write: encodeConfig(config) };
       },
       { backup: (bytes) => backupBytesTo(path, bytes) },
     );
-    if (result.status === "written") return { ok: true, removed: true, message: `pi: unwired ${display}` };
+    if (result.status === "written") return written ?? { ok: true, removed: true, message: `pi: unwired ${display}` };
     const s = settled as UnwireResult | null;
     if (s) return s;
     return { ok: false, removed: false, message: `pi: could not unwire ${display}: ${result.message}` };

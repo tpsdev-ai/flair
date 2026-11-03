@@ -125,8 +125,8 @@ describe("docs-freshness gate, everything present", () => {
   });
 
   test("reports every check as passed", () => {
-    expect(res.out).toContain("9/9 checks passed");
-    expect(res.out).toContain("All 9 docs-freshness checks ran and passed.");
+    expect(res.out).toContain("10/10 checks passed");
+    expect(res.out).toContain("All 10 docs-freshness checks ran and passed.");
   });
 
   test("reports nothing as skipped", () => {
@@ -168,12 +168,12 @@ describe("cli-command-descriptions with dist/cli.js absent", () => {
   });
 
   test("never claims all checks passed", () => {
-    expect(res.out).not.toContain("All 9 docs-freshness checks ran and passed.");
-    expect(res.out).not.toMatch(/9\/9 checks passed/);
+    expect(res.out).not.toContain("All 10 docs-freshness checks ran and passed.");
+    expect(res.out).not.toMatch(/10\/10 checks passed/);
   });
 
   test("the tally excludes it from the pass count and names it separately", () => {
-    expect(res.out).toContain("8/9 checks passed");
+    expect(res.out).toContain("9/10 checks passed");
     expect(res.out).toContain("1 DID NOT RUN");
   });
 });
@@ -305,7 +305,7 @@ describe("changelog-lede-length (flair#1392)", () => {
     expect(res.out).toContain("changelog-lede-length");
     expect(res.out).toMatch(/changelog-lede-length[\s\S]*?✓ pass/);
     expect(res.out).not.toContain("fixed-short-lede.md");
-    expect(res.out).toContain("9/9 checks passed");
+    expect(res.out).toContain("10/10 checks passed");
   });
 });
 

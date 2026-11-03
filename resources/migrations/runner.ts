@@ -30,6 +30,7 @@ import { shouldRegisterSyntheticMigration } from "./synthetic-test-migration.js"
 import type { MigrationRegistry } from "./registry.js";
 import { UNCONFIRMED_IDS_LIMIT, BatchOutcomeError, type Migration, type RiskClass, type SourceTable } from "./types.js";
 import { join } from "node:path";
+import { txnPausePoint } from "../txn-pause-point.js";
 
 /**
  * Test-only batch-throttle override, mirroring space.ts's
@@ -208,6 +209,13 @@ export async function runMigrationCycle(rawDeps: RunnerDeps): Promise<CycleResul
 }
 
 async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, { acquired: true }>): Promise<CycleResult> {
+  // Test-only hold (flair#2876): this cycle has taken the lock and has not yet
+  // read the state file, so a test can observe the progress row boot seeding
+  // produced. Inert unless the fault-injection opt-in and an arm file in the
+  // test pause dir are present.
+  const pause = txnPausePoint("migration-cycle-start");
+  if (pause) await pause;
+
   const state = readMigrationState(deps.statePath);
   const candidates: Migration[] = [];
   /** The re-verified unconfirmed record per migration, carried into its run. */
@@ -494,8 +502,8 @@ function stateFromOutcome(entry: MigrationStateEntry | undefined): MigrationProg
  * answers `at-target` (the row needs no further write from this migration) or
  * `no-row`.
  *
- * Conservative by construction: a `pending` verdict keeps the id, a read that
- * throws keeps it (unknown never clears a record), and a record whose count is
+ * Any other re-check answer keeps the id (one that is not `pending` is logged),
+ * and a read that throws keeps it in this re-check. A record whose count is
  * larger than its id list keeps the unlisted remainder as a count with no ids —
  * those rows were never named, so no read can clear them.
  */
@@ -509,7 +517,13 @@ async function reverifyUnconfirmed(
   const kept: string[] = [];
   for (const id of recorded.ids) {
     try {
-      if ((await migration.checkUnconfirmed(id)) === "pending") kept.push(id);
+      const verdict: unknown = await migration.checkUnconfirmed(id);
+      if (verdict === "at-target" || verdict === "no-row") continue;
+      if (verdict !== "pending") {
+        const answer = typeof verdict === "string" ? `string (length ${verdict.length})` : typeof verdict;
+        console.warn("[flair-migrations] %s: checkUnconfirmed(%s) answered %s; re-check kept id", migration.id, id, answer);
+      }
+      kept.push(id);
     } catch {
       kept.push(id);
     }

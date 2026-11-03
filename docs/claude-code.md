@@ -29,7 +29,7 @@ This generates an Ed25519 key pair at `~/.flair/keys/my-project.key` and registe
 
 ### 4. Add to your project's CLAUDE.md
 
-Copy this into your project's `CLAUDE.md` (or `.claude/settings.md`, `AGENTS.md`, etc.):
+Copy this into your project's `CLAUDE.md` (or `.claude/settings.md`, `AGENTS.md`, etc.): <!-- docs-freshness-allow: names files in the reader's project -->
 
 ---
 
@@ -184,7 +184,7 @@ flair agent add project-beta
 flair agent add infra-ops
 ```
 
-Each project's `CLAUDE.md` uses its own agent ID. Writes carry an `agentId` field (tags are optional); reads use owner plus visibility.
+Each project's `CLAUDE.md` uses its own agent ID. <!-- docs-freshness-allow: names a file in the reader's project --> Writes carry an `agentId` field (tags are optional); reads use owner plus visibility.
 
 ## Subagents
 

@@ -51,8 +51,10 @@ import {
   retryRowConfirmation,
   retryRowForAttempt,
   retryRowForRefusal,
+  retryRowMalformedness,
   terminalRetryRow,
   type RetryQueueRow,
+  type RetryRowMalformedness,
 } from "../lib/federation-retry-queue.js";
 import {
   presenceCursorMs,
@@ -858,6 +860,16 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const pendingRetries = new Map<string, RetryQueueRow>();
     /** Pending rows whose attempt this run reserved before sending. */
     const reservedOffers = new Set<string>();
+    /** Pending retry rows to reserve when their batch is reached. */
+    const reservationTargets = new Map<string, RetryQueueRow>();
+    /** Retry row ids already reported malformed in this run. */
+    const reportedMalformedRetries = new Set<string>();
+
+    function reportMalformedRetryRow(id: string, malformed: RetryRowMalformedness): void {
+      if (reportedMalformedRetries.has(id)) return;
+      reportedMalformedRetries.add(id);
+      console.warn(`⚠️  FederationRetry row ${id} is malformed (${malformed.problem}: ${malformed.field}); left as stored.`);
+    }
 
     async function loadPendingRetries(): Promise<void> {
       const res = await fetch(`${opsEndpoint}/`, {
@@ -881,6 +893,25 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       const list = await res.json() as unknown;
       if (!Array.isArray(list)) throw new Error("FederationRetry read failed: body is not a row list");
       for (const row of list as RetryQueueRow[]) pendingRetries.set(row.id, row);
+    }
+
+    /** Read the stored retry rows for `keys`, whatever their state. */
+    async function readStoredRetryRows(keys: string[]): Promise<Map<string, Record<string, unknown>>> {
+      const out = new Map<string, Record<string, unknown>>();
+      if (keys.length === 0) return out;
+      const res = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: retryHeaders,
+        body: JSON.stringify({ operation: "search_by_hash", database: "flair", table: "FederationRetry", hash_values: keys, get_attributes: ["*"] }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`FederationRetry read failed (${res.status})`);
+      const rows = await res.json() as unknown;
+      if (!Array.isArray(rows)) throw new Error("FederationRetry read failed: body is not a row list");
+      for (const row of rows as Array<Record<string, unknown>>) {
+        if (typeof row.id === "string") out.set(row.id, row);
+      }
+      return out;
     }
 
     /** Read one retry row back and check it with retryRowConfirmation. */
@@ -955,11 +986,24 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       const refused = new Map(result.refused.map((r) => [keyOf(r.table, r.id), r.reason]));
       const undecided = new Set(result.indeterminate.map((r) => keyOf(r.table, r.id)));
       const nowIso = new Date().toISOString();
+      // Read what is stored for this batch whatever each row's state: a
+      // malformed row is left as stored and its outcome write is skipped.
+      const storedRows = await readStoredRetryRows(
+        batch.filter((record) => record.table === "Memory").map((record) => retryEntryKey(hub.id, "Memory", record.id)),
+      );
       for (const record of batch) {
         if (record.table !== "Memory") continue;
         const key = retryEntryKey(hub.id, "Memory", record.id);
         const attemptReserved = reservedOffers.delete(key);
         const prior = pendingRetries.get(key) ?? null;
+        const stored = storedRows.get(key) ?? null;
+        if (stored !== null) {
+          const malformed = retryRowMalformedness(stored);
+          if (malformed !== null) {
+            reportMalformedRetryRow(key, malformed);
+            continue;
+          }
+        }
         // A row the shared validator names malformed is reported before the
         // offer and left as stored: the outcome does not transition it.
         if (prior !== null && retryOfferProblem(prior) !== null) continue;
@@ -985,6 +1029,27 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           continue;
         }
         if (prior) await retireRetry(prior, "merged", nowIso);
+      }
+    }
+
+    /**
+     * Reserve one attempt for each Memory record in `batch` that selection recorded
+     * in `reservationTargets` (a record with a valid pending retry row).
+     * Called immediately before that batch is sent, so a
+     * batch the run never reaches leaves its rows' attempts and lastAttemptAt
+     * as stored. A reservation write that fails throws here, before the send.
+     */
+    async function reserveBatchAttempts(batch: any[]): Promise<void> {
+      const nowIso = new Date().toISOString();
+      for (const record of batch) {
+        if (record.table !== "Memory") continue;
+        const pending = reservationTargets.get(String(record.id));
+        if (!pending) continue;
+        reservationTargets.delete(String(record.id));
+        const reserved = retryRowForAttempt(pending, nowIso);
+        await writeRetryRow("upsert", reserved);
+        pendingRetries.set(String(reserved.id), reserved as unknown as RetryQueueRow);
+        reservedOffers.add(String(reserved.id));
       }
     }
 
@@ -1155,22 +1220,18 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         // that is gone or has become private ends its obligation here.
         const seen = new Set(rows.map((r: any) => r.id));
         for (const pending of pendingRetries.values()) {
-          const problem = retryOfferProblem(pending);
-          if (problem !== null) {
-            console.warn(`⚠️  FederationRetry row ${pending.id} is malformed (${problem}); left as stored.`);
-          }
+          const malformed = retryRowMalformedness(pending as Record<string, unknown>);
+          if (malformed !== null) reportMalformedRetryRow(pending.id, malformed);
         }
         // A source the cursor selects that also has a valid pending row is
         // offered now — a new change is not a retry, so the backoff does not
-        // hold it back — and its attempt is reserved before the send, exactly
-        // as on the re-offer path. A malformed row reserves nothing.
+        // hold it back. Its attempt is reserved immediately before the batch
+        // carrying it is sent, as on the re-offer path. A malformed row
+        // reserves nothing.
         for (const row of rows) {
           const pending = pendingRetries.get(retryEntryKey(hub.id, "Memory", row.id));
           if (!pending || retryOfferProblem(pending) !== null) continue;
-          const reserved = retryRowForAttempt(pending, new Date().toISOString());
-          await writeRetryRow("upsert", reserved);
-          pendingRetries.set(String(reserved.id), reserved as unknown as RetryQueueRow);
-          reservedOffers.add(String(reserved.id));
+          reservationTargets.set(String(row.id), pending);
         }
         for (const pending of dueRetryRows([...pendingRetries.values()], Date.now())) {
           if (seen.has(pending.recordId)) continue;
@@ -1183,12 +1244,9 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
             await retireRetry(pending, "source_ineligible");
             continue;
           }
-          // Reserve this offer before the send; an unconfirmed send keeps the
-          // reservation, so the next cycle waits out its backoff.
-          const reserved = retryRowForAttempt(pending, new Date().toISOString());
-          await writeRetryRow("upsert", reserved);
-          pendingRetries.set(String(reserved.id), reserved as unknown as RetryQueueRow);
-          reservedOffers.add(String(reserved.id));
+          // An unconfirmed send keeps the reservation; retry backoff applies
+          // while the row remains behind the cursor.
+          reservationTargets.set(String(row.id), pending);
           rows.push(row);
           seen.add(pending.recordId);
         }
@@ -1254,6 +1312,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         const srBytes = JSON.stringify(sr).length;
 
         if (batch.length >= BUDGET_RECORDS || (batch.length > 0 && batchBytes + srBytes > BUDGET_BYTES)) {
+          if (table === "Memory") await reserveBatchAttempts(batch);
           const result = await sendBatch(batch);
           if (table === "Memory") await applyMemoryOutcomes(batch, result);
           totalMerged += result.merged;
@@ -1269,6 +1328,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
 
       // Send final partial batch for this table
       if (batch.length > 0) {
+        if (table === "Memory") await reserveBatchAttempts(batch);
         const result = await sendBatch(batch);
         if (table === "Memory") await applyMemoryOutcomes(batch, result);
         totalMerged += result.merged;
@@ -2547,38 +2607,67 @@ export function register(program: Command): void {
         return;
       }
 
-      // Apply path. Delete each peer via the Harper ops API. We use the
-      // domain-socket form when local; otherwise we fall back to the resource
-      // DELETE which requires admin auth.
+      // Apply path: delete each peer's `flair.Peer` row through the admin-only
+      // `/Peer/{id}` REST resource and read it back to confirm it is gone.
       let deleted = 0;
       let errors = 0;
       let unknown = 0;
+      const requestOptions = baseUrl ? { baseUrl } : undefined;
+      // The DELETE's own body is not evidence, so a 2xx whose body is empty or
+      // not JSON must not throw: the server may already have deleted the row.
+      const deleteOptions = { ...(requestOptions ?? {}), tolerateUnparsedSuccessBody: true };
       for (const p of candidates) {
+        let refusal: ApiHttpError | undefined;
         try {
-          const res = await api("DELETE", `/FederationPeers/${encodeRecordId(p.id)}`, undefined, baseUrl ? { baseUrl } : undefined);
-          const ok = res?.ok ?? res?.deleted ?? true;
-          if (ok) {
-            deleted++;
-            const ts = p.lastSyncAt ?? p.pairedAt ?? "never";
-            console.log(`Deleted ${p.id} (last seen ${ts}).`);
-          } else {
-            errors++;
-            console.log(`Failed to delete ${p.id}: ${JSON.stringify(res)}`);
-          }
+          await api("DELETE", `/Peer/${encodeRecordId(p.id)}`, undefined, deleteOptions);
         } catch (e: any) {
           if (e instanceof ApiRequestOutcomeUnknown) {
             // An expired request is reported as an unknown outcome, like every
             // other non-GET/HEAD request through the shared REST sender: the client cannot tell
             // whether the server acted. Count it apart from a definite failure
             // and exit 3 for it (unknown outranks a known failure, as rem's
-            // `unresolved` does). The route this DELETE targets cannot accept
-            // it; that route defect is #2868, outside this change.
+            // `unresolved` does).
             unknown++;
             console.log(`Unknown outcome for ${p.id}: ${e.message}`);
             continue;
           }
+          if (e instanceof ApiHttpError) refusal = e;
+          else {
+            errors++;
+            console.log(`Failed to delete ${p.id}: ${e.message}`);
+            continue;
+          }
+        }
+
+        // 404 or a null body means absent; a row means it is still there. A
+        // read failure after a successful DELETE is an unknown outcome.
+        let present: boolean;
+        try {
+          const row = await api("GET", `/Peer/${encodeRecordId(p.id)}`, undefined, requestOptions);
+          present = row != null;
+        } catch (e: any) {
+          if (e instanceof ApiHttpError && e.status === 404) present = false;
+          else if (refusal) {
+            errors++;
+            console.log(`Failed to delete ${p.id}: ${refusal.message}`);
+            continue;
+          } else {
+            unknown++;
+            console.log(`Unknown outcome for ${p.id}: the delete returned, but reading the row back failed: ${e.message}`);
+            continue;
+          }
+        }
+
+        if (refusal) {
           errors++;
-          console.log(`Failed to delete ${p.id}: ${e.message}`);
+          console.log(`Failed to delete ${p.id}: ${refusal.message}`);
+        } else if (!present) {
+          deleted++;
+          const ts = p.lastSyncAt ?? p.pairedAt ?? "never";
+          console.log(`Deleted ${p.id} (last seen ${ts}).`);
+        } else {
+          errors++;
+          console.log(`Failed to delete ${p.id}: the row is still present after the DELETE.`);
         }
       }
       console.log(`${deleted} peer(s) deleted; ${errors} error(s); ${unknown} unknown outcome(s).`);

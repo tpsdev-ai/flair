@@ -8,7 +8,7 @@
  * (or names the npm package as an intentional leftover).
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, symlinkSync, lstatSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, symlinkSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -22,6 +22,7 @@ import {
   ALL_CLIENTS,
   clientConfigBackupPath,
   clientConfigHasFlairEntry,
+  clientConfigPath,
   piSettingsPath,
   piPackageEntrySource,
   isPiFlairNpmSource,
@@ -35,6 +36,8 @@ import {
   purgeFlairInstall,
   formatPurgeReport,
   purgeHadFailures,
+  restoreHeldClientConfigBackups,
+  type PurgeLeftover,
   FLAIR_NPM_PACKAGE,
 } from "../../src/lib/uninstall-purge.ts";
 import { LAUNCHD_LABEL as REM_LAUNCHD_LABEL, SYSTEMD_TIMER_UNIT as REM_TIMER, SYSTEMD_SERVICE_UNIT as REM_SERVICE } from "../../src/rem/scheduler.ts";
@@ -507,6 +510,118 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
     expect(result.leftovers.filter((l) => l.kind === "unverified").map((l) => l.path))
       .toContain("~/.pi/agent/settings.json.bak");
     expect(purgeHadFailures(result)).toBe(true);
+  }, 30_000);
+
+  test("a failed hold skips the client's unwiring and leaves its backup byte-identical", () => {
+    const paths = seedWiredHome();
+    const bak = clientConfigBackupPath("claude-code");
+    const bakBytes = readFileSync(bak);
+    const configBytes = readFileSync(paths.claude);
+    // A read-only parent makes the hold rename fail (the shared unit lane runs
+    // as a non-root user, as GitHub's ubuntu runner does).
+    chmodSync(isoHome, 0o555);
+    try {
+      const result = purgeFlairInstall({
+        homeDir: isoHome,
+        skipSchedulerUnload: true,
+        omitNpmLeftover: true,
+      });
+
+      expect(Buffer.compare(readFileSync(bak), bakBytes)).toBe(0);
+      expect(Buffer.compare(readFileSync(paths.claude), configBytes)).toBe(0);
+      expect(JSON.parse(readFileSync(paths.claude, "utf-8")).mcpServers.flair).toBeDefined();
+      expect(result.removed).not.toContain("Claude Code: unwired ~/.claude.json");
+      expect(result.removed).not.toContain("~/.claude.json.bak");
+      const failed = result.leftovers.filter((l) => l.kind === "failed");
+      expect(failed.some((l) =>
+        l.path === "~/.claude.json.bak" && l.reason.includes("skipped unwiring this client"))).toBe(true);
+    } finally {
+      chmodSync(isoHome, 0o755);
+    }
+  }, 30_000);
+
+  test("a file already at the hold path survives and the backup is held under a free name", () => {
+    const paths = seedWiredHome();
+    const bak = clientConfigBackupPath("claude-code");
+    // A snapshot that carries the wiring purge sweeps.
+    writeFileSync(bak, readFileSync(paths.claude));
+    const heldPath = `${bak}.purge-hold-${process.pid}-0`;
+    const sentinel = "user-file-at-hold-path\n";
+    writeFileSync(heldPath, sentinel);
+
+    const result = purgeFlairInstall({
+      homeDir: isoHome,
+      skipSchedulerUnload: true,
+      omitNpmLeftover: true,
+    });
+
+    expect(readFileSync(heldPath, "utf-8")).toBe(sentinel);
+    expect(existsSync(bak)).toBe(false);
+    expect(result.removed).toContain("~/.claude.json.bak");
+    expect(existsSync(`${bak}.purge-hold-${process.pid}-0-1`)).toBe(false);
+  }, 30_000);
+
+  test("a failed restore skips that backup's sweep and names the held copy", () => {
+    const bak = clientConfigBackupPath("claude-code");
+    writeFileSync(bak, "the snapshot the unwire would write\n");
+    const heldPath = `${bak}.purge-hold-${process.pid}-missing`;
+    const leftovers: PurgeLeftover[] = [];
+
+    const unrestored = restoreHeldClientConfigBackups(isoHome, [{
+      clientId: "claude-code",
+      path: bak,
+      heldPath,
+      display: "~/.claude.json.bak",
+    }], leftovers);
+
+    expect(unrestored.has("claude-code")).toBe(true);
+    expect(existsSync(bak)).toBe(false);
+    expect(leftovers).toHaveLength(1);
+    expect(leftovers[0]!.kind).toBe("failed");
+    expect(leftovers[0]!.path).toBe("~/.claude.json.bak");
+    expect(leftovers[0]!.reason).toContain("skipped this backup's sweep");
+    expect(leftovers[0]!.reason).toContain(`the held copy remains at ~/.claude.json.bak.purge-hold-${process.pid}-missing`);
+  }, 30_000);
+
+  test("pi sources that are not Flair's own are kept: leading whitespace and an empty spec", () => {
+    mkdirSync(join(isoHome, ".pi", "agent"), { recursive: true });
+    const settings = clientConfigPath("pi");
+    const bak = clientConfigBackupPath("pi");
+    for (const source of [" npm:@tpsdev-ai/pi-flair", "npm:@tpsdev-ai/pi-flair@"]) {
+      const bytes = JSON.stringify({ packages: [source], extensions: [source] }, null, 2) + "\n";
+      writeFileSync(settings, bytes);
+      writeFileSync(bak, bytes);
+
+      const result = purgeFlairInstall({
+        homeDir: isoHome,
+        skipSchedulerUnload: true,
+        omitNpmLeftover: true,
+      });
+
+      expect(readFileSync(settings, "utf-8")).toBe(bytes);
+      expect(readFileSync(bak, "utf-8")).toBe(bytes);
+      expect(result.removed).not.toContain("~/.pi/agent/settings.json.bak");
+      expect(result.leftovers.filter((l) => l.kind === "unverified").map((l) => l.path))
+        .toContain("~/.pi/agent/settings.json.bak");
+    }
+  }, 30_000);
+
+  test("the report names an unrecognized pi file and never prints its entry value", async () => {
+    mkdirSync(join(isoHome, ".pi", "agent"), { recursive: true });
+    const settings = clientConfigPath("pi");
+    const source = "git:https://user:canary-purge-credential@example.test/owner/pi-flair.git";
+    const bytes = JSON.stringify({ packages: [source] }, null, 2) + "\n";
+    writeFileSync(settings, bytes);
+    writeFileSync(`${settings}.bak`, bytes);
+
+    const { stdout, stderr, exitCode } = await runCli(["uninstall", "--purge"]);
+    const out = stdout + stderr;
+
+    expect(exitCode).toBe(1);
+    expect(out).toContain("Not checked: ~/.pi/agent/settings.json.bak");
+    expect(out).toContain("an entry mentions pi-flair without being Flair's own: ~/.pi/agent/settings.json.bak");
+    expect(out).not.toContain("canary-purge-credential");
+    expect(out).not.toContain(source);
   }, 30_000);
 
   test("an unreadable or unparseable client backup is reported as not checked and left", () => {

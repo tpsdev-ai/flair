@@ -418,6 +418,7 @@ import {
   bindCli as bindAttentionCli,
   register as registerAttention,
 } from "./commands/attention.js";
+import { registerHelp } from "./commands/help.js";
 import {
   bindCli as bindBootstrapCli,
   register as registerBootstrap,
@@ -2837,7 +2838,7 @@ function b64url(bytes: Uint8Array): string {
  * / disabling authorizeLocal there) is tracked separately in flair#654 and is
  * out of scope for this HTTP/REST auth path.
  */
-async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string; signedOnly?: boolean; refuseRedirects?: boolean; deadlineMs?: number; deadlineSource?: RequestDeadlineSource }): Promise<any> {
+async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string; signedOnly?: boolean; refuseRedirects?: boolean; deadlineMs?: number; deadlineSource?: RequestDeadlineSource; tolerateUnparsedSuccessBody?: boolean }): Promise<any> {
   // Resolve port via the canonical path (flair#1129): options.baseUrl > FLAIR_URL > resolveHttpPort.
   // api() callers mean the default install, so resolveHttpPort({}) with no --data-dir is correct.
   const hasExplicitBase = !!(options?.baseUrl || process.env.FLAIR_URL);
@@ -2872,6 +2873,7 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     refuseRedirects: options?.refuseRedirects,
     deadlineMs: options?.deadlineMs,
     deadlineSource: options?.deadlineSource,
+    tolerateUnparsedSuccessBody: options?.tolerateUnparsedSuccessBody,
   };
 
   try {
@@ -4910,6 +4912,9 @@ program.configureHelp({ showGlobalOptions: true });
 // redundant noise on the one command whose whole job is this exact report.
 program.hook("preAction", async (_thisCommand, actionCommand) => {
   if (actionCommand.name() === "doctor") return;
+  // flair#2887: `help` only prints. Skip the handshake probe so showing help
+  // never reaches the server.
+  if (actionCommand.name() === "help") return;
   // flair#2034 §2: `status` reports the server's version itself, next to this
   // CLI's and the install tree that serves it, and decides the advice from
   // that one comparison — a second, tree-blind "run: flair restart" line here
@@ -9219,6 +9224,10 @@ bindAttentionCli({
   resolveSigningAgentId,
 });
 registerAttention(program);
+
+// ─── flair help ──────────────────────────────────────────────────────────────
+// Command registration lives in src/commands/help.ts (flair#2887).
+registerHelp(program);
 
 // Parse argv and run the CLI. Exported so the CommonJS preflight shim
 // (cli-shim.cts → dist/cli-shim.cjs, the real bin entry) can invoke it after

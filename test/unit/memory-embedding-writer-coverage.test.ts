@@ -63,7 +63,7 @@ add("Federation", ["writer:writeBackCommittedRow#2"], "LATCH",
 // shared request context so a direct/internal caller is atomic (A1'' 0a).
 add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1"], "GATED", "Memory.post() write — stamps + noteWriteStamp (slice 1).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#4"], "GATED", "Memory.put() main write — stamps + noteWriteStamp (slice 1).");
-add("Memory", ["writer:(databases as any).flair.Memory.put#3"], "GATED", "Memory.put() _reindex re-PUT (flair#2450: through the table, inside the shared write transaction, after the committed-row confirm) — writes supplied embedding fields without regenerating; calls noteWriteStamp on the submitted model.");
+add("Memory", ["writer:(databases as any).flair.Memory.put#3"], "GATED", "Memory.put() _reindex re-PUT (flair#2450: through the table, after the committed-row confirm; flair#2656: in a transaction it owns, read back after its commit) — writes supplied embedding fields without regenerating; calls noteWriteStamp on the submitted model.");
 // flair#2425 — an ordinary PATCH merges the body (including a caller-supplied
 // embedding/embeddingModel) into the row; it now calls noteWriteStamp too.
 add("Memory", ["writer:super.patch#1"], "GATED",

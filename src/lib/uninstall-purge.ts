@@ -195,19 +195,18 @@ function backupEntryAbsent(path: string): boolean {
 }
 
 /**
- * Client configs get the same sibling snapshot as hook settings: every
- * `unwire()` write copies the pre-write bytes to `<config>.bak`, so after
- * unwiring the copy holds the pre-purge Flair wiring. Purge removes a copy
- * that `clientConfigHasFlairEntry()` identifies as carrying a Flair entry and
+ * Client configs get the same sibling snapshot as hook settings: an unwire
+ * that writes an existing config copies its pre-write bytes to `<config>.bak`
+ * when that copy write succeeds. Purge removes a copy that
+ * `clientConfigHasFlairEntry()` identifies as carrying a Flair entry and
  * reports the path like a hook backup. A copy with no Flair entry may be the
  * user's own file and stays — as does one whose wiring could not be decided,
  * which is reported as not checked (flair#2886).
  *
  * Call inside `withHome(homeDir, ...)`: `clientConfigBackupPath()` resolves `~`
  * at call time, so the sweep must run with the target home in the environment,
- * not the caller's (flair#2886). A pre-existing copy is held across the unwire
- * first, so an undecidable one is still read and reported here rather than
- * replaced.
+ * not the caller's (flair#2886). When the hold succeeds, a pre-existing copy is
+ * read here instead of being replaced by the unwire's snapshot.
  */
 function sweepClientConfigBackup(
   clientId: ClientId,
@@ -242,10 +241,34 @@ function sweepClientConfigBackup(
   if (scan.status === "present") rmPath(backup, removed, leftovers, display);
 }
 
-interface HeldClientBackup {
+export interface HeldClientBackup {
+  clientId: ClientId;
   path: string;
   heldPath: string;
   display: string;
+}
+
+interface ClientBackupHold {
+  held: HeldClientBackup[];
+  /** Clients whose pre-existing backup could not be held: neither their
+   *  unwire nor their backup sweep may run (flair#2886). */
+  skipped: Set<ClientId>;
+}
+
+/** Pick a hold path no other entry occupies. The name is verified absent
+ *  with `lstat` and carries this process's pid and a per-client sequence, so a
+ *  user file already at a candidate is never overwritten. */
+function reserveHoldPath(backup: string, seq: number): string {
+  for (let attempt = 0; attempt < 16; attempt++) {
+    const candidate = `${backup}.purge-hold-${process.pid}-${seq}${attempt === 0 ? "" : `-${attempt}`}`;
+    try {
+      lstatSync(candidate);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return candidate;
+      throw err;
+    }
+  }
+  throw new Error("no free hold path name after 16 attempts");
 }
 
 /**
@@ -253,11 +276,15 @@ interface HeldClientBackup {
  * otherwise, but the unwire's snapshot write renames over it. Move it aside
  * first and put it back before the sweep, so its bytes — or, for a symlink,
  * the link itself — survive the unwire. This covers a copy that cannot be
- * read or parsed too: a failed read must never license its replacement.
- * Call inside `withHome(homeDir, ...)`.
+ * read or parsed too: a failed read must never license its replacement. The
+ * hold name is verified absent, so a file already there is never overwritten;
+ * when no free name can be reserved, or the rename fails, the client is
+ * reported and its unwire and sweep are skipped. Call inside
+ * `withHome(homeDir, ...)`.
  */
-function holdClientConfigBackups(homeDir: string, leftovers: PurgeLeftover[]): HeldClientBackup[] {
+function holdClientConfigBackups(homeDir: string, leftovers: PurgeLeftover[]): ClientBackupHold {
   const held: HeldClientBackup[] = [];
+  const skipped = new Set<ClientId>();
   for (const client of ALL_CLIENTS) {
     const backup = clientConfigBackupPath(client.id);
     try {
@@ -268,42 +295,67 @@ function holdClientConfigBackups(homeDir: string, leftovers: PurgeLeftover[]): H
       leftovers.push({
         path: displayUnderHome(homeDir, backup),
         kind: "failed",
-        reason: `could not hold the backup across unwiring: ${reason}`,
+        reason: `could not hold the backup across unwiring: ${reason}; skipped unwiring this client`,
       });
+      skipped.add(client.id);
       continue;
     }
-    const heldPath = `${backup}.purge-hold-${process.pid}-${held.length}`;
+    let heldPath: string;
     try {
-      renameSync(backup, heldPath);
-      held.push({ path: backup, heldPath, display: displayUnderHome(homeDir, backup) });
+      heldPath = reserveHoldPath(backup, held.length);
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
       leftovers.push({
         path: displayUnderHome(homeDir, backup),
         kind: "failed",
-        reason: `could not hold the backup across unwiring: ${reason}`,
+        reason: `could not reserve a hold path: ${reason}; skipped unwiring this client`,
       });
+      skipped.add(client.id);
+      continue;
+    }
+    try {
+      renameSync(backup, heldPath);
+      held.push({ clientId: client.id, path: backup, heldPath, display: displayUnderHome(homeDir, backup) });
+    } catch (err: unknown) {
+      rmSync(heldPath, { force: true });
+      const reason = err instanceof Error ? err.message : String(err);
+      leftovers.push({
+        path: displayUnderHome(homeDir, backup),
+        kind: "failed",
+        reason: `could not hold the backup across unwiring: ${reason}; skipped unwiring this client`,
+      });
+      skipped.add(client.id);
     }
   }
-  return held;
+  return { held, skipped };
 }
 
-/** Put a held entry back over the snapshot this purge's unwire wrote, then
- *  let the sweep decide it. Call inside `withHome(homeDir, ...)`. */
-function restoreHeldClientConfigBackups(held: HeldClientBackup[], leftovers: PurgeLeftover[]): void {
+/** Put a held entry back over the snapshot this purge's unwire attempts to
+ *  write, then let the sweep decide it. A client whose restore fails is
+ *  returned so its sweep is skipped and the reported path names the held
+ *  copy that remains. Call inside `withHome(homeDir, ...)`. */
+export function restoreHeldClientConfigBackups(
+  homeDir: string,
+  held: HeldClientBackup[],
+  leftovers: PurgeLeftover[],
+): Set<ClientId> {
+  const unrestored = new Set<ClientId>();
   for (const item of held) {
     try {
       rmSync(item.path, { force: true });
       renameSync(item.heldPath, item.path);
     } catch (err: unknown) {
+      unrestored.add(item.clientId);
       const reason = err instanceof Error ? err.message : String(err);
       leftovers.push({
         path: item.display,
         kind: "failed",
-        reason: `could not restore the backup held across unwiring: ${reason}`,
+        reason: `could not restore the backup held across unwiring: ${reason}; skipped this backup's sweep; ` +
+          `the held copy remains at ${displayUnderHome(homeDir, item.heldPath)}`,
       });
     }
   }
+  return unrestored;
 }
 
 /** Run client-config work with `HOME` set to the home being purged, and —
@@ -372,14 +424,16 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
     sweepHookBackup(hookSettingsPath(homeDir, harness), null, homeDir, removed, leftovers);
   }
 
-  const heldBackups: HeldClientBackup[] = [];
+  const hold: ClientBackupHold = { held: [], skipped: new Set<ClientId>() };
   withClientConfigHome(homeDir, ignorePiDirOverride, () => {
-    heldBackups.push(...holdClientConfigBackups(homeDir, leftovers));
+    const found = holdClientConfigBackups(homeDir, leftovers);
+    hold.held.push(...found.held);
+    for (const id of found.skipped) hold.skipped.add(id);
   });
 
   const unwireResults: UnwireResult[] = [];
   withClientConfigHome(homeDir, ignorePiDirOverride, () => {
-    unwireResults.push(...ALL_CLIENTS.map((c) => c.unwire()));
+    unwireResults.push(...ALL_CLIENTS.filter((c) => !hold.skipped.has(c.id)).map((c) => c.unwire()));
   });
   for (const u of unwireResults) {
     if (!u.ok) {
@@ -390,11 +444,13 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
   }
 
   // The unwire above snapshots each config before writing it; sweep those
-  // snapshots (and any older one) once the active configs are clean, under the
-  // target home the unwire ran in.
+  // snapshots (and any older one) after the unwire attempts, under the target
+  // home the unwire ran in. A client whose backup was not held or not restored
+  // keeps its entry and is skipped.
   withClientConfigHome(homeDir, ignorePiDirOverride, () => {
-    restoreHeldClientConfigBackups(heldBackups, leftovers);
+    const unrestored = restoreHeldClientConfigBackups(homeDir, hold.held, leftovers);
     for (const client of ALL_CLIENTS) {
+      if (hold.skipped.has(client.id) || unrestored.has(client.id)) continue;
       sweepClientConfigBackup(client.id, homeDir, removed, leftovers);
     }
   });

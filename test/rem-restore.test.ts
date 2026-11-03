@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { applySnapshot, CANDIDATE_LIST_LIMIT, CANDIDATE_LIST_MAX_PAGES, type ApiCall } from "../src/rem/restore.ts";
 import { ApiHttpError } from "../src/lib/auth-resolve.ts";
+import { SOUL_SCOPE_FIELDS_REFUSAL } from "../src/lib/soul-scope-fields.ts";
 import { buildOpsSearch } from "../src/commands/rem.ts";
 import { createSnapshot } from "../src/rem/snapshot.ts";
 import { create as tarCreate, extract as tarExtract } from "tar";
@@ -268,6 +269,33 @@ describe("applySnapshot — missing snapshot", () => {
     });
     expect(r.status).toBe("failed");
     expect(r.errors[0]).toContain("does not exist");
+  });
+});
+
+describe("applySnapshot — a refused Soul row", () => {
+  it("reports the row id and refusal from a simulated ApiHttpError", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const inner = statefulApi({ souls: [{ id: "current-soul", agentId: "test-agent" }] });
+    const soulId = snapshotSoul.id;
+    const api: ApiCall = async (method, path, body) => {
+      if (method === "PUT" && path === `/Soul/${encodeURIComponent(soulId)}`) {
+        throw ApiHttpError.fromResponse(403, JSON.stringify({ error: SOUL_SCOPE_FIELDS_REFUSAL }));
+      }
+      return inner.api(method, path, body);
+    };
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("failed");
+    expect(r.errors).toContain(`put-soul ${soulId}: HTTP 403: ${SOUL_SCOPE_FIELDS_REFUSAL}`);
+    expect(r.restored.souls).toBe(0);
   });
 });
 

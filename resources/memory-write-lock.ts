@@ -25,13 +25,11 @@
  * runs under one key per ID of `Memory.primaryStore`'s lock: `["memory", fullStoredId]`.
  * Within one Harper process the lock is per key and shared by its threads
  * (resources/key-lock.ts). A caller opens and settles its owned transaction
- * inside the callback, so the key is held across the commit. Two PUT paths can
- * join a transaction they do not own, which then commits after the put returns
- * and so after the key is released: a put composed into its caller's
- * transaction (manual promotion, via withComposedWriteTransaction in
- * resources/request-transaction.ts), and the admin `_reindex` re-PUT when the
- * request carries an open transaction, which it joins as it did before the lock
- * (with none open, it owns its transaction and commits before the release).
+ * inside the callback, so the key is held across the commit. A put composed
+ * into its caller's transaction (manual promotion, via
+ * withComposedWriteTransaction in resources/request-transaction.ts) joins a
+ * transaction it does not own, which then commits after the put returns and so
+ * after the key is released.
  *
  * A same-id writer that finds the key held waits and retries within its budget
  * ({@link MEMORY_LOCK_ATTEMPTS} attempts with a {@link MEMORY_LOCK_WAIT_MS} ms
@@ -42,10 +40,10 @@
  * below, even while the key is held). A writer that then opens a new owned
  * transaction (the ordinary PUT and PATCH) reads the row as stored at that
  * moment: the holder's committed row when the holder owned its transaction (a
- * composed or `_reindex` holder that joined another transaction may release
- * before that transaction commits). A composed or `_reindex` writer that joins
- * an already-open request transaction reads from that transaction's snapshot
- * instead, which can predate the acquisition. Otherwise it is refused:
+ * composed holder that joined another transaction may release before that
+ * transaction commits). A composed writer that joins an already-open request
+ * transaction reads from that transaction's snapshot instead, which can
+ * predate the acquisition. Otherwise it is refused:
  *
  *  - `503 memory_busy` — the key stayed held for the whole budget. Nothing was
  *    written, so the request can be sent again unchanged. The body carries the
@@ -65,9 +63,11 @@
  *    PUT/PATCH check the addressed id; DELETE also checks the resolved skill
  *    head. An automatic writer that takes the lock through
  *    {@link withMemoryWriteLockOnce} writes nothing to a marked id; the feed
- *    dedup repair records the marker when its committed update's confirmation
- *    read fails or does not show the update, and the other automatic writers
- *    do not set it for their own unconfirmed write, which they report or log.
+ *    write-back and the feed dedup repair record the marker when storage
+ *    withholds their write result, and the dedup repair also when its committed
+ *    update's confirmation read fails or does not show the update, while the
+ *    other automatic writers do not set it for their own unconfirmed write,
+ *    which they report or log.
  *    A POST that takes the lock checks the ids it locks; a POST that takes
  *    none, and the writers that take no per-id lock, do not check the marker.
  *
