@@ -22,7 +22,11 @@
  *   - skill-close-staged: a skill write's close is staged and its locks are
  *     held;
  *   - skill-head-resolved: a skill write has resolved the live head and has not
- *     taken its locks yet.
+ *     taken its locks yet;
+ *   - skill-update-confirm: a skill update has committed and not yet confirmed
+ *     its committed state; the test closes the successor and inserts a delete
+ *     version that does not hash-link to the update's version, so the update
+ *     answers `500 skill_update_compensation_failed`.
  *
  * Throwaway HOME + data dir, ephemeral ports.
  */
@@ -269,6 +273,68 @@ describe("flair#2927 — a skill-tagged feed write (real Harper)", () => {
     expect(typeof (await h.readRow(head))?.validTo, "the skill write did not close the live head").toBe("string");
     expect(h.writesBy(head, SKILL_WRITER).map((write) => write.method), "the close did not run under the lock phase").toContain("put");
   }, 120_000);
+
+  it("a skill update whose undo cannot be confirmed marks the ids it wrote outcome-unknown, and not a locked id it did not write", async () => {
+    // `pred` is the subject's first version and `head` its live successor. The
+    // failing write addresses `head` and repeats its `supersedes: pred`, so it
+    // locks `pred` as well, and writes only its successor and `head`'s close.
+    const pred = "fsl-undo-pred";
+    const head = "fsl-undo-head";
+    const created = await feedSkill(pred, "undo lineage first version");
+    expect(created.status, (await created.clone().text()).slice(0, 300)).toBe(200);
+    const updatePayload = (content: string) => ({
+      id: head, supersedes: pred, agentId: owner.id, content, trigger: `when ${content} applies`,
+      tags: ["skill"], durability: "persistent", visibility: "shared",
+    });
+    const updated = await h.signed(owner, "POST", "/FeedMemories", updatePayload("undo lineage second version"));
+    expect(updated.status, (await updated.clone().text()).slice(0, 300)).toBe(200);
+    expect((await h.readRow(head))?.supersedes).toBe(pred);
+    const predWrites = h.writesBy(pred, SKILL_WRITER).length;
+
+    h.arm("skill-update-confirm");
+    const failing = h.signed(owner, "POST", "/FeedMemories", updatePayload("undo lineage third version"));
+    let successorId = "";
+    try {
+      await h.assertPaused("skill-update-confirm");
+      const versions = await h.ops({
+        operation: "search_by_value", database: "flair", table: "InstructionVersion",
+        search_attribute: "subjectId", search_value: pred, get_attributes: ["*"],
+      }) as any[];
+      const appended = versions.sort((a, b) => Number(a.version) - Number(b.version)).at(-1);
+      expect(appended?.kind, JSON.stringify(versions)).toBe("update");
+      successorId = String(appended.memoryId);
+      const successor = await h.readRow(successorId);
+      expect(successor?.supersedes, "the paused write's successor does not supersede the head").toBe(head);
+      const closedAt = new Date().toISOString();
+      await h.ops({ operation: "put", database: "flair", table: "Memory", records: [{ ...successor, validTo: closedAt, updatedAt: closedAt }] });
+      const next = Number(appended.version) + 1;
+      await h.ops({
+        operation: "insert", database: "flair", table: "InstructionVersion", records: [{
+          id: `skill:${pred}:${next}`, subjectType: "skill", subjectId: pred, agentId: owner.id, key: null,
+          version: next, kind: "delete", rowId: successorId, valueHash: null,
+          previousVersionHash: "not-this-updates-record-hash", soulSnapshot: null, memoryId: null, visibility: "shared",
+          actorKind: "agent", actorId: owner.id, sourceClass: "agent",
+          createdAt: closedAt, guarded: false, expectedVersion: null, recordHash: "following-delete",
+        }],
+      });
+      await h.release("skill-update-confirm");
+    } finally {
+      h.letGo("skill-update-confirm");
+    }
+    const res = await failing;
+    const body = await res.clone().json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(500);
+    expect(body.error).toBe("skill_update_compensation_failed");
+    expect(h.writesBy(pred, SKILL_WRITER), "the failing write wrote the locked predecessor").toHaveLength(predWrites);
+
+    await expectRefused(await feedSkill(successorId, "write to the unconfirmed successor"), "write_outcome_unknown");
+    await expectRefused(await feedSkill(head, "write to the closed head"), "write_outcome_unknown");
+    // `pred` is not marked: the same write takes its lock and reaches the plan.
+    const unmarked = await feedSkill(pred, "write to the unwritten predecessor");
+    const unmarkedBody = await unmarked.clone().json() as any;
+    expect(unmarked.status, JSON.stringify(unmarkedBody)).toBe(409);
+    expect(unmarkedBody).toEqual({ error: "skill_head_missing" });
+  }, 180_000);
 
   it("CONTROL: an uncontended skill feed create is stored and its Memory write runs under the id's lock", async () => {
     const id = "fsl-skill-control";

@@ -329,13 +329,10 @@ export class FeedMemories extends Resource {
           });
           if (!outcome.ok) {
             if (headMoved) return HEAD_MOVED;
-            // flair#2927: record the id outcome-unknown for the outcomes the
-            // ordinary write-back records it for — storage withheld the write
-            // result, or the committed state could not be confirmed (the skill
-            // writer's `skill_update_compensation_failed`, whose undo was not
-            // confirmed either). A refusal the writer rolled back and confirmed
-            // is not one of them; a body that cannot be read is the same unknown
-            // outcome, never a pass.
+            // flair#2927: record the attempted ids outcome-unknown when storage
+            // withheld the write result, when the skill writer could not confirm
+            // its undo (`skill_update_compensation_failed`), or when the refusal
+            // body has no readable error code.
             const code = await responseErrorCode(outcome.response);
             if (code === null || code === WRITE_RESPONSE_WITHHELD || code === "skill_update_compensation_failed") {
               for (const id of attemptedWriteIds) markMemoryWriteOutcomeUnknown(id);
