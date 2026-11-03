@@ -5,7 +5,7 @@
  * Acquisition, reclaim and release of the migration lock are serialized by a
  * directory mutex. These tests pause real children at the mutex and lock
  * transitions: a prepared mutex directory is complete before publication, a
- * live mutex owner excludes every other child, a dead mutex generation can be
+ * live mutex owner excludes the other children, a dead mutex generation can be
  * recovered by one successor at a time, and release removes the lock file only
  * when its identity is still the one the handle published. The state writer
  * accepts only a live handle for the state file's lock, read from lock.ts's

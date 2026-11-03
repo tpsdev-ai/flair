@@ -17,7 +17,8 @@
  * already-populated directory over the guard path: replacing an empty
  * directory succeeds, replacing a non-empty one fails with ENOTEMPTY. The
  * mutex is released by unlinking only the owner entry of the generation it
- * published, which leaves the directory empty. A dead owner is recovered by
+ * published, leaving the directory empty when the unlink succeeds. A dead
+ * owner is recovered by
  * unlinking that same generation-specific entry; the recovering process must
  * then win publication of its own directory, so recovery never grants
  * ownership by itself.
@@ -37,7 +38,8 @@
  * Known windows: a holder recorded on another host is still judged by age,
  * for the mutex as well as the migration record, so a remote holder that
  * resumes after takeover is not fenced. A process killed while preparing a
- * record leaves an unpublished temporary file; one killed after publication
+ * record leaves an unpublished staging directory or temporary file; one
+ * killed after publication
  * leaves a complete owner record that another process can recover after
  * establishing death.
  */
