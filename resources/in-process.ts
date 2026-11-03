@@ -225,17 +225,15 @@ export function internalContext(): CallContext {
  * start their own transaction.
  *
  * **They do still need the CONTEXT.** Only the collection binding is
- * unnecessary for a read, not the identity. `Cls.search(query)` with the second
- * argument left off reads in Harper's ambient context — a request's context
- * can follow a timer or a promise — and with no ambient context it resolves to
- * the same trusted `internal` verdict this module exists to keep out of reach.
- * The query still narrows the rows it returns. With no ambient context, no
- * agent scope applies; under an inherited non-admin agent context, the read
- * gets that agent's read scope, which for Memory is the agent's own records
- * plus every other agent's non-private records (resources/memory-read-scope.ts).
- * Harper consults the resource's `allowRead` only when a permission check is
- * requested (`query.checkPermission` or `context.authorize`). Pass the context
- * to every call, read or write (flair#936).
+ * unnecessary for a read, not the identity. `Cls.search(query)` with no explicit
+ * or ambient context resolves to the trusted `internal` verdict. The query's
+ * conditions still narrow the rows, but no agent scope applies: every agent's
+ * matching records, `private` included, are returned. With the resulting `{}`
+ * context and no `query.checkPermission`, no permission check is requested
+ * (no `context.authorize`), so `allowRead` is never consulted. Memory's
+ * `allowRead` -> `memoryAuthGate` -> `allowVerified` would admit this `internal`
+ * call even if consulted. Pass the context to every call, read or write
+ * (flair#936).
  */
 export async function collectionResource<T = any>(Cls: any, context: CallContext): Promise<T> {
   if (context == null || typeof context !== "object") {

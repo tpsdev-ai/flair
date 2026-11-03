@@ -326,12 +326,7 @@ export async function allowAdmin(context: any): Promise<boolean> {
 }
 
 /**
- * flair#936 — the `internal` verdict is TRUSTED and UNFILTERED, and it is also
- * what a caller gets for supplying no context at all. Nothing distinguishes
- * "I am flair's own maintenance code" from "I am an application developer who
- * did not know a context was required": both spell it `new Memory()`, both
- * succeed, and both return plausible data. It surfaces months later as memories
- * that were never scoped.
+ * flair#936 — the `internal` verdict is TRUSTED and UNFILTERED.
  *
  * This does not change the verdict. noteInternalVerdict skips a context that
  * carries the `__flairInternal` marker, which `internalContext()`
