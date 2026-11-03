@@ -218,6 +218,27 @@ function asArray(raw: unknown): any[] {
   return [];
 }
 
+/**
+ * A live table listing for the pre-restore snapshot. Unlike `asArray`, which
+ * reads an unrecognised shape as an empty table, this refuses: an unreadable
+ * listing would look empty, so the pre-restore snapshot would miss the live
+ * rows, the scope preflight would see no live Souls, and the DELETE and PUT
+ * loops would run over a table this run never read (flair#2931).
+ */
+function requireLiveListing(raw: unknown, table: "Memory" | "Soul", agentId: string): any[] {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    if (Array.isArray(obj.results)) return obj.results as any[];
+    if (Array.isArray(obj.items)) return obj.items as any[];
+  }
+  throw new Error(
+    `live-listing-unreadable: GET /${table}?agentId=${agentId} returned a response that is not a list `
+      + `(expected a JSON array, or an object with a "results" or "items" array); `
+      + "refusing to restore until the live listing can be read — check the API response and that the agent id is correct.",
+  );
+}
+
 function soulWrite(opts: RestoreOpts): ApiCall {
   return opts.soulApiCall ?? opts.apiCall;
 }
@@ -468,8 +489,16 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   let currentMem: any[];
   let currentSouls: any[];
   try {
-    currentMem = asArray(await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`));
-    currentSouls = asArray(await opts.apiCall("GET", `/Soul?agentId=${encodeURIComponent(opts.agentId)}`));
+    currentMem = requireLiveListing(
+      await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`),
+      "Memory",
+      opts.agentId,
+    );
+    currentSouls = requireLiveListing(
+      await opts.apiCall("GET", `/Soul?agentId=${encodeURIComponent(opts.agentId)}`),
+      "Soul",
+      opts.agentId,
+    );
 
     const preRestore = await createSnapshot({
       agentId: opts.agentId,
