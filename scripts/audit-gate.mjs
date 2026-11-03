@@ -32,8 +32,8 @@
  *   3. Every allowlist entry must be well-formed: advisory id, package, the
  *      reason it cannot be fixed here, an expiry date, and the condition that
  *      removes it. Missing any field BLOCKS.
- *   4. Expiry is capped by severity (see the allowlist's `policy` block). You
- *      cannot park a critical for a year. Writing an over-long expiry BLOCKS.
+ *   4. Lifetime is capped by severity (see the allowlist's `policy` block).
+ *      An over-cap entry requires a valid overCapApproval.
  *   5. An expired entry BLOCKS. That is the point of the mechanism, not a flaw:
  *      the build stops and a human re-decides.
  *   6. STALENESS — an allowlist entry whose advisory no longer appears BLOCKS
@@ -538,7 +538,184 @@ function loadAllowlist() {
  * ------------------------------------------------------------------ */
 
 const DAY_MS = 86_400_000;
-const isIsoDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s ?? "")) && !Number.isNaN(Date.parse(s));
+/** A real calendar date: the UTC year, month and day round-trip. */
+function isCalendarDate(s) {
+  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [year, month, day] = s.split("-").map(Number);
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+/** The UTC calendar day of a Date or a parseable date string. */
+function utcDay(value) {
+  return (value instanceof Date ? value : new Date(value)).toISOString().slice(0, 10);
+}
+
+/**
+ * The first commit day each advisory id appears in parsed allowlist snapshots,
+ * oldest first, following file renames and comparing ids case-insensitively.
+ * Dates are read as UTC calendar days, because a commit made late in a negative
+ * offset is already the next day in UTC.
+ *
+ * A shallow repository, a failed git call or an unreadable allowlist throws.
+ * The repository root comes from the script location, so the gate behaves the
+ * same whatever directory it is run from.
+ */
+export function readAllowlistHistory(repoRoot = REPO_ROOT) {
+  const allowlistPath = join(repoRoot, ".github", "audit-allowlist.json");
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(allowlistPath, "utf8"));
+  } catch (e) {
+    throw new Error(`cannot read ${allowlistPath}: ${e.message}`);
+  }
+  if (!Array.isArray(parsed?.entries)) {
+    throw new Error(`${allowlistPath} must have an "entries" array`);
+  }
+
+  const runGit = (args) => {
+    const res = spawnSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 120_000 });
+    if (res.error) throw new Error(`git ${args[0]} failed: ${res.error.message}`);
+    if (res.status !== 0) {
+      throw new Error(`git ${args[0]} failed (exit ${res.status}): ${(res.stderr ?? "").trim()}`);
+    }
+    return res.stdout;
+  };
+
+  if (runGit(["rev-parse", "--is-shallow-repository"]).trim() === "true") {
+    throw new Error(
+      `repository ${repoRoot} is shallow, so the allowlist history is incomplete. ` +
+        "Fetch full history (fetch-depth: 0) before running the gate.",
+    );
+  }
+
+  const ids = new Set();
+  for (const entry of parsed.entries) {
+    const id = String(entry?.ghsa ?? "");
+    if (id) ids.add(id.toUpperCase());
+  }
+  if (ids.size > 1_000) throw new Error(`allowlist has ${ids.size} advisory ids; refusing to read history for more than 1000`);
+
+  let path = ".github/audit-allowlist.json";
+  const history = runGit(["log", "--follow", "--name-status", "--format=%x1e%H%x09%cI", "--", path]);
+  const snapshots = [];
+  for (const record of history.split("\x1e").filter((record) => record.trim())) {
+    const [header, ...changes] = record.trim().split("\n");
+    const [sha, timestamp] = header.split("\t");
+    const day = utcDayFromTimestamp(timestamp);
+    if (!day) throw new Error(`git returned an unparseable date for ${sha}: ${timestamp}`);
+    if (!changes.includes(`D\t${path}`)) snapshots.push({ sha, day, path });
+    for (const line of changes) {
+      const rename = /^R\d+\t(.+)\t(.+)$/.exec(line);
+      if (rename && rename[2] === path) path = rename[1];
+    }
+  }
+
+  const firstDays = new Map();
+  for (const { sha, day, path } of snapshots.reverse()) {
+    const contents = runGit(["show", `${sha}:${path}`]);
+    let snapshot;
+    try {
+      snapshot = JSON.parse(contents);
+    } catch (e) {
+      throw new Error(`cannot parse allowlist snapshot ${sha}:${path}: ${e.message}`);
+    }
+    if (!Array.isArray(snapshot?.entries)) {
+      throw new Error(`allowlist snapshot ${sha}:${path} must have an "entries" array`);
+    }
+    for (const entry of snapshot.entries) {
+      if (typeof entry?.ghsa !== "string") continue;
+      const id = entry.ghsa.toUpperCase();
+      if (!firstDays.has(id)) firstDays.set(id, day);
+    }
+  }
+  return firstDays;
+}
+
+function utcDayFromTimestamp(value) {
+  if (!isCalendarDate(value.slice(0, 10))) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const day = date.toISOString().slice(0, 10);
+  return isCalendarDate(day) ? day : null;
+}
+
+/**
+ * Each entry's `added` must be a real calendar date no later than the first day its advisory id
+ * appears in the parsed snapshots. An id absent from those snapshots uses today.
+ */
+export function validateAllowlistHistory(allowlist, firstDays, today) {
+  const problems = [];
+  const todayDay = utcDay(today);
+  (allowlist?.entries ?? []).forEach((entry, i) => {
+    if (typeof entry?.ghsa !== "string") return;
+    const where = `entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"})`;
+    if (!isCalendarDate(entry?.added)) {
+      problems.push(`${where}: "added" must be a real calendar date (YYYY-MM-DD)`);
+      return;
+    }
+    const id = entry.ghsa.toUpperCase();
+    const boundary = firstDays.get(id) ?? todayDay;
+    if (!isCalendarDate(boundary)) {
+      problems.push(`${where}: first history day must be a real calendar date (YYYY-MM-DD)`);
+      return;
+    }
+    if (firstDays.has(id) && boundary > todayDay) {
+      problems.push(`entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"}): first history day (${boundary}) is after today (${todayDay})`);
+    }
+    if (entry.added > todayDay) {
+      problems.push(`entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"}): "added" (${entry.added}) is after today (${todayDay})`);
+    }
+    if (entry.added <= boundary) return;
+    const bound =
+      firstDays.has(id)
+        ? `the first day this advisory appears in parsed allowlist history (${boundary})`
+        : `today (${boundary}), and no parsed snapshot contained this advisory id`;
+    problems.push(
+      `entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"}): lifetime cap: "added" (${entry.added}) is later than ${bound}.`,
+    );
+  });
+  return problems;
+}
+
+/**
+ * Problems with an over-cap entry's approval, exactly as the plan defines it:
+ * all four members, non-blank names and reasons, real dates, `approvedOn` <= today
+ * < its `expires`, the entry not outliving it, and the approval itself no longer
+ * than the severity cap.
+ */
+export function overCapApprovalProblems(entry, today, cap) {
+  const approval = entry?.overCapApproval;
+  if (!approval || typeof approval !== "object" || Array.isArray(approval)) {
+    return ["no overCapApproval is present"];
+  }
+  const problems = [];
+  for (const field of ["approvedBy", "reason", "approvedOn", "expires"]) {
+    if (typeof approval[field] !== "string" || approval[field].trim() === "") {
+      problems.push(`"overCapApproval.${field}" is required and must be non-blank`);
+    }
+  }
+  if (problems.length) return problems;
+  for (const field of ["approvedOn", "expires"]) {
+    if (!isCalendarDate(approval[field])) problems.push(`"overCapApproval.${field}" must be a real calendar date (YYYY-MM-DD)`);
+  }
+  if (problems.length) return problems;
+
+  const todayDay = utcDay(today);
+  if (approval.approvedOn > todayDay) problems.push(`"overCapApproval.approvedOn" (${approval.approvedOn}) is after today (${todayDay})`);
+  if (todayDay >= approval.expires) problems.push(`the over-cap approval EXPIRED on ${approval.expires}`);
+  if (entry.expires > approval.expires) {
+    problems.push(`the entry expires ${entry.expires}, after the approval's expiry ${approval.expires}`);
+  }
+  const approvalDays = Math.round((Date.parse(approval.expires) - Date.parse(approval.approvedOn)) / DAY_MS);
+  if (approvalDays <= 0) {
+    problems.push(`"overCapApproval.expires" (${approval.expires}) must be after "approvedOn" (${approval.approvedOn})`);
+  } else if (approvalDays > cap) {
+    problems.push(`the approval lasts ${approvalDays}d, beyond the ${cap}d cap for this severity`);
+  }
+  return problems;
+}
 
 export function validateAllowlist(allowlist, today) {
   const problems = [];
@@ -564,6 +741,8 @@ export function validateAllowlist(allowlist, today) {
 
     if (!/^GHSA-[a-z0-9-]+$/i.test(entry.ghsa)) {
       problems.push(`${where}: "ghsa" must be a GHSA id`);
+    } else if (!/^GHSA-[a-z0-9-]+$/.test(entry.ghsa)) {
+      problems.push(`${where}: "ghsa" must use canonical casing (uppercase GHSA- prefix, lowercase remainder)`);
     }
     const key = entryKey(entry);
     const duplicateKey = seenKeys.has(key);
@@ -613,9 +792,10 @@ export function validateAllowlist(allowlist, today) {
         );
       }
     }
-    if (!isIsoDate(entry.added)) problems.push(`${where}: "added" must be YYYY-MM-DD`);
-    if (!isIsoDate(entry.expires)) problems.push(`${where}: "expires" must be YYYY-MM-DD`);
-    if (!isIsoDate(entry.added) || !isIsoDate(entry.expires)) return;
+    if (!isCalendarDate(entry.added)) problems.push(`${where}: "added" must be a real calendar date (YYYY-MM-DD)`);
+    if (!isCalendarDate(entry.expires)) problems.push(`${where}: "expires" must be a real calendar date (YYYY-MM-DD)`);
+    if (!isCalendarDate(entry.added) || !isCalendarDate(entry.expires)) return;
+    if (entry.added > utcDay(today)) problems.push(`${where}: "added" (${entry.added}) is after today (${utcDay(today)})`);
 
     // An exception with no meaningful deadline is the defect this gate exists
     // to prevent, so the deadline is capped by severity and the cap is enforced
@@ -625,11 +805,19 @@ export function validateAllowlist(allowlist, today) {
       problems.push(`${where}: "expires" (${entry.expires}) must be after "added" (${entry.added})`);
     }
     const cap = caps[entry.severity];
-    if (typeof cap === "number" && lifetimeDays > cap) {
+    if (typeof cap !== "number") {
       problems.push(
-        `${where}: lifetime ${lifetimeDays}d exceeds the ${cap}d cap for severity "${entry.severity}". ` +
-          `Shorten "expires", or fix the advisory.`,
+        `${where}: no lifetime cap is configured for severity "${entry.severity}". Add it to ` +
+          `policy.maxLifetimeDaysBySeverity; an entry without a cap cannot be admitted.`,
       );
+    } else if (lifetimeDays > cap || entry.overCapApproval !== undefined) {
+      const approvalProblems = overCapApprovalProblems(entry, today, cap);
+      if (approvalProblems.length) {
+        problems.push(
+          `${where}: ${lifetimeDays > cap ? `lifetime ${lifetimeDays}d exceeds the ${cap}d cap for severity "${entry.severity}" and ` : ""}` +
+            `its overCapApproval is not valid — ${approvalProblems.join("; ")}.`,
+        );
+      }
     }
     if (String(entry.removeWhen).trim().length < 20) {
       problems.push(
@@ -1253,6 +1441,10 @@ function canonicalPrefix(prefix) {
 const SEVERITY_ORDER = { critical: 0, high: 1, moderate: 2, low: 3, info: 4, unknown: 5 };
 
 async function main() {
+  if (process.env.AUDIT_GATE_TODAY && !isCalendarDate(process.env.AUDIT_GATE_TODAY)) {
+    console.error("AUDIT_GATE_TODAY must be a real calendar date (YYYY-MM-DD)");
+    process.exit(2);
+  }
   const today = new Date(process.env.AUDIT_GATE_TODAY || Date.now());
   if (Number.isNaN(today.getTime())) {
     console.error("AUDIT_GATE_TODAY is not a parseable date");
@@ -1316,9 +1508,26 @@ async function main() {
   if (identityProblems.length) process.exit(2);
 
   let allowlist;
+  let firstDays;
   let advisories;
   try {
     allowlist = loadAllowlist();
+  } catch (e) {
+    console.error(`\n  DEPENDENCY AUDIT GATE: FAILED TO RUN\n\n  ${e.message}\n`);
+    console.error("  The gate fails closed: an audit that cannot run is not an audit that passed.\n");
+    process.exit(1);
+  }
+  try {
+    firstDays = readAllowlistHistory(REPO_ROOT);
+  } catch (e) {
+    console.error(`\n  DEPENDENCY AUDIT GATE: FAILED TO READ ALLOWLIST HISTORY\n\n  ${e.message}\n`);
+    console.error(
+      "  The gate fails closed: an unknown history is not evidence that an advisory is new.\n" +
+        "  Full history is required; the audit job checks out with fetch-depth: 0.\n",
+    );
+    process.exit(1);
+  }
+  try {
     advisories = flattenAdvisories(runBunAudit());
     for (const input of CONSUMER_INSTALLS) {
       advisories = advisories.concat(
@@ -1339,9 +1548,11 @@ async function main() {
 
   const schemaProblems = validateAllowlist(allowlist, today);
   for (const p of schemaProblems) fail(`allowlist is malformed — ${p}`);
+  const historyProblems = validateAllowlistHistory(allowlist, firstDays, today);
+  for (const p of historyProblems) fail(`allowlist history/date invalid — ${p}`);
   // Matching against a malformed allowlist can admit an entry the schema check
   // refused, and the summary would count it as allowlisted. Report and stop.
-  if (schemaProblems.length) {
+  if (schemaProblems.length || historyProblems.length) {
     console.log("\n  The allowlist is malformed; no advisory was matched against it.\n");
     reportFailuresAndExit();
   }
@@ -1709,6 +1920,23 @@ async function main() {
   console.log(`  advisories reported: ${advisories.length} (${countStr})`);
   console.log(`  allowlisted (justified + dated):  ${new Set(allowed.map(({ adv }) => adv)).size}`);
   console.log(`  blocking:                         ${blocked.length}\n`);
+
+  const caps = allowlist.policy?.maxLifetimeDaysBySeverity ?? {};
+  const overCap = allowlist.entries.filter((entry) => {
+    const cap = caps[entry?.severity];
+    if (typeof cap !== "number" || !isCalendarDate(entry?.added) || !isCalendarDate(entry?.expires)) return false;
+    return Math.round((Date.parse(entry.expires) - Date.parse(entry.added)) / DAY_MS) > cap;
+  });
+  for (const entry of overCap) {
+    const approval = entry.overCapApproval;
+    const lifetimeDays = Math.round((Date.parse(entry.expires) - Date.parse(entry.added)) / DAY_MS);
+    console.log(
+      `  OVER-CAP: ${entry.ghsa} ${entry.package} — cumulative ${lifetimeDays}d lifetime, ` +
+        `${caps[entry.severity]}d ${entry.severity} cap, approval recorded for ${approval.approvedBy} until ` +
+        `${approval.expires}: ${approval.reason}`,
+    );
+  }
+  if (overCap.length) console.log("");
 
   for (const { entry } of notReportedByBun) {
     console.log(
