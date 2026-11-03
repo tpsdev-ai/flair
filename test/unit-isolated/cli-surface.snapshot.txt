@@ -126,7 +126,7 @@ flair agent add
       description: Admin password for registration
       attr: adminPass
     --admin-pass-file <path>
-      description: Read the admin password from a file (chmod 600 enforced). Preferred over inline --admin-pass — keeps the secret out of ps and shell history; works for remote targets too (an explicit flag is operator intent).
+      description: Read the admin password from a file (owner-only permissions enforced). Preferred over inline --admin-pass — keeps the secret out of ps and shell history; works for remote targets too (an explicit flag is operator intent).
       attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -250,7 +250,7 @@ flair agent stamp-home
       description: Admin password (or set FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
-      description: Read the admin password from a file (chmod 600 enforced)
+      description: Read the admin password from a file (owner-only permissions enforced)
       attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -3217,11 +3217,11 @@ Options:
   --name <name>             Display name (defaults to id)
   --port <port>             Harper HTTP port
   --admin-pass <pass>       Admin password for registration
-  --admin-pass-file <path>  Read the admin password from a file (chmod 600
-                            enforced). Preferred over inline --admin-pass —
-                            keeps the secret out of ps and shell history; works
-                            for remote targets too (an explicit flag is operator
-                            intent).
+  --admin-pass-file <path>  Read the admin password from a file (owner-only
+                            permissions enforced). Preferred over inline
+                            --admin-pass — keeps the secret out of ps and shell
+                            history; works for remote targets too (an explicit
+                            flag is operator intent).
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --keys-dir <dir>          Directory for Ed25519 keys
@@ -3336,8 +3336,8 @@ Options:
   --port <port>             Harper HTTP port
   --ops-port <port>         Harper operations API port
   --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS)
-  --admin-pass-file <path>  Read the admin password from a file (chmod 600
-                            enforced)
+  --admin-pass-file <path>  Read the admin password from a file (owner-only
+                            permissions enforced)
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --apply                   Write the home; without it the command is a dry run

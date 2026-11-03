@@ -14,6 +14,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { spawnCli } from "../helpers/build-cli-once.js";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -211,6 +212,45 @@ describe("flair#2889 — agent list does not print the credential an endpoint ec
     } finally {
       stub.stop(true);
       rmSync(redactionHome, { recursive: true, force: true });
+    }
+  }, CASE_BUDGET_MS);
+
+  test("the signed branch redacts an echoed Authorization", async () => {
+    let seenAuth = "";
+    const stub = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        seenAuth = req.headers.get("authorization") ?? "";
+        return new Response(`endpoint echoed Authorization: ${seenAuth}`, { status: 500 });
+      },
+    });
+    const signedHome = mkdtempSync(join(tmpdir(), "flair-2889-signed-"));
+    const keyDir = join(signedHome, "keys");
+    try {
+      mkdirSync(join(signedHome, ".flair"));
+      mkdirSync(keyDir);
+      writeFileSync(
+        join(signedHome, ".flair", "config.yaml"),
+        `port: ${Number(stub.port)}\nopsPort: ${Number(stub.port) + 1}\n`,
+      );
+      writeFileSync(join(keyDir, `${AGENT_ID}.key`), randomBytes(32));
+      const list = await runCli(
+        ["agent", "list", "--agent", AGENT_ID],
+        { HOME: signedHome, FLAIR_KEY_DIR: keyDir },
+      );
+      expect(list.code).toBe(1);
+      expect(seenAuth).toMatch(/^TPS-Ed25519 /);
+      const signature = seenAuth.split(":")[3] ?? "";
+      expect(signature.length).toBeGreaterThan(0);
+      expect(list.stderr).toContain("[redacted]");
+      for (const output of [list.stdout, list.stderr]) {
+        expect(output).not.toContain(seenAuth);
+        expect(output).not.toContain(signature);
+      }
+    } finally {
+      stub.stop(true);
+      rmSync(signedHome, { recursive: true, force: true });
     }
   }, CASE_BUDGET_MS);
 });

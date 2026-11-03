@@ -32,6 +32,8 @@ import {
   resolveAdminUser,
   resolveKeyPath,
   authFetch,
+  authFetchWithSentCredentials,
+  type SentCredentials,
 } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { resolveLocalDeleteInstance } from "../lib/local-delete-instance.js";
@@ -318,7 +320,7 @@ export function register(program: Command): void {
     "Admin password for registration",
     {
       adminPassFileHelp:
-        "Read the admin password from a file (chmod 600 enforced). Preferred over inline --admin-pass — keeps the secret out of ps and shell history; works for remote targets too (an explicit flag is operator intent).",
+        "Read the admin password from a file (owner-only permissions enforced). Preferred over inline --admin-pass — keeps the secret out of ps and shell history; works for remote targets too (an explicit flag is operator intent).",
     },
   )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
@@ -480,13 +482,14 @@ export function register(program: Command): void {
         const agentId = opts.agent ?? process.env.FLAIR_AGENT_ID;
         const keysDir: string = opts.keysDir ?? process.env.FLAIR_KEY_DIR ?? defaultKeysDir();
         let res: Response;
+        let sent: SentCredentials = { values: [], withhold: false };
         if (agentId) {
           const keyPath = resolveKeyPath(agentId) ?? join(keysDir, `${agentId}.key`);
           if (!existsSync(keyPath)) {
             console.error(`${render.icons.error} no key for agent '${agentId}' (looked in ${keysDir}). Pass --admin-pass, --keys-dir, or a registered --agent.`);
             process.exit(1);
           }
-          res = await authFetch(baseUrl, agentId, keyPath, "GET", "/Agent");
+          ({ res, sent } = await authFetchWithSentCredentials(baseUrl, agentId, keyPath, "GET", "/Agent"));
         } else {
           // No agent identity available either. Try anonymously, but if it 403s
           // (the common case), tell the user exactly how to authenticate rather
@@ -500,7 +503,7 @@ export function register(program: Command): void {
             console.error(`   Use ${render.wrap(render.c.cyan, "--agent <id>")} (or set FLAIR_AGENT_ID) to authenticate as a registered agent,`);
             console.error(`   or ${render.wrap(render.c.cyan, "--admin-pass")} / FLAIR_ADMIN_PASS for the admin view.`);
           } else {
-            console.error(`${render.icons.error} ${res.status} ${text}`);
+            console.error(`${render.icons.error} ${describeHttpFailure(res.status, text, sent.values, sent.withhold)}`);
           }
           process.exit(1);
         }
@@ -829,7 +832,7 @@ export function register(program: Command): void {
       .option("--port <port>", "Harper HTTP port")
       .option("--ops-port <port>", "Harper operations API port"),
     "Admin password (or set FLAIR_ADMIN_PASS)",
-    { adminPassFileHelp: "Read the admin password from a file (chmod 600 enforced)" },
+    { adminPassFileHelp: "Read the admin password from a file (owner-only permissions enforced)" },
   )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--apply", "Write the home; without it the command is a dry run and writes nothing")

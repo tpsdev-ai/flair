@@ -946,7 +946,7 @@ export interface AddAdminPassOptionsConfig {
  * Declare the admin-password pair on `cmd`: the argv form and the file form
  * together, in that order, and apply it in a preAction hook. The hook runs after
  * option parsing and before the action body, so a refused file exits before any
- * request, and no action can forget the call.
+ * request the command's action makes, and no action can forget the call.
  */
 export function addAdminPassOptions(
   cmd: Command,
@@ -1258,6 +1258,23 @@ export async function authFetch(
   path: string,
   body?: unknown,
 ): Promise<Response> {
+  return (await authFetchWithSentCredentials(baseUrl, agentId, keyPath, method, path, body)).res;
+}
+
+/**
+ * `authFetch`'s request, with the credentials it sent: a caller that renders a
+ * non-ok response needs them to redact a body that echoes the Authorization
+ * header (flair#2889). `sent` is `credentialsInHeader`'s reading of the header
+ * this request sent.
+ */
+export async function authFetchWithSentCredentials(
+  baseUrl: string,
+  agentId: string,
+  keyPath: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ res: Response; sent: SentCredentials }> {
   const url = requestUrl(baseUrl, path);
   let auth: string;
   try {
@@ -1267,11 +1284,12 @@ export async function authFetch(
   }
   const headers: Record<string, string> = { Authorization: auth };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  return fetch(url.href, {
+  const res = await fetch(url.href, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  return { res, sent: credentialsInHeader(auth) };
 }
 
 export function isLocalBase(base: string): boolean {
