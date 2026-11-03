@@ -1516,7 +1516,8 @@ export async function sendJsonRequest(
  * The 401 error codes resources/auth-middleware.ts returns when it refuses
  * the Ed25519 credential itself: an unparseable header, a timestamp outside
  * the replay window, an unknown agent, a deactivated principal, or a signature
- * that does not verify. Only these move the tier-5 floor to the next key.
+ * that does not verify. A 401 carrying one of these codes moves the tier-5
+ * floor to the next key.
  * `nonce_replay_detected` and `replay_store_unavailable` are answers about the
  * REQUEST (a reused nonce, an unavailable store), not the credential, so they
  * are final.
@@ -1548,8 +1549,9 @@ function isEd25519CredentialRejection(err: unknown): boolean {
  * Tier 5, the floor (flair#747, generalizing flair#742's `verifyAuthedGet`
  * GET-only fallback to any method/body): try every registered key in
  * `keysDir` in sorted (deterministic) filename order, first one that
- * authenticates wins. Returns `undefined` when there are no keys to try, so
- * the caller can rethrow its ORIGINAL no-credentials error rather than a
+ * authenticates wins. Returns `undefined` when no key is accepted — there
+ * are no keys to try, or every key was refused as a credential — so the
+ * caller can rethrow its ORIGINAL no-credentials error rather than a
  * floor-specific one.
  *
  * The floor moves to the next key ONLY when the server refused the Ed25519

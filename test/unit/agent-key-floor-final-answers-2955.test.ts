@@ -114,7 +114,7 @@ function errorCodeOf(err: unknown): string | undefined {
 
 const ENV_KEYS = ["FLAIR_TOKEN", "FLAIR_ADMIN_PASS", "HDB_ADMIN_PASSWORD", "FLAIR_KEY_DIR"] as const;
 
-describe("flair#2955 — the agent-key floor treats an answered request as final", () => {
+describe("flair#2955 — the agent-key floor moves on only for credential refusals and connect failures", () => {
   let keysDir: string;
   let homeDir: string;
   let savedEnv: Record<string, string | undefined>;
