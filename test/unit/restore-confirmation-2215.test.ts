@@ -131,11 +131,13 @@ describe("restore confirms archived IDs (#2215)", () => {
     expect(JSON.parse(result.calls.find(call => call.path === memoryPath)!.body)).toEqual(archive.memories[0]);
   });
 
-  test("replace restores an earlier deleted row after the second deletion fails", async () => {
+  test("replace restores an earlier deleted Soul row after a later Soul deletion fails", async () => {
     const result = await run([{ method: "DELETE", path: "/Soul/kern%3Asoul", status: 500 }], archive, ["--replace"]);
     expect(result.rows.get("Soul/flint:soul")).toEqual(archive.souls[0]);
     refused(result, "kern:soul", "kern", "DELETE", "500");
-    expect(result.calls.slice(0, 2).map(({ method, path }) => ({ method, path }))).toEqual([
+    expect(result.calls.slice(0, 4).map(({ method, path }) => ({ method, path }))).toEqual([
+      { method: "DELETE", path: memoryPath },
+      { method: "DELETE", path: "/Memory/m2" },
       { method: "DELETE", path: "/Soul/flint%3Asoul" },
       { method: "DELETE", path: "/Soul/kern%3Asoul" },
     ]);

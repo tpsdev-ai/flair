@@ -170,6 +170,7 @@ describe("flair#1540 — rem restore refuses a scoped Soul row before deleting a
     expect(result.code, output).toBe(1);
     expect(result.stdout).toContain("Status:       failed");
     expect(result.stdout).toContain(`soul-scope-preflight: Soul ${SCOPED_ID}`);
+    expect(result.stdout).toContain("Restore from a different snapshot, or edit that row in the snapshot file");
     expect(result.stdout).toContain("Deleted:      0 memories, 0 souls");
     expect(result.stdout).toContain("Restored:     0 memories, 0 souls");
 
@@ -203,6 +204,7 @@ describe("flair#1540 — rem restore refuses a scoped Soul row before deleting a
     expect(result.code, output).toBe(1);
     expect(result.stdout).toContain("Status:       failed");
     expect(result.stdout).toContain(`soul-scope-preflight: Soul ${taggedId}`);
+    expect(result.stdout).toContain("Clear tags/scopeTag on that row (PATCH) or delete it");
     expect(result.stdout).toContain("Deleted:      0 memories, 0 souls");
     expect(await soulRow(harper, snapshotId)).toBeUndefined();
   }, 300_000);

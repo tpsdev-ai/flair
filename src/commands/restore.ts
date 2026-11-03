@@ -183,10 +183,11 @@ program
       // not checked here.
       //
       // The learned-content comparison runs against the state each Soul PUT
-      // will meet: the archived Memory ids are deleted first and written back
-      // after the Souls, so a live Memory row counts only when its id is not
-      // in the archive. Every live candidate counts: replace never deletes
-      // MemoryCandidate rows.
+      // will meet: the archived Memory ids are deleted first, and a failed
+      // Memory DELETE stops the run before any Soul delete, so those rows are
+      // gone when the Souls are written. They are written back after the Souls,
+      // so a live Memory row counts only when its id is not in the archive.
+      // Every live candidate counts: replace never deletes MemoryCandidate rows.
       const LEARNED_REFUSAL = "soul_value_is_learned_content";
       const writtenSouls = souls;
       const refusals: string[] = [];
@@ -195,8 +196,8 @@ program
         if (!suppliesSoulScopeFields(row)) continue;
         scopeRefused.add(String(row.id));
         refusals.push(
-          `Error: Soul ${row.id}: supplies a non-empty scopeTag or tags array, `
-            + "which the Soul scope-field rule refuses; no rows were deleted",
+          `Error: Soul ${row.id}: the archived row supplies a non-empty scopeTag or tags array, `
+            + "which the Soul scope-field rule refuses; edit that row in the archive, then re-run; no rows were deleted",
         );
       }
 
@@ -261,8 +262,9 @@ program
           }
           if (unmatched.size === 0) continue;
 
-          // The admin candidate route lists ids only; each row is read once to
-          // compare its claim exactly, as the server does.
+          // The admin candidate route lists ids only; each listed row is read
+          // until every unmatched value has matched, to compare its claim
+          // exactly.
           const candidates = await listAgentCandidates(preflightCall, agentId);
           for (const candidate of candidates) {
             if (unmatched.size === 0) break;
@@ -294,12 +296,25 @@ program
         return;
       }
       console.log("\nDeleting existing data (replace mode)...");
-      for (const { name, rows } of collections.filter(({ name }) => name !== "Agent")) {
-        for (const row of rows) {
-          const { status } = await adminWrite("DELETE", `/${name}/${encodeRecordId(row.id)}`);
-          if (status === undefined || (status !== 404 && (status < 200 || status >= 300))) {
-            failures.push(diagnostic(name, row, "DELETE", status));
-          }
+      // Memory rows go first: the learned-content check above assumes the
+      // archived Memory ids are gone before a Soul write. A Memory DELETE the
+      // server refuses leaves that row in place, so stop here rather than
+      // delete a Soul whose PUT the surviving row would refuse.
+      for (const row of memories) {
+        const { status } = await adminWrite("DELETE", `/Memory/${encodeRecordId(row.id)}`);
+        if (status === undefined || (status !== 404 && (status < 200 || status >= 300))) {
+          failures.push(diagnostic("Memory", row, "DELETE", status));
+        }
+      }
+      if (failures.length > 0) {
+        console.error("Error: a Memory DELETE failed; no Soul row was deleted.");
+        fail();
+        return;
+      }
+      for (const row of souls) {
+        const { status } = await adminWrite("DELETE", `/Soul/${encodeRecordId(row.id)}`);
+        if (status === undefined || (status !== 404 && (status < 200 || status >= 300))) {
+          failures.push(diagnostic("Soul", row, "DELETE", status));
         }
       }
     }

@@ -530,13 +530,16 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   // the row is live, deleting it first also makes the pre-restore rollback
   // refuse it. Merge mode does not exist here; this restore always replaces
   // the agent's rows.
-  const refusedSouls = refusedSoulReplayIds([...souls, ...currentSouls]);
+  const snapshotRefusedSouls = new Set(refusedSoulReplayIds(souls));
+  const refusedSouls = [...new Set([...snapshotRefusedSouls, ...refusedSoulReplayIds(currentSouls)])];
   if (refusedSouls.length > 0) {
     for (const id of refusedSouls) {
+      const remedy = snapshotRefusedSouls.has(id)
+        ? "Restore from a different snapshot, or edit that row in the snapshot file, then re-run."
+        : "Clear tags/scopeTag on that row (PATCH) or delete it, then re-run.";
       errors.push(
         `soul-scope-preflight: Soul ${id} supplies a non-empty scopeTag or tags array, `
-          + "which the Soul scope-field rule refuses; no target rows were deleted or written. "
-          + "Clear tags/scopeTag on that row (PATCH) or delete it, then re-run.",
+          + `which the Soul scope-field rule refuses; no target rows were deleted or written. ${remedy}`,
       );
     }
     result.status = "failed";

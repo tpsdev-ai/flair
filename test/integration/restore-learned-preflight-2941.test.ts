@@ -7,12 +7,14 @@
  * `content` or MemoryCandidate `claim` is refused (`soul_value_is_learned_content`).
  * Replace mode deletes only the archived ids, so a Memory or candidate row
  * written after the backup survives its deletes and refuses the Soul PUT that
- * follows — after the live Soul row is gone, with no rollback.
+ * follows. A Memory row whose id is in the archive is deleted before the
+ * Souls, and a failed Memory DELETE stops the run before any Soul row is
+ * deleted.
  *
  * Every case below runs a real `flair backup`, seeds the target with admin
  * credentials, and runs the built CLI under a throwaway HOME. The preflight
- * cases assert the live rows are byte-identical afterwards, which also proves
- * no delete was sent.
+ * cases assert the live rows are byte-identical afterwards; that comparison
+ * alone does not show which HTTP methods the CLI sent.
  *
  * Build prerequisite: `bun run build && bun run build:cli`.
  */
@@ -308,5 +310,33 @@ describe("flair restore --replace refuses a learned-content Soul replay before d
     } finally {
       proxy.stop(true);
     }
+  }, 300_000);
+
+  test("case (vi): a Memory DELETE the server refuses stops the run before any Soul row is deleted", async () => {
+    const home = tempDir("flair-2941-real-home-");
+    const agent = "learned-legacy-member-agent";
+    const soulId = `${agent}:identity`;
+    const memoryId = `${agent}:legacy.content`;
+    const value = "the text shared by the soul and the legacy memory";
+
+    await seedAgent(agent);
+    expect(await operatorPut(`/Soul/${encodeURIComponent(soulId)}`, {
+      id: soulId, agentId: agent, key: "identity", value, durability: "permanent", createdAt: CREATED_AT,
+    })).toBeLessThan(300);
+    await op({
+      operation: "upsert", table: "Memory",
+      records: [{ id: memoryId, agentId: agent, content: value, durability: "persistent", createdAt: CREATED_AT }],
+    });
+    const archive = await backup(home, "learned-legacy-member.json", agent);
+
+    const before = { soul: await row("Soul", soulId), memory: await row("Memory", memoryId) };
+
+    const restored = await runCli(["restore", archive, "--replace", "--url", harper.httpURL], home, { FLAIR_ADMIN_PASS: harper.admin.password });
+
+    expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
+    expect(await row("Soul", soulId)).toEqual(before.soul);
+    expect(await row("Memory", memoryId)).toEqual(before.memory);
+    expect(restored.stderr).toContain(memoryId);
+    expect(restored.stderr).toContain("no Soul row was deleted");
   }, 300_000);
 });
