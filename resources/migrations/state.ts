@@ -22,6 +22,8 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ensureSecureDir, writeSecureFile } from "./dir-safety.js";
+import { migrationLockHandleStatus, migrationLockIdentity, migrationLockStillHeld, type MigrationLockHandle } from "./lock.js";
+import { txnPausePoint } from "../txn-pause-point.js";
 
 export type MigrationOutcome = "success" | "halted" | "failed";
 
@@ -77,11 +79,55 @@ export function readMigrationState(path: string): MigrationStateFile {
   }
 }
 
-export function writeMigrationStateEntry(path: string, id: string, entry: MigrationStateEntry): void {
+/** The named refusal a state write makes without a live handle for the state
+ *  file's migration lock (flair#2866). */
+export class MigrationStateWriteRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MigrationStateWriteRefusedError";
+  }
+}
+
+export async function writeMigrationStateEntry(
+  path: string,
+  id: string,
+  entry: MigrationStateEntry,
+  lock: MigrationLockHandle,
+): Promise<void> {
   const dir = dirname(path);
+  const designatedLockPath = join(dir, "lock");
+  const status = migrationLockHandleStatus(lock);
+  const identity = migrationLockIdentity(lock);
+  if (status !== "live" || identity === null) {
+    throw new MigrationStateWriteRefusedError(
+      status === "released"
+        ? `refusing to write ${path}: the migration lock handle was already released`
+        : `refusing to write ${path}: no held migration lock handle was supplied`,
+    );
+  }
+  if (identity.lockPath !== designatedLockPath) {
+    throw new MigrationStateWriteRefusedError(
+      `refusing to write ${id} in ${path}: the lock handle is for ${identity.lockPath}, not the state file's lock at ${designatedLockPath}`,
+    );
+  }
   ensureSecureDir(dir);
   const current = readMigrationState(path);
   current[id] = entry;
+  // Test-only pause between the read and the rename (flair#2866).
+  const pause = txnPausePoint("migration-state-write");
+  if (pause) await pause;
+  // This re-check reads the lock pathname and detects a replacement that
+  // landed before the read. It inspects the file it opened, so a pathname
+  // replacement during that descriptor read can occur before the check
+  // returns.
+  // writeSecureFile then creates its temporary file, flushes it and renames it
+  // over the state file; a replacement that lands during that write is not
+  // detected again (flair#2866).
+  if (migrationLockHandleStatus(lock) !== "live" || !migrationLockStillHeld(lock)) {
+    throw new MigrationStateWriteRefusedError(
+      `refusing to write ${id} in ${path}: the migration lock at ${identity.lockPath} is no longer held by pid ${identity.holder.pid} (started ${identity.holder.startedAt})`,
+    );
+  }
   writeSecureFile(path, JSON.stringify(current, null, 2) + "\n", dir);
 }
 
