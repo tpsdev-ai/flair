@@ -709,6 +709,60 @@ describe("abandoned release cleanup (flair#2866)", () => {
     expect(existsSync(lockPath())).toBe(false);
   }, 30_000);
 
+  it("reports an uninspected record as unknown when release cannot take the mutex", async () => {
+    const first = acquireMigrationLock({ lockPath: lockPath() });
+    if (!first.acquired) throw new Error(`migration lock unavailable: ${first.reason}`);
+    const firstHolder = JSON.parse(readFileSync(lockPath(), "utf-8"));
+    expect(firstHolder.pid).toBe(process.pid);
+
+    arm(GUARD_PUBLISHED_PAUSE);
+    const child = spawnWriter("mig-child");
+    await waitFor(paused(GUARD_PUBLISHED_PAUSE), "the child's mutex publication pause");
+
+    // Another holder's record is at the lock path before this release runs.
+    const other = { pid: 1, hostname: hostname(), startedAt: "2000-01-01T00:00:00.000Z" };
+    const otherBytes = JSON.stringify(other);
+    expect(other).not.toEqual(firstHolder);
+    writeFileSync(lockPath(), otherBytes);
+
+    // The child holds the mutex, so release cannot inspect the record.
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      first.release();
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(readFileSync(lockPath(), "utf-8")).toBe(otherBytes);
+    const cleanupWarning = warnings.find((line) => line.includes("migration lock cleanup failed"));
+    expect(cleanupWarning).toBeDefined();
+    expect(cleanupWarning).toContain(
+      "The lock record was not inspected because the mutex could not be taken, so its state is unknown",
+    );
+    expect(cleanupWarning).toContain(
+      "a later acquisition by this process removes it only after taking the mutex and finding this exact record with no live handle",
+    );
+    expect(cleanupWarning).not.toContain("owned by this process");
+    expect(cleanupWarning).not.toContain("still present");
+    expect(cleanupWarning).not.toContain("left in place");
+
+    setGo(GUARD_PUBLISHED_PAUSE);
+    expect(await waitExit(child, "child")).toBe(3);
+    expect(readFileSync(join(pauseDir, "lock-failed.mig-child"), "utf-8")).toContain("held by pid 1");
+
+    // The remembered tuple is this process's record, not the other holder's:
+    // the next acquisition refuses by the normal liveness rule and leaves the
+    // other record in place.
+    const next = acquireMigrationLock({ lockPath: lockPath() });
+    expect(next.acquired).toBe(false);
+    if (!next.acquired) expect(next.reason).toContain("held by pid 1");
+    expect(readFileSync(lockPath(), "utf-8")).toBe(otherBytes);
+  }, 30_000);
+
   it("a record with this pid but a different startedAt is still refused", async () => {
     await abandonRelease();
 

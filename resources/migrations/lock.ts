@@ -112,10 +112,10 @@ const HANDLE_KEY = Symbol("migration-lock-handle");
 const liveHolderKeys = new Set<string>();
 
 /**
- * A record this process wrote whose release could not take the mutex, so the
- * record was left in place. A later acquisition may finish that cleanup under
- * the mutex, but only for this exact identity and only when no live handle
- * holds it (flair#2866).
+ * A record this process wrote whose release could not take the mutex. A later
+ * acquisition may finish that cleanup, but only after taking the mutex, finding
+ * this exact identity still at the lock path, and finding no live handle for it
+ * (flair#2866).
  */
 const abandonedOwnRecords = new Map<string, LockHolder>();
 
@@ -920,14 +920,15 @@ function issueHandle(
       // first, then serialize the identity-checked unlink with the mutex.
       txnPausePointSync("migration-lock-release-revoked", process.env, undefined, { lockPath });
       let cleanupFailure: string | null = null;
-      // What this release did to the record, so a later failure describes the
-      // state it actually left rather than assuming the record remains.
-      let recordOutcome: "removed" | "absent" | "present" | "present-owned" | "unknown" = "unknown";
+      // What this release established about the record, so a later failure
+      // does not claim more than the release observed.
+      let recordOutcome: "removed" | "absent" | "present" | "unknown" = "unknown";
+      let recordNotInspected = false;
       try {
         const guard = acquireGuard(guardPath, defaultLockDeps(lockPath));
         if (!guard.acquired) {
           rememberAbandonedRecord(lockPath, holder);
-          recordOutcome = "present-owned";
+          recordNotInspected = true;
           cleanupFailure = `the mutex could not be acquired: ${guard.reason}`;
         } else {
           txnPausePointSync("migration-lock-release-guard", process.env, undefined, { lockPath, guardPath });
@@ -982,8 +983,8 @@ function issueHandle(
               ? "No lock record was present"
               : recordOutcome === "present"
                 ? "The lock record is left in place"
-                : recordOutcome === "present-owned"
-                  ? "The lock record is still present and owned by this process and will be cleaned on this process's next acquisition"
+                : recordNotInspected
+                  ? "The lock record was not inspected because the mutex could not be taken, so its state is unknown; a later acquisition by this process removes it only after taking the mutex and finding this exact record with no live handle"
                   : "The lock record's state is unknown";
         console.warn(
           `[flair-migrations] migration lock cleanup failed for ${lockPath}: ${cleanupFailure}. ` +
