@@ -6,10 +6,11 @@
  * is absent, so (resources/MemoryFeed.ts) it now takes the same per-id Memory
  * write lock as the ordinary feed write-back
  * (resources/memory-write-lock.ts), including the outcome-unknown marker
- * check. A marked id answers `503 write_outcome_unknown` to both paths; a held
- * id refuses the skill write `503 memory_busy` without writing, exactly as it
- * refuses the ordinary write. A live head outside the held set releases and
- * retries, then refuses `409 skill_head_moved`.
+ * check. For an authorized caller, a marked id answers `503
+ * write_outcome_unknown` to both paths; a held id refuses the skill write `503
+ * memory_busy` without writing. A live head outside the held set releases and
+ * retries; `409 skill_head_moved` is returned only if the resolved head stays
+ * outside the held set through the final attempt.
  *
  * DETERMINISTIC ORDERING via the opt-in pause points
  * (FLAIR_ENABLE_TEST_FAULT_INJECTION + FLAIR_TEST_PAUSE_DIR):
@@ -18,7 +19,10 @@
  *     records the id outcome-unknown (the marker the cases below read);
  *   - feed-ingest-staged: the ordinary feed write is staged and the id's lock
  *     is held;
- *   - the skill writer's own `skill-close-staged` pause is not used here.
+ *   - skill-close-staged: a skill write's close is staged and its locks are
+ *     held;
+ *   - skill-head-resolved: a skill write has resolved the live head and has not
+ *     taken its locks yet.
  *
  * Throwaway HOME + data dir, ephemeral ports.
  */
@@ -28,10 +32,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import type { ProbeComponent } from "../helpers/component-with-replay-probe";
-import { RaceHarness, composeTracedComponent, expectRefused, newAgent } from "../helpers/embedding-writer-race";
+import { RaceHarness, composeTracedComponent, expectRefused, newAgent, type TestAgent } from "../helpers/embedding-writer-race";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const owner = newAgent("fsl-owner");
+const intruder = newAgent("fsl-intruder");
 const CURRENT_MODEL_ID = getModelId();
 const SKILL_WRITER = "feed-skill-ingest";
 
@@ -53,9 +58,9 @@ function seed(id: string, extra: Record<string, unknown> = {}): Promise<void> {
   }, {});
 }
 
-async function feedSkill(id: string, content: string): Promise<Response> {
-  return h.signed(owner, "POST", "/FeedMemories", {
-    id, agentId: owner.id, content, trigger: `when ${content} applies`,
+async function feedSkill(id: string, content: string, agent: TestAgent = owner): Promise<Response> {
+  return h.signed(agent, "POST", "/FeedMemories", {
+    id, agentId: agent.id, content, trigger: `when ${content} applies`,
     tags: ["skill"], durability: "persistent", visibility: "shared",
   });
 }
@@ -97,6 +102,7 @@ beforeAll(async () => {
   h.harper = harper;
   h.assertOwnInstance();
   await h.seedAgent(owner);
+  await h.seedAgent(intruder);
 }, 240_000);
 
 afterAll(async () => {
@@ -183,6 +189,71 @@ describe("flair#2927 — a skill-tagged feed write (real Harper)", () => {
     expect(await h.readRow(head), "the refused skill write changed the live head").toEqual(before);
     expect(await h.readRow(subject), "the refused skill write created the addressed row").toBeNull();
     expect(h.writesBy(head, SKILL_WRITER), "the refused skill write reached the live head").toEqual([]);
+  }, 180_000);
+
+  it("a head owned by another agent is refused the same ownership error whether it is free, held or marked", async () => {
+    const cases = [
+      { subject: "fsl-authz-free-subject", head: "fsl-authz-free-head" },
+      { subject: "fsl-authz-marked-subject", head: "fsl-authz-marked-head" },
+      { subject: "fsl-authz-held-subject", head: "fsl-authz-held-head" },
+    ];
+    for (const c of cases) await seed(c.head, { visibility: "private", skillSubjectId: c.subject });
+
+    const refusal = async (subject: string) => {
+      const res = await feedSkill(subject, "skill feed write by a caller without a grant", intruder);
+      const body = await res.clone().json() as any;
+      return { status: res.status, body };
+    };
+
+    const free = await refusal(cases[0].subject);
+    expect(free.status, JSON.stringify(free.body)).toBe(403);
+    expect(free.body.error).toBe("forbidden: cannot write a skill owned by another agent without a write grant");
+
+    await markOutcomeUnknown(cases[1].head);
+    const marked = await refusal(cases[1].subject);
+
+    h.arm("feed-ingest-staged");
+    const pending = h.signed(owner, "POST", "/FeedMemories", { id: cases[2].head, agentId: owner.id, content: "ordinary feed write holding the private head" });
+    await h.assertPaused("feed-ingest-staged");
+    const held = await refusal(cases[2].subject);
+    await h.release("feed-ingest-staged");
+    expect((await pending).status).toBe(200);
+
+    expect({ marked, held }, "the marked or held head answered differently from the free head").toEqual({ marked: free, held: free });
+    for (const c of cases) {
+      expect(await h.readRow(c.subject), "the refused skill write created the addressed row").toBeNull();
+      expect(h.writesBy(c.head, SKILL_WRITER), "the refused skill write reached the live head").toEqual([]);
+    }
+  }, 180_000);
+
+  it("a head that moves between attempts is included on the next attempt and the write succeeds", async () => {
+    const subject = "fsl-move-subject";
+    const first = "fsl-move-first";
+    await seed(first, { skillSubjectId: subject });
+
+    // The first writer supersedes `first`; its close is staged and its lock
+    // held while the transaction is uncommitted.
+    h.arm("skill-close-staged");
+    const moving = feedSkill(first, "skill write that replaces the first head");
+    await h.assertPaused("skill-close-staged");
+
+    // The second writer resolves the still-live first head, then pauses before
+    // taking its lock, so the move lands after that resolution.
+    h.arm("skill-head-resolved");
+    const moved = feedSkill(subject, "skill write that resolves a moved head");
+    await h.assertPaused("skill-head-resolved");
+
+    await h.release("skill-close-staged");
+    const movingRes = await moving;
+    expect(movingRes.status, (await movingRes.clone().text()).slice(0, 300)).toBe(200);
+    const newHead = String((await movingRes.clone().json() as any).id);
+
+    await h.release("skill-head-resolved");
+    const movedRes = await moved;
+    expect(movedRes.status, (await movedRes.clone().text()).slice(0, 300)).toBe(200);
+    expect((await h.readRow(subject))?.content).toBe("skill write that resolves a moved head");
+    expect(typeof (await h.readRow(newHead))?.validTo, "the skill write did not close the moved head").toBe("string");
+    expect(h.writesBy(subject, SKILL_WRITER).map((write) => write.method), "the retried write did not run under the lock phase").toContain("put");
   }, 180_000);
 
   it("a live head of an absent addressed id is closed under its own lock when free", async () => {

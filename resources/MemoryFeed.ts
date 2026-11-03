@@ -244,16 +244,29 @@ export class FeedMemories extends Resource {
       // The live head is resolved before the acquisition and its id joins the
       // lock set, because it is the row the write closes when the addressed id
       // is absent. Under the locks the head is resolved again; a head that is
-      // not one of the held ids releases and retries with the new head, and
-      // after SKILL_HEAD_LOCK_ATTEMPTS the write is refused skill_head_moved.
+      // not one of the held ids releases and retries with the new head. The
+      // write is refused skill_head_moved only if the resolved head stays
+      // outside the held set through the final attempt.
       // One acquisition per attempt, taken before the version writer's
       // instruction lock.
       const baseLockIds = [successorId, addressedId, predecessor ? String(predecessor.id) : null]
         .filter((id): id is string => typeof id === "string" && id.length > 0);
       const HEAD_MOVED = Symbol("skill-head-moved");
       let locked: MemoryLockOutcome<{ response: Response } | typeof HEAD_MOVED> | undefined;
+      let preLockDenial: Response | null = null;
       for (let attempt = 0; attempt < SKILL_HEAD_LOCK_ATTEMPTS; attempt++) {
         const preHead = await resolveSkillHead(subjectId, addressedId, {});
+        const resolvedPause = txnPausePoint("skill-head-resolved");
+        if (resolvedPause) await resolvedPause;
+        // flair#2927: a head or predecessor this request does not own is
+        // authorized before any lock or marker is checked on it, so a caller
+        // without a write grant gets the ownership refusal whether that row is
+        // free, held or marked; the plan re-checks authority under the locks.
+        const preDenied = await authorizeSkillOwners(ctx, auth, [preHead, predecessor], {});
+        if (preDenied) {
+          preLockDenial = preDenied;
+          break;
+        }
         const attemptIds = preHead && !baseLockIds.includes(String(preHead.id))
           ? [...baseLockIds, String(preHead.id)]
           : [...baseLockIds];
@@ -327,6 +340,7 @@ export class FeedMemories extends Resource {
         }, { phase: "feed-skill-ingest" });
         if (locked.kind !== "done" || locked.value !== HEAD_MOVED) break;
       }
+      if (preLockDenial) return preLockDenial;
       if (!locked) return skillWriteConflict("skill_head_moved");
       if (locked.kind === "busy") return memoryBusyResponse(agentId);
       if (locked.kind === "unknown") return writeOutcomeUnknownResponse();
