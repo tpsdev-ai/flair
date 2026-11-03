@@ -285,9 +285,10 @@ function incompleteListing(agentId: string, state: string, remedy = ""): Error {
  * an id listed twice, or more than {@link CANDIDATE_LIST_MAX_PAGES} pages is
  * refused.
  *
- * Exported for `flair restore --replace`, which lists each archived Soul
- * row's agent here before any delete so it can compare the agent's live
- * candidate claims with the Soul values it is about to write.
+ * Exported for `flair restore --replace`, which lists the agent of each
+ * archived Soul row it will write a non-empty value for before any delete, so
+ * it can compare that agent's live candidate claims with the values it is
+ * about to write.
  */
 export async function listAgentCandidates(apiCall: ApiCall, agentId: string): Promise<Array<{ id: string }>> {
   const listed: Array<{ id: string }> = [];

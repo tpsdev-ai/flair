@@ -9,8 +9,8 @@
  * written after the backup survives its deletes and refuses the Soul PUT that
  * follows — after the live Soul row is gone, with no rollback.
  *
- * Every case below runs a real `flair backup`, seeds the target through the
- * admin ops API, and runs the built CLI under a throwaway HOME. The preflight
+ * Every case below runs a real `flair backup`, seeds the target with admin
+ * credentials, and runs the built CLI under a throwaway HOME. The preflight
  * cases assert the live rows are byte-identical afterwards, which also proves
  * no delete was sent.
  *
