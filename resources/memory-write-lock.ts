@@ -66,7 +66,8 @@
  *    {@link withMemoryWriteLockOnce} writes nothing to a marked id; the feed
  *    write-back and the feed dedup repair record the marker when storage
  *    withholds their write result, the skill-tagged feed write when storage
- *    withholds its write result or its rollback could not be confirmed, and the dedup
+ *    withholds its write result, its rollback could not be confirmed or its
+ *    refusal body has no readable error code, and the dedup
  *    repair also when its committed
  *    update's confirmation read fails or does not show the update, while the
  *    other automatic writers do not set it for their own unconfirmed write,
