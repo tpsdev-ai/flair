@@ -13,7 +13,7 @@
  * Everything else is canonical, including `%2F` and `%5C` inside a segment, a
  * dot inside a segment (`a.b`), and any query string.
  *
- * PURE: string logic only, imports nothing.
+ * PURE: no imports and no I/O; the comparisons use the global `URL`.
  */
 
 /** The named error a non-canonical request target is refused with. */
@@ -28,6 +28,34 @@ const DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
 export function requestPath(rawTarget: string): string {
   const q = rawTarget.indexOf("?");
   return q === -1 ? rawTarget : rawTarget.slice(0, q);
+}
+
+/** The query part of a raw request target: everything after the first `?` ("" when none). */
+export function requestQuery(rawTarget: string): string {
+  const q = rawTarget.indexOf("?");
+  return q === -1 ? "" : rawTarget.slice(q + 1);
+}
+
+/** True when the serialized WHATWG `pathname + search` equals `rawTarget`. */
+export function whatwgUrlMatchesRawTarget(rawTarget: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(rawTarget, "http://localhost");
+  } catch {
+    return false;
+  }
+  return url.pathname + url.search === rawTarget;
+}
+
+/** True when the serialized WHATWG `search` without its leading `?` equals `requestQuery(rawTarget)`. */
+export function whatwgQueryMatchesRawTarget(rawTarget: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(rawTarget, "http://localhost");
+  } catch {
+    return false;
+  }
+  return url.search.slice(1) === requestQuery(rawTarget);
 }
 
 /** True when a raw request target is in canonical form (see the module header). */

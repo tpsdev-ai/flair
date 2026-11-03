@@ -255,6 +255,7 @@ describe("round 23 — sender projection through signed federation receive", () 
     });
     const sent: any[] = [];
     let projectionCalls = 0;
+    const retryRows = new Map<string, any>();
     globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
       const url = String(urlInput);
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
@@ -263,6 +264,9 @@ describe("round 23 — sender projection through signed federation receive", () 
       ] });
       if (url.endsWith("/FederationInstance")) return Response.json({ id: PEER_ID, publicKey, role: "spoke" });
       if (body?.operation === "search_by_conditions") {
+        if (body.table === "FederationRetry") {
+          return Response.json([...retryRows.values()].filter((row) => row.state === "pending" && row.peerId === "hub" && row.table === "Memory"));
+        }
         if (body.table !== "Memory") return Response.json([]);
         // The REAL sender query passes Harper's ops validation and projection.
         // A fetch mock returning the entire row would hide this regression.
@@ -273,6 +277,10 @@ describe("round 23 — sender projection through signed federation receive", () 
         });
         return Response.json(JSON.parse(projected));
       }
+      if (body?.operation === "search_by_hash" && body.table === "FederationRetry") {
+        const hashes: string[] = body.hash_values ?? [];
+        return Response.json(hashes.map((id) => retryRows.get(id)).filter(Boolean));
+      }
       if (url.endsWith("/FederationSync")) {
         sent.push(...structuredClone(body.records));
         const result = await new (FederationSync as any)().post(body);
@@ -281,7 +289,13 @@ describe("round 23 — sender projection through signed federation receive", () 
       if (body?.operation === "search_by_value" && body.table === "Peer") {
         return Response.json([{ id: "hub", role: "hub", status: "connected" }]);
       }
-      if (body?.operation === "update" || body?.operation === "upsert") return Response.json({ update_hashes: ["hub"] });
+      if (body?.operation === "update" || body?.operation === "upsert") {
+        if (body.table === "FederationRetry") {
+          for (const row of body.records ?? []) retryRows.set(row.id, { ...retryRows.get(row.id), ...row });
+          return Response.json({ update_hashes: (body.records ?? []).map((r: any) => r.id) });
+        }
+        return Response.json({ update_hashes: ["hub"] });
+      }
       throw new Error(`Unexpected round-trip fetch: ${url} ${body?.operation}`);
     }) as any;
     const { runFederationSyncOnce } = await import("../../src/cli.ts");

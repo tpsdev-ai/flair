@@ -12,8 +12,8 @@
  *                             reports it as `rem` does and exits 3.
  *
  * The prune case pins the CLI's reporting only. The local listener accepts any
- * request; the real `/FederationPeers` route implements GET alone and cannot
- * accept this DELETE (flair#2868).
+ * request; the real `/Peer/{id}` route requires admin auth and a live row
+ * (flair#2868).
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
@@ -118,7 +118,7 @@ describe("flair#2789 — a write with an unknown outcome exits 3", () => {
     expect(result.stdout, detail).toContain("may or may not have taken effect");
     expect(result.stdout, detail).toContain("0 error(s)");
     expect(result.stdout, detail).toContain("1 unknown outcome(s)");
-    expect(listener.seen.filter((l) => l.startsWith("DELETE /FederationPeers/")), detail).toHaveLength(1);
+    expect(listener.seen.filter((l) => l.startsWith("DELETE /Peer/")), detail).toHaveLength(1);
   }, 30_000);
 
   test("a non-rem write whose error propagates exits 3 through the top-level handler", async () => {

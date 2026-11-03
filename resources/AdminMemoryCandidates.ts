@@ -24,6 +24,7 @@
 import { Resource, databases } from "harper";
 import { allowAdmin } from "./agent-auth.js";
 import { refuseRewrittenAgentId } from "./path-id-rewrite.js";
+import { nonCanonicalRequestTargetRefusal, whatwgQueryMatchesRawTarget } from "./request-target.js";
 
 export const ADMIN_MEMORY_CANDIDATES_DEFAULT_LIMIT = 200;
 export const ADMIN_MEMORY_CANDIDATES_MAX_LIMIT = 500;
@@ -49,12 +50,13 @@ function candidateIdUnusable(): Response {
   );
 }
 
-function requestUrl(self: any): URL | null {
+function requestTarget(self: any): { url: URL; raw: string } | null {
   const ctx = self.getContext?.();
   const request = ctx?.request ?? ctx;
-  if (!request?.url) return null;
+  const raw = request?.url;
+  if (typeof raw !== "string" || raw.length === 0) return null;
   try {
-    return new URL(request.url, "http://localhost");
+    return { url: new URL(raw, "http://localhost"), raw };
   } catch {
     return null;
   }
@@ -84,7 +86,10 @@ export class AdminMemoryCandidates extends Resource {
     const rewritten = refuseRewrittenAgentId((this as any).getContext?.(), agentId);
     if (rewritten) return rewritten;
 
-    const params = requestUrl(this)?.searchParams;
+    const target = requestTarget(this);
+    // Refuse a target whose parsed query differs from its raw query.
+    if (target && !whatwgQueryMatchesRawTarget(target.raw)) return nonCanonicalRequestTargetRefusal();
+    const params = target?.url.searchParams;
     const rawLimit = params?.get("limit") ?? null;
     const parsedLimit = rawLimit === null ? ADMIN_MEMORY_CANDIDATES_DEFAULT_LIMIT : Number(rawLimit);
     if (!Number.isInteger(parsedLimit) || parsedLimit < 1) {
