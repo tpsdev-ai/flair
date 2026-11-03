@@ -13,7 +13,7 @@
  */
 import { Command, Option } from "commander";
 import * as render from "../render.js";
-import { resolveAdminUser } from "../lib/auth-resolve.js";
+import { resolveAdminUser, addAdminPassOptions } from "../lib/auth-resolve.js";
 import type { ResolvedSigningIdentity } from "../lib/signing-identity.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { DURABILITY_TIERS_HELP } from "../lib/durability-copy.js";
@@ -46,7 +46,6 @@ export type MemoryCli = {
   api: (...args: any[]) => Promise<any>;
   resolveBaseUrl: (opts: { target?: string; url?: string; port?: string | number }) => string;
   resolveSigningAgentId: (opts: { agent?: string }, command?: string) => ResolvedSigningIdentity;
-  applyAdminPassFile: (opts: { adminPass?: string; adminPassFile?: string }) => void;
   addSharedCredentialOptions: (cmd: Command) => Command;
   addSharedIdentityOption: (cmd: Command) => Command;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
@@ -76,9 +75,6 @@ function resolveBaseUrl(opts: { target?: string; url?: string; port?: string | n
 }
 function resolveSigningAgentId(opts: { agent?: string }, command?: string): ResolvedSigningIdentity {
   return cli.resolveSigningAgentId(opts, command);
-}
-function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
-  cli.applyAdminPassFile(opts);
 }
 function addSharedCredentialOptions(cmd: Command): Command {
   return cli.addSharedCredentialOptions(cmd);
@@ -150,7 +146,6 @@ export function register(program: Command): void {
     .action(async (contentArg: string | undefined, opts: any) => {
       const content = contentArg ?? opts.content;
       if (!content) { console.error("error: content required (positional arg or --content)"); process.exit(1); }
-      applyAdminPassFile(opts);
       const { agentId, source } = resolveSigningAgentId(opts, "memory add");
       if (!agentId) {
         console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
@@ -279,10 +274,14 @@ export function register(program: Command): void {
       console.log(memId);
     });
 
-  memory.command("search [query]")
-    .description("Semantic search over an agent's memories (query via positional arg or --q)")
-    .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
-    .option("--admin-pass <pass>", "Admin password — sign as admin while --agent names whose memories to search (flair#1500: a flag-pinned agent with no key no longer falls back to FLAIR_ADMIN_PASS)")
+  addAdminPassOptions(
+    memory
+      .command("search [query]")
+      .description("Semantic search over an agent's memories (query via positional arg or --q)")
+      .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)"),
+    "Admin password — sign as admin while --agent names whose memories to search (flair#1500: a flag-pinned agent with no key no longer falls back to FLAIR_ADMIN_PASS)",
+  )
+    .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--q <query>", "search query (alias for positional arg)")
     .option("--json", "Output raw JSON array")
     .option("--limit <n>", "Max results", "5")
@@ -303,7 +302,7 @@ export function register(program: Command): void {
       if (opts.tag) body.tag = opts.tag;
       if (opts.includeArchived) body.includeArchived = true;
       const baseUrl = resolveBaseUrl(opts);
-      const res = await api("POST", "/SemanticSearch", body, { baseUrl, agentId, agentIdSource: source, explicitAdminPass: opts.adminPass });
+      const res = await api("POST", "/SemanticSearch", body, { baseUrl, agentId, agentIdSource: source, explicitAdminPass: opts.adminPass, adminUser: opts.adminUser });
       if (opts.json) {
         const results = res.results || res || [];
         console.log(render.asJSON(Array.isArray(results) ? results : []));

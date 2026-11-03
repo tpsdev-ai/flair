@@ -33,13 +33,10 @@ import {
   apiErrorRawBody,
   defaultAdminPassPath,
   isLocalBase,
-  resolveAdminPassFromSources,
   resolveAdminUser,
+  addAdminPassOptions,
+  applyAdminPassFile,
   ApiRequestOutcomeUnknown,
-  ADMIN_PASS_FILE_FLAG,
-  ADMIN_PASS_FILE_HELP,
-  ADMIN_PASS_FLAG,
-  ADMIN_PASS_HELP,
 } from "../lib/auth-resolve.js";
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "../federation/scheduler.js";
 import { FEDERATION_MEMORY_SELECT } from "../lib/federation-memory-attributes.js";
@@ -86,7 +83,6 @@ export type FederationCli = {
   resolveBaseUrl: (opts: { target?: string; url?: string; port?: string | number }) => string;
   resolveEffectiveOpsUrl: (opts: { target?: string; opsTarget?: string }) => string | undefined;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
-  applyAdminPassFile: (opts: { adminPass?: string; adminPassFile?: string }) => void;
   addSharedCredentialOptions: (cmd: Command) => Command;
   addSharedIdentityOption: (cmd: Command) => Command;
   shouldShowInlineSecretWarning: (
@@ -119,39 +115,24 @@ function resolveEffectiveOpsUrl(opts: { target?: string; opsTarget?: string }): 
 function resolveOpsPort(opts: { opsPort?: string | number; port?: string | number }): number {
   return cli.resolveOpsPort(opts);
 }
-function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
-  cli.applyAdminPassFile(opts);
-}
 
 /** `federation token` / `federation pair` credential flags (flair#1873).
  *  The flag/help strings live in auth-resolve.ts next to the resolver, shared
  *  with every sibling command's credential options (flair#1910). */
 
 /**
- * Resolve `federation token`/`pair`'s admin password through the SAME reader
- * `flair backup` uses (`readAdminPassFileSecure`), with the precedence the
- * usage text states: an explicit `--admin-pass-file` or `--admin-pass` over
- * `FLAIR_ADMIN_PASS`; combining the file and the flag is a usage error. The resolved value is written back to
- * `opts.adminPass`, the slot the ops preflight and `loadInstanceSecretKey`
- * read — mirroring `applyAdminPassFile` for the sibling commands. Never prints
- * the value.
+ * `federation token`/`pair`'s admin password: an explicit `--admin-pass-file`
+ * or `--admin-pass` was already applied to `opts.adminPass` by
+ * addAdminPassOptions' preAction hook (which also refuses both at once); the
+ * environment is the fallback. Never prints the value.
  */
 function resolveFederationAdminPass(
-  opts: { adminPass?: string; adminPassFile?: string },
+  opts: { adminPass?: string },
   envPass: string | undefined,
 ): string {
-  try {
-    const pass = resolveAdminPassFromSources({
-      adminPassFile: opts.adminPassFile,
-      adminPass: opts.adminPass,
-      envPass,
-    });
-    if (pass) opts.adminPass = pass;
-    return pass;
-  } catch (err: any) {
-    console.error(`Error: ${err.message}`);
-    process.exit(1);
-  }
+  const pass = opts.adminPass ?? envPass ?? "";
+  if (pass) opts.adminPass = pass;
+  return pass;
 }
 function addSharedCredentialOptions(cmd: Command): Command {
   return cli.addSharedCredentialOptions(cmd);
@@ -166,6 +147,26 @@ function shouldShowInlineSecretWarning(
   flagName: string,
 ): boolean {
   return cli.shouldShowInlineSecretWarning(optValue, fromEnv, secretFlagNames, flagName);
+}
+
+/**
+ * Apply the admin-password pair inherited by `federation sync status` and
+ * `federation sync disable`. The parent (`flair federation sync`) declares the
+ * pair, so commander stores the values there.
+ * Resolve an explicitly supplied pair before the action body runs and store the
+ * password on the leaf, where `status` reads it for its request. `enable`
+ * stores the path only and does not call this.
+ */
+function applyInheritedAdminPass(actionCommand: Command): void {
+  const inherited = actionCommand.parent?.opts() as
+    | { adminPass?: string; adminPassFile?: string }
+    | undefined;
+  if (!inherited) return;
+  if (inherited.adminPass === undefined && inherited.adminPassFile === undefined) return;
+  const opts = { adminPass: inherited.adminPass, adminPassFile: inherited.adminPassFile };
+  applyAdminPassFile(opts);
+  actionCommand.setOptionValue("adminPass", opts.adminPass);
+  actionCommand.setOptionValue("adminPassFile", opts.adminPassFile);
 }
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
@@ -555,11 +556,20 @@ export async function persistLocalPeerPresenceSyncAt(args: {
  * Returns null on ANY failure. A driver verdict is a diagnostic aid; it must
  * never be the reason `federation status` fails.
  */
-async function latestPeerContact(opts: { target?: string }): Promise<string | null> {
+async function latestPeerContact(opts: { target?: string; adminPass?: string; adminUser?: string }): Promise<string | null> {
   try {
     const target = resolveTarget(opts);
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
-    const { peers } = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+    const requestOptions: { baseUrl?: string; explicitAdminPass?: string; adminUser?: string } = {};
+    if (baseUrl) requestOptions.baseUrl = baseUrl;
+    if (opts.adminPass) requestOptions.explicitAdminPass = opts.adminPass;
+    if (opts.adminUser) requestOptions.adminUser = opts.adminUser;
+    const { peers } = await api(
+      "GET",
+      "/FederationPeers",
+      undefined,
+      Object.keys(requestOptions).length ? requestOptions : undefined,
+    );
     let best: number | null = null;
     for (const p of peers ?? []) {
       if (!p?.lastSyncAt) continue;
@@ -1996,12 +2006,12 @@ export function register(program: Command): void {
       if (failures > 0) process.exit(1);
     });
 
-  federation
-    .command("pair <hub-url>")
-    .description("Pair this spoke with a hub instance")
-    .option("--port <port>", "Harper HTTP port")
-    .option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP)
-    .option("--admin-pass <pass>", ADMIN_PASS_HELP)
+  addAdminPassOptions(
+    federation
+      .command("pair <hub-url>")
+      .description("Pair this spoke with a hub instance")
+      .option("--port <port>", "Harper HTTP port"),
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--token <token>", "One-time pairing token from hub admin (env: FLAIR_PAIRING_TOKEN) [deprecated: use --token-from]")
@@ -2276,12 +2286,12 @@ export function register(program: Command): void {
       }
     });
 
-  federation
-    .command("token")
-    .description("Generate a one-time pairing token (run on the hub)")
-    .option("--port <port>", "Harper HTTP port")
-    .option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP)
-    .option("--admin-pass <pass>", ADMIN_PASS_HELP)
+  addAdminPassOptions(
+    federation
+      .command("token")
+      .description("Generate a one-time pairing token (run on the hub)")
+      .option("--port <port>", "Harper HTTP port"),
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--ttl <minutes>", "Token TTL in minutes (default: 60)", "60")
@@ -2387,7 +2397,6 @@ export function register(program: Command): void {
   ).action(async (opts: any) => {
       // --admin-pass-file resolves into the same `adminPass` slot the inline
       // flag uses, so the scheduler never has to embed a secret in a unit file.
-      applyAdminPassFile(opts);
       const r = await runFederationSyncOnce(opts);
       if (r.error) {
         console.error(`Error: ${r.error.message}`);
@@ -2474,6 +2483,7 @@ export function register(program: Command): void {
     .command("disable")
     .description("Remove the sync driver (peers and sync history are preserved)")
     .option("--remove-shim", "Also delete the ~/.flair/bin/flair-federation-sync shim")
+    .hook("preAction", (_thisCommand, actionCommand) => applyInheritedAdminPass(actionCommand))
     .action(async (opts: any) => {
       const { disableScheduler } = await import("../federation/scheduler.js");
       try {
@@ -2504,6 +2514,7 @@ export function register(program: Command): void {
     // `flair federation sync` owns them and commander binds them there. They
     // still work on this command, via optsWithGlobals() below.
     .option("--json", "Emit JSON")
+    .hook("preAction", (_thisCommand, actionCommand) => applyInheritedAdminPass(actionCommand))
     .action(async (_opts: any, cmd: any) => {
       // See the comment on `enable` above: `--target`/`--port` live on the
       // parent, so commander binds them there and only optsWithGlobals() sees
@@ -2532,12 +2543,14 @@ export function register(program: Command): void {
       }
     });
 
-  federation
-    .command("watch")
-    .description("Run federation sync in a loop (foreground daemon)")
-    .option("--interval <seconds>", "Seconds between syncs", "30")
-    .option("--port <port>", "Harper HTTP port")
-    .option("--admin-pass <pass>", "Admin password")
+  addAdminPassOptions(
+    federation
+      .command("watch")
+      .description("Run federation sync in a loop (foreground daemon)")
+      .option("--interval <seconds>", "Seconds between syncs", "30")
+      .option("--port <port>", "Harper HTTP port"),
+    "Admin password",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--target <url>", "Remote Flair URL")
@@ -2690,7 +2703,6 @@ export function register(program: Command): void {
   const instanceOpsEndpoint = (opts: any): OpsEndpoint => {
     // --admin-pass-file resolves into the same `adminPass` slot the inline flag
     // uses (the shared idiom: the secret stays out of ps and shell history).
-    applyAdminPassFile(opts);
     const opsUrl = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     return { opsUrl, credentials: { user: resolveAdminUser(opts.adminUser), pass: adminPass } };
@@ -2822,7 +2834,6 @@ export function register(program: Command): void {
         .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)"),
     ),
   ).action(async (opts: any) => {
-      applyAdminPassFile(opts);
       const target = resolveTarget(opts);
       const baseUrl = target ? target.replace(/\/$/, "") : undefined;
       const waitSeconds = Number(opts.wait) || 60;
@@ -2841,7 +2852,7 @@ export function register(program: Command): void {
         peerId: opts.peer,
         baseUrl,
         syncOpts: opts,
-        // GET /FederationPeers is allowAdmin. applyAdminPassFile already
+        // GET /FederationPeers is allowAdmin. The preAction hook already
         // folded --admin-pass-file into opts.adminPass; without this the
         // injected api only sees { baseUrl } and flag-only creds never
         // reach the listing (UNVERIFIABLE, check never runs).

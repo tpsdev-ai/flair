@@ -695,17 +695,24 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
   // flag in the same file must fail, whether it copies the original literal
   // exactly (the entry then matches two findings) or words it differently (a
   // finding no entry covers). The unmutated file is the control.
-  test("flair#2123: both inline-admin-password warnings give the history-safe remedy", async () => {
+  test("agent list and rotate-key warn only for inline admin passwords", async () => {
     const home = mkdtempSync(join(tmpdir(), "flair-inline-password-warning-"));
     const warning =
       "warning: --admin-pass passed inline. Use FLAIR_ADMIN_PASS without typing its value into a recorded " +
       "shell line (for example, read it from the admin-pass file).";
-    const rows = [
-      ["agent", "list", "--admin-pass", "test-only-inline-pass", "--port", "2"],
-      ["agent", "rotate-key", "warning-test", "--admin-pass", "test-only-inline-pass", "--ops-port", "1", "--keys-dir", join(home, "keys")],
+    const password = "test-only-inline-pass";
+    const passFile = join(home, "admin-pass");
+    writeFileSync(passFile, `${password}\n`, { mode: 0o600 });
+    const commands = [
+      ["agent", "list", "--port", "2"],
+      ["agent", "rotate-key", "warning-test", "--ops-port", "1", "--keys-dir", join(home, "keys")],
     ];
+    const rows = commands.flatMap((argv) => [
+      { argv: [...argv, "--admin-pass", password], warns: true },
+      { argv: [...argv, "--admin-pass-file", passFile], warns: false },
+    ]);
     try {
-      for (const argv of rows) {
+      for (const { argv, warns } of rows) {
         const env: Record<string, string> = { ...process.env, HOME: home } as Record<string, string>;
         for (const key of ["FLAIR_ADMIN_PASS", "FLAIR_OPS_TARGET", "FLAIR_TARGET", "HDB_ADMIN_PASSWORD"]) delete env[key];
         const child = Bun.spawn(["bun", join(REPO, "src/cli.ts"), ...argv], {
@@ -716,7 +723,8 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
         });
         const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited]);
         expect(exitCode).not.toBe(0);
-        expect(stderr.split(warning)).toHaveLength(2);
+        expect(stderr.split(warning)).toHaveLength(warns ? 2 : 1);
+        expect(stderr).not.toContain(password);
         expect(stderr).not.toContain("the FLAIR_ADMIN_PASS env to keep secrets out of shell history");
       }
     } finally {

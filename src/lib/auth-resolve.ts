@@ -71,6 +71,7 @@ import {
 } from "node:fs";
 
 import { join } from "node:path";
+import { Option, type Command } from "commander";
 import { createPrivateKey, randomUUID, sign as nodeCryptoSign } from "node:crypto";
 import type { SigningIdentitySource } from "./signing-identity.js";
 import { resolveHome } from "./home.js";
@@ -945,6 +946,86 @@ export const ADMIN_PASS_FLAG = "--admin-pass <pass>";
 export const ADMIN_PASS_HELP =
   "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)";
 
+/** Commands whose admin-password pair `addAdminPassOptions` wired. A test walks
+ *  the registered tree and asserts every command that declares `--admin-pass`
+ *  is in it, and every command that declares `--admin-pass-file` except
+ *  `rem nightly enable`, which declares that flag itself as path-only. Inherited
+ *  leaves are not in this set: `federation sync enable` stores the path in the
+ *  unit it installs, and `sync status`/`disable` apply the pair in their own
+ *  hooks. */
+export const adminPassFileWired = new WeakSet<Command>();
+
+export interface AddAdminPassOptionsConfig {
+  adminPassFileHelp?: string;
+  /** Report a refusal instead of the default one-line error. Must not return. */
+  onAdminPassRefusal?: (err: unknown, actionCommand: Command) => never;
+}
+
+/**
+ * Declare the admin-password pair on `cmd`: the argv form and the file form
+ * together, in that order, and apply it in a preAction hook. For a command that
+ * declares the pair, the hook runs after option parsing and before the action
+ * body, so a refused file exits before any request the action makes. A
+ * subcommand that inherits the pair from `cmd` stores the values on `cmd`; the
+ * leaves that apply them (`federation sync status`/`disable`) do so in their
+ * own hooks.
+ */
+export function addAdminPassOptions(
+  cmd: Command,
+  adminPassHelp: string = ADMIN_PASS_HELP,
+  opts: AddAdminPassOptionsConfig = {},
+): Command {
+  const adminPassFile = new Option(ADMIN_PASS_FILE_FLAG, opts.adminPassFileHelp ?? ADMIN_PASS_FILE_HELP);
+  cmd.option(ADMIN_PASS_FLAG, adminPassHelp).addOption(adminPassFile);
+  adminPassFileWired.add(cmd);
+  cmd.hook("preAction", (_thisCommand, actionCommand) => {
+    // A subcommand that inherits the pair (`federation sync status`) stores the
+    // values on this command, not on itself; the leaves that read an inherited
+    // pair apply it in their own hook. Reading only the leaf's opts() would ignore
+    // the inherited pair, leaving `status` able to send its request with the
+    // ambient admin password.
+    if (!actionCommand.options.some((o) => o.long === "--admin-pass-file")) return;
+    const actionOpts = actionCommand.opts() as {
+      adminPass?: string;
+      adminPassFile?: string;
+      inlineAdminPass?: string;
+    };
+    // Recorded before the file is applied: the warning keys on whether
+    // --admin-pass itself was given, not on the value that ends up in the slot.
+    actionOpts.inlineAdminPass =
+      actionCommand.getOptionValueSource("adminPass") === "cli" ? actionOpts.adminPass : undefined;
+    applyAdminPassFile(
+      actionOpts,
+      opts.onAdminPassRefusal
+        ? (err) => opts.onAdminPassRefusal!(err, actionCommand)
+        : undefined,
+    );
+  });
+  return cmd;
+}
+
+/**
+ * Copy a nonempty explicit password into `opts.adminPass`; callers own environment fallback.
+ * Refuse combined options and missing, empty or group-/world-accessible files.
+ * Group/world permission refusals name the path and mode; missing and empty file errors name only the path.
+ */
+export function applyAdminPassFile(
+  opts: { adminPass?: string; adminPassFile?: string },
+  onRefusal?: (err: unknown) => never,
+): void {
+  try {
+    const pass = resolveAdminPassFromSources({
+      adminPassFile: opts.adminPassFile,
+      adminPass: opts.adminPass,
+    });
+    if (pass) opts.adminPass = pass;
+  } catch (err: any) {
+    if (onRefusal) onRefusal(err);
+    console.error(`Error: ${err.message}`);
+    process.exit(1);
+  }
+}
+
 /** The admin username Harper's bootstrap creates and every Basic-auth path
  * historically hardcoded. Kept as the default; overridable per call via
  * `resolveAdminUser` (flair#1345). */
@@ -1205,6 +1286,23 @@ export async function authFetch(
   path: string,
   body?: unknown,
 ): Promise<Response> {
+  return (await authFetchWithSentCredentials(baseUrl, agentId, keyPath, method, path, body)).res;
+}
+
+/**
+ * `authFetch`'s request, with the credentials it sent: a caller that renders a
+ * non-ok response needs them to redact a body that echoes the Authorization
+ * header (flair#2889). `sent` is `credentialsInHeader`'s reading of the header
+ * this request sent.
+ */
+export async function authFetchWithSentCredentials(
+  baseUrl: string,
+  agentId: string,
+  keyPath: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ res: Response; sent: SentCredentials }> {
   const url = requestUrl(baseUrl, path);
   let auth: string;
   try {
@@ -1214,11 +1312,12 @@ export async function authFetch(
   }
   const headers: Record<string, string> = { Authorization: auth };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  return fetch(url.href, {
+  const res = await fetch(url.href, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  return { res, sent: credentialsInHeader(auth) };
 }
 
 export function isLocalBase(base: string): boolean {

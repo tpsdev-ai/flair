@@ -1,0 +1,1 @@
+- **Commands that take `--admin-pass` now also accept `--admin-pass-file`.**
