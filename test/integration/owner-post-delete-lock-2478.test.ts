@@ -296,7 +296,7 @@ describe("flair#2478 — owner DELETE (real Harper)", () => {
     expect(res.status, await res.clone().text()).toBe(200);
     expect(await h.readRow(id)).toBeNull();
     expect(h.writesBy(id, "delete"), "the DELETE did not delete the row exactly once, with no field write, under phase delete").toEqual([
-      { writer: "delete", method: "delete", id, fields: [] },
+      { writer: "delete", method: "delete", id, fields: [], held: [id] },
     ]);
   }, 120_000);
 

@@ -69,6 +69,17 @@ async function feedSkill(id: string, content: string, agent: TestAgent = owner):
   });
 }
 
+/** Every Memory write the skill path traced ran with its own id among the keys
+ *  its acquisition held (`memoryWriteLockTokenIds` is recorded per write). */
+function expectSkillWritesUnderHeldIds(): void {
+  const writes = h.traceAll().filter((entry) => entry.writer === SKILL_WRITER);
+  expect(writes.length, "no skill-path Memory write was traced").toBeGreaterThan(0);
+  for (const write of writes) {
+    expect(write.held, `${write.method} on ${write.id} recorded no held-key set`).not.toBeNull();
+    expect(write.held, `${write.method} on ${write.id} ran without ${write.id} held`).toContain(write.id);
+  }
+}
+
 /** Mark `id` outcome-unknown: an owner PATCH whose verification read is failed
  *  on demand (the arm file is consumed by the first Memory read of that id). */
 async function markOutcomeUnknown(id: string): Promise<void> {
@@ -345,5 +356,12 @@ describe("flair#2927 — a skill-tagged feed write (real Harper)", () => {
     expect(row?.skillSubjectId).toBe(id);
     expect(h.writesBy(id, SKILL_WRITER).map((write) => write.method), "the skill write did not run under the lock phase").toContain("put");
   }, 120_000);
+
+  it("every traced skill-path Memory write ran under a lock holding its own id", () => {
+    // The guarded attempt writes nothing unheld, and the retry that closes the
+    // moved head holds it: this separates "re-acquired with the moved head
+    // held" from "closed the moved head unheld and returned 200".
+    expectSkillWritesUnderHeldIds();
+  }, 30_000);
 
 });
