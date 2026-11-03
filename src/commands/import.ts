@@ -1,17 +1,127 @@
 /**
  * import.ts — extracted from src/cli.ts (flair#1636, epic #1618).
  *
- * Pure move, ZERO behavior change: `flair import`.
+ * `flair import`: restore an agent from an export file, writing its Soul and
+ * Memory rows and reporting each refused, failed or unknown row.
  * Shared cli-locals stay in cli.ts and are injected via bindCli() before
  * register(); this module never imports src/cli.ts. Top-level imports only
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { defaultKeysDir, resolveAdminUser, addAdminPassOptions } from "../lib/auth-resolve.js";
+import {
+  addAdminPassOptions,
+  ApiHttpError,
+  ApiRequestOutcomeUnknown,
+  apiErrorRawBody,
+  defaultKeysDir,
+  isLocalBase,
+  resolveAdminUser,
+  sendJsonRequest,
+} from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { SOUL_SCOPE_FIELDS_REFUSAL, suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
 import * as render from "../render.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import nacl from "tweetnacl";
+
+/** The fixed error names Flair's write guards return for a Soul or Memory
+ *  write. A response body's `error` is displayed only when it is one of these;
+ *  any other server-supplied text is not displayed by the import report. The
+ *  writes also withhold the response body from the FLAIR_DEBUG HTTP-error
+ *  line. */
+const WRITE_GUARD_ERROR_NAMES = new Set([
+  // Soul write guards (resources/Soul.ts, resources/soul-write-policy.ts).
+  "soul_owner_required",
+  "soul_scope_fields_not_writable",
+  "soul_value_is_learned_content",
+  "soul_write_requires_one_record",
+  // Memory write guards (resources/Memory.ts and the guards it runs).
+  "content_safety_violation",
+  "derived_from_self",
+  "embedding_unavailable",
+  "id_target_mismatch",
+  "invalid_durability",
+  "invalid_expiry",
+  "invalid_visibility",
+  "invalid_visibility_for_durability",
+  "memory_id_required",
+  "owner_lookup_failed",
+  "reembed_no_text",
+  "reembed_row_changed",
+  "skill_durability",
+  "skill_lineage_tag_removed",
+  "skill_metadata_duplicate_key",
+  "skill_opt_out_not_boolean",
+  "skill_source_not_durable",
+  "skill_state_requires_delete",
+  "skill_update_compensation_failed",
+  "skill_update_not_closed",
+  "skill_update_not_confirmed",
+  "skill_update_unconfirmed",
+  "skill_write_path",
+  "storage_quota_exceeded",
+  "stored_row_changed",
+  "stored_row_lookup_failed",
+  "stored_row_read_failed",
+  "unresolved_request_target",
+  "write_body_unreadable",
+  "write_id_not_addressed",
+]);
+
+/** A recognised error name from a refused response body; undefined for any
+ *  other server-supplied text, which the import report does not display. */
+function responseErrorName(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const body = JSON.parse(raw) as { error?: unknown };
+    return typeof body?.error === "string" && WRITE_GUARD_ERROR_NAMES.has(body.error) ? body.error : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+type RowWrite =
+  | { kind: "imported" }
+  | { kind: "failed"; status: number | undefined; error: string | undefined }
+  | { kind: "unknown"; status: number | undefined; message: string };
+
+/** Write one imported row. Only a 2xx response counts as imported. */
+async function writeRow(
+  baseUrl: string,
+  table: "Soul" | "Memory",
+  row: { id: string },
+  auth: string,
+): Promise<RowWrite> {
+  try {
+    await sendJsonRequest(
+      new URL(`${baseUrl}/${table}/${encodeRecordId(row.id)}`),
+      "PUT",
+      row,
+      auth,
+      isLocalBase(baseUrl),
+      { withholdResponseBodyDebug: true },
+    );
+    return { kind: "imported" };
+  } catch (err) {
+    if (err instanceof ApiRequestOutcomeUnknown) {
+      return { kind: "unknown", status: err.status, message: err.message };
+    }
+    if (err instanceof ApiHttpError) {
+      return { kind: "failed", status: err.status, error: responseErrorName(apiErrorRawBody(err)) };
+    }
+    // The shared sender parses a 2xx body as JSON; a 2xx body that is not JSON
+    // still arrived as a successful write.
+    if (err instanceof SyntaxError) return { kind: "imported" };
+    return { kind: "failed", status: undefined, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** The per-row failure text: an HTTP status and a recognised error name, or
+ *  the thrown error. Never the row's content. */
+function failureText(row: { status: number | undefined; error: string | undefined }): string {
+  if (row.status === undefined) return row.error ?? "no response";
+  return `HTTP ${row.status}${row.error ? ` ${row.error}` : ""}`;
+}
 
 export type ImportCli = {
   b64url: (...args: any[]) => any;
@@ -141,33 +251,64 @@ addAdminPassOptions(
     // Restore souls before memories: refuseLearnedSoulWrite matches Memory text.
     const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
     let soulCount = 0;
+    let memCount = 0;
+    let failedCount = 0;
+    let unknownCount = 0;
+
     for (const soul of data.souls ?? []) {
-      try {
-        await fetch(`${baseUrl}/Soul/${encodeRecordId(soul.id)}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Authorization: auth },
-          body: JSON.stringify(soul),
-        });
+      const outcome = await writeRow(baseUrl, "Soul", soul, auth);
+      if (outcome.kind === "imported") {
         soulCount++;
-      } catch { /* skip failures */ }
+        continue;
+      }
+      // A row the server refuses with HTTP 403 for supplying a non-empty
+      // `scopeTag` or a non-empty `tags` array is reported with its id and
+      // left out of the count; the rest of the export is imported as before
+      // (flair#1540).
+      if (
+        outcome.kind === "failed" &&
+        outcome.status === 403 &&
+        outcome.error === SOUL_SCOPE_FIELDS_REFUSAL &&
+        suppliesSoulScopeFields(soul)
+      ) {
+        console.log(`${render.icons.warn} Soul ${soul.id} refused: ${outcome.error}`);
+        continue;
+      }
+      if (outcome.kind === "unknown") {
+        unknownCount++;
+        console.error(`${render.icons.warn} Soul ${soul.id} unknown: ${outcome.message}`);
+        continue;
+      }
+      failedCount++;
+      console.error(`${render.icons.error} Soul ${soul.id} failed: ${failureText(outcome)}`);
     }
 
-    let memCount = 0;
     for (const mem of data.memories ?? []) {
-      try {
-        await fetch(`${baseUrl}/Memory/${encodeRecordId(mem.id)}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Authorization: auth },
-          body: JSON.stringify(mem),
-        });
+      const outcome = await writeRow(baseUrl, "Memory", mem, auth);
+      if (outcome.kind === "imported") {
         memCount++;
-      } catch { /* skip failures */ }
+        continue;
+      }
+      if (outcome.kind === "unknown") {
+        unknownCount++;
+        console.error(`${render.icons.warn} Memory ${mem.id} unknown: ${outcome.message}`);
+        continue;
+      }
+      failedCount++;
+      console.error(`${render.icons.error} Memory ${mem.id} failed: ${failureText(outcome)}`);
     }
 
     console.log(`\n${render.icons.ok} ${render.wrap(render.c.green, `Agent '${agentId}' imported`)}`);
     console.log(render.kv("Memories", `${render.wrap(render.c.bold, String(memCount))}${render.wrap(render.c.dim, `/${(data.memories ?? []).length}`)}`));
     console.log(render.kv("Souls", `${render.wrap(render.c.bold, String(soulCount))}${render.wrap(render.c.dim, `/${(data.souls ?? []).length}`)}`));
+    if (failedCount > 0) console.log(render.kv("Failed", String(failedCount)));
+    if (unknownCount > 0) console.log(render.kv("Unknown", String(unknownCount)));
     console.log(render.kv("Key", render.wrap(render.c.dim, privPath)));
+
+    // An unknown write outcome exits 3, as the REM runner and `flair memory
+    // verify` use it, distinct from the 1 a definite failure exits with.
+    if (unknownCount > 0) process.exit(3);
+    if (failedCount > 0) process.exit(1);
   });
 
 }

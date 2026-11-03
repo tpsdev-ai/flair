@@ -1347,6 +1347,15 @@ export async function sendJsonRequest(
     signedOnly?: SignedOnlyHintContext;
     deadlineMs?: number;
     deadlineSource?: RequestDeadlineSource;
+    /** Withhold the response body from the FLAIR_DEBUG HTTP-error line. */
+    withholdResponseBodyDebug?: boolean;
+    /**
+     * Treat a 2xx whose body is not JSON as a success instead of throwing.
+     * For a caller that has its own confirmation step (prune's DELETE, which
+     * reads the row back): the server may have acted before the client parsed
+     * the body, so a parse failure must not become a definite failure.
+     */
+    tolerateUnparsedSuccessBody?: boolean;
   } = {},
 ): Promise<any> {
   // The deadline covers the request AND the response body read: a server that
@@ -1403,11 +1412,23 @@ export async function sendJsonRequest(
       // and the server's text is withheld when it sets `withhold`; classifiers
       // read the unredacted text through apiErrorRawBody.
       const sent = credentialsInHeader(authHeader);
-      emitHttpErrorBodyDebug(method, url.pathname, res.status, text, sent.values, sent.withhold);
+      emitHttpErrorBodyDebug(
+        method,
+        url.pathname,
+        res.status,
+        text,
+        sent.values,
+        sent.withhold || transport.withholdResponseBodyDebug === true,
+      );
       throw ApiHttpError.fromResponse(res.status, text, sent.values, sent.withhold);
     }
     if (!text) return { ok: true };
-    return JSON.parse(text);
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      if (transport.tolerateUnparsedSuccessBody) return { ok: true };
+      throw err;
+    }
   } catch (err: unknown) {
     // A fired deadline is reported by the deadline, not by the abort error
     // fetch raised: a non-GET/HEAD request may have committed, so it is an
@@ -1436,7 +1457,12 @@ export async function tryAgentKeyFloor(
   method: string,
   body: unknown,
   keysDir: string,
-  transport: { refuseRedirects?: boolean; deadlineMs?: number; deadlineSource?: RequestDeadlineSource } = {},
+  transport: {
+    refuseRedirects?: boolean;
+    deadlineMs?: number;
+    deadlineSource?: RequestDeadlineSource;
+    tolerateUnparsedSuccessBody?: boolean;
+  } = {},
 ): Promise<any> {
   let keyFiles: string[] = [];
   try {
@@ -1622,6 +1648,12 @@ export interface AuthedRequestOptions {
    * the variable that overrides that route's deadline.
    */
   deadlineSource?: RequestDeadlineSource;
+  /**
+   * Treat a 2xx whose body is not JSON as a success instead of throwing. Only
+   * pass this from a caller that confirms the write independently; the default
+   * keeps every other caller's behaviour (an unparseable success body throws).
+   */
+  tolerateUnparsedSuccessBody?: boolean;
 }
 
 /** The Authorization scheme of an Ed25519 agent signature (buildEd25519Auth). */
@@ -1763,6 +1795,7 @@ export async function authedRequest(
       refuseRedirects: opts.refuseRedirects,
       deadlineMs: opts.deadlineMs,
       deadlineSource: opts.deadlineSource,
+      tolerateUnparsedSuccessBody: opts.tolerateUnparsedSuccessBody,
       ...(opts.signedOnly ? { signedOnly: { agentId: opts.agentId, keysDir } } : {}),
     });
   } catch (err: unknown) {
@@ -1774,6 +1807,7 @@ export async function authedRequest(
         refuseRedirects: opts.refuseRedirects,
         deadlineMs: opts.deadlineMs,
         deadlineSource: opts.deadlineSource,
+        tolerateUnparsedSuccessBody: opts.tolerateUnparsedSuccessBody,
       });
       if (floorResult !== undefined) return floorResult;
     }
