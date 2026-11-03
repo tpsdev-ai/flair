@@ -147,7 +147,7 @@ describe("flair#2955 — the agent-key floor treats an answered request as final
    * Reproduce the defect for one answered response: the request is sent once
    * per key today, and the surfaced error is the caller's "no credentials
    * sent". After the fix: exactly one signed request (by the first key) and
-   * the server's own status/code surface.
+   * the server's status (plus its error code when the body carries one) surface.
    */
   async function expectFinalAnswer(reply: Reply, expectedStatus: number, expectedCode?: string): Promise<void> {
     const server = await startFloorServer(() => reply);
