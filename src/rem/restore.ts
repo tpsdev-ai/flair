@@ -225,7 +225,7 @@ function asArray(raw: unknown): any[] {
  * rows, the scope preflight would see no live Souls, and the DELETE and PUT
  * loops would run over a table this run never read (flair#2931).
  */
-function requireLiveListing(raw: unknown, table: "Memory" | "Soul", agentId: string): any[] {
+export function requireLiveListing(raw: unknown, table: "Memory" | "Soul", agentId: string): any[] {
   if (Array.isArray(raw)) return raw;
   if (raw && typeof raw === "object") {
     const obj = raw as Record<string, unknown>;
@@ -284,8 +284,12 @@ function incompleteListing(agentId: string, state: string, remedy = ""): Error {
  * listing. A `hasMore: true` page with no candidates (the cursor cannot move),
  * an id listed twice, or more than {@link CANDIDATE_LIST_MAX_PAGES} pages is
  * refused.
+ *
+ * Exported for `flair restore --replace`, which lists each archived Soul
+ * row's agent here before any delete so it can compare the agent's live
+ * candidate claims with the Soul values it is about to write.
  */
-async function listAgentCandidates(apiCall: ApiCall, agentId: string): Promise<Array<{ id: string }>> {
+export async function listAgentCandidates(apiCall: ApiCall, agentId: string): Promise<Array<{ id: string }>> {
   const listed: Array<{ id: string }> = [];
   const seen = new Set<string>();
   let after: string | undefined;
@@ -530,7 +534,8 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     for (const id of refusedSouls) {
       errors.push(
         `soul-scope-preflight: Soul ${id} supplies a non-empty scopeTag or tags array, `
-          + "which the Soul scope-field rule refuses; no target rows were deleted or written.",
+          + "which the Soul scope-field rule refuses; no target rows were deleted or written. "
+          + "Clear tags/scopeTag on that row (PATCH) or delete it, then re-run.",
       );
     }
     result.status = "failed";
