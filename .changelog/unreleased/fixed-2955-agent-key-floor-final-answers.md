@@ -1,7 +1,9 @@
-- **The CLI's agent-key fallback now surfaces a non-credential server answer instead of resending the same request signed as a different agent.**
-  In `src/lib/auth-resolve.ts`, the tier-5 key fallback moves to the next key
-  when the server refuses the Ed25519 credential itself (its 401 authentication
-  codes) or when a connect-phase failure shows the request never left the host.
-  Any other answer — such as a 500, 409, policy 403, refused redirect or a GET
-  404 — is thrown as itself, with the server's status and any error code its
-  body carries (#2955).
+- **A server answer to an agent-key fallback attempt is now final, and the fallback refuses redirects.**
+  In `src/lib/auth-resolve.ts`, every tier-5 attempt is sent with redirects
+  refused, so a 3xx is that attempt's final answer. The floor moves to the next
+  candidate key file only when the Ed25519 authentication middleware refused
+  the credential itself (its 401 codes), or when an attempt that does not
+  follow redirects fails in the connect phase. Otherwise the answer is final: a
+  successful response returns, a failed HTTP response whose body was read is
+  thrown with its status and that body's error code, and a refused redirect is
+  thrown with its status before any body is read (#2955).

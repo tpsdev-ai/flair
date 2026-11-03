@@ -2,14 +2,15 @@
  * agent-key-floor-final-answers-2955.test.ts — flair#2955.
  *
  * Tier 5 of src/lib/auth-resolve.ts (`tryAgentKeyFloor`) must move to the next
- * registered key ONLY when the server refused the ED25519 CREDENTIAL itself
- * (the 401 codes resources/auth-middleware.ts returns from its signature
- * check), or when the request provably never left this host (a connect-phase
- * failure). Every other answer — 500, 409, a policy 403, a refused redirect, a
- * 404 on a GET — is FINAL: the floor rethrows it as itself, with the server's
- * status and error code, instead of replaying the same request signed as a
- * different agent and then letting the caller report its original
- * "no credentials sent".
+ * candidate key file ONLY when the server refused the ED25519 CREDENTIAL itself
+ * (the 401 codes the Ed25519 authentication middleware in
+ * resources/auth-middleware.ts returns), or when an attempt that does not
+ * follow redirects fails in the connect phase. Every other response — 500, 409,
+ * a policy 403, a refused redirect, a 404 on a GET — is FINAL and rethrows as
+ * itself: a failed HTTP response whose body was read carries its status and
+ * the error code its body names, and a refused redirect carries its status. The
+ * floor never replays it signed as a different agent, nor hides it behind the
+ * caller's original "no credentials sent".
  *
  * A real local HTTP server answers the anonymous probe (403, which is what
  * makes tier 5 engage) and then each signed attempt, so the tests assert both
@@ -144,10 +145,11 @@ describe("flair#2955 — the agent-key floor moves on only for credential refusa
   });
 
   /**
-   * Reproduce the defect for one answered response: the request is sent once
-   * per key today, and the surfaced error is the caller's "no credentials
-   * sent". After the fix: exactly one signed request (by the first key) and
-   * the server's status (plus its error code when the body carries one) surface.
+   * Reproduce the defect for one answered response: the request was sent once
+   * per key before the fix, and the surfaced error is the caller's "no
+   * credentials sent". After the fix: exactly one signed request (by the first
+   * key) and the server's status (plus its error code when the body carries
+   * one) surface.
    */
   async function expectFinalAnswer(reply: Reply, expectedStatus: number, expectedCode?: string): Promise<void> {
     const server = await startFloorServer(() => reply);
@@ -191,6 +193,44 @@ describe("flair#2955 — the agent-key floor moves on only for credential refusa
 
   test("(d) a refused 302 is final — one signed attempt, the redirect status surfaces", async () => {
     await expectFinalAnswer({ status: 302, location: "http://elsewhere.invalid/" }, 302);
+  });
+
+  test("a redirect on a floor attempt is refused, not followed: one signed POST reaches the server, no second key sends it, and the 3xx surfaces", async () => {
+    // A port with nothing listening, as the redirect's destination: following
+    // the 307 would fail there in the connect phase and, before the fix, move
+    // the floor on to the second key.
+    const closed = createServer(() => {});
+    await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", () => resolve()));
+    const bound = closed.address();
+    const closedPort = typeof bound === "object" && bound ? bound.port : 0;
+    await new Promise<void>((resolve) => closed.close(() => resolve()));
+
+    const server = await startFloorServer(() => ({
+      status: 307,
+      location: `http://127.0.0.1:${closedPort}/elsewhere`,
+    }));
+    try {
+      let caught: unknown;
+      try {
+        // The caller passes no refuseRedirects: the floor must refuse on its own.
+        await authedRequest("POST", "/Memory", { agentId: "agent-first", content: "hello" }, {
+          baseUrl: server.url,
+          keysDir,
+        });
+        throw new Error("expected the floor to surface the redirect");
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(signedRequests(server).map((r) => agentOf(r.authorization))).toEqual(["agent-first"]);
+      expect(server.requests).toHaveLength(2); // the anonymous probe + one signed POST
+      expect(caught).toBeInstanceOf(ApiHttpError);
+      const httpError = caught as ApiHttpError;
+      expect(httpError.status).toBe(307);
+      expect(httpError.noCredentials).toBe(false);
+    } finally {
+      await server.close();
+    }
   });
 
   test("a read-only GET answered 404 is final — the answer, not a key failure", async () => {

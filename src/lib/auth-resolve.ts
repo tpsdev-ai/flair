@@ -40,7 +40,7 @@
  *      remote instance; see `resolveLocalAdminPass`).
  *   5. THE FLOOR (flair#747, generalizing flair#742's upgrade-only
  *      fallback) — when NOTHING above resolved to anything sendable at
- *      all, sign the SAME request with every registered key under
+ *      all, sign the SAME request with every candidate key file under
  *      `~/.flair/keys` (sorted, deterministic order), first one the server
  *      accepts wins. This is the credential every headless/agent machine
  *      actually has, and is exactly the flair#741 incident's fix: an agent
@@ -1513,14 +1513,16 @@ export async function sendJsonRequest(
 }
 
 /**
- * The 401 error codes resources/auth-middleware.ts returns when it refuses
- * the Ed25519 credential itself: an unparseable header, a timestamp outside
- * the replay window, an unknown agent, a deactivated principal, or a signature
- * that does not verify. A 401 carrying one of these codes moves the tier-5
- * floor to the next key.
- * `nonce_replay_detected` and `replay_store_unavailable` are answers about the
- * REQUEST (a reused nonce, an unavailable store), not the credential, so they
- * are final.
+ * The 401 error codes the Ed25519 authentication middleware in
+ * resources/auth-middleware.ts returns when it refuses the credential: an
+ * unparseable header, a timestamp outside the replay window, an unknown agent,
+ * a deactivated principal, or a signature that does not verify. The timestamp,
+ * replay, lookup and status checks run before signature verification, and the
+ * middleware's catch around that verification also covers key import errors.
+ * A 401 carrying one of these codes moves the tier-5 floor to the next key.
+ * `nonce_replay_detected` is an answer about the REQUEST (a reused nonce) and
+ * `replay_store_unavailable` is a server-side failure; neither is a credential
+ * rejection, so both are final.
  */
 const CREDENTIAL_REJECTION_CODES: ReadonlySet<string> = new Set([
   "invalid_authorization_header",
@@ -1547,24 +1549,27 @@ function isEd25519CredentialRejection(err: unknown): boolean {
 
 /**
  * Tier 5, the floor (flair#747, generalizing flair#742's `verifyAuthedGet`
- * GET-only fallback to any method/body): try every registered key in
+ * GET-only fallback to any method/body): try every candidate key file in
  * `keysDir` in sorted (deterministic) filename order, first one that
- * authenticates wins. Returns `undefined` when no key is accepted — there
- * are no keys to try, or every key was refused as a credential — so the
- * caller can rethrow its ORIGINAL no-credentials error rather than a
- * floor-specific one.
+ * authenticates wins. Returns `undefined` when there are no candidate key
+ * files, when every candidate was credential-rejected, or when every attempt
+ * was a connect failure; a final answer throws. That lets the caller rethrow
+ * its ORIGINAL no-credentials error rather than a floor-specific one.
+ *
+ * Every attempt refuses redirects (flair#2955), whatever the caller asked
+ * for: the location a 3xx names receives no request, and the 3xx is thrown as
+ * itself — a final answer, never a reason to try another key.
  *
  * The floor moves to the next key ONLY when the server refused the Ed25519
- * credential itself (the 401 codes in `CREDENTIAL_REJECTION_CODES`, taken
- * from resources/auth-middleware.ts's signature check) or when the request
- * provably never left this host (a connect-phase failure, the existing
- * network-blip case). Every other answer belongs to the request that was
- * sent, not to the key: a 500, 409, policy 403, refused redirect or GET 404 is
- * FINAL and is thrown as itself, with the server's status and code, so it is
- * never replayed as a different agent and never hidden behind the caller's
- * "no credentials sent". When every key is refused as a credential, the floor
- * returns `undefined`, so the caller rethrows its original no-credentials
- * hint, which carries the operator's remedy.
+ * credential itself (the 401 codes in `CREDENTIAL_REJECTION_CODES`) or when an
+ * attempt that does not follow redirects fails in the connect phase (the
+ * existing network-blip case). Every other response is final: a successful
+ * response returns; a failed HTTP response whose body was read is thrown as
+ * itself with its status and the error code its body names; a refused redirect
+ * is thrown as itself with its status before any body is read. When every
+ * candidate is refused as a credential, the floor returns `undefined`, so the
+ * caller rethrows its original no-credentials hint, which carries the
+ * operator's remedy.
  */
 export async function tryAgentKeyFloor(
   url: URL,
@@ -1572,7 +1577,6 @@ export async function tryAgentKeyFloor(
   body: unknown,
   keysDir: string,
   transport: {
-    refuseRedirects?: boolean;
     deadlineMs?: number;
     deadlineSource?: RequestDeadlineSource;
     tolerateUnparsedSuccessBody?: boolean;
@@ -1590,7 +1594,7 @@ export async function tryAgentKeyFloor(
     const keyPath = join(keysDir, kf);
     try {
       const authHeader = buildEd25519Auth(agentId, method, requestTarget(url), keyPath);
-      return await sendJsonRequest(url, method, body, authHeader, isLocal, transport);
+      return await sendJsonRequest(url, method, body, authHeader, isLocal, { ...transport, refuseRedirects: true });
     } catch (err: unknown) {
       // A write whose outcome is unknown stops the floor. Trying the next key
       // would send the same write again — a blind replay of a request that may
@@ -1600,11 +1604,12 @@ export async function tryAgentKeyFloor(
       // signature, expired timestamp, deactivated principal): another key may
       // authenticate.
       if (isEd25519CredentialRejection(err)) continue;
-      // A connection refused or DNS failure before any byte was sent is the
-      // existing network-blip case: the request provably never left this host.
+      // A connect-phase failure on an attempt that refuses redirects is the
+      // existing network-blip case: another key may connect.
       if (isConnectPhaseFailure(err)) continue;
-      // The server answered the request that was sent. That answer is final —
-      // resending it as a different agent would hide what the server said.
+      // A server answer is final — resending it as a different agent would hide
+      // what the server said. Errors that are not a server answer at all (key
+      // loading, local request failures) are rethrown as themselves.
       throw err;
     }
   }
@@ -1750,11 +1755,9 @@ export interface AuthedRequestOptions {
   /**
    * Refuse a redirect instead of following it (flair#2708): the location a 3xx
    * names receives no request, and that attempt throws `ApiHttpError` with its
-   * status. When the request falls back across agent keys (no resolved
-   * credential), the fallback loop catches that error like any other attempt's,
-   * so the caller can receive an earlier attempt's answer or a later key's
-   * success instead. Unset, a redirect is followed (fetch's default), as for
-   * every caller that does not pass this.
+   * status. Unset, a redirect is followed (fetch's default), as for every
+   * caller that does not pass this. The tier-5 agent-key floor always refuses
+   * redirects (flair#2955), whatever this option says.
    */
   refuseRedirects?: boolean;
   /**
@@ -1928,7 +1931,6 @@ export async function authedRequest(
     // does not retry here).
     if (err instanceof ApiHttpError && err.noCredentials) {
       const floorResult = await tryAgentKeyFloor(url, method, body, keysDir, {
-        refuseRedirects: opts.refuseRedirects,
         deadlineMs: opts.deadlineMs,
         deadlineSource: opts.deadlineSource,
         tolerateUnparsedSuccessBody: opts.tolerateUnparsedSuccessBody,
