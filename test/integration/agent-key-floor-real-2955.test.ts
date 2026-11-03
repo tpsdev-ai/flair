@@ -6,7 +6,7 @@
 // attempt against the server.
 //
 // Each case drives this instance's own ephemeral Harper through
-// `tryAgentKeyFloor` itself with two key files in a scratch keys directory:
+// `tryAgentKeyFloor` itself with key files in a scratch keys directory:
 //   1. an unregistered key (401 unknown_agent) followed by a registered key
 //      whose own Memory write succeeds — the floor moves on;
 //   2. only the registered key, whose write names another principal's
