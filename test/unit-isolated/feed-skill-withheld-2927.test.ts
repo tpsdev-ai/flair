@@ -2,9 +2,9 @@
  * feed-skill-withheld-2927.test.ts — flair#2927, isolated.
  *
  * A skill-tagged POST /FeedMemories write takes the per-id Memory write lock
- * (resources/MemoryFeed.ts), and records the id outcome-unknown on the
- * outcomes the ordinary write-back records it for: storage withholding the
- * write result. Isolated process: owns the harper mock for MemoryFeed.ts.
+ * (resources/MemoryFeed.ts) and can record the id outcome-unknown. This suite
+ * tests one marker case: storage withholding the write result. Isolated
+ * process: owns the harper mock for MemoryFeed.ts.
  */
 import { beforeEach, expect, test } from "bun:test";
 import {
