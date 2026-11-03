@@ -36,6 +36,7 @@ import { PAUSE_LIMIT_MS, txnFault, txnPausePoint } from "./txn-pause-point.js";
 import {
   markMemoryWriteOutcomeUnknown,
   memoryWriteOutcomeUnknown,
+  memoryLockRefusal,
   memoryBusyResponse,
   memoryLockUnavailableResponse,
   boundLockedProviderCall,
@@ -372,14 +373,6 @@ export function memoryLockCallerIdFor(ctx: any): string {
   if (typeof request?.tpsAgent === "string" && request.tpsAgent.length > 0) return request.tpsAgent;
   if (request?.tpsAnonymous === true) return "anonymous";
   return "internal";
-}
-
-/** Map a lock outcome to its refusal `Response`, or `null` when the verb ran. */
-function memoryLockRefusal(outcome: MemoryLockOutcome<unknown>, callerId: string): Response | null {
-  if (outcome.kind === "busy") return memoryBusyResponse(callerId);
-  if (outcome.kind === "unknown") return writeOutcomeUnknownResponse();
-  if (outcome.kind === "unavailable") return memoryLockUnavailableResponse();
-  return null;
 }
 
 /** PUT and PATCH require a target id before entering the lock helper. */

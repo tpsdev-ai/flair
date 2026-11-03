@@ -6,7 +6,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { isLocalBase, resolveAdminUser, sendJsonRequest } from "../lib/auth-resolve.js";
+import { addAdminPassOptions, isLocalBase, resolveAdminUser, sendJsonRequest } from "../lib/auth-resolve.js";
 import { readBackupArtifact } from "../lib/backup-artifact.js";
 import { loadApprovedArchive } from "../lib/backup-approval-store.js";
 import type { RestoreArchive } from "../lib/restore-archive.js";
@@ -36,14 +36,16 @@ export function register(program: Command): void {
 // ─── flair restore ────────────────────────────────────────────────────────────
 
 
-program
-  .command("restore <path>")
-  .description("Import a Flair backup archive")
-  .option("--merge", "Add/update records without deleting existing (default)")
-  .option("--replace", "Delete archived Soul and Memory IDs first, then import")
-  .option("--port <port>", "Harper HTTP port")
-  .option("--url <url>", "Flair base URL (overrides --port)")
-  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+addAdminPassOptions(
+  program
+    .command("restore <path>")
+    .description("Import a Flair backup archive")
+    .option("--merge", "Add/update records without deleting existing (default)")
+    .option("--replace", "Delete archived Soul and Memory IDs first, then import")
+    .option("--port <port>", "Harper HTTP port")
+    .option("--url <url>", "Flair base URL (overrides --port)"),
+  "Admin password (or set FLAIR_ADMIN_PASS env)",
+)
   .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--dry-run", "Show what would be imported without making changes")
   .action(async (backupPath: string, opts) => {

@@ -44,7 +44,6 @@ import * as render from "../render.js";
 
 export type BackupApprovalCli = {
   addSharedCredentialOptions: (...args: any[]) => any;
-  applyAdminPassFile: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
 };
 
@@ -81,7 +80,6 @@ function errnoCode(error: unknown): string {
  * hold; never prints the password.
  */
 async function verifyOperator(opts: any, action: string, nothing = NOTHING_APPROVED): Promise<string> {
-  cli.applyAdminPassFile(opts);
   const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
   const adminUser = resolveAdminUser(opts.adminUser);
   if (!adminPass) {

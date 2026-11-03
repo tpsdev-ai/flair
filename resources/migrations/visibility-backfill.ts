@@ -63,11 +63,11 @@
  * find. A NEGATED comparator does match them (`undefined !== "private"` is
  * true), so the pending condition here is `visibility not_equals "private"
  * AND visibility not_equals "shared"` — no separate `equals: null` leg
- * needed (unlike `embedding-stamp`, whose write path can leave an
- * intermediate explicit-null state on a failed HTTP regen; this migration's
- * write is a single in-process read-modify-write that either fully
- * succeeds or leaves the row in its exact prior state, so there is no
- * intermediate state to add a leg for). This exact `not_equal`-covers-
+ * needed (unlike `embedding-stamp`, whose pending condition carries an
+ * `equals: null` leg for rows whose `embeddingModel` is an explicit null; this
+ * migration's write stages only `{ visibility }` through an incremental
+ * `update`, so it creates no explicit-null state to add a leg for). This exact
+ * `not_equal`-covers-
  * absent-and-null-and-nothing-else-with-the-value-itself semantics is
  * already relied on, in production, by `resources/memory-read-scope.ts`'s
  * cross-agent read-scope condition on this SAME field (`visibility !=
@@ -94,29 +94,25 @@
  * don't-brick (invariant II), and worth surfacing loudly if it ever
  * happens, since a garbage `visibility` value is itself a bug worth seeing.
  *
- * THE WRITE PATH — deliberately NOT `embedding-stamp`'s loopback-HTTP
- * `PUT /Memory/:id` trick. That mechanism exists ONLY because
- * `embedding-stamp` needs `resources/Memory.ts`'s SUBCLASS override (the
- * `content.content && !content.embedding` regen branch) to actually fire,
- * and the raw `databases.flair.Memory` reference (what this migration and
- * that one both get via their table accessor) resolves to the RAW
- * underlying table, silently skipping every subclass override — see that
- * file's module doc for the full, empirically-confirmed mechanism. This
- * migration needs NO subclass business logic (no dedup, no regen, no
- * provenance stamping, no rate limiting) — it is a narrow, single-field
- * patch, which is exactly the shape `resources/table-helpers.ts`'s
- * `patchRecord` documents and this codebase already uses directly against
- * the RAW table for the same kind of narrow metadata write:
- * `resources/auth-middleware.ts`'s `backfillEmbedding()` (patches
- * `embedding`), `resources/MemoryReflect.ts` and `resources/Memory.ts`
- * itself (both patch `lastReflected` this exact way). Per that file's own
- * warning, Harper's raw `.put()` is FULL RECORD REPLACEMENT — a partial
- * object silently deletes every field not included — so `run()` below
- * always spreads the freshly-read `existing` record before adding
- * `visibility`, the same read-modify-write shape `patchRecord` implements
- * (inlined here rather than calling that helper directly only because
- * `run()` already needs its own `.get()` for the write-gate check above,
- * and re-using that same read avoids a second, redundant round-trip).
+ * THE WRITE PATH — a single-field incremental `update`, not
+ * `embedding-stamp`'s loopback HTTP request. For ordinary row ids,
+ * embedding-stamp sends a loopback `PATCH /Memory/:id` with
+ * `{ embedding: null, embeddingModel: null }`, invoking Memory.patch()'s
+ * re-embed path, because it needs `resources/Memory.ts`'s SUBCLASS logic: the raw
+ * `databases.flair.Memory` reference (what this migration and that one both
+ * get via their table accessor) resolves to the RAW underlying table, silently
+ * skipping every subclass override — see that file's module doc for the full,
+ * empirically-confirmed mechanism. This migration needs NO subclass business
+ * logic (no dedup, no regen, no provenance stamping, no rate limiting): it
+ * writes only `visibility`, through `writeBackCommittedRow`
+ * (`resources/write-back.ts`), whose `update` plan calls the table's
+ * incremental `update` with `{ visibility }` and refuses when the table has
+ * none (`applyFieldUpdate`). Nothing spreads the stored row into a full-record
+ * `put`, so the full-record-replacement hazard `resources/table-helpers.ts`'s
+ * `patchRecord` warns about does not arise here. `run()` hands the candidate
+ * from its search to the write-back as `expectedRow`; the write-back re-reads
+ * the row inside its owned transaction, requires the row's identity fields to
+ * still match that basis, and confirms the committed row after staging.
  *
  * NO `recheckPending()`: that hook exists specifically to catch a stale
  * SECONDARY INDEX diverging from live values (flair#807, `embedding-stamp`
@@ -179,11 +175,11 @@ function pendingCondition() {
 }
 
 /**
- * `getTable` is injectable so unit tests exercise this migration's full
- * detect/countPending/run logic against an in-memory fake table (matching
- * `embedding-stamp.ts`'s DI style) — no real Harper needed. Unlike
- * `embedding-stamp`, there is no separate HTTP mechanism to inject: the
- * write IS the table's own `.put()`, already covered by the same fake.
+ * `getTable` and the write-back are injectable so unit tests exercise this
+ * migration's full detect/countPending/run logic against an in-memory fake
+ * table and a fake write-back (matching `embedding-stamp.ts`'s DI style) — no
+ * real Harper needed. The default write-back is the real helper; an `update`
+ * plan needs the table's incremental `update`.
  */
 export function createVisibilityBackfillMigration(
   getTable: () => MemoryTableLike = defaultMemoryTable,

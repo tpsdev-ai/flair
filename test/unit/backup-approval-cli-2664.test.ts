@@ -60,7 +60,6 @@ async function cli(args: string[], options: { home?: string; ops?: OpsReply } = 
     };
     bindCli({
       addSharedCredentialOptions(command) { return command.option("--admin-pass <pass>").option("--admin-pass-file <path>").option("--admin-user <user>"); },
-      applyAdminPassFile() {},
       resolveHttpPort() { return 19926; },
       resolveOpsPort() { return 19925; },
     });

@@ -78,13 +78,13 @@ export function composeTracedComponent(): ProbeComponent {
   expect(lockSource.split(invocation).length, "lock callback instrumentation site").toBe(2);
   writeFileSync(lockPath,
     'import { traceMemoryWriter } from "./zz-memory-write-trace-2478.js";\n' +
-    lockSource.replace(invocation, "value: await traceMemoryWriter(options.phase, () => fn(scope))"));
+    lockSource.replace(invocation, "value: await traceMemoryWriter(options.phase, () => fn(scope), memoryWriteLockTokenIds(scope))"));
   writeFileSync(join(component.dir, FAILING_MEMORY_READ_MODULE_REL), FAILING_MEMORY_READ_MODULE_SRC);
   writeFileSync(join(component.dir, GUARD_STAMP_FAILURE_MODULE_REL), GUARD_STAMP_FAILURE_MODULE_SRC);
   return component;
 }
 
-export interface MemoryWriteTrace { writer: string; method: string; id: string; fields: string[] }
+export interface MemoryWriteTrace { writer: string; method: string; id: string; fields: string[]; held: string[] | null }
 
 export class RaceHarness {
   harper!: HarperInstance;
@@ -241,11 +241,13 @@ export class RaceHarness {
   }
 
   // ── the Memory write trace ──
-  trace(id: string): MemoryWriteTrace[] {
+  traceAll(): MemoryWriteTrace[] {
     const path = join(this.harper.installDir, TRACE_FILE);
     if (!existsSync(path)) return [];
-    return readFileSync(path, "utf8").split("\n").filter(Boolean)
-      .map((line) => JSON.parse(line) as MemoryWriteTrace).filter((entry) => entry.id === id);
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as MemoryWriteTrace);
+  }
+  trace(id: string): MemoryWriteTrace[] {
+    return this.traceAll().filter((entry) => entry.id === id);
   }
   writesBy(id: string, writer: string): MemoryWriteTrace[] {
     return this.trace(id).filter((entry) => entry.writer === writer);
