@@ -20,21 +20,30 @@ function fakeCli(n: number): string {
   return `export const program = { commands: [${cmds}] };\n`;
 }
 
+const IDENTITY_ENV = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] as const;
+
+/** process.env without inherited commit identities, so the fixture repo's own config decides `%an`. */
+function fixtureGitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const k of IDENTITY_ENV) delete env[k];
+  return env;
+}
+
 function git(dir: string, ...args: string[]): void {
-  execFileSync("git", args, { cwd: dir, stdio: ["ignore", "pipe", "pipe"] });
+  execFileSync("git", args, { cwd: dir, env: fixtureGitEnv(), stdio: ["ignore", "pipe", "pipe"] });
 }
 
 function gitOut(dir: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return execFileSync("git", args, { cwd: dir, env: fixtureGitEnv(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
-/** Commit with an explicit author, then leave the fixture identity restored. */
+/** Commit with an explicit author and committer, set through the environment so nothing inherited overrides them. */
 function commitAs(dir: string, name: string, email: string, message: string): void {
-  git(dir, "config", "user.name", name);
-  git(dir, "config", "user.email", email);
-  git(dir, "commit", "-qm", message);
-  git(dir, "config", "user.name", "Fixture");
-  git(dir, "config", "user.email", "fixture@example.invalid");
+  execFileSync("git", ["commit", "-qm", message], {
+    cwd: dir,
+    env: { ...fixtureGitEnv(), GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 }
 
 function writeFixtureFile(dir: string, rel: string, body: string): void {
