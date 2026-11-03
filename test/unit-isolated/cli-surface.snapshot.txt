@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=149 options=703
+# commands=149 options=704
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -2161,6 +2161,9 @@ flair memory search
     --admin-pass-file <path>
       description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
     --q <query>
       description: search query (alias for positional arg)
       attr: q
@@ -5734,6 +5737,8 @@ Options:
                             list. An explicit option (this or --admin-pass)
                             overrides FLAIR_ADMIN_PASS; combining it with
                             --admin-pass is a usage error.
+  --admin-user <name>       Admin username for Basic auth (env:
+                            FLAIR_ADMIN_USER; default: admin)
   --q <query>               search query (alias for positional arg)
   --json                    Output raw JSON array
   --limit <n>               Max results (default: "5")

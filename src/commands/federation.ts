@@ -556,13 +556,14 @@ export async function persistLocalPeerPresenceSyncAt(args: {
  * Returns null on ANY failure. A driver verdict is a diagnostic aid; it must
  * never be the reason `federation status` fails.
  */
-async function latestPeerContact(opts: { target?: string; adminPass?: string }): Promise<string | null> {
+async function latestPeerContact(opts: { target?: string; adminPass?: string; adminUser?: string }): Promise<string | null> {
   try {
     const target = resolveTarget(opts);
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
-    const requestOptions: { baseUrl?: string; explicitAdminPass?: string } = {};
+    const requestOptions: { baseUrl?: string; explicitAdminPass?: string; adminUser?: string } = {};
     if (baseUrl) requestOptions.baseUrl = baseUrl;
     if (opts.adminPass) requestOptions.explicitAdminPass = opts.adminPass;
+    if (opts.adminUser) requestOptions.adminUser = opts.adminUser;
     const { peers } = await api(
       "GET",
       "/FederationPeers",

@@ -281,6 +281,7 @@ export function register(program: Command): void {
       .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)"),
     "Admin password — sign as admin while --agent names whose memories to search (flair#1500: a flag-pinned agent with no key no longer falls back to FLAIR_ADMIN_PASS)",
   )
+    .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--q <query>", "search query (alias for positional arg)")
     .option("--json", "Output raw JSON array")
     .option("--limit <n>", "Max results", "5")
@@ -301,7 +302,7 @@ export function register(program: Command): void {
       if (opts.tag) body.tag = opts.tag;
       if (opts.includeArchived) body.includeArchived = true;
       const baseUrl = resolveBaseUrl(opts);
-      const res = await api("POST", "/SemanticSearch", body, { baseUrl, agentId, agentIdSource: source, explicitAdminPass: opts.adminPass });
+      const res = await api("POST", "/SemanticSearch", body, { baseUrl, agentId, agentIdSource: source, explicitAdminPass: opts.adminPass, adminUser: opts.adminUser });
       if (opts.json) {
         const results = res.results || res || [];
         console.log(render.asJSON(Array.isArray(results) ? results : []));

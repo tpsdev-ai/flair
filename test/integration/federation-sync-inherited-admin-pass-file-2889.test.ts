@@ -132,6 +132,23 @@ describe("flair#2889 — federation sync status/disable apply the inherited admi
     );
   }, 60_000);
 
+  test.each([
+    { command: ["federation", "sync", "status"], method: "GET", path: "/FederationPeers" },
+    { command: ["memory", "search", "example", "--agent", "test-agent", "--json"], method: "POST", path: "/SemanticSearch" },
+  ])("$command sends the file password with --admin-user", async ({ command, method, path }) => {
+    const stub = startStub();
+    const result = await run(
+      [...command, "--target", `http://127.0.0.1:${stub.port}`, "--admin-pass-file", passFile(0o600), "--admin-user", "someone"],
+      tempHome("flair-2889-sync-home-"),
+      { FLAIR_ADMIN_PASS: ENV_PASS, FLAIR_ADMIN_USER: "ambient-user" },
+    );
+    expect(result.code).toBe(0);
+    expect(stub.requests.map((r) => ({ method: r.method, path: r.path }))).toEqual([{ method, path }]);
+    expect(stub.requests[0].auth).toBe(
+      `Basic ${Buffer.from(`someone:${FILE_PASS}`).toString("base64")}`,
+    );
+  }, 60_000);
+
   test("disable refuses a 0644 file and leaves the pre-existing timer fixture untouched", async () => {
     const home = tempHome("flair-2889-sync-home-");
     const unitDir = join(home, ".config", "systemd", "user");
