@@ -1259,6 +1259,8 @@ export async function sendJsonRequest(
     signedOnly?: SignedOnlyHintContext;
     deadlineMs?: number;
     deadlineSource?: RequestDeadlineSource;
+    /** Withhold the response body from the FLAIR_DEBUG HTTP-error line. */
+    withholdResponseBodyDebug?: boolean;
     /**
      * Treat a 2xx whose body is not JSON as a success instead of throwing.
      * For a caller that has its own confirmation step (prune's DELETE, which
@@ -1322,7 +1324,14 @@ export async function sendJsonRequest(
       // and the server's text is withheld when it sets `withhold`; classifiers
       // read the unredacted text through apiErrorRawBody.
       const sent = credentialsInHeader(authHeader);
-      emitHttpErrorBodyDebug(method, url.pathname, res.status, text, sent.values, sent.withhold);
+      emitHttpErrorBodyDebug(
+        method,
+        url.pathname,
+        res.status,
+        text,
+        sent.values,
+        sent.withhold || transport.withholdResponseBodyDebug === true,
+      );
       throw ApiHttpError.fromResponse(res.status, text, sent.values, sent.withhold);
     }
     if (!text) return { ok: true };
