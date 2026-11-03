@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, readdirSync, renameSync, rmSync, existsSync, re
 import { join } from "node:path";
 import { hostname, tmpdir } from "node:os";
 import { probeMigrationDataDir } from "../../resources/migrations/data-dir.ts";
-import { acquireMigrationLock, _resetInProcessLockForTests, DEFAULT_STALE_MS, defaultIsProcessAlive } from "../../resources/migrations/lock.ts";
+import { acquireMigrationLock, _resetInProcessLockForTests, migrationLockStillHeld, DEFAULT_STALE_MS, defaultIsProcessAlive } from "../../resources/migrations/lock.ts";
 
 let testRoot: string;
 let lockPath: string;
@@ -285,6 +285,23 @@ describe("acquireMigrationLock — directory mutex (flair#2866)", () => {
     expect(result.acquired).toBe(false);
     if (!result.acquired) expect(result.reason).toContain("mutex is held by pid");
     expect(readdirSync(guardPath())).toEqual([`owner-${generation}.json`]);
+  });
+
+  it("a released handle whose record still exists is not still-held", () => {
+    const result = acquireMigrationLock({ lockPath });
+    expect(result.acquired).toBe(true);
+    if (!result.acquired) return;
+    // A live local owner holds the mutex, so release cannot remove the lock
+    // record this handle wrote.
+    writeFileSync(
+      join(guardPath(), `owner-${generation}.json`),
+      JSON.stringify({ pid: process.pid, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z", generation }),
+    );
+
+    result.release();
+
+    expect(existsSync(lockPath)).toBe(true);
+    expect(migrationLockStillHeld(result)).toBe(false);
   });
 
   it("recovers a dead mutex generation by removing only its owner entry", () => {

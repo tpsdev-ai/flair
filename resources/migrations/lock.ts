@@ -27,9 +27,12 @@
  * holder is on THIS host is reclaimed only when that pid is no longer alive;
  * a live local holder is held regardless of the file's age. A holder
  * recorded on ANOTHER host is judged by age alone (`staleMs`) and is never
- * probed by a local pid. The pid probe is therefore only used for a local
- * holder. A holder record that cannot be read or parsed is not treated as
- * stale: acquisition refuses with a named error.
+ * probed by a local pid. Same host is decided by comparing the recorded
+ * hostname string: the discriminator is a name, not an identity, so two
+ * hosts sharing a hostname and a data dir judge a remote holder by a local
+ * pid probe. The pid probe is therefore only used for a local holder. A
+ * holder record that cannot be read or parsed is not treated as stale:
+ * acquisition refuses with a named error.
  *
  * This is a SINGLE-HOST guard, not a Fabric-wide one — multiple Flair
  * instances in a Fabric cluster each have their OWN data dir today. Fabric-
@@ -105,6 +108,21 @@ const revokedHandles = new WeakSet<MigrationLockHandle>();
 const identities = new WeakMap<MigrationLockHandle, LockIdentity>();
 const HANDLE_KEY = Symbol("migration-lock-handle");
 
+/** Holder identities this process currently has a live handle for, per lock path. */
+const liveHolderKeys = new Set<string>();
+
+/**
+ * A record this process wrote whose release could not take the mutex, so the
+ * record was left in place. A later acquisition may finish that cleanup under
+ * the mutex, but only for this exact identity and only when no live handle
+ * holds it (flair#2866).
+ */
+const abandonedOwnRecords = new Map<string, LockHolder>();
+
+function holderKey(lockPath: string, holder: LockHolder): string {
+  return `${lockPath}\u0000${holder.pid}\u0000${holder.hostname}\u0000${holder.startedAt}`;
+}
+
 /**
  * An acquired migration lock. Only {@link acquireMigrationLock} constructs a
  * live one; {@link MigrationLockHandle.release} revokes it. The lock path and
@@ -136,6 +154,7 @@ export class MigrationLockHandle {
     if (!liveHandles.has(this) || identity === undefined) return;
     liveHandles.delete(this);
     revokedHandles.add(this);
+    liveHolderKeys.delete(holderKey(identity.lockPath, identity.holder));
     identity.release();
   }
 
@@ -268,6 +287,7 @@ export type AcquireResult =
  * unknown lock state never licenses a write (flair#2866).
  */
 export function migrationLockStillHeld(lock: MigrationLockHandle): boolean {
+  if (!liveHandles.has(lock)) return false;
   const identity = identities.get(lock);
   if (identity === undefined) return false;
   const current = inspectLock(identity.lockPath);
@@ -682,6 +702,24 @@ function guardHolderIsBreakable(holder: GuardHolder, mtimeMs: number, deps: Lock
   return deps.now() - mtimeMs > deps.staleMs;
 }
 
+/**
+ * True only for the exact record this process wrote and could not remove, with
+ * no live handle for it. The path and the full identity must match: a pid
+ * alone never authorizes deleting a record (flair#2866).
+ */
+function isAbandonedOwnRecord(lockPath: string, holder: LockHolder): boolean {
+  const remembered = abandonedOwnRecords.get(lockPath);
+  return (
+    remembered !== undefined &&
+    sameHolder(remembered, holder) &&
+    !liveHolderKeys.has(holderKey(lockPath, holder))
+  );
+}
+
+function rememberAbandonedRecord(lockPath: string, holder: LockHolder): void {
+  abandonedOwnRecords.set(lockPath, holder);
+}
+
 // ─── migration lock protocol ────────────────────────────────────────────────
 
 type UnderGuardOutcome =
@@ -699,6 +737,7 @@ function transitionUnderGuard(lockPath: string, deps: LockDeps, staleMs: number,
   const inspected = inspectLock(lockPath);
 
   if (inspected.state === "absent") {
+    abandonedOwnRecords.delete(lockPath);
     const holder = makeHolder(now);
     const published = publishLock(lockPath, holder);
     if (!published.published) return { kind: "retry" };
@@ -711,6 +750,30 @@ function transitionUnderGuard(lockPath: string, deps: LockDeps, staleMs: number,
   }
 
   const holder = inspected.holder;
+  if (isAbandonedOwnRecord(lockPath, holder)) {
+    // This process wrote the record and its release could not take the mutex.
+    // No live handle owns it, so under the mutex this process may finish the
+    // cleanup its release could not perform.
+    try {
+      unlinkSync(lockPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        return {
+          kind: "refused",
+          reason:
+            `refusing to reclaim ${lockPath}: this process's abandoned lock record cannot be removed ` +
+            `(${(err as NodeJS.ErrnoException)?.code ?? String(err)})`,
+        };
+      }
+    }
+    abandonedOwnRecords.delete(lockPath);
+    const fresh = makeHolder(now);
+    const published = publishLock(lockPath, fresh);
+    if (!published.published) return { kind: "retry" };
+    return { kind: "handle", holder: fresh, dev: published.dev, ino: published.ino };
+  }
+  // A different (or live) record means the abandoned one is gone.
+  abandonedOwnRecords.delete(lockPath);
   let breakable: boolean;
   try {
     if (holder.hostname === osHostname()) {
@@ -859,10 +922,12 @@ function issueHandle(
       let cleanupFailure: string | null = null;
       // What this release did to the record, so a later failure describes the
       // state it actually left rather than assuming the record remains.
-      let recordOutcome: "removed" | "absent" | "present" | "unknown" = "unknown";
+      let recordOutcome: "removed" | "absent" | "present" | "present-owned" | "unknown" = "unknown";
       try {
         const guard = acquireGuard(guardPath, defaultLockDeps(lockPath));
         if (!guard.acquired) {
+          rememberAbandonedRecord(lockPath, holder);
+          recordOutcome = "present-owned";
           cleanupFailure = `the mutex could not be acquired: ${guard.reason}`;
         } else {
           txnPausePointSync("migration-lock-release-guard", process.env, undefined, { lockPath, guardPath });
@@ -917,7 +982,9 @@ function issueHandle(
               ? "No lock record was present"
               : recordOutcome === "present"
                 ? "The lock record is left in place"
-                : "The lock record's state is unknown";
+                : recordOutcome === "present-owned"
+                  ? "The lock record is still present and owned by this process and will be cleaned on this process's next acquisition"
+                  : "The lock record's state is unknown";
         console.warn(
           `[flair-migrations] migration lock cleanup failed for ${lockPath}: ${cleanupFailure}. ` +
             `${recordState}; inspect the lock and its mutex before the next migration cycle`,
@@ -956,5 +1023,6 @@ function issueHandle(
       }
     },
   };
+  liveHolderKeys.add(holderKey(lockPath, holder));
   return new MigrationLockHandle(HANDLE_KEY, identity);
 }

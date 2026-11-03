@@ -443,8 +443,8 @@ describe("three-contender reclaim (flair#2866)", () => {
     const c2 = spawnWriter("mig-c2");
     expect(await waitExit(b2, "B2")).toBe(3);
     expect(await waitExit(c2, "C2")).toBe(3);
-    expect(readFileSync(join(pauseDir, "lock-failed.mig-b2"), "utf-8")).toContain("held by pid");
-    expect(readFileSync(join(pauseDir, "lock-failed.mig-c2"), "utf-8")).toContain("held by pid");
+    expect(readFileSync(join(pauseDir, "lock-failed.mig-b2"), "utf-8")).toContain(`held by pid ${a.pid}`);
+    expect(readFileSync(join(pauseDir, "lock-failed.mig-c2"), "utf-8")).toContain(`held by pid ${a.pid}`);
 
     setGo("release-a");
     expect(await waitExit(a, "A")).toBe(0);
@@ -452,7 +452,7 @@ describe("three-contender reclaim (flair#2866)", () => {
     expect(readState()["mig-d"]).toMatchObject({ lastOutcome: "success" });
   }, 40_000);
 
-  it("after the reclaimer is killed at the replacement boundary, exactly one contender wins", async () => {
+  it("after the reclaimer is killed before the replacement, exactly one contender wins and no old record is restored", async () => {
     await seedDeadHolder("mig-d");
 
     arm(RECLAIM_PAUSE);
@@ -477,6 +477,8 @@ describe("three-contender reclaim (flair#2866)", () => {
     await waitFor(join(pauseDir, `lock-failed.${loserId}`), "the losing contender's refusal");
     expect(readState()[winnerId]).toMatchObject({ lastOutcome: "success" });
     expect(readState()[loserId]).toBeUndefined();
+    // The winner's record replaced the dead one; the killed reclaimer restored nothing.
+    expect(JSON.parse(readFileSync(lockPath(), "utf-8")).pid).toBe(winner.pid);
 
     setGo("release-win");
     expect(await waitExit(winner, winnerId)).toBe(0);
@@ -672,6 +674,52 @@ describe("release under the mutex (flair#2866)", () => {
     setGo("release-b2");
     expect(await waitExit(b2, "B2")).toBe(0);
   }, 40_000);
+});
+
+describe("abandoned release cleanup (flair#2866)", () => {
+  async function abandonRelease(): Promise<void> {
+    const first = acquireMigrationLock({ lockPath: lockPath() });
+    if (!first.acquired) throw new Error(`migration lock unavailable: ${first.reason}`);
+    const record = JSON.parse(readFileSync(lockPath(), "utf-8"));
+    expect(record.pid).toBe(process.pid);
+
+    arm(GUARD_PUBLISHED_PAUSE);
+    const child = spawnWriter("mig-child");
+    await waitFor(paused(GUARD_PUBLISHED_PAUSE), "the child's mutex publication pause");
+
+    // The child holds the mutex, so release cannot take it and leaves the
+    // record this process wrote.
+    first.release();
+    expect(existsSync(lockPath())).toBe(true);
+
+    setGo(GUARD_PUBLISHED_PAUSE);
+    expect(await waitExit(child, "child")).toBe(3);
+    expect(readFileSync(join(pauseDir, "lock-failed.mig-child"), "utf-8")).toContain(`held by pid ${process.pid}`);
+  }
+
+  it("a later acquisition removes this process's abandoned record and publishes a new one", async () => {
+    await abandonRelease();
+
+    const next = acquireMigrationLock({ lockPath: lockPath() });
+    expect(next.acquired).toBe(true);
+    if (!next.acquired) return;
+    expect(JSON.parse(readFileSync(lockPath(), "utf-8"))).toEqual(next.holder);
+
+    next.release();
+    expect(existsSync(lockPath())).toBe(false);
+  }, 30_000);
+
+  it("a record with this pid but a different startedAt is still refused", async () => {
+    await abandonRelease();
+
+    const forged = { pid: process.pid, hostname: hostname(), startedAt: "2000-01-01T00:00:00.000Z" };
+    writeFileSync(lockPath(), JSON.stringify(forged));
+
+    const next = acquireMigrationLock({ lockPath: lockPath() });
+    expect(next.acquired).toBe(false);
+    if (!next.acquired) expect(next.reason).toContain(`held by pid ${process.pid}`);
+    expect(JSON.parse(readFileSync(lockPath(), "utf-8"))).toEqual(forged);
+  }, 30_000);
 });
 
 describe("descriptor heartbeat (flair#2866)", () => {

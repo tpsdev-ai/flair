@@ -5,16 +5,16 @@
  * currently running version (Kern's detect() short-circuit fallback).
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   readMigrationState,
   writeMigrationStateEntry,
   isShortCircuited,
   defaultStatePath,
 } from "../../resources/migrations/state.ts";
-import { acquireMigrationLock } from "../../resources/migrations/lock.ts";
+import { acquireMigrationLock, migrationLockStillHeld } from "../../resources/migrations/lock.ts";
 import { seedMigrationStateEntry } from "../helpers/migration-state.ts";
 
 let root: string;
@@ -28,6 +28,14 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
+
+async function waitForFile(path: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
 
 describe("readMigrationState", () => {
   it("returns {} when the file doesn't exist yet (never throws)", () => {
@@ -127,6 +135,51 @@ describe("writeMigrationStateEntry — lock handle (flair#2866)", () => {
     expect((error as Error)?.message).toContain("already released");
     expect(existsSync(statePath)).toBe(false);
   });
+
+  it("refuses a write when the handle is released while the mutex is occupied and the record survives", async () => {
+    await seedMigrationStateEntry(statePath, "m", { lastOutcome: "halted", reason: "old" });
+    const lockPath = join(root, ".migrations", "lock");
+    const pauseDir = mkdtempSync(join(tmpdir(), "flair-migration-state-pause-"));
+    const previousFault = process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION;
+    const previousPause = process.env.FLAIR_TEST_PAUSE_DIR;
+    process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
+    process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
+    try {
+      const lock = acquireMigrationLock({ lockPath });
+      if (!lock.acquired) throw new Error(`migration lock unavailable: ${lock.reason}`);
+      // A live local owner holds the mutex, so release cannot take it and the
+      // lock record this handle wrote survives.
+      const generation = "0123456789abcdef";
+      mkdirSync(`${lockPath}.guard`, { recursive: true, mode: 0o700 });
+      writeFileSync(
+        join(`${lockPath}.guard`, `owner-${generation}.json`),
+        JSON.stringify({ pid: process.pid, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z", generation }),
+      );
+      writeFileSync(join(pauseDir, "arm.migration-state-write"), "");
+      const pending = writeMigrationStateEntry(statePath, "m", { lastOutcome: "success" }, lock);
+      await waitForFile(join(pauseDir, "paused.migration-state-write"));
+
+      lock.release();
+      expect(existsSync(lockPath)).toBe(true);
+      expect(migrationLockStillHeld(lock)).toBe(false);
+
+      writeFileSync(join(pauseDir, "go.migration-state-write"), "");
+      let error: unknown;
+      try {
+        await pending;
+      } catch (err) {
+        error = err;
+      }
+      expect((error as Error)?.name).toBe("MigrationStateWriteRefusedError");
+      expect(readMigrationState(statePath)["m"].lastOutcome).toBe("halted");
+    } finally {
+      if (previousFault === undefined) delete process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION;
+      else process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = previousFault;
+      if (previousPause === undefined) delete process.env.FLAIR_TEST_PAUSE_DIR;
+      else process.env.FLAIR_TEST_PAUSE_DIR = previousPause;
+      rmSync(pauseDir, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("refuses a live handle for a different lock path", async () => {
     const otherRoot = mkdtempSync(join(tmpdir(), "flair-migration-state-other-"));
