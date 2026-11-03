@@ -336,8 +336,8 @@ describe("api() — alternate-port fallback is connect-phase only (flair#2869)",
 
   test("a bare fetch failed with no recognised code is not a connect-phase failure", () => {
     // What the classification must treat as unknown: no code at all, or a
-    // code that can also occur after send. No server can produce a bare `fetch failed` on demand, so
-    // the predicate is exercised directly on the shapes undici and Bun raise.
+    // code that can also occur after send.
+    // The predicate is also exercised directly with representative error shapes.
     expect(isConnectPhaseFailure(new TypeError("fetch failed"))).toBe(false);
     const socketClosed = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
     expect(isConnectPhaseFailure(new TypeError("fetch failed", { cause: socketClosed }))).toBe(false);

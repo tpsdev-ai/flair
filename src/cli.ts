@@ -2881,9 +2881,8 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
   // connect-phase failure may fall back to (flair#1719).
   const altPort = hasExplicitBase ? null : alternateConfiguredLocalPort({});
   const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
-  // A write that could fall back must not follow a redirect: fetch would send
-  // the write to the Location, and a connect failure there would look like a
-  // connect-phase failure of this request and be replayed on the alternate.
+  // Following a redirect can start another connection attempt; a connect-phase
+  // failure there could cause the original write to be replayed on the alternate.
   // Refusing it (redirect: "manual") yields a named HTTP 3xx error, which is
   // never fallback-eligible because it is not a connect-phase failure.
   if (altPort !== null && !readOnly) requestOptions.refuseRedirects = true;
