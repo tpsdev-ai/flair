@@ -1,9 +1,8 @@
 // check-cli-spawn-budgets-rekey-2854.test.ts — GATE-LEVEL tests for the
-// re-key rule (flair#2854): `spawn-no-timeout`'s scope is derived attribution,
-// so a scope re-attribution in a test file that is byte-identical at the base
-// and the PR head must be reported as RE-KEYED rather than refused as
-// ADDED-EX. A changed file is never a re-key. Case-level kinds keep strict
-// identity.
+// re-key rule (flair#2854): added `spawn-no-timeout` keys pair one-to-one with
+// removed keys of identical file, fingerprint, kind and occurrence when the
+// scanned working-tree file is byte-identical to the trusted base blob.
+// Case-level kinds keep strict identity.
 //
 // Each test drives the real gate (`runGate`, and the CLI for the exit codes)
 // against a fixture git repo with a base commit and a PR working tree.

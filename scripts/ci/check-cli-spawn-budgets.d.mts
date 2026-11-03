@@ -91,7 +91,7 @@ export function loadBaselineAtRef(ref: string, root: string): BaselineEntry[] | 
 export function readPrBaseline(root: string): BaselineEntry[];
 /** Entries with exception keys absent from the trusted base. */
 export function addedExceptions(baseEntries: BaselineEntry[], prEntries: BaselineEntry[]): BaselineEntry[];
-/** Split added keys into re-keys (scope-only moves of a spawn-no-timeout call in a test file that is byte-identical at the base and the PR head) and true additions (flair#2854). */
+/** Re-keys pair added spawn-no-timeout keys one-to-one with removed keys of identical file, fingerprint, kind and occurrence when the scanned working-tree file is byte-identical to the trusted base blob (flair#2854). */
 export function classifyAddedExceptions(
   baseEntries: BaselineEntry[],
   prEntries: BaselineEntry[],

@@ -1,6 +1,6 @@
 // check-cli-spawn-budgets-arrow-2842.test.ts — the spawn-budget gate attributes
-// a spawn directly assigned to an unannotated variable arrow to that arrow
-// (flair#2842), however the body is laid out: on the `=>` line, on the next
+// a spawn in a directly assigned, unannotated variable arrow with simple parameters
+// to that arrow (flair#2842), however the body is laid out: on the `=>` line, on the next
 // line, or parenthesized across lines. It also reports a case's line as the
 // line its `test(`/`it(` starts on.
 // Each fixture is written to a real `test/` tree and scanned through `scanTree`,
@@ -96,7 +96,7 @@ test("calls a void arrow", () => {
 });
 `;
 
-describe("a spawn directly assigned to an unannotated variable arrow belongs to it (flair#2842)", () => {
+describe("a spawn in a directly assigned, unannotated variable arrow with simple parameters belongs to it (flair#2842)", () => {
   it("attributes a same-line spawn to the arrow and reports the case that calls it", () => {
     const { spawnOffenders, caseOffenders } = scanFixture("arrow-expression.test.ts", EXPRESSION_ARROW_FIXTURE);
     expect(spawnOffenders.map((o) => [o.kind, o.scope])).toEqual([["spawn-no-timeout", "f"]]);

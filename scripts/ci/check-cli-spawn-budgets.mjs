@@ -41,17 +41,11 @@
 // an entry that no longer offends FAILS. New exception keys FAIL. There is
 // no skip flag and no whole-file skip.
 //
-// A RE-KEY IS NOT AN ADDED EXCEPTION (flair#2854). `spawn-no-timeout`'s scope is
-// derived attribution: the enclosing helper or case the scanner picks for the
-// call. Moving a spawn into the helper that actually performs it changes the key
-// although it is the same call — file, fingerprint, kind and occurrence are
-// unchanged. Such an added key is paired ONE-TO-ONE with a removed baseline key
-// of identical file, fingerprint, kind and occurrence, and reported as RE-KEYED
-// without failing, ONLY when that test file is byte-identical at the trusted
-// base ref and the PR head: in a changed file identical call text can be a
-// different call (a bounded helper whose spawn gains a timeout while another
-// helper gains an unbounded spawn). Pairing consumes both keys, so a second
-// added key with the same identity still fails as ADDED-EX. Only
+// A RE-KEY IS NOT AN ADDED EXCEPTION (flair#2854). An added key is paired
+// ONE-TO-ONE with a removed baseline key of identical file, fingerprint, kind
+// and occurrence, and reported as RE-KEYED without failing, ONLY when the
+// scanned working-tree file is byte-identical to its blob at the trusted base
+// ref. Pairing consumes both keys. Only
 // `spawn-no-timeout` is re-keyable: a case-level kind's scope names the case
 // that owns the defect, and a fix in one case must never cover a regression in
 // another, so those keys keep strict identity.
@@ -1420,19 +1414,18 @@ export function addedExceptions(baseEntries, prEntries) {
   return prEntries.filter((e) => !baseKeys.has(offenderKey(e)));
 }
 
-/** Identity of a call whose scope is derived, i.e. everything but the scope. */
 function rekeyIdentity(e) {
   return [e.file, e.fingerprint, e.kind, String(e.occurrence ?? 0)].join(" | ");
 }
 
 /**
- * Split the PR's added exception keys into re-keys and true additions
+ * Split the PR's added exception keys into re-keys and ADDED-EX
  * (flair#2854).
  *
  * An added key is a re-key when it pairs one-to-one with a REMOVED baseline key
  * (in the base, absent from the PR) of identical file, fingerprint, kind and
- * occurrence, AND that test file is byte-identical at the base and the PR head:
- * only the scope moved. Only `spawn-no-timeout` qualifies, because its scope is
+ * occurrence, AND the scanned working-tree file is byte-identical to its blob
+ * at the trusted base ref. Only `spawn-no-timeout` qualifies, because its scope is
  * derived attribution; the case-level kinds keep strict identity. Pairing
  * consumes both keys, so two added keys against one removed key are one re-key
  * and one addition, never two re-keys. `fileUnchanged` must answer true only
