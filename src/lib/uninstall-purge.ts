@@ -287,8 +287,9 @@ function holdSelectionBarrier(candidate: string): void {
  * `recursive` fails with `EEXIST` when any entry already occupies the name,
  * so a user file or directory there is never adopted or overwritten. The name
  * carries this process's pid and a per-client sequence; the directory is
- * created by this purge, mode 0700, and removed by `restoreHeldClientConfigBackups`
- * or the failed-rename cleanup below.
+ * created by this purge, mode 0700, and removed after a successful restore
+ * (or by the failed-rename cleanup below); a failed restore leaves it holding
+ * the copy the report names.
  */
 function reserveHoldPath(backup: string, seq: number): HoldReservation {
   for (let attempt = 0; attempt < 16; attempt++) {
