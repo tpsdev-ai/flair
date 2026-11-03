@@ -1538,9 +1538,9 @@ export async function sendJsonRequest(
  * The 401 error codes the Ed25519 authentication middleware in
  * resources/auth-middleware.ts returns when it refuses the credential: an
  * unparseable header, a timestamp outside the replay window, an unknown agent,
- * a deactivated principal, or a signature that does not verify. The timestamp,
- * replay, lookup and status checks run before signature verification, and the
- * middleware's catch around that verification also covers key import errors.
+ * a deactivated principal, or a signature that does not verify. The
+ * middleware's catch around signature verification also covers key import
+ * errors.
  * A 401 carrying one of these codes moves the tier-5 floor to the next key.
  * `nonce_replay_detected` is an answer about the REQUEST (a reused nonce) and
  * `replay_store_unavailable` is a server-side failure; neither is a credential
@@ -1579,9 +1579,9 @@ function isEd25519CredentialRejection(err: unknown): boolean {
  * or a connect failure; a final answer throws. That lets the caller rethrow its
  * ORIGINAL no-credentials error rather than a floor-specific one.
  *
- * Every attempt refuses redirects (flair#2955), whatever the caller asked
- * for: the location a 3xx names receives no request, and the 3xx is thrown as
- * itself — a final answer, never a reason to try another key.
+ * Every request the floor sends refuses redirects (flair#2955), whatever the
+ * caller asked for: the location a 3xx names receives no request, and the 3xx
+ * is thrown as itself — a final answer, never a reason to try another key.
  *
  * The floor moves to the next key ONLY when the server refused the Ed25519
  * credential itself (the 401 codes in `CREDENTIAL_REJECTION_CODES`), when an
@@ -1589,9 +1589,9 @@ function isEd25519CredentialRejection(err: unknown): boolean {
  * existing network-blip case), or when that candidate's key file cannot be read
  * or decoded as an Ed25519 key (nothing was sent for it). Failures after a key
  * is loaded (nonce, signing) are final. Every other response is final too: a
- * successful response returns; a failed HTTP response whose body was read is
- * thrown as itself with its status and the error code its body names; a refused
- * redirect is thrown as itself with its status before any body is read. When
+ * failed HTTP response whose body was read is thrown as itself with its status
+ * and any error code its body names, and a refused redirect is thrown as itself
+ * with its status before any body is read. When
  * every candidate is refused as a credential, the floor returns `undefined`, so
  * the caller rethrows its original no-credentials hint, which carries the
  * operator's remedy.
