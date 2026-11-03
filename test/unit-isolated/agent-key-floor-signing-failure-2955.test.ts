@@ -1,10 +1,10 @@
 /**
  * agent-key-floor-signing-failure-2955.test.ts — flair#2955.
  *
- * The tier-5 floor skips a candidate only when its KEY FILE cannot be read or
- * decoded as an Ed25519 key. A failure after the key is loaded — here the
- * signing step — is not this key file's problem: it is thrown as itself, and no
- * later key is sent.
+ * The tier-5 floor treats a candidate's KEY FILE as skippable only when it
+ * cannot be read or decoded as an Ed25519 key. A failure after the key is loaded
+ * — here the signing step — is not this key file's problem: it is thrown as
+ * itself, and no later key is sent.
  *
  * Isolated: this file owns its `node:crypto` mock (`sign` throws; every other
  * export is the real one), because the signing seam is inside

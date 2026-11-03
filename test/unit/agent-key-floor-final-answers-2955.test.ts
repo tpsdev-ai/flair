@@ -135,7 +135,7 @@ function errorCodeOf(err: unknown): string | undefined {
 
 const ENV_KEYS = ["FLAIR_TOKEN", "FLAIR_ADMIN_PASS", "HDB_ADMIN_PASSWORD", "FLAIR_KEY_DIR"] as const;
 
-describe("flair#2955 — the agent-key floor moves on only for credential refusals, connect failures, and key files that are not Ed25519", () => {
+describe("flair#2955 — the agent-key floor moves on for credential refusals, connect-phase failures, and candidates whose key file cannot be loaded as an Ed25519 key", () => {
   let keysDir: string;
   let homeDir: string;
   let savedEnv: Record<string, string | undefined>;

@@ -1172,7 +1172,7 @@ function buildEd25519AuthFromKey(
   return `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${sig}`;
 }
 
-/** Build a TPS-Ed25519 auth header from a raw 32-byte seed on disk. */
+/** Build a TPS-Ed25519 auth header from the key file at `keyPath`. */
 export function buildEd25519Auth(agentId: string, method: string, path: string, keyPath: string): string {
   return buildEd25519AuthFromKey(agentId, method, path, loadEd25519SigningKey(keyPath));
 }
