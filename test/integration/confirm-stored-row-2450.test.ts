@@ -265,11 +265,12 @@ describe("flair#2450 — the _reindex re-PUT confirms the stored row (real Harpe
     const id = `csr2-reidx-ok-${Date.now()}`;
     const TOKEN = randomUUID();
     await seed(id, TOKEN);
-    const res = await reindexPut(id);
+    const res = await reindexPut(id, { retrievalCount: 7 });
     expect(res.status, (await res.clone().text()).slice(0, 200)).toBeLessThan(300);
     const row = await readRow("Memory", id);
     expect(row?.content, "the ordinary re-PUT did not land").toBe(`reindex ${id}`);
     expect(row?.instanceToken, "the re-PUT did not preserve the stored token").toBe(TOKEN);
+    expect(row?.retrievalCount, "the re-PUT did not commit the changed bookkeeping field").toBe(7);
   }, 60_000);
 });
 
@@ -306,12 +307,13 @@ describe("flair#2656 — the _reindex re-PUT reads its committed row back (real 
     const id = `csr2-reidx-gap-ok-${Date.now()}`;
     const TOKEN = randomUUID();
     await seed(id, TOKEN);
-    const { response, released, paused } = await withPaused(POINT, () => reindexPut(id), async () => {});
+    const { response, released, paused } = await withPaused(POINT, () => reindexPut(id, { retrievalCount: 7 }), async () => {});
     const text = await response.clone().text();
     expect(response.status, text.slice(0, 200)).toBeLessThan(300);
     const row = await readRow("Memory", id);
     expect(row?.content).toBe(`reindex ${id}`);
     expect(row?.instanceToken).toBe(TOKEN);
+    expect(row?.retrievalCount, "the re-PUT did not commit the changed bookkeeping field").toBe(7);
     expect(paused, "the reindex re-PUT was not paused after its final confirmation").toBe(true);
     expect(released).toBe("go");
   }, 60_000);

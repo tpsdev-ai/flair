@@ -22,9 +22,19 @@ Full setup walkthrough, subject/sessionId patterns, and security guidance are in
 
 ## Host compatibility
 
-The tool schema is built with zod 4 and parsed by the host's `@langchain/core`. The declared `@langchain/core` peer range is `>=0.3.0 <2`, the range across which the search tool's schema passed the host's parser (table below). The chat-memory node also needs the host's `@langchain/classic`, which this test does not install.
+The declared LangChain peer ranges apply to two nodes:
 
-Measured in this release by packing the built node, installing it with `@langchain/core` and `n8n-workflow` in a scratch prefix (no workspace overrides), and invoking the tool through the installed parser:
+- **Flair Search** needs `@langchain/core` `>=0.3.0 <2`; its schema passed the host's parser at the listed versions (table below).
+- **Flair Chat Memory** needs `@langchain/classic` `>=1.0.0 <2`, tested with the packed node at the classic/core pairs below. Those classic releases require `@langchain/core` `^1.0.0` and `^1.3.0`, respectively. A host on `@langchain/core` `0.3.x` with one of those classic releases cannot satisfy classic's peer under default npm resolution (`npm` reports `ERESOLVE`); overriding npm's peer checks (for example `--legacy-peer-deps` or `--force`) can install that untested combination.
+
+Both tests pack the built node and install it with its host packages in a scratch prefix (no workspace overrides). The chat-memory test installs `@langchain/classic`, `@langchain/core` and `n8n-workflow` without `--legacy-peer-deps`, builds the memory through the node's `supplyData`, then runs `saveContext` and `loadMemoryVariables` against a stub Flair endpoint:
+
+| `@langchain/classic` | `@langchain/core` | Save + load |
+| --- | --- | --- |
+| 1.0.0 | 1.0.0 | passed |
+| 1.0.55 | 1.3.0 | passed |
+
+The search test invokes the tool through the installed parser:
 
 | `@langchain/core` | Valid `{ query }` | Non-string `query` |
 | --- | --- | --- |
