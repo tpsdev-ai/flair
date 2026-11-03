@@ -1395,7 +1395,7 @@ export function readPrBaseline(root) {
  */
 function fileByteIdenticalAtBase(root, baseSha, file, cache) {
   if (cache.has(file)) return cache.get(file);
-  const res = spawnSync("git", ["-C", root, "show", `${baseSha}:${file}`], { encoding: "buffer" });
+  const res = spawnSync("git", ["-C", root, "show", `${baseSha}:${file}`], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "resolve a trusted git ref with literal revision syntax" }, encoding: "buffer" });
   let same = false;
   if (res.status === 0 && Buffer.isBuffer(res.stdout)) {
     try {

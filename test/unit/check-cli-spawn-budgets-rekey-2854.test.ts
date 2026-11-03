@@ -1,11 +1,8 @@
-// check-cli-spawn-budgets-rekey-2854.test.ts — GATE-LEVEL tests for the
+// check-cli-spawn-budgets-rekey-2854.test.ts — tests for the
 // re-key rule (flair#2854): added `spawn-no-timeout` keys pair one-to-one with
 // removed keys of identical file, fingerprint, kind and occurrence when the
 // scanned working-tree file is byte-identical to the trusted base blob.
 // Case-level kinds keep strict identity.
-//
-// Each test drives the real gate (`runGate`, and the CLI for the exit codes)
-// against a fixture git repo with a base commit and a PR working tree.
 
 import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
@@ -13,7 +10,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runGate } from "../../scripts/ci/check-cli-spawn-budgets.mjs";
+import { classifyAddedExceptions, runGate } from "../../scripts/ci/check-cli-spawn-budgets.mjs";
 
 const GATE = join(import.meta.dir, "..", "..", "scripts", "ci", "check-cli-spawn-budgets.mjs");
 const GIT_ENV = {
@@ -227,7 +224,7 @@ test("two helpers", () => {
     expect(cli.stdout).toContain("1 added-exception, 1 re-keyed");
   });
 
-  it("(e) a case-no-budget scope change is ADDED-EX, never a re-key", () => {
+  it("(e) a case rename inside a changed file is ADDED-EX", () => {
     const oldName = "the old case name";
     const { dir, baseSha } = repo([entry(oldName, "case-no-budget")], {
       "test/fixture.test.ts": `import { spawnSync } from "node:child_process";
@@ -297,4 +294,20 @@ test("calls both helpers", () => {
     expect(cli.stdout).toContain("1 added-exception, 0 re-keyed");
     expect(cli.stdout).not.toContain("RE-KEYED");
   });
+});
+
+it("only spawn-no-timeout scope changes re-key when the file is unchanged", () => {
+  const base = { file: "test/x.test.ts", kind: "case-no-budget", scope: "case X", fingerprint: "fp", occurrence: 0, reason: "r" };
+  const pr = { ...base, scope: "case Y" };
+  const caseResult = classifyAddedExceptions([base], [pr], () => true);
+  expect(caseResult.added.length).toBe(1);
+  expect(caseResult.rekeyed.length).toBe(0);
+
+  const spawnResult = classifyAddedExceptions(
+    [{ ...base, kind: "spawn-no-timeout" }],
+    [{ ...pr, kind: "spawn-no-timeout" }],
+    () => true,
+  );
+  expect(spawnResult.rekeyed.length).toBe(1);
+  expect(spawnResult.added.length).toBe(0);
 });

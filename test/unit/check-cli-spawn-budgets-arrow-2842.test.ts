@@ -103,6 +103,18 @@ describe("a spawn in a directly assigned, unannotated variable arrow with simple
     expect(caseOffenders.map((o) => [o.kind, o.scope])).toEqual([["case-no-budget", "calls an expression-bodied arrow"]]);
   });
 
+  it("attributes an async expression-bodied arrow's spawn to f and flags its case", () => {
+    const source = `import { test } from "bun:test";
+test("calls an async arrow", async () => {
+  const f = async () => Bun.spawn(["bun", "src/cli.ts"]);
+  await f();
+});
+`;
+    const { spawnOffenders, caseOffenders } = scanFixture("arrow-async.test.ts", source);
+    expect(spawnOffenders.map((o) => [o.kind, o.scope])).toEqual([["spawn-no-timeout", "f"]]);
+    expect(caseOffenders.map((o) => [o.kind, o.scope])).toEqual([["case-no-budget", "calls an async arrow"]]);
+  });
+
   it("attributes a next-line spawn to the arrow and reports the case that calls it", () => {
     const { spawnOffenders, caseOffenders } = scanFixture("arrow-next-line.test.ts", NEXT_LINE_ARROW_FIXTURE);
     expect(spawnOffenders.map((o) => [o.kind, o.scope])).toEqual([["spawn-no-timeout", "f"]]);
