@@ -15,5 +15,6 @@
   of following it: the run names the status and sends no request to the
   redirect location. A Memory or candidate
   listing that cannot be read refuses the run before any delete, when
-  a non-empty archived Soul value requires that read. A refused Soul write now
+  a non-empty archived Soul value requires that read; refusals already
+  collected are printed before that error. A refused Soul write now
   reports the server's error name when the body carries one (#2941).

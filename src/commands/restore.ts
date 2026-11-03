@@ -291,6 +291,10 @@ program
           }
         }
       } catch (err: any) {
+        // A refusal already collected stays visible even when a later listing
+        // read fails: the operator should see each refusal collected so far,
+        // not only the error that stopped it (flair#2941).
+        for (const refusal of refusals) console.error(refusal);
         console.error(`Error: ${err?.message ?? String(err)}`);
         console.error(
           "Error: the replace stopped before any delete: a Soul write rule could not be checked against "

@@ -133,6 +133,20 @@ function reorderMemories(archivePath: string, orderedIds: string[]): void {
   writeFileSync(`${archivePath}.sha256`, `${createHash("sha256").update(text).digest("hex")}  ${basename(archivePath)}\n`);
 }
 
+/** Rewrite an archive's Soul order and its digest sidecar. */
+function reorderSouls(archivePath: string, orderedIds: string[]): void {
+  const archive = JSON.parse(readFileSync(archivePath, "utf8"));
+  const byId = new Map((archive.souls as any[]).map((soul) => [String(soul.id), soul]));
+  archive.souls = orderedIds.map((id) => {
+    const soul = byId.get(id);
+    if (soul === undefined) throw new Error(`archive has no Soul ${id}`);
+    return soul;
+  });
+  const text = `${JSON.stringify(archive, null, 2)}\n`;
+  writeFileSync(archivePath, text);
+  writeFileSync(`${archivePath}.sha256`, `${createHash("sha256").update(text).digest("hex")}  ${basename(archivePath)}\n`);
+}
+
 beforeAll(async () => {
   if (!existsSync(CLI)) {
     throw new Error("dist/cli.js is missing: run `bun run build:cli` before this file; `bun run build` alone does not build the CLI");
@@ -388,6 +402,7 @@ describe("flair restore --replace refuses a learned-content Soul replay before d
     expect(await row("Soul", soulId)).toEqual(before.soul);
   }, 300_000);
 
+
   test("case (viii): a redirect on a restore write is named and its target receives no request", async () => {
     const home = tempDir("flair-2941-real-home-");
     const agent = "learned-redirect-agent";
@@ -441,6 +456,78 @@ describe("flair restore --replace refuses a learned-content Soul replay before d
     } finally {
       proxy.stop(true);
       sink.stop(true);
+    }
+  }, 300_000);
+  test("case (ix): a refusal already collected is printed before a later listing read error", async () => {
+    const home = tempDir("flair-2941-real-home-");
+    const agentA = "learned-a-collected-refusal-agent";
+    const agentB = "learned-b-unreadable-listing-agent";
+    const soulA = `${agentA}:identity`;
+    const soulB = `${agentB}:identity`;
+    const memoryA = `${agentA}:post-backup`;
+    const valueA = "the text shared by the first agent's soul and memory";
+    const valueB = "a value that needs the second agent's listing";
+
+    await seedAgent(agentA);
+    await seedAgent(agentB);
+    expect(await operatorPut(`/Soul/${encodeURIComponent(soulA)}`, {
+      id: soulA, agentId: agentA, key: "identity", value: valueA, durability: "permanent", createdAt: CREATED_AT,
+    })).toBeLessThan(300);
+    expect(await operatorPut(`/Soul/${encodeURIComponent(soulB)}`, {
+      id: soulB, agentId: agentB, key: "identity", value: valueB, durability: "permanent", createdAt: CREATED_AT,
+    })).toBeLessThan(300);
+    const archive = await backup(home, "learned-collected-refusal.json", `${agentA},${agentB}`);
+    reorderSouls(archive, [soulA, soulB]);
+    expect(await operatorPut(`/Memory/${encodeURIComponent(memoryA)}`, {
+      id: memoryA, agentId: agentA, content: valueA, durability: "persistent", createdAt: CREATED_AT,
+    })).toBeLessThan(300);
+
+    const proxy = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/Memory" && url.searchParams.get("agentId") === agentB) {
+          return new Response(JSON.stringify({ not: "a-list" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        const target = new URL(url.pathname + url.search, harper.httpURL);
+        const headers = new Headers(req.headers);
+        headers.delete("host");
+        const res = await fetch(target, {
+          method: req.method,
+          headers,
+          body: req.method === "GET" || req.method === "HEAD" ? undefined : await req.text(),
+          signal: AbortSignal.timeout(30_000),
+        });
+        return new Response(res.body, { status: res.status, headers: res.headers });
+      },
+    });
+    const proxyURL = `http://127.0.0.1:${proxy.port}`;
+    if (proxy.port === 9925 || proxy.port === 9926) throw new Error("refusing to run: proxy landed on a production ops port");
+
+    try {
+      const before = {
+        soulA: await row("Soul", soulA),
+        soulB: await row("Soul", soulB),
+        memoryA: await row("Memory", memoryA),
+      };
+      const restored = await runCli(["restore", archive, "--replace", "--url", proxyURL], home, { FLAIR_ADMIN_PASS: harper.admin.password });
+
+      expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
+      assertNothingDeleted(restored);
+      expect(restored.stderr).toContain(`Soul ${soulA}`);
+      expect(restored.stderr).toContain("soul_value_is_learned_content");
+      expect(restored.stderr).toContain("remove or edit that Memory row or the archived Soul's value, then re-run");
+      expect(restored.stderr).toContain("live-listing-unreadable");
+      expect(restored.stderr).toContain(agentB);
+      expect(await row("Soul", soulA)).toEqual(before.soulA);
+      expect(await row("Soul", soulB)).toEqual(before.soulB);
+      expect(await row("Memory", memoryA)).toEqual(before.memoryA);
+    } finally {
+      proxy.stop(true);
     }
   }, 300_000);
 });
