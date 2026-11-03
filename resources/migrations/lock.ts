@@ -39,9 +39,9 @@
  * for the mutex as well as the migration record, so a remote holder that
  * resumes after takeover is not fenced. A process killed while preparing a
  * record leaves an unpublished staging directory or temporary file; one
- * killed after publication
- * leaves a complete owner record that another process can recover after
- * establishing death.
+ * killed after publication and before that record is cleaned up leaves a
+ * complete owner record that another process can recover after establishing
+ * death.
  */
 import {
   closeSync,
@@ -885,7 +885,7 @@ function issueHandle(
                 if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
                   recordOutcome = "absent";
                 } else {
-                  recordOutcome = "present";
+                  recordOutcome = "unknown";
                   cleanupFailure = `the lock file cannot be removed (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`;
                 }
               }

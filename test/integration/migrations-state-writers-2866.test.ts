@@ -7,9 +7,11 @@
  * transitions: a prepared mutex directory is complete before publication, a
  * live mutex owner excludes the other children, a dead mutex generation can be
  * recovered by one successor at a time, and release removes the lock file only
- * when its identity is still the one the handle published. The state writer
- * accepts only a live handle for the state file's lock, read from lock.ts's
- * module-private identity.
+ * when its identity is still the one the handle published, for cooperating
+ * holders under the mutex: a cross-host takeover is unfenced, so a replacement
+ * between the inspection and the pathname unlink is outside that guarantee.
+ * The state writer accepts only a live handle for the state file's lock, read
+ * from lock.ts's module-private identity.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
@@ -583,7 +585,7 @@ describe("release under the mutex (flair#2866)", () => {
     expect(await waitExit(b2, "B2")).toBe(0);
   }, 40_000);
 
-  it("an unreadable record during release is reported and left in place", async () => {
+  it("an unreadable record during release is reported and the dangling symlink remains", async () => {
     arm(RELEASE_GUARD_PAUSE);
     const a = spawnWriter("mig-a", { holdUntil: "go.release-now", mode: "release" });
     await waitFor(join(pauseDir, "written.mig-a"), "A's entry");
@@ -626,6 +628,28 @@ describe("release under the mutex (flair#2866)", () => {
     const warning = await a.stderrText();
     expect(warning).toContain("migration lock cleanup failed");
     expect(warning).toContain("The lock record was removed by this release");
+  }, 30_000);
+
+  it("a failed unlink of a lock path replaced by a directory reports the record state as unknown", async () => {
+    arm(RELEASE_VERIFIED_PAUSE);
+    const a = spawnWriter("mig-a", { holdUntil: "go.release-now", mode: "release" });
+    await waitFor(join(pauseDir, "written.mig-a"), "A's entry");
+    setGo("release-now");
+    await waitFor(paused(RELEASE_VERIFIED_PAUSE), "A's identity-verification pause");
+
+    // Replace the verified record with a directory: unlink(2) then fails with
+    // a non-ENOENT error, so release never established what the pathname
+    // holds afterwards.
+    unlinkSync(lockPath());
+    mkdirSync(lockPath());
+
+    setGo(RELEASE_VERIFIED_PAUSE);
+    expect(await waitExit(a, "A")).toBe(0);
+
+    const warning = await a.stderrText();
+    expect(warning).toContain("the lock file cannot be removed (");
+    expect(warning).toContain("The lock record's state is unknown");
+    expect(lstatSync(lockPath()).isDirectory()).toBe(true);
   }, 30_000);
 
   it("after the lock file is unlinked, the mutex still excludes a writer until release ends", async () => {

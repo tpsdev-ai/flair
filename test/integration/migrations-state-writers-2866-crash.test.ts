@@ -4,9 +4,10 @@
  *
  * Each case pauses a real child at one filesystem transition, kills it with
  * SIGKILL, awaits its exit, then starts a survivor. The survivor must recover
- * the mutex and the lock file and write its entry; state committed before the
- * kill must survive. Cases cover a prepared staging directory, mutex
- * publication, lock-file publication, reclaim, and each release step.
+ * the mutex and either published record when present, and write its entry;
+ * some kill points precede publication or follow the unlink. State committed
+ * before the kill must survive. Cases cover a prepared staging directory,
+ * mutex publication, lock-file publication, reclaim, and each release step.
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";

@@ -70,7 +70,7 @@ describe("acquireMigrationLock — basic acquire/release", () => {
     expect(first.acquired).toBe(true);
     const replacement = { pid: 424242, hostname: "host-b", startedAt: "2026-01-01T00:00:00.000Z" };
     // A sibling file renamed over the lock pathname gives the lock a new
-    // inode and a different holder, so every comparison in release differs.
+    // inode and a different holder; the device stays the same.
     const temp = join(testRoot, ".migrations", `.replacement.${process.pid}.tmp`);
     writeFileSync(temp, JSON.stringify(replacement));
     renameSync(temp, lockPath);

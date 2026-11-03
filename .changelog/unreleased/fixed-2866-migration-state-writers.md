@@ -2,8 +2,9 @@
 
   The writer accepts only the handle returned by a successful migration-lock
   acquisition, read from module-private identity, and refuses a forged object,
-  a released handle, a handle for a different lock path, or a lock file that no
-  longer holds that handle, with a named error. Lock-file acquisition,
+  a released handle, a handle for a different lock path, or a lock file that
+  the descriptor recheck finds no longer held by that handle, with a named
+  error. Lock-file acquisition,
   replacement and release are serialized by a directory mutex published as a
   populated directory; a dead mutex generation is recovered by unlinking only
   its owner entry, and the recovering process must then win publication of its
