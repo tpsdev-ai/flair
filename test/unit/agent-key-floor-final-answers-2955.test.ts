@@ -18,12 +18,12 @@
  * a scratch directory so tier 4's ~/.flair/admin-pass file cannot sign first.
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import nacl from "tweetnacl";
-import { authedRequest, ApiHttpError, apiErrorRawBody } from "../../src/lib/auth-resolve.ts";
+import { authedRequest, ApiHttpError, apiErrorRawBody, CREDENTIAL_REJECTION_CODES, tryAgentKeyFloor } from "../../src/lib/auth-resolve.ts";
 
 const ED25519_PREFIX = "TPS-Ed25519 ";
 
@@ -37,6 +37,14 @@ function writeAgentKey(keysDir: string, agentId: string): void {
 
 function makeTmpDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `${prefix}-`));
+}
+
+/** An undecodable key file: not a 32-byte seed, not base64 of one, not DER or PEM. */
+function writeCorruptKey(keysDir: string, fileName: string): void {
+  mkdirSync(keysDir, { recursive: true });
+  const path = join(keysDir, fileName);
+  writeFileSync(path, Buffer.from("not a private key ".repeat(4)));
+  chmodSync(path, 0o600);
 }
 
 function agentOf(authorization: string | undefined): string | undefined {
@@ -233,6 +241,77 @@ describe("flair#2955 — the agent-key floor moves on only for credential refusa
     }
   });
 
+  test("a corrupt first key file is skipped before anything is sent, and the next key signs once", async () => {
+    const onlyCorruptFirst = makeTmpDir("flair-2955-corrupt-first");
+    try {
+      writeCorruptKey(onlyCorruptFirst, "a-corrupt.key");
+      writeAgentKey(onlyCorruptFirst, "agent-second");
+      const server = await startFloorServer(() => ({ status: 200, body: { ok: true, via: "second" } }));
+      try {
+        const result = await authedRequest("POST", "/Memory", { agentId: "agent-second", content: "hello" }, {
+          baseUrl: server.url,
+          keysDir: onlyCorruptFirst,
+        });
+        expect(result).toEqual({ ok: true, via: "second" });
+        expect(signedRequests(server).map((r) => agentOf(r.authorization))).toEqual(["agent-second"]);
+        expect(server.requests).toHaveLength(2); // the anonymous probe + one signed attempt
+      } finally {
+        await server.close();
+      }
+    } finally {
+      rmSync(onlyCorruptFirst, { recursive: true, force: true });
+    }
+  });
+
+  test("only a corrupt key file: the caller's no-credentials hint, no signed request, no raw OpenSSL text", async () => {
+    const onlyCorrupt = makeTmpDir("flair-2955-corrupt-only");
+    try {
+      writeCorruptKey(onlyCorrupt, "a-corrupt.key");
+      const server = await startFloorServer(() => ({ status: 200, body: { ok: true } }));
+      try {
+        let caught: unknown;
+        try {
+          await authedRequest("GET", "/HealthDetail", undefined, { baseUrl: server.url, keysDir: onlyCorrupt });
+        } catch (err) {
+          caught = err;
+        }
+        expect(signedRequests(server)).toHaveLength(0);
+        expect(server.requests).toHaveLength(1); // the anonymous probe only
+        expect(caught).toBeInstanceOf(ApiHttpError);
+        const httpError = caught as ApiHttpError;
+        expect(httpError.status).toBe(403);
+        expect(httpError.noCredentials).toBe(true);
+        expect(httpError.message).toMatch(/no credentials sent/);
+        expect(httpError.message).not.toMatch(/OPENSSL|PEM routines|ASN\.?1|error:\d/i);
+      } finally {
+        await server.close();
+      }
+    } finally {
+      rmSync(onlyCorrupt, { recursive: true, force: true });
+    }
+  });
+
+  test("a request-target failure is thrown before any key is tried, not skipped per candidate", async () => {
+    const origFetch = globalThis.fetch;
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches++;
+      throw new Error("fetch must not run");
+    }) as unknown as typeof fetch;
+    try {
+      const url = {
+        origin: "http://127.0.0.1:9",
+        get pathname(): string {
+          throw new Error("unrenderable request target");
+        },
+      } as unknown as URL;
+      await expect(tryAgentKeyFloor(url, "POST", { content: "hello" }, keysDir)).rejects.toThrow("unrenderable request target");
+      expect(fetches).toBe(0);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
   test("a read-only GET answered 404 is final — the answer, not a key failure", async () => {
     const server = await startFloorServer(() => ({ status: 404, body: { error: "not_found" } }));
     try {
@@ -251,41 +330,63 @@ describe("flair#2955 — the agent-key floor moves on only for credential refusa
     }
   });
 
-  test("the server's credential rejection (401 unknown_agent) still moves to the second key, which succeeds", async () => {
-    const server = await startFloorServer((signedIndex) =>
-      signedIndex === 0
-        ? { status: 401, body: { error: "unknown_agent" } }
-        : { status: 200, body: { ok: true, via: "floor" } },
-    );
-    try {
-      const result = await authedRequest("POST", "/Memory", { agentId: "agent-second", content: "hello" }, {
-        baseUrl: server.url,
-        keysDir,
-      });
-      expect(result).toEqual({ ok: true, via: "floor" });
-      expect(signedRequests(server).map((r) => agentOf(r.authorization))).toEqual(["agent-first", "agent-second"]);
-    } finally {
-      await server.close();
-    }
-  });
+  // Every code the middleware can return for a refused credential is pinned by
+  // name, so removing one from the client set fails a per-code case as well as
+  // the drift check below.
+  const CREDENTIAL_REJECTION_CODES_PINNED = [
+    "invalid_authorization_header",
+    "timestamp_out_of_window",
+    "unknown_agent",
+    "principal_deactivated",
+    "invalid_signature",
+    "signature_verification_failed",
+  ] as const;
 
-  test("an invalid_signature rejection also moves to the second key", async () => {
-    const server = await startFloorServer((signedIndex) =>
-      signedIndex === 0
-        ? { status: 401, body: { error: "invalid_signature" } }
-        : { status: 200, body: { ok: true } },
-    );
-    try {
-      const result = await authedRequest("POST", "/Memory", { agentId: "agent-second", content: "hello" }, {
-        baseUrl: server.url,
-        keysDir,
-      });
-      expect(result).toEqual({ ok: true });
-      expect(signedRequests(server).map((r) => agentOf(r.authorization))).toEqual(["agent-first", "agent-second"]);
-    } finally {
-      await server.close();
-    }
-  });
+  for (const code of CREDENTIAL_REJECTION_CODES_PINNED) {
+    test(`a 401 ${code} credential rejection moves to the next key, which succeeds`, async () => {
+      const server = await startFloorServer((signedIndex) =>
+        signedIndex === 0
+          ? { status: 401, body: { error: code } }
+          : { status: 200, body: { ok: true, via: code } },
+      );
+      try {
+        const result = await authedRequest("POST", "/Memory", { agentId: "agent-second", content: "hello" }, {
+          baseUrl: server.url,
+          keysDir,
+        });
+        expect(result).toEqual({ ok: true, via: code });
+        expect(signedRequests(server).map((r) => agentOf(r.authorization))).toEqual(["agent-first", "agent-second"]);
+      } finally {
+        await server.close();
+      }
+    });
+  }
+
+  // Answers about the request or the server, not about the credential: these
+  // stay final even though they are 401s.
+  const FINAL_401_CODES = ["nonce_replay_detected", "authentication required", "replay_store_unavailable"] as const;
+
+  for (const code of FINAL_401_CODES) {
+    test(`a 401 ${code} is final — exactly one signed request`, async () => {
+      const server = await startFloorServer(() => ({ status: 401, body: { error: code } }));
+      try {
+        let caught: unknown;
+        try {
+          await authedRequest("GET", "/HealthDetail", undefined, { baseUrl: server.url, keysDir });
+        } catch (err) {
+          caught = err;
+        }
+        expect(signedRequests(server).map((r) => agentOf(r.authorization))).toEqual(["agent-first"]);
+        expect(caught).toBeInstanceOf(ApiHttpError);
+        const httpError = caught as ApiHttpError;
+        expect(httpError.status).toBe(401);
+        expect(httpError.noCredentials).toBe(false);
+        expect(errorCodeOf(httpError)).toBe(code);
+      } finally {
+        await server.close();
+      }
+    });
+  }
 
   test("every key refused as a credential returns undefined, so the caller's original no-credentials hint surfaces", async () => {
     const server = await startFloorServer(() => ({ status: 401, body: { error: "unknown_agent" } }));
@@ -357,5 +458,30 @@ describe("flair#2955 — the agent-key floor moves on only for credential refusa
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+});
+
+describe("flair#2955 — the client's credential-rejection set tracks the middleware", () => {
+  /** The `error` string literals of the 401 responses built in the Ed25519 middleware. */
+  function middleware401ErrorCodes(): Set<string> {
+    const source = readFileSync(join(import.meta.dir, "../../resources/auth-middleware.ts"), "utf8");
+    const codes = new Set<string>();
+    const re = /new Response\(\s*JSON\.stringify\(\{\s*error:\s*"([^"]+)"/g;
+    for (const match of source.matchAll(re)) {
+      const start = match.index ?? 0;
+      const end = source.indexOf(");", start);
+      const call = end === -1 ? source.slice(start) : source.slice(start, end + 2);
+      if (/status:\s*401\b/.test(call)) codes.add(match[1]);
+    }
+    return codes;
+  }
+
+  test("the set equals the middleware's 401 error literals minus the documented exclusion", () => {
+    const middleware = middleware401ErrorCodes();
+    // The exclusion is documented on CREDENTIAL_REJECTION_CODES: a reused nonce
+    // is an answer about the request, not about the credential.
+    expect(middleware.has("nonce_replay_detected")).toBe(true);
+    const expected = new Set([...middleware].filter((code) => code !== "nonce_replay_detected"));
+    expect([...CREDENTIAL_REJECTION_CODES].sort()).toEqual([...expected].sort());
   });
 });

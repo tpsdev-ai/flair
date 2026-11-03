@@ -1524,7 +1524,7 @@ export async function sendJsonRequest(
  * `replay_store_unavailable` is a server-side failure; neither is a credential
  * rejection, so both are final.
  */
-const CREDENTIAL_REJECTION_CODES: ReadonlySet<string> = new Set([
+export const CREDENTIAL_REJECTION_CODES: ReadonlySet<string> = new Set([
   "invalid_authorization_header",
   "timestamp_out_of_window",
   "unknown_agent",
@@ -1552,18 +1552,20 @@ function isEd25519CredentialRejection(err: unknown): boolean {
  * GET-only fallback to any method/body): tries candidate key files in
  * `keysDir` in sorted (deterministic) filename order until one authenticates
  * or an answer is final. Returns `undefined` when there are no candidate key
- * files, when every candidate was credential-rejected, or when every attempt
- * was a connect failure; a final answer throws. That lets the caller rethrow
- * its ORIGINAL no-credentials error rather than a floor-specific one.
+ * files, or when no candidate authenticated: every attempt was skipped for an
+ * unloadable key file, credential-rejected, or a connect failure; a final
+ * answer throws. That lets the caller rethrow its ORIGINAL no-credentials
+ * error rather than a floor-specific one.
  *
  * Every attempt refuses redirects (flair#2955), whatever the caller asked
  * for: the location a 3xx names receives no request, and the 3xx is thrown as
  * itself — a final answer, never a reason to try another key.
  *
  * The floor moves to the next key ONLY when the server refused the Ed25519
- * credential itself (the 401 codes in `CREDENTIAL_REJECTION_CODES`) or when an
+ * credential itself (the 401 codes in `CREDENTIAL_REJECTION_CODES`), when an
  * attempt that does not follow redirects fails in the connect phase (the
- * existing network-blip case). Every other response is final: a successful
+ * existing network-blip case), or when that candidate's key file cannot be
+ * loaded (nothing was sent for it). Every other response is final: a successful
  * response returns; a failed HTTP response whose body was read is thrown as
  * itself with its status and the error code its body names; a refused redirect
  * is thrown as itself with its status before any body is read. When every
@@ -1589,11 +1591,23 @@ export async function tryAgentKeyFloor(
     // No keys dir at all — nothing to fall back to.
   }
   const isLocal = isLocalBase(url.origin);
+  // The signed target is identical for every candidate, so build it once,
+  // before any key is loaded. A failure here is about the request itself, not
+  // about any one candidate, so it is final.
+  const target = requestTarget(url);
   for (const kf of keyFiles) {
     const agentId = kf.replace(/\.key$/, "");
     const keyPath = join(keysDir, kf);
+    let authHeader: string;
     try {
-      const authHeader = buildEd25519Auth(agentId, method, requestTarget(url), keyPath);
+      authHeader = buildEd25519Auth(agentId, method, target, keyPath);
+    } catch {
+      // This candidate's key file could not be loaded. Nothing was sent for
+      // it, and every other candidate is exactly as usable as it was before
+      // this file was read, so skip this one.
+      continue;
+    }
+    try {
       return await sendJsonRequest(url, method, body, authHeader, isLocal, { ...transport, refuseRedirects: true });
     } catch (err: unknown) {
       // A write whose outcome is unknown stops the floor. Trying the next key
@@ -1608,8 +1622,7 @@ export async function tryAgentKeyFloor(
       // existing network-blip case: another key may connect.
       if (isConnectPhaseFailure(err)) continue;
       // A server answer is final — resending it as a different agent would hide
-      // what the server said. Errors that are not a server answer at all (key
-      // loading, local request failures) are rethrown as themselves.
+      // what the server said. Local request failures are rethrown as they are.
       throw err;
     }
   }
