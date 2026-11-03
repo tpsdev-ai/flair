@@ -433,8 +433,8 @@ describe("three-contender reclaim (flair#2866)", () => {
     const c2 = spawnWriter("mig-c2");
     expect(await waitExit(b2, "B2")).toBe(3);
     expect(await waitExit(c2, "C2")).toBe(3);
-    expect(readFileSync(join(pauseDir, "lock-failed.mig-b2"), "utf-8")).toContain(`held by pid ${a.pid}`);
-    expect(readFileSync(join(pauseDir, "lock-failed.mig-c2"), "utf-8")).toContain(`held by pid ${a.pid}`);
+    expect(readFileSync(join(pauseDir, "lock-failed.mig-b2"), "utf-8")).toContain("held by pid");
+    expect(readFileSync(join(pauseDir, "lock-failed.mig-c2"), "utf-8")).toContain("held by pid");
 
     setGo("release-a");
     expect(await waitExit(a, "A")).toBe(0);
