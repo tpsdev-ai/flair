@@ -151,7 +151,7 @@ describe("pi settings loader conformance", () => {
   }
 });
 
-describe("purge agrees with pi's package-manager verdict, per settings field", () => {
+describe("purge applies Flair's shared ownership rule to packages and extensions", () => {
   const cases: [string, string][] = [
     ["the documented npm source", "npm:@tpsdev-ai/pi-flair"],
     ["a local package path inside the pi-flair package", "~/.pi/agent/npm/node_modules/@tpsdev-ai/pi-flair/dist/index.js"],
@@ -163,7 +163,7 @@ describe("purge agrees with pi's package-manager verdict, per settings field", (
 
   for (const field of ["packages", "extensions"] as const) {
     for (const [label, source] of cases) {
-      it(`purge and pi's package manager agree on ${label} in ${field} only`, () => {
+      it(`purge applies Flair's shared ownership rule to ${label} in ${field} only`, () => {
         fixture = mkdtempSync(join(tmpdir(), "flair-pi-loader-"));
         const home = join(fixture, "home");
         const project = join(fixture, "project");
@@ -191,8 +191,8 @@ describe("purge agrees with pi's package-manager verdict, per settings field", (
           : answer.localCandidate && inside;
 
         expect(after.settingsPath).toBe(path);
-        // Purge removes the snapshot when pi's package manager resolves the
-        // source as Flair's; otherwise the snapshot stays.
+        // Flair's shared ownership rule applies to both fields; pi's source
+        // parser agrees for packages sources.
         expect(after.backupPresent).toBe(!loaderOwns);
       }, 15_000);
     }

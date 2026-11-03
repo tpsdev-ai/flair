@@ -663,7 +663,7 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
     }
   }, 30_000);
 
-  test("the report names an unrecognized pi file and never prints its entry value", async () => {
+  test("an unrecognized pi backup's Not checked reason omits its entry value", async () => {
     mkdirSync(join(isoHome, ".pi", "agent"), { recursive: true });
     const settings = clientConfigPath("pi");
     const source = "git:https://user:canary-purge-credential@example.test/owner/pi-flair.git";
@@ -681,7 +681,7 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
     expect(out).not.toContain(source);
   }, 30_000);
 
-  test("a malformed backup's parser message never reaches the report", async () => {
+  test("a malformed backup's Not checked reason omits its parser message", async () => {
     mkdirSync(join(isoHome, ".gemini"), { recursive: true });
     const bak = clientConfigBackupPath("gemini");
     const canary = "canaryPurgeParserToken";
