@@ -248,7 +248,7 @@ export interface HeldClientBackup {
   display: string;
 }
 
-interface ClientBackupHold {
+export interface ClientBackupHold {
   held: HeldClientBackup[];
   /** Clients whose pre-existing backup could not be held: neither their
    *  unwire nor their backup sweep may run (flair#2886). */
@@ -358,6 +358,22 @@ export function restoreHeldClientConfigBackups(
   return unrestored;
 }
 
+/** Restore every held snapshot, then sweep the clients whose hold and restore
+ *  succeeded. A client skipped at the hold, or whose restore failed, keeps its
+ *  `.bak` and is reported instead (flair#2886). */
+export function restoreAndSweepClientConfigBackups(
+  homeDir: string,
+  hold: ClientBackupHold,
+  removed: string[],
+  leftovers: PurgeLeftover[],
+): void {
+  const unrestored = restoreHeldClientConfigBackups(homeDir, hold.held, leftovers);
+  for (const client of ALL_CLIENTS) {
+    if (hold.skipped.has(client.id) || unrestored.has(client.id)) continue;
+    sweepClientConfigBackup(client.id, homeDir, removed, leftovers);
+  }
+}
+
 /** Run client-config work with `HOME` set to the home being purged, and —
  *  when that home is not the caller's — with `PI_CODING_AGENT_DIR` ignored, so
  *  pi resolves under the target home instead of the caller's pi directory. */
@@ -448,11 +464,7 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
   // home the unwire ran in. A client whose backup was not held or not restored
   // keeps its entry and is skipped.
   withClientConfigHome(homeDir, ignorePiDirOverride, () => {
-    const unrestored = restoreHeldClientConfigBackups(homeDir, hold.held, leftovers);
-    for (const client of ALL_CLIENTS) {
-      if (hold.skipped.has(client.id) || unrestored.has(client.id)) continue;
-      sweepClientConfigBackup(client.id, homeDir, removed, leftovers);
-    }
+    restoreAndSweepClientConfigBackups(homeDir, hold, removed, leftovers);
   });
 
   const flairDir = join(homeDir, ".flair");

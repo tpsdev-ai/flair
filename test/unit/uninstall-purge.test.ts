@@ -8,7 +8,7 @@
  * (or names the npm package as an intentional leftover).
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, symlinkSync, lstatSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, symlinkSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -36,7 +36,7 @@ import {
   purgeFlairInstall,
   formatPurgeReport,
   purgeHadFailures,
-  restoreHeldClientConfigBackups,
+  restoreAndSweepClientConfigBackups,
   type PurgeLeftover,
   FLAIR_NPM_PACKAGE,
 } from "../../src/lib/uninstall-purge.ts";
@@ -517,27 +517,28 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
     const bak = clientConfigBackupPath("claude-code");
     const bakBytes = readFileSync(bak);
     const configBytes = readFileSync(paths.claude);
-    // A read-only parent makes the hold rename fail (the shared unit lane runs
-    // as a non-root user, as GitHub's ubuntu runner does).
-    chmodSync(isoHome, 0o555);
-    try {
-      const result = purgeFlairInstall({
-        homeDir: isoHome,
-        skipSchedulerUnload: true,
-        omitNpmLeftover: true,
-      });
-
-      expect(Buffer.compare(readFileSync(bak), bakBytes)).toBe(0);
-      expect(Buffer.compare(readFileSync(paths.claude), configBytes)).toBe(0);
-      expect(JSON.parse(readFileSync(paths.claude, "utf-8")).mcpServers.flair).toBeDefined();
-      expect(result.removed).not.toContain("Claude Code: unwired ~/.claude.json");
-      expect(result.removed).not.toContain("~/.claude.json.bak");
-      const failed = result.leftovers.filter((l) => l.kind === "failed");
-      expect(failed.some((l) =>
-        l.path === "~/.claude.json.bak" && l.reason.includes("skipped unwiring this client"))).toBe(true);
-    } finally {
-      chmodSync(isoHome, 0o755);
+    // Occupy every hold name this purge would try, so the hold fails while the
+    // directory stays writable for the unwire.
+    for (let attempt = 0; attempt < 16; attempt++) {
+      writeFileSync(`${bak}.purge-hold-${process.pid}-0${attempt === 0 ? "" : `-${attempt}`}`, "taken\n");
     }
+
+    const result = purgeFlairInstall({
+      homeDir: isoHome,
+      skipSchedulerUnload: true,
+      omitNpmLeftover: true,
+    });
+
+    expect(Buffer.compare(readFileSync(bak), bakBytes)).toBe(0);
+    expect(Buffer.compare(readFileSync(paths.claude), configBytes)).toBe(0);
+    expect(JSON.parse(readFileSync(paths.claude, "utf-8")).mcpServers.flair).toBeDefined();
+    expect(result.removed).not.toContain("Claude Code: unwired ~/.claude.json");
+    expect(result.removed).not.toContain("~/.claude.json.bak");
+    const failed = result.leftovers.filter((l) => l.kind === "failed");
+    expect(failed.some((l) =>
+      l.path === "~/.claude.json.bak" &&
+      l.reason.includes("could not reserve a hold path") &&
+      l.reason.includes("skipped unwiring this client"))).toBe(true);
   }, 30_000);
 
   test("a file already at the hold path survives and the backup is held under a free name", () => {
@@ -563,24 +564,29 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
 
   test("a failed restore skips that backup's sweep and names the held copy", () => {
     const bak = clientConfigBackupPath("claude-code");
-    writeFileSync(bak, "the snapshot the unwire would write\n");
-    const heldPath = `${bak}.purge-hold-${process.pid}-missing`;
+    // The restore's removal fails for every uid: a non-empty directory where
+    // the unwire's snapshot would be. The held copy is a real file.
+    mkdirSync(bak, { recursive: true });
+    writeFileSync(join(bak, "keep.txt"), "user data\n");
+    const heldPath = `${bak}.purge-hold-${process.pid}-real`;
+    const heldBytes = "the user's pre-purge snapshot\n";
+    writeFileSync(heldPath, heldBytes);
+    const removed: string[] = [];
     const leftovers: PurgeLeftover[] = [];
 
-    const unrestored = restoreHeldClientConfigBackups(isoHome, [{
-      clientId: "claude-code",
-      path: bak,
-      heldPath,
-      display: "~/.claude.json.bak",
-    }], leftovers);
+    restoreAndSweepClientConfigBackups(isoHome, {
+      held: [{ clientId: "claude-code", path: bak, heldPath, display: "~/.claude.json.bak" }],
+      skipped: new Set(),
+    }, removed, leftovers);
 
-    expect(unrestored.has("claude-code")).toBe(true);
-    expect(existsSync(bak)).toBe(false);
+    expect(readFileSync(heldPath, "utf-8")).toBe(heldBytes);
+    expect(readFileSync(join(bak, "keep.txt"), "utf-8")).toBe("user data\n");
+    expect(removed).toHaveLength(0);
     expect(leftovers).toHaveLength(1);
     expect(leftovers[0]!.kind).toBe("failed");
     expect(leftovers[0]!.path).toBe("~/.claude.json.bak");
     expect(leftovers[0]!.reason).toContain("skipped this backup's sweep");
-    expect(leftovers[0]!.reason).toContain(`the held copy remains at ~/.claude.json.bak.purge-hold-${process.pid}-missing`);
+    expect(leftovers[0]!.reason).toContain(`the held copy remains at ~/.claude.json.bak.purge-hold-${process.pid}-real`);
   }, 30_000);
 
   test("pi sources that are not Flair's own are kept: leading whitespace and an empty spec", () => {
