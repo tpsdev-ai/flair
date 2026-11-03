@@ -578,7 +578,7 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
     };
     delete env.FLAIR_URL;
     delete env.FLAIR_TARGET;
-    const proc = Bun.spawn(["bun", cliPath, "uninstall", "--purge"], { env, stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(["bun", cliPath, "uninstall", "--purge"], { env, stdout: "pipe", stderr: "pipe", timeout: 20_000 });
     try {
       const marker = join(barrier, `${proc.pid}.hold-select`);
       const deadline = Date.now() + 12_000;
