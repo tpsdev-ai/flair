@@ -239,9 +239,9 @@ export function validateHumanReviewerId(reviewerId: string): string | null {
 // lives server-side in resources/auto-promote-lib.ts (decideAutoPromote — the
 // UNATTENDED path), which IMPORTS these from here. The direction is deliberate
 // and established in this repo: a server file may import a PURE helper from src/
-// (resources/PromoteMemoryCandidate.ts and resources/soul-adk-guard.ts already
-// import this very module); it is a CLI file importing FROM resources/ that does
-// not survive npm packaging. Defining it here lets the CLI side
+// (resources/PromoteMemoryCandidate.ts already imports this very module); it is
+// a CLI file importing FROM resources/ that does not survive npm packaging.
+// Defining it here lets the CLI side
 // (src/commands/rem.ts, `flair rem candidates`) and the server gate share ONE
 // implementation rather than a hand-kept pair.
 //
