@@ -117,9 +117,11 @@ program
       process.exitCode = 1;
     }
     const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
-    // Every preflight read goes to the same target as the writes and refuses
-    // redirects. It raises ApiHttpError for a non-2xx reply, which is the shape
-    // the reused candidate-listing helper turns into its route guidance.
+    // Every preflight read and every restore write targets baseUrl and refuses
+    // redirects, so a method-specific redirect is named instead of sent to a
+    // location the preflight did not check. The read raises ApiHttpError for a
+    // non-2xx reply, which is the shape the reused candidate-listing helper
+    // turns into its route guidance.
     const preflightCall: ApiCall = (method, path, body) =>
       sendJsonRequest(new URL(`${baseUrl}${path}`), method, body, auth, isLocalBase(baseUrl), { refuseRedirects: true, withholdResponseBodyDebug: true });
 
@@ -135,14 +137,18 @@ program
       return;
     }
 
-    async function adminWrite(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<{ status: number | undefined; error: string | undefined }> {
+    async function adminWrite(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<{ status: number | undefined; error: string | undefined; redirected: boolean }> {
       try {
         const res = await fetch(`${baseUrl}${path}`, {
           method,
           headers: { "Content-Type": "application/json", Authorization: auth },
           body: body === undefined ? undefined : JSON.stringify(body),
+          redirect: "manual",
           signal: AbortSignal.timeout(10_000),
         });
+        if (res.status >= 300 && res.status < 400) {
+          return { status: res.status, error: undefined, redirected: true };
+        }
         // The refusal name is read from the body, never the outcome: a body
         // that cannot be read keeps the status this write answered with.
         let error: string | undefined;
@@ -151,11 +157,16 @@ program
         } catch {
           error = undefined;
         }
-        return { status: res.status, error };
+        return { status: res.status, error, redirected: false };
       } catch {
-        return { status: undefined, error: undefined };
+        return { status: undefined, error: undefined, redirected: false };
       }
     }
+
+    /** A redirect on a restore write, named rather than followed. */
+    const redirectFailure = (name: string, row: any, method: string, status: number): string =>
+      `${label(name, row)}: ${method} was answered with HTTP ${status} redirect, which restore does not follow; `
+        + "no request was sent to the redirected location";
 
     /** The `error` name in a refusal body, when it carries one. */
     function errorName(text: string): string | undefined {
@@ -300,20 +311,71 @@ program
       // archived Memory ids are gone before a Soul write. A Memory DELETE the
       // server refuses leaves that row in place, so stop here rather than
       // delete a Soul whose PUT the surviving row would refuse.
+      // Archived Memories whose DELETE removed them, plus any whose outcome is
+      // unknown; they are written back if a later DELETE fails.
+      const memoriesToRestore: any[] = [];
       for (const row of memories) {
-        const { status } = await adminWrite("DELETE", `/Memory/${encodeRecordId(row.id)}`);
-        if (status === undefined || (status !== 404 && (status < 200 || status >= 300))) {
+        const { status, redirected } = await adminWrite("DELETE", `/Memory/${encodeRecordId(row.id)}`);
+        if (redirected) {
+          failures.push(redirectFailure("Memory", row, "DELETE", status!));
+        } else if (status === undefined || (status !== 404 && (status < 200 || status >= 300))) {
           failures.push(diagnostic("Memory", row, "DELETE", status));
+          if (status === undefined) memoriesToRestore.push(row);
+        } else if (status >= 200 && status < 300) {
+          memoriesToRestore.push(row);
         }
       }
       if (failures.length > 0) {
         console.error("Error: a Memory DELETE failed; no Soul row was deleted.");
+        // A later refusal must not strand a row this run already deleted: put
+        // every such archived Memory back and verify it. Soul rows are never
+        // touched here.
+        for (const row of memoriesToRestore) {
+          const { status, redirected } = await adminWrite("PUT", `/Memory/${encodeRecordId(row.id)}`, row);
+          if (redirected || status === undefined || status < 200 || status >= 300) {
+            failures.push(
+              `${label("Memory", row)}: could not be restored after a later DELETE failed (`
+                + `${redirected ? `PUT was answered with HTTP ${status} redirect, which restore does not follow` : `PUT HTTP ${status ?? "unavailable"}`})`,
+            );
+            continue;
+          }
+          let problem: string | undefined;
+          try {
+            const res = await fetch(`${baseUrl}/Memory/${encodeRecordId(row.id)}`, {
+              headers: { Authorization: auth },
+              redirect: "manual",
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (res.status >= 300 && res.status < 400) {
+              problem = `GET verification was answered with HTTP ${res.status} redirect, which restore does not follow`;
+            } else if (!res.ok) {
+              problem = `GET verification failed (HTTP ${res.status})`;
+            } else {
+              const restored = await res.json();
+              const mismatched = comparePreservedFields("Memory", row, restored);
+              if (!restored || typeof restored !== "object" || Array.isArray(restored)) {
+                problem = "GET verification returned a row that is not an object";
+              } else if (restored.id !== row.id) {
+                problem = "GET verification returned a different id";
+              } else if (mismatched.length > 0) {
+                problem = `GET verification failed (field mismatch: ${mismatched.join(", ")})`;
+              }
+            }
+          } catch {
+            problem = "GET verification failed";
+          }
+          if (problem !== undefined) {
+            failures.push(`${label("Memory", row)}: could not be restored after a later DELETE failed: ${problem}`);
+          }
+        }
         fail();
         return;
       }
       for (const row of souls) {
-        const { status } = await adminWrite("DELETE", `/Soul/${encodeRecordId(row.id)}`);
-        if (status === undefined || (status !== 404 && (status < 200 || status >= 300))) {
+        const { status, redirected } = await adminWrite("DELETE", `/Soul/${encodeRecordId(row.id)}`);
+        if (redirected) {
+          failures.push(redirectFailure("Soul", row, "DELETE", status!));
+        } else if (status === undefined || (status !== 404 && (status < 200 || status >= 300))) {
           failures.push(diagnostic("Soul", row, "DELETE", status));
         }
       }
@@ -322,8 +384,10 @@ program
     for (const { name, rows } of collections) {
       console.log(`Restoring ${name} records...`);
       for (const row of rows) {
-        const { status, error } = await adminWrite("PUT", `/${name}/${encodeRecordId(row.id)}`, row);
-        if (status === undefined || status < 200 || status >= 300) {
+        const { status, error, redirected } = await adminWrite("PUT", `/${name}/${encodeRecordId(row.id)}`, row);
+        if (redirected) {
+          failures.push(redirectFailure(name, row, "PUT", status!));
+        } else if (status === undefined || status < 200 || status >= 300) {
           // A failed Soul write appends the refusal name the server returned,
           // so a learned-content 403 is named rather than read as an auth
           // failure (flair#2931, #2941).
@@ -337,12 +401,18 @@ program
         const path = `/${name}/${encodeRecordId(row.id)}`;
         let status: number | undefined;
         let restored: any;
+        let redirect: number | undefined;
         try {
           const res = await fetch(`${baseUrl}${path}`, {
             headers: { Authorization: auth },
+            redirect: "manual",
             signal: AbortSignal.timeout(10_000),
           });
           status = res.status;
+          if (res.status >= 300 && res.status < 400) {
+            redirect = res.status;
+            throw new Error();
+          }
           if (!res.ok) throw new Error();
           restored = await res.json();
           if (!restored || typeof restored !== "object" || Array.isArray(restored)
@@ -351,7 +421,9 @@ program
             throw new Error();
           }
         } catch {
-          failures.push(`${diagnostic(name, row, "GET", status)}: verification failed`);
+          failures.push(redirect === undefined
+            ? `${diagnostic(name, row, "GET", status)}: verification failed`
+            : `${label(name, row)}: GET verification was answered with HTTP ${redirect} redirect, which restore does not follow`);
           continue;
         }
         // Report mismatched field names without mismatched content values.

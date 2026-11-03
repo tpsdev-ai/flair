@@ -209,6 +209,32 @@ describe("flair#1540 — rem restore refuses a scoped Soul row before deleting a
     expect(await soulRow(harper, snapshotId)).toBeUndefined();
   }, 300_000);
 
+  test("an id refused in both the snapshot and the live rows reports both sources and both remedies", async () => {
+    const agent = "rem-both-tag-agent";
+    const bothId = `${agent}:identity`;
+    const stem = await makeSnapshot(agent, [
+      { id: bothId, agentId: agent, key: "identity", value: "snapshot content", durability: "permanent", createdAt, scopeTag: "team:alpha" },
+    ]);
+    await op(harper, {
+      operation: "upsert", database: "flair", table: "Soul",
+      records: [
+        { id: bothId, agentId: agent, key: "identity", value: "live content", durability: "permanent", createdAt, tags: ["team-alpha"] },
+      ],
+    });
+    const before = await soulRow(harper, bothId);
+
+    const result = await runRestore(stem, agent);
+    const output = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+
+    expect(result.code, output).toBe(1);
+    expect(result.stdout).toContain(`soul-scope-preflight: Soul ${bothId}`);
+    expect(result.stdout).toContain("in the snapshot row and the live row");
+    expect(result.stdout).toContain("Restore from a different snapshot, or edit that row in the snapshot file");
+    expect(result.stdout).toContain("Clear tags/scopeTag on the live row (PATCH) or delete it");
+    expect(await soulRow(harper, bothId)).toEqual(before);
+    expect(result.stdout).toContain("Deleted:      0 memories, 0 souls");
+  }, 300_000);
+
   test("a snapshot with no refused Soul row still restores as before", async () => {
     const agent = "rem-clean-agent";
     const snapshotId = `${agent}:identity`;

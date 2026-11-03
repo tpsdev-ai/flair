@@ -5,11 +5,11 @@
  * The server's Soul PUT applies the scope-field rule and then the
  * learned-content rule: a write whose `value` equals a same-agent Memory
  * `content` or MemoryCandidate `claim` is refused (`soul_value_is_learned_content`).
- * Replace mode deletes only the archived ids, so a Memory or candidate row
- * written after the backup survives its deletes and refuses the Soul PUT that
- * follows. A Memory row whose id is in the archive is deleted before the
- * Souls, and a failed Memory DELETE stops the run before any Soul row is
- * deleted.
+ * Replace mode deletes only the archived ids, so a Memory whose id is absent
+ * from the archive, or a candidate row written after the backup, survives its
+ * deletes and refuses the Soul PUT that follows. A Memory row whose id is in
+ * the archive is deleted before the Souls, and a failed Memory DELETE stops
+ * the run before any Soul row is deleted.
  *
  * Every case below runs a real `flair backup`, seeds the target with admin
  * credentials, and runs the built CLI under a throwaway HOME. The preflight
@@ -20,9 +20,10 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import nacl from "tweetnacl";
 import { nodeBin } from "../helpers/node-runtime";
 import { tempDir } from "../helpers/temp-dir";
@@ -116,6 +117,20 @@ async function backup(home: string, name: string, agent: string): Promise<string
 function assertNothingDeleted(result: RunResult): void {
   expect(result.stdout).not.toContain("Deleting existing data");
   expect(result.stdout).not.toContain("Restore complete");
+}
+
+/** Rewrite an archive's Memory order and its digest sidecar. */
+function reorderMemories(archivePath: string, orderedIds: string[]): void {
+  const archive = JSON.parse(readFileSync(archivePath, "utf8"));
+  const byId = new Map((archive.memories as any[]).map((memory) => [String(memory.id), memory]));
+  archive.memories = orderedIds.map((id) => {
+    const memory = byId.get(id);
+    if (memory === undefined) throw new Error(`archive has no Memory ${id}`);
+    return memory;
+  });
+  const text = `${JSON.stringify(archive, null, 2)}\n`;
+  writeFileSync(archivePath, text);
+  writeFileSync(`${archivePath}.sha256`, `${createHash("sha256").update(text).digest("hex")}  ${basename(archivePath)}\n`);
 }
 
 beforeAll(async () => {
@@ -338,5 +353,94 @@ describe("flair restore --replace refuses a learned-content Soul replay before d
     expect(await row("Memory", memoryId)).toEqual(before.memory);
     expect(restored.stderr).toContain(memoryId);
     expect(restored.stderr).toContain("no Soul row was deleted");
+  }, 300_000);
+
+  test("case (vii): a later Memory DELETE failure restores a Memory the run already deleted", async () => {
+    const home = tempDir("flair-2941-real-home-");
+    const agent = "learned-partial-delete-agent";
+    const soulId = `${agent}:identity`;
+    const ordinaryId = `${agent}:a-ordinary`;
+    const refusedId = `${agent}:z-legacy.content`;
+    const value = "the text shared by the soul and the legacy memory";
+
+    await seedAgent(agent);
+    expect(await operatorPut(`/Soul/${encodeURIComponent(soulId)}`, {
+      id: soulId, agentId: agent, key: "identity", value, durability: "permanent", createdAt: CREATED_AT,
+    })).toBeLessThan(300);
+    expect(await operatorPut(`/Memory/${encodeURIComponent(ordinaryId)}`, {
+      id: ordinaryId, agentId: agent, content: "an ordinary note", durability: "persistent", createdAt: CREATED_AT,
+    })).toBeLessThan(300);
+    await op({
+      operation: "upsert", table: "Memory",
+      records: [{ id: refusedId, agentId: agent, content: value, durability: "persistent", createdAt: CREATED_AT }],
+    });
+    const archive = await backup(home, "learned-partial-delete.json", agent);
+    reorderMemories(archive, [ordinaryId, refusedId]);
+
+    const before = { soul: await row("Soul", soulId), refused: await row("Memory", refusedId) };
+
+    const restored = await runCli(["restore", archive, "--replace", "--url", harper.httpURL], home, { FLAIR_ADMIN_PASS: harper.admin.password });
+
+    expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
+    expect(restored.stderr).toContain("no Soul row was deleted");
+    expect(await row("Memory", ordinaryId)).toMatchObject({ agentId: agent, content: "an ordinary note" });
+    expect(await row("Memory", refusedId)).toEqual(before.refused);
+    expect(await row("Soul", soulId)).toEqual(before.soul);
+  }, 300_000);
+
+  test("case (viii): a redirect on a restore write is named and its target receives no request", async () => {
+    const home = tempDir("flair-2941-real-home-");
+    const agent = "learned-redirect-agent";
+    const memoryId = `${agent}:memory`;
+    let sinkHits = 0;
+    const sinkPaths: string[] = [];
+    const sink = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req) {
+        sinkHits++;
+        sinkPaths.push(new URL(req.url).pathname);
+        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+      },
+    });
+    const proxy = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (req.method !== "GET" && req.method !== "HEAD") {
+          return new Response(null, {
+            status: 307,
+            headers: { Location: `http://127.0.0.1:${sink.port}/redirected${url.pathname}` },
+          });
+        }
+        const target = new URL(url.pathname + url.search, harper.httpURL);
+        const headers = new Headers(req.headers);
+        headers.delete("host");
+        const res = await fetch(target, { method: req.method, headers, signal: AbortSignal.timeout(30_000) });
+        return new Response(res.body, { status: res.status, headers: res.headers });
+      },
+    });
+    if ([proxy.port, sink.port].some((port) => port === 9925 || port === 9926)) throw new Error("refusing to run: proxy or sink landed on a production ops port");
+    const proxyURL = `http://127.0.0.1:${proxy.port}`;
+
+    try {
+      await seedAgent(agent);
+      expect(await operatorPut(`/Memory/${encodeURIComponent(memoryId)}`, {
+        id: memoryId, agentId: agent, content: "an ordinary note", durability: "persistent", createdAt: CREATED_AT,
+      })).toBeLessThan(300);
+      const archive = await backup(home, "learned-redirect.json", agent);
+      const before = await row("Memory", memoryId);
+
+      const restored = await runCli(["restore", archive, "--replace", "--url", proxyURL], home, { FLAIR_ADMIN_PASS: harper.admin.password });
+
+      expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
+      expect(restored.stderr).toContain("redirect");
+      expect(sinkHits, `redirect target received ${sinkPaths.join(", ")}`).toBe(0);
+      expect(await row("Memory", memoryId)).toEqual(before);
+    } finally {
+      proxy.stop(true);
+      sink.stop(true);
+    }
   }, 300_000);
 });

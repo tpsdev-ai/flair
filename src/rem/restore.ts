@@ -531,15 +531,25 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   // refuse it. Merge mode does not exist here; this restore always replaces
   // the agent's rows.
   const snapshotRefusedSouls = new Set(refusedSoulReplayIds(souls));
-  const refusedSouls = [...new Set([...snapshotRefusedSouls, ...refusedSoulReplayIds(currentSouls)])];
+  const liveRefusedSouls = new Set(refusedSoulReplayIds(currentSouls));
+  const refusedSouls = [...new Set([...snapshotRefusedSouls, ...liveRefusedSouls])];
   if (refusedSouls.length > 0) {
     for (const id of refusedSouls) {
-      const remedy = snapshotRefusedSouls.has(id)
-        ? "Restore from a different snapshot, or edit that row in the snapshot file, then re-run."
-        : "Clear tags/scopeTag on that row (PATCH) or delete it, then re-run.";
+      const inSnapshot = snapshotRefusedSouls.has(id);
+      const inLive = liveRefusedSouls.has(id);
+      const source = inSnapshot && inLive
+        ? "in the snapshot row and the live row"
+        : inSnapshot ? "in the snapshot row" : "in the live row";
+      const remedies: string[] = [];
+      if (inSnapshot) remedies.push("Restore from a different snapshot, or edit that row in the snapshot file, then re-run.");
+      if (inLive) {
+        remedies.push(inSnapshot
+          ? "Clear tags/scopeTag on the live row (PATCH) or delete it, then re-run."
+          : "Clear tags/scopeTag on that row (PATCH) or delete it, then re-run.");
+      }
       errors.push(
-        `soul-scope-preflight: Soul ${id} supplies a non-empty scopeTag or tags array, `
-          + `which the Soul scope-field rule refuses; no target rows were deleted or written. ${remedy}`,
+        `soul-scope-preflight: Soul ${id} supplies a non-empty scopeTag or tags array ${source}, `
+          + `which the Soul scope-field rule refuses; no target rows were deleted or written. ${remedies.join(" ")}`,
       );
     }
     result.status = "failed";
