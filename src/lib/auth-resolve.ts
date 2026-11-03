@@ -42,7 +42,7 @@
  *      fallback) — when NOTHING above resolved to anything sendable at
  *      all, tries candidate key files under `~/.flair/keys` in order (sorted,
  *      deterministic) until one succeeds or an answer is final. This is the
- *      credential every headless/agent machine
+ *      credential a headless/agent machine
  *      actually has, and is exactly the flair#741 incident's fix: an agent
  *      key existed the whole time, nothing tried it.
  *
@@ -1549,9 +1549,9 @@ function isEd25519CredentialRejection(err: unknown): boolean {
 
 /**
  * Tier 5, the floor (flair#747, generalizing flair#742's `verifyAuthedGet`
- * GET-only fallback to any method/body): try every candidate key file in
- * `keysDir` in sorted (deterministic) filename order, first one that
- * authenticates wins. Returns `undefined` when there are no candidate key
+ * GET-only fallback to any method/body): tries candidate key files in
+ * `keysDir` in sorted (deterministic) filename order until one authenticates
+ * or an answer is final. Returns `undefined` when there are no candidate key
  * files, when every candidate was credential-rejected, or when every attempt
  * was a connect failure; a final answer throws. That lets the caller rethrow
  * its ORIGINAL no-credentials error rather than a floor-specific one.
