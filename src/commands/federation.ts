@@ -35,6 +35,7 @@ import {
   isLocalBase,
   resolveAdminUser,
   addAdminPassOptions,
+  applyAdminPassFile,
   ApiRequestOutcomeUnknown,
 } from "../lib/auth-resolve.js";
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "../federation/scheduler.js";
@@ -146,6 +147,26 @@ function shouldShowInlineSecretWarning(
   flagName: string,
 ): boolean {
   return cli.shouldShowInlineSecretWarning(optValue, fromEnv, secretFlagNames, flagName);
+}
+
+/**
+ * Apply the admin-password pair inherited by `federation sync status` and
+ * `federation sync disable`. The parent (`flair federation sync`) declares the
+ * pair, so commander stores the values there and the leaf's opts() is empty.
+ * Resolve an explicitly supplied pair before the action body runs and store the
+ * password on the leaf, where `status` reads it for its request. `enable`
+ * stores the path only and does not call this.
+ */
+function applyInheritedAdminPass(actionCommand: Command): void {
+  const inherited = actionCommand.parent?.opts() as
+    | { adminPass?: string; adminPassFile?: string }
+    | undefined;
+  if (!inherited) return;
+  if (inherited.adminPass === undefined && inherited.adminPassFile === undefined) return;
+  const opts = { adminPass: inherited.adminPass, adminPassFile: inherited.adminPassFile };
+  applyAdminPassFile(opts);
+  actionCommand.setOptionValue("adminPass", opts.adminPass);
+  actionCommand.setOptionValue("adminPassFile", opts.adminPassFile);
 }
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
@@ -535,11 +556,19 @@ export async function persistLocalPeerPresenceSyncAt(args: {
  * Returns null on ANY failure. A driver verdict is a diagnostic aid; it must
  * never be the reason `federation status` fails.
  */
-async function latestPeerContact(opts: { target?: string }): Promise<string | null> {
+async function latestPeerContact(opts: { target?: string; adminPass?: string }): Promise<string | null> {
   try {
     const target = resolveTarget(opts);
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
-    const { peers } = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+    const requestOptions: { baseUrl?: string; explicitAdminPass?: string } = {};
+    if (baseUrl) requestOptions.baseUrl = baseUrl;
+    if (opts.adminPass) requestOptions.explicitAdminPass = opts.adminPass;
+    const { peers } = await api(
+      "GET",
+      "/FederationPeers",
+      undefined,
+      Object.keys(requestOptions).length ? requestOptions : undefined,
+    );
     let best: number | null = null;
     for (const p of peers ?? []) {
       if (!p?.lastSyncAt) continue;
@@ -2453,6 +2482,7 @@ export function register(program: Command): void {
     .command("disable")
     .description("Remove the sync driver (peers and sync history are preserved)")
     .option("--remove-shim", "Also delete the ~/.flair/bin/flair-federation-sync shim")
+    .hook("preAction", (_thisCommand, actionCommand) => applyInheritedAdminPass(actionCommand))
     .action(async (opts: any) => {
       const { disableScheduler } = await import("../federation/scheduler.js");
       try {
@@ -2483,6 +2513,7 @@ export function register(program: Command): void {
     // `flair federation sync` owns them and commander binds them there. They
     // still work on this command, via optsWithGlobals() below.
     .option("--json", "Emit JSON")
+    .hook("preAction", (_thisCommand, actionCommand) => applyInheritedAdminPass(actionCommand))
     .action(async (_opts: any, cmd: any) => {
       // See the comment on `enable` above: `--target`/`--port` live on the
       // parent, so commander binds them there and only optsWithGlobals() sees

@@ -1,14 +1,14 @@
 /**
  * admin-pass-file-wired-2889.test.ts — flair#2889
  *
- * The admin-password pair is applied by addAdminPassOptions' preAction hook, so
- * a command cannot accept `--admin-pass-file` while ignoring it. This walks the
- * registered commander tree and requires every command that declares the flag
- * to be in the helper's registry, except the named path-only exception. A
- * command that copies the flag into its own option list fails here by name.
- * `rem nightly enable` is the sole locally declaring path-only exception;
- * `federation sync enable` inherits the pair from its parent and stores the
- * path for its scheduler.
+ * The helper's registry lists the commands whose preAction hook applies the
+ * pair. This walks the registered commander tree and requires every command
+ * that declares `--admin-pass-file` to be in it, except the named locally
+ * declaring path-only exception (`rem nightly enable`). It does not see
+ * inherited flags: `federation sync enable` stores the path for its scheduler,
+ * and `sync status`/`sync disable` apply the inherited pair in their own hooks
+ * (test/integration/federation-sync-inherited-admin-pass-file-2889.test.ts).
+ * A command that copies the flag into its own option list fails here by name.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -24,7 +24,7 @@ import { walkCliCommands } from "../helpers/cli-surface";
 const NOT_APPLIED_ON_INVOCATION = new Set(["flair rem nightly enable"]);
 
 describe("flair#2889 — the credential-reading --admin-pass-file commands are wired", () => {
-  test("every command applying --admin-pass-file is in the helper's registry, except the named path-only flag", () => {
+  test("every command declaring --admin-pass-file is in the helper's registry, except the named path-only flag", () => {
     const nodes = walkCliCommands(program);
     const declaring = nodes.filter(({ cmd }) => cmd.options.some((o) => o.long === "--admin-pass-file"));
 

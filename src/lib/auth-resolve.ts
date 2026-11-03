@@ -932,10 +932,12 @@ export const ADMIN_PASS_HELP =
   "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)";
 
 /** Commands whose admin-password pair `addAdminPassOptions` wired. A test walks
- *  the registered tree and asserts every command that applies the credential
- *  pair is in it. `rem nightly enable` is the sole command that declares the
- *  path-only flag itself; `federation sync enable` inherits the pair from its
- *  parent and stores the path in the unit it installs. */
+ *  the registered tree and asserts every command that declares `--admin-pass`
+ *  is in it, and every command that declares `--admin-pass-file` except
+ *  `rem nightly enable`, which declares that flag itself as path-only. Inherited
+ *  leaves are not in this set: `federation sync enable` stores the path in the
+ *  unit it installs, and `sync status`/`disable` apply the pair in their own
+ *  hooks. */
 export const adminPassFileWired = new WeakSet<Command>();
 
 export interface AddAdminPassOptionsConfig {
@@ -946,9 +948,12 @@ export interface AddAdminPassOptionsConfig {
 
 /**
  * Declare the admin-password pair on `cmd`: the argv form and the file form
- * together, in that order, and apply it in a preAction hook. The hook runs after
- * option parsing and before the action body, so a refused file exits before any
- * request the command's action makes, and no action can forget the call.
+ * together, in that order, and apply it in a preAction hook. For a command that
+ * declares the pair, the hook runs after option parsing and before the action
+ * body, so a refused file exits before any request the action makes. A
+ * subcommand that inherits the pair from `cmd` stores the values on `cmd`; the
+ * leaves that apply them (`federation sync status`/`disable`) do so in their
+ * own hooks.
  */
 export function addAdminPassOptions(
   cmd: Command,
@@ -959,6 +964,12 @@ export function addAdminPassOptions(
   cmd.option(ADMIN_PASS_FLAG, adminPassHelp).addOption(adminPassFile);
   adminPassFileWired.add(cmd);
   cmd.hook("preAction", (_thisCommand, actionCommand) => {
+    // A subcommand that inherits the pair (`federation sync status`) stores the
+    // values on this command, not on itself; the leaves that read an inherited
+    // pair apply it in their own hook. Reading the leaf's empty opts() here
+    // would silently ignore an explicit file and copy the ambient env password
+    // into it.
+    if (!actionCommand.options.some((o) => o.long === "--admin-pass-file")) return;
     const actionOpts = actionCommand.opts() as {
       adminPass?: string;
       adminPassFile?: string;
