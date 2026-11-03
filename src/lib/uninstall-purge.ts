@@ -52,11 +52,8 @@ export const FLAIR_NPM_PACKAGE = "@tpsdev-ai/flair";
 
 export interface PurgeLeftover {
   path: string;
-  /** `unverified`: purge could not decide this path (an unreadable file, a
-   *  JSON config that is malformed, `null` or otherwise not an object, or a pi
-   *  `packages`/`extensions` entry that mentions pi-flair without being
-   *  Flair's own). It is left in place and reported by name — never claimed
-   *  removed and never silently kept (flair#2886). */
+  /** `unverified`: purge could not decide this path. It is left in place
+   *  and reported by name (flair#2886). */
   kind: "intentional" | "failed" | "unverified";
   reason: string;
   remedy?: string;
@@ -205,8 +202,7 @@ function backupEntryAbsent(path: string): boolean {
  *
  * Call inside `withHome(homeDir, ...)`: `clientConfigBackupPath()` resolves `~`
  * at call time, so the sweep must run with the target home in the environment,
- * not the caller's (flair#2886). When the hold succeeds, a pre-existing copy is
- * read here instead of being replaced by the unwire's snapshot.
+ * not the caller's (flair#2886).
  */
 function sweepClientConfigBackup(
   clientId: ClientId,
@@ -287,9 +283,7 @@ function holdSelectionBarrier(candidate: string): void {
  * `recursive` fails with `EEXIST` when any entry already occupies the name,
  * so a user file or directory there is never adopted or overwritten. The name
  * carries this process's pid and a per-client sequence; the directory is
- * created by this purge, mode 0700, and removed after a successful restore
- * (or by the failed-rename cleanup below); a failed restore leaves it holding
- * the copy the report names.
+ * created with requested mode 0700.
  */
 function reserveHoldPath(backup: string, seq: number): HoldReservation {
   for (let attempt = 0; attempt < 16; attempt++) {
@@ -398,10 +392,10 @@ export function restoreHeldClientConfigBackups(
   return unrestored;
 }
 
-/** Restore every held snapshot, then sweep the clients whose hold and restore
- *  succeeded. An absent backup is not held, and its client proceeds. A client
- *  skipped at the hold, or whose restore failed, keeps its `.bak` and is
- *  reported instead (flair#2886). */
+/** Restore held snapshots, then sweep eligible clients. A failed hold skips
+ *  unwiring and leaves the original backup in place. A failed restore skips
+ *  the sweep and reports the held path; the original backup path may be absent.
+ *  An absent backup is not held, and its client proceeds (flair#2886). */
 export function restoreAndSweepClientConfigBackups(
   homeDir: string,
   hold: ClientBackupHold,
@@ -500,11 +494,9 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
     }
   }
 
-  // The unwire above snapshots each config before writing it; sweep those
-  // snapshots (and any older one) after the unwire attempts, under the target
-  // home the unwire ran in. A client whose backup was not held or not restored
-  // keeps its entry and is skipped. An absent backup is not held, and its
-  // client proceeds.
+  // Restore and sweep under the target home. A failed hold skipped unwiring
+  // and left the original backup in place; a failed restore skips the sweep,
+  // reports the held path, and may leave the original backup path absent.
   withClientConfigHome(homeDir, ignorePiDirOverride, () => {
     restoreAndSweepClientConfigBackups(homeDir, hold, removed, leftovers);
   });

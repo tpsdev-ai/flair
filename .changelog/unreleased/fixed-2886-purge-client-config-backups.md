@@ -9,7 +9,8 @@
   a snapshot with no Flair entry may be the user's own copy and stays byte-identical, and its bytes
   (or, for a symlink, the link itself) survive the unwiring write. When the hold and restore succeed
   and the scan runs, a snapshot that cannot be read, a JSON snapshot that cannot be parsed, and a pi
-  snapshot whose only pi-flair mention in either field is not Flair's own are listed under
+  snapshot with no Flair-owned entry but with `pi-flair` in a `packages` string/object `source`
+  string or string `extensions` entry are listed under
   `Not checked` and left in place; a failed hold or restore is reported under `Left (failed)`
   instead. Purging a home other than the resolved caller home resolves pi under that home; a
   `PI_CODING_AGENT_DIR` override is then ignored and reported. A run with failed or unverified

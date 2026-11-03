@@ -1427,10 +1427,8 @@ export function clientConfigBackupPath(id: ClientId): string {
 }
 
 /**
- * What a client-config snapshot says about Flair wiring. `unknown` is a read
- * that could not be decided (malformed JSON in a JSON config, a non-object,
- * including JSON `null`, or a pi `packages`/`extensions` entry that mentions
- * pi-flair without being Flair's own) — it is never "absent" (flair#2886).
+ * What a client-config snapshot says about Flair wiring. `unknown` means the
+ * scan could not decide (flair#2886).
  */
 export type ClientConfigFlairScan =
   | { status: "present" }
@@ -1441,11 +1439,8 @@ export type ClientConfigFlairScan =
  * Answer "does this client config carry a Flair entry?" for callers reading a
  * copy of the config rather than the live file (purge's `.bak` sweep,
  * flair#2886). `present` and `absent` use the identification that client's
- * `unwire()` acts on. `unknown` is a read that could not decide the file —
- * never "absent": malformed JSON in a JSON config, a non-object (including
- * JSON `null`), or a pi entry that mentions pi-flair without being Flair's
- * own. `path` only names the file in an `unknown` reason (a malformed-JSON
- * reason is fixed text plus that path, never the parser's message).
+ * `unwire()` acts on. `path` names the file in an `unknown` reason; malformed
+ * JSON uses fixed text plus that path, never the parser's message.
  */
 export function clientConfigHasFlairEntry(
   id: ClientId,
@@ -1625,24 +1620,17 @@ function mcpConfigHasFlairEntry(config: any): boolean {
   return !!servers && typeof servers === "object" && !Array.isArray(servers) && "flair" in servers;
 }
 
-/** What a pi settings object says about pi-flair. `unrecognized` is an entry
- *  that mentions `pi-flair` without being Flair's own and appears when no
- *  Flair-owned entry is also present — it cannot decide whether a snapshot is
- *  safe to delete (flair#2886). */
+/** What a pi settings object says about pi-flair (flair#2886). */
 type PiFlairEntryScan =
   | { status: "present" }
   | { status: "absent" }
   | { status: "unrecognized" };
 
 /**
- * The pi shape that counts as a Flair entry: a `packages` source or an
- * `extensions` entry that `isFlairOwnedPiEntry` accepts — an npm pi-flair
- * source or a local path inside the pi-flair package, resolved with the same
- * home and agent-dir context `_unwirePi` uses. Any other entry containing
- * `pi-flair`, in either field and when no Flair-owned entry is also present,
- * is `unrecognized`. The entry value is not retained: the purge report names
- * the file, not its contents. Shared with `_unwirePi` for the same reason as
- * `mcpConfigHasFlairEntry`.
+ * Scan `packages` strings/object `source` strings and string `extensions`
+ * entries with `isFlairOwnedPiEntry`, using `_unwirePi`'s home and agent-dir
+ * context. If none is Flair-owned, a scanned string containing `pi-flair`
+ * makes the result `unrecognized`. Entry values are not retained.
  */
 function piConfigFlairEntryScan(config: any, homeDir: string, baseDir: string): PiFlairEntryScan {
   const packages = Array.isArray(config.packages) ? config.packages : [];
