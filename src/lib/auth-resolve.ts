@@ -40,9 +40,9 @@
  *      remote instance; see `resolveLocalAdminPass`).
  *   5. THE FLOOR (flair#747, generalizing flair#742's upgrade-only
  *      fallback) — when NOTHING above resolved to anything sendable at
- *      all, sign the SAME request with every registered key under
- *      `~/.flair/keys` (sorted, deterministic order), first one the server
- *      accepts wins. This is the credential every headless/agent machine
+ *      all, tries candidate key files under `~/.flair/keys` in order (sorted,
+ *      deterministic) until one succeeds or an answer is final. This is the
+ *      credential a headless/agent machine
  *      actually has, and is exactly the flair#741 incident's fix: an agent
  *      key existed the whole time, nothing tried it.
  *
@@ -1125,8 +1125,12 @@ export function resolveKeyPath(agentId: string): string | null {
   return candidates.find((p) => existsSync(p)) ?? null;
 }
 
-/** Build a TPS-Ed25519 auth header from a raw 32-byte seed on disk. */
-export function buildEd25519Auth(agentId: string, method: string, path: string, keyPath: string): string {
+/**
+ * Load a signing key from disk: read the file, decode it (raw 32-byte seed,
+ * base64 seed, full PKCS8 DER or PEM), and require an Ed25519 key. A throw here
+ * is a failure of THIS key file; nothing has been sent for it.
+ */
+function loadEd25519SigningKey(keyPath: string): ReturnType<typeof createPrivateKey> {
   const raw = readFileSync(keyPath);
   const pkcs8Header = Buffer.from("302e020100300506032b657004220420", "hex");
   let privKey: ReturnType<typeof createPrivateKey>;
@@ -1148,11 +1152,29 @@ export function buildEd25519Auth(agentId: string, method: string, path: string, 
       }
     }
   }
+  if (privKey.asymmetricKeyType !== "ed25519") {
+    throw new Error(`signing key ${keyPath} is not an Ed25519 private key`);
+  }
+  return privKey;
+}
+
+/** Build a TPS-Ed25519 auth header from an already-loaded Ed25519 key. */
+function buildEd25519AuthFromKey(
+  agentId: string,
+  method: string,
+  path: string,
+  privKey: ReturnType<typeof createPrivateKey>,
+): string {
   const ts = Date.now().toString();
   const nonce = randomUUID();
   const payload = `${agentId}:${ts}:${nonce}:${method}:${path}`;
   const sig = nodeCryptoSign(null, Buffer.from(payload), privKey).toString("base64");
   return `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${sig}`;
+}
+
+/** Build a TPS-Ed25519 auth header from the key file at `keyPath`. */
+export function buildEd25519Auth(agentId: string, method: string, path: string, keyPath: string): string {
+  return buildEd25519AuthFromKey(agentId, method, path, loadEd25519SigningKey(keyPath));
 }
 
 /** Join a Flair route to an optional base path before signing or sending it. */
@@ -1513,12 +1535,66 @@ export async function sendJsonRequest(
 }
 
 /**
+ * The 401 error codes the Ed25519 authentication middleware in
+ * resources/auth-middleware.ts returns when it refuses the credential: an
+ * unparseable header, a timestamp outside the replay window, an unknown agent,
+ * a deactivated principal, or a signature that does not verify. The
+ * middleware's catch around signature verification also covers key import
+ * errors.
+ * A 401 carrying one of these codes moves the tier-5 floor to the next key.
+ * `nonce_replay_detected` is an answer about the REQUEST (a reused nonce) and
+ * `replay_store_unavailable` is a server-side failure; neither is a credential
+ * rejection, so both are final.
+ */
+export const CREDENTIAL_REJECTION_CODES: ReadonlySet<string> = new Set([
+  "invalid_authorization_header",
+  "timestamp_out_of_window",
+  "unknown_agent",
+  "principal_deactivated",
+  "invalid_signature",
+  "signature_verification_failed",
+]);
+
+/** True when the server answered 401 with one of its Ed25519 credential-rejection codes. */
+function isEd25519CredentialRejection(err: unknown): boolean {
+  if (!(err instanceof ApiHttpError) || err.status !== 401) return false;
+  const raw = apiErrorRawBody(err);
+  if (raw === undefined) return false;
+  try {
+    const parsed = JSON.parse(raw);
+    const code = parsed && typeof parsed === "object" ? (parsed as { error?: unknown }).error : undefined;
+    return typeof code === "string" && CREDENTIAL_REJECTION_CODES.has(code);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Tier 5, the floor (flair#747, generalizing flair#742's `verifyAuthedGet`
- * GET-only fallback to any method/body): try every registered key in
- * `keysDir` in sorted (deterministic) filename order, first one that
- * authenticates wins. Returns `undefined` — never throws — when every key
- * fails or none exist, so the caller can rethrow its ORIGINAL
- * no-credentials error rather than a floor-specific one.
+ * GET-only fallback to any method/body): tries candidate key files in
+ * `keysDir` in sorted (deterministic) filename order until one authenticates
+ * or an answer is final. Returns `undefined` when there are no candidate key
+ * files, or when no candidate authenticated: every attempt was skipped for a
+ * key file that cannot be read or decoded as an Ed25519 key, credential-rejected,
+ * or a connect failure; a final answer throws. That lets the caller rethrow its
+ * ORIGINAL no-credentials error rather than a floor-specific one.
+ *
+ * Every request the floor sends refuses redirects (flair#2955), whatever the
+ * caller asked for: the location a 3xx names receives no request, and the 3xx
+ * is thrown as itself — a final answer, never a reason to try another key.
+ *
+ * The floor moves to the next key ONLY when the server refused the Ed25519
+ * credential itself (the 401 codes in `CREDENTIAL_REJECTION_CODES`), when an
+ * attempt that does not follow redirects fails in the connect phase (the
+ * existing network-blip case), or when that candidate's key file cannot be read
+ * or decoded as an Ed25519 key (nothing was sent for it). Failures after a key
+ * is loaded (nonce, signing) are final. Every other response is final too: a
+ * failed HTTP response whose body was read is thrown as itself with its status
+ * and any error code its body names, and a refused redirect is thrown as itself
+ * with its status before any body is read. When
+ * every candidate is refused as a credential, the floor returns `undefined`, so
+ * the caller rethrows its original no-credentials hint, which carries the
+ * operator's remedy.
  */
 export async function tryAgentKeyFloor(
   url: URL,
@@ -1526,7 +1602,6 @@ export async function tryAgentKeyFloor(
   body: unknown,
   keysDir: string,
   transport: {
-    refuseRedirects?: boolean;
     deadlineMs?: number;
     deadlineSource?: RequestDeadlineSource;
     tolerateUnparsedSuccessBody?: boolean;
@@ -1539,21 +1614,46 @@ export async function tryAgentKeyFloor(
     // No keys dir at all — nothing to fall back to.
   }
   const isLocal = isLocalBase(url.origin);
+  // The signed target is identical for every candidate, so build it once,
+  // before any key is loaded. A failure here is about the request itself, not
+  // about any one candidate, so it is final.
+  const target = requestTarget(url);
   for (const kf of keyFiles) {
     const agentId = kf.replace(/\.key$/, "");
     const keyPath = join(keysDir, kf);
+    let privKey: ReturnType<typeof createPrivateKey>;
     try {
-      const authHeader = buildEd25519Auth(agentId, method, requestTarget(url), keyPath);
-      return await sendJsonRequest(url, method, body, authHeader, isLocal, transport);
+      privKey = loadEd25519SigningKey(keyPath);
+    } catch {
+      // This candidate's key file could not be loaded as an Ed25519 key.
+      // Nothing was sent for it, and every other candidate is exactly as
+      // usable as it was before this file was read, so skip this one.
+      continue;
+    }
+    // The key loaded: a failure from here (nonce, signing) is not about this
+    // key file and is thrown as itself, with no later key sent.
+    const authHeader = buildEd25519AuthFromKey(agentId, method, target, privKey);
+    try {
+      return await sendJsonRequest(url, method, body, authHeader, isLocal, { ...transport, refuseRedirects: true });
     } catch (err: unknown) {
       // A write whose outcome is unknown stops the floor. Trying the next key
       // would send the same write again — a blind replay of a request that may
       // have committed.
       if (err instanceof ApiRequestOutcomeUnknown) throw err;
-      // This key didn't work (unregistered, bad signature, network blip on
-      // this one attempt) — try the next one.
+      // The server rejected THIS credential (unregistered agent, bad
+      // signature, expired timestamp, deactivated principal): another key may
+      // authenticate.
+      if (isEd25519CredentialRejection(err)) continue;
+      // A connect-phase failure on an attempt that refuses redirects is the
+      // existing network-blip case: another key may connect.
+      if (isConnectPhaseFailure(err)) continue;
+      // A server answer is final — resending it as a different agent would hide
+      // what the server said. Local request failures are rethrown as they are.
+      throw err;
     }
   }
+  // No key authenticated. Returning `undefined` lets the caller rethrow its
+  // original no-credentials hint, which carries the operator's remedy.
   return undefined;
 }
 
@@ -1694,11 +1794,9 @@ export interface AuthedRequestOptions {
   /**
    * Refuse a redirect instead of following it (flair#2708): the location a 3xx
    * names receives no request, and that attempt throws `ApiHttpError` with its
-   * status. When the request falls back across agent keys (no resolved
-   * credential), the fallback loop catches that error like any other attempt's,
-   * so the caller can receive an earlier attempt's answer or a later key's
-   * success instead. Unset, a redirect is followed (fetch's default), as for
-   * every caller that does not pass this.
+   * status. Unset, a redirect is followed (fetch's default), as for every
+   * caller that does not pass this. The tier-5 agent-key floor always refuses
+   * redirects (flair#2955), whatever this option says.
    */
   refuseRedirects?: boolean;
   /**
@@ -1872,7 +1970,6 @@ export async function authedRequest(
     // does not retry here).
     if (err instanceof ApiHttpError && err.noCredentials) {
       const floorResult = await tryAgentKeyFloor(url, method, body, keysDir, {
-        refuseRedirects: opts.refuseRedirects,
         deadlineMs: opts.deadlineMs,
         deadlineSource: opts.deadlineSource,
         tolerateUnparsedSuccessBody: opts.tolerateUnparsedSuccessBody,
