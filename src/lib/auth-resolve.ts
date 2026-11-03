@@ -1513,12 +1513,55 @@ export async function sendJsonRequest(
 }
 
 /**
+ * The 401 error codes resources/auth-middleware.ts returns when it refuses
+ * the Ed25519 credential itself: an unparseable header, a timestamp outside
+ * the replay window, an unknown agent, a deactivated principal, or a signature
+ * that does not verify. Only these move the tier-5 floor to the next key.
+ * `nonce_replay_detected` and `replay_store_unavailable` are answers about the
+ * REQUEST (a reused nonce, an unavailable store), not the credential, so they
+ * are final.
+ */
+const CREDENTIAL_REJECTION_CODES: ReadonlySet<string> = new Set([
+  "invalid_authorization_header",
+  "timestamp_out_of_window",
+  "unknown_agent",
+  "principal_deactivated",
+  "invalid_signature",
+  "signature_verification_failed",
+]);
+
+/** True when the server answered 401 with one of its Ed25519 credential-rejection codes. */
+function isEd25519CredentialRejection(err: unknown): boolean {
+  if (!(err instanceof ApiHttpError) || err.status !== 401) return false;
+  const raw = apiErrorRawBody(err);
+  if (raw === undefined) return false;
+  try {
+    const parsed = JSON.parse(raw);
+    const code = parsed && typeof parsed === "object" ? (parsed as { error?: unknown }).error : undefined;
+    return typeof code === "string" && CREDENTIAL_REJECTION_CODES.has(code);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Tier 5, the floor (flair#747, generalizing flair#742's `verifyAuthedGet`
  * GET-only fallback to any method/body): try every registered key in
  * `keysDir` in sorted (deterministic) filename order, first one that
- * authenticates wins. Returns `undefined` — never throws — when every key
- * fails or none exist, so the caller can rethrow its ORIGINAL
- * no-credentials error rather than a floor-specific one.
+ * authenticates wins. Returns `undefined` when there are no keys to try, so
+ * the caller can rethrow its ORIGINAL no-credentials error rather than a
+ * floor-specific one.
+ *
+ * The floor moves to the next key ONLY when the server refused the Ed25519
+ * credential itself (the 401 codes in `CREDENTIAL_REJECTION_CODES`, taken
+ * from resources/auth-middleware.ts's signature check) or when the request
+ * provably never left this host (a connect-phase failure, the existing
+ * network-blip case). Every other answer belongs to the request that was
+ * sent, not to the key: a 500, 409, policy 403, refused redirect or GET 404 is
+ * FINAL and is thrown as itself, with the server's status and code, so it is
+ * never replayed as a different agent and never hidden behind the caller's
+ * "no credentials sent". When every key is refused as a credential, the last
+ * such answer is thrown for the same reason (something WAS sent).
  */
 export async function tryAgentKeyFloor(
   url: URL,
@@ -1539,6 +1582,7 @@ export async function tryAgentKeyFloor(
     // No keys dir at all — nothing to fall back to.
   }
   const isLocal = isLocalBase(url.origin);
+  let lastCredentialRejection: unknown;
   for (const kf of keyFiles) {
     const agentId = kf.replace(/\.key$/, "");
     const keyPath = join(keysDir, kf);
@@ -1550,10 +1594,25 @@ export async function tryAgentKeyFloor(
       // would send the same write again — a blind replay of a request that may
       // have committed.
       if (err instanceof ApiRequestOutcomeUnknown) throw err;
-      // This key didn't work (unregistered, bad signature, network blip on
-      // this one attempt) — try the next one.
+      // The server rejected THIS credential (unregistered agent, bad
+      // signature, expired timestamp, deactivated principal): another key may
+      // authenticate.
+      if (isEd25519CredentialRejection(err)) {
+        lastCredentialRejection = err;
+        continue;
+      }
+      // A connection refused or DNS failure before any byte was sent is the
+      // existing network-blip case: the request provably never left this host.
+      if (isConnectPhaseFailure(err)) continue;
+      // The server answered the request that was sent. That answer is final —
+      // resending it as a different agent would hide what the server said.
+      throw err;
     }
   }
+  // Every key the server was asked about was refused as a credential. Report
+  // the server's answer, not the caller's "no credentials sent" for a request
+  // that was sent with credentials.
+  if (lastCredentialRejection !== undefined) throw lastCredentialRejection;
   return undefined;
 }
 
