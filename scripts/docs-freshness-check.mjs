@@ -523,7 +523,9 @@ defineCheck("changelog-unreleased", null, () => {
   if (!hasContent && !perChangeRuleRan && excludedRenovateCommits > 0) {
     return { failures, scanned: null, skips: [skip(
       `the per-change fragment rule did not run (${perChangeRuleError ? `git read failed: ${perChangeRuleError?.message ?? perChangeRuleError}` : `no merge base with ${baseRef}`}), and ${excludedRenovateCommits} feat/fix commit(s) were excluded from the since-tag count as Renovate dependency commits, so no rule checked them.`,
-      "Locally, fetch the full history (git fetch --unshallow for a shallow checkout); in CI, use actions/checkout with fetch-depth: 0",
+      perChangeRuleError
+        ? "resolve the reported git error and rerun"
+        : `fetch the full history including ${baseRef} (CI: fetch-depth: 0; local: git fetch --unshallow if shallow, and fetch the base ref)`,
     )] };
   }
 
