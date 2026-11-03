@@ -1292,8 +1292,8 @@ export function register(program: Command): void {
       // admin credentials are available, inject ops-API and admin-authed REST
       // helpers so the pending-candidate count and the admin-gated dedup step
       // can run. An explicit file or flag is applied by the pair's preAction
-      // hook before any cycle work; when it is unavailable the hook reports NOT
-      // RUN rather than issuing an agent-authed call that an agent key cannot
+      // hook before any cycle work. A refused FILE is reported as `Dedup: NOT
+      // RUN` rather than issuing an agent-authed call that an agent key cannot
       // authorize.
       const adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
       // Every agent-scoped call is signed by the selected agent and nothing

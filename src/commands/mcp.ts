@@ -885,7 +885,7 @@ export function register(program: Command): void {
       const adminPass = dryRun ? (opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "") : resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
       if (!dryRun && !adminPass) {
         console.error(
-          "Error: --admin-pass <pass> or --admin-pass-file <path> is required for a REMOTE target " +
+          "Error: --admin-pass <pass> or --admin-pass-file <path> is required for a target instance " +
             "(the command authenticates to the target instance's operations API with it).\n" +
             "  FLAIR_ADMIN_PASS and ~/.flair/admin-pass are deliberately NOT used here: they are THIS machine's " +
             "local admin credentials, and sending them to another instance is how a local secret ends up on someone " +
@@ -1018,7 +1018,7 @@ export function register(program: Command): void {
       }
       const adminPass = resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
       if (!adminPass) {
-        console.error("Error: --admin-pass <pass> or --admin-pass-file <path> is required for a REMOTE target. Pass the target instance's admin password explicitly.");
+        console.error("Error: --admin-pass <pass> or --admin-pass-file <path> is required for a target instance. Pass the target instance's admin password explicitly.");
         process.exit(1);
       }
 

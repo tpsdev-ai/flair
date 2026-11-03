@@ -933,7 +933,9 @@ export const ADMIN_PASS_HELP =
 
 /** Commands whose admin-password pair `addAdminPassOptions` wired. A test walks
  *  the registered tree and asserts every command that applies the credential
- *  pair is in it (the path-only flag on `rem nightly enable` is the exception). */
+ *  pair is in it. `rem nightly enable` is the sole command that declares the
+ *  path-only flag itself; `federation sync enable` inherits the pair from its
+ *  parent and stores the path in the unit it installs. */
 export const adminPassFileWired = new WeakSet<Command>();
 
 export interface AddAdminPassOptionsConfig {

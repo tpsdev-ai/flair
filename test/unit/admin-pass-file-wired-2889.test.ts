@@ -4,8 +4,11 @@
  * The admin-password pair is applied by addAdminPassOptions' preAction hook, so
  * a command cannot accept `--admin-pass-file` while ignoring it. This walks the
  * registered commander tree and requires every command that declares the flag
- * to be in the helper's registry. A command that copies the flag into its own
- * option list fails here by name.
+ * to be in the helper's registry, except the named path-only exception. A
+ * command that copies the flag into its own option list fails here by name.
+ * `rem nightly enable` is the sole locally declaring path-only exception;
+ * `federation sync enable` inherits the pair from its parent and stores the
+ * path for its scheduler.
  */
 
 import { describe, expect, test } from "bun:test";

@@ -40,8 +40,8 @@ describe("flair#2889 — --admin-pass descriptions", () => {
   });
 });
 
-describe("flair#2889 — --admin-pass-file does not reorder options", () => {
-  test("option order matches the fixture after removing --admin-pass-file", () => {
+describe("flair#2889 — options other than --admin-pass-file keep their origin/main order", () => {
+  test("the registered tree matches the fixture once --admin-pass-file is removed", () => {
     const walked = new Map<string, string[]>();
     for (const { path, cmd } of walkCliCommands(program)) walked.set(path, optionNames(cmd));
 

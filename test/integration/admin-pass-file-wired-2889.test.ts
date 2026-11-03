@@ -93,7 +93,7 @@ function passFile(mode: number): string {
   return path;
 }
 
-describe("flair#2889 — the pair is applied before the action for every wired command", () => {
+describe("flair#2889 — the pair is applied before the action for the sampled wired commands", () => {
   for (const testCase of CASES) {
     test(`${testCase.name}: a 0644 file exits 1 with the permission text and sends nothing`, async () => {
       const stub = startStub();
