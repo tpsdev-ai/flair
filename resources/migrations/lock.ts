@@ -15,7 +15,8 @@
  * Every ownership transition on the migration lock is serialized by a sibling directory mutex
  * (`<lock>.guard`). A process publishes that mutex by renaming an
  * already-populated directory over the guard path: replacing an empty
- * directory succeeds, replacing a non-empty one fails with ENOTEMPTY. The
+ * directory succeeds; replacing a non-empty one fails, and either EEXIST or
+ * ENOTEMPTY from that rename is treated as contention. The
  * mutex is released by unlinking only the owner entry of the generation it
  * published, leaving the directory empty when the unlink succeeds. A dead
  * owner is recovered by
