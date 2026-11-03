@@ -59,7 +59,7 @@ jobs:
         # the default branch's commit this schedule run started on — trusted main.
         # The sparse set is EXACTLY what `lockstep-packages.mjs` reads: scripts/ci,
         # the root package.json and packages/*/package.json.
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
