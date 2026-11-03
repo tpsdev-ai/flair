@@ -12,7 +12,7 @@
  *      a record this module refuses as unreadable; it never treats a partial
  *      or unknown record as stale.
  *
- * Every migration-lock transition is serialized by a sibling directory mutex
+ * Every ownership transition on the migration lock is serialized by a sibling directory mutex
  * (`<lock>.guard`). A process publishes that mutex by renaming an
  * already-populated directory over the guard path: replacing an empty
  * directory succeeds, replacing a non-empty one fails with ENOTEMPTY. The
