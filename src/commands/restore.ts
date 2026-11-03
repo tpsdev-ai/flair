@@ -317,8 +317,9 @@ addAdminPassOptions(
       // archived Memory ids are gone before a Soul write. A Memory DELETE the
       // server refuses leaves that row in place, so stop here rather than
       // delete a Soul whose PUT the surviving row would refuse.
-      // Archived Memories whose DELETE removed them, plus any whose outcome is
-      // unknown; they are written back if a later DELETE fails.
+      // Archived Memories whose DELETE succeeded or whose outcome is unknown:
+      // if a later DELETE fails, attempt their write-back, verify each successful
+      // PUT, and report any PUT or verification failure by id.
       const memoriesToRestore: any[] = [];
       for (const row of memories) {
         const { status, redirected } = await adminWrite("DELETE", `/Memory/${encodeRecordId(row.id)}`);
@@ -333,9 +334,8 @@ addAdminPassOptions(
       }
       if (failures.length > 0) {
         console.error("Error: a Memory DELETE failed; no Soul row was deleted.");
-        // A later refusal must not strand a row this run already deleted: put
-        // every such archived Memory back and verify it. Soul rows are never
-        // touched here.
+        // Attempt the archived Memory write-backs, verify each successful PUT,
+        // and report any PUT or verification failure by id.
         for (const row of memoriesToRestore) {
           const { status, redirected } = await adminWrite("PUT", `/Memory/${encodeRecordId(row.id)}`, row);
           if (redirected || status === undefined || status < 200 || status >= 300) {
