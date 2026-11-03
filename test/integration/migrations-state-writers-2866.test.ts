@@ -165,6 +165,22 @@ function readStateAt(path: string): Record<string, any> {
   return JSON.parse(readFileSync(path, "utf-8"));
 }
 
+function expectContenderRefusal(id: string, lockHolderPid: number, mutexHolderPids: number[]): void {
+  const reason = readFileSync(join(pauseDir, `lock-failed.${id}`), "utf-8");
+  const lock = /^held by pid ([1-9]\d*) on (.+) since (.+) \(lock (.+)\)$/.exec(reason);
+  const mutex = /^the migration-lock mutex is held by pid ([1-9]\d*) on (.+) since (.+) \((.+)\)$/.exec(reason);
+  expect([lock, mutex].filter((match) => match !== null), reason).toHaveLength(1);
+  if (lock !== null) {
+    expect(Number(lock[1])).toBe(lockHolderPid);
+    expect(lock[2]).toBe(hostname());
+    expect(lock[4]).toBe(lockPath());
+  } else if (mutex !== null) {
+    expect(mutexHolderPids).toContain(Number(mutex[1]));
+    expect(mutex[2]).toBe(hostname());
+    expect(mutex[4]).toBe(guardPath());
+  }
+}
+
 function installSuccessor(): { bytes: string; holder: Record<string, unknown> } {
   const holder = { pid: 424242, hostname: "host-b", startedAt: "2026-01-01T00:00:00.000Z" };
   const bytes = JSON.stringify(holder);
@@ -439,12 +455,19 @@ describe("three-contender reclaim (flair#2866)", () => {
     expect(JSON.parse(readFileSync(lockPath(), "utf-8")).pid).toBe(a.pid);
 
     // The successful successor stays open; the others retry and are refused.
+    arm(GUARD_PUBLISHED_PAUSE);
     const b2 = spawnWriter("mig-b2");
     const c2 = spawnWriter("mig-c2");
+    await waitFor(paused(GUARD_PUBLISHED_PAUSE), "a retry contender's mutex publication pause");
+    await Promise.race([
+      waitFor(join(pauseDir, "lock-failed.mig-b2"), "B2's refusal"),
+      waitFor(join(pauseDir, "lock-failed.mig-c2"), "C2's refusal"),
+    ]);
+    setGo(GUARD_PUBLISHED_PAUSE);
     expect(await waitExit(b2, "B2")).toBe(3);
     expect(await waitExit(c2, "C2")).toBe(3);
-    expect(readFileSync(join(pauseDir, "lock-failed.mig-b2"), "utf-8")).toContain(`held by pid ${a.pid}`);
-    expect(readFileSync(join(pauseDir, "lock-failed.mig-c2"), "utf-8")).toContain(`held by pid ${a.pid}`);
+    expectContenderRefusal("mig-b2", a.pid, [c2.pid]);
+    expectContenderRefusal("mig-c2", a.pid, [b2.pid]);
 
     setGo("release-a");
     expect(await waitExit(a, "A")).toBe(0);

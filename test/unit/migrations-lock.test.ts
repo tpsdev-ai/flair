@@ -244,6 +244,27 @@ describe("defaultIsProcessAlive — probe classification (flair#2866)", () => {
 });
 
 describe("acquireMigrationLock — touch()", () => {
+  it("touch() leaves a successor installed before the heartbeat unchanged", () => {
+    const first = acquireMigrationLock({ lockPath });
+    expect(first.acquired).toBe(true);
+    if (!first.acquired) return;
+
+    const replacement = { pid: 424242, hostname: "host-b", startedAt: "2026-01-01T00:00:00.000Z" };
+    const bytes = JSON.stringify(replacement);
+    const temp = join(testRoot, ".migrations", `.replacement.${process.pid}.tmp`);
+    writeFileSync(temp, bytes);
+    renameSync(temp, lockPath);
+    const past = new Date(Date.now() - 10_000);
+    utimesSync(lockPath, past, past);
+    const mtime = statSync(lockPath).mtimeMs;
+
+    first.touch();
+
+    expect(readFileSync(lockPath, "utf-8")).toBe(bytes);
+    expect(statSync(lockPath).mtimeMs).toBe(mtime);
+    first.release();
+  });
+
   it("touch() updates the lock file's mtime (heartbeat, keeps a live holder from looking stale)", async () => {
     const result = acquireMigrationLock({ lockPath });
     expect(result.acquired).toBe(true);
