@@ -1125,8 +1125,12 @@ export function resolveKeyPath(agentId: string): string | null {
   return candidates.find((p) => existsSync(p)) ?? null;
 }
 
-/** Build a TPS-Ed25519 auth header from a raw 32-byte seed on disk. */
-export function buildEd25519Auth(agentId: string, method: string, path: string, keyPath: string): string {
+/**
+ * Load a signing key from disk: read the file, decode it (raw 32-byte seed,
+ * base64 seed, full PKCS8 DER or PEM), and require an Ed25519 key. A throw here
+ * is a failure of THIS key file; nothing has been sent for it.
+ */
+function loadEd25519SigningKey(keyPath: string): ReturnType<typeof createPrivateKey> {
   const raw = readFileSync(keyPath);
   const pkcs8Header = Buffer.from("302e020100300506032b657004220420", "hex");
   let privKey: ReturnType<typeof createPrivateKey>;
@@ -1148,11 +1152,29 @@ export function buildEd25519Auth(agentId: string, method: string, path: string, 
       }
     }
   }
+  if (privKey.asymmetricKeyType !== "ed25519") {
+    throw new Error(`signing key ${keyPath} is not an Ed25519 private key`);
+  }
+  return privKey;
+}
+
+/** Build a TPS-Ed25519 auth header from an already-loaded Ed25519 key. */
+function buildEd25519AuthFromKey(
+  agentId: string,
+  method: string,
+  path: string,
+  privKey: ReturnType<typeof createPrivateKey>,
+): string {
   const ts = Date.now().toString();
   const nonce = randomUUID();
   const payload = `${agentId}:${ts}:${nonce}:${method}:${path}`;
   const sig = nodeCryptoSign(null, Buffer.from(payload), privKey).toString("base64");
   return `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${sig}`;
+}
+
+/** Build a TPS-Ed25519 auth header from a raw 32-byte seed on disk. */
+export function buildEd25519Auth(agentId: string, method: string, path: string, keyPath: string): string {
+  return buildEd25519AuthFromKey(agentId, method, path, loadEd25519SigningKey(keyPath));
 }
 
 /** Join a Flair route to an optional base path before signing or sending it. */
@@ -1552,10 +1574,10 @@ function isEd25519CredentialRejection(err: unknown): boolean {
  * GET-only fallback to any method/body): tries candidate key files in
  * `keysDir` in sorted (deterministic) filename order until one authenticates
  * or an answer is final. Returns `undefined` when there are no candidate key
- * files, or when no candidate authenticated: every attempt was skipped for an
- * unloadable key file, credential-rejected, or a connect failure; a final
- * answer throws. That lets the caller rethrow its ORIGINAL no-credentials
- * error rather than a floor-specific one.
+ * files, or when no candidate authenticated: every attempt was skipped for a
+ * key file that cannot be read or decoded as an Ed25519 key, credential-rejected,
+ * or a connect failure; a final answer throws. That lets the caller rethrow its
+ * ORIGINAL no-credentials error rather than a floor-specific one.
  *
  * Every attempt refuses redirects (flair#2955), whatever the caller asked
  * for: the location a 3xx names receives no request, and the 3xx is thrown as
@@ -1564,13 +1586,14 @@ function isEd25519CredentialRejection(err: unknown): boolean {
  * The floor moves to the next key ONLY when the server refused the Ed25519
  * credential itself (the 401 codes in `CREDENTIAL_REJECTION_CODES`), when an
  * attempt that does not follow redirects fails in the connect phase (the
- * existing network-blip case), or when that candidate's key file cannot be
- * loaded (nothing was sent for it). Every other response is final: a successful
- * response returns; a failed HTTP response whose body was read is thrown as
- * itself with its status and the error code its body names; a refused redirect
- * is thrown as itself with its status before any body is read. When every
- * candidate is refused as a credential, the floor returns `undefined`, so the
- * caller rethrows its original no-credentials hint, which carries the
+ * existing network-blip case), or when that candidate's key file cannot be read
+ * or decoded as an Ed25519 key (nothing was sent for it). Failures after a key
+ * is loaded (nonce, signing) are final. Every other response is final too: a
+ * successful response returns; a failed HTTP response whose body was read is
+ * thrown as itself with its status and the error code its body names; a refused
+ * redirect is thrown as itself with its status before any body is read. When
+ * every candidate is refused as a credential, the floor returns `undefined`, so
+ * the caller rethrows its original no-credentials hint, which carries the
  * operator's remedy.
  */
 export async function tryAgentKeyFloor(
@@ -1598,15 +1621,18 @@ export async function tryAgentKeyFloor(
   for (const kf of keyFiles) {
     const agentId = kf.replace(/\.key$/, "");
     const keyPath = join(keysDir, kf);
-    let authHeader: string;
+    let privKey: ReturnType<typeof createPrivateKey>;
     try {
-      authHeader = buildEd25519Auth(agentId, method, target, keyPath);
+      privKey = loadEd25519SigningKey(keyPath);
     } catch {
-      // This candidate's key file could not be loaded. Nothing was sent for
-      // it, and every other candidate is exactly as usable as it was before
-      // this file was read, so skip this one.
+      // This candidate's key file could not be loaded as an Ed25519 key.
+      // Nothing was sent for it, and every other candidate is exactly as
+      // usable as it was before this file was read, so skip this one.
       continue;
     }
+    // The key loaded: a failure from here (nonce, signing) is not about this
+    // key file and is thrown as itself, with no later key sent.
+    const authHeader = buildEd25519AuthFromKey(agentId, method, target, privKey);
     try {
       return await sendJsonRequest(url, method, body, authHeader, isLocal, { ...transport, refuseRedirects: true });
     } catch (err: unknown) {

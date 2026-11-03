@@ -4,8 +4,10 @@
  * Tier 5 of src/lib/auth-resolve.ts (`tryAgentKeyFloor`) must move to the next
  * candidate key file ONLY when the server refused the ED25519 CREDENTIAL itself
  * (the 401 codes the Ed25519 authentication middleware in
- * resources/auth-middleware.ts returns), or when an attempt that does not
- * follow redirects fails in the connect phase. Every other response — 500, 409,
+ * resources/auth-middleware.ts returns), when an attempt that does not follow
+ * redirects fails in the connect phase, or when that candidate's key file cannot
+ * be read or decoded as an Ed25519 key. A failure after a key is loaded (nonce,
+ * signing) is final. Every other response — 500, 409,
  * a policy 403, a refused redirect, a 404 on a GET — is FINAL and rethrows as
  * itself: a failed HTTP response whose body was read carries its status and
  * the error code its body names, and a refused redirect carries its status. The
@@ -19,6 +21,7 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { generateKeyPairSync } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
@@ -44,6 +47,15 @@ function writeCorruptKey(keysDir: string, fileName: string): void {
   mkdirSync(keysDir, { recursive: true });
   const path = join(keysDir, fileName);
   writeFileSync(path, Buffer.from("not a private key ".repeat(4)));
+  chmodSync(path, 0o600);
+}
+
+/** A valid private key file of the wrong type: a PKCS8 RSA key. */
+function writeWrongTypeKey(keysDir: string, fileName: string): void {
+  mkdirSync(keysDir, { recursive: true });
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const path = join(keysDir, fileName);
+  writeFileSync(path, privateKey.export({ format: "pem", type: "pkcs8" }));
   chmodSync(path, 0o600);
 }
 
@@ -123,7 +135,7 @@ function errorCodeOf(err: unknown): string | undefined {
 
 const ENV_KEYS = ["FLAIR_TOKEN", "FLAIR_ADMIN_PASS", "HDB_ADMIN_PASSWORD", "FLAIR_KEY_DIR"] as const;
 
-describe("flair#2955 — the agent-key floor moves on only for credential refusals and connect failures", () => {
+describe("flair#2955 — the agent-key floor moves on only for credential refusals, connect failures, and key files that are not Ed25519", () => {
   let keysDir: string;
   let homeDir: string;
   let savedEnv: Record<string, string | undefined>;
@@ -263,6 +275,28 @@ describe("flair#2955 — the agent-key floor moves on only for credential refusa
     }
   });
 
+  test("a valid key file of the wrong type (RSA) is skipped before anything is sent, and the next Ed25519 key signs once", async () => {
+    const wrongTypeFirst = makeTmpDir("flair-2955-wrong-type-first");
+    try {
+      writeWrongTypeKey(wrongTypeFirst, "a-wrong-type.key");
+      writeAgentKey(wrongTypeFirst, "agent-second");
+      const server = await startFloorServer(() => ({ status: 200, body: { ok: true, via: "second" } }));
+      try {
+        const result = await authedRequest("POST", "/Memory", { agentId: "agent-second", content: "hello" }, {
+          baseUrl: server.url,
+          keysDir: wrongTypeFirst,
+        });
+        expect(result).toEqual({ ok: true, via: "second" });
+        expect(signedRequests(server).map((r) => agentOf(r.authorization))).toEqual(["agent-second"]);
+        expect(server.requests).toHaveLength(2); // the anonymous probe + one signed attempt
+      } finally {
+        await server.close();
+      }
+    } finally {
+      rmSync(wrongTypeFirst, { recursive: true, force: true });
+    }
+  });
+
   test("only a corrupt key file: the caller's no-credentials hint, no signed request, no raw OpenSSL text", async () => {
     const onlyCorrupt = makeTmpDir("flair-2955-corrupt-only");
     try {
@@ -363,12 +397,17 @@ describe("flair#2955 — the agent-key floor moves on only for credential refusa
   }
 
   // Answers about the request or the server, not about the credential: these
-  // stay final even though they are 401s.
-  const FINAL_401_CODES = ["nonce_replay_detected", "authentication required", "replay_store_unavailable"] as const;
+  // stay final whatever their status. `replay_store_unavailable` is a 503 from
+  // resources/replay-store.ts, forwarded by the middleware, not a 401.
+  const FINAL_CODES = [
+    { code: "nonce_replay_detected", status: 401 },
+    { code: "authentication required", status: 401 },
+    { code: "replay_store_unavailable", status: 503 },
+  ] as const;
 
-  for (const code of FINAL_401_CODES) {
-    test(`a 401 ${code} is final — exactly one signed request`, async () => {
-      const server = await startFloorServer(() => ({ status: 401, body: { error: code } }));
+  for (const { code, status } of FINAL_CODES) {
+    test(`a ${status} ${code} is final — exactly one signed request`, async () => {
+      const server = await startFloorServer(() => ({ status, body: { error: code } }));
       try {
         let caught: unknown;
         try {
@@ -379,7 +418,7 @@ describe("flair#2955 — the agent-key floor moves on only for credential refusa
         expect(signedRequests(server).map((r) => agentOf(r.authorization))).toEqual(["agent-first"]);
         expect(caught).toBeInstanceOf(ApiHttpError);
         const httpError = caught as ApiHttpError;
-        expect(httpError.status).toBe(401);
+        expect(httpError.status).toBe(status);
         expect(httpError.noCredentials).toBe(false);
         expect(errorCodeOf(httpError)).toBe(code);
       } finally {
@@ -481,6 +520,9 @@ describe("flair#2955 — the client's credential-rejection set tracks the middle
     // The exclusion is documented on CREDENTIAL_REJECTION_CODES: a reused nonce
     // is an answer about the request, not about the credential.
     expect(middleware.has("nonce_replay_detected")).toBe(true);
+    // This reader collects 401 literals only. `replay_store_unavailable` is a
+    // 503 forwarded from the replay store, so it is correctly outside the set.
+    expect(middleware.has("replay_store_unavailable")).toBe(false);
     const expected = new Set([...middleware].filter((code) => code !== "nonce_replay_detected"));
     expect([...CREDENTIAL_REJECTION_CODES].sort()).toEqual([...expected].sort());
   });
