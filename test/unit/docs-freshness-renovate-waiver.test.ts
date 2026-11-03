@@ -20,26 +20,32 @@ function fakeCli(n: number): string {
   return `export const program = { commands: [${cmds}] };\n`;
 }
 
-const IDENTITY_ENV = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] as const;
+const AMBIENT_GIT_ENV = [
+  "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+  "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR",
+] as const;
 
-/** process.env without inherited commit identities, so the fixture repo's own config decides `%an`. */
 function fixtureGitEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const k of IDENTITY_ENV) delete env[k];
+  for (const k of AMBIENT_GIT_ENV) delete env[k];
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_CONFIG_GLOBAL = "/dev/null";
+  env.GIT_TERMINAL_PROMPT = "0";
   return env;
 }
 
 function git(dir: string, ...args: string[]): void {
-  execFileSync("git", args, { cwd: dir, env: fixtureGitEnv(), stdio: ["ignore", "pipe", "pipe"] });
+  execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: dir, env: fixtureGitEnv(), stdio: ["ignore", "pipe", "pipe"] });
 }
 
 function gitOut(dir: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd: dir, env: fixtureGitEnv(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: dir, env: fixtureGitEnv(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
 /** Commit with an explicit author and committer, set through the environment so nothing inherited overrides them. */
 function commitAs(dir: string, name: string, email: string, message: string): void {
-  execFileSync("git", ["commit", "-qm", message], {
+  execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-qm", message], {
     cwd: dir,
     env: { ...fixtureGitEnv(), GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email },
     stdio: ["ignore", "pipe", "pipe"],
@@ -96,14 +102,14 @@ function makeRepo(): string {
   git(dir, "commit", "-qm", "chore: fixture");
   git(dir, "tag", "v0.1.0");
 
-  execFileSync("git", ["init", "--bare", "-q"], { cwd: origin });
+  execFileSync("git", ["init", "--bare", "-q"], { cwd: origin, env: fixtureGitEnv() });
   git(dir, "remote", "add", "origin", origin);
   git(dir, "push", "-q", "origin", "HEAD:refs/heads/main");
   git(dir, "fetch", "-q", "origin");
   return dir;
 }
 
-function runGate(dir: string, author?: string, gitEnv: NodeJS.ProcessEnv = process.env): { status: number | null; out: string } {
+function runGate(dir: string, author?: string, gitEnv: NodeJS.ProcessEnv = fixtureGitEnv()): { status: number | null; out: string } {
   const env: NodeJS.ProcessEnv = { ...gitEnv, GITHUB_ACTIONS: "", GITHUB_BASE_REF: "main" };
   delete env.FLAIR_PR_AUTHOR_LOGIN;
   if (author !== undefined) env.FLAIR_PR_AUTHOR_LOGIN = author;
@@ -111,7 +117,7 @@ function runGate(dir: string, author?: string, gitEnv: NodeJS.ProcessEnv = proce
   return { status: r.status, out: `${r.stdout}${r.stderr}` };
 }
 
-function runPromotion(dir: string, extraArgs: string[] = [], env: NodeJS.ProcessEnv = process.env) {
+function runPromotion(dir: string, extraArgs: string[] = [], env: NodeJS.ProcessEnv = fixtureGitEnv()) {
   const r = spawnSync("bash", [join(dir, "scripts", "release-promote-changelog.sh"), "0.2.0", ...extraArgs], {
     cwd: dir, encoding: "utf8", env,
   });
@@ -121,11 +127,12 @@ function runPromotion(dir: string, extraArgs: string[] = [], env: NodeJS.Process
 function failingGitEnv(dir: string, command: string): NodeJS.ProcessEnv {
   const bin = join(dir, "fake-bin");
   mkdirSync(bin);
-  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8", env: fixtureGitEnv() }).trim();
   const shim = join(bin, "git");
   writeFileSync(shim, `#!/bin/sh\nif [ "$1" = "${command}" ]; then echo forced-${command}-failure >&2; exit 1; fi\nexec "${realGit}" "$@"\n`);
   chmodSync(shim, 0o755);
-  return { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+  const env = fixtureGitEnv();
+  return { ...env, PATH: `${bin}:${env.PATH}` };
 }
 
 function addDependencyOnlyCommit(dir: string, opts: { author?: "renovate"; type?: "chore" | "fix" } = {}): void {
@@ -165,7 +172,7 @@ describe("Git basename classification", () => {
     const url = pathToFileURL(join(REPO_ROOT, "scripts", "dependency-change.mjs")).href;
     const result = execFileSync(process.execPath, ["--input-type=module", "-e",
       `import { isDependencyOnlyChange } from ${JSON.stringify(url)}; console.log(isDependencyOnlyChange(${JSON.stringify(paths)}));`,
-    ], { encoding: "utf8" });
+    ], { encoding: "utf8", env: fixtureGitEnv() });
     expect(result.trim()).toBe(String(accepted));
   });
 });
@@ -441,7 +448,7 @@ describe("release-time history", () => {
     const notes = execFileSync(
       process.execPath,
       [join(dir, "scripts", "changelog-release-notes.mjs"), "0.2.0", "CHANGELOG.md"],
-      { cwd: dir, encoding: "utf8" },
+      { cwd: dir, encoding: "utf8", env: fixtureGitEnv() },
     );
     expect(notes).toContain("Human fix for the widget");
     expect(notes).toContain("update dependency left-pad to v1.3.0");
@@ -465,7 +472,7 @@ describe("release-time history", () => {
     expect(result.out).toContain("promoted 0 fragment entr(ies)");
     const changelog = readFileSync(join(dir, "CHANGELOG.md"), "utf8");
     expect(changelog).toContain("### Dependencies\n\n- fix(deps): update dependency left-pad to v1.3.0 (#42)");
-    const rendered = execFileSync(process.execPath, [join(dir, "scripts", "changelog-release-notes.mjs"), "0.2.0", "CHANGELOG.md"], { cwd: dir, encoding: "utf8" });
+    const rendered = execFileSync(process.execPath, [join(dir, "scripts", "changelog-release-notes.mjs"), "0.2.0", "CHANGELOG.md"], { cwd: dir, encoding: "utf8", env: fixtureGitEnv() });
     expect(rendered).toContain("update dependency left-pad to v1.3.0");
   });
 
@@ -523,7 +530,7 @@ describe("release wiring", () => {
       `RELEASE_TAG_ARGS=(${tagArgs.join(" ")})`,
       `${invocation} exit 97; }`,
     ].join("\n"));
-    const result = spawnSync("/bin/bash", [join(dir, "invoke.sh"), dir], { encoding: "utf8" });
+    const result = spawnSync("/bin/bash", [join(dir, "invoke.sh"), dir], { encoding: "utf8", env: fixtureGitEnv() });
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
     expect(result.stdout.trim().split("\n")).toEqual(["0.2.0", ...tagArgs]);
@@ -537,7 +544,7 @@ describe("release wiring", () => {
     writeFixtureFile(dir, "CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n");
     writeFixtureFile(dir, ".changelog/unreleased/fixed-fixture.md", "- **Fixture fix.**\n");
     const result = spawnSync(process.execPath, [join(dir, "scripts", "changelog-fragments.mjs"),
-      "promote", "0.2.0", "--allow-no-release-tag"], { cwd: dir, encoding: "utf8" });
+      "promote", "0.2.0", "--allow-no-release-tag"], { cwd: dir, encoding: "utf8", env: fixtureGitEnv() });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("promote: --allow-no-release-tag requires --with-dependencies");
   });
