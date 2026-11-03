@@ -3420,6 +3420,12 @@ export class Memory extends (databases as any).flair.Memory {
       // successful Response is replaced by the write_response_withheld
       // refusal (writeResultResponse).
       if (reindexed instanceof Response) return writeResultResponse(reindexed);
+      // embedding-space-guard slice 1 (see put()): the owned transaction has
+      // returned, so notify the guard of the ATTEMPTED stamp now, before the
+      // verification read; the read-back determines whether that stamp remains
+      // stored. A refused or unknown verification still leaves the guard told
+      // about the attempt.
+      noteWriteStamp(reindexRow?.embeddingModel as string | null | undefined, reindexExisting);
       // flair#2478 slice 3c + flair#2656: read the committed row back after the
       // commit. A row that does not show the re-PUT answers 409
       // stored_row_changed; a failed read marks the id and answers 503
@@ -3437,7 +3443,6 @@ export class Memory extends (databases as any).flair.Memory {
       if (committedVerdict === "unreadable") return writeOutcomeUnknownFor(reindexRow.id);
       if (committedVerdict !== "shown") return storedRowChangedRefusal("Memory");
       noteMemoryUpsert(content);
-      noteWriteStamp(reindexRow?.embeddingModel as string | null | undefined, reindexExisting); // embedding-space-guard slice 1 (see post())
       return rowWriteResponse(reindexed, reindexRow?.id, 0);
     }
     // flair#2441 + flair#2478 slice 1: a test-only pause of this PUT before its

@@ -156,9 +156,9 @@ export class Soul extends (databases as any).flair.Soul {
           content.updatedAt = new Date().toISOString();
           this.validate?.(content, true);
           merged = { ...existing, ...content, id: rowId };
-          // The patch body decides the scope-field refusal, never the stored
-          // fields the merge carries.
-          const learnedDenied = await refuseSoulWriteContent(merged, content);
+          // The merged row decides: a patch that would leave or add a non-empty
+          // scopeTag or a non-empty tags array is refused.
+          const learnedDenied = await refuseSoulWriteContent(merged);
           if (learnedDenied) return learnedDenied;
           const skillSourceDenied = refuseSkillAssignmentWrite(content, existing);
           if (skillSourceDenied) return skillSourceDenied;

@@ -7,16 +7,16 @@
  * This test exercises two CLI writers, each replaying a stored row whole:
  *
  *   - `flair restore` over a real backup archive whose Soul rows were edited to
- *     carry the fields: the scoped row is reported with its id and the
- *     refusal's name, the `adk:`-tagged row with its id and HTTP status alone,
- *     the rest of the archive still restores, and restore exits non-zero.
+ *     carry the fields: each scoped row is reported with its id and the
+ *     refusal's name, the rest of the archive still restores, and restore
+ *     exits non-zero.
  *   - `flair import` over a real agent-export file carrying the same row: the
  *     refused row is named with its id and the refusal's name, the ordinary
  *     Soul row still lands, and import exits zero.
  *
- * The same instance also takes operator POST and PATCH writes carrying those
- * fields, so the refusal is exercised through Harper's own routing rather than
- * a mock.
+ * The same instance also takes operator POST and PATCH writes, including a
+ * PATCH of a seeded stored row that carries those fields, so the refusal is
+ * exercised through Harper's own routing rather than a mock.
  *
  * Real files: the archive and export are real temporary files, and the CLI runs
  * under a separate throwaway HOME.
@@ -46,7 +46,6 @@ const REFUSAL = "soul_scope_fields_not_writable";
 
 let harper: HarperInstance;
 let running: HarperInstance | undefined;
-let passFile: string;
 
 interface RunResult { code: number | null; stdout: string; stderr: string }
 
@@ -127,16 +126,26 @@ async function versionCount(subjectId: string): Promise<number> {
 const soulRow = async (id: string): Promise<any> =>
   (await op({ operation: "search_by_id", database: "flair", table: "Soul", ids: [id], get_attributes: ["*"] }))[0];
 
-/** A real `flair backup` of `AGENT`; returns the archive path. */
-async function backup(home: string, name: string): Promise<string> {
+/** A real `flair backup` of `agent`; returns the archive path. */
+async function backup(home: string, name: string, agent = AGENT): Promise<string> {
   const output = join(tempDir("flair-1540-real-archive-"), name);
+  const passFile = join(tempDir("flair-1540-real-secrets-"), "admin-pass");
+  writeFileSync(passFile, `${harper.admin.password}\n`, { mode: 0o600 });
   const result = await runCli([
     "backup", "--url", harper.httpURL, "--ops-target", harper.opsURL, "--admin-pass-file", passFile,
-    "--agents", AGENT, "--output", output,
+    "--agents", agent, "--output", output,
   ], home);
   expect(result.code, `${result.stdout}${result.stderr}`).toBe(0);
   expect(existsSync(`${output}.sha256`)).toBe(true);
   return output;
+}
+
+/** Seed an Agent row so `flair backup --agents` has an agent to archive. */
+async function seedAgent(agent: string): Promise<void> {
+  await op({
+    operation: "upsert", database: "flair", table: "Agent",
+    records: [{ id: agent, name: agent, role: "agent", publicKey: Buffer.from(nacl.sign.keyPair().publicKey).toString("base64"), createdAt: CREATED_AT }],
+  });
 }
 
 /** Rewrite an archive and publish the digest sidecar its new bytes hash to. */
@@ -154,9 +163,6 @@ beforeAll(async () => {
   harper = await startHarper();
   running = harper;
   assertOwnInstance(harper);
-  const secrets = tempDir("flair-1540-real-secrets-");
-  passFile = join(secrets, "admin-pass");
-  writeFileSync(passFile, `${harper.admin.password}\n`, { mode: 0o600 });
 
   await op({
     operation: "upsert", database: "flair", table: "Agent",
@@ -172,7 +178,7 @@ afterAll(async () => {
 }, HARPER_STOP_BUDGET_MS);
 
 describe("flair restore refuses an archived Soul row that carries scope fields (flair#1540)", () => {
-  test("the row is refused by name and out of the restore; an adk-tagged row gets today's handling; the rest of the archive restores", async () => {
+  test("the row is refused by name and out of the restore; an adk-tagged row is refused the same way; the rest of the archive restores", async () => {
     const home = tempDir("flair-1540-real-home-");
     const archive = await backup(home, "scoped-soul.json");
     const parsed = JSON.parse(readFileSync(archive, "utf8"));
@@ -196,7 +202,7 @@ describe("flair restore refuses an archived Soul row that carries scope fields (
     expect(restored.stdout).not.toContain("Restore complete");
     expect(restored.stderr.trimEnd().split("\n").sort()).toEqual([
       `Error: Soul ${SCOPE_SOUL_ID} (agent ${AGENT}): PUT failed (HTTP 403): ${REFUSAL}`,
-      `Error: Soul ${ADK_SOUL_ID} (agent ${AGENT}): PUT failed (HTTP 403)`,
+      `Error: Soul ${ADK_SOUL_ID} (agent ${AGENT}): PUT failed (HTTP 403): ${REFUSAL}`,
       `Error: Soul ${SCOPE_SOUL_ID} (agent ${AGENT}): GET failed (HTTP 404): verification failed`,
       `Error: Soul ${ADK_SOUL_ID} (agent ${AGENT}): GET failed (HTTP 404): verification failed`,
     ].sort());
@@ -205,6 +211,89 @@ describe("flair restore refuses an archived Soul row that carries scope fields (
     expect(await soulRow(SOUL_ID)).toMatchObject({ agentId: AGENT, key: "identity", value: "The row the archive brings back" });
     expect(await soulRow(SCOPE_SOUL_ID)).toBeUndefined();
     expect(await soulRow(ADK_SOUL_ID)).toBeUndefined();
+  }, 300_000);
+});
+
+describe("flair restore --replace stops before any delete when a Soul replay would be refused (flair#2931)", () => {
+  test("case (1): a scoped archived row over a live plain row leaves every live row unchanged", async () => {
+    const home = tempDir("flair-2931-replace-home-");
+    const agent = "replace-scope-agent";
+    const id = `${agent}:scoped`;
+    await seedAgent(agent);
+    expect(await operatorPut(`/Soul/${encodeURIComponent(id)}`, {
+      id, agentId: agent, key: "scoped", value: "live plain content", durability: "permanent", createdAt: CREATED_AT,
+    })).toBeLessThan(300);
+    const archive = await backup(home, "replace-scoped.json", agent);
+    const parsed = JSON.parse(readFileSync(archive, "utf8"));
+    expect(parsed.souls.map((s: any) => s.id)).toContain(id);
+    republish(archive, {
+      ...parsed,
+      souls: parsed.souls.map((s: any) => s.id === id ? { ...s, scopeTag: "team:alpha" } : s),
+    });
+
+    const before = await soulRow(id);
+    expect(before).toMatchObject({ agentId: agent, value: "live plain content" });
+    const restored = await runCli(["restore", archive, "--replace", "--url", harper.httpURL], home, { FLAIR_ADMIN_PASS: harper.admin.password });
+
+    expect(await soulRow(id)).toEqual(before);
+    expect(restored.code).toBe(1);
+    expect(restored.stdout).not.toContain("Deleting existing data");
+    expect(restored.stderr).toContain(`Soul ${id}`);
+  }, 300_000);
+
+  test("case (2): a tagged live row archived unedited by a real backup is not deleted", async () => {
+    const home = tempDir("flair-2931-replace-home-");
+    const agent = "replace-tagged-agent";
+    const id = `${agent}:identity`;
+    await seedAgent(agent);
+    await op({
+      operation: "upsert", database: "flair", table: "Soul",
+      records: [{
+        id, agentId: agent, key: "identity", value: "live tagged content", durability: "permanent",
+        createdAt: CREATED_AT, tags: ["team-alpha"],
+      }],
+    });
+    const archive = await backup(home, "replace-tagged.json", agent);
+    const parsed = JSON.parse(readFileSync(archive, "utf8"));
+    expect(parsed.souls.find((s: any) => s.id === id)?.tags).toEqual(["team-alpha"]);
+
+    const before = await soulRow(id);
+    expect(before).toMatchObject({ agentId: agent, tags: ["team-alpha"] });
+    const restored = await runCli(["restore", archive, "--replace", "--url", harper.httpURL], home, { FLAIR_ADMIN_PASS: harper.admin.password });
+
+    expect(await soulRow(id)).toEqual(before);
+    expect(restored.code).toBe(1);
+    expect(restored.stdout).not.toContain("Deleting existing data");
+    expect(restored.stderr).toContain(`Soul ${id}`);
+  }, 300_000);
+
+  test("a replace replay with no refused Soul row still deletes and rewrites it as before", async () => {
+    const home = tempDir("flair-2931-replace-home-");
+    const agent = "replace-clean-agent";
+    const id = `${agent}:identity`;
+    await seedAgent(agent);
+    expect(await operatorPut(`/Soul/${encodeURIComponent(id)}`, {
+      id, agentId: agent, key: "identity", value: "archived content", durability: "permanent", createdAt: CREATED_AT,
+    })).toBeLessThan(300);
+    const archive = await backup(home, "replace-clean.json", agent);
+    await op({ operation: "upsert", database: "flair", table: "Soul", records: [{ id, value: "changed after the backup" }] });
+    const beforeCreatedAt = (await soulRow(id)).createdAt;
+
+    const restored = await runCli(["restore", archive, "--replace", "--url", harper.httpURL], home, { FLAIR_ADMIN_PASS: harper.admin.password });
+
+    // The replace path ran: the archived rows were deleted and written back.
+    // A re-created Soul row's GET verification reports the pre-existing
+    // `createdAt` mismatch (out of scope for flair#2931), so this test asserts
+    // the replayed row, not the exit code.
+    expect(restored.stdout).toContain("Deleting existing data");
+    expect(restored.stderr).not.toContain("scope-field");
+    const after = await soulRow(id);
+    expect(after).toMatchObject({ agentId: agent, value: "archived content" });
+    // The DELETE is observable: with the archived row gone, the PUT runs
+    // Harper's create path, which stamps `createdAt` to the write time. A PUT
+    // over the live row keeps its stored `createdAt`.
+    expect(after.createdAt).not.toBe(beforeCreatedAt);
+    expect(Date.parse(after.createdAt)).toBeGreaterThan(Date.parse(beforeCreatedAt));
   }, 300_000);
 });
 
@@ -238,6 +327,43 @@ describe("flair import refuses an exported Soul row that carries scope fields (f
     expect(await soulRow(plainId)).toMatchObject({ agentId: IMPORT_AGENT, value: "The row the export brings back" });
     expect(await soulRow(scopedId)).toBeUndefined();
   }, 300_000);
+});
+
+describe("operator PATCH of a stored scoped row on the real instance (flair#1540)", () => {
+  // Seeded through the admin OPS upsert, the way the restore test above seeds
+  // its target row, so the row carries the fields without a policy-checked write.
+  async function seed(key: string, scope: Record<string, unknown>): Promise<string> {
+    const id = `${AGENT}:${key}`;
+    await op({
+      operation: "upsert", database: "flair", table: "Soul",
+      records: [{ id, agentId: AGENT, key, value: "stored", durability: "permanent", createdAt: CREATED_AT, ...scope }],
+    });
+    return id;
+  }
+
+  for (const [label, key, scope] of [
+    ["an adk tags entry", "legacy-adk-tags", { tags: ["adk:app:alice"] }],
+    ["a non-adk tags entry", "legacy-plain-tags", { tags: ["team-alpha"] }],
+    ["an adk scopeTag", "legacy-adk-scope", { scopeTag: "adk:app:alice" }],
+  ] as const) {
+    test(`a PATCH of a stored row carrying ${label} is 403 and leaves the row and its version count unchanged`, async () => {
+      const id = await seed(key, scope);
+      const before = await soulRow(id);
+      const versionsBefore = await versionCount(id);
+      const res = await operatorSend("PATCH", `/Soul/${encodeURIComponent(id)}`, { value: "after" });
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: REFUSAL });
+      expect(await soulRow(id)).toEqual(before);
+      expect(await versionCount(id)).toBe(versionsBefore);
+    }, 120_000);
+  }
+
+  test("a PATCH of an ordinary untagged stored row still lands", async () => {
+    const id = await seed("legacy-plain", {});
+    const res = await operatorSend("PATCH", `/Soul/${encodeURIComponent(id)}`, { value: "after" });
+    expect(res.status).toBeLessThan(300);
+    expect((await soulRow(id)).value).toBe("after");
+  }, 120_000);
 });
 
 describe("operator POST and PATCH on the real instance (flair#1540)", () => {

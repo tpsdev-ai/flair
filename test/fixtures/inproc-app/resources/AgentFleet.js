@@ -9,7 +9,7 @@
  *
  * Copy the three helpers at the top — `flair()`, `registerAgent()`,
  * `remember()`/`recall()` — into your own component and you have the whole
- * integration. `test/integration/in-process-agents.test.ts` drives this file
+ * integration. `test/integration-heavy/in-process-agents.test.ts` drives this file
  * and asserts the properties that make it safe: registration lands a complete
  * Principal record, every call is attributed to ONE agent, an agent cannot
  * write as another, and an agent cannot read another's private memories.

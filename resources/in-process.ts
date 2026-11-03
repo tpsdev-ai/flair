@@ -75,7 +75,7 @@
  *
  * These guards are runtime, not types, on purpose: an embedding application may
  * be plain JavaScript, where a `string` parameter annotation buys exactly
- * nothing. test/integration/in-process-agents.test.ts pins both the guards and
+ * nothing. test/integration-heavy/in-process-agents.test.ts pins both the guards and
  * the hazard they exist for, against a real Harper.
  *
  * ── Deliberately dependency-free ─────────────────────────────────────────────
@@ -225,13 +225,15 @@ export function internalContext(): CallContext {
  * start their own transaction.
  *
  * **They do still need the CONTEXT.** Only the collection binding is
- * unnecessary for a read, not the identity. `Cls.search(query)` with the second
- * argument left off does not read "as nobody" — outside a Harper request scope
- * (a boot hook, a timer, a queue worker, a detached promise) it resolves to the
- * same trusted `internal` verdict this module exists to keep out of reach, and
- * returns every agent's private records unfiltered. On that path the resource's
- * own `allow*` gate is not consulted at all, so nothing else stands in the way.
- * Pass the context to every call, read or write (flair#936).
+ * unnecessary for a read, not the identity. `Cls.search(query)` with no explicit
+ * or ambient context resolves to the trusted `internal` verdict. The query's
+ * conditions still narrow the rows, but no agent scope applies: every agent's
+ * matching records, `private` included, are returned. With the resulting `{}`
+ * context and no `query.checkPermission`, no permission check is requested
+ * (no `context.authorize`), so `allowRead` is never consulted. Memory's
+ * `allowRead` -> `memoryAuthGate` -> `allowVerified` would admit this `internal`
+ * call even if consulted. Pass the context to every call, read or write
+ * (flair#936).
  */
 export async function collectionResource<T = any>(Cls: any, context: CallContext): Promise<T> {
   if (context == null || typeof context !== "object") {
