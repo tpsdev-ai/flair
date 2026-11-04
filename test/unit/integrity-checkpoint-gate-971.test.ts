@@ -33,6 +33,7 @@ import {
   initializeIntegrityCustody,
   integrityPaths,
   openIntegrityState,
+  tombstoneEnrollment,
   type IntegrityStateOptions,
 } from "../../src/lib/integrity-state.ts";
 import { assertSupportedLocalFilesystem, isSupportedLocalFilesystemType } from "../../src/lib/config-critical-section.ts";
@@ -263,6 +264,19 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toBe("checkpoint_incompatible");
+  });
+
+  it("tombstones an enrollment, advances the sequence and refuses a stale expectation", () => {
+    const state = init();
+    commitFirst(state);
+    const stale = tombstoneEnrollment({ ...options(), expectedSequence: 0 });
+    expect(stale.ok).toBe(false);
+    if (!stale.ok) expect(stale.status).toBe("commit_conflict");
+    const first = tombstoneEnrollment({ ...options(), expectedSequence: 1 });
+    expect(first).toMatchObject({ ok: true, sequence: 2 });
+    const opened = openIntegrityState(options({ newCustody: false }));
+    expect(opened.ok).toBe(false);
+    if (!opened.ok) expect(opened.reason).toBe("custody_invalid");
   });
 
   it("N5: an absent registry with generation history is custody_invalid, never uninitialized", () => {
