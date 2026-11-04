@@ -293,6 +293,27 @@ describe("commit-fence (invariant 7)", () => {
     expect(existsSync(integrityPaths(custodyDir).currentPath)).toBe(false);
   });
 
+  it("refuses a commit on a live handle when CURRENT is deleted", () => {
+    const state = init();
+    commit(state, 0);
+    const paths = integrityPaths(custodyDir);
+    const publishedGeneration = readFileSync(generationPath(paths.generationsDir, 1), "utf-8");
+    unlinkSync(paths.currentPath);
+    const changed = payload();
+    changed.baseline.scannedAt = "2026-11-04T00:05:00.000Z";
+    changed.baseline.scanStartedAt = "2026-11-04T00:05:00.000Z";
+    changed.baseline.scanEndedAt = "2026-11-04T00:05:01.000Z";
+    // A scan that started before generation one: with CURRENT gone, this
+    // expectation must not be read as an empty history.
+    const result = commitGeneration({ state, expectedGeneration: 0, checkpoint: changed });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("custody_invalid");
+    expect(existsSync(paths.currentPath)).toBe(false);
+    expect(generationNumbers(paths)).toEqual([1]);
+    expect(readFileSync(generationPath(paths.generationsDir, 1), "utf-8")).toBe(publishedGeneration);
+  });
+
   it("races two real writers with one commit winning and one commit_conflict", async () => {
     const state = init();
     commit(state, 0);
@@ -351,15 +372,28 @@ describe("commit-fence (invariant 7)", () => {
     expect(generationNumbers(paths)).toEqual([1]);
   });
 
-  it("refuses to publish when the uncertainty marker cannot be written", () => {
+  it("refuses to publish when the uncertainty marker write fails after the decision", () => {
     const state = init();
-    mkdirSync(integrityPaths(custodyDir).uncertainPath, { mode: 0o700 });
-    const result = commitGeneration({ state, expectedGeneration: 0, checkpoint: payload() });
+    commit(state, 0);
+    const paths = integrityPaths(custodyDir);
+    const published = readFileSync(paths.currentPath, "utf-8");
+    const changed = payload();
+    changed.baseline.scannedAt = "2026-11-04T00:05:00.000Z";
+    changed.baseline.scanStartedAt = "2026-11-04T00:05:00.000Z";
+    changed.baseline.scanEndedAt = "2026-11-04T00:05:01.000Z";
+    const result = commitGeneration({
+      state,
+      expectedGeneration: 1,
+      checkpoint: changed,
+      testHooks: { beforeUncertainMarkerWrite: () => { throw new Error("injected marker write failure"); } },
+    });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.reason).toBe("unavailable");
-    expect(existsSync(integrityPaths(custodyDir).currentPath)).toBe(false);
-    expect(generationNumbers(integrityPaths(custodyDir))).toEqual([]);
+    expect(result.status).toBe("commit_failed");
+    expect(readFileSync(paths.currentPath, "utf-8")).toBe(published);
+    // The generation was staged, so the marker write is the step that failed.
+    expect(generationNumbers(paths)).toEqual([1, 2]);
+    expect(existsSync(paths.uncertainPath)).toBe(false);
   });
 
   it("retains a pre-existing marker entry when exclusive creation fails", () => {

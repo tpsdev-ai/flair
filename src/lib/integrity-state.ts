@@ -5,24 +5,25 @@
  * NOT REACHABLE YET. This module adds no command, resource or route. It is the
  * library half the enrollment and check slices build on:
  *
- *   - a v3 checkpoint whose ENTIRE record is HMAC-SHA256 over a canonical JSON
- *     encoding with a custody key;
+ *   - a v3 checkpoint whose fields other than `hmac` are covered by an
+ *     HMAC-SHA256 over a canonical JSON encoding with a custody key;
  *   - the fixed twelve-reason taxonomy (strings, not prose) for callers to
  *     report;
  *   - the custody predicate: key directory 0700, key and state files 0600,
- *     managed entries checked for symlinks and ACL grants,
- *     a server uid that can neither read the key nor write state, and the recorded operator uid and machine identity compared
- *     when custody is opened and when a generation is committed;
+ *     managed entries checked for symlinks and ACL grants, a caller-supplied
+ *     server uid that can neither read the key nor write state, and the
+ *     recorded operator uid and machine identity compared when custody is
+ *     opened and when a generation is committed;
  *   - an authenticated enrollment registry with a monotonic sequence and
  *     tombstones, plus retained generations;
  *   - generation staging and uncertain-commit recovery under ONE custody lock
  *     (commit, tombstone, registry write and recovery all serialize on it).
  *
  * The custody key and state live in the caller-supplied custody directory.
- * Modes alone cannot prove a server cannot reach them, so `checkCustody`
- * records the operator/machine pair and rechecks it at open and at commit,
- * and refuses a same-machine same-uid arrangement; a test must additionally
- * demonstrate the real denial.
+ * Modes alone cannot prove a server cannot reach them. The enrollment registry
+ * records the operator/machine pair, and `checkCustody` rechecks it at open and
+ * at commit and refuses a same-machine same-uid arrangement; a test must
+ * additionally demonstrate the real denial.
  */
 import {
   closeSync,
@@ -415,10 +416,11 @@ export function checkCustody(opts: CustodyCheckOptions): CustodyCheck {
   return { ok: true };
 }
 
-/** Read the machine identity. The hostname is the stable part exposed by Node;
- *  a readable machine-id file adds the platform's stable id when present. A
- *  missing machine-id is not an error here (it is folded into the recorded
- *  value, and the value is rechecked later). */
+/** Read the machine identity: the platform, the hostname, and the platform's
+ *  machine-id when that file is readable. A hostname can be shared or changed,
+ *  so this value is only as identifying as the hostname when no machine-id is
+ *  available; it is not proof of a unique machine. A missing machine-id is
+ *  folded into the recorded value, not treated as an error. */
 export function machineIdentity(): string {
   let id = `${process.platform}:${hostname()}`;
   for (const candidate of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
@@ -429,8 +431,8 @@ export function machineIdentity(): string {
         break;
       }
     } catch {
-      // Absence is not an unknown for identity: the hostname still identifies
-      // the machine we recorded and recheck.
+      // Absence is not an unknown for identity: the value falls back to the
+      // hostname, which a renamed or cloned host can share.
     }
   }
   return id;
@@ -474,9 +476,10 @@ function writeNewDurable(path: string, bytes: Uint8Array, mode: number, onCreate
   fsyncDir(dirname(path));
 }
 
-/** Replace an UNREFERENCED orphan generation atomically. A generation file is
- *  immutable once CURRENT names it; this is used only for a generation that a
- *  failed pre-rename commit staged while CURRENT still named its predecessor. */
+/** Replace a generation file atomically. The caller only reaches this for a
+ *  number CURRENT does not name (the commit decision verified CURRENT names
+ *  expectedGeneration and this writes expectedGeneration + 1); the function
+ *  itself does not check that, so it cannot detect another writer. */
 function replaceDurable(path: string, bytes: Uint8Array, mode: number): void {
   const temp = `${path}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
   try {
@@ -552,8 +555,10 @@ function hasGenerationHistory(paths: IntegrityPaths): HistoryCheck {
 }
 
 /** Write the durable intent marker BEFORE publication. A failure here must
- *  refuse the publication. */
-function writeUncertainMarker(paths: IntegrityPaths, value: string): void {
+ *  refuse the publication. `beforeWrite` is the test seam that injects such a
+ *  failure after the commit decision succeeded. */
+function writeUncertainMarker(paths: IntegrityPaths, value: string, beforeWrite?: () => void): void {
+  beforeWrite?.();
   let created = false;
   try {
     writeNewDurable(paths.uncertainPath, Buffer.from(value, "utf-8"), 0o600, () => { created = true; });
@@ -785,8 +790,12 @@ export interface CommitGenerationOptions {
   /** Generation observed before the scan. A mismatch holds the write. */
   expectedGeneration: number;
   checkpoint: Omit<IntegrityCheckpointPayload, "version" | "kind" | "enrollmentId" | "generation" | "operatorUid" | "machineId">;
-  /** TEST-ONLY barriers, from the shared critical section. */
-  testHooks?: ConfigSectionOptions["testHooks"];
+  /** TEST-ONLY barriers. The shared critical-section hooks are passed through;
+   *  `beforeUncertainMarkerWrite` fires after the decision succeeded and before
+   *  the intent marker is created. */
+  testHooks?: NonNullable<ConfigSectionOptions["testHooks"]> & {
+    beforeUncertainMarkerWrite?: () => void;
+  };
 }
 
 function fail(reason: IntegrityReason, detail: string): IntegrityStateResult {
@@ -1311,6 +1320,17 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
       return holdMessage("custody_invalid", "the enrollment sequence changed during the scan");
     }
 
+    if (bytes === null || bytes.byteLength === 0) {
+      // CURRENT is absent. Generation one is publishable only into an empty
+      // history: a retained entry (or a directory that cannot be listed) means
+      // the absent pointer is lost evidence, not a fresh start.
+      const history = listGenerationEntries(state.paths.generationsDir);
+      if (history.kind === "error") return holdMessage(history.reason, history.detail);
+      if (history.kind === "ok" && history.files.length > 0) {
+        return holdMessage("custody_invalid", "CURRENT is absent while generation history exists");
+      }
+    }
+
     let onDisk = 0;
     if (bytes !== null && bytes.byteLength > 0) {
       let parsed: unknown;
@@ -1344,14 +1364,15 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
       const existing = readFileSync(path);
       if (!Buffer.from(generationBytes).equals(existing)) {
         // CURRENT still names expectedGeneration (checked in decide), so this
-        // generation is an unreferenced orphan from a failed pre-rename
-        // attempt. Replace it; a referenced generation is never touched.
+        // number is unreferenced: an orphan left by an earlier attempt that
+        // staged but did not publish. Replace it. A file another writer put at
+        // a number CURRENT names is outside what this check can see.
         replaceDurable(path, generationBytes, 0o600);
       }
     }
     // Durable intent marker BEFORE publication: a post-rename fsync warning
     // then cannot lose the uncertainty. Failure here refuses the publication.
-    writeUncertainMarker(state.paths, `${UNCERTAIN_COMMIT_PREFIX}${nextGeneration}`);
+    writeUncertainMarker(state.paths, `${UNCERTAIN_COMMIT_PREFIX}${nextGeneration}`, opts.testHooks?.beforeUncertainMarkerWrite);
     return () => { try { clearUncertainMarker(state.paths); } catch { /* leave it for the next open */ } };
   };
 
@@ -1401,8 +1422,9 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     };
   }
 
-  // refused: the target was not replaced. A staged generation may remain, but
-  // it is immutable and unreferenced; a retry with identical bytes accepts it.
+  // refused: the target was not replaced. A staged generation may remain,
+  // unreferenced; a later retry that passes decide reuses it when the bytes
+  // match and replaces it otherwise.
   return {
     ok: false,
     status: "commit_failed",

@@ -321,9 +321,21 @@ export function selectMountEntry(
   return matches.length === 1 ? matches[0]! : null;
 }
 
+/** One `df -P` data row: device, blocks, used, available, capacity, mount. */
+const DF_DATA_LINE = /^(.+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+%)\s+(.+)$/;
+
+/** The one non-data line `df -P` prefixes: its column header. */
+const DF_HEADER_LINE = /^Filesystem(\s|$)/;
+
+/** Parse `df -P` output. The output must be the header (optional) plus exactly
+ *  one data row; any other nonempty line is a refusal, never skipped. */
 export function parseDfMountPoint(output: string): string | null {
-  const lines = output.split("\n").map((line) => /^(.+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+%)\s+(.+)$/.exec(line.trim())).filter((line) => line !== null);
-  return lines.length === 1 && lines[0]![6]!.startsWith("/") ? lines[0]![6]! : null;
+  const lines = output.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+  if (lines.length === 0) return null;
+  const rows = DF_HEADER_LINE.test(lines[0]!) ? lines.slice(1) : lines;
+  if (rows.length !== 1) return null;
+  const match = DF_DATA_LINE.exec(rows[0]!);
+  return match !== null && match[6]!.startsWith("/") ? match[6]! : null;
 }
 
 function readDarwinDf(path: string): string {

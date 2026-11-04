@@ -98,6 +98,22 @@ describe("macOS mount table classification", () => {
     }
   });
 
+  it("refuses a df response with an unexpected line beside one valid row", () => {
+    for (const output of [
+      `garbage\n${DATA_DF}`,
+      `${DATA_DF}garbage\n`,
+      DATA_DF.replace("\n", "\ngarbage\n"),
+    ]) {
+      expect(parseDfMountPoint(output)).toBeNull();
+      const support = classifyDarwinFilesystem("/Users/operator", APFS_LINE, () => output);
+      expect(support.ok).toBe(false);
+      if (!support.ok) expect(support.reason).toBe("unparseable df output");
+    }
+    expect(parseDfMountPoint(DATA_DF)).toBe("/System/Volumes/Data");
+    expect(parseDfMountPoint(NET_DF)).toBe("/Volumes/Net");
+    expect(parseDfMountPoint(SPACE_DF)).toBe("/Volumes/Data Disk");
+  });
+
   it("requires exactly one mount entry equal to the df mount point", () => {
     const entries = [parseMountLine(ROOT_LINE)!, parseMountLine(APFS_LINE)!];
     expect(selectMountEntry(entries, "/System/Volumes/Data")?.mountPoint).toBe("/System/Volumes/Data");
