@@ -26,10 +26,10 @@
  * Schema admission (flair#2953): a row of a table restore writes is also
  * checked against that table's GraphQL schema (schemas/*.graphql). A `!`
  * column the row does not hold is refused, except a field the write supplies
- * itself (RESTORE_WRITE_SUPPLIED_FIELDS); a column the row does hold must hold
- * the JS value its declared type names. Replace mode deletes an archived
- * Memory or Soul row before writing it back, so a row the write would refuse
- * has to be refused here, before the delete.
+ * itself (RESTORE_WRITE_SUPPLIED_FIELDS); every present non-null held column
+ * must hold the JS value its declared type names. Replace mode deletes an
+ * archived Memory or Soul row before writing it back, so a row these named
+ * checks refuse is refused here, before the delete.
  *
  * Archive diagnostics. `parseRestoreArchive` returns the first problem it
  * finds as one refusal with a JSON Pointer `location`. Decoding and JSON-syntax
@@ -136,9 +136,10 @@ export const RESTORE_TABLE_FIELDS: Readonly<Record<"Agent" | "Soul" | "Memory", 
 
 /**
  * Required columns the write supplies, so an archived row may omit them:
- * Soul.put and Memory.put stamp `createdAt`, and Agent.put carries
- * `createdAt` and `publicKey` from the stored row. Each is an assignment in
- * the resource before its `validate()` call (pinned by the same test).
+ * Soul.put and Memory.put assign `createdAt`, and Agent.put carries
+ * `createdAt` and `publicKey` from the stored row when it has them. Soul
+ * calls `validate()` after assigning `createdAt`; Agent and Memory assign
+ * the field before `super.put` (pinned by the same test).
  */
 export const RESTORE_WRITE_SUPPLIED_FIELDS: Readonly<Record<"Agent" | "Soul" | "Memory", ReadonlySet<string>>> = Object.freeze({
   Agent: new Set(["createdAt", "publicKey"]),
@@ -602,8 +603,8 @@ function rowShapeProblem(row: unknown, owned: boolean): { reason: string; field?
   if (typeof id !== "string" || id.length === 0) return { reason: "the row id is not a non-empty string", field: "id" };
   if (id.includes(".")) {
     return {
-      reason: "the row id contains \".\", which Harper's REST path reads as a content-type suffix or an attribute "
-        + "selector, so the id cannot address its own record",
+      reason: "the row id contains \".\", which admission conservatively refuses because a suffix such as "
+        + "\".json\" or \".content\" can be read as a content type or an attribute selector",
       field: "id",
     };
   }

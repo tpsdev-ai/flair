@@ -5,19 +5,23 @@
  * The source set is the relative-import closure of resources/Soul.ts.
  * Every syntactic reference to `Response` in a construction or call position
  * (bare, `globalThis.Response`, `<x>.Response`, or a top-level alias of one)
- * is counted, and each is either classified or recorded as an unresolved site;
- * the test asserts classified + unresolved equals the number of references.
- * For new Response and Response.json, only no init (default 200) or a
- * plain, unwrapped object literal with no spread or computed keys is classified;
- * every property is read to prove status absent or statically numeric.
- * Every other init, every other static method (`Response.redirect`) and
- * `Response.error()` (status 0) is unresolved and fails with file:line unless
- * listed with a reason. Recognised status-taking helpers require statically
- * numeric status arguments; their unresolved definitions must also be listed.
- * A function that forwards one of its parameters into a callee the inventory
- * cannot resolve (a method call, a computed callee, a callee outside the
- * closure) is opaque: listed by name with a reason, or the test fails naming
- * it. Refusal codes must be preflighted, admission-refused or listed out of scope.
+ * is counted, and each is either classified or recorded as an unresolved site.
+ * A separate pass counts the `Response` tokens in every callee expression
+ * (including a computed member, a cast and a parenthesised form) without
+ * consulting the classifier, and the test asserts classified + unresolved
+ * equals that independent count. For new Response and Response.json, only no
+ * init (default 200) or a plain, unwrapped object literal with no spread or
+ * computed keys is classified; every property is read to prove status absent
+ * or statically numeric. Every other init, every other static method
+ * (`Response.redirect`) and `Response.error()` (status 0) is unresolved and
+ * fails with file:line unless listed with a reason. Recognised status-taking
+ * helpers require statically numeric status arguments; their unresolved
+ * definitions must also be listed. A function that forwards one of its
+ * parameters into a callee the inventory cannot resolve (a method call, a
+ * computed callee, a callee outside the closure), including through a
+ * parenthesis, an `as` cast or a non-null assertion, is opaque: listed by name
+ * with a reason, or the test fails naming it. Refusal codes must be
+ * preflighted, admission-refused or listed out of scope.
  */
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
@@ -105,12 +109,47 @@ interface RefusalInventory {
   unresolved: Map<string, string>;
   /** Response references (construction or call position). */
   occurrences: number;
+  /** Response tokens counted independently of `responseCallee`. */
+  responseReferences: number;
   /** References `responseShape` classified (a status list it proved). */
   classified: number;
   /** References recorded as unresolved. */
   unresolvedReferences: number;
   /** Functions forwarding a parameter into a callee the inventory cannot resolve. */
   opaque: Map<string, string>;
+}
+
+/**
+ * Unwrap the transparent wrappers a caller can put around an argument without
+ * changing which value it passes: parentheses, an `as` cast, a `<T>` assertion
+ * and a non-null assertion.
+ */
+function forwardedIdentifier(expression: ts.Expression | undefined): ts.Identifier | null {
+  let current = expression;
+  while (current) {
+    if (ts.isParenthesizedExpression(current) || ts.isAsExpression(current) ||
+        ts.isTypeAssertionExpression(current) || ts.isNonNullExpression(current)) {
+      current = current.expression;
+      continue;
+    }
+    return ts.isIdentifier(current) ? current : null;
+  }
+  return null;
+}
+
+/**
+ * Count every `Response` token in a callee expression without consulting the
+ * classifier: the identifier itself, a `Response` property name (`x.Response`),
+ * a token inside parentheses, a cast, a computed member or a top-level alias.
+ */
+function responseReferencesIn(expression: ts.Expression, aliases: Set<string> | undefined): number {
+  let count = 0;
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && (node.text === "Response" || aliases?.has(node.text) === true)) count++;
+    ts.forEachChild(node, visit);
+  };
+  visit(expression);
+  return count;
 }
 
 function parametersOf(fn: FnNode): Set<string> {
@@ -451,7 +490,8 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
           if (ts.isIdentifier(parameter.name) && parameter.name.text === sink) index = position;
         });
         const argument = index >= 0 ? node.arguments[index] : undefined;
-        if (argument && ts.isIdentifier(argument) && parameters.has(argument.text)) forwarded = argument.text;
+        const forwardedArgument = forwardedIdentifier(argument);
+        if (forwardedArgument && parameters.has(forwardedArgument.text)) forwarded = forwardedArgument.text;
       };
       const walk = (node: ts.Node): void => {
         if (forwarded) return;
@@ -495,7 +535,8 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
         if (ts.isIdentifier(parameter.name) && parameter.name.text === sink) index = position;
       });
       const argument = index >= 0 ? node.arguments[index] : undefined;
-      if (argument && ts.isIdentifier(argument) && sinkParamOf(enclosingFunction(node)) === argument.text) {
+      const forwardedArgument = forwardedIdentifier(argument);
+      if (forwardedArgument && sinkParamOf(enclosingFunction(node)) === forwardedArgument.text) {
         ts.forEachChild(node, visit);
         return;
       }
@@ -515,27 +556,32 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   // are unresolved and fail with file:line unless listed with a reason.
   // Status-taking helpers require static status arguments in (c).
   let occurrences = 0;
+  let responseReferences = 0;
   let classified = 0;
   let unresolvedReferences = 0;
   for (const [file, source] of sources) {
     const visit = (node: ts.Node): void => {
-      if ((ts.isNewExpression(node) || ts.isCallExpression(node)) && responseCallee(file, node.expression, responseAliases)) {
-        occurrences++;
-        const shape = responseShape(file, node);
-        if (shape && shape.statuses !== null) {
-          classified++;
-          if (shape.statuses.some((value) => value >= 400)) {
-            const error = propertyOf(payloadOf(file, shape.body), file, "error");
-            const holder = enclosingFunction(node);
-            if (!(holder && error && ts.isIdentifier(error) && sinkParamOf(holder) === error.text)) {
-              const values = resolveString(file, error);
-              if (values) for (const value of values) recordCode(value, file, lineOf(source, node));
-              else recordUnresolved(file, lineOf(source, node), "unresolvable refusal body");
+      if (ts.isNewExpression(node) || ts.isCallExpression(node)) {
+        const references = responseReferencesIn(node.expression, responseAliases.get(file));
+        responseReferences += references;
+        if (references > 0) {
+          occurrences++;
+          const shape = responseCallee(file, node.expression, responseAliases) ? responseShape(file, node) : null;
+          if (shape && shape.statuses !== null) {
+            classified++;
+            if (shape.statuses.some((value) => value >= 400)) {
+              const error = propertyOf(payloadOf(file, shape.body), file, "error");
+              const holder = enclosingFunction(node);
+              if (!(holder && error && ts.isIdentifier(error) && sinkParamOf(holder) === error.text)) {
+                const values = resolveString(file, error);
+                if (values) for (const value of values) recordCode(value, file, lineOf(source, node));
+                else recordUnresolved(file, lineOf(source, node), "unresolvable refusal body");
+              }
             }
+          } else {
+            unresolvedReferences++;
+            recordUnresolved(file, lineOf(source, node), shape ? "unresolvable Response status" : "unrecognised Response reference");
           }
-        } else {
-          unresolvedReferences++;
-          recordUnresolved(file, lineOf(source, node), shape ? "unresolvable Response status" : "unrecognised Response reference");
         }
       }
       ts.forEachChild(node, visit);
@@ -589,10 +635,11 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
         const resolved = ts.isIdentifier(callee) && resolveFunction(record.file, callee.text) !== null;
         if (!resolved) {
           for (const argument of node.arguments ?? []) {
-            if (ts.isIdentifier(argument) && parameters.has(argument.text) && !opaque.has(record.key)) {
+            const forwardedArgument = forwardedIdentifier(argument);
+            if (forwardedArgument && parameters.has(forwardedArgument.text) && !opaque.has(record.key)) {
               const source = record.fn.getSourceFile();
               opaque.set(record.key,
-                `${record.file}:${lineOf(source, node)} forwards ${argument.text} into ${callee.getText(source)}`);
+                `${record.file}:${lineOf(source, node)} forwards ${forwardedArgument.text} into ${callee.getText(source)}`);
             }
           }
         }
@@ -602,7 +649,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     visit(bodyOf(record.fn));
   }
 
-  return { codes, unresolved, occurrences, classified, unresolvedReferences, opaque };
+  return { codes, unresolved, occurrences, responseReferences, classified, unresolvedReferences, opaque };
 }
 
 function enclosingFunction(node: ts.Node): FnNode | null {
@@ -776,8 +823,8 @@ test("each unresolved site is listed by file:line with a reason", () => {
 
 test("every Response reference is classified or listed unresolved", () => {
   const inventory = buildInventory(collectSourceSet());
-  expect(inventory.occurrences).toBeGreaterThan(0);
-  expect(inventory.classified + inventory.unresolvedReferences).toBe(inventory.occurrences);
+  expect(inventory.responseReferences).toBeGreaterThan(0);
+  expect(inventory.classified + inventory.unresolvedReferences).toBe(inventory.responseReferences);
 });
 
 test("each function that forwards a parameter into an unresolvable callee is opaque and listed", () => {
@@ -873,6 +920,30 @@ test.each([
   expect(inventory.classified).toBe(0);
   expect(inventory.unresolvedReferences).toBe(1);
   expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unrecognised Response reference"]]);
+});
+
+test.each([
+  'Response["json"]({ error: "x" }, { status: 403 })',
+  '(Response as any).json({ error: "x" }, { status: 403 })',
+  'new (Response as any)(JSON.stringify({ error: "x" }), { status: 403 })',
+])('counts a Response form the classifier does not know as unresolved: %s', (expression) => {
+  const source = ts.createSourceFile("fixture.ts", expression, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect(inventory.responseReferences).toBe(1);
+  expect(inventory.occurrences).toBe(1);
+  expect(inventory.classified).toBe(0);
+  expect(inventory.unresolvedReferences).toBe(1);
+  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unrecognised Response reference"]]);
+});
+
+test("a function forwarding a parameter through a cast is opaque", () => {
+  const source = ts.createSourceFile("fixture.ts", `
+function forbid(code: string) { return new Response(JSON.stringify({ error: code }), { status: 403 }); }
+const gate = { forbid(code: string) { return forbid(code); } };
+function refuseContent(content: any) { return gate.forbid((content as unknown)); }
+function write(content: any) { return refuseContent(content); }`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.opaque.keys()]).toEqual(["fixture.ts:refuseContent"]);
 });
 
 test("a function forwarding a parameter into a class method is opaque", () => {

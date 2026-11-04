@@ -1,14 +1,15 @@
 /**
- * restore-soul-admission-2953.test.ts — archive admission refuses a row
- * restore could not write back, before `--replace` can delete its live copy
+ * restore-soul-admission-2953.test.ts — archive admission refuses, before
+ * `--replace` can delete its live copy, a row these named checks reject
  * (flair#2953).
  *
  * Three classes, each refused as `invalid-row` at the row's own field before
  * any request: a Soul row without a non-empty string `agentId`; a row id
- * containing `.` in any collection, because Harper's REST path reads a dot as
- * a content-type suffix or an attribute selector and would address a
- * different record; and a row that does not match the GraphQL schema of its
- * table (a required column absent, or a column holding the wrong JS type).
+ * containing `.` in any collection, which admission conservatively refuses
+ * because a suffix such as `.json` or `.content` can be read as a content type
+ * or an attribute selector; and a row that does not match the GraphQL schema
+ * of its table (a required column absent, or a present non-null column holding
+ * the wrong JS type).
  * The command cases run the real restore command with `fetch` as its only
  * write path; a refusal sends no request at all.
  */

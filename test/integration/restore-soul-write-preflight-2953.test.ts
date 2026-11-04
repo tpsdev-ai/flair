@@ -9,7 +9,9 @@
  * skill-assignment row with a non-boolean optOut, and a Soul row without a
  * non-empty agentId. Archive admission also refuses before any delete a row id
  * containing a dot and a Soul row whose schema columns do not hold their
- * declared types. Each refusal stops the run with the live rows untouched.
+ * declared types. Each refusal stops the run with the live rows untouched. A
+ * direct server PUT with a numeric `value` shows the server also refuses that
+ * row.
  *
  * Build prerequisite: `bun run build && bun run build:cli`.
  */
@@ -93,6 +95,17 @@ async function operatorPut(path: string, body: unknown): Promise<number> {
     if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   return status;
+}
+
+/** A direct PUT whose status and body the caller asserts, for expected refusals. */
+async function operatorPutResponse(path: string, body: unknown): Promise<{ status: number; body: string }> {
+  const res = await fetch(harper.httpURL + path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30_000),
+  });
+  return { status: res.status, body: await res.text() };
 }
 
 const row = async (table: string, id: string): Promise<any> =>
@@ -320,6 +333,20 @@ describe("flair restore --replace refuses the Soul write rules it covers before 
     expect(restored.stderr).toContain("invalid-row");
     expect(restored.stderr).toContain("value is not a string");
     expect(await row("Soul", soulId)).toEqual(before);
+  }, 300_000);
+
+  test("the server itself refuses a Soul row whose value is not a string", async () => {
+    const agent = "schema-server-agent";
+    const soulId = `${agent}:identity`;
+
+    await seedAgent(agent);
+    const refused = await operatorPutResponse(`/Soul/${encodeURIComponent(soulId)}`, {
+      id: soulId, agentId: agent, key: "identity", value: 42, durability: "permanent", createdAt: CREATED_AT,
+    });
+
+    expect(refused.status, refused.body).toBe(500);
+    expect(refused.body).toContain("instruction_version_append_failed");
+    expect(await row("Soul", soulId)).toBeUndefined();
   }, 300_000);
 
   test("a well-formed archive still restores", async () => {
