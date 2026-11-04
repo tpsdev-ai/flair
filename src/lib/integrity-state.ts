@@ -1212,6 +1212,13 @@ export function openIntegrityState(opts: IntegrityStateOptions): IntegrityStateR
       const history = hasGenerationHistory(paths);
       if (history.kind === "error") return fail(history.reason, history.detail);
       if (history.kind === "yes") return fail("custody_invalid", "the key is absent while generation history exists");
+      try {
+        if ([paths.custodyDir, paths.keyPath, paths.registryPath].every((path) => lstatSync(path, { throwIfNoEntry: false }) === undefined)) {
+          return fail("uninitialized", "no custody exists; an explicit new-custody enrollment is required");
+        }
+      } catch (err) {
+        return fail("unavailable", `cannot inspect custody: ${msg(err)}`);
+      }
     }
     return fail(key.reason, key.detail);
   }

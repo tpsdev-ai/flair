@@ -856,7 +856,8 @@ export function withConfigCriticalSection(
       }
       if (!wr.ok) {
         try { stageCleanup?.(); } catch { /* the refusal stands */ }
-        return { status: "refused", path: targetPath, attempts, message: `target was not replaced; staged files may remain: ${wr.reason}`, backupPath };
+        const prefix = opts.stage ? "target was not replaced; staged files may remain" : "target was not replaced";
+        return { status: "refused", path: targetPath, attempts, message: `${prefix}: ${wr.reason}`, backupPath };
       }
       let cleanupWarning = wr.cleanupWarning;
       if (cleanupWarning === null && opts.onCommitted) {

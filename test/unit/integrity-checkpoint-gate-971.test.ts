@@ -188,6 +188,31 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(lstatSync(custodyDir, { throwIfNoEntry: false })).toBeUndefined();
   });
 
+  it("opens a fresh empty root as uninitialized with the enroll remedy", () => {
+    const result = openIntegrityState(options({ newCustody: false }));
+    expect(result).toMatchObject({ ok: false, reason: "uninitialized", remedy: INTEGRITY_REASON_REMEDIES.uninitialized });
+    expect(lstatSync(custodyDir, { throwIfNoEntry: false })).toBeUndefined();
+    expect(readdirSync(root)).toEqual([]);
+  });
+
+  it("opens custody with a key but no registry as uninitialized", () => {
+    const state = init();
+    unlinkSync(state.paths.registryPath);
+    const result = openIntegrityState(options({ newCustody: false }));
+    expect(result).toMatchObject({ ok: false, reason: "uninitialized", remedy: INTEGRITY_REASON_REMEDIES.uninitialized });
+    expect(readFileSync(state.paths.keyPath)).toHaveLength(32);
+  });
+
+  it("refuses a custody directory without a key and names the missing key", () => {
+    mkdirSync(custodyDir, { mode: 0o700 });
+    const result = openIntegrityState(options({ newCustody: false }));
+    expect(result).toMatchObject({ ok: false, reason: "unavailable" });
+    if (result.ok) return;
+    expect(result.detail).toContain("cannot read the custody key");
+    expect(result.detail).toContain(integrityPaths(custodyDir).keyPath);
+    expect(readdirSync(custodyDir)).toEqual([]);
+  });
+
   it("refuses an invalid machine identity before creating custody files", () => {
     for (const machineId of ["", 42 as unknown as string]) {
       const result = initializeIntegrityCustody(options({ machineId }));
