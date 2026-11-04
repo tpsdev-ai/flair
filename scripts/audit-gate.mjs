@@ -1196,16 +1196,10 @@ function harperHoistedVersion(npmPrefix, pkg, node) {
 }
 
 /**
- * For a vendor-pinned exception, reject any npm-audit-reported node path outside
- * harper. When all reported paths are under harper, compare each installed version
- * and any audit-reported version with the version harper shipped it at: the
- * shrinkwrap pin for releases that carry one, otherwise the bundle evidence in the
- * consumer install's package-lock and harper's package.json. A hoisted top-level
- * node is accepted only when the entry names it with `hoistedNode` and the
- * lockfile attributes it to harper alone. Empty node lists, a node package.json,
- * package directory or directory between harper's and it whose real path is
- * outside harper's installed tree, unreadable required metadata, and version
- * mismatches block the gate; errors name a node when one was reported.
+ * For a vendor-pinned exception, compare each node under harper with its
+ * shrinkwrap pin or bundle evidence. A hoisted top-level node requires the
+ * entry's `hoistedNode` and the exact-pin evidence in `harperHoistedVersion`.
+ * Other node paths and empty node lists block the gate.
  */
 export function vendorPinnedNodeProblems(adv, npmPrefix, entry = undefined) {
   const nodes = adv.nodes;
