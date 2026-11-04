@@ -489,6 +489,32 @@ describe("commit-fence (invariant 7)", () => {
     expect(existsSync(paths.uncertainPath)).toBe(false);
   });
 
+  it("refuses malformed journal entries before staging", () => {
+    const state = init();
+    const paths = state.paths;
+    const registryBefore = readFileSync(paths.registryPath);
+    const entriesBefore = readdirSync(custodyDir).sort();
+    for (const entry of [
+      { at: 42, kind: null, detail: [] },
+      null, [], "entry", {},
+      { at: 42, kind: "scan" },
+      { at: "2026-11-04T00:00:00.000Z", kind: null },
+      { at: "2026-11-04T00:00:00.000Z", kind: "scan", detail: [] },
+    ]) {
+      const result = commitGeneration({
+        state, expectedGeneration: 0,
+        // @ts-expect-error malformed journal entries exercise the runtime guard
+        checkpoint: { ...payload(), journal: [entry] },
+      });
+      expect(result).toMatchObject({ ok: false, reason: "checkpoint_incompatible" });
+      expect(readFileSync(paths.registryPath)).toEqual(registryBefore);
+      expect(readdirSync(custodyDir).sort()).toEqual(entriesBefore);
+      expect(readdirSync(paths.generationsDir)).toEqual([]);
+      expect(existsSync(paths.currentPath)).toBe(false);
+      expect(existsSync(paths.uncertainPath)).toBe(false);
+    }
+  });
+
   it("refuses a present empty CURRENT before the first generation", () => {
     const state = init();
     const paths = integrityPaths(custodyDir);

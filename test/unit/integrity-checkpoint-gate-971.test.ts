@@ -380,6 +380,39 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(result.reason).toBe("tampered");
   });
 
+  it("refuses signed checkpoints with malformed journal entries on open", () => {
+    const state = init();
+    commitFirst(state);
+    const path = generationPath(state.paths.generationsDir, 1);
+    const checkpoint = JSON.parse(readFileSync(path, "utf-8"));
+    for (const entry of [
+      { at: 42, kind: null, detail: [] },
+      null, [], "entry", {},
+      { at: 42, kind: "scan" },
+      { at: "2026-11-04T00:00:00.000Z", kind: null },
+      { at: "2026-11-04T00:00:00.000Z", kind: "scan", detail: [] },
+    ]) {
+      const signed = signIntegrityRecord({ ...checkpoint, journal: [entry] }, state.key);
+      expect(verifyIntegrityRecord(signed, state.key)).toBe(true);
+      writeFileSync(path, `${canonicalJson(signed)}\n`);
+      const opened = openIntegrityState(options({ newCustody: false }));
+      expect(opened).toMatchObject({ ok: false, reason: "tampered" });
+      if (!opened.ok) expect(opened.detail).toContain("not a valid v3 record");
+    }
+  });
+
+  it("commits and reopens journal entries with and without detail", () => {
+    const state = init();
+    const journal = [
+      { at: "2026-11-04T00:00:00.000Z", kind: "scan" },
+      { at: "2026-11-04T00:00:01.000Z", kind: "scan", detail: "complete" },
+    ];
+    expect(commitGeneration({ state, expectedGeneration: 0, checkpoint: { ...payload(), journal } }).ok).toBe(true);
+    const opened = openIntegrityState(options({ newCustody: false }));
+    expect(opened.ok).toBe(true);
+    if (opened.ok) expect(opened.state.checkpoint?.journal).toEqual(journal);
+  });
+
   it("rejects a tampered generation HMAC", () => {
     const state = init();
     commitFirst(state);

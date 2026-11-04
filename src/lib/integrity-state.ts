@@ -681,7 +681,15 @@ function validateCheckpointShape(value: unknown): value is IntegrityCheckpointV3
     ((b.instanceTokens as Record<string, unknown>)[id] === null || (typeof (b.instanceTokens as Record<string, unknown>)[id] === "string" && ((b.instanceTokens as Record<string, unknown>)[id] as string).length > 0)))) return false;
   if (typeof b.byDurability !== "object" || b.byDurability === null || Array.isArray(b.byDurability)) return false;
   if (!ALL_TIERS.every((tier) => Number.isSafeInteger((b.byDurability as Record<string, unknown>)[tier]) && ((b.byDurability as Record<string, unknown>)[tier] as number) >= 0)) return false;
-  if (c.journal !== undefined && !Array.isArray(c.journal)) return false;
+  if (c.journal !== undefined) {
+    if (!Array.isArray(c.journal)) return false;
+    for (const raw of c.journal) {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
+      const entry = raw as Record<string, unknown>;
+      if (typeof entry.at !== "string" || typeof entry.kind !== "string") return false;
+      if (entry.detail !== undefined && typeof entry.detail !== "string") return false;
+    }
+  }
   if (c.pendingEvents !== undefined && !Array.isArray(c.pendingEvents)) return false;
   return true;
 }

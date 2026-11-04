@@ -158,6 +158,16 @@ describe("macOS mount table classification", () => {
 });
 
 describe("apfs custody (invariant 1)", () => {
+  it("refuses when the ancestor walk exhausts its iteration cap", () => {
+    const root = mkdtempSync(join(tmpdir(), "flair-971-walk-"));
+    try {
+      const result = assertSupportedLocalFilesystem(join(root, ...Array<string>(256).fill("absent")));
+      expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("iteration cap") });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(!isDarwin)("initializes custody in a real APFS directory", () => {
     const root = mkdtempSync(join(tmpdir(), "flair-971-apfs-"));
     try {

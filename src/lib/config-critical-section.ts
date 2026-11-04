@@ -361,11 +361,12 @@ export function classifyDarwinFilesystem(
 
 export function assertSupportedLocalFilesystem(targetPath: string): FilesystemSupport {
   let probe = resolve(targetPath);
-  // Bounded: `/` exists on every supported host; stop at the root.
+  // Try at most 256 paths, stopping early at root; refuse if the cap is exhausted.
   for (let i = 0; i < 256; i++) {
     if (existsSync(probe)) break;
     const parent = dirname(probe);
     if (parent === probe) return { ok: false, reason: `cannot find an existing ancestor of ${targetPath}` };
+    if (i === 255) return { ok: false, reason: `ancestor walk reached its iteration cap for ${targetPath}` };
     probe = parent;
   }
   if (process.platform === "darwin") {
