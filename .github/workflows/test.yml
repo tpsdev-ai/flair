@@ -39,10 +39,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Jobs previously using ubuntu-latest now pin ubuntu-24.04.
+  # On this PR's first run, ubuntu-latest resolved to ubuntu-26.04:
+  # Playwright could not install Chromium, and three unit cases failed.
   # flair#2540 — share one build with pack-smoke and dist-esm-guard.
   build:
     name: "Build (shared dist)"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -98,7 +101,7 @@ jobs:
   # non-REDACTED value must be reported as a finding.
   redaction-fixtures:
     name: "Launchd diagnostics redaction: fixture check"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -118,7 +121,7 @@ jobs:
     # branch-protection required check expects — see the `test-unit-gate` job
     # below, which reports that fixed context instead.
     name: "Unit Tests (node ${{ matrix.node-version }}, shard ${{ matrix.shard }})"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 22
     strategy:
       # fail-fast: false — a failure on one Node major must not cancel the
@@ -281,7 +284,7 @@ jobs:
   test-unit-gate:
     name: Unit Tests
     needs: [test-unit, test-darwin-gated]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: always()
     steps:
       - name: Require all Node-version legs and the darwin-gated lane to pass
@@ -307,7 +310,7 @@ jobs:
     # release/v* PRs only; needs just node + npm, so no install step.
     name: First-publish preflight
     if: startsWith(github.head_ref, 'release/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -400,6 +403,9 @@ jobs:
       # 60 s readiness wait, which spans its embedding engine's boot. This step
       # loads the engine once, before the steps below start their test Harpers,
       # so the job's first Metal library load happens here.
+      # Measured 2026-11-02 on fresh macOS runners (#2867, three runs each): the first
+      # test Harper's Metal load had a median of 0.018 s with this step and 13.662 s
+      # without. The load moves here, outside the readiness wait; it does not disappear.
       - name: Load the embedding engine once before the test Harpers (flair#2824)
         timeout-minutes: 5
         run: |
@@ -445,7 +451,7 @@ jobs:
   launchd-lane-changes:
     name: "launchd adopt-then-upgrade: changed-files gate"
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       run: ${{ steps.filter.outputs.run }}
@@ -593,7 +599,7 @@ jobs:
 
   test-integration:
     name: Integration Tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Sharded (#2149, #2131). Before: ONE job ran the whole suite ~16-26 min
     # against a 30-minute cap — main dfe01f0d 16m16s (`Run integration tests`
     # alone 13m45s), three other recent runs 23m2s / 24m38s / 26m1s, and PR
@@ -607,12 +613,18 @@ jobs:
     # that cap, so the cap was raised to 40 until the shards were rebalanced
     # (#2556). After the rebalance the shards ran 14-23 min on the three main
     # runs with completed integration jobs (3b040f1e, 6ab0d351, d6463b1e); the
-    # slowest, shard 1/3, was 22m33s, so the cap below is 34 — 1.5x the slowest
-    # measured shard. Each shard runs the same steps on its share of
+    # slowest, shard 1/3, was 22m33s, so the prior cap was 34 — 1.5x the slowest
+    # measured shard. On 2026-11-02 the last 20 runs with completed shards took
+    # 18-33 min (most 27-33), and PR runs 41427491902 and 41463469623 had shard
+    # 4/4 cancelled at the 34-minute cap with no test failure reported before
+    # cancellation, so that shard's full runtime is at least 34 min and was not
+    # measured. The cap below is 1.5x the old 34-minute cap = 51; re-check it
+    # against the first completed runtime under it.
+    # Each shard runs the same steps on its share of
     # test/integration/*.test.ts
     # (scripts/ci/integration-shards.mjs), and the final job named
     # `Integration Tests` (below) requires every shard to succeed.
-    timeout-minutes: 34
+    timeout-minutes: 51
     strategy:
       # fail-fast: false — one failed shard does not cancel the others; the
       # aggregate job below fails unless each one succeeded.
@@ -873,7 +885,7 @@ jobs:
   test-integration-gate:
     name: Integration Tests
     needs: [test-integration]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: always()
     timeout-minutes: 5
     steps:
@@ -887,7 +899,7 @@ jobs:
 
   test-integration-heavy:
     name: Integration Tests (heavy)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # flair#1290 — bulk-embedding integration files live in their OWN job.
     # The large-store conformance suite's dominant cost is CPU embedding
     # generation for a 251-record corpus: measured 253.4s on this runner
@@ -997,7 +1009,7 @@ jobs:
     #   Gemini/Google or any other model key belongs in CI — so that one test
     #   skips visibly regardless of runner class. All other quickstart cases run.
     name: adk-flair Python tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Generous headroom: the unit gate is ~1 min, but the live step below builds
     # the repo + fetches the embedding model + attempts an ephemeral Harper boot
     # whose warm-up carries a 120s floor-detection deadline before it skips.
@@ -1081,7 +1093,7 @@ jobs:
     # 3x cost buys real, high-signal coverage rather than padding the matrix
     # for its own sake.
     name: "Install-from-tarball smoke (node ${{ matrix.node-version }})"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: build
     strategy:
@@ -1388,7 +1400,7 @@ jobs:
     # cannot block a merge.
     name: Install-from-tarball smoke
     needs: pack-smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: always()
     steps:
       - name: Require all Node-version legs to pass
@@ -1414,7 +1426,7 @@ jobs:
     # script cannot run (no tarball, no CLI, unresolved --version) it exits 2
     # (DID NOT RUN), not 0. Required-check name: "MCP client wiring".
     name: MCP client wiring
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -1492,7 +1504,7 @@ jobs:
     # empty tree) the script exits 2 (DID NOT RUN), not 0. Required-check
     # name: "Install-weight budget".
     name: Install-weight budget
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -1578,7 +1590,7 @@ jobs:
 
   upgrade-smoke:
     name: Upgrade from npm-stable
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -1831,7 +1843,7 @@ jobs:
     # unpinned/removed entirely, since nothing needs it) is a reasonable
     # follow-up — flagging for reviewer call rather than silently deciding.
     name: "Type Check (node ${{ matrix.node-version }})"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -1872,7 +1884,7 @@ jobs:
   typecheck-gate:
     name: Type Check
     needs: typecheck
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: always()
     steps:
       - name: Require all Node-version legs to pass
@@ -1885,7 +1897,7 @@ jobs:
 
   typecheck-strict:
     name: "Type Check (strict)"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -2007,7 +2019,7 @@ jobs:
 
   audit:
     name: Dependency Audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # This job was the ONLY one in this file without a job timeout, so when the
     # Socket firewall (`sfw`) install below hung (ops-fumh, seen 2026-07-04) it
     # ran 33+ min with nothing to cancel it, indefinitely blocking merge on a
@@ -2018,6 +2030,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          # The allowlist gate searches this file's history across renames.
+          # It refuses a shallow checkout.
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
           bun-version: "1.3.10"
@@ -2143,7 +2159,7 @@ jobs:
 
   sast-semgrep:
     name: Semgrep SAST
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - run: python3 -m pip install semgrep
@@ -2157,7 +2173,7 @@ jobs:
 
   sast-codeql:
     name: CodeQL SAST
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       security-events: write
     steps:
@@ -2172,7 +2188,7 @@ jobs:
 
   doclint:
     name: "Doc/Code Lint: implementation-term leaks"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -2213,7 +2229,7 @@ jobs:
 
   docs-freshness:
     name: "Doc/Code Lint: docs-freshness gate"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # fetch-depth: 0 pulls full history + tags so the CHANGELOG check can count
       # feat/fix commits since the last v* tag. The other checks are file-only.
@@ -2242,6 +2258,8 @@ jobs:
       - name: Build CLI
         run: bun run build:cli
       - run: node scripts/docs-freshness-check.mjs
+        env:
+          FLAIR_PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
 
   # flair#1807: the CLI spawn-budget gate. Every test that spawns the CLI entry
   # must carry its own child deadline (a `timeout:` on the spawn), and the case
@@ -2252,7 +2270,7 @@ jobs:
   # gate rejects newly added exception keys, and there is no skip flag.
   cli-spawn-budgets:
     name: "Doc/Code Lint: CLI spawn budgets"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -2304,7 +2322,7 @@ jobs:
     # check that cannot go red is not a control. If dist/ is missing or empty
     # the script exits non-zero rather than passing vacuously.
     name: "Dist ESM: require() + top-level await guard"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: build
     steps:

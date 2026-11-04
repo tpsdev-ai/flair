@@ -103,7 +103,6 @@ const { bindCli, register } = await import(env.RESTORE_SEAM_BACKUP);
 const { resolveOpsTarget } = await import(env.RESTORE_SEAM_CLI);
 bindCli({
   addSharedCredentialOptions(command) { return command.option("--admin-pass <pass>").option("--admin-user <user>"); },
-  applyAdminPassFile() {},
   resolveHttpPort() { throw new Error("unexpected local port resolution"); },
   resolveOpsPort() { throw new Error("unexpected local ops port resolution"); },
   resolveOpsTarget,

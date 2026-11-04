@@ -5,6 +5,8 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { delimiter, dirname, join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
+// @ts-expect-error — plain .mjs helper, no type declarations by design.
+import { readAllowlistHistory, validateAllowlist, validateAllowlistHistory } from "../../scripts/audit-gate.mjs";
 
 /**
  * The dependency audit gate run against the real audit tools (flair#2278).
@@ -19,8 +21,10 @@ import { tempDir } from "../helpers/temp-dir.ts";
  * gate's exit status and output. The servers record every request, and each
  * gate case checks which fixture each tool reached.
  *
- * The fixture allowlist has no entries, so a gate run that gets past both
- * audit stages passes exactly when both stages report zero advisories.
+ * The fixture allowlist has no entries unless a case writes its own (the ADK
+ * uuid cases copy the committed uuid entries); with no entries, a gate run that
+ * gets past both audit stages passes exactly when both stages report zero
+ * advisories.
  */
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -32,6 +36,11 @@ const TEST_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"
 /** The bun version the `audit` job installs with setup-bun. */
 const PINNED_BUN = /\n  audit:\n[\s\S]*?bun-version: "([^"]+)"/.exec(TEST_YML)?.[1];
 
+/**
+ * The day the fixture gate runs as "today": after the committed uuid entries'
+ * `added` (2026-10-09) and before their `expires` (2026-11-15).
+ */
+const FIXTURE_TODAY = "2026-10-10";
 /** Ports production Flair listens on; a fixture server must never hold one. */
 const RESERVED_PORTS = new Set([9925, 9926, 19925, 19926]);
 /** A fixture server drops a connection idle this long. */
@@ -71,6 +80,41 @@ const tarballStem = (pkg: string) => pkg.replace(/^@/, "").replace("/", "-");
 /** The gate's arguments: each input's flag followed by the prefix `prefixOf` gives it. */
 const prefixArgs = (prefixOf: (input: (typeof CONSUMER_INPUTS)[number]) => string) =>
   CONSUMER_INPUTS.flatMap((input) => [input.flag, prefixOf(input)]);
+
+/**
+ * Commits a fixture's allowlist so the gate can read the history it checks.
+ * The default commit day is the latest `added` day in the file, so the history
+ * boundary and the pinned today agree with the entries' dates.
+ */
+function commitAllowlistHistory(root: string, date?: string) {
+  const entries = JSON.parse(readFileSync(join(root, ".github/audit-allowlist.json"), "utf8")).entries ?? [];
+  const addedDays = entries.map((entry: { added?: string }) => entry.added)
+    .filter((day: unknown): day is string => typeof day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(day));
+  date ??= `${addedDays.sort().at(-1) ?? "2026-01-01"}T12:00:00Z`;
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "fixture",
+    GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+    GIT_COMMITTER_NAME: "fixture",
+    GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+    GIT_AUTHOR_DATE: date,
+    GIT_COMMITTER_DATE: date,
+  };
+  for (const args of [["init", "-q"], ["add", ".github/audit-allowlist.json"], ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "fixture allowlist"]]) {
+    const res = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", env, timeout: 20_000 });
+    if (res.status !== 0) throw new Error(`fixture git ${args[0]} failed (${res.status}): ${res.stderr}`);
+  }
+}
+
+/** The validator's problems for a fixture's allowlist on the pinned day. */
+function allowlistProblems(root: string, today = FIXTURE_TODAY): string[] {
+  const allowlist = JSON.parse(readFileSync(join(root, ".github/audit-allowlist.json"), "utf8"));
+  const day = new Date(`${today}T00:00:00Z`);
+  return [
+    ...validateAllowlist(allowlist, day),
+    ...validateAllowlistHistory(allowlist, readAllowlistHistory(root), day),
+  ];
+}
 
 /** The advisory the "advisory" registry answer lists for DEP. */
 const ADVISORY_ANSWER = {
@@ -250,6 +294,7 @@ function makeFixture(opts: FixtureOptions): Fixture {
     join(root, ".github", "audit-allowlist.json"),
     JSON.stringify({ policy: ALLOWLIST_POLICY, entries: [] }),
   );
+  commitAllowlistHistory(root);
 
   writeFileSync(
     join(root, "package.json"),
@@ -312,7 +357,7 @@ function makeFixture(opts: FixtureOptions): Fixture {
       npm_config_globalconfig: join(root, "npmrc-global"),
       npm_config_cache: join(root, "cache", "npm"),
       BUN_INSTALL_CACHE_DIR: join(root, "cache", "bun"),
-      AUDIT_GATE_TODAY: "2026-10-01",
+      AUDIT_GATE_TODAY: FIXTURE_TODAY,
     },
   };
 }
@@ -564,8 +609,12 @@ describe("ADK uuid paths from real npm audit", () => {
         }));
         const allowlist = JSON.parse(readFileSync(join(REPO_ROOT, ".github/audit-allowlist.json"), "utf8"));
         writeFileSync(join(f.root, ".github/audit-allowlist.json"), JSON.stringify({
-          policy: ALLOWLIST_POLICY, entries: allowlist.entries.filter((entry: { package: string }) => entry.package === "uuid"),
+          // The single-chain entry: the uuid copy under @google-cloud/vertexai.
+          policy: ALLOWLIST_POLICY, entries: allowlist.entries.filter((entry: { package: string; introducedBy: string }) =>
+            entry.package === "uuid" && entry.introducedBy === chain.join(" -> ")),
         }));
+        commitAllowlistHistory(f.root);
+        expect(allowlistProblems(f.root)).toEqual([]);
         const run = await runProcess(process.execPath, [
           join(f.root, "scripts/audit-gate.mjs"),
           ...prefixArgs((input) => (input.source === "npm-install-adk" ? adkPrefix : f.prefixes[input.source]!)),
@@ -581,6 +630,76 @@ describe("ADK uuid paths from real npm audit", () => {
           expect(run.stdout).toContain(`installed version ${version} differs from allowlist version 9.0.1`);
           expect(run.stdout).not.toContain(PASS_MARKER);
         } else {
+          expect(run.stdout).toContain(PASS_MARKER);
+        }
+      } finally {
+        await Promise.all([bunRegistry.close(), npmRegistry.close()]);
+      }
+    }, CASE_BUDGET_MS);
+  }
+});
+
+describe("two ADK uuid copies from real npm audit, one allowlist entry per copy", () => {
+  for (const { extra, title } of [
+    { extra: false, title: "allows both copies when each chain covers its own node" },
+    { extra: true, title: "blocks a third uuid copy that no entry's chain covers" },
+  ]) {
+    it(title, async () => {
+      const bunRegistry = await startRegistry("clean");
+      const npmRegistry = await startRegistry("uuid");
+      try {
+        const f = makeFixture({ bunRegistry: bunRegistry.url, npmRegistry: npmRegistry.url });
+        const adkPrefix = join(f.root, "adk-prefix");
+        const adkTgz = `file:../packed/${tarballStem("@tpsdev-ai/adk-flair")}-${FIXTURE_VERSION}.tgz`;
+        const manifest = { name: "adk-consumer", version: "1.0.0", dependencies: {
+          "@tpsdev-ai/adk-flair": adkTgz, ...(extra ? { uuid: "9.0.1" } : {}),
+        } };
+        writeFileSync(join(f.root, "packages/adk-flair-js/package.json"), JSON.stringify({
+          name: "@tpsdev-ai/adk-flair", version: FIXTURE_VERSION, dependencies: { "@google/adk": "*" },
+        }));
+        const deps = (...names: string[]) => Object.fromEntries(names.map((name) => [name, "*"]));
+        const rows: [string, Record<string, unknown>][] = [
+          ["node_modules/@tpsdev-ai/adk-flair", { name: "@tpsdev-ai/adk-flair", version: FIXTURE_VERSION, dependencies: deps("@google/adk"), resolved: adkTgz }],
+          ["node_modules/@google/adk", { name: "@google/adk", version: "1.0.0", dependencies: deps("@google-cloud/vertexai") }],
+          ["node_modules/@google-cloud/vertexai", { name: "@google-cloud/vertexai", version: "1.0.0", dependencies: deps("google-auth-library") }],
+          ["node_modules/@google-cloud/vertexai/node_modules/google-auth-library", { name: "google-auth-library", version: "1.0.0", dependencies: deps("gaxios", "gtoken") }],
+          ["node_modules/@google-cloud/vertexai/node_modules/gaxios", { name: "gaxios", version: "1.0.0", dependencies: deps("uuid") }],
+          ["node_modules/@google-cloud/vertexai/node_modules/uuid", { name: "uuid", version: "9.0.1" }],
+          ["node_modules/gtoken", { name: "gtoken", version: "1.0.0", dependencies: deps("gaxios") }],
+          ["node_modules/gtoken/node_modules/gaxios", { name: "gaxios", version: "1.0.0", dependencies: deps("uuid") }],
+          ["node_modules/gtoken/node_modules/uuid", { name: "uuid", version: "9.0.1" }],
+          ...(extra ? [["node_modules/uuid", { name: "uuid", version: "9.0.1" }] as [string, Record<string, unknown>]] : []),
+        ];
+        const packages: Record<string, object> = { "": manifest };
+        for (const [node, row] of rows) {
+          packages[node] = row;
+          mkdirSync(join(adkPrefix, node), { recursive: true });
+          const { resolved: _resolved, ...installed } = row;
+          writeFileSync(join(adkPrefix, node, "package.json"), JSON.stringify(installed));
+        }
+        writeFileSync(join(adkPrefix, "package.json"), JSON.stringify(manifest));
+        writeFileSync(join(adkPrefix, "package-lock.json"), JSON.stringify({
+          ...manifest, lockfileVersion: 3, requires: true, packages,
+        }));
+        const allowlist = JSON.parse(readFileSync(join(REPO_ROOT, ".github/audit-allowlist.json"), "utf8"));
+        const uuidEntries = allowlist.entries.filter((entry: { package: string }) => entry.package === "uuid");
+        expect(uuidEntries.length).toBe(2);
+        writeFileSync(join(f.root, ".github/audit-allowlist.json"), JSON.stringify({ policy: ALLOWLIST_POLICY, entries: uuidEntries }));
+        commitAllowlistHistory(f.root);
+        expect(allowlistProblems(f.root)).toEqual([]);
+        const run = await runProcess(process.execPath, [
+          join(f.root, "scripts/audit-gate.mjs"),
+          ...prefixArgs((input) => (input.source === "npm-install-adk" ? adkPrefix : f.prefixes[input.source]!)),
+        ], f.root, f.env, GATE_TIMEOUT_MS);
+        expect(run.timedOut).toBe(false);
+        expect(run.stderr).not.toContain("FAILED TO RUN");
+        expect(npmRegistry.requests).toContain(BULK_REQUEST);
+        if (extra) {
+          expect(run.status).toBe(1);
+          expect(run.stdout).toContain('node "node_modules/uuid" in npm-install-adk is covered by no allowlist entry');
+          expect(run.stdout).not.toContain(PASS_MARKER);
+        } else {
+          expect(run.status).toBe(0);
           expect(run.stdout).toContain(PASS_MARKER);
         }
       } finally {

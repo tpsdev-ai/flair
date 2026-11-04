@@ -37,6 +37,8 @@
  * `src/cli.ts`, so every branch here is unit-testable without a daemon.
  */
 
+import { REFUSED_CODES } from "./connect-phase.js";
+
 /** The five states, as a discriminated union — never booleans. */
 export type DaemonState =
   | { state: "RUNNING"; pid: number }
@@ -453,7 +455,7 @@ export function classifyHealthProbe(
     | { kind: "network-error"; code?: string },
 ): HealthResult {
   if (input.kind === "network-error") {
-    if (input.code === "ECONNREFUSED" || input.code === "ConnectionRefused") {
+    if (input.code !== undefined && REFUSED_CODES.includes(input.code)) {
       return { kind: "refused" };
     }
     return { kind: "unreachable" };

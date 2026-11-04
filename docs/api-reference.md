@@ -6,7 +6,7 @@ adopter does not have to read `resources/` or `schemas/` to see what is
 callable.
 
 - **Auth model:** [docs/auth.md](auth.md), [SECURITY.md](../SECURITY.md)
-- **Access invariant:** [DESIGN.md](../DESIGN.md) — open within the org, closed
+- **Access invariant:** [DESIGN.md](https://github.com/tpsdev-ai/flair/blob/main/DESIGN.md) — open within the org, closed
   at the federation edge
 - **Federation pairing and sync:** [docs/federation.md](federation.md)
 - **Source of truth for tables:** [`schemas/*.graphql`](../schemas/)
@@ -632,4 +632,4 @@ Raw operations-API Memory deletes create no deletion history. A scan alerts when
 - [docs/rem.md](rem.md) — MemoryCandidate promote/reject
 - [docs/entity-vocabulary.md](entity-vocabulary.md) — `entities` grammar
 - [docs/embedding-in-a-harper-app.md](embedding-in-a-harper-app.md) — in-process API
-- [`packages/flair-client/README.md`](../packages/flair-client/README.md) — typed HTTP client
+- [`packages/flair-client/README.md`](https://github.com/tpsdev-ai/flair/blob/main/packages/flair-client/README.md) — typed HTTP client

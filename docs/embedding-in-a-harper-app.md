@@ -385,7 +385,7 @@ export async function registerAgent(id, { publicKey = "pending", admin = false }
 
 ### What we measured, so you do not have to
 
-Run end to end on **Harper 5.1.22**, from a second component loaded into the same instance — the exact shape above. `test/integration/in-process-agents.test.ts` in the Flair repo is that run, and `test/fixtures/inproc-app` is the component it drives.
+Run end to end on **Harper 5.1.22**, from a second component loaded into the same instance — the exact shape above. `test/integration-heavy/in-process-agents.test.ts` in the Flair repo is that run, and `test/fixtures/inproc-app` is the component it drives.
 
 | Claim | Result |
 |---|---|
@@ -404,4 +404,4 @@ Handlers return a `Response` for `401`/`403`/`400` rather than throwing — chec
 
 ## See also
 
-[Integrations](integrations.md) · [Deployment](deployment.md) · [Federation](federation.md) · [Auth](auth.md) · [Architecture](../DESIGN.md)
+[Integrations](integrations.md) · [Deployment](deployment.md) · [Federation](federation.md) · [Auth](auth.md) · [Architecture](https://github.com/tpsdev-ai/flair/blob/main/DESIGN.md)

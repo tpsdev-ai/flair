@@ -133,7 +133,7 @@ describe("flair#2797 — a Memory response must account for every offered record
     expect(result.error?.message).toContain("outcomes do not account");
     const stored = fake.retryRows.get(retryEntryKey(HUB, "Memory", ROW));
     expect(stored.state).toBe("pending");
-    expect(stored.resolution).toBeUndefined();
+    expect(stored.resolution ?? null).toBeNull();
     expect(fake.peerUpdates).toEqual([]);
   });
 

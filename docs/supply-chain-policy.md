@@ -54,14 +54,13 @@ Some `dependencies` entries are exact-pinned (`harper@5.3.4`, `commander@14.0.3`
 
   Note the corollary, measured during flair#893: an optional peer that is simply *absent* installs silently — npm prints no warning at all — so it cannot be relied on to prompt anyone to install it. Anything a user must install for a feature to work needs to be documented, or detected and reported at runtime.
 - `bun.lock` is committed and `bun install --frozen-lockfile` is run in CI (the `test-unit` job's "Install dependencies" step in `.github/workflows/test.yml`, after the bake-time step). That lockfile gate fails on the package.json and bun.lock mismatches bun detects, not on every one (§2 lists those measured, and a recorded version outside its declared range that it accepts); `scripts/check-workspace-deps.mjs` compares each recognized internal `@tpsdev-ai/*` dependency's literal declared version to the version the target package ships, and accepts `workspace:` declarations (e.g. `workspace:*` at `packages/cursor-wake-runner/package.json`, line 22; skip at `scripts/check-workspace-deps.mjs`, line 59).
-- Pin updates happen via deliberate, test-gated PRs — never auto-merged. **Renovate is enabled** (the shared org preset at `.github/renovate-preset.json`, with `.github/renovate.json` holding only flair-specific exceptions) to *propose* these updates on a schedule, but it respects the bake-time cooldown (`minimumReleaseAge: "7 days"`, matching `FLAIR_DEP_MIN_AGE_DAYS`) and opens PRs only — `automerge` is off, so every bump flows through the full test suite + K&S review. Renovate uses `rangeStrategy: "pin"` so it proposes exact-version bumps (never re-widens to ranges) and shares the keep-current allow-list with `check-dep-ages.mjs`. Vulnerability alerts bypass the Renovate cooldown, so Renovate can propose an advisory fix immediately; the CI age gate can still hold a fresh pinned npm production dependency.
+- Pin updates happen via deliberate, test-gated PRs — never auto-merged. **Renovate is enabled** (the shared org preset at `.github/renovate-preset.json`, with `.github/renovate.json` holding only flair-specific exceptions) to *propose* these updates on a schedule; `automerge` is off, so every bump flows through the full test suite + K&S review. Renovate uses `rangeStrategy: "replace"` so it preserves declared ranges and shares the keep-current allow-list with `check-dep-ages.mjs`; an exact pin still receives exact-version updates. Vulnerability alerts bypass the Renovate cooldown, so Renovate can propose an advisory fix immediately; the CI age gate can still hold a fresh pinned npm production dependency.
 
 ### 3. Internal dep version lockstep
 
 Every `@tpsdev-ai/*` dep declared in any workspace package must match the version that workspace package ships. Enforced by `scripts/check-workspace-deps.mjs` in the test-unit CI job.
 
 - Why: prevents the v0.8.0 bug shape where `openclaw-flair@0.8.0` declared `@tpsdev-ai/flair-client@0.5.0`, shipping a 3-version-old client to consumers of the published tarball.
-- See `notes/dogfood-log.md` for the full incident.
 
 ### 4. Workspace `bun.lock` is the source of truth
 
@@ -103,10 +102,13 @@ Both mechanisms independently forced a pass (`|| echo` made the shell exit 0, so
 | `class` | `no-patch-published`, `vendor-pinned`, or `remediation-available` |
 | `introducedBy` | the dependency edge that pulls it in |
 | `reason` | why it cannot be fixed here, specifically |
-| `added`, `expires` | hard dates; lifetime is capped by severity |
+| `added`, `expires` | each must be a real calendar date. Lifetime is `expires − added`; `added` must be on or before the first commit's UTC day containing the id in parsed snapshots, following file renames and comparing ids case-insensitively |
+| `overCapApproval` | an over-cap entry's approval: `approvedBy`, `reason`, `approvedOn` and `expires`. `approvedBy` records a name; the gate does not verify that name. Approval is reviewed in the PR |
 | `removeWhen` | the concrete condition that retires the entry |
 
-`scripts/audit-gate.mjs` fails the build on: an unlisted advisory, a malformed entry, an entry parked beyond its severity cap (critical 30 days, high 60, moderate/low 180), an **expired** entry, a **stale** entry whose advisory no longer appears, or a `no-patch-published` entry for which a patched version has since shipped. That last pair matters — an allowlist that only ever grows is the same failure with more ceremony.
+An advisory can have several entries (for example one per install source or dependency chain), and one entry may still name several sources; an entry is identified by its `ghsa`, `package`, `sources` and `introducedBy`. At most one entry per advisory and package may name `bun` or the root npm install. When an advisory has several entries, each entry that names another consumer install must have an `introducedBy` chain that resolves to an installed copy there, and each reported copy must be covered by exactly one entry. `vendor-pinned` is refused for `bun`, which the root `overrides` control.
+
+`scripts/audit-gate.mjs` fails the build on: an unlisted advisory, a malformed entry, an entry whose `added` is after today or later than the first commit's UTC day containing its id in parsed snapshots (following file renames, comparing ids case-insensitively), or a first history day after today, an entry parked beyond its cumulative severity cap (critical 30 days, high 60, moderate/low 180) unless it carries a valid over-cap approval, an **expired** entry, a **stale** entry whose advisory no longer appears (or, for an advisory with several entries, an entry that covers no reported location in a source it names), or, when the registry re-check succeeds, a `no-patch-published` entry for which a patched version has since shipped. An entry over its cap passes only with `overCapApproval` carrying all four members, a non-blank name and reason, real calendar dates, `approvedOn` no later than today and before its `expires`, an entry that does not outlive the approval, and an approval no longer than the severity cap. A shallow repository, unreadable history or invalid JSON snapshot fails the run before advisory matching.
 
 When an entry expires the build fails and a human re-decides. **That is the mechanism working, not a flaw.** Re-dating an entry without re-reading its reason is how this file rots back into the thing it replaced.
 
@@ -124,7 +126,7 @@ Run it locally with `node scripts/audit-gate.mjs --explain`.
 
 Renovate opens PRs to propose dependency updates so we don't drift behind upstream indefinitely — but on our terms, not the registry's. The org preset (`.github/renovate-preset.json`) is common to all tpsdev-ai repos; `.github/renovate.json` holds only flair-specific overrides (workspace-internal dep exclusions, keep-current allow-list)
 
-Renovate is configured to never auto-merge (`automerge: false`), to pin (`rangeStrategy: "pin"`, consistent with §2), and to respect the bake-time cooldown (`minimumReleaseAge: "7 days"` by default, matching `FLAIR_DEP_MIN_AGE_DAYS` in `check-dep-ages.mjs`), so by default it proposes only versions that have cleared the detection window — the two named exceptions are vulnerability fixes and the keep-current list below. Non-major updates are grouped per ecosystem (npm/Bun, Python, GitHub Actions, Docker); a manager outside those four gets no ecosystem-wide group from the four explicit rules (groups inherited from config:recommended may still apply); majors land as isolated PRs. The keep-current allow-list (`harper`, `harper-fabric-embeddings`, `@harperfast/oauth`) mirrors the script's `DEFAULT_KEEP_CURRENT` — keep the two in lockstep when either changes. Vulnerability alerts bypass the cooldown: Renovate can propose an advisory fix immediately. Flair's CI age gate (`check-dep-ages.mjs`) can still block a fresh npm dependency version it checks (an exact pin, or the version bun.lock resolves a range to; §2); other fresh versions follow the 7-day cooldown unless an explicit exception, such as the keep-current list, applies. The control for the fast-track is not the cooldown: it is `automerge: false` plus the full CI suite (including the bake-time and workspace-deps gates) and a K&S review on every Renovate PR. Docker image digests in Dockerfiles and compose files land in the docker group; images in workflow `container:`/`services:` are proposed by the github-actions manager and land in the github-actions group. The preset is in the CODEOWNERS trust root (`@heskew`): Renovate reads it from the default branch for every repo that extends it, so a change to it takes the same human as a change to the release tagger.
+Renovate is configured with `automerge: false`, `rangeStrategy: "replace"` (§2), and `minimumReleaseAge: "7 days"` by default. The explicit ecosystem rules group `minor`, `patch`, `pin`, and `digest` updates per ecosystem (npm/Bun, Python, GitHub Actions, Docker); groups inherited from config:recommended may also apply. The shared preset leaves major updates ungrouped; repository-specific rules can group them. The keep-current allow-list (`harper`, `harper-fabric-embeddings`, `@harperfast/oauth`) mirrors the script's `DEFAULT_KEEP_CURRENT` — keep the two in lockstep when either changes. Vulnerability alerts bypass the cooldown: Renovate can propose an advisory fix immediately. Flair's CI age gate (`check-dep-ages.mjs`) can still block a fresh npm dependency version it checks (an exact pin, or the version bun.lock resolves a range to; §2). The control for the fast-track is not the cooldown: it is `automerge: false` plus the full CI suite (including the bake-time and workspace-deps gates) and a K&S review on every Renovate PR. Docker and GitHub Actions updates with types `minor`, `patch`, `pin`, or `digest` receive the corresponding ecosystem group. These explicit rules do not group `pinDigest` updates. The preset is in the CODEOWNERS trust root (`@heskew`): Renovate reads it from the default branch for every repo that extends it, so a change to it takes the same human as a change to the release tagger.
 
 ### `scripts/check-workspace-deps.mjs` (already shipped, PR #368)
 
@@ -166,7 +168,7 @@ Mirrors the CI test-unit gates locally so issues are caught at `git commit` time
 Runs three checks before each commit:
 - `check-workspace-deps.mjs` — workspace internal-dep version lockstep
 - `check-dep-ages.mjs` — supply-chain bake-time (≥7 days for the external dependency versions §2 describes)
-- `check-impl-term-leaks.sh` — no Bead refs / impl labels in user-facing docs, `CHANGELOG.md`, or `.changelog/`
+- `check-impl-term-leaks.sh` — no Bead refs / impl labels in user-facing docs, `CHANGELOG.md`, or `.changelog/` <!-- docs-freshness-allow: names the files the gate scans -->
 
 Bypass with `git commit --no-verify` when warranted (rare; CI will still catch you). Skip just the dep-ages check (the slowest one, ~2-5s of registry fetches) with `FLAIR_PRECOMMIT_SKIP_DEP_AGES=1 git commit`.
 
@@ -216,7 +218,6 @@ Add `packageRules` only for your own exceptions. The preset carries no `@tpsdev-
 
 ## See also
 
-- `notes/dogfood-log.md` — internal incidents that have shaped this policy
 - `scripts/check-workspace-deps.mjs` — the workspace-internal dep consistency gate
 - `scripts/check-dep-ages.mjs` — the bake-time dep guard
 - `ops/scripts/git-hooks/pre-commit-secret-guard.sh` — pre-commit secret blocker (cross-repo)

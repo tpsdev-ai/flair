@@ -3,7 +3,7 @@ import { isDeliberateInternalVerdict } from "./internal-authority.js";
 import { FORBIDDEN, UNAUTH } from "./record-type-kit.js";
 import { buildProvenance } from "./provenance.js";
 import { databases } from "harper";
-import { refuseAdkSourcedSoulWrite } from "./soul-adk-guard.js";
+import { SOUL_SCOPE_FIELDS_REFUSAL, suppliesSoulScopeFields } from "../src/lib/soul-scope-fields.js";
 
 export type SoulWriteSource = "operator" | "internal";
 
@@ -66,10 +66,20 @@ export async function refuseLearnedSoulWrite(content: any): Promise<Response | n
   return null;
 }
 
-/** Content guards after source authorization: dated vendor-tag bridge, then the
- *  generic learned-content backstop. New connectors need no Soul-side branch. */
+/** Refuse a write that would store a non-empty `scopeTag` or a non-empty
+ *  `tags` array: Soul has no dedicated or enforced per-user scope field (flair#1540). */
+export function refuseSoulScopeFields(content: any): Response | null {
+  return suppliesSoulScopeFields(content) ? FORBIDDEN(SOUL_SCOPE_FIELDS_REFUSAL) : null;
+}
+
+/** Content guards after source authorization: the vendor-neutral scope-field
+ *  refusal, then the generic learned-content backstop. New connectors need no
+ *  Soul-side branch.
+ *
+ *  `content` is the row this write would store: POST and PUT pass the request
+ *  body, PATCH the merged row, so a stored row's scope fields decide a PATCH. */
 export async function refuseSoulWriteContent(content: any): Promise<Response | null> {
-  const adk = await refuseAdkSourcedSoulWrite(content);
-  if (adk) return adk;
+  const scope = refuseSoulScopeFields(content);
+  if (scope) return scope;
   return refuseLearnedSoulWrite(content);
 }

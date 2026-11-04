@@ -4,7 +4,7 @@
 # The component name must match the directory under `node_modules/` that Harper
 # resolves it from (componentLoader.ts walks up from this directory looking for
 # `node_modules/<componentName>`); the `package:` identifier is only consulted
-# at deploy time. test/integration/in-process-agents.test.ts materialises that
+# at deploy time. test/integration-heavy/in-process-agents.test.ts materialises that
 # symlink against the worktree before starting Harper.
 name: inproc-app
 rest: true
