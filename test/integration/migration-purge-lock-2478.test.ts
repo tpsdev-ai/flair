@@ -321,7 +321,7 @@ describe("flair#2478 slice 3b — the purge writer (real Harper)", () => {
     // The purge's one Memory write on the row is the row delete; it stages no
     // field update.
     expect(h.writesBy("pmp-a1", PURGE_WRITER), "the purge wrote fields, or did not delete the row exactly once").toEqual([
-      { writer: PURGE_WRITER, method: "delete", id: "pmp-a1", fields: [] },
+      { writer: PURGE_WRITER, method: "delete", id: "pmp-a1", fields: [], held: ["pmp-a1"] },
     ]);
     expect((await h.readRow("pmp-a2")).content).toBe("content of pmp-a2");
   }, 300_000);

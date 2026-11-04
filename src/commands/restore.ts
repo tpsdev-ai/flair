@@ -6,13 +6,14 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { resolveAdminUser } from "../lib/auth-resolve.js";
+import { addAdminPassOptions, isLocalBase, resolveAdminUser, sendJsonRequest } from "../lib/auth-resolve.js";
 import { readBackupArtifact } from "../lib/backup-artifact.js";
 import { loadApprovedArchive } from "../lib/backup-approval-store.js";
 import type { RestoreArchive } from "../lib/restore-archive.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { comparePreservedFields } from "../lib/restore-verify.js";
-import { SOUL_SCOPE_FIELDS_REFUSAL, suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
+import { suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
+import { listAgentCandidates, requireLiveListing, type ApiCall } from "../rem/restore.js";
 import * as render from "../render.js";
 import { existsSync } from "node:fs";
 
@@ -35,14 +36,16 @@ export function register(program: Command): void {
 // ─── flair restore ────────────────────────────────────────────────────────────
 
 
-program
-  .command("restore <path>")
-  .description("Import a Flair backup archive")
-  .option("--merge", "Add/update records without deleting existing (default)")
-  .option("--replace", "Delete archived Soul and Memory IDs first, then import")
-  .option("--port <port>", "Harper HTTP port")
-  .option("--url <url>", "Flair base URL (overrides --port)")
-  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+addAdminPassOptions(
+  program
+    .command("restore <path>")
+    .description("Import a Flair backup archive")
+    .option("--merge", "Add/update records without deleting existing (default)")
+    .option("--replace", "Delete archived Soul and Memory IDs first, then import")
+    .option("--port <port>", "Harper HTTP port")
+    .option("--url <url>", "Flair base URL (overrides --port)"),
+  "Admin password (or set FLAIR_ADMIN_PASS env)",
+)
   .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--dry-run", "Show what would be imported without making changes")
   .action(async (backupPath: string, opts) => {
@@ -116,6 +119,13 @@ program
       process.exitCode = 1;
     }
     const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+    // Every preflight read and every restore write targets baseUrl and refuses
+    // redirects, so a method-specific redirect is named instead of sent to a
+    // location the preflight did not check. The read raises ApiHttpError for a
+    // non-2xx reply, which is the shape the reused candidate-listing helper
+    // turns into its route guidance.
+    const preflightCall: ApiCall = (method, path, body) =>
+      sendJsonRequest(new URL(`${baseUrl}${path}`), method, body, auth, isLocalBase(baseUrl), { refuseRedirects: true, withholdResponseBodyDebug: true });
 
     console.log(`Restoring from: ${backupPath}`);
     console.log(`Archive SHA-256: ${admitted}`);
@@ -129,14 +139,18 @@ program
       return;
     }
 
-    async function adminWrite(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<{ status: number | undefined; error: string | undefined }> {
+    async function adminWrite(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<{ status: number | undefined; error: string | undefined; redirected: boolean }> {
       try {
         const res = await fetch(`${baseUrl}${path}`, {
           method,
           headers: { "Content-Type": "application/json", Authorization: auth },
           body: body === undefined ? undefined : JSON.stringify(body),
+          redirect: "manual",
           signal: AbortSignal.timeout(10_000),
         });
+        if (res.status >= 300 && res.status < 400) {
+          return { status: res.status, error: undefined, redirected: true };
+        }
         // The refusal name is read from the body, never the outcome: a body
         // that cannot be read keeps the status this write answered with.
         let error: string | undefined;
@@ -145,11 +159,16 @@ program
         } catch {
           error = undefined;
         }
-        return { status: res.status, error };
+        return { status: res.status, error, redirected: false };
       } catch {
-        return { status: undefined, error: undefined };
+        return { status: undefined, error: undefined, redirected: false };
       }
     }
+
+    /** A redirect on a restore write, named rather than followed. */
+    const redirectFailure = (name: string, row: any, method: string, status: number): string =>
+      `${label(name, row)}: ${method} was answered with HTTP ${status} redirect, which restore does not follow; `
+        + "no request was sent to the redirected location";
 
     /** The `error` name in a refusal body, when it carries one. */
     function errorName(text: string): string | undefined {
@@ -168,29 +187,202 @@ program
 
     if (mode === "replace") {
       // A replace replay sends every archived Soul row back whole after
-      // attempting to delete the archived ids. The server refuses a Soul write
-      // that supplies a non-empty `scopeTag` or `tags` array (flair#1540), so a
-      // row it would refuse must stop the replay before the deletes, or the
-      // refused row may lose its live copy (flair#2931). Merge mode deletes
-      // nothing and is not checked here.
-      const refusedSouls = souls.filter((row) => suppliesSoulScopeFields(row)).map((row) => row.id);
-      if (refusedSouls.length > 0) {
-        for (const id of refusedSouls) {
-          console.error(
-            `Error: Soul ${id}: supplies a non-empty scopeTag or tags array, `
-              + "which the Soul scope-field rule refuses; no rows were deleted",
-          );
+      // deleting the archived ids. The server refuses a Soul write that
+      // supplies a non-empty `scopeTag` or `tags` array (flair#1540) or whose
+      // `value` equals a same-agent Memory content or MemoryCandidate claim
+      // (resources/soul-write-policy.ts), so a row either rule would refuse
+      // must stop the replay before the deletes, or the refused row may lose
+      // its live copy (flair#2931, #2941). Merge mode deletes nothing and is
+      // not checked here.
+      //
+      // The learned-content comparison runs against the state each Soul PUT
+      // will meet: the archived Memory ids are deleted first, and a failed
+      // Memory DELETE stops the run before any Soul delete, so those rows are
+      // gone when the Souls are written. They are written back after the Souls,
+      // so a live Memory row counts only when its id is not in the archive.
+      // Every live candidate counts: replace never deletes MemoryCandidate rows.
+      const LEARNED_REFUSAL = "soul_value_is_learned_content";
+      const writtenSouls = souls;
+      const refusals: string[] = [];
+      const scopeRefused = new Set<string>();
+      for (const row of writtenSouls) {
+        if (!suppliesSoulScopeFields(row)) continue;
+        scopeRefused.add(String(row.id));
+        refusals.push(
+          `Error: Soul ${row.id}: the archived row supplies a non-empty scopeTag or tags array, `
+            + "which the Soul scope-field rule refuses; edit that row in the archive, then re-run; no rows were deleted",
+        );
+      }
+
+      // Soul id -> value each Soul PUT will send, per owning agent.
+      const learnedCandidates = new Map<string, Map<string, string[]>>();
+      for (const row of writtenSouls) {
+        const id = String(row.id);
+        if (scopeRefused.has(id)) continue;
+        if (typeof row.value !== "string" || row.value === "") continue;
+        if (typeof row.agentId !== "string" || row.agentId === "") continue;
+        let byValue = learnedCandidates.get(row.agentId);
+        if (byValue === undefined) {
+          byValue = new Map();
+          learnedCandidates.set(row.agentId, byValue);
         }
+        const ids = byValue.get(row.value) ?? [];
+        ids.push(id);
+        byValue.set(row.value, ids);
+      }
+
+      const learnedRefusal = (soulId: string, table: "Memory" | "MemoryCandidate", row: any): string => {
+        const field = table === "Memory" ? "content" : "claim";
+        const subject = row?.id === undefined || row.id === null || row.id === ""
+          ? `a ${table} row without an id`
+          : `${table} ${row.id}`;
+        return `Error: Soul ${soulId}: its value equals the ${field} of the same agent's ${subject}, `
+          + `which the Soul learned-content rule refuses (${LEARNED_REFUSAL}); `
+          + `remove or edit that ${table} row or the archived Soul's value, then re-run; no rows were deleted`;
+      };
+
+      // A live Memory row whose id is in the archive is deleted before the
+      // Souls are written, so it does not count as a survivor.
+      const archivedMemoryIds = new Set(
+        memories.filter((row: any) => row?.id !== undefined && row.id !== null && row.id !== "").map((row: any) => String(row.id)),
+      );
+
+      try {
+        for (const [agentId, byValue] of learnedCandidates) {
+          const liveMemories = requireLiveListing(
+            await preflightCall("GET", `/Memory?agentId=${encodeURIComponent(agentId)}`),
+            "Memory",
+            agentId,
+          );
+          const survivorByContent = new Map<string, any>();
+          for (const memory of liveMemories) {
+            if (!memory || typeof memory !== "object" || Array.isArray(memory)) {
+              throw new Error(`the Memory listing for agent ${agentId} carries a row that is not an object`);
+            }
+            if (memory.agentId !== agentId) continue;
+            if (typeof memory.content !== "string") continue;
+            const id = memory.id === undefined || memory.id === null || memory.id === "" ? undefined : String(memory.id);
+            if (id !== undefined && archivedMemoryIds.has(id)) continue;
+            if (!survivorByContent.has(memory.content)) survivorByContent.set(memory.content, memory);
+          }
+
+          const unmatched = new Map(byValue);
+          for (const [value, soulIds] of byValue) {
+            const match = survivorByContent.get(value);
+            if (match === undefined) continue;
+            for (const soulId of soulIds) refusals.push(learnedRefusal(soulId, "Memory", match));
+            unmatched.delete(value);
+          }
+          if (unmatched.size === 0) continue;
+
+          // The admin candidate route lists ids only; each listed row is read
+          // until every unmatched value has matched, to compare its claim
+          // exactly.
+          const candidates = await listAgentCandidates(preflightCall, agentId);
+          for (const candidate of candidates) {
+            if (unmatched.size === 0) break;
+            const row = await preflightCall("GET", `/MemoryCandidate/${encodeRecordId(candidate.id)}`);
+            if (!row || typeof row !== "object" || Array.isArray(row) || typeof row.claim !== "string") {
+              throw new Error(`MemoryCandidate ${candidate.id} could not be read as a row with a claim`);
+            }
+            if (row.agentId !== agentId) continue;
+            const soulIds = unmatched.get(row.claim);
+            if (soulIds === undefined) continue;
+            for (const soulId of soulIds) refusals.push(learnedRefusal(soulId, "MemoryCandidate", candidate));
+            unmatched.delete(row.claim);
+          }
+        }
+      } catch (err: any) {
+        // A refusal already collected stays visible even when a later listing
+        // read fails: the operator should see each refusal collected so far,
+        // not only the error that stopped it (flair#2941).
+        for (const refusal of refusals) console.error(refusal);
+        console.error(`Error: ${err?.message ?? String(err)}`);
+        console.error(
+          "Error: the replace stopped before any delete: a Soul write rule could not be checked against "
+            + "the live rows; check the target's Memory listing and MemoryCandidate listing responses, "
+            + "then re-run. No rows were deleted.",
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      if (refusals.length > 0) {
+        for (const refusal of refusals) console.error(refusal);
         process.exitCode = 1;
         return;
       }
       console.log("\nDeleting existing data (replace mode)...");
-      for (const { name, rows } of collections.filter(({ name }) => name !== "Agent")) {
-        for (const row of rows) {
-          const { status } = await adminWrite("DELETE", `/${name}/${encodeRecordId(row.id)}`);
-          if (status === undefined || (status !== 404 && (status < 200 || status >= 300))) {
-            failures.push(diagnostic(name, row, "DELETE", status));
+      // Memory rows go first: the learned-content check above assumes the
+      // archived Memory ids are gone before a Soul write. A Memory DELETE the
+      // server refuses leaves that row in place, so stop here rather than
+      // delete a Soul whose PUT the surviving row would refuse.
+      // Archived Memories whose DELETE succeeded or whose outcome is unknown:
+      // if a later DELETE fails, attempt their write-back, verify each successful
+      // PUT, and report any PUT or verification failure by id.
+      const memoriesToRestore: any[] = [];
+      for (const row of memories) {
+        const { status, redirected } = await adminWrite("DELETE", `/Memory/${encodeRecordId(row.id)}`);
+        if (redirected) {
+          failures.push(redirectFailure("Memory", row, "DELETE", status!));
+        } else if (status === undefined || (status !== 404 && (status < 200 || status >= 300))) {
+          failures.push(diagnostic("Memory", row, "DELETE", status));
+          if (status === undefined) memoriesToRestore.push(row);
+        } else if (status >= 200 && status < 300) {
+          memoriesToRestore.push(row);
+        }
+      }
+      if (failures.length > 0) {
+        console.error("Error: a Memory DELETE failed; no Soul row was deleted.");
+        // Attempt the archived Memory write-backs, verify each successful PUT,
+        // and report any PUT or verification failure by id.
+        for (const row of memoriesToRestore) {
+          const { status, redirected } = await adminWrite("PUT", `/Memory/${encodeRecordId(row.id)}`, row);
+          if (redirected || status === undefined || status < 200 || status >= 300) {
+            failures.push(
+              `${label("Memory", row)}: could not be restored after a later DELETE failed (`
+                + `${redirected ? `PUT was answered with HTTP ${status} redirect, which restore does not follow` : `PUT HTTP ${status ?? "unavailable"}`})`,
+            );
+            continue;
           }
+          let problem: string | undefined;
+          try {
+            const res = await fetch(`${baseUrl}/Memory/${encodeRecordId(row.id)}`, {
+              headers: { Authorization: auth },
+              redirect: "manual",
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (res.status >= 300 && res.status < 400) {
+              problem = `GET verification was answered with HTTP ${res.status} redirect, which restore does not follow`;
+            } else if (!res.ok) {
+              problem = `GET verification failed (HTTP ${res.status})`;
+            } else {
+              const restored = await res.json();
+              const mismatched = comparePreservedFields("Memory", row, restored);
+              if (!restored || typeof restored !== "object" || Array.isArray(restored)) {
+                problem = "GET verification returned a row that is not an object";
+              } else if (restored.id !== row.id) {
+                problem = "GET verification returned a different id";
+              } else if (mismatched.length > 0) {
+                problem = `GET verification failed (field mismatch: ${mismatched.join(", ")})`;
+              }
+            }
+          } catch {
+            problem = "GET verification failed";
+          }
+          if (problem !== undefined) {
+            failures.push(`${label("Memory", row)}: could not be restored after a later DELETE failed: ${problem}`);
+          }
+        }
+        fail();
+        return;
+      }
+      for (const row of souls) {
+        const { status, redirected } = await adminWrite("DELETE", `/Soul/${encodeRecordId(row.id)}`);
+        if (redirected) {
+          failures.push(redirectFailure("Soul", row, "DELETE", status!));
+        } else if (status === undefined || (status !== 404 && (status < 200 || status >= 300))) {
+          failures.push(diagnostic("Soul", row, "DELETE", status));
         }
       }
     }
@@ -198,12 +390,14 @@ program
     for (const { name, rows } of collections) {
       console.log(`Restoring ${name} records...`);
       for (const row of rows) {
-        const { status, error } = await adminWrite("PUT", `/${name}/${encodeRecordId(row.id)}`, row);
-        if (status === undefined || status < 200 || status >= 300) {
-          // A failed write whose error name equals this refusal's gets that
-          // name appended; the row and status are reported either way
-          // (flair#1540).
-          failures.push(`${diagnostic(name, row, "PUT", status)}${error === SOUL_SCOPE_FIELDS_REFUSAL ? `: ${error}` : ""}`);
+        const { status, error, redirected } = await adminWrite("PUT", `/${name}/${encodeRecordId(row.id)}`, row);
+        if (redirected) {
+          failures.push(redirectFailure(name, row, "PUT", status!));
+        } else if (status === undefined || status < 200 || status >= 300) {
+          // A failed Soul write appends the refusal name the server returned,
+          // so a learned-content 403 is named rather than read as an auth
+          // failure (flair#2931, #2941).
+          failures.push(`${diagnostic(name, row, "PUT", status)}${name === "Soul" && error ? `: ${error}` : ""}`);
         }
       }
     }
@@ -213,12 +407,18 @@ program
         const path = `/${name}/${encodeRecordId(row.id)}`;
         let status: number | undefined;
         let restored: any;
+        let redirect: number | undefined;
         try {
           const res = await fetch(`${baseUrl}${path}`, {
             headers: { Authorization: auth },
+            redirect: "manual",
             signal: AbortSignal.timeout(10_000),
           });
           status = res.status;
+          if (res.status >= 300 && res.status < 400) {
+            redirect = res.status;
+            throw new Error();
+          }
           if (!res.ok) throw new Error();
           restored = await res.json();
           if (!restored || typeof restored !== "object" || Array.isArray(restored)
@@ -227,7 +427,9 @@ program
             throw new Error();
           }
         } catch {
-          failures.push(`${diagnostic(name, row, "GET", status)}: verification failed`);
+          failures.push(redirect === undefined
+            ? `${diagnostic(name, row, "GET", status)}: verification failed`
+            : `${label(name, row)}: GET verification was answered with HTTP ${redirect} redirect, which restore does not follow`);
           continue;
         }
         // Report mismatched field names without mismatched content values.

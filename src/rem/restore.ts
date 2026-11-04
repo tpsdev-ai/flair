@@ -225,7 +225,7 @@ function asArray(raw: unknown): any[] {
  * rows, the scope preflight would see no live Souls, and the DELETE and PUT
  * loops would run over a table this run never read (flair#2931).
  */
-function requireLiveListing(raw: unknown, table: "Memory" | "Soul", agentId: string): any[] {
+export function requireLiveListing(raw: unknown, table: "Memory" | "Soul", agentId: string): any[] {
   if (Array.isArray(raw)) return raw;
   if (raw && typeof raw === "object") {
     const obj = raw as Record<string, unknown>;
@@ -284,8 +284,13 @@ function incompleteListing(agentId: string, state: string, remedy = ""): Error {
  * listing. A `hasMore: true` page with no candidates (the cursor cannot move),
  * an id listed twice, or more than {@link CANDIDATE_LIST_MAX_PAGES} pages is
  * refused.
+ *
+ * Exported for `flair restore --replace`, which lists the agent of each
+ * archived Soul row it will write a non-empty value for before any delete, so
+ * it can compare that agent's live candidate claims with the values it is
+ * about to write.
  */
-async function listAgentCandidates(apiCall: ApiCall, agentId: string): Promise<Array<{ id: string }>> {
+export async function listAgentCandidates(apiCall: ApiCall, agentId: string): Promise<Array<{ id: string }>> {
   const listed: Array<{ id: string }> = [];
   const seen = new Set<string>();
   let after: string | undefined;
@@ -525,12 +530,26 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   // the row is live, deleting it first also makes the pre-restore rollback
   // refuse it. Merge mode does not exist here; this restore always replaces
   // the agent's rows.
-  const refusedSouls = refusedSoulReplayIds([...souls, ...currentSouls]);
+  const snapshotRefusedSouls = new Set(refusedSoulReplayIds(souls));
+  const liveRefusedSouls = new Set(refusedSoulReplayIds(currentSouls));
+  const refusedSouls = [...new Set([...snapshotRefusedSouls, ...liveRefusedSouls])];
   if (refusedSouls.length > 0) {
     for (const id of refusedSouls) {
+      const inSnapshot = snapshotRefusedSouls.has(id);
+      const inLive = liveRefusedSouls.has(id);
+      const source = inSnapshot && inLive
+        ? "in the snapshot row and the live row"
+        : inSnapshot ? "in the snapshot row" : "in the live row";
+      const remedies: string[] = [];
+      if (inSnapshot) remedies.push("Restore from a different snapshot, or edit that row in the snapshot file, then re-run.");
+      if (inLive) {
+        remedies.push(inSnapshot
+          ? "Clear tags/scopeTag on the live row (PATCH) or delete it, then re-run."
+          : "Clear tags/scopeTag on that row (PATCH) or delete it, then re-run.");
+      }
       errors.push(
-        `soul-scope-preflight: Soul ${id} supplies a non-empty scopeTag or tags array, `
-          + "which the Soul scope-field rule refuses; no target rows were deleted or written.",
+        `soul-scope-preflight: Soul ${id} supplies a non-empty scopeTag or tags array ${source}, `
+          + `which the Soul scope-field rule refuses; no target rows were deleted or written. ${remedies.join(" ")}`,
       );
     }
     result.status = "failed";

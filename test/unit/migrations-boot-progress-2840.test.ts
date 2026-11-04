@@ -28,7 +28,8 @@ import {
   setMigrationProgress,
 } from "../../resources/migrations/progress.ts";
 import { getMigrationStatusSnapshot } from "../../resources/migrations/status.ts";
-import { defaultStatePath, writeMigrationStateEntry } from "../../resources/migrations/state.ts";
+import { defaultStatePath } from "../../resources/migrations/state.ts";
+import { seedMigrationStateEntry } from "../helpers/migration-state.ts";
 import { computeQualityReport } from "../../src/commands/quality.ts";
 
 const REASON = "Memory/Relationship tables never became ready within 30s — this boot's migration cycle was skipped (it retries on the next restart)";
@@ -43,8 +44,8 @@ afterEach(() => {
   noteSelectedMigrationDataDir(null);
 });
 
-function writeCompletedWithRecord(dataDir: string, id: string): void {
-  writeMigrationStateEntry(defaultStatePath(dataDir), id, {
+async function writeCompletedWithRecord(dataDir: string, id: string): Promise<void> {
+  await seedMigrationStateEntry(defaultStatePath(dataDir), id, {
     completedAtVersion: "0.1.0",
     completedAt: "2026-01-01T00:00:00.000Z",
     lastOutcome: "success",
@@ -56,9 +57,9 @@ function writeCompletedWithRecord(dataDir: string, id: string): void {
 }
 
 describe("boot failure after seeding from the state file (flair#2840)", () => {
-  it("marks a seeded `completed` entry failed, keeps its unconfirmed record, and quality reports not clean", () => {
+  it("marks a seeded `completed` entry failed, keeps its unconfirmed record, and quality reports not clean", async () => {
     const dataDir = tempDir("flair-boot-2840-");
-    writeCompletedWithRecord(dataDir, "mig-a");
+    await writeCompletedWithRecord(dataDir, "mig-a");
     const resolved = seedBootProgress(["mig-a"], { [MIGRATION_DATA_DIR_ENV]: dataDir });
     expect(resolved.dataDir).toBe(dataDir);
     expect(listMigrationProgress().find((p) => p.id === "mig-a")?.state).toBe("completed");
@@ -79,9 +80,9 @@ describe("boot failure after seeding from the state file (flair#2840)", () => {
     expect(report.instance.haltedMigrations.map((m) => m.id)).toEqual(["mig-a"]);
   });
 
-  it("leaves a seeded entry alone once the runner has written it this boot", () => {
+  it("leaves a seeded entry alone once the runner has written it this boot", async () => {
     const dataDir = tempDir("flair-boot-2840-");
-    writeCompletedWithRecord(dataDir, "mig-a");
+    await writeCompletedWithRecord(dataDir, "mig-a");
     seedBootProgress(["mig-a"], { [MIGRATION_DATA_DIR_ENV]: dataDir });
     setMigrationProgress({ id: "mig-a", rowsDone: 0, rowsRemaining: 0, state: "halted", reason: "pre-flight integrity check failed: x" });
 
@@ -93,13 +94,13 @@ describe("boot failure after seeding from the state file (flair#2840)", () => {
 });
 
 describe("boot seeds from the data dir selected for writes (flair#2840)", () => {
-  it("skips an earlier refused candidate with a `.migrations` path and seeds from the later writable one", () => {
+  it("skips an earlier refused candidate with a `.migrations` path and seeds from the later writable one", async () => {
     const root = tempDir("flair-boot-2840-dirs-");
     const refused = join(root, "refused");
     const staleTarget = join(root, "stale-target");
     const writable = join(root, "writable");
     for (const dir of [refused, staleTarget, writable]) mkdirSync(dir);
-    writeMigrationStateEntry(defaultStatePath(staleTarget), "mig-b", {
+    await seedMigrationStateEntry(defaultStatePath(staleTarget), "mig-b", {
       completedAtVersion: "0.1.0",
       completedAt: "2026-01-01T00:00:00.000Z",
       lastOutcome: "success",
@@ -107,7 +108,7 @@ describe("boot seeds from the data dir selected for writes (flair#2840)", () => 
       rowsRemaining: 0,
     });
     symlinkSync(join(staleTarget, ".migrations"), join(refused, ".migrations"));
-    writeMigrationStateEntry(defaultStatePath(writable), "mig-b", {
+    await seedMigrationStateEntry(defaultStatePath(writable), "mig-b", {
       lastOutcome: "halted",
       reason: "completion gate failed: rowsRemaining=0",
       rowsProcessed: 1,

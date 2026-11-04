@@ -14,6 +14,9 @@ import {
   npmAuditReportRefusal,
   bunAuditReportRefusal,
   registryUrlFor,
+  overCapApprovalProblems,
+  readAllowlistHistory,
+  validateAllowlistHistory,
   vendorPinnedNodeProblems,
 } from "../../scripts/audit-gate.mjs";
 
@@ -106,6 +109,32 @@ function declareDependencies(
 /** Every input's flag followed by its prefix. */
 const prefixArgs = (prefixOf: (source: string) => string) =>
   CONSUMER_INPUTS.flatMap((input) => [input.flag, prefixOf(input.source)]);
+
+/**
+ * Commits a fixture's allowlist so the gate can read the history its cumulative
+ * lifetime check depends on.
+ */
+function commitAllowlistHistory(root: string, date?: string) {
+  const snapshots = JSON.parse(readFileSync(join(root, ".github/audit-allowlist.json"), "utf8"));
+  const addedDays = snapshots.entries.map((entry: { added?: string }) => entry.added)
+    .filter((day: unknown): day is string => typeof day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(day));
+  date ??= `${addedDays.sort().at(-1) ?? "2026-01-01"}T12:00:00Z`;
+  mkdirSync(join(root, "tmp"), { recursive: true });
+  const env = {
+    ...process.env,
+    TMPDIR: join(root, "tmp"),
+    GIT_AUTHOR_NAME: "fixture",
+    GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+    GIT_COMMITTER_NAME: "fixture",
+    GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+    GIT_AUTHOR_DATE: date,
+    GIT_COMMITTER_DATE: date,
+  };
+  for (const args of [["init", "-q"], ["add", ".github/audit-allowlist.json"], ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "fixture allowlist"]]) {
+    const res = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", env, timeout: 20_000 });
+    if (res.status !== 0) throw new Error(`fixture git ${args[0]} failed (${res.status}): ${res.stderr}`);
+  }
+}
 
 /**
  * These tests exist because the audit step's original defect was not a wrong
@@ -236,6 +265,7 @@ describe("the four added consumer-install inputs, stand-in tools (flair#2757)", 
       writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({
         policy: ALLOWLIST.policy, entries: opts.entries ?? [],
       }));
+      commitAllowlistHistory(root);
       const prefixes: Record<string, string> = Object.fromEntries(
         CONSUMER_INPUTS.map(({ source }) => [source, join(root, `prefix-${source}`)]),
       );
@@ -688,6 +718,7 @@ describe("vendor-pinned npm-install nodes", () => {
         policy: { maxLifetimeDaysBySeverity: { moderate: 180 } },
         entries: [adk ? {
           ...ALLOWLIST.entries.find((entry: { package: string }) => entry.package === "uuid"),
+          added: "2026-09-03",
         } : {
           ghsa: "GHSA-w2qp-rph6-63g4",
           package: "fastify",
@@ -702,6 +733,7 @@ describe("vendor-pinned npm-install nodes", () => {
           removeWhen: "harper's shrinkwrap resolves fastify >=5.12.1",
         }],
       }));
+      commitAllowlistHistory(root);
       writeFileSync(join(root, "bin/bun"), "#!/bin/sh\nprintf '{}\\n'\n");
       const chain = ["@tpsdev-ai/adk-flair", "@google/adk", "@google-cloud/vertexai", "google-auth-library", "gaxios", "uuid"];
       let parent = tree;
@@ -952,12 +984,17 @@ describe("several allowlist entries for one advisory, per source and per locatio
    * 10.2.4. `bun` prints `bun`; `npm` prints `npm[source]` in that source's
    * prefix and an empty report elsewhere.
    */
-  function runMulti(opts: { entries: object[]; bun?: object; npm?: Record<string, object>; today?: string }) {
+  function runMulti(opts: { entries: object[]; bun?: object; npm?: Record<string, object>; today?: string; history?: "full" | "none" | "unreadable" }) {
     const root = mkdtempSync(join(tmpdir(), "flair-audit-multi-"));
     try {
       for (const dir of ["scripts", ".github", "bin", "home", "tmp"]) mkdirSync(join(root, dir));
       writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts/audit-gate.mjs")));
       writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({ policy: ALLOWLIST.policy, entries: opts.entries }));
+      if (opts.history !== "none") commitAllowlistHistory(root);
+      if (opts.history === "unreadable") {
+        rmSync(join(root, ".github/audit-allowlist.json"));
+        symlinkSync(join(root, ".github/missing.json"), join(root, ".github/audit-allowlist.json"));
+      }
       const prefixes: Record<string, string> = Object.fromEntries(
         CONSUMER_INPUTS.map(({ source }) => [source, join(root, `prefix-${source}`)]),
       );
@@ -1192,13 +1229,513 @@ describe("several allowlist entries for one advisory, per source and per locatio
       `allowlist entry[1] (${UUID} / uuid, sources [npm-install-adk], via ${GTOKEN}) (moderate) EXPIRED on 2026-10-02`,
     );
   }, 24_000);
+
+  it("rejects a nonexistent added date before advisory matching with real Git history", () => {
+    const res = runMulti({ entries: [uuidEntry(VERTEXAI, { added: "2026-02-30" })], npm: uuidAt(VERTEXAI_NODE) });
+    expectBlocked(res, '"added" must be a real calendar date (YYYY-MM-DD)');
+    expect(res.stdout).toContain("no advisory was matched against it");
+    expect(res.stdout).not.toContain("NOT allowlisted");
+  }, 12_000);
+
+  it("prints an over-cap entry without --explain", () => {
+    const entries = [uuidEntry(VERTEXAI, {
+      added: "2025-01-01",
+      expires: "2026-10-01",
+      overCapApproval: {
+        approvedBy: "fixture-approver",
+        reason: "Fixture approval reason.",
+        approvedOn: "2026-09-01",
+        expires: "2026-10-01",
+      },
+    })];
+    const res = runMulti({ entries, npm: uuidAt(VERTEXAI_NODE), today: "2026-09-02" });
+    expectPass(res);
+    expect(res.stdout).toContain(
+      "OVER-CAP: GHSA-w5hq-g745-h8pq uuid — cumulative 638d lifetime, 180d moderate cap, " +
+        "approval recorded for fixture-approver until 2026-10-01: Fixture approval reason.",
+    );
+  }, 12_000);
+
+  it("fails closed before matching when the allowlist has no readable history", () => {
+    const res = runMulti({
+      entries: [uuidEntry(VERTEXAI)],
+      npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE),
+      history: "none",
+    });
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain("FAILED TO READ ALLOWLIST HISTORY");
+    expect(res.stdout).not.toContain("NOT allowlisted");
+  }, 12_000);
+
+  it("fails closed before matching when the allowlist file cannot be read", () => {
+    const res = runMulti({
+      entries: [uuidEntry(VERTEXAI)],
+      npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE),
+      history: "unreadable",
+    });
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain("cannot read");
+    expect(res.stdout).not.toContain("NOT allowlisted");
+  }, 12_000);
+});
+
+// ─── Cumulative lifetime and over-cap approval (#2897) ──────
+
+describe("cumulative allowlist lifetime (#2897)", () => {
+  const GHSA = "GHSA-aaaa-bbbb-cccc";
+  const NEW_GHSA = "GHSA-dddd-eeee-ffff";
+  const policy = { maxLifetimeDaysBySeverity: { high: 60 } };
+  const entry = (extra: Record<string, unknown> = {}) => ({
+    ghsa: GHSA,
+    package: "pkg-a",
+    severity: "high",
+    class: "remediation-available",
+    sources: ["bun"],
+    approvedBy: "fixture",
+    introducedBy: "fixture -> pkg-a",
+    reason: "Fixture entry.",
+    added: "2026-09-01",
+    expires: "2026-10-01",
+    removeWhen: "the fixture resolves a patched copy",
+    ...extra,
+  });
+
+  /** Runs one git command in a fixture repo with a fixed commit date. */
+  function gitAt(root: string, date: string, args: string[]) {
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "fixture",
+      GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+      GIT_COMMITTER_NAME: "fixture",
+      GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+      GIT_AUTHOR_DATE: date,
+      GIT_COMMITTER_DATE: date,
+    };
+    const res = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", env, timeout: 20_000 });
+    if (res.status !== 0) throw new Error(`fixture git ${args[0]} failed (${res.status}): ${res.stderr || res.stdout || res.error?.message}`);
+    return res.stdout;
+  }
+
+  /** A real repository with commits of the supplied allowlist snapshots. */
+  function historyRepo(commits: { date: string; entries: object[]; raw?: string }[]) {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-history-"));
+    mkdirSync(join(root, ".github"), { recursive: true });
+    gitAt(root, commits[0]!.date, ["init", "-q"]);
+    commits.forEach((commit, i) => {
+      writeFileSync(join(root, ".github/audit-allowlist.json"), commit.raw ?? JSON.stringify({ policy, entries: commit.entries }));
+      gitAt(root, commit.date, ["add", ".github/audit-allowlist.json"]);
+      gitAt(root, commit.date, ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "--allow-empty", "-q", "-m", `fixture ${i}`]);
+    });
+    return root;
+  }
+
+  for (const date of ["2026-02-30", "2026-04-31", "2025-02-29", "2026-13-01"]) {
+    for (const field of ["added", "expires"]) {
+      it(`rejects nonexistent ${field} ${date} with a calendar-date problem`, () => {
+        expect(validateAllowlist({ policy, entries: [entry({ [field]: date })] }, new Date("2026-09-21")).join("\n"))
+          .toContain(`"${field}" must be a real calendar date (YYYY-MM-DD)`);
+      });
+    }
+    for (const field of ["approvedOn", "expires"]) {
+      it(`rejects nonexistent overCapApproval.${field} ${date} with a calendar-date problem`, () => {
+        const candidate = entry({
+          overCapApproval: { approvedBy: "fixture", reason: "Fixture approval.", approvedOn: "2026-09-01", expires: "2026-10-01", [field]: date },
+        });
+        expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-09-21")).join("\n"))
+          .toContain(`"overCapApproval.${field}" must be a real calendar date (YYYY-MM-DD)`);
+      });
+    }
+    it(`rejects nonexistent first history day ${date} with a calendar-date problem`, () => {
+      const firstDays = new Map([[GHSA.toUpperCase(), date]]);
+      expect(validateAllowlistHistory({ entries: [entry()] }, firstDays, new Date("2026-09-21")).join("\n"))
+        .toContain("first history day must be a real calendar date (YYYY-MM-DD)");
+    });
+    it(`rejects nonexistent AUDIT_GATE_TODAY ${date} before reading inputs`, () => {
+      const res = spawnSync(process.execPath, [join(REPO_ROOT, "scripts/audit-gate.mjs")], {
+        encoding: "utf8", env: { ...process.env, AUDIT_GATE_TODAY: date }, timeout: 12_000,
+      });
+      expect(res.status).toBe(2);
+      expect(res.stderr).toContain("AUDIT_GATE_TODAY must be a real calendar date (YYYY-MM-DD)");
+      expect(res.stderr).not.toContain("missing --npm-install-prefix");
+    });
+  }
+
+  for (const [date, nextDay] of [["2024-02-29", "2024-03-01"], ["2026-09-01", "2026-09-02"]]) {
+    it(`accepts calendar date ${date} in entries, approvals and history`, () => {
+      const candidate = entry({
+        added: date, expires: nextDay,
+        overCapApproval: { approvedBy: "fixture", reason: "Fixture approval.", approvedOn: date, expires: nextDay },
+      });
+      expect(validateAllowlist({ policy, entries: [candidate] }, new Date(date!))).toEqual([]);
+      expect(validateAllowlistHistory({ entries: [candidate] }, new Map([[GHSA.toUpperCase(), date]]), new Date(date!))).toEqual([]);
+    });
+  }
+
+  it("rejects a nonexistent added date that normalizes to a shorter lifetime than the Git history", () => {
+    const root = historyRepo([{ date: "2026-03-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      const firstDays = readAllowlistHistory(root);
+      const firstDay = firstDays.get(GHSA.toUpperCase());
+      expect(firstDay).toBe("2026-03-01");
+      const candidate = entry({ added: "2026-02-30", expires: "2026-05-01" });
+      expect((Date.parse(candidate.expires) - Date.parse(candidate.added)) / 86_400_000).toBe(60);
+      expect((Date.parse(candidate.expires) - Date.parse(firstDay!)) / 86_400_000).toBe(61);
+      expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-03-01")).join("\n"))
+        .toContain('"added" must be a real calendar date (YYYY-MM-DD)');
+      expect(validateAllowlistHistory({ entries: [candidate] }, firstDays, new Date("2026-03-01")).join("\n"))
+        .toContain('"added" must be a real calendar date (YYYY-MM-DD)');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a non-canonical GHSA even when history used that casing", () => {
+    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA.toUpperCase() }] }]);
+    try {
+      expect(validateAllowlist({ policy, entries: [entry({ ghsa: GHSA.toUpperCase() })] }, new Date("2026-09-21")).join("\n"))
+        .toContain('"ghsa" must use canonical casing');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("finds a canonical GHSA whose first history commit used different casing", () => {
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA.toUpperCase() }] },
+      { date: "2026-09-20T12:00:00Z", entries: [{ ghsa: GHSA }] },
+    ]);
+    try {
+      const firstDays = readAllowlistHistory(root);
+      expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
+      expect(validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21"))).not.toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a renewal after a split-line ghsa field is normalized", () => {
+    const original = entry({ added: "2026-09-01", expires: "2026-10-01" });
+    const renewed = entry({ added: "2026-09-20", expires: "2026-11-15" });
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [original], raw: JSON.stringify({ policy, entries: [original] }).replace('"ghsa":', '"ghsa":\n') },
+      { date: "2026-09-20T12:00:00Z", entries: [original] },
+      { date: "2026-09-21T12:00:00Z", entries: [renewed] },
+    ]);
+    try {
+      const firstDays = readAllowlistHistory(root);
+      expect(validateAllowlist({ policy, entries: [renewed] }, new Date("2026-09-21"))).toEqual([]);
+      const problems = validateAllowlistHistory({ policy, entries: [renewed] }, firstDays, new Date("2026-09-21"));
+      expect(problems.join("\n")).toContain("first day this advisory appears in parsed allowlist history (2026-09-01)");
+      expect(problems.join("\n")).toContain("lifetime cap:");
+      expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
+      expect(validateAllowlist({ policy, entries: [{ ...renewed, added: firstDays.get(GHSA.toUpperCase()) }] }, new Date("2026-09-21")).join("\n"))
+        .toContain('lifetime 75d exceeds the 60d cap');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("names an invalid JSON snapshot even when later history is valid", () => {
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [], raw: '{"entries":[' },
+      { date: "2026-09-20T12:00:00Z", entries: [entry()] },
+    ]);
+    try {
+      const sha = gitAt(root, "2026-09-21T12:00:00Z", ["rev-parse", "HEAD~1"]).trim();
+      expect(() => readAllowlistHistory(root)).toThrow(`cannot parse allowlist snapshot ${sha}:.github/audit-allowlist.json`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("finds the first day before an allowlist file rename", () => {
+    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [] }]);
+    try {
+      gitAt(root, "2026-09-02T12:00:00Z", ["mv", ".github/audit-allowlist.json", ".github/old-allowlist.json"]);
+      writeFileSync(join(root, ".github/old-allowlist.json"), JSON.stringify({ policy, entries: [{ ghsa: GHSA }] }));
+      gitAt(root, "2026-09-02T12:00:00Z", ["add", ".github/old-allowlist.json"]);
+      gitAt(root, "2026-09-02T12:00:00Z", ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "first id in old path"]);
+      gitAt(root, "2026-09-20T12:00:00Z", ["mv", ".github/old-allowlist.json", ".github/audit-allowlist.json"]);
+      gitAt(root, "2026-09-20T12:00:00Z", ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "rename allowlist"]);
+      expect(readAllowlistHistory(root).get(GHSA.toUpperCase())).toBe("2026-09-02");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a future-dated first history commit", () => {
+    const root = historyRepo([{ date: "2030-01-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      expect(validateAllowlistHistory({ entries: [entry({ added: "2026-09-01" })] }, readAllowlistHistory(root), new Date("2026-09-21")).join("\n"))
+        .toContain("first history day (2030-01-01) is after today (2026-09-21)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a future added date with existing history", () => {
+    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      const history = readAllowlistHistory(root);
+      expect(history.get(GHSA.toUpperCase())).toBe("2026-09-01");
+      const candidate = entry({ added: "2026-09-22", expires: "2026-10-01" });
+      expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-09-21")).join("\n"))
+        .toContain('"added" (2026-09-22) is after today (2026-09-21)');
+      expect(validateAllowlistHistory({ entries: [candidate] }, history, new Date("2026-09-21")).join("\n"))
+        .toContain('"added" (2026-09-22) is after today (2026-09-21)');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a future approvedOn in a history-backed entry", () => {
+    const root = historyRepo([{ date: "2026-08-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      const candidate = entry({
+        added: "2026-07-01",
+        expires: "2026-09-20",
+        overCapApproval: {
+          approvedBy: "fixture-approver",
+          reason: "Fixture approval reason.",
+          approvedOn: "2026-08-03",
+          expires: "2026-09-25",
+        },
+      });
+      expect(readAllowlistHistory(root).get(GHSA.toUpperCase())).toBe("2026-08-01");
+      expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-08-02")).join("\n"))
+        .toContain('"overCapApproval.approvedOn" (2026-08-03) is after today (2026-08-02)');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a future approvedOn even when the entry is within its cap", () => {
+    const root = historyRepo([{ date: "2026-08-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      const candidate = entry({
+        added: "2026-08-01",
+        expires: "2026-09-01",
+        overCapApproval: {
+          approvedBy: "fixture-approver",
+          reason: "Fixture approval reason.",
+          approvedOn: "2026-08-03",
+          expires: "2026-09-25",
+        },
+      });
+      expect(readAllowlistHistory(root).get(GHSA.toUpperCase())).toBe("2026-08-01");
+      expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-08-02")).join("\n"))
+        .toContain('"overCapApproval.approvedOn" (2026-08-03) is after today (2026-08-02)');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a renewal that moves added later", () => {
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] },
+      { date: "2026-09-20T12:00:00Z", entries: [{ ghsa: GHSA }] },
+    ]);
+    try {
+      const firstDays = readAllowlistHistory(root);
+      expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
+      expect(
+        validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21")).join("\n"),
+      ).toContain(
+        '"added" (2026-09-20) is later than the first day this advisory appears in parsed allowlist history (2026-09-01)',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a re-key to another source and chain", () => {
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] },
+      { date: "2026-09-20T12:00:00Z", entries: [{ ghsa: GHSA, package: "pkg-b", sources: ["npm-install"] }] },
+    ]);
+    try {
+      const firstDays = readAllowlistHistory(root);
+      expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
+      expect(
+        validateAllowlistHistory(
+          { entries: [entry({ package: "pkg-b", sources: ["npm-install"], added: "2026-09-20" })] },
+          firstDays,
+          new Date("2026-09-21"),
+        ).join("\n"),
+      ).toContain("is later than the first day this advisory appears in parsed allowlist history (2026-09-01)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a delete-then-re-add", () => {
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] },
+      { date: "2026-09-10T12:00:00Z", entries: [] },
+      { date: "2026-09-20T12:00:00Z", entries: [{ ghsa: GHSA }] },
+    ]);
+    try {
+      const firstDays = readAllowlistHistory(root);
+      expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
+      expect(
+        validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21")).join("\n"),
+      ).toContain("first day this advisory appears in parsed allowlist history (2026-09-01)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts an added date moved earlier", () => {
+    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      expect(validateAllowlistHistory({ entries: [entry({ added: "2026-08-15" })] }, readAllowlistHistory(root), new Date("2026-09-21"))).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a new id on or before today and rejects one added later", () => {
+    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      const firstDays = readAllowlistHistory(root);
+      expect(firstDays.has(NEW_GHSA.toUpperCase())).toBe(false);
+      expect(
+        validateAllowlistHistory({ entries: [entry({ ghsa: NEW_GHSA, added: "2026-09-15" })] }, firstDays, new Date("2026-09-15")),
+      ).toEqual([]);
+      expect(
+        validateAllowlistHistory({ entries: [entry({ ghsa: NEW_GHSA, added: "2026-09-16" })] }, firstDays, new Date("2026-09-15")).join("\n"),
+      ).toContain("today (2026-09-15), and no parsed snapshot contained this advisory id");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a shallow history", () => {
+    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    const shallow = mkdtempSync(join(tmpdir(), "flair-audit-shallow-"));
+    try {
+      const clone = spawnSync("git", ["clone", "-q", "--depth", "1", `file://${root}`, shallow], {
+        encoding: "utf8",
+        timeout: 20_000,
+      });
+      expect(clone.status).toBe(0);
+      expect(() => readAllowlistHistory(shallow)).toThrow(/shallow/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(shallow, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an unreadable allowlist history", () => {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-unreadable-"));
+    try {
+      mkdirSync(join(root, ".github"), { recursive: true });
+      symlinkSync(join(root, ".github/missing.json"), join(root, ".github/audit-allowlist.json"));
+      expect(() => readAllowlistHistory(root)).toThrow(/cannot read/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a failed git call", () => {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-nogit-"));
+    try {
+      mkdirSync(join(root, ".github"), { recursive: true });
+      writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({ policy, entries: [] }));
+      expect(() => readAllowlistHistory(root)).toThrow(/git rev-parse failed/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  const TODAY = new Date("2026-08-02");
+  const validApproval = {
+    approvedBy: "fixture-approver",
+    reason: "Fixture approval reason.",
+    approvedOn: "2026-08-01",
+    expires: "2026-09-25",
+  };
+  const overCapEntry = (extra: Record<string, unknown> = {}) =>
+    entry({ added: "2026-07-01", expires: "2026-09-20", ...extra });
+  const problems = (entryValue: object) =>
+    validateAllowlist({ policy, entries: [entryValue] }, TODAY).join("\n");
+
+  it("rejects an over-cap entry with no overCapApproval", () => {
+    expect(problems(overCapEntry())).toContain("lifetime 81d exceeds the 60d cap");
+    expect(problems(overCapEntry())).toContain("no overCapApproval is present");
+  });
+
+  it("accepts an over-cap entry with a valid overCapApproval", () => {
+    expect(problems(overCapEntry({ overCapApproval: validApproval }))).toBe("");
+  });
+
+  it("rejects an approval missing a member or carrying a blank reason", () => {
+    const missing = { ...validApproval } as Record<string, unknown>;
+    delete missing.reason;
+    expect(problems(overCapEntry({ overCapApproval: missing }))).toContain('"overCapApproval.reason" is required');
+    expect(problems(overCapEntry({ overCapApproval: { ...validApproval, approvedBy: "  " } }))).toContain(
+      '"overCapApproval.approvedBy" is required and must be non-blank',
+    );
+  });
+
+  it("rejects an approval with an unreal calendar date", () => {
+    expect(problems(overCapEntry({ overCapApproval: { ...validApproval, approvedOn: "2026-02-30" } }))).toContain(
+      '"overCapApproval.approvedOn" must be a real calendar date',
+    );
+  });
+
+  it("rejects an expired approval", () => {
+    expect(
+      problems(
+        overCapEntry({
+          added: "2026-05-01",
+          expires: "2026-07-01",
+          overCapApproval: { ...validApproval, approvedOn: "2026-06-01", expires: "2026-07-01" },
+        }),
+      ),
+    ).toContain("the over-cap approval EXPIRED on 2026-07-01");
+  });
+
+  it("rejects an entry that outlives its approval", () => {
+    expect(
+      problems(
+        overCapEntry({
+          overCapApproval: { ...validApproval, expires: "2026-09-10" },
+        }),
+      ),
+    ).toContain("the entry expires 2026-09-20, after the approval's expiry 2026-09-10");
+  });
+
+  it("rejects an approval longer than the severity cap", () => {
+    expect(
+      problems(
+        overCapEntry({
+          expires: "2026-09-01",
+          overCapApproval: { ...validApproval, approvedOn: "2026-06-01", expires: "2026-09-10" },
+        }),
+      ),
+    ).toContain("the approval lasts 101d, beyond the 60d cap");
+  });
+
+  it("rejects an approval dated after today", () => {
+    expect(
+      problems(overCapEntry({ overCapApproval: { ...validApproval, approvedOn: "2026-09-01" } })),
+    ).toContain('"overCapApproval.approvedOn" (2026-09-01) is after today (2026-08-02)');
+  });
+
+  it("rejects an unknown severity or a missing cap instead of skipping the cap check", () => {
+    expect(problems(overCapEntry({ severity: "severe" }))).toContain('no lifetime cap is configured for severity "severe"');
+    expect(validateAllowlist({ policy: {}, entries: [entry()] }, TODAY).join("\n")).toContain(
+      'no lifetime cap is configured for severity "high"',
+    );
+  });
 });
 
 // ─── Allowlist integrity ─────────────────────────────────────────────────────
 
 describe("the committed allowlist", () => {
   it("passes its own schema validation", () => {
-    expect(validateAllowlist(ALLOWLIST, new Date("2026-07-27"))).toEqual([]);
+    expect(validateAllowlist(ALLOWLIST, new Date("2026-11-02"))).toEqual([]);
   });
 
   it("gives every entry a reason, an expiry and a removal condition", () => {
@@ -1209,14 +1746,17 @@ describe("the committed allowlist", () => {
     }
   });
 
-  it("caps how long an exception may live, by severity", () => {
+  it("caps how long an exception may live, by severity, allowing only a valid over-cap approval", () => {
     // An unexpirable exception is how the original defect survived.
     const caps = ALLOWLIST.policy.maxLifetimeDaysBySeverity;
     expect(caps.critical).toBeLessThanOrEqual(30);
     for (const e of ALLOWLIST.entries) {
       const days = (Date.parse(e.expires) - Date.parse(e.added)) / 86_400_000;
-      expect(days).toBeLessThanOrEqual(caps[e.severity]);
+      const cap = caps[e.severity];
+      expect(typeof cap).toBe("number");
       expect(days).toBeGreaterThan(0);
+      if (days > cap) expect(overCapApprovalProblems(e, new Date("2026-11-02"), cap)).toEqual([]);
+      else expect(days).toBeLessThanOrEqual(cap);
     }
   });
 
@@ -1225,14 +1765,14 @@ describe("the committed allowlist", () => {
     bad.entries[0].severity = "critical";
     bad.entries[0].added = "2026-07-27";
     bad.entries[0].expires = "2027-07-27";
-    const problems = validateAllowlist(bad, new Date("2026-07-27"));
+    const problems = validateAllowlist(bad, new Date("2026-11-02"));
     expect(problems.join("\n")).toContain("exceeds the 30d cap");
   });
 
   it("rejects an entry missing its justification", () => {
     const bad = structuredClone(ALLOWLIST);
     delete bad.entries[0].reason;
-    expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain(
+    expect(validateAllowlist(bad, new Date("2026-11-02")).join("\n")).toContain(
       'missing required field "reason"',
     );
   });
@@ -1240,7 +1780,7 @@ describe("the committed allowlist", () => {
   it("rejects an entry missing its removal condition", () => {
     const bad = structuredClone(ALLOWLIST);
     delete bad.entries[0].removeWhen;
-    expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain(
+    expect(validateAllowlist(bad, new Date("2026-11-02")).join("\n")).toContain(
       'missing required field "removeWhen"',
     );
   });
@@ -1248,7 +1788,7 @@ describe("the committed allowlist", () => {
   it("rejects a hand-waved removal condition", () => {
     const bad = structuredClone(ALLOWLIST);
     bad.entries[0].removeWhen = "later";
-    expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain(
+    expect(validateAllowlist(bad, new Date("2026-11-02")).join("\n")).toContain(
       "must state the concrete condition",
     );
   });
@@ -1256,22 +1796,22 @@ describe("the committed allowlist", () => {
   it("rejects a duplicate advisory id", () => {
     const bad = structuredClone(ALLOWLIST);
     bad.entries.push(structuredClone(bad.entries[0]));
-    expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain("duplicate entry");
+    expect(validateAllowlist(bad, new Date("2026-11-02")).join("\n")).toContain("duplicate entry");
   });
 
   it("rejects an unknown exception class", () => {
     const bad = structuredClone(ALLOWLIST);
     bad.entries[0].class = "because-i-said-so";
-    expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain("unknown class");
+    expect(validateAllowlist(bad, new Date("2026-11-02")).join("\n")).toContain("unknown class");
   });
 
   it("accepts the ADK consumer observation as a source and rejects an unknown one (flair#2398)", () => {
     const ok = structuredClone(ALLOWLIST);
     ok.entries[0].sources = ["npm-install-adk"];
-    expect(validateAllowlist(ok, new Date("2026-07-27"))).toEqual([]);
+    expect(validateAllowlist(ok, new Date("2026-11-02"))).toEqual([]);
     const bad = structuredClone(ALLOWLIST);
     bad.entries[0].sources = ["somewhere-else"];
-    expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain("unknown source");
+    expect(validateAllowlist(bad, new Date("2026-11-02")).join("\n")).toContain("unknown source");
   });
 
   it("carries the ADK consumer-install observation (uuid, glob and minimatch; flair#2398)", () => {
@@ -1640,6 +2180,7 @@ describe("the gate fails closed on a refused stage answer, stand-in tools (flair
         join(root, ".github/audit-allowlist.json"),
         JSON.stringify({ policy: ALLOWLIST.policy, entries: [] }),
       );
+      commitAllowlistHistory(root);
       writeFileSync(join(root, "bin/bun"), `#!/bin/sh\nprintf '%s\\n' '${bunOut}'\n`);
       writeFileSync(join(root, "bin/npm"), `#!/bin/sh\nprintf '%s\\n' '${npmOut}'\n`);
       chmodSync(join(root, "bin/bun"), 0o755);

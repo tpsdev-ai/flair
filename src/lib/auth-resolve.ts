@@ -40,9 +40,9 @@
  *      remote instance; see `resolveLocalAdminPass`).
  *   5. THE FLOOR (flair#747, generalizing flair#742's upgrade-only
  *      fallback) — when NOTHING above resolved to anything sendable at
- *      all, sign the SAME request with every registered key under
- *      `~/.flair/keys` (sorted, deterministic order), first one the server
- *      accepts wins. This is the credential every headless/agent machine
+ *      all, tries candidate key files under `~/.flair/keys` in order (sorted,
+ *      deterministic) until one succeeds or an answer is final. This is the
+ *      credential a headless/agent machine
  *      actually has, and is exactly the flair#741 incident's fix: an agent
  *      key existed the whole time, nothing tried it.
  *
@@ -71,9 +71,13 @@ import {
 } from "node:fs";
 
 import { join } from "node:path";
+import { Option, type Command } from "commander";
 import { createPrivateKey, randomUUID, sign as nodeCryptoSign } from "node:crypto";
 import type { SigningIdentitySource } from "./signing-identity.js";
 import { resolveHome } from "./home.js";
+import { isConnectPhaseFailure } from "./connect-phase.js";
+
+export { isConnectPhaseFailure, REFUSED_CODES } from "./connect-phase.js";
 
 // ─── Failure classification ─────────────────────────────────────────────────
 
@@ -295,29 +299,41 @@ export class ApiRequestTimeout extends Error {
 }
 
 /**
- * Thrown when a request on any other method crosses the whole-request deadline.
- * Expiry cannot establish delivery: the request may not have reached the server,
- * or it may have taken effect. The message says the outcome is unknown, and no
- * caller may retry the write blindly.
+ * Thrown for a write's deadline expiry, non-connect-phase fetch failure, or
+ * failed 2xx body read. No caller may retry the write blindly.
  */
 export class ApiRequestOutcomeUnknown extends Error {
   readonly method: string;
   readonly path: string;
-  readonly deadlineMs: number;
-  /** The status line that arrived before the deadline fired, when one did. */
+  /** The deadline that expired, or undefined for a transport failure. */
+  readonly deadlineMs: number | undefined;
+  /** The status line that arrived before the deadline expired or the response read failed, when one did. */
   readonly status: number | undefined;
-  constructor(method: string, path: string, deadlineMs: number, status: number | undefined, source: RequestDeadlineSource) {
+  constructor(method: string, path: string, deadlineMs: number | undefined, status: number | undefined, source: RequestDeadlineSource, detail?: string) {
     const envName = deadlineEnvName(source);
     super(
-      `${method} ${path} may or may not have taken effect: no complete response within ${deadlineMs} ms` +
-        (envName === undefined ? "" : ` (${envName})`) +
-        `${deadlineStatusClause(status)}. Expiry does not show whether the request was delivered or took effect; do not retry it blindly. ${deadlineRemedy(source)}`,
+      detail ??
+        `${method} ${path} may or may not have taken effect: no complete response within ${deadlineMs} ms` +
+          (envName === undefined ? "" : ` (${envName})`) +
+          `${deadlineStatusClause(status)}. Expiry does not show whether the request was delivered or took effect; do not retry it blindly. ${deadlineRemedy(source)}`,
     );
     this.name = "ApiRequestOutcomeUnknown";
     this.method = method;
     this.path = path;
     this.deadlineMs = deadlineMs;
     this.status = status;
+  }
+
+  /** Name the requested origin and warn against retrying. */
+  static fromTransportFailure(method: string, path: string, url: string, cause: unknown, status?: number): ApiRequestOutcomeUnknown {
+    const detail = status === undefined
+      ? `${method} ${path} to ${url}: no final response; outcome unknown, write may have been applied. ` +
+        `Check the server (or the origin it redirected to) before retrying.`
+      : `${method} ${path} to ${url}: the successful response body could not be read (HTTP ${status}); outcome unknown, write may have been applied. ` +
+        `Check the server (or the origin it redirected to) before retrying.`;
+    const err = new ApiRequestOutcomeUnknown(method, path, undefined, status, "explicit", detail);
+    (err as { cause?: unknown }).cause = cause;
+    return err;
   }
 }
 
@@ -930,6 +946,86 @@ export const ADMIN_PASS_FLAG = "--admin-pass <pass>";
 export const ADMIN_PASS_HELP =
   "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)";
 
+/** Commands whose admin-password pair `addAdminPassOptions` wired. A test walks
+ *  the registered tree and asserts every command that declares `--admin-pass`
+ *  is in it, and every command that declares `--admin-pass-file` except
+ *  `rem nightly enable`, which declares that flag itself as path-only. Inherited
+ *  leaves are not in this set: `federation sync enable` stores the path in the
+ *  unit it installs, and `sync status`/`disable` apply the pair in their own
+ *  hooks. */
+export const adminPassFileWired = new WeakSet<Command>();
+
+export interface AddAdminPassOptionsConfig {
+  adminPassFileHelp?: string;
+  /** Report a refusal instead of the default one-line error. Must not return. */
+  onAdminPassRefusal?: (err: unknown, actionCommand: Command) => never;
+}
+
+/**
+ * Declare the admin-password pair on `cmd`: the argv form and the file form
+ * together, in that order, and apply it in a preAction hook. For a command that
+ * declares the pair, the hook runs after option parsing and before the action
+ * body, so a refused file exits before any request the action makes. A
+ * subcommand that inherits the pair from `cmd` stores the values on `cmd`; the
+ * leaves that apply them (`federation sync status`/`disable`) do so in their
+ * own hooks.
+ */
+export function addAdminPassOptions(
+  cmd: Command,
+  adminPassHelp: string = ADMIN_PASS_HELP,
+  opts: AddAdminPassOptionsConfig = {},
+): Command {
+  const adminPassFile = new Option(ADMIN_PASS_FILE_FLAG, opts.adminPassFileHelp ?? ADMIN_PASS_FILE_HELP);
+  cmd.option(ADMIN_PASS_FLAG, adminPassHelp).addOption(adminPassFile);
+  adminPassFileWired.add(cmd);
+  cmd.hook("preAction", (_thisCommand, actionCommand) => {
+    // A subcommand that inherits the pair (`federation sync status`) stores the
+    // values on this command, not on itself; the leaves that read an inherited
+    // pair apply it in their own hook. Reading only the leaf's opts() would ignore
+    // the inherited pair, leaving `status` able to send its request with the
+    // ambient admin password.
+    if (!actionCommand.options.some((o) => o.long === "--admin-pass-file")) return;
+    const actionOpts = actionCommand.opts() as {
+      adminPass?: string;
+      adminPassFile?: string;
+      inlineAdminPass?: string;
+    };
+    // Recorded before the file is applied: the warning keys on whether
+    // --admin-pass itself was given, not on the value that ends up in the slot.
+    actionOpts.inlineAdminPass =
+      actionCommand.getOptionValueSource("adminPass") === "cli" ? actionOpts.adminPass : undefined;
+    applyAdminPassFile(
+      actionOpts,
+      opts.onAdminPassRefusal
+        ? (err) => opts.onAdminPassRefusal!(err, actionCommand)
+        : undefined,
+    );
+  });
+  return cmd;
+}
+
+/**
+ * Copy a nonempty explicit password into `opts.adminPass`; callers own environment fallback.
+ * Refuse combined options and missing, empty or group-/world-accessible files.
+ * Group/world permission refusals name the path and mode; missing and empty file errors name only the path.
+ */
+export function applyAdminPassFile(
+  opts: { adminPass?: string; adminPassFile?: string },
+  onRefusal?: (err: unknown) => never,
+): void {
+  try {
+    const pass = resolveAdminPassFromSources({
+      adminPassFile: opts.adminPassFile,
+      adminPass: opts.adminPass,
+    });
+    if (pass) opts.adminPass = pass;
+  } catch (err: any) {
+    if (onRefusal) onRefusal(err);
+    console.error(`Error: ${err.message}`);
+    process.exit(1);
+  }
+}
+
 /** The admin username Harper's bootstrap creates and every Basic-auth path
  * historically hardcoded. Kept as the default; overridable per call via
  * `resolveAdminUser` (flair#1345). */
@@ -1029,8 +1125,12 @@ export function resolveKeyPath(agentId: string): string | null {
   return candidates.find((p) => existsSync(p)) ?? null;
 }
 
-/** Build a TPS-Ed25519 auth header from a raw 32-byte seed on disk. */
-export function buildEd25519Auth(agentId: string, method: string, path: string, keyPath: string): string {
+/**
+ * Load a signing key from disk: read the file, decode it (raw 32-byte seed,
+ * base64 seed, full PKCS8 DER or PEM), and require an Ed25519 key. A throw here
+ * is a failure of THIS key file; nothing has been sent for it.
+ */
+function loadEd25519SigningKey(keyPath: string): ReturnType<typeof createPrivateKey> {
   const raw = readFileSync(keyPath);
   const pkcs8Header = Buffer.from("302e020100300506032b657004220420", "hex");
   let privKey: ReturnType<typeof createPrivateKey>;
@@ -1052,11 +1152,29 @@ export function buildEd25519Auth(agentId: string, method: string, path: string, 
       }
     }
   }
+  if (privKey.asymmetricKeyType !== "ed25519") {
+    throw new Error(`signing key ${keyPath} is not an Ed25519 private key`);
+  }
+  return privKey;
+}
+
+/** Build a TPS-Ed25519 auth header from an already-loaded Ed25519 key. */
+function buildEd25519AuthFromKey(
+  agentId: string,
+  method: string,
+  path: string,
+  privKey: ReturnType<typeof createPrivateKey>,
+): string {
   const ts = Date.now().toString();
   const nonce = randomUUID();
   const payload = `${agentId}:${ts}:${nonce}:${method}:${path}`;
   const sig = nodeCryptoSign(null, Buffer.from(payload), privKey).toString("base64");
   return `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${sig}`;
+}
+
+/** Build a TPS-Ed25519 auth header from the key file at `keyPath`. */
+export function buildEd25519Auth(agentId: string, method: string, path: string, keyPath: string): string {
+  return buildEd25519AuthFromKey(agentId, method, path, loadEd25519SigningKey(keyPath));
 }
 
 /** Join a Flair route to an optional base path before signing or sending it. */
@@ -1190,6 +1308,23 @@ export async function authFetch(
   path: string,
   body?: unknown,
 ): Promise<Response> {
+  return (await authFetchWithSentCredentials(baseUrl, agentId, keyPath, method, path, body)).res;
+}
+
+/**
+ * `authFetch`'s request, with the credentials it sent: a caller that renders a
+ * non-ok response needs them to redact a body that echoes the Authorization
+ * header (flair#2889). `sent` is `credentialsInHeader`'s reading of the header
+ * this request sent.
+ */
+export async function authFetchWithSentCredentials(
+  baseUrl: string,
+  agentId: string,
+  keyPath: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ res: Response; sent: SentCredentials }> {
   const url = requestUrl(baseUrl, path);
   let auth: string;
   try {
@@ -1199,11 +1334,12 @@ export async function authFetch(
   }
   const headers: Record<string, string> = { Authorization: auth };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  return fetch(url.href, {
+  const res = await fetch(url.href, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  return { res, sent: credentialsInHeader(auth) };
 }
 
 export function isLocalBase(base: string): boolean {
@@ -1277,27 +1413,57 @@ export async function sendJsonRequest(
   const deadlineSource: RequestDeadlineSource =
     transport.deadlineSource ?? (transport.deadlineMs === undefined ? "env" : "explicit");
   const deadlineMs = resolveRequestDeadlineMs(transport.deadlineMs);
+  const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
+  // Serialize before the transport call: a body that cannot be serialized was
+  // never sent, so it is a serialization failure, not a delivery failure.
+  // Every supplied body is checked (a falsy one such as 0n can still fail to
+  // serialize); a falsy body that does serialize is still omitted, as before.
+  let serializedBody: string | undefined;
+  if (body !== undefined) {
+    try {
+      const serialized = JSON.stringify(body);
+      if (serialized === undefined) throw new Error("JSON.stringify returned undefined");
+      if (body) serializedBody = serialized;
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`${method} ${url.pathname} was not sent: the request body could not be serialized to JSON (${reason}).`);
+    }
+  }
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
   }, deadlineMs);
-  const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
   let res: Response | undefined;
+  let fetchRejected = false;
+  let bodyReadFailed = false;
+  const readBody = async (): Promise<string> => {
+    try {
+      return await res!.text();
+    } catch (err: unknown) {
+      bodyReadFailed = true;
+      throw err;
+    }
+  };
   try {
-    res = await fetch(url.href, {
-      method,
-      headers: {
-        "content-type": "application/json",
-        ...(authHeader ? { authorization: authHeader } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: controller.signal,
-      // "manual" hands back the 3xx itself, so the refusal can name its status;
-      // the location it names is never requested.
-      ...(transport.refuseRedirects ? { redirect: "manual" as const } : {}),
-    });
+    try {
+      res = await fetch(url.href, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          ...(authHeader ? { authorization: authHeader } : {}),
+        },
+        body: serializedBody,
+        signal: controller.signal,
+        // "manual" hands back the 3xx itself, so the refusal can name its status;
+        // the location it names is never requested.
+        ...(transport.refuseRedirects ? { redirect: "manual" as const } : {}),
+      });
+    } catch (err: unknown) {
+      fetchRejected = true;
+      throw err;
+    }
     if (transport.refuseRedirects && res.status >= 300 && res.status < 400) {
       throw new ApiHttpError(res.status, `HTTP ${res.status}: the instance answered with a redirect, which this request does not follow`);
     }
@@ -1307,7 +1473,7 @@ export async function sendJsonRequest(
     // before the empty-body shortcut below, so a zero-length 403 gets the same
     // hint and noCredentials as one with a body (flair#2749).
     if (res.status === 403 && !authHeader) {
-      await res.text();
+      await readBody();
       const hint = noCredentialsHint(isLocal, transport.signedOnly);
       throw new ApiHttpError(403, `HTTP 403: no credentials sent. ${hint}`, /* noCredentials */ true);
     }
@@ -1316,7 +1482,7 @@ export async function sendJsonRequest(
       if (!res.ok) throw ApiHttpError.fromResponse(res.status, "");
       return { ok: true };
     }
-    const text = await res.text();
+    const text = await readBody();
     if (!res.ok) {
       // The FLAIR_DEBUG line's path and body, the message's reason and `body`
       // are redacted with the credential values credentialsInHeader reads from
@@ -1350,6 +1516,18 @@ export async function sendJsonRequest(
       if (readOnly) throw new ApiRequestTimeout(method, url.pathname, deadlineMs, status, deadlineSource);
       throw new ApiRequestOutcomeUnknown(method, url.pathname, deadlineMs, status, deadlineSource);
     }
+    // A connect-phase code identifies failure of the current connection attempt;
+    // it proves unsent delivery only if no earlier redirect was followed.
+    if (fetchRejected && !readOnly && !isConnectPhaseFailure(err)) {
+      throw ApiRequestOutcomeUnknown.fromTransportFailure(method, url.pathname, url.origin, err);
+    }
+    // The status line arrived but the body could not be read. A write's 2xx
+    // response leaves the outcome unknown, and the message names the status
+    // received; a non-2xx status is reported by that status.
+    if (bodyReadFailed && res !== undefined && !readOnly) {
+      if (res.ok) throw ApiRequestOutcomeUnknown.fromTransportFailure(method, url.pathname, url.origin, err, res.status);
+      throw ApiHttpError.fromResponse(res.status, "");
+    }
     throw err;
   } finally {
     clearTimeout(timer);
@@ -1357,12 +1535,66 @@ export async function sendJsonRequest(
 }
 
 /**
+ * The 401 error codes the Ed25519 authentication middleware in
+ * resources/auth-middleware.ts returns when it refuses the credential: an
+ * unparseable header, a timestamp outside the replay window, an unknown agent,
+ * a deactivated principal, or a signature that does not verify. The
+ * middleware's catch around signature verification also covers key import
+ * errors.
+ * A 401 carrying one of these codes moves the tier-5 floor to the next key.
+ * `nonce_replay_detected` is an answer about the REQUEST (a reused nonce) and
+ * `replay_store_unavailable` is a server-side failure; neither is a credential
+ * rejection, so both are final.
+ */
+export const CREDENTIAL_REJECTION_CODES: ReadonlySet<string> = new Set([
+  "invalid_authorization_header",
+  "timestamp_out_of_window",
+  "unknown_agent",
+  "principal_deactivated",
+  "invalid_signature",
+  "signature_verification_failed",
+]);
+
+/** True when the server answered 401 with one of its Ed25519 credential-rejection codes. */
+function isEd25519CredentialRejection(err: unknown): boolean {
+  if (!(err instanceof ApiHttpError) || err.status !== 401) return false;
+  const raw = apiErrorRawBody(err);
+  if (raw === undefined) return false;
+  try {
+    const parsed = JSON.parse(raw);
+    const code = parsed && typeof parsed === "object" ? (parsed as { error?: unknown }).error : undefined;
+    return typeof code === "string" && CREDENTIAL_REJECTION_CODES.has(code);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Tier 5, the floor (flair#747, generalizing flair#742's `verifyAuthedGet`
- * GET-only fallback to any method/body): try every registered key in
- * `keysDir` in sorted (deterministic) filename order, first one that
- * authenticates wins. Returns `undefined` — never throws — when every key
- * fails or none exist, so the caller can rethrow its ORIGINAL
- * no-credentials error rather than a floor-specific one.
+ * GET-only fallback to any method/body): tries candidate key files in
+ * `keysDir` in sorted (deterministic) filename order until one authenticates
+ * or an answer is final. Returns `undefined` when there are no candidate key
+ * files, or when no candidate authenticated: every attempt was skipped for a
+ * key file that cannot be read or decoded as an Ed25519 key, credential-rejected,
+ * or a connect failure; a final answer throws. That lets the caller rethrow its
+ * ORIGINAL no-credentials error rather than a floor-specific one.
+ *
+ * Every request the floor sends refuses redirects (flair#2955), whatever the
+ * caller asked for: the location a 3xx names receives no request, and the 3xx
+ * is thrown as itself — a final answer, never a reason to try another key.
+ *
+ * The floor moves to the next key ONLY when the server refused the Ed25519
+ * credential itself (the 401 codes in `CREDENTIAL_REJECTION_CODES`), when an
+ * attempt that does not follow redirects fails in the connect phase (the
+ * existing network-blip case), or when that candidate's key file cannot be read
+ * or decoded as an Ed25519 key (nothing was sent for it). Failures after a key
+ * is loaded (nonce, signing) are final. Every other response is final too: a
+ * failed HTTP response whose body was read is thrown as itself with its status
+ * and any error code its body names, and a refused redirect is thrown as itself
+ * with its status before any body is read. When
+ * every candidate is refused as a credential, the floor returns `undefined`, so
+ * the caller rethrows its original no-credentials hint, which carries the
+ * operator's remedy.
  */
 export async function tryAgentKeyFloor(
   url: URL,
@@ -1370,7 +1602,6 @@ export async function tryAgentKeyFloor(
   body: unknown,
   keysDir: string,
   transport: {
-    refuseRedirects?: boolean;
     deadlineMs?: number;
     deadlineSource?: RequestDeadlineSource;
     tolerateUnparsedSuccessBody?: boolean;
@@ -1383,21 +1614,46 @@ export async function tryAgentKeyFloor(
     // No keys dir at all — nothing to fall back to.
   }
   const isLocal = isLocalBase(url.origin);
+  // The signed target is identical for every candidate, so build it once,
+  // before any key is loaded. A failure here is about the request itself, not
+  // about any one candidate, so it is final.
+  const target = requestTarget(url);
   for (const kf of keyFiles) {
     const agentId = kf.replace(/\.key$/, "");
     const keyPath = join(keysDir, kf);
+    let privKey: ReturnType<typeof createPrivateKey>;
     try {
-      const authHeader = buildEd25519Auth(agentId, method, requestTarget(url), keyPath);
-      return await sendJsonRequest(url, method, body, authHeader, isLocal, transport);
+      privKey = loadEd25519SigningKey(keyPath);
+    } catch {
+      // This candidate's key file could not be loaded as an Ed25519 key.
+      // Nothing was sent for it, and every other candidate is exactly as
+      // usable as it was before this file was read, so skip this one.
+      continue;
+    }
+    // The key loaded: a failure from here (nonce, signing) is not about this
+    // key file and is thrown as itself, with no later key sent.
+    const authHeader = buildEd25519AuthFromKey(agentId, method, target, privKey);
+    try {
+      return await sendJsonRequest(url, method, body, authHeader, isLocal, { ...transport, refuseRedirects: true });
     } catch (err: unknown) {
       // A write whose outcome is unknown stops the floor. Trying the next key
       // would send the same write again — a blind replay of a request that may
       // have committed.
       if (err instanceof ApiRequestOutcomeUnknown) throw err;
-      // This key didn't work (unregistered, bad signature, network blip on
-      // this one attempt) — try the next one.
+      // The server rejected THIS credential (unregistered agent, bad
+      // signature, expired timestamp, deactivated principal): another key may
+      // authenticate.
+      if (isEd25519CredentialRejection(err)) continue;
+      // A connect-phase failure on an attempt that refuses redirects is the
+      // existing network-blip case: another key may connect.
+      if (isConnectPhaseFailure(err)) continue;
+      // A server answer is final — resending it as a different agent would hide
+      // what the server said. Local request failures are rethrown as they are.
+      throw err;
     }
   }
+  // No key authenticated. Returning `undefined` lets the caller rethrow its
+  // original no-credentials hint, which carries the operator's remedy.
   return undefined;
 }
 
@@ -1538,11 +1794,9 @@ export interface AuthedRequestOptions {
   /**
    * Refuse a redirect instead of following it (flair#2708): the location a 3xx
    * names receives no request, and that attempt throws `ApiHttpError` with its
-   * status. When the request falls back across agent keys (no resolved
-   * credential), the fallback loop catches that error like any other attempt's,
-   * so the caller can receive an earlier attempt's answer or a later key's
-   * success instead. Unset, a redirect is followed (fetch's default), as for
-   * every caller that does not pass this.
+   * status. Unset, a redirect is followed (fetch's default), as for every
+   * caller that does not pass this. The tier-5 agent-key floor always refuses
+   * redirects (flair#2955), whatever this option says.
    */
   refuseRedirects?: boolean;
   /**
@@ -1716,7 +1970,6 @@ export async function authedRequest(
     // does not retry here).
     if (err instanceof ApiHttpError && err.noCredentials) {
       const floorResult = await tryAgentKeyFloor(url, method, body, keysDir, {
-        refuseRedirects: opts.refuseRedirects,
         deadlineMs: opts.deadlineMs,
         deadlineSource: opts.deadlineSource,
         tolerateUnparsedSuccessBody: opts.tolerateUnparsedSuccessBody,

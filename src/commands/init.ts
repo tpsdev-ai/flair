@@ -10,7 +10,7 @@ import { applyOrReportClaudeMdBootstrap } from "../doctor-client.js";
 import { applyOrRepinSessionStartHook } from "../lib/owned-pins.js";
 import { hookSettingsPath } from "../hook-install.js";
 import { ClientId, claudeCodeMcpEntry, detectClients, renderWiringSummary, wireAntigravity, wireClaudeCodeJson, wireCodex, wireCursor, wireGemini, wirePi } from "../install/clients.js";
-import { DEFAULT_ADMIN_USER, ApiRequestOutcomeUnknown, authFetch, defaultAdminPassPath, defaultKeysDir, readAdminPassFileSecure, resolveAdminUser } from "../lib/auth-resolve.js";
+import { DEFAULT_ADMIN_USER, ApiRequestOutcomeUnknown, addAdminPassOptions, authFetch, defaultAdminPassPath, defaultKeysDir, readAdminPassFileSecure, resolveAdminUser } from "../lib/auth-resolve.js";
 import {
   INIT_RESET_ADMIN_PASS_COMMAND,
   detectPersistedAdminUser,
@@ -330,22 +330,24 @@ export function register(program: Command): void {
 // ─── flair init ──────────────────────────────────────────────────────────────
 
 
-program
-  .command("init")
-  .description("One-command Flair setup — bootstrap the instance, register an agent, and wire MCP clients")
-  .option("--agent-id <id>", "Agent ID to register (omit to bootstrap instance without agent)")
-  .option("--agent <id>", "Alias for --agent-id")
-  // No commander default (flair#928). A default here is indistinguishable from
-  // the user typing it, so a BARE `flair init` used to state DEFAULT_PORT and
-  // renumber an instance already serving a custom one. Absent means absent, and
-  // resolveHttpPort's "create" ladder supplies DEFAULT_PORT for a genuinely new
-  // instance — which is the only case that ever wanted one.
-  .option("--port <port>", "Harper HTTP port (default: this instance's current port, or 19926 for a new one)")
-  .option("--ops-port <port>", "Harper operations API port")
-  .option("--ops-bind <addr>", "Harper ops API bind address (env: FLAIR_OPS_BIND; default: 127.0.0.1 loopback-only for single-host — pass e.g. 0.0.0.0 for multi-host/Fabric remote admin)")
-  .option("--http-bind <addr>", "Harper HTTP bind address (env: FLAIR_HTTP_BIND; default: 127.0.0.1 loopback-only). The listener MUST include IPv4 loopback (Flair's self-calls hardcode 127.0.0.1), so only 127.0.0.1 or a wildcard (0.0.0.0 / ::) is accepted; a specific non-loopback host is refused.")
-  .option("--admin-pass <pass>", "Admin password (generated if omitted)")
-  .option("--admin-pass-file <path>", "Read admin password from file (chmod 600 recommended)")
+addAdminPassOptions(
+  program
+    .command("init")
+    .description("One-command Flair setup — bootstrap the instance, register an agent, and wire MCP clients")
+    .option("--agent-id <id>", "Agent ID to register (omit to bootstrap instance without agent)")
+    .option("--agent <id>", "Alias for --agent-id")
+    // No commander default (flair#928). A default here is indistinguishable from
+    // the user typing it, so a BARE `flair init` used to state DEFAULT_PORT and
+    // renumber an instance already serving a custom one. Absent means absent, and
+    // resolveHttpPort's "create" ladder supplies DEFAULT_PORT for a genuinely new
+    // instance — which is the only case that ever wanted one.
+    .option("--port <port>", "Harper HTTP port (default: this instance's current port, or 19926 for a new one)")
+    .option("--ops-port <port>", "Harper operations API port")
+    .option("--ops-bind <addr>", "Harper ops API bind address (env: FLAIR_OPS_BIND; default: 127.0.0.1 loopback-only for single-host — pass e.g. 0.0.0.0 for multi-host/Fabric remote admin)")
+    .option("--http-bind <addr>", "Harper HTTP bind address (env: FLAIR_HTTP_BIND; default: 127.0.0.1 loopback-only). The listener MUST include IPv4 loopback (Flair's self-calls hardcode 127.0.0.1), so only 127.0.0.1 or a wildcard (0.0.0.0 / ::) is accepted; a specific non-loopback host is refused."),
+    "Admin password (generated if omitted)",
+    { adminPassFileHelp: "Read admin password from file (chmod 600 recommended)" },
+  )
   .option("--reset-admin-pass", "Rotate Harper's persisted admin hash via the operations socket, then write ~/.flair/admin-pass")
   .option("--admin-user <name>", "Admin username when authenticating to an already-running instance via --target/--ops-target (env: FLAIR_ADMIN_USER; default: admin — local bootstrap and Fabric provisioning always create 'admin')")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
@@ -813,8 +815,8 @@ program
       opsSocketAvailable: alreadyRunning || !opts.skipStart,
     };
 
-    // Warn if --admin-pass is passed inline (not from env)
-    if (shouldShowInlineSecretWarning(opts.adminPass, false, new Set(["--admin-pass"]), "--admin-pass")) {
+    // Warn if --admin-pass is passed inline (not from env or a file)
+    if (shouldShowInlineSecretWarning(opts.inlineAdminPass, false, new Set(["--admin-pass"]), "--admin-pass")) {
       console.error(
         "warning: --admin-pass passed inline. Consider --admin-pass-file <path> or FLAIR_ADMIN_PASS env " +
         "to keep secrets out of shell history."

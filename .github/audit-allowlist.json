@@ -45,10 +45,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> @fastify/static",
-      "reason": "Split 2026-11-01 from the vendor-pinned entry for this advisory (first added 2026-07-27): bun.lock resolves through this repository's root overrides, so its copy is remediable here. bun.lock resolves @fastify/static 9.3.0, pulled only by harper 5.3.1's ^9.1.3. A patched release exists (10.1.1, or 10.1.2, which also clears GHSA-8pvw-jcv7-9cmj; npm's latest is 10.1.8), and a root override could move bun.lock's copy to it, but that forces a major version outside harper's declared range onto the operations server harper itself mounts. Deferred to a separate, test-gated dependency PR. Same use and exposure as the npm-install entry for this advisory. flair does not import @fastify/static.",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "A dependency PR moves bun.lock's @fastify/static to a patched release with harper's operations server tested, or flair moves to a harper release that declares a patched @fastify/static range, or flair stops depending on harper."
+      "reason": "Split 2026-11-01 from the vendor-pinned entry for this advisory: bun.lock resolves through this repository's root overrides, so its copy is remediable here. bun.lock resolves @fastify/static 9.3.0, pulled only by harper 5.3.1's ^9.1.3. A patched release exists (10.1.1, or 10.1.2, which also clears GHSA-8pvw-jcv7-9cmj; npm's latest is 10.1.8), and a root override could move bun.lock's copy to it, but that forces a major version outside harper's declared range onto the operations server harper itself mounts. Deferred to a separate, test-gated dependency PR. Same use and exposure as the npm-install entry for this advisory. flair does not import @fastify/static.",
+      "added": "2026-07-27",
+      "expires": "2026-11-29",
+      "removeWhen": "A dependency PR moves bun.lock's @fastify/static to a patched release with harper's operations server tested, or flair moves to a harper release that declares a patched @fastify/static range, or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "A root override to 10.x would change only flair’s bun tree, not the copy an npm install gets, and is declined. The npm copy is fixed only by a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-83w8-p2f5-377r",
@@ -60,10 +66,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> @fastify/static",
-      "reason": "Split 2026-11-01: this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-07-27; renewed 2026-09-25, 2026-10-07 and 2026-10-22). harper 5.3.1's npm-shrinkwrap pins @fastify/static 9.3.0 (node_modules/harper/node_modules/@fastify/static in an npm install of flair), and npm honours that pin over root overrides; harper 5.3.5 declares the same ^9.1.3 and bundles 9.3.0. The fix is 10.1.1 (10.1.2 for GHSA-8pvw-jcv7-9cmj; npm's latest is 10.1.8), and the 9.x line still ends at 9.3.0, so no fixed release is inside ^9.1.3. Where it is used: harper 5.3.1 imports it only in dist/server/operationsServer.js:53 and registers it once (:208), on the operations server, with a fixed root of harper's own Studio assets (studio/web); flair sets localStudio enabled: false (src/commands/init.ts:1039,1194). Authentication on the operations server is per-route preValidation (GET /api/openapi/rest :217, POST / :220), so no guard is tied to the paths the plugin serves. harper's application-port static handler uses send, not this plugin (dist/server/static.js:12), and flair's config.yaml declares no static handler. flair does not import @fastify/static. The default flair install binds the operations server to 127.0.0.1 (DEFAULT_OPS_BIND_HOST, src/cli.ts) plus a domain socket; an operator who widens the bind with --ops-bind or FLAIR_OPS_BIND makes the plugin reachable beyond loopback.",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves @fastify/static >=10.1.1 (>=10.1.2 also retires GHSA-8pvw-jcv7-9cmj), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. harper 5.3.1 and 5.3.5 both declare ^9.1.3, and the 9.x line ends at 9.3.0."
+      "reason": "Split 2026-11-01: this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (renewed 2026-09-25, 2026-10-07 and 2026-10-22). harper 5.3.1's npm-shrinkwrap pins @fastify/static 9.3.0 (node_modules/harper/node_modules/@fastify/static in an npm install of flair), and npm honours that pin over root overrides; harper 5.3.5 declares the same ^9.1.3 and bundles 9.3.0. The fix is 10.1.1 (10.1.2 for GHSA-8pvw-jcv7-9cmj; npm's latest is 10.1.8), and the 9.x line still ends at 9.3.0, so no fixed release is inside ^9.1.3. Where it is used: harper 5.3.1 imports it only in dist/server/operationsServer.js:53 and registers it once (:208), on the operations server, with a fixed root of harper's own Studio assets (studio/web); flair sets localStudio enabled: false (src/commands/init.ts:1039,1194). Authentication on the operations server is per-route preValidation (GET /api/openapi/rest :217, POST / :220), so no guard is tied to the paths the plugin serves. harper's application-port static handler uses send, not this plugin (dist/server/static.js:12), and flair's config.yaml declares no static handler. flair does not import @fastify/static. The default flair install binds the operations server to 127.0.0.1 (DEFAULT_OPS_BIND_HOST, src/cli.ts) plus a domain socket; an operator who widens the bind with --ops-bind or FLAIR_OPS_BIND makes the plugin reachable beyond loopback.",
+      "added": "2026-07-27",
+      "expires": "2026-11-29",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves @fastify/static >=10.1.1 (>=10.1.2 also retires GHSA-8pvw-jcv7-9cmj), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. harper 5.3.1 and 5.3.5 both declare ^9.1.3, and the 9.x line ends at 9.3.0.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "The latest harper release still bundles the vulnerable copy; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-8pvw-jcv7-9cmj",
@@ -75,8 +87,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> @fastify/static",
-      "reason": "Split 2026-11-01 from the vendor-pinned entry for this advisory (first added 2026-07-27): bun.lock resolves through this repository's root overrides, so its copy is remediable here. bun.lock resolves @fastify/static 9.3.0, pulled only by harper 5.3.1's ^9.1.3. A patched release exists (10.1.2; npm's latest is 10.1.8), and a root override could move bun.lock's copy to it, but that forces a major version outside harper's declared range onto the operations server harper itself mounts. Deferred to a separate, test-gated dependency PR. Same use and exposure as the npm-install entry for this advisory. flair does not import @fastify/static.",
-      "added": "2026-11-01",
+      "reason": "Split 2026-11-01 from the vendor-pinned entry for this advisory: bun.lock resolves through this repository's root overrides, so its copy is remediable here. bun.lock resolves @fastify/static 9.3.0, pulled only by harper 5.3.1's ^9.1.3. A patched release exists (10.1.2; npm's latest is 10.1.8), and a root override could move bun.lock's copy to it, but that forces a major version outside harper's declared range onto the operations server harper itself mounts. Deferred to a separate, test-gated dependency PR. Same use and exposure as the npm-install entry for this advisory. flair does not import @fastify/static.",
+      "added": "2026-07-27",
       "expires": "2026-11-15",
       "removeWhen": "A dependency PR moves bun.lock's @fastify/static to a patched release with harper's operations server tested, or flair moves to a harper release that declares a patched @fastify/static range, or flair stops depending on harper."
     },
@@ -90,8 +102,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> @fastify/static",
-      "reason": "Split 2026-11-01: this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-07-27; re-checked 2026-10-07 and 2026-10-22). Same vendored edge, same pinned copy (@fastify/static 9.3.0 in harper 5.3.1's npm-shrinkwrap and in harper 5.3.5's bundle) and same exposure as GHSA-83w8-p2f5-377r: harper registers the plugin only on its operations server, for its own Studio assets (node_modules/harper/dist/server/operationsServer.js:208); flair does not import it. Fixed in 10.1.2 (npm's latest is 10.1.8); no 9.x release is fixed, and harper 5.3.1 and 5.3.5 declare ^9.1.3. Expiry aligned with GHSA-83w8-p2f5-377r.",
-      "added": "2026-11-01",
+      "reason": "Split 2026-11-01: this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (re-checked 2026-10-07 and 2026-10-22). Same vendored edge, same pinned copy (@fastify/static 9.3.0 in harper 5.3.1's npm-shrinkwrap and in harper 5.3.5's bundle) and same exposure as GHSA-83w8-p2f5-377r: harper registers the plugin only on its operations server, for its own Studio assets (node_modules/harper/dist/server/operationsServer.js:208); flair does not import it. Fixed in 10.1.2 (npm's latest is 10.1.8); no 9.x release is fixed, and harper 5.3.1 and 5.3.5 declare ^9.1.3.",
+      "added": "2026-07-27",
       "expires": "2026-11-15",
       "removeWhen": "flair moves to a harper release whose installed tree resolves @fastify/static >=10.1.2 (the same move that retires GHSA-83w8-p2f5-377r), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. harper 5.3.1 and 5.3.5 both declare ^9.1.3."
     },
@@ -105,8 +117,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fastify",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-10-22). harper's npm-shrinkwrap pins fastify 5.12.5 in its installed tree: harper 5.3.1 declares ^5.8.2 and places 5.12.5 at node_modules/harper/node_modules/fastify in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 declares the same range and bundles 5.12.5. A fixed release (5.12.6; npm's latest is 5.12.7) is inside ^5.8.2, and flair's own lockfile takes it (the root override fastify ^5.12.7 resolves 5.12.7 in bun.lock), but npm installs carry harper's pin. flair does not import fastify.",
-      "added": "2026-11-01",
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper's npm-shrinkwrap pins fastify 5.12.5 in its installed tree: harper 5.3.1 declares ^5.8.2 and places 5.12.5 at node_modules/harper/node_modules/fastify in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 declares the same range and bundles 5.12.5. A fixed release (5.12.6; npm's latest is 5.12.7) is inside ^5.8.2, and flair's own lockfile takes it (the root override fastify ^5.12.7 resolves 5.12.7 in bun.lock), but npm installs carry harper's pin. flair does not import fastify.",
+      "added": "2026-10-22",
       "expires": "2026-11-15",
       "removeWhen": "flair moves to a harper release whose installed tree resolves fastify >=5.12.6, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
     },
@@ -121,8 +133,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> validate.js",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-07-27; renewed 2026-10-22). No fixed release exists: npm's latest validate.js is 0.13.1 (published 2019-06-15), inside the affected range (<=0.13.1). Resolved copies: one in bun.lock (validate.js 0.13.1, pulled only by harper's exact 0.13.1) and harper 5.3.1's npm-shrinkwrap pin 0.13.1 (node_modules/harper/node_modules/validate.js in an npm install of flair); harper 5.3.5 declares the same exact 0.13.1 and bundles it. flair's own code does not import validate.js.",
-      "added": "2026-11-01",
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (renewed 2026-10-22). No fixed release exists: npm's latest validate.js is 0.13.1 (published 2019-06-15), inside the affected range (<=0.13.1). Resolved copies: one in bun.lock (validate.js 0.13.1, pulled only by harper's exact 0.13.1) and harper 5.3.1's npm-shrinkwrap pin 0.13.1 (node_modules/harper/node_modules/validate.js in an npm install of flair); harper 5.3.5 declares the same exact 0.13.1 and bundles it. flair's own code does not import validate.js.",
+      "added": "2026-07-27",
       "expires": "2026-11-15",
       "removeWhen": "validate.js publishes a fixed release AND harper picks it up, or flair stops depending on harper. The gate flags the first half automatically."
     },
@@ -136,10 +148,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-03). harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <=3.1.3).",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <=3.1.3), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <=3.1.3).",
+      "added": "2026-09-03",
+      "expires": "2026-11-29",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <=3.1.3), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "The latest harper release still bundles the vulnerable copy; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-7p8r-x3mc-p8w7",
@@ -151,10 +169,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-03). harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.5).",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <3.1.5), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.5).",
+      "added": "2026-09-03",
+      "expires": "2026-11-29",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <3.1.5), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "The latest harper release still bundles the vulnerable copy; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-q3j6-qgpj-74h6",
@@ -166,10 +190,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-03). harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <=3.1.0).",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <=3.1.0), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <=3.1.0).",
+      "added": "2026-09-03",
+      "expires": "2026-11-29",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <=3.1.0), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "The latest harper release still bundles the vulnerable copy; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-4c8g-83qw-93j6",
@@ -181,10 +211,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-03). harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.3).",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <3.1.3), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.3).",
+      "added": "2026-09-03",
+      "expires": "2026-11-29",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <3.1.3), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "The latest harper release still bundles the vulnerable copy; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-v39h-62p7-jpjc",
@@ -196,10 +232,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-03). harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <=3.1.1).",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <=3.1.1), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <=3.1.1).",
+      "added": "2026-09-03",
+      "expires": "2026-11-29",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <=3.1.1), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "The latest harper release still bundles the vulnerable copy; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-f65p-4m7j-42xc",
@@ -211,10 +253,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-03). harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.6).",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <3.1.6), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.6).",
+      "added": "2026-09-03",
+      "expires": "2026-11-29",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <3.1.6), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "The latest harper release still bundles the vulnerable copy; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-jqff-g426-hqxp",
@@ -226,10 +274,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-03). harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.6).",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <3.1.6), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.6).",
+      "added": "2026-09-03",
+      "expires": "2026-11-29",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <3.1.6), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "The latest harper release still bundles the vulnerable copy; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-qw65-cvwx-89v3",
@@ -241,8 +295,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-28). harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.7).",
-      "added": "2026-11-01",
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.7).",
+      "added": "2026-09-28",
       "expires": "2026-11-15",
       "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <3.1.7), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
     },
@@ -256,8 +310,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-30). harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.8).",
-      "added": "2026-11-01",
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.8).",
+      "added": "2026-09-30",
       "expires": "2026-11-15",
       "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <3.1.8), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
     },
@@ -301,10 +355,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-03). harper 5.3.1's npm-shrinkwrap pins brace-expansion 5.0.4 at node_modules/harper/node_modules/brace-expansion in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 5.0.4. A fixed release (5.0.12, npm's latest) is inside the range the package that pulls it declares (minimatch 10.2.4, ^5.0.2), but npm installs carry harper's pin. flair's own lockfile resolves the fixed 5.0.12 (the root override brace-expansion ^5.0.12). flair does not import brace-expansion. 5.0.4 is in this advisory's affected range (>=3.0.0 <5.0.7).",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion outside this advisory's affected range (>=3.0.0 <5.0.7), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins brace-expansion 5.0.4 at node_modules/harper/node_modules/brace-expansion in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 5.0.4. A fixed release (5.0.12, npm's latest) is inside the range the package that pulls it declares (minimatch 10.2.4, ^5.0.2), but npm installs carry harper's pin. flair's own lockfile resolves the fixed 5.0.12 (the root override brace-expansion ^5.0.12). flair does not import brace-expansion. 5.0.4 is in this advisory's affected range (>=3.0.0 <5.0.7).",
+      "added": "2026-09-03",
+      "expires": "2026-11-29",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion outside this advisory's affected range (>=3.0.0 <5.0.7), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "The latest harper release still bundles the vulnerable copy; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-mh99-v99m-4gvg",
@@ -316,10 +376,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-03). harper 5.3.1's npm-shrinkwrap pins brace-expansion 5.0.4 at node_modules/harper/node_modules/brace-expansion in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 5.0.4. A fixed release (5.0.12, npm's latest) is inside the range the package that pulls it declares (minimatch 10.2.4, ^5.0.2), but npm installs carry harper's pin. flair's own lockfile resolves the fixed 5.0.12 (the root override brace-expansion ^5.0.12). flair does not import brace-expansion. 5.0.4 is in this advisory's affected range (>=4.0.0 <5.0.8).",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion outside this advisory's affected range (>=4.0.0 <5.0.8), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins brace-expansion 5.0.4 at node_modules/harper/node_modules/brace-expansion in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 5.0.4. A fixed release (5.0.12, npm's latest) is inside the range the package that pulls it declares (minimatch 10.2.4, ^5.0.2), but npm installs carry harper's pin. flair's own lockfile resolves the fixed 5.0.12 (the root override brace-expansion ^5.0.12). flair does not import brace-expansion. 5.0.4 is in this advisory's affected range (>=4.0.0 <5.0.8).",
+      "added": "2026-09-03",
+      "expires": "2026-11-29",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion outside this advisory's affected range (>=4.0.0 <5.0.8), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "The latest harper release still bundles the vulnerable copy; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-rgw5-rvv9-x895",
@@ -331,10 +397,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-03). harper 5.3.1's npm-shrinkwrap pins brace-expansion 5.0.4 at node_modules/harper/node_modules/brace-expansion in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 5.0.4. A fixed release (5.0.12, npm's latest) is inside the range the package that pulls it declares (minimatch 10.2.4, ^5.0.2), but npm installs carry harper's pin. flair's own lockfile resolves the fixed 5.0.12 (the root override brace-expansion ^5.0.12). flair does not import brace-expansion. 5.0.4 is in this advisory's affected range (>=4.0.0 <5.0.9).",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion outside this advisory's affected range (>=4.0.0 <5.0.9), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins brace-expansion 5.0.4 at node_modules/harper/node_modules/brace-expansion in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 5.0.4. A fixed release (5.0.12, npm's latest) is inside the range the package that pulls it declares (minimatch 10.2.4, ^5.0.2), but npm installs carry harper's pin. flair's own lockfile resolves the fixed 5.0.12 (the root override brace-expansion ^5.0.12). flair does not import brace-expansion. 5.0.4 is in this advisory's affected range (>=4.0.0 <5.0.9).",
+      "added": "2026-09-03",
+      "expires": "2026-11-29",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion outside this advisory's affected range (>=4.0.0 <5.0.9), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "The latest harper release still bundles the vulnerable copy; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-6j4f-fj2g-mc7p",
@@ -346,8 +418,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-30). harper 5.3.1's npm-shrinkwrap pins brace-expansion 5.0.4 at node_modules/harper/node_modules/brace-expansion in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 5.0.4. A fixed release (5.0.12, npm's latest) is inside the range the package that pulls it declares (minimatch 10.2.4, ^5.0.2), but npm installs carry harper's pin. flair's own lockfile resolves the fixed 5.0.12 (the root override brace-expansion ^5.0.12). flair does not import brace-expansion. 5.0.4 is in this advisory's affected range (>=4.0.0 <5.0.10).",
-      "added": "2026-11-01",
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins brace-expansion 5.0.4 at node_modules/harper/node_modules/brace-expansion in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 5.0.4. A fixed release (5.0.12, npm's latest) is inside the range the package that pulls it declares (minimatch 10.2.4, ^5.0.2), but npm installs carry harper's pin. flair's own lockfile resolves the fixed 5.0.12 (the root override brace-expansion ^5.0.12). flair does not import brace-expansion. 5.0.4 is in this advisory's affected range (>=4.0.0 <5.0.10).",
+      "added": "2026-09-30",
       "expires": "2026-11-15",
       "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion outside this advisory's affected range (>=4.0.0 <5.0.10), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
     },
@@ -361,8 +433,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-30). harper 5.3.1's npm-shrinkwrap pins brace-expansion 5.0.4 at node_modules/harper/node_modules/brace-expansion in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 5.0.4. A fixed release (5.0.12, npm's latest) is inside the range the package that pulls it declares (minimatch 10.2.4, ^5.0.2), but npm installs carry harper's pin. flair's own lockfile resolves the fixed 5.0.12 (the root override brace-expansion ^5.0.12). flair does not import brace-expansion. 5.0.4 is in this advisory's affected range (>=4.0.0 <5.0.11).",
-      "added": "2026-11-01",
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins brace-expansion 5.0.4 at node_modules/harper/node_modules/brace-expansion in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 5.0.4. A fixed release (5.0.12, npm's latest) is inside the range the package that pulls it declares (minimatch 10.2.4, ^5.0.2), but npm installs carry harper's pin. flair's own lockfile resolves the fixed 5.0.12 (the root override brace-expansion ^5.0.12). flair does not import brace-expansion. 5.0.4 is in this advisory's affected range (>=4.0.0 <5.0.11).",
+      "added": "2026-09-30",
       "expires": "2026-11-15",
       "removeWhen": "flair moves to a harper release whose installed tree resolves brace-expansion outside this advisory's affected range (>=4.0.0 <5.0.11), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
     },
@@ -391,10 +463,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> find-my-way",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-03). harper 5.3.1's npm-shrinkwrap pins find-my-way 9.6.0 at node_modules/harper/node_modules/find-my-way in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 9.6.0. A fixed release (9.6.1; npm's latest is 9.10.0) is inside the range the package that pulls it declares (fastify 5.12.5, ^9.6.0), but npm installs carry harper's pin. flair's own lockfile resolves find-my-way 9.7.0 (through fastify 5.12.7). flair does not import find-my-way. 9.6.0 is in this advisory's affected range (<=9.6.0).",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves find-my-way >=9.6.1, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins find-my-way 9.6.0 at node_modules/harper/node_modules/find-my-way in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 9.6.0. A fixed release (9.6.1; npm's latest is 9.10.0) is inside the range the package that pulls it declares (fastify 5.12.5, ^9.6.0), but npm installs carry harper's pin. flair's own lockfile resolves find-my-way 9.7.0 (through fastify 5.12.7). flair does not import find-my-way. 9.6.0 is in this advisory's affected range (<=9.6.0).",
+      "added": "2026-09-03",
+      "expires": "2026-11-29",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves find-my-way >=9.6.1, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "The latest harper release still bundles the vulnerable copy; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-3v7f-55p6-f55p",
@@ -421,10 +499,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> picomatch",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-03). harper 5.3.1's npm-shrinkwrap pins picomatch 2.3.1 at node_modules/harper/node_modules/picomatch in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 2.3.1. A fixed release (2.3.2) is inside the range the package that pulls it declares (micromatch 4.0.8, ^2.3.1), but npm installs carry harper's pin. flair's own lockfile resolves picomatch 2.3.2. flair does not import picomatch. 2.3.1 is in this advisory's affected range (<2.3.2).",
-      "added": "2026-11-01",
-      "expires": "2026-11-15",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves picomatch >=2.3.2, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins picomatch 2.3.1 at node_modules/harper/node_modules/picomatch in an npm install of flair, and npm honours that pin over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 2.3.1. A fixed release (2.3.2) is inside the range the package that pulls it declares (micromatch 4.0.8, ^2.3.1), but npm installs carry harper's pin. flair's own lockfile resolves picomatch 2.3.2. flair does not import picomatch. 2.3.1 is in this advisory's affected range (<2.3.2).",
+      "added": "2026-09-03",
+      "expires": "2026-11-29",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves picomatch >=2.3.2, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "flint",
+        "reason": "The latest harper release still bundles the vulnerable copy; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-01",
+        "expires": "2026-11-29"
+      }
     },
     {
       "ghsa": "GHSA-528h-pc64-c93x",
@@ -436,8 +520,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> stream-json",
-      "reason": "Split 2026-11-01 from the vendor-pinned entry for this advisory (first added 2026-09-04): bun.lock resolves through this repository's root overrides, so its copy is remediable here. bun.lock resolves stream-json 1.9.1, pulled only by harper 5.3.1's exact 1.9.1, inside this advisory's affected range (<=3.4.0). A release outside the affected ranges of all three stream-json entries exists (3.7.0, published 2026-09-19; npm's latest is 3.8.0), and a root override could move bun.lock's copy to it, but that is a major version change under the parser harper's bulk loader imports (dist/dataLayer/bulkLoad.js:55-56). Deferred to a separate, test-gated dependency PR. flair does not import stream-json.",
-      "added": "2026-11-01",
+      "reason": "Split 2026-11-01 from the vendor-pinned entry for this advisory: bun.lock resolves through this repository's root overrides, so its copy is remediable here. bun.lock resolves stream-json 1.9.1, pulled only by harper 5.3.1's exact 1.9.1, inside this advisory's affected range (<=3.4.0). A release outside the affected ranges of all three stream-json entries exists (3.7.0, published 2026-09-19; npm's latest is 3.8.0), and a root override could move bun.lock's copy to it, but that is a major version change under the parser harper's bulk loader imports (dist/dataLayer/bulkLoad.js:55-56). Deferred to a separate, test-gated dependency PR. flair does not import stream-json.",
+      "added": "2026-09-04",
       "expires": "2026-11-15",
       "removeWhen": "A dependency PR moves bun.lock's stream-json to a patched 3.x release with harper's bulk loader tested, or flair moves to a harper release that declares a patched stream-json, or flair stops depending on harper."
     },
@@ -447,7 +531,7 @@
       "severity": "moderate",
       "class": "vendor-pinned",
       "introducedBy": "harper -> stream-json",
-      "reason": "Split and re-read 2026-11-01 against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-09-04): this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. harper 5.3.1 declares stream-json 1.9.1 exactly, and its npm-shrinkwrap pins 1.9.1 at node_modules/harper/node_modules/stream-json in an npm install of flair; npm honours that pin over root overrides. harper 5.3.5 declares the same exact 1.9.1 and bundles it. 1.9.1 is in this advisory's affected range (<=3.4.0); the patched releases are on the 3.x line. flair does not import stream-json; harper 5.3.1 imports it in dist/dataLayer/bulkLoad.js:55-56.",
+      "reason": "Split and re-read 2026-11-01 against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01: this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. harper 5.3.1 declares stream-json 1.9.1 exactly, and its npm-shrinkwrap pins 1.9.1 at node_modules/harper/node_modules/stream-json in an npm install of flair; npm honours that pin over root overrides. harper 5.3.5 declares the same exact 1.9.1 and bundles it. 1.9.1 is in this advisory's affected range (<=3.4.0); the patched releases are on the 3.x line. flair does not import stream-json; harper 5.3.1 imports it in dist/dataLayer/bulkLoad.js:55-56.",
       "sources": [
         "npm-install"
       ],
@@ -466,8 +550,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> stream-json",
-      "reason": "Split 2026-11-01 from the vendor-pinned entry for this advisory (first added 2026-10-06): bun.lock resolves through this repository's root overrides, so its copy is remediable here. bun.lock resolves stream-json 1.9.1, pulled only by harper 5.3.1's exact 1.9.1, inside this advisory's affected range (<3.6.0). A release outside the affected ranges of all three stream-json entries exists (3.7.0, published 2026-09-19; npm's latest is 3.8.0), and a root override could move bun.lock's copy to it, but that is a major version change under the parser harper's bulk loader imports (dist/dataLayer/bulkLoad.js:55-56). Deferred to a separate, test-gated dependency PR. flair does not import stream-json.",
-      "added": "2026-11-01",
+      "reason": "Split 2026-11-01 from the vendor-pinned entry for this advisory: bun.lock resolves through this repository's root overrides, so its copy is remediable here. bun.lock resolves stream-json 1.9.1, pulled only by harper 5.3.1's exact 1.9.1, inside this advisory's affected range (<3.6.0). A release outside the affected ranges of all three stream-json entries exists (3.7.0, published 2026-09-19; npm's latest is 3.8.0), and a root override could move bun.lock's copy to it, but that is a major version change under the parser harper's bulk loader imports (dist/dataLayer/bulkLoad.js:55-56). Deferred to a separate, test-gated dependency PR. flair does not import stream-json.",
+      "added": "2026-10-06",
       "expires": "2026-11-15",
       "removeWhen": "A dependency PR moves bun.lock's stream-json to a patched 3.x release with harper's bulk loader tested, or flair moves to a harper release that declares a patched stream-json, or flair stops depending on harper."
     },
@@ -477,7 +561,7 @@
       "severity": "moderate",
       "class": "vendor-pinned",
       "introducedBy": "harper -> stream-json",
-      "reason": "Split and re-read 2026-11-01 against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-10-06): this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. harper 5.3.1 declares stream-json 1.9.1 exactly, and its npm-shrinkwrap pins 1.9.1 at node_modules/harper/node_modules/stream-json in an npm install of flair; npm honours that pin over root overrides. harper 5.3.5 declares the same exact 1.9.1 and bundles it. 1.9.1 is in this advisory's affected range (<3.6.0); the patched releases are on the 3.x line. flair does not import stream-json; harper 5.3.1 imports it in dist/dataLayer/bulkLoad.js:55-56.",
+      "reason": "Split and re-read 2026-11-01 against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01: this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. harper 5.3.1 declares stream-json 1.9.1 exactly, and its npm-shrinkwrap pins 1.9.1 at node_modules/harper/node_modules/stream-json in an npm install of flair; npm honours that pin over root overrides. harper 5.3.5 declares the same exact 1.9.1 and bundles it. 1.9.1 is in this advisory's affected range (<3.6.0); the patched releases are on the 3.x line. flair does not import stream-json; harper 5.3.1 imports it in dist/dataLayer/bulkLoad.js:55-56.",
       "sources": [
         "npm-install"
       ],
@@ -496,8 +580,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> stream-json",
-      "reason": "Split 2026-11-01 from the vendor-pinned entry for this advisory (first added 2026-10-06): bun.lock resolves through this repository's root overrides, so its copy is remediable here. bun.lock resolves stream-json 1.9.1, pulled only by harper 5.3.1's exact 1.9.1, inside this advisory's affected range (<=3.5.0). A release outside the affected ranges of all three stream-json entries exists (3.7.0, published 2026-09-19; npm's latest is 3.8.0), and a root override could move bun.lock's copy to it, but that is a major version change under the parser harper's bulk loader imports (dist/dataLayer/bulkLoad.js:55-56). Deferred to a separate, test-gated dependency PR. flair does not import stream-json.",
-      "added": "2026-11-01",
+      "reason": "Split 2026-11-01 from the vendor-pinned entry for this advisory: bun.lock resolves through this repository's root overrides, so its copy is remediable here. bun.lock resolves stream-json 1.9.1, pulled only by harper 5.3.1's exact 1.9.1, inside this advisory's affected range (<=3.5.0). A release outside the affected ranges of all three stream-json entries exists (3.7.0, published 2026-09-19; npm's latest is 3.8.0), and a root override could move bun.lock's copy to it, but that is a major version change under the parser harper's bulk loader imports (dist/dataLayer/bulkLoad.js:55-56). Deferred to a separate, test-gated dependency PR. flair does not import stream-json.",
+      "added": "2026-10-06",
       "expires": "2026-11-15",
       "removeWhen": "A dependency PR moves bun.lock's stream-json to a patched 3.x release with harper's bulk loader tested, or flair moves to a harper release that declares a patched stream-json, or flair stops depending on harper."
     },
@@ -507,7 +591,7 @@
       "severity": "moderate",
       "class": "vendor-pinned",
       "introducedBy": "harper -> stream-json",
-      "reason": "Split and re-read 2026-11-01 against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-10-06): this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. harper 5.3.1 declares stream-json 1.9.1 exactly, and its npm-shrinkwrap pins 1.9.1 at node_modules/harper/node_modules/stream-json in an npm install of flair; npm honours that pin over root overrides. harper 5.3.5 declares the same exact 1.9.1 and bundles it. 1.9.1 is in this advisory's affected range (<=3.5.0); the patched releases are on the 3.x line. flair does not import stream-json; harper 5.3.1 imports it in dist/dataLayer/bulkLoad.js:55-56.",
+      "reason": "Split and re-read 2026-11-01 against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01: this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. harper 5.3.1 declares stream-json 1.9.1 exactly, and its npm-shrinkwrap pins 1.9.1 at node_modules/harper/node_modules/stream-json in an npm install of flair; npm honours that pin over root overrides. harper 5.3.5 declares the same exact 1.9.1 and bundles it. 1.9.1 is in this advisory's affected range (<=3.5.0); the patched releases are on the 3.x line. flair does not import stream-json; harper 5.3.1 imports it in dist/dataLayer/bulkLoad.js:55-56.",
       "sources": [
         "npm-install"
       ],
@@ -526,8 +610,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> node-forge",
-      "reason": "Re-classed 2026-11-01 from no-patch-published (first added 2026-10-02): node-forge 1.4.1, published 2026-10-27, is the first release outside the affected range (<=1.4.0). harper's npm-shrinkwrap pins node-forge 1.4.0 in its installed tree: harper 5.3.1, the version flair pins (package.json:69), places it at node_modules/harper/node_modules/node-forge in an npm install of flair, and npm honours that pin over root overrides. flair's own lockfile resolves the fixed release (the root override node-forge 1.4.2, inside harper's declared ^1.3.1, resolves 1.4.2 in bun.lock). harper 5.3.5, npm's latest harper on 2026-11-01, ships no npm-shrinkwrap.json, but its bundled tree carries the same node-forge 1.4.0. flair does not import node-forge.",
-      "added": "2026-11-01",
+      "reason": "Re-classed 2026-11-01 from no-patch-published: node-forge 1.4.1, published 2026-10-27, is the first release outside the affected range (<=1.4.0). harper's npm-shrinkwrap pins node-forge 1.4.0 in its installed tree: harper 5.3.1, the version flair pins (package.json:69), places it at node_modules/harper/node_modules/node-forge in an npm install of flair, and npm honours that pin over root overrides. flair's own lockfile resolves the fixed release (the root override node-forge 1.4.2, inside harper's declared ^1.3.1, resolves 1.4.2 in bun.lock). harper 5.3.5, npm's latest harper on 2026-11-01, ships no npm-shrinkwrap.json, but its bundled tree carries the same node-forge 1.4.0. flair does not import node-forge.",
+      "added": "2026-10-02",
       "expires": "2026-11-15",
       "removeWhen": "flair moves to a harper release whose installed tree resolves node-forge >=1.4.1, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. harper 5.3.1 pins, and harper 5.3.5 bundles, node-forge 1.4.0."
     },
@@ -542,8 +626,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "@tpsdev-ai/adk-flair -> @google/adk -> @google-cloud/vertexai -> google-auth-library -> gaxios -> uuid",
-      "reason": "Renewed 2026-11-01 after re-reading against the ADK consumer install, which resolves @google/adk 2.4.0, npm's latest (first added 2026-10-09). Resolved inside @google/adk's own tree, which we do not control: @google/adk 2.4.0 depends on @google-cloud/vertexai ^1.12.0 (1.12.0), which requires google-auth-library ^9.1.0 (9.15.1); that requires gaxios ^6.1.1 and gtoken ^7.0.0, and each gaxios 6.7.1 copy requires uuid ^9.0.1. The install has two uuid 9.0.1 copies. This entry covers node_modules/@google-cloud/vertexai/node_modules/uuid, the copy its introducedBy chain resolves to; node_modules/gtoken/node_modules/uuid, reached through gtoken 7.1.0's own gaxios, has its own entry. The fix, uuid 11.1.1, is outside ^9.0.1, and the gaxios 6.x line ends at 6.7.1. A direct dependency or override in @tpsdev-ai/adk-flair cannot reach these nested copies. flair's adapter does not import uuid.",
-      "added": "2026-11-01",
+      "reason": "Renewed 2026-11-01 after re-reading against the ADK consumer install, which resolves @google/adk 2.4.0, npm's latest. Resolved inside @google/adk's own tree, which we do not control: @google/adk 2.4.0 depends on @google-cloud/vertexai ^1.12.0 (1.12.0), which requires google-auth-library ^9.1.0 (9.15.1); that requires gaxios ^6.1.1 and gtoken ^7.0.0, and each gaxios 6.7.1 copy requires uuid ^9.0.1. The install has two uuid 9.0.1 copies. This entry covers node_modules/@google-cloud/vertexai/node_modules/uuid, the copy its introducedBy chain resolves to; node_modules/gtoken/node_modules/uuid, reached through gtoken 7.1.0's own gaxios, has its own entry. The fix, uuid 11.1.1, is outside ^9.0.1, and the gaxios 6.x line ends at 6.7.1. A direct dependency or override in @tpsdev-ai/adk-flair cannot reach these nested copies. flair's adapter does not import uuid.",
+      "added": "2026-10-09",
       "expires": "2026-11-15",
       "removeWhen": "a @google/adk release's dependency tree resolves every uuid copy >= 11.1.1, or the ADK consumer install no longer reports this advisory"
     },
@@ -559,7 +643,7 @@
       "approvedBy": "tps-flint",
       "introducedBy": "@tpsdev-ai/adk-flair -> @google/adk -> @google-cloud/vertexai -> google-auth-library -> gtoken -> gaxios -> uuid",
       "reason": "Added 2026-11-01 for the second uuid copy in the ADK consumer install, which resolves @google/adk 2.4.0, npm's latest. Resolved inside @google/adk's own tree, which we do not control: @google/adk 2.4.0 depends on @google-cloud/vertexai ^1.12.0 (1.12.0), which requires google-auth-library ^9.1.0 (9.15.1); that requires gtoken ^7.0.0 (7.1.0, at node_modules/gtoken), whose own gaxios ^6.0.0 (6.7.1) requires uuid ^9.0.1. This entry covers node_modules/gtoken/node_modules/uuid (9.0.1), the copy its introducedBy chain resolves to; the copy under @google-cloud/vertexai has its own entry. The fix, uuid 11.1.1, is outside ^9.0.1, and the gaxios 6.x line ends at 6.7.1. A direct dependency or override in @tpsdev-ai/adk-flair cannot reach this nested copy. flair's adapter does not import uuid.",
-      "added": "2026-11-01",
+      "added": "2026-10-09",
       "expires": "2026-11-15",
       "removeWhen": "a @google/adk release's dependency tree resolves every uuid copy >= 11.1.1, or the ADK consumer install no longer reports this advisory"
     },
@@ -573,8 +657,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-10-24). harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Both of harper's copies are in this advisory's affected ranges (>=3.0.0 <3.1.9 and >=4.0.0 <4.2.3).",
-      "added": "2026-11-01",
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Both of harper's copies are in this advisory's affected ranges (>=3.0.0 <3.1.9 and >=4.0.0 <4.2.3).",
+      "added": "2026-10-24",
       "expires": "2026-11-15",
       "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected ranges (>=3.0.0 <3.1.9 and >=4.0.0 <4.2.3), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
     },
@@ -588,8 +672,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-10-24). harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 4.2.1 is in this advisory's affected range (>=4.0.1 <4.2.3).",
-      "added": "2026-11-01",
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 4.2.1 is in this advisory's affected range (>=4.0.1 <4.2.3).",
+      "added": "2026-10-24",
       "expires": "2026-11-15",
       "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=4.0.1 <4.2.3), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
     },
@@ -603,8 +687,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-10-24). harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Both of harper's copies are in this advisory's affected ranges (>=3.0.0 <3.1.9 and >=4.0.0 <4.2.3).",
-      "added": "2026-11-01",
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Both of harper's copies are in this advisory's affected ranges (>=3.0.0 <3.1.9 and >=4.0.0 <4.2.3).",
+      "added": "2026-10-24",
       "expires": "2026-11-15",
       "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected ranges (>=3.0.0 <3.1.9 and >=4.0.0 <4.2.3), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
     },
@@ -618,8 +702,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01 (first added 2026-10-24). harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Both of harper's copies are in this advisory's affected ranges (>=3.0.0 <3.1.9 and >=4.0.0 <4.2.3).",
-      "added": "2026-11-01",
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Both of harper's copies are in this advisory's affected ranges (>=3.0.0 <3.1.9 and >=4.0.0 <4.2.3).",
+      "added": "2026-10-24",
       "expires": "2026-11-15",
       "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected ranges (>=3.0.0 <3.1.9 and >=4.0.0 <4.2.3), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
     },
