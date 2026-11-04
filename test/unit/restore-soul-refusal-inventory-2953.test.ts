@@ -24,12 +24,16 @@
  * properties are not followed, so
  * `const o = { r: Response }; o.r.json()` leaves that Response token
  * unaccounted and fails. Payloads, error values and statuses accept only
- * literals and conditional/&&/||/?? branches that all resolve; every possible
- * code and status is recorded. Objects with spreads, computed keys or duplicate
- * error/status keys are unresolved, as are identifiers, calls, members and
- * templates with substitutions. A new Response body may use JSON.stringify
- * around its payload. Other Response methods and unsupported forms are
- * unresolved with file:line and require a listed reason. A function that
+ * literals, identifiers bound lexically or through imports and re-exports to
+ * string/numeric literal consts (initializer parentheses and `as const`
+ * allowed), and conditional/&&/||/?? branches that all resolve; every possible
+ * code and status is recorded.
+ * Objects with spreads, computed keys or duplicate error/status keys are
+ * unresolved, as are other identifiers, calls, members and templates with
+ * substitutions. Members remain unresolved because object mutation is not
+ * checked. A new Response body may use JSON.stringify around its payload.
+ * Other Response methods and unsupported forms are unresolved with file:line
+ * and require a listed reason. A function that
  * forwards one of its parameters into a callee the inventory cannot resolve (a
  * method call, a computed callee, a callee outside the closure), including
  * through a parenthesis, an `as` cast or a non-null assertion, is opaque:
@@ -509,11 +513,43 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     return values.every((value) => value !== null) ? [...new Set(values.flatMap((value) => value!))] : null;
   };
 
+  const host = ts.createCompilerHost({ noLib: true });
+  host.getSourceFile = (file) => sources.get(relative(root, resolve(file)));
+  host.resolveModuleNames = (names, fromFile) => names.map((name) => {
+    const target = resolveRelative(relative(root, fromFile), name);
+    return target && sources.has(target) ? { resolvedFileName: join(root, target), extension: ts.Extension.Ts } : undefined;
+  });
+  const checker = ts.createProgram([...sources.keys()].map((file) => join(root, file)), { noLib: true }, host).getTypeChecker();
+  const literalConst = (expression: ts.Expression): ts.Expression => {
+    if (!ts.isIdentifier(expression)) return expression;
+    let symbol = ts.isShorthandPropertyAssignment(expression.parent)
+      ? checker.getShorthandAssignmentValueSymbol(expression.parent)
+      : checker.getSymbolAtLocation(expression);
+    if (symbol && (symbol.flags & ts.SymbolFlags.Alias)) symbol = checker.getAliasedSymbol(symbol);
+    const declaration = symbol?.valueDeclaration;
+    if (!declaration || !ts.isVariableDeclaration(declaration) || !ts.isIdentifier(declaration.name) ||
+        !ts.isVariableDeclarationList(declaration.parent) || !(declaration.parent.flags & ts.NodeFlags.Const) ||
+        !declaration.initializer) return expression;
+    let value = declaration.initializer;
+    while (ts.isParenthesizedExpression(value) ||
+           (ts.isAsExpression(value) && ts.isTypeReferenceNode(value.type) &&
+            ts.isIdentifier(value.type.typeName) && value.type.typeName.text === "const")) {
+      value = value.expression;
+    }
+    return ts.isStringLiteral(value) || ts.isNumericLiteral(value) ? value : expression;
+  };
+
   const resolveString = (_file: string, expression: ts.Expression | null | undefined): string[] | null =>
-    evaluate(expression, (node) => ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? [node.text] : null);
+    evaluate(expression, (node) => {
+      const value = literalConst(node);
+      return ts.isStringLiteral(value) || ts.isNoSubstitutionTemplateLiteral(value) ? [value.text] : null;
+    });
 
   const resolveNumbers = (_file: string, expression: ts.Expression | null | undefined): number[] | null =>
-    evaluate(expression, (node) => ts.isNumericLiteral(node) ? [Number(node.text)] : null);
+    evaluate(expression, (node) => {
+      const value = literalConst(node);
+      return ts.isNumericLiteral(value) ? [Number(value.text)] : null;
+    });
 
   const payloadOf = (_file: string, expression: ts.Expression | null | undefined): ts.Expression | null => {
     if (expression && ts.isCallExpression(expression) && ts.isPropertyAccessExpression(expression.expression) &&
@@ -912,6 +948,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
 
 /** Refusal codes `restore --replace` decides before its first delete. */
 const PREFLIGHTED = [
+  "soul_scope_fields_not_writable", // suppliesSoulScopeFields in src/commands/restore.ts
   "soul_value_is_learned_content", // LEARNED_REFUSAL plus the Memory and candidate comparisons
   "skill_source_not_durable", // refuseSkillAssignmentWrite in src/lib/skill-assignment-preflight.ts
   "skill_opt_out_not_boolean", // the same predicate
@@ -935,6 +972,8 @@ const OUT_OF_SCOPE = new Map<string, string>([
   ["soul_delete_requires_one_record", "DELETE-only: restore --replace addresses each Soul row by its single-record id"],
   ["soul_stored_state_unavailable", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
   ["soul_patch_table_unavailable", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
+  ["soul_patch_conflict", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
+  ["soul_patch_row_changed", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
   ["soul_subject_occupied", "identity-change path: a successful Soul DELETE leaves the replace PUT no stored row, so its identity did not change; after a failed DELETE (recorded, and the PUT still runs) a stored row with a different identity can reach this 409"],
   ["instruction_version_head_mismatch", "compare-and-set: the replace PUT supplies no expectedVersion"],
   ["instruction_version_append_failed", "the server reports version append failures and catch-all-wrapped schema validation errors under this code (#2979); admission refuses checked schema cases (a present non-null held column of the wrong type or a missing required field the write does not supply) before any delete; unchecked validator refusals and append failures are not predictable here (#2970: server dry run)"],
@@ -950,12 +989,10 @@ const UNRESOLVED_SITES = new Map<string, string>([
   ["resources/record-type-kit.ts:519", "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately"],
   ["resources/record-type-kit.ts:527", "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately"],
   ["resources/Soul.ts:70", "patchConflict forwards its error parameter; literal call arguments are checked separately"],
-  ["resources/Soul.ts:186", "the conditional error argument includes the SOUL_PATCH_CONFLICT identifier; this PATCH conflict remains unresolved"],
-  ["resources/record-owner-guard.ts:255", "ownerCheckUnavailable uses status and error identifiers; the owner-field read guard remains unresolved"],
+  ["resources/record-owner-guard.ts:255", "status has a conditional initializer rather than a literal"],
   ["resources/record-type-kit.ts:76", "FORBIDDEN forwards msg; literal call arguments are checked separately"],
   ["resources/request-target.ts:75", "the HEAD/body conditional uses null and a body identifier; the request-target refusal remains unresolved"],
   ["resources/skill-provenance.ts:212", "the error is result.error from registerSkillAssignment; this response remains unresolved"],
-  ["resources/soul-write-policy.ts:72", "FORBIDDEN receives the SOUL_SCOPE_FIELDS_REFUSAL identifier; this scope-field refusal remains unresolved"],
   ["resources/instruction-version-record.ts:272", "jsonResponse forwards its status parameter; its call sites are checked for static statuses"],
   ["resources/record-owner-guard.ts:220", "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write"],
   ["resources/record-owner-guard.ts:231", "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write"],
@@ -1073,6 +1110,8 @@ test("each unresolved site is listed by file:line with a reason", () => {
     .map(([at, detail]) => `${at}: ${detail}`)
     .sort();
   expect(unexpected).toEqual([]);
+  const stale = [...UNRESOLVED_SITES.keys()].filter((at) => !inventory.unresolved.has(at)).sort();
+  expect(stale).toEqual([]);
 });
 
 test("every Response identifier token in the import closure's source is accounted for; a name built at runtime (e.g. from strings) is not seen — #2970 replaces this inventory with a server dry run", () => {
@@ -1252,7 +1291,6 @@ jsonResponse(${status}, { error: "x" });`, ts.ScriptTarget.Latest, true);
 
 
 test.each([
-  'const status = 403; Response.json({}, { status })',
   'Response.json({}, { headers() {} })',
   'let status = 200; status = 403; Response.json({}, { status })',
   'const status = 200; function f(status: number) { return Response.json({}, { status }); }',
@@ -1403,7 +1441,7 @@ test.each([
   'makePayload()',
   'JSON.stringify({ error: "x" })',
 ])("leaves an incompletely evaluated payload unresolved: %s", (body) => {
-  const source = ts.createSourceFile("fixture.ts", `const payload = { error: "x" }; const unknown = "x"; const extra = {}; Response.json(${body}, { status: 403 })`, ts.ScriptTarget.Latest, true);
+  const source = ts.createSourceFile("fixture.ts", `const payload = { error: "x" }; let unknown = "x"; const extra = {}; Response.json(${body}, { status: 403 })`, ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
   expect([...inventory.codes]).toEqual([]);
   expect(inventory.classified).toBe(0);
@@ -1462,4 +1500,86 @@ test("a payload toJSON override is unresolved", async () => {
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
   expect(inventory.classified).toBe(0);
   expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable refusal body"]]);
+});
+
+
+test.each([
+  'const code = "x"; const status = 403;',
+  'const code = ("x" as const); const status = (403 as const);',
+  'const code = (("x")); const status = ((403));',
+])("evaluates literal const bindings: %s", (bindings) => {
+  const source = ts.createSourceFile("fixture.ts",
+    `${bindings} Response.json({ error: code }, { status });`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.codes]).toEqual([["x", "fixture.ts:1"]]);
+  expect([...inventory.statuses]).toEqual([["fixture.ts:1", [403]]]);
+  expect([...inventory.unresolved]).toEqual([]);
+});
+
+test.each([
+  'let code = "x";',
+  'var code = "x";',
+  'const { code } = { code: "x" };',
+  'const [code] = ["x"];',
+  'const code = flag ? "x" : "y";',
+  'const code = getCode();',
+  'const original = "x"; const code = original;',
+  'const code = "x" as string;',
+  'const code = `x`;',
+  'const code = "outer"; function f(code: string) {',
+  'const code = "outer"; { let code = "inner";',
+  'const code = "outer"; { const code = getCode();',
+])("leaves a nonliteral or shadowed binding unresolved: %s", (bindings) => {
+  const source = ts.createSourceFile("fixture.ts",
+    `${bindings} Response.json({ error: code }, { status: 403 }); ${bindings.endsWith("{") || bindings.includes("; {") ? "}" : ""}`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.codes]).toEqual([]);
+  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable refusal body"]]);
+});
+
+test.each([
+  'const code = "outer"; { const code = "x";',
+  'function f() { const code = "x";',
+  'const code = "x"; function f() {',
+])("resolves the lexical literal const: %s", (bindings) => {
+  const source = ts.createSourceFile("fixture.ts",
+    `${bindings} Response.json({ error: code }, { status: 403 }); }`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.codes]).toEqual([["x", "fixture.ts:1"]]);
+  expect([...inventory.unresolved]).toEqual([]);
+});
+
+test.each([
+  'export { code as renamed, status } from "./soul-write-policy.js";',
+  'import { code, status } from "./soul-write-policy.js"; export { code as renamed, status };',
+  'export * from "./soul-write-policy.js";',
+])("resolves imported literal consts through re-exports: %s", (reexport) => {
+  const texts = new Map([
+    ["resources/soul-write-policy.ts", 'export const code = ("x" as const); export const status = (403 as const);'],
+    ["resources/owner-field-guard.ts", reexport],
+    ["resources/Soul.ts", `import { ${reexport.startsWith("export *") ? "code" : "renamed"} as error, status as refusalStatus } from "./owner-field-guard.js"; Response.json({ error }, { status: refusalStatus });`],
+  ]);
+  const sources = new Map([...texts].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
+  const inventory = buildInventory(sources);
+  expect([...inventory.codes]).toEqual([["x", "resources/Soul.ts:1"]]);
+  expect([...inventory.unresolved]).toEqual([]);
+});
+
+test.each([
+  'const obj = { code: "x" };',
+  'const obj = { code: "x" }; obj.code = "y";',
+  'const obj = { code: "x" }; Object.assign(obj, { code: "y" });',
+])("leaves object members unresolved: %s", (bindings) => {
+  const source = ts.createSourceFile("fixture.ts",
+    `${bindings} Response.json({ error: obj.code }, { status: 403 });`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.codes]).toEqual([]);
+  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable refusal body"]]);
+});
+
+test("record-type-kit FORBIDDEN parameter forwarding stays unresolved", () => {
+  const inventory = buildInventory(collectSourceSet());
+  for (const at of ["resources/record-type-kit.ts:514", "resources/record-type-kit.ts:519", "resources/record-type-kit.ts:527"]) {
+    expect(inventory.unresolved.get(at)).toBe("unresolvable refusal argument: FORBIDDEN.msg");
+  }
 });
