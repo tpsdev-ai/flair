@@ -291,9 +291,13 @@ on PASS — runs the promote block below, which it obtains as executable text fr
 `scripts/ci/canary-verdict.sh` (`--emit bash`, the same block a human would paste). A
 manual dispatch of `release-promote` defaults `dry_run` to `true`: it validates through
 block generation and prints the block, but does not test the move (the block's
-current-`latest` reads, refusals and moves run only under the token). Its title ends
-with `(dry run)` and it does not suppress the poll's real promotion. The manual path
-below stays as the fallback; a failed run's recovery is
+current-`latest` reads, refusals and moves run only under the token).
+A dry run does not count as a prior attempt in the poll or replace a pending live promote
+run (the parent workflows use separate concurrency groups); live and dry-run promotes
+share the called canary's queue, where a dry run queued while another canary runs can
+replace a pending live canary, leaving a failed live attempt requiring operator review
+without automatic redispatch.
+The manual path below stays as the fallback; a failed run's recovery is
 [described below](#slice-2-flair1928--the-privileged-promote).
 
 - **On PASS**, paste the complete block emitted by `scripts/ci/canary-verdict.sh`
@@ -441,10 +445,7 @@ only from a pinned `origin/main` tree, and refuse on any unverifiable input. The
 only for a tag whose copy of the workflow is the reviewed one.
 
 Until the environment exists, the poll dispatches nothing; if it exists without its
-`NPM_TOKEN`, the token step refuses with a named message and moves nothing. A manual
-run of `release-promote` with `dry_run` left at its default (`true`) needs no token: it
-validates through block generation without testing the move or suppressing automatic
-promotion.
+`NPM_TOKEN`, the token step refuses with a named message and moves nothing.
 
 ### GitHub `adk-flair-publish` environment
 

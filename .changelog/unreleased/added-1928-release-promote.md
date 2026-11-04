@@ -22,5 +22,4 @@
   > deployment policy of exactly the tag pattern `v*` and an `NPM_TOKEN` with write
   > access to the lockstep packages (required reviewers are optional). Before adding the token,
   > audit the creation actors and other actors' rule exceptions. Until the environment exists,
-  > the poll dispatches nothing. A manual dispatch with `dry_run` at its default validates
-  > through block generation without testing the move or suppressing automatic promotion.
+  > the poll dispatches nothing.

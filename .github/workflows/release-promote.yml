@@ -85,7 +85,6 @@ permissions: {}
 concurrency:
   # One live promote per ref; never cancel a run mid-move (a cancelled run could leave
   # the lockstep set half-moved).
-  # Dry runs use their own group, so a dry-run dispatch cannot replace a pending live run.
   group: release-promote-${{ github.ref_name }}${{ inputs.dry_run && '-dry-run' || '' }}
   cancel-in-progress: false
 
