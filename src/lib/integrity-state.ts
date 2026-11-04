@@ -11,18 +11,18 @@
  *     report;
  *   - the custody predicate: key directory 0700, key and state files 0600, no
  *     symlinks, no ACL grants, a server uid that can neither read the key nor
- *     write state, and the recorded operator uid and machine identity rechecked
- *     on every operation;
+ *     write state, and the recorded operator uid and machine identity compared
+ *     when custody is opened and when a generation is committed;
  *   - an authenticated enrollment registry with a monotonic sequence and
  *     tombstones, plus retained generations;
- *   - generation staging and uncertain-commit recovery on top of
- *     `withConfigCriticalSection` (NO second lock).
+ *   - generation staging and uncertain-commit recovery under ONE custody lock
+ *     (commit, tombstone, registry write and recovery all serialize on it).
  *
  * The custody key and state live in the caller-supplied custody directory.
  * Modes alone cannot prove a server cannot reach them, so `checkCustody`
- * records and rechecks the operator/machine pair on every call and refuses a
- * same-machine same-uid arrangement; a test must additionally demonstrate the
- * real denial.
+ * records the operator/machine pair and rechecks it at open and at commit,
+ * and refuses a same-machine same-uid arrangement; a test must additionally
+ * demonstrate the real denial.
  */
 import {
   closeSync,
@@ -36,7 +36,6 @@ import {
   renameSync,
   statSync,
   unlinkSync,
-  writeFileSync,
   type Stats,
 } from "node:fs";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
@@ -59,6 +58,13 @@ export const INTEGRITY_REGISTRY_FILENAME = "registry.json";
 export const INTEGRITY_CURRENT_FILENAME = "CURRENT";
 export const INTEGRITY_GENERATIONS_DIRNAME = "generations";
 export const INTEGRITY_UNCERTAIN_FILENAME = "UNCERTAIN";
+
+function msg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+const UNCERTAIN_COMMIT_PREFIX = "commit:";
+const UNCERTAIN_REGISTRY_PREFIX = "registry:";
 
 /**
  * The fixed reason union. These strings are part of the module contract: the
@@ -167,17 +173,40 @@ export interface IntegrityRegistry {
 
 // ── canonical JSON + HMAC ───────────────────────────────────────────────────
 
-/** Deterministic JSON: object keys sorted, `undefined` omitted, arrays in
- *  order. HMACs are computed over THIS encoding, never over parse order. */
-export function canonicalJson(value: unknown): string {
+/** Deterministic JSON over plain JSON values only: object keys sorted, arrays
+ *  in order, no holes. Anything JSON cannot represent (undefined, functions,
+ *  symbols, bigint, NaN/Infinity, class instances, sparse arrays) is refused.
+ *  HMACs are computed over THIS encoding, never over parse order. */
+export function canonicalJson(value: unknown, location = "$"): string {
   if (value === null) return "null";
-  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    const keys = Object.keys(record).filter((key) => record[key] !== undefined).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+  switch (typeof value) {
+    case "string":
+      return JSON.stringify(value);
+    case "boolean":
+      return value ? "true" : "false";
+    case "number":
+      if (!Number.isFinite(value)) throw new TypeError(`${location} is not a finite number`);
+      return JSON.stringify(value);
+    case "object":
+      break;
+    default:
+      throw new TypeError(`${location} is ${typeof value}, which is not plain JSON`);
   }
-  return JSON.stringify(value) as string;
+  if (Array.isArray(value)) {
+    const parts: string[] = [];
+    for (let index = 0; index < value.length; index++) {
+      if (!(index in value)) throw new TypeError(`${location}[${index}] is a sparse array hole`);
+      parts.push(canonicalJson(value[index], `${location}[${index}]`));
+    }
+    return `[${parts.join(",")}]`;
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) {
+    throw new TypeError(`${location} is not a plain object`);
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key], `${location}.${key}`)}`).join(",")}}`;
 }
 
 function hmacHex(payload: unknown, key: Buffer): string {
@@ -321,8 +350,8 @@ function uidCanReadKeyOrWriteState(serverUid: number, operatorUid: number): bool
   return false;
 }
 
-/** The custody predicate. Evaluated at enrollment and again at the start of
- *  every operation. All failures map to a reason from the fixed union. */
+/** The custody predicate. Evaluated at enrollment, at every open and at the
+ *  start of every commit. All failures map to a reason from the fixed union. */
 export function checkCustody(opts: CustodyCheckOptions): CustodyCheck {
   const { paths, serverUid, operatorUid, machineId } = opts;
   const requireFiles = opts.requireFiles ?? true;
@@ -358,9 +387,13 @@ export function checkCustody(opts: CustodyCheckOptions): CustodyCheck {
       const gens = checkManagedEntry(paths.generationsDir, "dir", operatorUid);
       if (!gens.ok) return gens;
       if (opts.checkGenerations) {
-        for (const name of listGenerationFiles(paths.generationsDir)) {
-          const gen = checkManagedEntry(join(paths.generationsDir, name), "file", operatorUid);
-          if (!gen.ok) return gen;
+        const listed = listGenerationFiles(paths.generationsDir);
+        if (listed.kind === "error") return { ok: false, reason: listed.reason, detail: listed.detail };
+        if (listed.kind === "ok") {
+          for (const name of listed.files) {
+            const gen = checkManagedEntry(join(paths.generationsDir, name), "file", operatorUid);
+            if (!gen.ok) return gen;
+          }
         }
       }
     }
@@ -455,17 +488,81 @@ function jsonBytes(value: unknown): Uint8Array {
   return Buffer.from(`${canonicalJson(value)}\n`, "utf-8");
 }
 
-function listGenerationFiles(generationsDir: string): string[] {
-  try {
-    return readdirSync(generationsDir).filter((name) => /^\d{12}\.json$/.test(name)).sort();
-  } catch {
-    return [];
-  }
+/** The ONE lock every custody state mutation takes. */
+function custodyLockPath(paths: IntegrityPaths): string {
+  return join(paths.custodyDir, ".custody.lock");
 }
 
-function hasGenerationHistory(paths: IntegrityPaths): boolean {
-  if (existsSync(paths.currentPath)) return true;
-  return listGenerationFiles(paths.generationsDir).length > 0;
+type GenerationListing =
+  | { kind: "ok"; files: string[] }
+  | { kind: "absent" }
+  | { kind: "error"; reason: IntegrityReason; detail: string };
+
+/** ENOENT is the only "absent". Any other readdir failure is an error the
+ *  callers must refuse, never an empty history. */
+function listGenerationFiles(generationsDir: string): GenerationListing {
+  let names: string[];
+  try {
+    names = readdirSync(generationsDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
+    return { kind: "error", reason: "unavailable", detail: `cannot list ${generationsDir}: ${msg(err)}` };
+  }
+  return { kind: "ok", files: names.filter((name) => /^\d{12}\.json$/.test(name)).sort() };
+}
+
+type HistoryCheck =
+  | { kind: "yes" }
+  | { kind: "no" }
+  | { kind: "error"; reason: IntegrityReason; detail: string };
+
+function hasGenerationHistory(paths: IntegrityPaths): HistoryCheck {
+  try {
+    lstatSync(paths.currentPath);
+    return { kind: "yes" };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      return { kind: "error", reason: "unavailable", detail: `cannot stat CURRENT: ${msg(err)}` };
+    }
+  }
+  const listed = listGenerationFiles(paths.generationsDir);
+  if (listed.kind === "error") return listed;
+  return listed.kind === "ok" && listed.files.length > 0 ? { kind: "yes" } : { kind: "no" };
+}
+
+/** Write the durable intent marker BEFORE publication. A failure here must
+ *  refuse the publication. */
+function writeUncertainMarker(paths: IntegrityPaths, value: string): void {
+  writeNewDurable(paths.uncertainPath, Buffer.from(value, "utf-8"), 0o600);
+}
+
+/** Remove the marker after durable completion (or after a publication that
+ *  did not land). Throws unless the marker is already absent; callers decide
+ *  whether a failure is fatal. */
+function clearUncertainMarker(paths: IntegrityPaths): void {
+  try {
+    unlinkSync(paths.uncertainPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
+  }
+  fsyncDir(paths.custodyDir);
+}
+
+type MarkerRead =
+  | { kind: "absent" }
+  | { kind: "value"; value: string }
+  | { kind: "error"; detail: string };
+
+function readUncertainMarker(paths: IntegrityPaths): MarkerRead {
+  let value: string;
+  try {
+    value = readFileSync(paths.uncertainPath, "utf-8").trim();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
+    return { kind: "error", detail: `cannot read the uncertainty marker: ${msg(err)}` };
+  }
+  return { kind: "value", value };
 }
 
 // ── registry ────────────────────────────────────────────────────────────────
@@ -615,8 +712,9 @@ export interface IntegrityStateHandle {
   operatorUid: number;
   machineId: string;
   serverUid: number;
-  /** True when this open recovered an uncertain commit or a retained
-   *  generation before returning. */
+  /** Where the caller's server uid came from. */
+  serverUidSource: string;
+  /** True when this open reconciled an uncertain commit before returning. */
   recovered: boolean;
 }
 
@@ -642,10 +740,11 @@ export type CommitGenerationResult =
 
 export interface IntegrityStateOptions {
   custodyDir: string;
-  /** Instance data dir, used to derive the server uid when `serverUid` is not
-   *  supplied. */
-  dataDir?: string;
+  /** The server uid, measured by the caller (`serverUidSource` names how).
+   *  Binding it to a live server process belongs to the enrollment slice;
+   *  this slice refuses an unmeasured value. */
   serverUid?: number;
+  serverUidSource?: string;
   operatorUid?: number;
   machineId?: string;
   enrollmentId?: string;
@@ -667,16 +766,14 @@ function fail(reason: IntegrityReason, detail: string): IntegrityStateResult {
   return { ok: false, reason, detail, remedy: INTEGRITY_REASON_REMEDIES[reason] };
 }
 
-function deriveServerUid(opts: IntegrityStateOptions, operatorUid: number): { ok: true; uid: number } | { ok: false; detail: string } {
-  if (opts.serverUid !== undefined) return { ok: true, uid: opts.serverUid };
-  if (opts.dataDir === undefined) {
-    return { ok: false, detail: "no dataDir or serverUid was supplied; the server uid cannot be established" };
+function resolveServerUid(opts: IntegrityStateOptions): { ok: true; uid: number; source: string } | { ok: false; detail: string } {
+  if (opts.serverUid === undefined) {
+    return { ok: false, detail: "no server uid was supplied; the caller must measure it and name the measurement source" };
   }
-  try {
-    return { ok: true, uid: statSync(opts.dataDir).uid };
-  } catch (err) {
-    return { ok: false, detail: `cannot stat the data dir ${opts.dataDir}: ${err instanceof Error ? err.message : String(err)}` };
+  if (typeof opts.serverUidSource !== "string" || opts.serverUidSource.trim().length === 0) {
+    return { ok: false, detail: "the server uid has no recorded source" };
   }
+  return { ok: true, uid: opts.serverUid, source: opts.serverUidSource };
 }
 
 function readKey(paths: IntegrityPaths): { ok: true; key: Buffer } | { ok: false; reason: IntegrityReason; detail: string } {
@@ -700,67 +797,122 @@ function ensureLocalFilesystem(paths: IntegrityPaths): { ok: true } | { ok: fals
   return { ok: true };
 }
 
-// ── generation recovery ─────────────────────────────────────────────────────
+// ── custody lock and uncertainty recovery ───────────────────────────────────
 
-function newestGeneration(paths: IntegrityPaths, key: Buffer, enrollmentId: string, operatorUid: number, machineId: string):
-  { kind: "ok"; checkpoint: IntegrityCheckpointV3 } | { kind: "absent" } | { kind: "error"; reason: IntegrityReason; detail: string } {
-  const files = listGenerationFiles(paths.generationsDir);
-  for (let i = files.length - 1; i >= 0; i--) {
-    const path = join(paths.generationsDir, files[i]!);
-    const read = readSignedJson(path, validateCheckpointShape, key, `generation ${files[i]}`);
-    if (read.kind === "error") return read;
-    if (read.kind === "absent") continue;
-    const cp = read.value;
-    if (cp.enrollmentId !== enrollmentId) {
-      return { kind: "error", reason: "custody_invalid", detail: `generation ${cp.generation} belongs to a different enrollment` };
-    }
-    if (cp.operatorUid !== operatorUid || cp.machineId !== machineId) {
-      return { kind: "error", reason: "custody_invalid", detail: `generation ${cp.generation} records a different operator or machine` };
-    }
-    return { kind: "ok", checkpoint: cp };
+/** Run `action` under the ONE custody lock. Recovery is a state mutation too,
+ *  so it serializes with commits and tombstones. */
+function withCustodyLock(paths: IntegrityPaths, action: () => void): { ok: true } | { ok: false; detail: string } {
+  try {
+    const result = withConfigCriticalSection(paths.registryPath, () => {
+      action();
+      return { noop: "custody recovery" };
+    }, { lockPath: custodyLockPath(paths) });
+    if (result.status === "noop") return { ok: true };
+    return { ok: false, detail: result.message };
+  } catch (err) {
+    return { ok: false, detail: `the custody lock failed: ${msg(err)}` };
   }
-  return { kind: "absent" };
 }
 
-/** Restore CURRENT from the newest retained generation. Used only when CURRENT
- *  is absent (an interrupted or rolled-back pointer write), never to paper over
- *  an unreadable or tampered CURRENT. */
-function restoreCurrentFromGeneration(
-  paths: IntegrityPaths,
-  key: Buffer,
-  enrollmentId: string,
-  checkpoint: IntegrityCheckpointV3,
-): { ok: true } | { ok: false; reason: IntegrityReason; detail: string } {
-  try {
-    fsyncFile(generationPath(paths.generationsDir, checkpoint.generation));
-    fsyncDir(paths.generationsDir);
-  } catch (err) {
-    return { ok: false, reason: "unavailable", detail: `cannot fsync the retained generation: ${err instanceof Error ? err.message : String(err)}` };
+type MarkerReconcile =
+  | { ok: true; recovered: boolean }
+  | { ok: false; reason: IntegrityReason; detail: string };
+
+function parseUncertainMarker(raw: string): { kind: "commit" | "registry"; value: number } | null {
+  for (const [kind, prefix] of [["commit", UNCERTAIN_COMMIT_PREFIX], ["registry", UNCERTAIN_REGISTRY_PREFIX]] as const) {
+    if (!raw.startsWith(prefix)) continue;
+    const value = Number(raw.slice(prefix.length));
+    if (!Number.isSafeInteger(value) || value < 1) return null;
+    return { kind, value };
   }
-  const pointer = signIntegrityRecord({
-    version: INTEGRITY_STATE_VERSION,
-    kind: "current",
-    enrollmentId,
-    generation: checkpoint.generation,
-  } satisfies Omit<IntegrityCurrentPointer, "hmac">, key);
-  const result = withConfigCriticalSection(paths.currentPath, (bytes) => {
-    if (bytes !== null && bytes.byteLength > 0) {
-      return { hold: "commit_conflict: CURRENT appeared while restoring a retained generation" };
+  return null;
+}
+
+/** Reconcile the durable intent marker left before a publication. The marker
+ *  is not evidence that the publication landed: the published record decides.
+ *  A landed publication is fsynced and the marker cleared; an unlanded one is
+ *  discarded. */
+function reconcileUncertainMarker(paths: IntegrityPaths, key: Buffer, checkpoint: IntegrityCheckpointV3 | null): MarkerReconcile {
+  let outcome: MarkerReconcile = { ok: true, recovered: false };
+  const locked = withCustodyLock(paths, () => {
+    const marker = readUncertainMarker(paths);
+    if (marker.kind === "absent") return;
+    if (marker.kind === "error") {
+      outcome = { ok: false, reason: "unavailable", detail: marker.detail };
+      throw new Error(marker.detail);
     }
-    return { write: jsonBytes(pointer) };
+    const parsed = parseUncertainMarker(marker.value);
+    if (parsed === null) {
+      outcome = { ok: false, reason: "commit_uncertain", detail: `the uncertainty marker ${JSON.stringify(marker.value)} is not a recognized intent` };
+      throw new Error("unrecognized uncertainty marker");
+    }
+    if (parsed.kind === "registry") {
+      const read = readRegistry(paths, key);
+      if (read.kind === "error") {
+        outcome = { ok: false, reason: read.reason, detail: read.detail };
+        throw new Error(read.detail);
+      }
+      if (read.kind === "absent") {
+        outcome = { ok: false, reason: "commit_uncertain", detail: "the uncertainty marker names a registry write but the registry is absent" };
+        throw new Error("registry absent");
+      }
+      if (read.registry.sequence > parsed.value) {
+        outcome = { ok: false, reason: "commit_uncertain", detail: `the uncertainty marker names registry sequence ${parsed.value}, but the registry is at ${read.registry.sequence}` };
+        throw new Error("registry sequence ahead");
+      }
+      if (read.registry.sequence === parsed.value) {
+        try {
+          fsyncFile(paths.registryPath);
+          fsyncDir(paths.custodyDir);
+        } catch (err) {
+          outcome = { ok: false, reason: "commit_uncertain", detail: `cannot recover the uncertain registry write: ${msg(err)}` };
+          throw err;
+        }
+        outcome = { ok: true, recovered: true };
+      }
+    } else {
+      if (checkpoint === null) {
+        // Leave a commit marker for the caller that resolves CURRENT.
+        return;
+      }
+      if (parsed.value > checkpoint.generation) {
+        outcome = { ok: false, reason: "commit_uncertain", detail: `the uncertainty marker names generation ${parsed.value}, but the current generation is ${checkpoint.generation}` };
+        throw new Error("generation ahead");
+      }
+      if (parsed.value === checkpoint.generation) {
+        try {
+          fsyncFile(generationPath(paths.generationsDir, checkpoint.generation));
+          fsyncDir(paths.generationsDir);
+          fsyncDir(paths.custodyDir);
+        } catch (err) {
+          outcome = { ok: false, reason: "commit_uncertain", detail: `cannot recover the uncertain commit: ${msg(err)}` };
+          throw err;
+        }
+        outcome = { ok: true, recovered: true };
+      }
+    }
+    try {
+      unlinkSync(paths.uncertainPath);
+      fsyncDir(paths.custodyDir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        outcome = { ok: false, reason: "commit_uncertain", detail: `cannot clear the uncertainty marker: ${msg(err)}` };
+        throw err;
+      }
+    }
   });
-  if (result.status !== "written") {
-    return { ok: false, reason: "unavailable", detail: `cannot restore CURRENT: ${result.message}` };
-  }
-  if (result.cleanupWarning) {
-    return { ok: false, reason: "commit_uncertain", detail: result.cleanupWarning };
-  }
-  return { ok: true };
+  if (!locked.ok && outcome.ok) return { ok: false, reason: "unavailable", detail: locked.detail };
+  return outcome;
 }
 
 // ── initialization and open ─────────────────────────────────────────────────
 
-function writeInitialRegistry(paths: IntegrityPaths, key: Buffer, operatorUid: number, machineId: string): IntegrityRegistry {
+function writeInitialRegistry(
+  paths: IntegrityPaths,
+  key: Buffer,
+  operatorUid: number,
+  machineId: string,
+): { ok: true; registry: IntegrityRegistry } | { ok: false; reason: IntegrityReason; detail: string } {
   const enrollmentId = `enr_${randomBytes(16).toString("hex")}`;
   const registry = signIntegrityRecord({
     version: INTEGRITY_STATE_VERSION,
@@ -775,8 +927,19 @@ function writeInitialRegistry(paths: IntegrityPaths, key: Buffer, operatorUid: n
       status: "active",
     }],
   } satisfies Omit<IntegrityRegistry, "hmac">, key);
-  writeNewDurable(paths.registryPath, jsonBytes(registry), 0o600);
-  return registry;
+  const result = withConfigCriticalSection(paths.registryPath, (bytes) => {
+    if (bytes !== null && bytes.byteLength > 0) {
+      return { hold: "custody_invalid: the registry appeared during initialization" };
+    }
+    return { write: jsonBytes(registry) };
+  }, { lockPath: custodyLockPath(paths) });
+  if (result.status === "written" && !result.cleanupWarning) return { ok: true, registry };
+  if (result.status === "written") return { ok: false, reason: "commit_uncertain", detail: result.cleanupWarning! };
+  if (result.status === "held") {
+    const parsed = parseHold(result.message);
+    return { ok: false, reason: parsed.reason, detail: parsed.detail };
+  }
+  return { ok: false, reason: "unavailable", detail: result.message };
 }
 
 function openWithRegistry(
@@ -787,6 +950,7 @@ function openWithRegistry(
   operatorUid: number,
   machineId: string,
   serverUid: number,
+  serverUidSource: string,
   allowEmpty: boolean,
 ): IntegrityStateResult {
   const enrollmentId = opts.enrollmentId ?? registry.entries.find((entry) => entry.status === "active")?.enrollmentId;
@@ -814,16 +978,14 @@ function openWithRegistry(
 
   let checkpoint: IntegrityCheckpointV3 | null = null;
   if (current.kind === "absent") {
-    const newest = newestGeneration(paths, key, enrollmentId, operatorUid, machineId);
-    if (newest.kind === "error") return fail(newest.reason, newest.detail);
-    if (newest.kind === "absent") {
-      if (!allowEmpty) return fail("checkpoint_missing", "no CURRENT pointer and no retained generation");
-    } else {
-      checkpoint = newest.checkpoint;
-      const restored = restoreCurrentFromGeneration(paths, key, enrollmentId, checkpoint);
-      if (!restored.ok) return fail(restored.reason, restored.detail);
-      recovered = true;
+    // A staged generation is never commit evidence on its own: only CURRENT
+    // proves a commit. Fail closed when any generation history exists.
+    const history = hasGenerationHistory(paths);
+    if (history.kind === "error") return fail(history.reason, history.detail);
+    if (history.kind === "yes") {
+      return fail("custody_invalid", "CURRENT is absent while generation history exists; a staged generation is not commit evidence");
     }
+    if (!allowEmpty) return fail("checkpoint_missing", "no CURRENT pointer and no retained generation");
   } else {
     const pointer = current.value;
     if (pointer.enrollmentId !== enrollmentId) {
@@ -849,33 +1011,12 @@ function openWithRegistry(
     }
   }
 
-  // An UNCERTAIN marker means the last replacement committed but its directory
-  // fsync did not complete. Verify and fsync the durable generation before any
-  // operation, then clear the marker.
-  if (checkpoint !== null) {
-    let marked: string | null = null;
-    try {
-      marked = readFileSync(paths.uncertainPath, "utf-8").trim();
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-        return fail("unavailable", `cannot read the uncertainty marker: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-    if (marked !== null) {
-      if (marked.length > 0 && Number(marked) !== checkpoint.generation) {
-        return fail("commit_uncertain", `the uncertainty marker names generation ${marked}, current is ${checkpoint.generation}`);
-      }
-      try {
-        fsyncFile(generationPath(paths.generationsDir, checkpoint.generation));
-        fsyncDir(paths.generationsDir);
-        fsyncDir(paths.custodyDir);
-        unlinkSync(paths.uncertainPath);
-      } catch (err) {
-        return fail("commit_uncertain", `cannot recover the uncertain commit: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      recovered = true;
-    }
-  }
+  // A durable intent marker is written BEFORE publication. Reconcile it
+  // against the published record: a landed publication is fsynced and the
+  // marker cleared; an unlanded one is discarded.
+  const reconciled = reconcileUncertainMarker(paths, key, checkpoint);
+  if (!reconciled.ok) return fail(reconciled.reason, reconciled.detail);
+  if (reconciled.recovered) recovered = true;
 
   return {
     ok: true,
@@ -889,20 +1030,21 @@ function openWithRegistry(
       operatorUid,
       machineId,
       serverUid,
+      serverUidSource,
       recovered,
     },
   };
 }
 
 /** Create custody for a genuine first use. `newCustody: true` is required: an
- *  absent registry with ANY generation history is `custody_invalid`, never
+ *  absent registry with generation history is `custody_invalid`, never
  *  `uninitialized` (N5), and an existing registry is not re-initialized. */
 export function initializeIntegrityCustody(opts: IntegrityStateOptions): IntegrityStateResult {
   const uid = opts.operatorUid ?? currentUid();
   if (uid === null) return fail("custody_invalid", "the process has no uid; custody cannot be established");
   const machineId = opts.machineId ?? machineIdentity();
-  const derived = deriveServerUid(opts, uid);
-  if (!derived.ok) return fail("unavailable", derived.detail);
+  const derived = resolveServerUid(opts);
+  if (!derived.ok) return fail("custody_invalid", derived.detail);
   if (derived.uid === uid || derived.uid === 0) {
     return fail("custody_invalid", "the server uid and the operator uid must differ, and the server must not be root");
   }
@@ -925,7 +1067,9 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
     if (read.kind === "error") return fail(read.reason, read.detail);
     return fail("custody_invalid", "custody is already initialized; use the existing state");
   }
-  if (hasGenerationHistory(paths)) {
+  const history = hasGenerationHistory(paths);
+  if (history.kind === "error") return fail(history.reason, history.detail);
+  if (history.kind === "yes") {
     return fail("custody_invalid", "the registry is absent but generation history exists; refusing to mint a new custody root");
   }
   if (opts.newCustody !== true) {
@@ -951,12 +1095,9 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
 
   const key = readKey(paths);
   if (!key.ok) return fail(key.reason, key.detail);
-  let registry: IntegrityRegistry;
-  try {
-    registry = writeInitialRegistry(paths, key.key, uid, machineId);
-  } catch (err) {
-    return fail("unavailable", `writing the registry failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  const written = writeInitialRegistry(paths, key.key, uid, machineId);
+  if (!written.ok) return fail(written.reason, written.detail);
+  const registry = written.registry;
 
   const custody = checkCustody({
     paths,
@@ -969,17 +1110,17 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
   });
   if (!custody.ok) return fail(custody.reason, custody.detail);
 
-  return openWithRegistry(paths, key.key, registry, opts, uid, machineId, derived.uid, true);
+  return openWithRegistry(paths, key.key, registry, opts, uid, machineId, derived.uid, derived.source, true);
 }
 
 /** Open existing custody and recover an interrupted commit before returning.
- *  Custody is rechecked on EVERY call. */
+ *  Custody is rechecked on every open. */
 export function openIntegrityState(opts: IntegrityStateOptions): IntegrityStateResult {
   const uid = opts.operatorUid ?? currentUid();
   if (uid === null) return fail("custody_invalid", "the process has no uid; custody cannot be verified");
   const machineId = opts.machineId ?? machineIdentity();
-  const derived = deriveServerUid(opts, uid);
-  if (!derived.ok) return fail("unavailable", derived.detail);
+  const derived = resolveServerUid(opts);
+  if (!derived.ok) return fail("custody_invalid", derived.detail);
   if (derived.uid === uid || derived.uid === 0) {
     return fail("custody_invalid", "the server uid and the operator uid must differ, and the server must not be root");
   }
@@ -998,22 +1139,31 @@ export function openIntegrityState(opts: IntegrityStateOptions): IntegrityStateR
 
   const key = readKey(paths);
   if (!key.ok) {
-    if (key.reason === "unavailable" && !existsSync(paths.keyPath) && hasGenerationHistory(paths)) {
-      return fail("custody_invalid", "the key is absent while generation history exists");
+    if (key.reason === "unavailable" && !existsSync(paths.keyPath)) {
+      const history = hasGenerationHistory(paths);
+      if (history.kind === "error") return fail(history.reason, history.detail);
+      if (history.kind === "yes") return fail("custody_invalid", "the key is absent while generation history exists");
     }
     return fail(key.reason, key.detail);
   }
 
   const read = readRegistry(paths, key.key);
   if (read.kind === "absent") {
-    if (hasGenerationHistory(paths)) {
+    const history = hasGenerationHistory(paths);
+    if (history.kind === "error") return fail(history.reason, history.detail);
+    if (history.kind === "yes") {
       return fail("custody_invalid", "the registry is absent but generation history exists; refusing to treat this as first use");
     }
     return fail("uninitialized", "no custody registry exists; an explicit new-custody enrollment is required");
   }
   if (read.kind === "error") return fail(read.reason, read.detail);
 
-  return openWithRegistry(paths, key.key, read.registry, opts, uid, machineId, derived.uid, false);
+  // A registry-write intent marker is reconciled before the enrollment check:
+  // the tombstone that wrote it has already made the enrollment inactive.
+  const marker = reconcileUncertainMarker(paths, key.key, null);
+  if (!marker.ok) return fail(marker.reason, marker.detail);
+
+  return openWithRegistry(paths, key.key, read.registry, opts, uid, machineId, derived.uid, derived.source, false);
 }
 
 // ── commit ──────────────────────────────────────────────────────────────────
@@ -1046,11 +1196,11 @@ function parseHold(message: string): { reason: IntegrityReason; detail: string }
 }
 
 /**
- * Commit a generation under the shared critical section.
+ * Commit a generation under the ONE custody lock.
  *
  * The pre-scan generation is rechecked inside `decide`; a mismatch returns
- * `commit_conflict` and never writes. The generation file is staged under the
- * SAME lock (via the section's `stage` extension) before CURRENT is replaced.
+ * `commit_conflict` and never writes. The generation and a durable intent
+ * marker are staged under the ONE custody lock before CURRENT is replaced.
  * A post-rename directory-fsync warning is `commit_uncertain`, never success.
  */
 export function commitGeneration(opts: CommitGenerationOptions): CommitGenerationResult {
@@ -1059,14 +1209,29 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     return { ok: false, status: "commit_failed", reason: "commit_conflict", detail: "the expected generation is not a non-negative integer", remedy: INTEGRITY_REASON_REMEDIES.commit_conflict };
   }
 
+  // Re-measure the identity at commit time. The handle's recorded values were
+  // measured when it was opened; a drift since then must not stage a
+  // generation.
+  const measuredOperatorUid = currentUid();
+  if (measuredOperatorUid === null) {
+    return { ok: false, status: "commit_failed", reason: "custody_invalid", detail: "the process has no uid", remedy: INTEGRITY_REASON_REMEDIES.custody_invalid };
+  }
+  if (measuredOperatorUid !== state.operatorUid) {
+    return { ok: false, status: "commit_failed", reason: "custody_invalid", detail: `the operator uid changed from the recorded ${state.operatorUid} to ${measuredOperatorUid}`, remedy: INTEGRITY_REASON_REMEDIES.custody_invalid };
+  }
+  const measuredMachineId = machineIdentity();
+  if (measuredMachineId !== state.machineId) {
+    return { ok: false, status: "commit_failed", reason: "custody_invalid", detail: "the machine identity changed since the state was opened", remedy: INTEGRITY_REASON_REMEDIES.custody_invalid };
+  }
+
   // Custody is rechecked at the start of the commit operation too, not only
   // when the state was opened: a mode or identity drift between the open and
   // the commit must not stage a generation.
   const custody = checkCustody({
     paths: state.paths,
     serverUid: state.serverUid,
-    operatorUid: state.operatorUid,
-    machineId: state.machineId,
+    operatorUid: measuredOperatorUid,
+    machineId: measuredMachineId,
     expectedOperatorUid: state.enrollment.operatorUid,
     expectedMachineId: state.enrollment.machineId,
     checkGenerations: true,
@@ -1083,16 +1248,29 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
 
   const nextGeneration = opts.expectedGeneration + 1;
   const checkpointPayload = checkpointPayloadFor(opts, nextGeneration);
-  const checkpoint = signIntegrityRecord(checkpointPayload, state.key);
-  const pointerPayload: Omit<IntegrityCurrentPointer, "hmac"> = {
-    version: INTEGRITY_STATE_VERSION,
-    kind: "current",
-    enrollmentId: state.enrollment.enrollmentId,
-    generation: nextGeneration,
-  };
-  const pointer = signIntegrityRecord(pointerPayload, state.key);
-  const generationBytes = jsonBytes(checkpoint);
-  let stagedGeneration: number | null = null;
+  let checkpoint: IntegrityCheckpointV3;
+  let pointer: IntegrityCurrentPointer;
+  let generationBytes: Uint8Array;
+  try {
+    checkpoint = signIntegrityRecord(checkpointPayload, state.key);
+    pointer = signIntegrityRecord({
+      version: INTEGRITY_STATE_VERSION,
+      kind: "current",
+      enrollmentId: state.enrollment.enrollmentId,
+      generation: nextGeneration,
+    } satisfies Omit<IntegrityCurrentPointer, "hmac">, state.key);
+    generationBytes = jsonBytes(checkpoint);
+  } catch (err) {
+    // canonicalJson refuses values JSON cannot represent (including
+    // undefined, NaN/Infinity and non-plain objects); nothing is staged.
+    return {
+      ok: false,
+      status: "commit_failed",
+      reason: "checkpoint_incompatible",
+      detail: `the checkpoint payload is not plain JSON: ${msg(err)}`,
+      remedy: INTEGRITY_REASON_REMEDIES.checkpoint_incompatible,
+    };
+  }
 
   const decide = (bytes: Uint8Array | null): { write: Uint8Array } | { hold: string } => {
     // Recheck the registry under the lock: an enrollment tombstoned while this
@@ -1127,11 +1305,10 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     if (onDisk !== opts.expectedGeneration) {
       return holdMessage("commit_conflict", `the on-disk generation is ${onDisk}, expected ${opts.expectedGeneration}`);
     }
-    stagedGeneration = nextGeneration;
     return { write: jsonBytes(pointer) };
   };
 
-  const stage = (_bytes: Uint8Array): void => {
+  const stage = (): (() => void) => {
     const path = generationPath(state.paths.generationsDir, nextGeneration);
     try {
       writeNewDurable(path, generationBytes, 0o600);
@@ -1145,13 +1322,23 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
         replaceDurable(path, generationBytes, 0o600);
       }
     }
-    stagedGeneration = nextGeneration;
+    // Durable intent marker BEFORE publication: a post-rename fsync warning
+    // then cannot lose the uncertainty. Failure here refuses the publication.
+    try {
+      writeUncertainMarker(state.paths, `${UNCERTAIN_COMMIT_PREFIX}${nextGeneration}`);
+    } catch (err) {
+      try { clearUncertainMarker(state.paths); } catch { /* the write failure stands */ }
+      throw err;
+    }
+    return () => { try { clearUncertainMarker(state.paths); } catch { /* leave it for the next open */ } };
   };
 
   let result: ConfigSectionResult;
   try {
     result = withConfigCriticalSection(state.paths.currentPath, decide, {
       stage,
+      lockPath: custodyLockPath(state.paths),
+      onCommitted: () => clearUncertainMarker(state.paths),
       testHooks: opts.testHooks,
     });
   } catch (err) {
@@ -1166,15 +1353,8 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
 
   if (result.status === "written") {
     if (result.cleanupWarning) {
-      // CURRENT is committed, but its directory fsync did not complete. Mark
-      // the generation uncertain so the next operation verifies and fsyncs it.
-      try {
-        writeFileSync(state.paths.uncertainPath, String(nextGeneration), { mode: 0o600 });
-        fsyncFile(state.paths.uncertainPath);
-        fsyncDir(state.paths.custodyDir);
-      } catch {
-        // The marker is best-effort; the commit is still reported uncertain.
-      }
+      // CURRENT is committed, but its directory fsync did not complete. The
+      // durable marker stays until the next open verifies and clears it.
       return {
         ok: false,
         status: "commit_uncertain",
@@ -1214,14 +1394,16 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
 
 export interface TombstoneOptions extends IntegrityStateOptions {
   expectedSequence: number;
+  /** TEST-ONLY barriers, from the shared critical section. */
+  testHooks?: ConfigSectionOptions["testHooks"];
 }
 
 export type TombstoneResult =
   | { ok: true; sequence: number }
   | { ok: false; status: "commit_conflict" | "commit_failed"; reason: IntegrityReason; detail: string; remedy: string };
 
-/** Tombstone an enrollment under the same critical section. The sequence is a
- *  compare-and-swap: a stale expectation holds. No new lock is introduced. */
+/** Tombstone an enrollment under the same custody lock as commit. The
+ *  sequence is a compare-and-swap: a stale expectation holds. */
 export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
   const opened = openIntegrityState(opts);
   if (!opened.ok) return { ok: false, status: "commit_failed", reason: opened.reason, detail: opened.detail, remedy: opened.remedy };
@@ -1256,8 +1438,29 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
     } satisfies Omit<IntegrityRegistry, "hmac">, state.key);
     return { write: jsonBytes(updated) };
   };
-  const result = withConfigCriticalSection(state.paths.registryPath, decide);
-  if (result.status === "written" && !result.cleanupWarning) return { ok: true, sequence: nextSequence };
+  const stage = (): (() => void) => {
+    try {
+      writeUncertainMarker(state.paths, `${UNCERTAIN_REGISTRY_PREFIX}${nextSequence}`);
+    } catch (err) {
+      try { clearUncertainMarker(state.paths); } catch { /* the write failure stands */ }
+      throw err;
+    }
+    return () => { try { clearUncertainMarker(state.paths); } catch { /* leave it for the next open */ } };
+  };
+  let result: ConfigSectionResult;
+  try {
+    result = withConfigCriticalSection(state.paths.registryPath, decide, {
+      stage,
+      lockPath: custodyLockPath(state.paths),
+      onCommitted: () => clearUncertainMarker(state.paths),
+      testHooks: opts.testHooks,
+    });
+  } catch (err) {
+    return { ok: false, status: "commit_failed", reason: "unavailable", detail: `the tombstone fence failed before replacing the registry: ${msg(err)}`, remedy: INTEGRITY_REASON_REMEDIES.unavailable };
+  }
+  if (result.status === "written" && !result.cleanupWarning) {
+    return { ok: true, sequence: nextSequence };
+  }
   if (result.status === "written" && result.cleanupWarning) {
     return { ok: false, status: "commit_failed", reason: "commit_uncertain", detail: result.cleanupWarning, remedy: INTEGRITY_REASON_REMEDIES.commit_uncertain };
   }
@@ -1271,7 +1474,10 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
 // ── small readers for later slices ──────────────────────────────────────────
 
 export function generationNumbers(paths: IntegrityPaths): number[] {
-  return listGenerationFiles(paths.generationsDir)
+  const listed = listGenerationFiles(paths.generationsDir);
+  if (listed.kind === "error") throw new Error(listed.detail);
+  if (listed.kind === "absent") return [];
+  return listed.files
     .map((name) => Number.parseInt(basename(name, ".json"), 10))
     .filter((value) => Number.isSafeInteger(value));
 }

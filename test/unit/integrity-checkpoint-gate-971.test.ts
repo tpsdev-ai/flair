@@ -2,8 +2,8 @@
  * integrity-checkpoint-gate-971.test.ts — flair#971 slice 1a, invariant 1.
  *
  * Proves the v3 checkpoint gate: the fixed reason union, the custody predicate
- * (modes, symlinks, ACLs, recorded operator/machine, real uid denial), HMAC and
- * binding refusal, and the N5 anti-rebootstrap rule. No command or route is
+ * (modes, symlinks, ACLs, recorded operator/machine, real uid denial), HMAC
+ * verification, and the N5 anti-rebootstrap rule. No command or route is
  * exercised; the module under test is the library foundation.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
@@ -27,29 +27,28 @@ import { spawnSync } from "node:child_process";
 import {
   INTEGRITY_REASONS,
   INTEGRITY_REASON_REMEDIES,
+  canonicalJson,
   checkCustody,
   commitGeneration,
   generationPath,
   initializeIntegrityCustody,
   integrityPaths,
+  machineIdentity,
   openIntegrityState,
   tombstoneEnrollment,
   type IntegrityStateOptions,
 } from "../../src/lib/integrity-state.ts";
-import { assertSupportedLocalFilesystem, isSupportedLocalFilesystemType } from "../../src/lib/config-critical-section.ts";
+import { assertSupportedLocalFilesystem, isSupportedLocalFilesystemName, isSupportedLocalFilesystemType } from "../../src/lib/config-critical-section.ts";
 
 const OPERATOR_UID = process.getuid?.() ?? 0;
 const SERVER_UID = OPERATOR_UID === 0 ? 65534 : OPERATOR_UID + 1000;
-const MACHINE = "host-a";
+const MACHINE = machineIdentity();
 
 let root: string;
 let custodyDir: string;
-let dataDir: string;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "flair-971-gate-"));
-  dataDir = join(root, "data");
-  mkdirSync(dataDir, { mode: 0o700 });
   custodyDir = join(root, "custody");
 });
 
@@ -60,8 +59,8 @@ afterEach(() => {
 function options(overrides: Partial<IntegrityStateOptions> = {}): IntegrityStateOptions {
   return {
     custodyDir,
-    dataDir,
     serverUid: SERVER_UID,
+    serverUidSource: "measured",
     operatorUid: OPERATOR_UID,
     machineId: MACHINE,
     newCustody: true,
@@ -154,7 +153,7 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(result.reason).toBe("custody_invalid");
   });
 
-  it("rechecks the recorded machine identity on every operation", () => {
+  it("rechecks the recorded machine identity at open", () => {
     init();
     const result = openIntegrityState(options({ machineId: "host-b", newCustody: false }));
     expect(result.ok).toBe(false);
@@ -163,7 +162,7 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(result.detail).toContain("machine identity");
   });
 
-  it("rechecks the recorded operator uid on every operation", () => {
+  it("rechecks the recorded operator uid at open", () => {
     init();
     const result = openIntegrityState(options({ operatorUid: OPERATOR_UID + 1, newCustody: false }));
     expect(result.ok).toBe(false);
@@ -313,10 +312,12 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(support.ok).toBe(true);
     if (support.ok) expect(support.type.length).toBeGreaterThan(0);
     expect(isSupportedLocalFilesystemType(0xef53)).toBe(true);
-    expect(isSupportedLocalFilesystemType(0x1a2b3c4d)).toBe(true);
     expect(isSupportedLocalFilesystemType(0x6969)).toBe(false); // NFS
     expect(isSupportedLocalFilesystemType(0xff534d42)).toBe(false); // SMB/CIFS
     expect(isSupportedLocalFilesystemType(0x65735546)).toBe(false); // FUSE
+    expect(isSupportedLocalFilesystemName("apfs")).toBe(true);
+    expect(isSupportedLocalFilesystemName("hfs")).toBe(true);
+    expect(isSupportedLocalFilesystemName("nfs")).toBe(false);
   });
 
   it("reports the custody predicate directly", () => {
@@ -330,6 +331,43 @@ describe("checkpoint-gate (invariant 1)", () => {
       expectedMachineId: state.enrollment.machineId,
     });
     expect(verdict.ok).toBe(true);
+  });
+
+  it("refuses a server uid without a recorded measurement source", () => {
+    const missing = initializeIntegrityCustody({ ...options(), serverUid: undefined });
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.reason).toBe("custody_invalid");
+    const unsourced = initializeIntegrityCustody({ ...options(), serverUidSource: "" });
+    expect(unsourced.ok).toBe(false);
+    if (!unsourced.ok) expect(unsourced.reason).toBe("custody_invalid");
+    expect(lstatSync(custodyDir, { throwIfNoEntry: false })).toBeUndefined();
+  });
+
+  it("refuses an unreadable generation history instead of reading it as none", () => {
+    const state = init();
+    commitFirst(state);
+    const paths = integrityPaths(custodyDir);
+    unlinkSync(paths.registryPath);
+    unlinkSync(paths.currentPath);
+    renameSync(paths.generationsDir, join(root, "generations-real"));
+    writeFileSync(paths.generationsDir, "not a directory");
+    const opened = openIntegrityState(options({ newCustody: false }));
+    expect(opened.ok).toBe(false);
+    if (!opened.ok) {
+      expect(opened.reason).toBe("unavailable");
+      expect(opened.detail).toContain("cannot list");
+    }
+  });
+
+  it("refuses values JSON cannot represent", () => {
+    const sparse: unknown[] = [1];
+    sparse.length = 3;
+    for (const value of [undefined, () => 1, Symbol("s"), 1n, NaN, Infinity, -Infinity, new Date(0), /x/, new Map(), sparse]) {
+      expect(() => canonicalJson(value)).toThrow();
+    }
+    expect(() => canonicalJson({ a: undefined })).toThrow();
+    expect(canonicalJson({ b: 1, a: [true, null, "x"] })).toBe('{"a":[true,null,"x"],"b":1}');
+    expect(JSON.parse(canonicalJson({ b: 1, a: [true, null, "x"] }))).toEqual({ a: [true, null, "x"], b: 1 });
   });
 
   // The real denial. Mode arithmetic is not evidence: a child process with the

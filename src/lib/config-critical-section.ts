@@ -18,11 +18,12 @@
  *      the configured entry does not exist AND the parent resolves. A dangling
  *      symlink is not absence; EACCES / ELOOP / ENOTDIR are resolution ERRORS
  *      and HOLD, never "absent".
- *   2. LOCK: an `O_EXCL` create of `<resolvedTarget>.lock`, beside the
- *      RESOLVED target so stable symlink aliases share one lock, computed once
- *      per attempt. Content is diagnostic only (`<pid> <iso> <hostname>`),
- *      never an authorization input. Bounded retry then a NAMED refusal. No
- *      reclaim, no age-out, no pid-liveness shortcut.
+ *   2. LOCK: an `O_EXCL` create of `<resolvedTarget>.lock` (or the caller's
+ *      explicit `lockPath`), beside the RESOLVED target so stable symlink
+ *      aliases share one lock, computed once per attempt. Content is
+ *      diagnostic only (`<pid> <iso> <hostname>`), never an authorization
+ *      input. Bounded retry then a NAMED refusal. No reclaim, no age-out, no
+ *      pid-liveness shortcut.
  *   3. RE-OBSERVE INSIDE the lock and compare. Any change of entry type,
  *      entry identity, resolved path, target identity, parent identity or
  *      absence state HELDS the write (fixture 11/12), naming which
@@ -83,8 +84,8 @@
  * (every wired client re-reads at startup). ACL, xattr and hard-link
  * preservation are NOT handled and are documented, not silently dropped.
  *
- * Leaf module: imports only node:fs, node:crypto, node:os and node:path.
- * NEVER import src/cli.ts here — its `writeFileAtomic` lacks exclusive temp
+ * Leaf module: imports only node:fs, node:child_process, node:crypto, node:os
+ * and node:path. NEVER import src/cli.ts here — its `writeFileAtomic` lacks exclusive temp
  * creation, fsync, locking and identity checks (flair#1778 2c-i-b ruling).
  */
 import {
@@ -106,6 +107,7 @@ import {
   writeSync,
   type Stats,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -179,15 +181,25 @@ export interface ConfigSectionOptions {
   maxAttempts?: number;
   /** Lock acquisition: bounded retry (default 40 × 50 ms). */
   lockRetry?: { attempts?: number; delayMs?: number };
+  /** Explicit lock path. When set, every mutator of a protocol passes the SAME
+   *  path so their state changes serialize together (flair#971 custody: commit,
+   *  tombstone, registry write and recovery). Defaults to
+   *  `<resolvedTarget>.lock`. */
+  lockPath?: string;
   /** In-lock staging for a protocol that must publish IMMUTABLE side records
    *  before the target replacement. Runs after `decide` returns a write and
    *  before the temp file is created for the target. It must not replace the
    *  target or any name a reader can resolve to current state; an unreferenced
    *  staging orphan may be replaced. A throw aborts the write, leaving the
-   *  target unchanged and any staged names unreferenced. Added for the
-   *  integrity generation/registry protocol (flair#971); existing sinks leave
-   *  it unset. */
-  stage?: (bytes: Uint8Array, identity: ConfigObservation) => void;
+   *  target unchanged and any staged names unreferenced. When it returns a
+   *  function, that cleanup runs under the SAME lock if the target replacement
+   *  does not land (a throw or a pre-rename failure). Added for the integrity
+   *  generation/registry protocol (flair#971); existing sinks leave it unset. */
+  stage?: (bytes: Uint8Array, identity: ConfigObservation) => void | (() => void);
+  /** Runs under the lock immediately after a successful replacement. A throw
+   *  is reported as a post-rename cleanup warning (the replacement is
+   *  committed). Used by the integrity protocol to clear its intent marker. */
+  onCommitted?: () => void;
   /** TEST-ONLY deterministic barriers at the production read/write boundary.
    *  Inert unless a fixture sets them. `afterPreObserve` fires between the
    *  pre-lock observation and the lock; `afterRead` fires between the in-lock
@@ -233,19 +245,20 @@ export interface ConfigSectionResult {
 
 // ── filesystem support ──────────────────────────────────────────────────────
 
-/** Filesystems the integrity custody protocol accepts. The lock's O_EXCL
- *  create and rename guarantees are documented above for APFS and ext4/xfs;
- *  the rest are local filesystems with the same directory semantics. Anything
- *  not listed — including NFS, SMB/CIFS, FUSE and 9p — is refused, because on
- *  those the lock may not serialize and rename/fsync guarantees are weaker
- *  than this module claims. A caller that needs this refusal (the integrity
- *  protocol) runs the wrapper before creating a lock; the primitive itself
- *  keeps its documented NFS/SMB degradation. */
+/** Filesystems the integrity custody protocol accepts on Linux, keyed by the
+ *  documented `statfs` magic numbers. The lock's O_EXCL create and rename
+ *  guarantees are documented above for APFS and ext4/xfs; the rest are local
+ *  filesystems with the same directory semantics. Anything not listed —
+ *  including NFS, SMB/CIFS, FUSE and 9p — is refused, because on those the
+ *  lock may not serialize and rename/fsync guarantees are weaker than this
+ *  module claims. A caller that needs this refusal (the integrity protocol)
+ *  runs the wrapper before creating a lock; the primitive itself keeps its
+ *  documented NFS/SMB degradation. macOS is classified by NAME instead: its
+ *  `f_type` is not a stable filesystem identifier (APFS reports 0x1a). */
 const LOCAL_FILESYSTEM_TYPES: Record<number, string> = {
   0xef53: "ext2/ext3/ext4",
   0x58465342: "xfs",
   0x9123683e: "btrfs",
-  0x1a2b3c4d: "apfs",
   0x2fc12fc1: "zfs",
   0x01021994: "tmpfs",
   0x794c7630: "overlayfs",
@@ -253,19 +266,28 @@ const LOCAL_FILESYSTEM_TYPES: Record<number, string> = {
   0xf2f52010: "f2fs",
 };
 
+/** macOS filesystem names accepted for custody. `stat -f %T` prints these. */
+const LOCAL_FILESYSTEM_NAMES = new Set(["apfs", "hfs"]);
+
 export type FilesystemSupport =
   | { ok: true; type: string }
   | { ok: false; reason: string };
 
-/** Whether a statfs type is one of the recognized local filesystems. Exported
- *  so the refusal policy can be pinned without mounting a network filesystem. */
+/** Whether a Linux statfs magic is one of the recognized local filesystems.
+ *  Exported so the refusal policy can be pinned without mounting a network
+ *  filesystem. */
 export function isSupportedLocalFilesystemType(type: number): boolean {
   return Object.hasOwn(LOCAL_FILESYSTEM_TYPES, type);
 }
 
+/** Whether a filesystem NAME reported by the platform is accepted. */
+export function isSupportedLocalFilesystemName(name: string): boolean {
+  return LOCAL_FILESYSTEM_NAMES.has(name.toLowerCase());
+}
+
 /** Refuse a network or unrecognized filesystem. Resolves the nearest existing
  *  ancestor so an about-to-be-created custody directory is checked too. A
- *  failed statfs is a refusal, never "local". */
+ *  failed probe is a refusal, never "local". */
 export function assertSupportedLocalFilesystem(targetPath: string): FilesystemSupport {
   let probe = targetPath;
   // Bounded: `/` exists on every supported host; stop at the root.
@@ -274,6 +296,21 @@ export function assertSupportedLocalFilesystem(targetPath: string): FilesystemSu
     const parent = dirname(probe);
     if (parent === probe) return { ok: false, reason: `cannot find an existing ancestor of ${targetPath}` };
     probe = parent;
+  }
+  if (process.platform === "darwin") {
+    // macOS reports the same numeric f_type for every local disk filesystem,
+    // so the name is the stable identifier; BSD stat documents `%T` as the
+    // file-system type name.
+    let name: string;
+    try {
+      name = execFileSync("stat", ["-f", "%T", probe], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    } catch (err) {
+      return { ok: false, reason: `cannot determine the filesystem name for ${probe}: ${msg(err)}` };
+    }
+    if (!isSupportedLocalFilesystemName(name)) {
+      return { ok: false, reason: `filesystem ${name || "(empty)"} at ${probe} is not a recognized local filesystem` };
+    }
+    return { ok: true, type: name.toLowerCase() };
   }
   let st: { type: number };
   try {
@@ -665,7 +702,7 @@ export function withConfigCriticalSection(
     barrier(opts.testHooks?.afterPreObserve, "preObserve", attempt);
 
     // 2. LOCK (computed once per attempt).
-    const lockPath = `${targetPath}.lock`;
+    const lockPath = opts.lockPath ?? `${targetPath}.lock`;
     const lock = acquireLock(lockPath, lockRetry);
     if (!lock.ok) {
       return { status: "refused", path: targetPath, attempts, message: lockRefusalLine(lockPath, lock.holder) };
@@ -729,9 +766,11 @@ export function withConfigCriticalSection(
       // 5. WRITE. Immutable side records are staged under the SAME lock before
       // the target replacement, so a failure before the rename leaves the
       // target untouched while the staged records stay unreferenced.
+      let stageCleanup: (() => void) | undefined;
       if (opts.stage) {
         try {
-          opts.stage(decision.write, obs);
+          const staged = opts.stage(decision.write, obs);
+          stageCleanup = typeof staged === "function" ? staged : undefined;
         } catch (err) {
           return { status: "refused", path: targetPath, attempts, message: `nothing written: staging failed: ${msg(err)}`, backupPath };
         }
@@ -739,9 +778,21 @@ export function withConfigCriticalSection(
       const original = obs.target.type === "regular"
         ? { mode: obs.target.mode!, uid: obs.target.uid!, gid: obs.target.gid! }
         : null;
-      const wr = atomicReplace(targetPath, decision.write, original, opts.testHooks?.afterTempCreate, opts.testHooks?.afterFsync, opts.testHooks?.afterRename);
+      let wr: ReplaceResult;
+      try {
+        wr = atomicReplace(targetPath, decision.write, original, opts.testHooks?.afterTempCreate, opts.testHooks?.afterFsync, opts.testHooks?.afterRename);
+      } catch (err) {
+        try { stageCleanup?.(); } catch { /* the original failure stands */ }
+        throw err;
+      }
       if (!wr.ok) {
+        try { stageCleanup?.(); } catch { /* the refusal stands */ }
         return { status: "refused", path: targetPath, attempts, message: `nothing written: ${wr.reason}`, backupPath };
+      }
+      let cleanupWarning = wr.cleanupWarning;
+      if (cleanupWarning === null && opts.onCommitted) {
+        try { opts.onCommitted(); }
+        catch (err) { cleanupWarning = `the replacement is committed but the post-rename step failed: ${msg(err)}`; }
       }
       return {
         status: "written",
@@ -750,7 +801,7 @@ export function withConfigCriticalSection(
         message: "",
         backupPath,
         committed: true,
-        cleanupWarning: wr.cleanupWarning,
+        cleanupWarning,
       };
     } finally {
       // 6. RELEASE in finally, including when decide() throws.

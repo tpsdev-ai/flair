@@ -3,8 +3,9 @@
  *
  * Proves the commit fence on `withConfigCriticalSection`: competing writers
  * hold on the pre-scan generation, a failure before the rename leaves CURRENT
- * unchanged, a post-rename fsync warning is `commit_uncertain`, and the next
- * operation recovers a retained/uncertain generation before proceeding.
+ * unchanged, a staged generation is never commit evidence on its own, a
+ * post-rename fsync warning is `commit_uncertain`, and the next open reconciles
+ * an uncertain commit before proceeding.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import {
@@ -29,24 +30,23 @@ import {
   generationPath,
   initializeIntegrityCustody,
   integrityPaths,
+  machineIdentity,
   openIntegrityState,
+  tombstoneEnrollment,
   type IntegrityStateOptions,
 } from "../../src/lib/integrity-state.ts";
 
 const OPERATOR_UID = process.getuid?.() ?? 0;
 const SERVER_UID = OPERATOR_UID === 0 ? 65534 : OPERATOR_UID + 1000;
-const MACHINE = "host-a";
+const MACHINE = machineIdentity();
 const CHILD_DEADLINE_MS = 20_000;
 const modulePath = join(import.meta.dirname, "..", "..", "src", "lib", "integrity-state.ts");
 
 let root: string;
 let custodyDir: string;
-let dataDir: string;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "flair-971-fence-"));
-  dataDir = join(root, "data");
-  mkdirSync(dataDir, { mode: 0o700 });
   custodyDir = join(root, "custody");
 });
 
@@ -57,8 +57,8 @@ afterEach(() => {
 function options(overrides: Partial<IntegrityStateOptions> = {}): IntegrityStateOptions {
   return {
     custodyDir,
-    dataDir,
     serverUid: SERVER_UID,
+    serverUidSource: "measured",
     operatorUid: OPERATOR_UID,
     machineId: MACHINE,
     newCustody: true,
@@ -97,11 +97,20 @@ function commit(state = init(), expectedGeneration = 0) {
 function childSource(): string {
   return [
     `import { openIntegrityState, commitGeneration } from ${JSON.stringify(modulePath)};`,
-    "const [custodyDir, dataDir, serverUid, operatorUid, machineId, expected] = process.argv.slice(1);",
-    "const opened = openIntegrityState({ custodyDir, dataDir, serverUid: Number(serverUid), operatorUid: Number(operatorUid), machineId, newCustody: false });",
+    "const [custodyDir, serverUid, operatorUid, machineId, expected] = process.argv.slice(1);",
+    "const opened = openIntegrityState({ custodyDir, serverUid: Number(serverUid), serverUidSource: \"measured\", operatorUid: Number(operatorUid), machineId, newCustody: false });",
     "if (!opened.ok) { console.log('RESULT:' + JSON.stringify(opened)); process.exit(0); }",
     "const checkpoint = { baseline: { scannedAt: '2026-11-04T00:00:00.000Z', scanStartedAt: '2026-11-04T00:00:00.000Z', scanEndedAt: '2026-11-04T00:00:01.000Z', clockSource: 'test', byDurability: { permanent: 1, persistent: 0, standard: 0, ephemeral: 0 }, ids: { 'mem-a': 'permanent' }, instanceTokens: { 'mem-a': 'tok-a' } } };",
     "const result = commitGeneration({ state: opened.state, expectedGeneration: Number(expected), checkpoint });",
+    "console.log('RESULT:' + JSON.stringify(result));",
+  ].join("\n");
+}
+
+function tombstoneChildSource(): string {
+  return [
+    `import { tombstoneEnrollment } from ${JSON.stringify(modulePath)};`,
+    "const [custodyDir, serverUid, operatorUid, machineId, expectedSequence] = process.argv.slice(1);",
+    "const result = tombstoneEnrollment({ custodyDir, serverUid: Number(serverUid), serverUidSource: 'measured', operatorUid: Number(operatorUid), machineId, newCustody: false, expectedSequence: Number(expectedSequence) });",
     "console.log('RESULT:' + JSON.stringify(result));",
   ].join("\n");
 }
@@ -115,9 +124,32 @@ interface ChildResult {
 function startChild(barrierDir: string, expected: number): { child: ChildProcess; done: Promise<ChildResult> } {
   const child = spawn(
     process.execPath,
-    ["-e", childSource(), custodyDir, dataDir, String(SERVER_UID), String(OPERATOR_UID), MACHINE, String(expected)],
+    ["-e", childSource(), custodyDir, String(SERVER_UID), String(OPERATOR_UID), MACHINE, String(expected)],
     {
       env: { ...process.env, HOME: join(root, "home"), FLAIR_TEST_CRITICAL_BARRIER: barrierDir },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+  child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+  const done = new Promise<ChildResult>((resolve) => {
+    const killer = setTimeout(() => { child.kill("SIGKILL"); }, CHILD_DEADLINE_MS);
+    child.on("close", (code) => {
+      clearTimeout(killer);
+      resolve({ code, stdout, stderr });
+    });
+  });
+  return { child, done };
+}
+
+function startTombstoneChild(expectedSequence: number): { child: ChildProcess; done: Promise<ChildResult> } {
+  const child = spawn(
+    process.execPath,
+    ["-e", tombstoneChildSource(), custodyDir, String(SERVER_UID), String(OPERATOR_UID), MACHINE, String(expectedSequence)],
+    {
+      env: { ...process.env, HOME: join(root, "home") },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -218,7 +250,7 @@ describe("commit-fence (invariant 7)", () => {
     expect(uncertain.status).toBe("commit_uncertain");
     expect(uncertain.reason).toBe("commit_uncertain");
     expect(uncertain.committed).toBe(true);
-    expect(existsSync(integrityPaths(custodyDir).uncertainPath)).toBe(true);
+    expect(readFileSync(integrityPaths(custodyDir).uncertainPath, "utf-8")).toBe("commit:2");
 
     const recovered = openIntegrityState(options({ newCustody: false }));
     expect(recovered.ok).toBe(true);
@@ -228,18 +260,15 @@ describe("commit-fence (invariant 7)", () => {
     expect(lstatSync(integrityPaths(custodyDir).uncertainPath, { throwIfNoEntry: false })).toBeUndefined();
   });
 
-  it("recovers CURRENT from a retained generation when the pointer is missing", () => {
+  it("refuses to publish a retained generation when CURRENT is missing", () => {
     const state = init();
     commit(state, 0);
     commit(state, 1);
     unlinkSync(integrityPaths(custodyDir).currentPath);
-    const recovered = openIntegrityState(options({ newCustody: false }));
-    expect(recovered.ok).toBe(true);
-    if (!recovered.ok) return;
-    expect(recovered.state.generation).toBe(2);
-    expect(recovered.state.recovered).toBe(true);
-    expect(generationNumbers(integrityPaths(custodyDir))).toEqual([1, 2]);
-    expect(existsSync(integrityPaths(custodyDir).currentPath)).toBe(true);
+    const opened = openIntegrityState(options({ newCustody: false }));
+    expect(opened.ok).toBe(false);
+    if (!opened.ok) expect(opened.reason).toBe("custody_invalid");
+    expect(existsSync(integrityPaths(custodyDir).currentPath)).toBe(false);
   });
 
   it("races two real writers with one commit winning and one commit_conflict", async () => {
@@ -277,6 +306,125 @@ describe("commit-fence (invariant 7)", () => {
       b.child.kill("SIGKILL");
     }
   }, 40_000);
+
+  it("refuses a generation staged by a failed first commit", () => {
+    const state = init();
+    const failed = commitGeneration({
+      state,
+      expectedGeneration: 0,
+      checkpoint: payload(),
+      testHooks: { afterFsync: () => { throw new Error("injected failure before the first rename"); } },
+    });
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.status).toBe("commit_failed");
+    const paths = integrityPaths(custodyDir);
+    expect(existsSync(paths.currentPath)).toBe(false);
+    expect(generationNumbers(paths)).toEqual([1]);
+    expect(existsSync(paths.uncertainPath)).toBe(false);
+
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    expect(reopened.ok).toBe(false);
+    if (!reopened.ok) expect(reopened.reason).toBe("custody_invalid");
+    expect(existsSync(paths.currentPath)).toBe(false);
+    expect(generationNumbers(paths)).toEqual([1]);
+  });
+
+  it("refuses to publish when the uncertainty marker cannot be written", () => {
+    const state = init();
+    mkdirSync(integrityPaths(custodyDir).uncertainPath, { mode: 0o700 });
+    const result = commitGeneration({ state, expectedGeneration: 0, checkpoint: payload() });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
+    expect(existsSync(integrityPaths(custodyDir).currentPath)).toBe(false);
+    expect(generationNumbers(integrityPaths(custodyDir))).toEqual([1]);
+  });
+
+  it("keeps the registry intent marker when the tombstone's directory fsync fails", () => {
+    const state = init();
+    commit(state, 0);
+    const result = tombstoneEnrollment({
+      ...options({ newCustody: false }),
+      expectedSequence: 1,
+      testHooks: { afterRename: () => { throw new Error("injected registry fsync failure"); } },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("commit_uncertain");
+    expect(readFileSync(integrityPaths(custodyDir).uncertainPath, "utf-8")).toBe("registry:2");
+
+    const opened = openIntegrityState(options({ newCustody: false }));
+    expect(opened.ok).toBe(false);
+    if (!opened.ok) expect(opened.reason).toBe("custody_invalid");
+    expect(lstatSync(integrityPaths(custodyDir).uncertainPath, { throwIfNoEntry: false })).toBeUndefined();
+  });
+
+  it("orders a tombstone after a commit that holds the one custody lock", async () => {
+    const state = init();
+    commit(state, 0);
+    const barrierDir = join(root, "barrier");
+    mkdirSync(barrierDir, { mode: 0o700 });
+    writeFileSync(join(barrierDir, "go.preObserve"), "1");
+    writeFileSync(join(barrierDir, "go.read"), "1");
+    const commitChild = startChild(barrierDir, 1);
+    let tombstoneChild: ReturnType<typeof startTombstoneChild> | null = null;
+    try {
+      await waitFor(() => readdirCount(barrierDir, ".fsync") >= 1, "the commit's pre-rename barrier");
+      tombstoneChild = startTombstoneChild(1);
+      await new Promise((resolve) => setTimeout(resolve, 700));
+
+      // The commit holds the ONE custody lock, so the tombstone cannot land
+      // underneath it.
+      const during = JSON.parse(readFileSync(integrityPaths(custodyDir).registryPath, "utf-8")) as {
+        sequence: number;
+        entries: Array<{ status: string }>;
+      };
+      expect(during.sequence).toBe(1);
+      expect(during.entries.map((entry) => entry.status)).toEqual(["active"]);
+
+      writeFileSync(join(barrierDir, "go.fsync"), "1");
+      const [committed, tombstoned] = await Promise.all([commitChild.done, tombstoneChild.done]);
+      expect(committed.code).toBe(0);
+      expect(tombstoned.code).toBe(0);
+      expect(resultOf(committed.stdout)).toMatchObject({ ok: true, status: "committed", generation: 2 });
+      expect(resultOf(tombstoned.stdout)).toMatchObject({ ok: true, sequence: 2 });
+    } finally {
+      commitChild.child.kill("SIGKILL");
+      tombstoneChild?.child.kill("SIGKILL");
+    }
+  }, 40_000);
+
+  it("refuses a commit when the machine identity drifted since open", () => {
+    const state = init({ machineId: "host-a" });
+    const result = commitGeneration({ state, expectedGeneration: 0, checkpoint: payload() });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("custody_invalid");
+    expect(generationNumbers(integrityPaths(custodyDir))).toEqual([]);
+  });
+
+  it("refuses a checkpoint payload that is not plain JSON before staging", () => {
+    const state = init();
+    const result = commitGeneration({
+      state,
+      expectedGeneration: 0,
+      checkpoint: { ...payload(), pendingEvents: [undefined] },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("checkpoint_incompatible");
+    expect(generationNumbers(integrityPaths(custodyDir))).toEqual([]);
+    expect(existsSync(integrityPaths(custodyDir).currentPath)).toBe(false);
+  });
+
+  it("round-trips a committed checkpoint through JSON and reopens", () => {
+    const state = init();
+    commit(state, 0);
+    const path = generationPath(integrityPaths(custodyDir).generationsDir, 1);
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as { generation: number };
+    expect(parsed.generation).toBe(1);
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    expect(reopened.ok).toBe(true);
+    if (reopened.ok) expect(reopened.state.checkpoint?.generation).toBe(1);
+  });
 });
 
 function readdirCount(dir: string, suffix: string): number {
