@@ -4,7 +4,7 @@
  * on well-known path; dead-holder → break and proceed").
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, readdirSync, renameSync, rmSync, existsSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, renameSync, rmSync, existsSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { hostname, tmpdir } from "node:os";
 import { probeMigrationDataDir } from "../../resources/migrations/data-dir.ts";
@@ -332,6 +332,29 @@ describe("acquireMigrationLock — directory mutex (flair#2866)", () => {
       result.release();
     }
     expect(readdirSync(guardPath())).toEqual([]);
+  });
+
+  it("reports an owner-entry unlink failure after finding a holder as error", () => {
+    mkdirSync(join(testRoot, ".migrations"), { recursive: true, mode: 0o700 });
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid + 1, hostname: hostname(), startedAt: new Date().toISOString() }));
+    let inspected = false;
+    const result = acquireMigrationLock({
+      lockPath,
+      isProcessAlive: () => {
+        inspected = true;
+        const guard = `${lockPath}.guard`;
+        const owner = join(guard, readdirSync(guard)[0]);
+        unlinkSync(owner);
+        mkdirSync(owner);
+        return true;
+      },
+    });
+    expect(inspected).toBe(true);
+    expect(result.acquired).toBe(false);
+    if (result.acquired) throw new Error("expected refusal");
+    expect(result.kind).toBe("error");
+    expect(result.reason).toContain("could not be released");
+    expect(result.reason).toContain("cannot be removed");
   });
 
   it("refuses a mutex directory with an unexpected entry", () => {

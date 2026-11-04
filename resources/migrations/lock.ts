@@ -277,10 +277,7 @@ export function _resetInProcessLockForTests(): void {
 }
 
 /**
- * A refused acquisition. `held` is contention: another caller or process holds
- * the lock, or won the race for it, so skipping is benign. `error` means the
- * acquisition could not be attempted or completed, and the caller must report
- * it.
+ * A refused acquisition. Callers report `error` and skip `held` as contention.
  */
 export type MigrationLockRefusal =
   | { acquired: false; kind: "held"; reason: string; holder?: LockHolder }
@@ -620,7 +617,7 @@ function settleContention(): void {
 }
 
 type GuardResult =
-  | { acquired: true; generation: string }
+  | { generation: string }
   | { acquired: false; kind: "held" | "error"; reason: string };
 
 function makeGuardHolder(now: () => number): GuardHolder {
@@ -646,7 +643,7 @@ function acquireGuard(guardPath: string, deps: LockDeps): GuardResult {
         guardPath,
         generation: holder.generation,
       });
-      return { acquired: true, generation: holder.generation };
+      return { generation: holder.generation };
     }
     if (!published.contention) {
       return {
@@ -856,7 +853,13 @@ function transitionUnderGuard(lockPath: string, deps: LockDeps, staleMs: number,
  * descriptor.
  */
 export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: string }): AcquireResult {
-  const resolved: LockDeps = { ...defaultLockDeps(deps.lockPath), ...deps };
+  const defaults = defaultLockDeps(deps.lockPath);
+  const resolved: LockDeps = {
+    lockPath: deps.lockPath,
+    staleMs: deps.staleMs ?? defaults.staleMs,
+    isProcessAlive: deps.isProcessAlive ?? defaults.isProcessAlive,
+    now: deps.now ?? defaults.now,
+  };
   const { lockPath, staleMs, now } = resolved;
   const guardPath = guardPathFor(lockPath);
 
@@ -890,7 +893,7 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
 
   for (let round = 0; round < LOCK_ACQUISITION_ROUNDS; round++) {
     const guard = acquireGuard(guardPath, resolved);
-    if (!guard.acquired) return guard.kind === "held" ? abortHeld(guard.reason) : abortError(guard.reason);
+    if (!("generation" in guard)) return guard.kind === "held" ? abortHeld(guard.reason) : abortError(guard.reason);
 
     let outcome: UnderGuardOutcome;
     try {
@@ -898,7 +901,7 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
     } catch (err) {
       const released = releaseGuard(guardPath, guard.generation);
       if (!released.ok) {
-        console.warn(`[flair-migrations] migration-lock mutex cleanup failed for ${guardPath}: ${released.reason}`);
+        return abortError(`${String(err)}; the mutex at ${guardPath} could not be released (${released.reason})`);
       }
       inProcessHeld = false;
       throw err;
@@ -906,13 +909,10 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
 
     const released = releaseGuard(guardPath, guard.generation);
     if (!released.ok) {
-      if (outcome.kind === "handle") {
-        return abortError(
-          `refusing to return the migration lock at ${lockPath}: the mutex could not be released ` +
-            `(${released.reason}); the lock file remains`,
-        );
-      }
-      console.warn(`[flair-migrations] migration-lock mutex cleanup failed for ${guardPath}: ${released.reason}`);
+      return abortError(
+        `refusing to return the migration lock at ${lockPath}: the mutex could not be released ` +
+          `(${released.reason})`,
+      );
     }
 
     if (outcome.kind === "retry") {
@@ -961,7 +961,7 @@ function issueHandle(
       let recordNotInspected = false;
       try {
         const guard = acquireGuard(guardPath, defaultLockDeps(lockPath));
-        if (!guard.acquired) {
+        if (!("generation" in guard)) {
           rememberAbandonedRecord(lockPath, holder);
           recordNotInspected = true;
           cleanupFailure = `the mutex could not be acquired: ${guard.reason}`;

@@ -1,16 +1,9 @@
 /**
- * migrations-boot-lock-error-2978.test.ts — a refused migration-lock
- * acquisition is reported as a boot failure only when it is NOT contention
- * (flair#2978).
- *
- * The runner used to prefix every refusal `single-flight:`, and the boot path
- * treats that prefix as benign, so a mutex error that blocked the cycle was
- * skipped quietly. These tests drive the real boot entry point against a real
- * filesystem: a broken mutex must be reported with the lock's own reason,
- * while a live holder and an in-process caller stay quiet.
+ * Boot reports lock errors through cycle failure reporting; held refusals stay quiet.
+ * Tests use the boot entry point and real filesystem mutex entries.
  */
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -138,6 +131,42 @@ test("a mutex error is reported as a boot failure naming the lock reason", async
   for (const entry of failed) expect(entry.reason).toContain("MigrationLockMutexError");
 });
 
+test("an owner-entry unlink failure after finding a holder is reported by boot", async () => {
+  const holder = Bun.spawn(["sleep", "30"]);
+  const kill = process.kill.bind(process);
+  const probe = spyOn(process, "kill").mockImplementation((pid, signal) => {
+    const result = kill(pid, signal);
+    if (pid === holder.pid && signal === 0) {
+      const guard = `${lockPath()}.guard`;
+      const owner = join(guard, readdirSync(guard)[0]);
+      unlinkSync(owner);
+      mkdirSync(owner);
+    }
+    return result;
+  });
+  try {
+    mkdirSync(join(dataDir, ".migrations"), { recursive: true, mode: 0o700 });
+    writeFileSync(lockPath(), JSON.stringify({ pid: holder.pid, hostname: os.hostname(), startedAt: new Date().toISOString() }));
+
+    boot.scheduleMigrationBoot();
+    await waitForBootAttempt();
+
+    expect(probe.mock.calls.some(([pid, signal]) => pid === holder.pid && signal === 0)).toBe(true);
+    expect(bootLog()).toContain("[flair-migrations] migration cycle did not run:");
+    expect(bootLog()).toContain("lock error:");
+    expect(bootLog()).toContain("cannot be removed");
+    expect(getCycleStatus().phase).toBe("done");
+    expect(getCycleStatus().lastCycleError).toContain("cannot be removed");
+    const failed = listMigrationProgress().filter((entry) => entry.state === "failed");
+    expect(failed.length).toBeGreaterThan(0);
+    for (const entry of failed) expect(entry.reason).toContain("cannot be removed");
+  } finally {
+    probe.mockRestore();
+    holder.kill();
+    await holder.exited;
+  }
+});
+
 test("a live holder in another process stays quiet", async () => {
   const holder = Bun.spawn(["sleep", "30"]);
   try {
@@ -175,7 +204,7 @@ test("a caller already holding the lock in this process stays quiet", async () =
   }
 });
 
-test("only the single-flight prefix is benign", () => {
+test("boot classifies single-flight, lock error and nothing pending reasons", () => {
   expect(boot.isBenignSkip("single-flight: held by pid 1 on host-a since then")).toBe(true);
   expect(boot.isBenignSkip("lock error: MigrationLockMutexError: it cannot be inspected")).toBe(false);
   expect(boot.isBenignSkip("nothing pending")).toBe(true);
