@@ -1,0 +1,77 @@
+// agent-key-register-2266.test.ts — three pure subjects of flair#2266, without
+// Harper: a canonical base64url encoding of 32 bytes
+// (isCanonicalEd25519Base64url), the audit fingerprint (keyFingerprint), and the
+// federation pending-key predicate (inboundChangesExistingPendingKey).
+//
+// No refusal name is asserted here. The handler's refusals are asserted against
+// real Harper in test/integration/agent-key-register-2266.test.ts, and the
+// federation skip names in
+// test/integration/agent-pending-key-federation-2266.test.ts.
+import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import {
+  PENDING_PUBLIC_KEY,
+  isCanonicalEd25519Base64url,
+  keyFingerprint,
+} from "../../src/lib/agent-key-register.js";
+import { inboundChangesExistingPendingKey } from "../../resources/federation-classify.js";
+
+const KEY = Buffer.from(new Uint8Array(32).fill(7)).toString("base64url");
+
+describe("flair#2266 — a canonical base64url encoding of 32 bytes", () => {
+  test("accepts a canonical base64url encoding of 32 bytes", () => {
+    expect(KEY.length).toBe(43);
+    expect(isCanonicalEd25519Base64url(KEY)).toBe(true);
+  });
+
+  test("rejects padding, wrong length, wrong alphabet and non-strings", () => {
+    expect(isCanonicalEd25519Base64url(`${KEY}=`)).toBe(false);
+    expect(isCanonicalEd25519Base64url(KEY.slice(0, 42))).toBe(false);
+    expect(isCanonicalEd25519Base64url(`${KEY.slice(0, 42)}+`)).toBe(false);
+    expect(isCanonicalEd25519Base64url("pending")).toBe(false);
+    expect(isCanonicalEd25519Base64url("")).toBe(false);
+    expect(isCanonicalEd25519Base64url(undefined)).toBe(false);
+    expect(isCanonicalEd25519Base64url(123)).toBe(false);
+  });
+
+  test("rejects a non-canonical tail that decodes to 32 bytes but re-encodes differently", () => {
+    // The final base64url char of a 32-byte key encodes 4 key bits and 2 padding
+    // bits. Swapping it for a char whose padding bits are non-zero still decodes
+    // to 32 bytes, but the canonical re-encoding differs — so it is refused.
+    const nonCanonical = `${KEY.slice(0, 42)}f`;
+    expect(Buffer.from(nonCanonical, "base64url").length).toBe(32);
+    expect(Buffer.from(nonCanonical, "base64url").toString("base64url")).not.toBe(nonCanonical);
+    expect(isCanonicalEd25519Base64url(nonCanonical)).toBe(false);
+  });
+});
+
+describe("flair#2266 — the audit fingerprint is a sha256 of the key string, not the key", () => {
+  test("is deterministic sha256 hex of the canonical key string", async () => {
+    const fp = await keyFingerprint(KEY);
+    expect(fp).toMatch(/^[0-9a-f]{64}$/);
+    expect(fp).toBe(createHash("sha256").update(KEY, "utf8").digest("hex"));
+    expect(await keyFingerprint(KEY)).toBe(fp);
+    expect(fp).not.toContain(KEY);
+  });
+});
+
+describe("flair#2266 — the federation pending-key predicate", () => {
+  const pendingRow = { id: "a", publicKey: PENDING_PUBLIC_KEY, status: "active" };
+  const record = (data: unknown, table = "Agent") => ({ table, id: "a", updatedAt: "2026-01-01T00:00:00.000Z", data }) as any;
+
+  test("true for an incoming publicKey different from stored pending", () => {
+    expect(inboundChangesExistingPendingKey(record({ id: "a", publicKey: KEY }), pendingRow)).toBe(true);
+  });
+
+  test("false when the stored key is not pending, there is no local row, or the table differs", () => {
+    expect(inboundChangesExistingPendingKey(record({ id: "a", publicKey: KEY }), { id: "a", publicKey: "notpending" })).toBe(false);
+    expect(inboundChangesExistingPendingKey(record({ id: "a", publicKey: KEY }), null)).toBe(false);
+    expect(inboundChangesExistingPendingKey(record({ id: "a", publicKey: KEY }, "Soul"), pendingRow)).toBe(false);
+  });
+
+  test("false when the record does not carry a publicKey, or restates pending", () => {
+    expect(inboundChangesExistingPendingKey(record({ id: "a", status: "active" }), pendingRow)).toBe(false);
+    expect(inboundChangesExistingPendingKey(record({ id: "a", publicKey: PENDING_PUBLIC_KEY }), pendingRow)).toBe(false);
+    expect(inboundChangesExistingPendingKey(record({ id: "a" }), pendingRow)).toBe(false);
+  });
+});

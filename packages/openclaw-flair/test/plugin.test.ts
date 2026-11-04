@@ -16,18 +16,26 @@
  * requests" is asserted directly, and the signer id is read off the
  * `Authorization` header of anything that IS sent.
  *
- * A lockfile install supplies the `openclaw` peer version resolved in bun.lock.
- * The mock is typed against that installed peer's API; its simulated behavior
- * does not establish runtime parity with supported hosts. That requires real-host drills.
+ * The mock is typed against the installed `openclaw` peer's API; its simulated
+ * behavior does not establish runtime parity with supported hosts. That requires
+ * real-host drills. In the real-runner cases (see `supportedRunnerHost`),
+ * the registration fixture reports the installed runner package's version,
+ * while callback delivery uses that package's real runner; registration itself
+ * is the mock (createMockApi).
  */
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readdirSync, readFileSync } from "node:fs";
 import * as realFs from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { loadPrivateKey, resolveKeyPath } from "@tpsdev-ai/flair-client";
+// flair#1940 seam: the REAL server validator, from the repo source (the way the
+// flair-mcp tests reach `resources/`), so the plugin's pre-write id check is
+// tested against the code that decides, not against a second copy of its regex.
+import { validateHostSource } from "../../../resources/host-source.ts";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 
 /** The one file the A1 regression test plants under a root-owned directory. */
@@ -149,7 +157,7 @@ function createMockApi(opts: {
 
 // ── network stub ─────────────────────────────────────────────────────────────
 
-interface Call { url: string; method: string; authorization: string | null; signal: AbortSignal | null }
+interface Call { url: string; method: string; authorization: string | null; signal: AbortSignal | null; body: unknown }
 
 function installFetchStub(
   handler?: (call: Call) => { status?: number; body?: unknown },
@@ -158,11 +166,16 @@ function installFetchStub(
   const calls: Call[] = [];
   globalThis.fetch = (async (url: string, init: any = {}) => {
     const headers = (init.headers ?? {}) as Record<string, string>;
+    let parsedBody: unknown = null;
+    if (typeof init.body === "string") {
+      try { parsedBody = JSON.parse(init.body); } catch { parsedBody = init.body; }
+    }
     const call: Call = {
       url: String(url),
       method: init.method ?? "GET",
       authorization: headers["Authorization"] ?? null,
       signal: (init.signal as AbortSignal | undefined) ?? null,
+      body: parsedBody,
     };
     calls.push(call);
     const out = handler ? handler(call) : {};
@@ -264,6 +277,9 @@ const CAPTURE_BOUNDS_DEFAULTS = {
   tombstoneMinAgeMs: 60 * 60_000,
   abortOverflowCap: 1_000,
   logOnceCap: 10_000,
+  sessionStateCap: 10_000,
+  sessionMessageCap: 4_096,
+  sessionScanQueueCap: 32,
   sweepIntervalMs: 30_000,
 };
 let captureBounds: typeof CAPTURE_BOUNDS_DEFAULTS;
@@ -289,6 +305,11 @@ let captureInternals: {
   stateCount: () => number;
   tombstoneCount: () => number;
   logOnceCount: () => number;
+  // flair#2513: declared OPTIONAL so a build without them yields 0 (a clean
+  // assertion failure) instead of a TypeError.
+  sessionStateCount?: () => number;
+  sessionIdentityCount?: () => number;
+  maxSessionScans?: () => number;
   recordOf: (agentId: string, runId: string) => RunRecordLike | undefined;
 };
 const CAPTURE_INTERNALS_FALLBACK = {
@@ -297,6 +318,9 @@ const CAPTURE_INTERNALS_FALLBACK = {
   stateCount: () => 0,
   tombstoneCount: () => 0,
   logOnceCount: () => 0,
+  sessionStateCount: () => 0,
+  sessionIdentityCount: () => 0,
+  maxSessionScans: () => 0,
   recordOf: () => undefined as RunRecordLike | undefined,
 };
 try {
@@ -1088,9 +1112,89 @@ describe("evaluateAutoCapture", () => {
   });
 });
 
+// ── the pinned runner package ───────────────────────────────────────────────
+//
+// The registration fixture reports the installed runner package's version,
+// while callback delivery uses that package's real runner; registration itself
+// is the mock (createMockApi).
+function supportedRunnerHost(): { dist: string; version: string } {
+  const dist = dirname(fileURLToPath(import.meta.resolve("openclaw-supported")));
+  const pkg = JSON.parse(readFileSync(join(dist, "..", "package.json"), "utf8")) as { version: string };
+  return { dist, version: pkg.version };
+}
+
+/** The hooks chunk in `dist` that exports `createHookRunner` (the real runner). */
+function runnerEntry(dist: string): string | undefined {
+  return readdirSync(dist).find(
+    (name) => /^hooks-.*\.mjs$/.test(name) &&
+      readFileSync(join(dist, name), "utf8").includes("export { createHookRunner };"),
+  );
+}
+
 // ── slice 2 — capture done right (D5 / D11 / D14) ─────────────────────────────
 
 describe("slice 2 — capture normalisation, ids and outcomes", () => {
+  test("the real-runner host is a supported OpenClaw release, read from the installed package", async () => {
+    const { dist, version } = supportedRunnerHost();
+    const { TESTED_HOST_VERSIONS } = await loadModule();
+    // The fixture's reported version must be in the tested set.
+    expect(TESTED_HOST_VERSIONS).toContain(version);
+    expect(runnerEntry(dist)).toBeDefined();
+  });
+
+  for (const [hook, method] of [
+    ["agent_end", "runAgentEnd"],
+    ["llm_input", "runLlmInput"],
+    ["llm_output", "runLlmOutput"],
+  ]) {
+    for (const session of ["event", "context", "key-only"]) {
+      test(`real OpenClaw hook runner: ${hook}, ${session} identifiers`, async () => {
+        const { dist, version: hostVersion } = supportedRunnerHost();
+        const entry = runnerEntry(dist);
+        expect(entry).toBeDefined();
+        const { createHookRunner } = await import(pathToFileURL(join(dist, entry!)).href);
+        writeKey("A");
+        const calls = installFetchStub();
+        const api = createMockApi({
+          hostVersion,
+          pluginConfig: { autoCapture: true },
+          config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+        });
+        (await loadPlugin()).register(api as any);
+        const typedHooks = [...api._hooks].flatMap(([hookName, handlers]) =>
+          handlers.map((handler) => ({ hookName, handler, pluginId: api.id })),
+        );
+        const runner = createHookRunner({ typedHooks }, { catchErrors: false });
+        const runId = `run-${hook}-${session}`;
+        const text = `remember this: capture from ${hook} with ${session} identifiers`;
+        const event = {
+          ...(session === "event" ? { runId, sessionId: "event-session" } : {}),
+          success: true,
+          messages: [{ role: "user", content: text }],
+          provider: "p", model: "m", prompt: text, assistantTexts: [text],
+        };
+        const ctx = {
+          agentId: "A",
+          runId: session === "event" ? "context-other-run" : runId,
+          ...(session !== "key-only" ? { sessionId: "context-session" } : {}),
+          sessionKey: "agent:A:slot",
+        };
+        try {
+          expect(runner.hasHooks(hook)).toBe(true);
+          await runner[method](event, ctx);
+          const writes = calls.filter((call) => call.method === "PUT" && /\/Memory\//.test(call.url));
+          expect(writes).toHaveLength(1);
+          const body = writes[0].body as Record<string, unknown>;
+          expect(body.hostSource).toEqual({ v: 1, host: "openclaw", kind: "run", id: runId });
+          if (session === "key-only") expect("sessionId" in body).toBe(false);
+          else expect(body.sessionId).toBe(session === "event" ? "event-session" : "context-session");
+        } finally {
+          await runner.runGatewayStop({}, {});
+        }
+      });
+    }
+  }
+
   test("D5: a string and an equivalent text-block array normalise to the same capture text", async () => {
     const { captureText } = await loadModule();
     expect(captureText("hello world")).toBe("hello world");
@@ -1112,6 +1216,187 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
     for (const leak of ["LEAK-IMAGE", "LEAK-THINK", "LEAK-TOOL", "LEAK-RESULT"]) {
       expect(text).not.toContain(leak);
     }
+  });
+
+  test("hostSource decision: a grammar-valid run id becomes the pointer; an invalid one is null", async () => {
+    const { captureHostSource } = await loadModule();
+    expect(captureHostSource("1a2b3c4d-0000-4000-8000-000000000000")).toEqual({ host: "openclaw", kind: "run", id: "1a2b3c4d-0000-4000-8000-000000000000" });
+    expect(captureHostSource("run-1a2b3c4d")).toEqual({ host: "openclaw", kind: "run", id: "run-1a2b3c4d" });
+    for (const bad of ["", "bad run id", "a".repeat(257), "run\u0007"]) {
+      expect(captureHostSource(bad)).toBeNull();
+    }
+  });
+
+  test("session id decision: the event session id, else the context session id, else none", async () => {
+    const { sessionIdForCapture } = await loadModule();
+    expect(sessionIdForCapture({ sessionId: "e" }, { sessionId: "c" })).toBe("e");
+    expect(sessionIdForCapture({ sessionId: "e" }, {})).toBe("e");
+    expect(sessionIdForCapture({}, { sessionId: "c" })).toBe("c");
+    expect(sessionIdForCapture({}, { sessionKey: "k" })).toBeNull();
+    expect(sessionIdForCapture({}, {})).toBeNull();
+  });
+
+  test("a hook context with both sessionKey and sessionId: the write carries the sessionId", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_output",
+      { runId: "run-1a2b3c4d", assistantTexts: ["remember this: both session fields are on the context"] },
+      { agentId: "A", sessionKey: "agent:A:slot", sessionId: "sess-ctx" } as any,
+    );
+    const body = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url))[0].body as any;
+    expect(body.sessionId).toBe("sess-ctx");
+  });
+
+  test("a hook context with only sessionKey: the write has no sessionId field", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_output",
+      { runId: "run-1a2b3c4d", assistantTexts: ["remember this: only the session key is present"] },
+      { agentId: "A", sessionKey: "agent:A:slot" } as any,
+    );
+    const body = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url))[0].body as any;
+    expect("sessionId" in body).toBe(false);
+  });
+
+  test("D15: the capture write carries hostSource {openclaw, run, <runId>} and the session id", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_output",
+      { runId: "run-1a2b3c4d", sessionId: "sess-9", assistantTexts: ["remember this: the capture body carries its source"] },
+      { agentId: "A" },
+    );
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1); // assertion: one capture write
+    const body = memPuts[0].body as any;
+    expect(body.hostSource).toEqual({ v: 1, host: "openclaw", kind: "run", id: "run-1a2b3c4d" }); // assertion: the run id is the source
+    expect(body.sessionId).toBe("sess-9"); // assertion: the host session id is carried
+  });
+
+  test("D15: a run id outside the id grammar captures with no source", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_output",
+      { runId: "bad run id", assistantTexts: ["remember this: the capture target is the bad run id case"] },
+      { agentId: "A" },
+    );
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1); // assertion: the capture still lands
+    expect((memPuts[0].body as any).hostSource).toBeUndefined(); // assertion: no source was attached
+    expect(api._warnText()).toContain("omitted its host source");
+  });
+
+  test("D15: the memory_store tool's write carries no source", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    await store.execute("1", { text: "remember this: a manual write carries no source" });
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1); // assertion: one manual write
+    expect((memPuts[0].body as any).hostSource).toBeUndefined(); // assertion: no source on a non-capture write
+  });
+
+  test("D15: one out-of-grammar run id across two captures logs EXACTLY one line, and the line carries no captured text", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    const warnLines = (): string[] => (api.logger!.warn as any).mock.calls.map((c: any[]) => String(c[0]));
+    // Registration warns on its own (prompt policy withheld); count only what the captures add.
+    const before = warnLines().length;
+    const runId = "run ]bad\nid";
+    await api._fire("llm_output", { runId, assistantTexts: ["remember this: the first capture marker is LOGTEXT-ONE"] }, { agentId: "A" });
+    await api._fire("llm_output", { runId, assistantTexts: ["remember this: the second capture marker is LOGTEXT-TWO"] }, { agentId: "A" });
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(2); // assertion: both captures land
+    for (const p of memPuts) expect((p.body as any).hostSource).toBeUndefined(); // assertion: neither carries a source
+    const warns = warnLines().slice(before);
+    expect(warns.length).toBe(1); // assertion: ONE warn line across both captures, not one per capture
+    expect(warns[0]).toContain("omitted its host source"); // assertion: it is the omitted-source line
+    for (const leaked of ["LOGTEXT-ONE", "LOGTEXT-TWO", "remember this", "capture marker", runId, "]bad"]) {
+      expect(warns[0]).not.toContain(leaked); // assertion: no captured text and no raw run id in the line
+    }
+  });
+
+  test("flair#1940: an agent_end capture write carries hostSource {openclaw, run, <runId>} and the EVENT's sessionId", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "agent_end",
+      {
+        runId: "run-ae-1a2b",
+        sessionId: "sess-event-ae",
+        success: true,
+        messages: [{ role: "user", content: "remember this: the agent_end capture carries its source" }],
+      },
+      { agentId: "A", sessionId: "sess-ctx-ae", sessionKey: "agent:A:slot" } as any,
+    );
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1); // assertion: one capture write
+    const body = memPuts[0].body as any;
+    expect(body.hostSource).toEqual({ v: 1, host: "openclaw", kind: "run", id: "run-ae-1a2b" }); // assertion: the run id is the source
+    expect(body.sessionId).toBe("sess-event-ae"); // assertion: the event's sessionId wins over ctx's and over sessionKey
+  });
+
+  test("flair#1940: an llm_input capture write carries hostSource {openclaw, run, <runId>} and the EVENT's sessionId", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_input",
+      { runId: "run-li-3c4d", sessionId: "sess-event-li", provider: "p", model: "m", prompt: "remember this: the llm_input capture carries its source" },
+      { agentId: "A", sessionId: "sess-ctx-li", sessionKey: "agent:A:slot" } as any,
+    );
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1); // assertion: one capture write
+    const body = memPuts[0].body as any;
+    expect(body.hostSource).toEqual({ v: 1, host: "openclaw", kind: "run", id: "run-li-3c4d" }); // assertion: the run id is the source
+    expect(body.sessionId).toBe("sess-event-li"); // assertion: the event's sessionId wins over ctx's and over sessionKey
   });
 
   test("D5: a block-shaped agent_end message is captured (mixed blocks contribute nothing)", async () => {
@@ -1205,6 +1490,1086 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
     expect(res.details.written).toBe(true);
     expect(res.details.supersedeClosed).toBe(false);
     expect(res.details.errors.length).toBe(1);
+  });
+});
+
+// ── flair#2560 — the pinned host's real agent_end dispatch, synthetic snapshots ──
+//
+// This is a DISPATCH test with synthetic snapshots, not a producer test. For
+// embedded runs, the session producer is the pinned host's embedded agent runner
+// (`createOpenClawAgentHarness().runAttempt`). The CLI runner separately produces
+// agent_end messages. The embedded producer is not driven by this PR: a
+// bare `runAttempt({})` enters an embedded run and dies at `mkdir ''`, and an
+// attempt must be fully prepared (resolved config, model registry, session file
+// and lock, sandbox, abort signal) and reach a provider, which this PR does not
+// set up. This drives the host's real agent_end dispatch instead: the test
+// calls the awaited wrapper, `awaitAgentHarnessAgentEndHook`. The embedded path
+// calls `runAgentHarnessAgentEndHook` through `runAgentEndSideEffects`; both
+// wrappers use the shared inner dispatcher. It runs over the pinned host's real
+// hook runner, with snapshots the TEST supplies. The dispatcher forwards the event it is
+// given, so this cannot detect a change in what the producer puts in a
+// snapshot (a message's identity across runs); driving the embedded producer
+// is a follow-up.
+
+describe("flair#2560 — the pinned host's real agent_end dispatch, with synthetic snapshots", () => {
+  const dispatchConfig = {
+    plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } },
+  };
+
+  /** The unique chunk in `dist` matching `re` whose source contains `needle`. */
+  function distChunk(dist: string, re: RegExp, needle: string): string {
+    const hits = readdirSync(dist).filter((n) => re.test(n) && readFileSync(join(dist, n), "utf8").includes(needle));
+    expect(hits.length).toBe(1);
+    return hits[0];
+  }
+
+  /** The name a minified pinned chunk binds to `pretty`, per its OWN export statement. */
+  function realExport(dist: string, file: string, pretty: string): string {
+    const stmt = readFileSync(join(dist, file), "utf8").match(/export\s*\{([\s\S]*?)\}\s*;?\s*$/);
+    if (!stmt) throw new Error(`no export statement in ${file}`);
+    for (const part of stmt[1].split(",")) {
+      const m = part.trim().match(/^(\S+)\s+as\s+(\S+)$/);
+      if (m && m[1] === pretty) return m[2];
+      if (part.trim() === pretty) return pretty;
+    }
+    throw new Error(`${pretty} is not exported by ${file}`);
+  }
+
+  test("real agent_end dispatch, synthetic snapshots: a message the test re-delivers keeps its identity through the dispatcher and issues one Memory write request", async () => {
+    const { dist, version: hostVersion } = supportedRunnerHost();
+    const { createHookRunner } = await import(pathToFileURL(join(dist, distChunk(dist, /^hooks-.*\.mjs$/, "export { createHookRunner };"))).href);
+    const helpersFile = distChunk(dist, /^lifecycle-hook-helpers-.*\.mjs$/, "awaitAgentHarnessAgentEndHook");
+    const helpers: any = await import(pathToFileURL(join(dist, helpersFile)).href);
+    const dispatch = helpers[realExport(dist, helpersFile, "awaitAgentHarnessAgentEndHook")]; // the host's agent_end dispatch
+    const { messageIdentity } = await loadModule();
+    expect(typeof dispatch).toBe("function");
+    writeKey("A");
+    const calls = installFetchStub();
+    const api = createMockApi({ hostVersion, pluginConfig: { autoCapture: true }, config: dispatchConfig });
+    (await loadPlugin()).register(api as any);
+    // A spy on the SAME real hook runner reads each snapshot the dispatcher
+    // forwards, so a message's identity can be compared across the two calls.
+    const snapshots: string[][] = [];
+    const typedHooks = [
+      ...[...api._hooks].flatMap(([hookName, handlers]) => handlers.map((handler) => ({ hookName, handler, pluginId: api.id }))),
+      { hookName: "agent_end", handler: (event: any) => { snapshots.push((event.messages ?? []).map(messageIdentity)); }, pluginId: "spy-2560" },
+    ];
+    const runner = createHookRunner({ typedHooks }, { catchErrors: false });
+    const ctx = { agentId: "A", sessionId: "sess-dispatch" };
+    // Synthetic snapshots, shaped as the host's `Message` types: role, content,
+    // and a millisecond `timestamp`. The test supplies the SAME M1 object to
+    // both calls; the producer is not involved.
+    const M1 = { role: "user", content: "remember this: the dispatched first message", timestamp: 1_700_000_000_000 };
+    const M2 = { role: "assistant", content: "remember this: the dispatched second message", timestamp: 1_700_000_001_000 };
+    try {
+      await dispatch({ hookRunner: runner, event: { messages: [M1], success: true }, ctx: { ...ctx, runId: "run-1" } });
+      await dispatch({ hookRunner: runner, event: { messages: [M1, M2], success: true }, ctx: { ...ctx, runId: "run-2" } });
+      // M1's identity is the same in both forwarded snapshots, and equals the plugin's.
+      expect(snapshots).toHaveLength(2);
+      expect(snapshots[0][0]).toBe(snapshots[1][0]);
+      expect(snapshots[0][0]).toBe(messageIdentity(M1));
+      // Not vacuous: the identity is sensitive to the timestamp field it keys on.
+      expect(messageIdentity({ ...M1, timestamp: (M1 as any).timestamp + 1 })).not.toBe(messageIdentity(M1));
+      // The session retains M1's identity, so its re-delivery issues no second
+      // Memory write request (this stubs fetch; the real-Harper test reads rows).
+      const puts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+      const sources = puts.filter((c) => String((c.body as any).content).includes("the dispatched first message")).map((c) => (c.body as any).hostSource.id);
+      expect(sources).toEqual(["run-1"]);
+      expect(puts.filter((c) => String((c.body as any).content).includes("the dispatched second message")).map((c) => (c.body as any).hostSource.id)).toEqual(["run-2"]);
+    } finally {
+      await runner.runGatewayStop({}, {});
+    }
+  });
+});
+
+// ── flair#2513 — agent_end: best-effort capture by occurrence counting ──────
+//
+// These tests drive `agent_end` with session-keyed snapshots and check which
+// messages are written under which run id, what the session records, and the
+// log lines: a concurrent callback, a rewritten snapshot, a failed write, a scan
+// queued past the retirement window, equal-field messages, refused callbacks
+// (success: false, retired, no key, no capacity with an abort that cannot be
+// recorded), a write settling after an abort, the session and identity caps, a
+// full scan queue with a write settling after the disable, and `gateway_stop`.
+//
+// The real-runner test drives synthetic events, shaped like the host's
+// `PluginHookAgentEndEvent` and agent context, through the pinned host's real
+// hook runner (`createHookRunner`), the component that dispatches `agent_end` to
+// the plugin. The embedded session producer (the embedded agent runner in
+// `dist/builtin-openclaw-*.mjs`) is not driven here.
+// The host's config reader, plugin loader and conversation-access registration
+// gate are driven, with the plugin loaded from source, by
+// `test/host-config-loader.test.ts`.
+
+describe("flair#2513 — agent_end capture is keyed by counted message identities, not a count", () => {
+  const captureConfig = {
+    plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } },
+  };
+
+  test("behaviour: concurrent agent_end callbacks (run 1's write held) store each message once, under its OWN run", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-concurrent" };
+    const M1 = { role: "user", content: "remember this: run one's own message", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: run two's own message", timestamp: 2 };
+    const handler = api._handler("agent_end");
+
+    // Run 1's write is held open; run 2 arrives while it is still in flight.
+    const p1 = handler({ runId: "run-1", success: true, messages: [M1] }, ctx);
+    await waitFor(() => puts(calls).length === 1);
+    const p2 = handler({ runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+    d.release();
+    await Promise.all([p1, p2]);
+
+    const memPuts = puts(calls);
+    expect(memPuts.length).toBe(2);
+    const m1 = memPuts.filter((c) => String((c.body as any).content).includes("run one's own message"));
+    expect(m1.length).toBe(1); // run 2 did not re-store run 1's message
+    expect((m1[0].body as any).hostSource.id).toBe("run-1");
+    const m2 = memPuts.filter((c) => String((c.body as any).content).includes("run two's own message"));
+    expect(m2.length).toBe(1);
+    expect((m2[0].body as any).hostSource.id).toBe("run-2");
+  });
+
+  test("behaviour: a rewritten (compacted) snapshot captures the new message and restamps nothing", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-compacted" };
+    const M1 = { role: "user", content: "remember this: the message before compaction", timestamp: 1 };
+    const M2 = { role: "assistant", content: "remember this: the reply before compaction", timestamp: 2 };
+    const summary = { role: "compactionSummary", summary: "earlier turns", timestamp: 3 };
+    const M3 = { role: "user", content: "remember this: the message after compaction", timestamp: 4 };
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [M1, M2] }, ctx);
+    // Compaction replaces the history with a summary: the snapshot SHRINKS below
+    // the earlier run's message count and a new message appears.
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [summary, M3] }, ctx);
+
+    const memPuts = puts(calls);
+    expect(memPuts.length).toBe(3); // M1, M2 (run-1) and M3 (run-2); the summary captured nothing
+    const m3 = memPuts.filter((c) => String((c.body as any).content).includes("after compaction"));
+    expect(m3.length).toBe(1);
+    expect((m3[0].body as any).hostSource.id).toBe("run-2");
+    const retained = memPuts.filter((c) => /before compaction/.test(String((c.body as any).content)));
+    expect(retained.length).toBe(2);
+    expect(retained.every((c) => (c.body as any).hostSource.id === "run-1")).toBe(true);
+  });
+
+  test("round 5 (mutation: a failed write is not recorded): a failed write is dropped with a log line and no scheduled retry, and the next run of the session does not write it", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = failFirstWrite();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-failed-write" };
+    const M1 = { role: "user", content: "remember this: the message whose write failed", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: the next run's own message", timestamp: 2 };
+
+    // Run 1's write fails; run 2's snapshot still holds M1 (the host re-delivers
+    // the whole session) plus its own M2.
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [M1] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+
+    // M1's only write is the failed attempt under run 1: no retry, no restamp.
+    expect(puts(calls).filter((c) => contentOf(c).includes("whose write failed")).map(sourceOf)).toEqual(["run-1"]);
+    expect(puts(calls).filter((c) => contentOf(c).includes("next run's own message")).map(sourceOf)).toEqual(["run-2"]);
+    expect(api._warnText()).toMatch(
+      /capture failed for run run-1 \(agent A\), message [0-9a-f]{16}: \S+; the capture is dropped and recorded as skipped, with no retry scheduled/,
+    );
+  });
+
+  test("sequential callbacks: once each scan settles the session map is within sessionStateCap, and evicted sessions take their identities with them", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.sessionStateCap = 1;
+    const msg = { role: "user", content: "remember this: same text in every session", timestamp: 1 };
+    for (const id of ["s1", "s2", "s3"]) {
+      await api._fire("agent_end", { runId: `run-${id}`, success: true, messages: [msg] }, { agentId: "A", sessionId: id });
+    }
+    expect(captureInternals.sessionStateCount?.() ?? 0).toBe(1);
+    expect(captureInternals.sessionIdentityCount?.() ?? 0).toBe(1);
+  });
+
+  /** A fetch stub whose FIRST Memory write fails with a 500; every other call succeeds. */
+  const failFirstWrite = () => {
+    let failFirst = true;
+    return installFetchStub((call) => {
+      if (call.method === "PUT" && /\/Memory\//.test(call.url) && failFirst) {
+        failFirst = false;
+        return { status: 500, body: { error: "write failed" } };
+      }
+      return { status: 200, body: {} };
+    });
+  };
+  const contentOf = (c: Call) => String((c.body as any).content);
+  const sourceOf = (c: Call) => (c.body as any).hostSource?.id;
+  /** A callback that captures nothing but runs the sweep (it passes `captureGate`). */
+  const runSweep = (api: MockApi) => api._handler("llm_output")({ runId: "sweep-only", assistantTexts: ["a plain note"] }, { agentId: "A" });
+
+  test("round 2 (mutation: queued run not reserved): a scan queued past the retirement window still writes its message under its own run", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const base = 5_000_000;
+    captureClock.now = () => base;
+    const ctx = { agentId: "A", sessionId: "sess-queued" };
+    const M1 = { role: "user", content: "remember this: the first run's held message", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: the queued run's own message", timestamp: 2 };
+    const handler = api._handler("agent_end");
+
+    // Run 1's write is held; run 2's scan queues behind it.
+    const p1 = handler({ runId: "run-1", success: true, messages: [M1] }, ctx);
+    await waitFor(() => puts(calls).length === 1);
+    const p2 = handler({ runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+    // The 30 s retirement window passes while run 2 waits, and the sweep runs.
+    captureClock.now = () => base + 31_000;
+    await runSweep(api);
+    expect(captureInternals.recordOf("A", "run-2")?.phase).toBe("ended");
+    d.release();
+    await Promise.all([p1, p2]);
+
+    const m2 = puts(calls).filter((c) => contentOf(c).includes("queued run's own message"));
+    expect(m2.map(sourceOf)).toEqual(["run-2"]);
+    // (mutation: window starts at agent_end) Run 2's 30 s window starts when its
+    // scan settles, so its llm_output delivered next still captures.
+    await api._handler("llm_output")({ runId: "run-2", assistantTexts: ["remember this: run two's reply after its scan"] }, { agentId: "A" });
+    expect(puts(calls).filter((c) => contentOf(c).includes("reply after its scan")).map(sourceOf)).toEqual(["run-2"]);
+    expect(api._warnText()).not.toMatch(/dropped a callback for retired run run-2/);
+  });
+
+  test("round 2 (mutation: a record with a queued scan is removable): an aborted run whose scan is still queued keeps its record, so the scan writes nothing", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const base = 5_500_000;
+    captureClock.now = () => base;
+    const ctx = { agentId: "A", sessionId: "sess-aborted-queued" };
+    const M1 = { role: "user", content: "remember this: the write held while run two waits", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: the aborted run's queued message", timestamp: 2 };
+    const handler = api._handler("agent_end");
+
+    const p1 = handler({ runId: "run-1", success: true, messages: [M1] }, ctx);
+    await waitFor(() => puts(calls).length === 1);
+    const p2 = handler({ runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+    // Run 2 is aborted while its scan waits, and its tombstone ages out.
+    await api._fire("model_call_ended", { runId: "run-2", failureKind: "aborted" }, { agentId: "A" });
+    captureClock.now = () => base + captureBounds.tombstoneMinAgeMs + 1;
+    await runSweep(api);
+    expect(captureInternals.recordOf("A", "run-2")?.phase).toBe("aborted");
+    d.release();
+    await Promise.all([p1, p2]);
+    expect(puts(calls).filter((c) => contentOf(c).includes("aborted run's queued message")).length).toBe(0);
+  });
+
+  test("round 2 (mutation: an identity counts once): equal role, content and timestamp in successive runs are captured once per run, each under its own run", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-equal-fields" };
+    const M = { role: "user", content: "remember this: the same words at the same instant", timestamp: 7 };
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [M] }, ctx);
+    // Run 2 adds a second message whose role, content and timestamp equal M's.
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M, { ...M }] }, ctx);
+    // Run 3 re-delivers both and adds nothing.
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [M, { ...M }] }, ctx);
+
+    const ms = puts(calls).filter((c) => contentOf(c).includes("same words at the same instant"));
+    expect(ms.map(sourceOf)).toEqual(["run-1", "run-2"]);
+  });
+
+  test("round 2 (mutation: no diagnostic): a compaction that leaves fewer equal copies than recorded captures none of them and logs the ambiguity", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-equal-compacted" };
+    const M = { role: "user", content: "remember this: words repeated across a compaction", timestamp: 9 };
+    const summary = { role: "compactionSummary", summary: "earlier turns", timestamp: 10 };
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [M] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M, { ...M }] }, ctx);
+    // A compaction removed one of the two recorded copies. Whether the copy
+    // that remains is new cannot be told, so none is captured for run 3.
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [summary, { ...M }] }, ctx);
+
+    const ms = puts(calls).filter((c) => contentOf(c).includes("repeated across a compaction"));
+    expect(ms.map(sourceOf)).toEqual(["run-1", "run-2"]);
+    expect(api._warnText()).toMatch(
+      /agent_end for run run-3 \(agent A\): the snapshot holds 1 of 2 recorded copies of a message \(as after a compaction\); no copy of it is captured for this run, since/,
+    );
+  });
+
+  test("round 2 (mutation: no eviction on settle): cap 1, two sessions busy together, one session remains once both scans settle", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.sessionStateCap = 1;
+    const handler = api._handler("agent_end");
+    const p1 = handler(
+      { runId: "run-s1", success: true, messages: [{ role: "user", content: "remember this: session one's message", timestamp: 1 }] },
+      { agentId: "A", sessionId: "s1" },
+    );
+    const p2 = handler(
+      { runId: "run-s2", success: true, messages: [{ role: "user", content: "remember this: session two's message", timestamp: 1 }] },
+      { agentId: "A", sessionId: "s2" },
+    );
+    await waitFor(() => puts(calls).length === 2);
+    // Both sessions have a scan in flight, so neither can be evicted yet.
+    expect(captureInternals.sessionStateCount?.() ?? 0).toBe(2);
+    d.release();
+    await Promise.all([p1, p2]);
+    expect(puts(calls).length).toBe(2);
+    expect(captureInternals.sessionStateCount?.() ?? 0).toBe(1);
+  });
+
+  test("gateway_stop (mutation: queued scan not guarded): a scan queued before the stop records no session state and starts no write after it", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-stop" };
+    const M1 = { role: "user", content: "remember this: the write held across the stop", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: the message queued before the stop", timestamp: 2 };
+    const handler = api._handler("agent_end");
+
+    const p1 = handler({ runId: "run-1", success: true, messages: [M1] }, ctx);
+    await waitFor(() => puts(calls).length === 1);
+    const p2 = handler({ runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+    await api._fire("gateway_stop", {}, {});
+    expect(captureInternals.sessionStateCount?.() ?? 0).toBe(0);
+    d.release();
+    await Promise.all([p1, p2]);
+
+    expect(captureInternals.sessionStateCount?.() ?? 0).toBe(0);
+    expect(captureInternals.sessionIdentityCount?.() ?? 0).toBe(0);
+    expect(puts(calls).filter((c) => contentOf(c).includes("queued before the stop")).length).toBe(0);
+  });
+
+  /** A fetch stub whose first `n` Memory writes fail with a 500; every other call succeeds. */
+  const failFirstWrites = (n: number) => {
+    let writes = 0;
+    return installFetchStub((call) => {
+      if (call.method === "PUT" && /\/Memory\//.test(call.url)) {
+        writes += 1;
+        if (writes <= n) return { status: 500, body: { error: "write failed" } };
+      }
+      return { status: 200, body: {} };
+    });
+  };
+
+  test("round 5 (mutation: a keyless run's snapshot is not recorded): a keyless run's snapshot is skipped with a log line; once the key is back, the next run of the session does not capture its messages", async () => {
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-no-key" };
+    const M1 = { role: "user", content: "remember this: said while the key was missing", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: said once the key was back", timestamp: 2 };
+
+    // No key file yet: run 1 cannot sign anything.
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [M1] }, ctx);
+    writeKey("A");
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+
+    expect(puts(calls).filter((c) => contentOf(c).includes("while the key was missing")).length).toBe(0);
+    expect(puts(calls).filter((c) => contentOf(c).includes("once the key was back")).map(sourceOf)).toEqual(["run-2"]);
+    expect(api._warnText()).toMatch(
+      /agent_end for run run-1 \(agent A\) cannot capture now \(no usable signing key\); its new messages are not captured and no retry is scheduled; those this scan identifies are recorded as skipped for the session/,
+    );
+  });
+
+  test("round 5 (mutation: a capacity-refused run's snapshot is not recorded): the queued callback of a run refused for capacity and then aborted with the abort overflow full writes nothing, and the next run of the session does not write its message once a slot frees", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.capacityCap = 1;
+    captureBounds.abortOverflowCap = 0;
+    const ctx = { agentId: "A", sessionId: "sess-capacity-abort" };
+    const M0 = { role: "user", content: "remember this: the held run's message", timestamp: 1 };
+    const M1 = { role: "user", content: "remember this: said in the run refused for capacity", timestamp: 2 };
+    const M2 = { role: "user", content: "remember this: said once a slot was free", timestamp: 3 };
+    const handler = api._handler("agent_end");
+
+    // Run 0 holds the only slot and its write is held.
+    const p0 = handler({ runId: "run-0", success: true, messages: [M0] }, ctx);
+    await waitFor(() => puts(calls).length === 1);
+    // Run 1 is refused admission, and its scan queues behind run 0's.
+    const p1 = handler({ runId: "run-1", success: true, messages: [M0, M1] }, ctx);
+    // Run 1 is aborted while the budget AND its overflow are full: no tombstone.
+    await api._fire("model_call_ended", { runId: "run-1", failureKind: "aborted" }, { agentId: "A" });
+    expect(captureInternals.recordOf("A", "run-1")).toBeUndefined();
+    d.release();
+    await Promise.all([p0, p1]);
+    // A slot frees, and a later run's snapshot still holds run 1's message.
+    captureBounds.capacityCap = 10;
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M0, M1, M2] }, ctx);
+
+    expect(puts(calls).filter((c) => contentOf(c).includes("refused for capacity")).length).toBe(0);
+    expect(puts(calls).filter((c) => contentOf(c).includes("held run's message")).map(sourceOf)).toEqual(["run-0"]);
+    expect(puts(calls).filter((c) => contentOf(c).includes("once a slot was free")).map(sourceOf)).toEqual(["run-2"]);
+    expect(api._warnText()).toMatch(
+      /agent_end for run run-1 \(agent A\) cannot capture now \(the run map is full \(capacityCap\)\); its new messages are not captured and no retry is scheduled; those this scan identifies are recorded as skipped for the session/,
+    );
+  });
+
+  test("round 3 (mutation: a failed run's snapshot is not recorded): a failed run's messages are not stored by it or by the next run of the session, which stores only its own", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-failed-run" };
+    const M1 = { role: "user", content: "remember this: said in the run that failed", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: said in the run that succeeded", timestamp: 2 };
+
+    await api._fire("agent_end", { runId: "run-1", success: false, messages: [M1] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+
+    expect(puts(calls).filter((c) => contentOf(c).includes("the run that failed")).length).toBe(0);
+    expect(puts(calls).filter((c) => contentOf(c).includes("the run that succeeded")).map(sourceOf)).toEqual(["run-2"]);
+    expect(api._warnText()).toMatch(
+      /agent_end for run run-1 \(agent A\) does not capture \(the host reported success: false, for an aborted run or a failed attempt\); the new messages this scan identifies are recorded as skipped for the session/,
+    );
+  });
+
+  test("round 3 (mutation: a policy-refused run's snapshot is not recorded): an agent_end for an already-retired run is recorded as skipped, and the next run stores only its own", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const base = 8_000_000;
+    captureClock.now = () => base;
+    const ctx = { agentId: "A", sessionId: "sess-retired-run" };
+    const M1 = { role: "user", content: "remember this: said in the run that had retired", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: said in the run after it", timestamp: 2 };
+
+    // Run 1 is admitted by a live turn, then idle-retires before its agent_end.
+    await api._handler("llm_input")({ runId: "run-1", prompt: "a plain note" }, { agentId: "A" });
+    captureClock.now = () => base + captureBounds.idleRunRetireMs + 1;
+    await runSweep(api);
+    expect(captureInternals.recordOf("A", "run-1")?.phase).toBe("retired");
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [M1] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+
+    expect(puts(calls).filter((c) => contentOf(c).includes("the run that had retired")).length).toBe(0);
+    expect(puts(calls).filter((c) => contentOf(c).includes("the run after it")).map(sourceOf)).toEqual(["run-2"]);
+  });
+
+  test("round 5 (mutation: queue full does not disable; no recheck after the await): a callback that finds the scan queue full disables the session's agent_end capture, and a held write that then fails records nothing", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    let writes = 0;
+    const calls = installFetchStub(
+      (call) => {
+        if (call.method === "PUT" && /\/Memory\//.test(call.url)) {
+          writes += 1;
+          if (writes === 1) return { status: 500, body: { error: "write failed" } };
+        }
+        return { status: 200, body: {} };
+      },
+      { deferUntil: d.gate },
+    );
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.sessionScanQueueCap = 1;
+    const ctx = { agentId: "A", sessionId: "sess-queue-full" };
+    const M1 = { role: "user", content: "remember this: the held write that fails", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: the run that found the queue full", timestamp: 2 };
+    const M3 = { role: "user", content: "remember this: a later run's message", timestamp: 3 };
+    const handler = api._handler("agent_end");
+
+    const p1 = handler({ runId: "run-1", success: true, messages: [M1] }, ctx);
+    await waitFor(() => puts(calls).length === 1);
+    // The queue is full: run 2 disables capture for the session.
+    const p2 = handler({ runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+    const queuedWhileHeld = captureInternals.maxSessionScans?.() ?? -1;
+    d.release(); // run 1's held write now fails
+    await Promise.all([p1, p2]);
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [M1, M2, M3] }, ctx);
+
+    // Only run 1's failed attempt: no retry, nothing from runs 2 or 3.
+    expect(puts(calls).map(sourceOf)).toEqual(["run-1"]);
+    // The failed write settled after the disable: nothing was recorded.
+    expect(captureInternals.sessionIdentityCount?.() ?? -1).toBe(0);
+    expect(queuedWhileHeld).toBe(1);
+    expect(api._warnText()).toMatch(
+      /agent_end capture is disabled for a session of agent A: agent_end for run run-2 found 1 scans queued or running for the session \(sessionScanQueueCap\); no later agent_end scan of that session captures or records anything while its capture state is held/,
+    );
+    expect(api._warnText()).not.toMatch(/capture failed for run run-1/);
+  });
+
+  test("round 3 (mutation: recording not stopped): after gateway_stop, a failed run's agent_end records no session state", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    await api._fire("gateway_stop", {}, {});
+    await api._fire(
+      "agent_end",
+      { runId: "run-after-stop", success: false, messages: [{ role: "user", content: "remember this: after the stop", timestamp: 1 }] },
+      { agentId: "A", sessionId: "sess-after-stop" },
+    );
+    expect(captureInternals.sessionStateCount?.() ?? -1).toBe(0);
+  });
+
+  test("round 3 (mutation: undefined JSON is hashed): a message whose content JSON cannot represent has no identity", async () => {
+    const { messageIdentity } = await loadModule();
+    expect(messageIdentity({ role: "user", content: () => 1, timestamp: 1 })).toBeNull();
+    expect(messageIdentity({ role: "user", content: Symbol("s"), timestamp: 1 })).toBeNull();
+    expect(messageIdentity({ role: "user", content: "text", timestamp: 1 })).not.toBeNull();
+  });
+
+  test("round 5 guard (mutation: a discarded write is not recorded): a write that settles after its run is aborted records no capture, and a later run does not capture that message", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-abort-in-flight" };
+    const M1 = { role: "user", content: "remember this: the write in flight at the abort", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: the next run's message", timestamp: 2 };
+
+    const p1 = api._handler("agent_end")({ runId: "run-1", success: true, messages: [M1] }, ctx);
+    await waitFor(() => puts(calls).length === 1);
+    await api._fire("model_call_ended", { runId: "run-1", failureKind: "aborted" }, { agentId: "A" });
+    d.release(); // the stub ignores the signal, so the write resolves after the abort
+    await p1;
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+
+    expect(puts(calls).filter((c) => contentOf(c).includes("in flight at the abort")).map(sourceOf)).toEqual(["run-1"]);
+    expect(puts(calls).filter((c) => contentOf(c).includes("the next run's message")).map(sourceOf)).toEqual(["run-2"]);
+    expect(api._warnText()).toMatch(/discarded a capture for run run-1 \(agent A\) that completed after the run was aborted/);
+  });
+
+  test("round 5 guard (mutation: no identity cap): a session remembers at most max(sessionMessageCap, its last accounted snapshot's distinct messages) identities", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.sessionMessageCap = 2;
+    const ctx = { agentId: "A", sessionId: "sess-identity-cap" };
+    const messages = [1, 2, 3].map((i) => ({ role: "user", content: `a plain note number ${i}`, timestamp: i }));
+    await api._fire("agent_end", { runId: "run-1", success: true, messages }, ctx);
+    // flair#2560: all three are in the current snapshot, so none is evicted.
+    expect(captureInternals.sessionIdentityCount?.() ?? -1).toBe(3);
+    // A rewritten snapshot without them: the session is trimmed to the cap.
+    const rewritten = [{ role: "user", content: "a plain note after a rewrite", timestamp: 4 }];
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: rewritten }, ctx);
+    expect(captureInternals.sessionIdentityCount?.() ?? -1).toBe(2);
+  });
+
+  test("real host runner, synthetic events: successive runs and a rewritten snapshot through the pinned OpenClaw hook runner", async () => {
+    const { dist, version: hostVersion } = supportedRunnerHost();
+    const entry = runnerEntry(dist);
+    expect(entry).toBeDefined();
+    const { createHookRunner } = await import(pathToFileURL(join(dist, entry!)).href);
+    writeKey("A");
+    const calls = installFetchStub();
+    const api = createMockApi({ hostVersion, pluginConfig: { autoCapture: true }, config: captureConfig });
+    (await loadPlugin()).register(api as any);
+    const typedHooks = [...api._hooks].flatMap(([hookName, handlers]) =>
+      handlers.map((handler) => ({ hookName, handler, pluginId: api.id })),
+    );
+    const runner = createHookRunner({ typedHooks }, { catchErrors: false });
+    const ctx = { agentId: "A", sessionId: "sess-real" } as any;
+    const M1 = { role: "user", content: "remember this: the real snapshot's first message", timestamp: 1 };
+    const M2 = { role: "assistant", content: "remember this: the real snapshot's second message", timestamp: 2 };
+    const M3 = { role: "user", content: "remember this: the real snapshot after a rewrite", timestamp: 3 };
+    try {
+      await runner.runAgentEnd({ runId: "run-1", success: true, messages: [M1] }, ctx);
+      await runner.runAgentEnd({ runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+      // A rewritten snapshot: M2 is gone, M3 is new.
+      await runner.runAgentEnd({ runId: "run-3", success: true, messages: [M1, M3] }, ctx);
+      const memPuts = puts(calls);
+      expect(memPuts.length).toBe(3);
+      expect(memPuts.map((c) => (c.body as any).hostSource.id).sort()).toEqual(["run-1", "run-2", "run-3"]);
+      expect(memPuts.filter((c) => String((c.body as any).content).includes("first message")).length).toBe(1);
+    } finally {
+      await runner.runGatewayStop({}, {});
+    }
+  });
+
+  // ── flair#2560 — no host message position: the identity set is the only "already seen" signal ──
+
+  test("flair#2560 (mutation: a timestamp mark): a new message is captured whether its timestamp ties with, precedes or follows the session's earlier messages, and a later non-capturable message hides none", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-no-mark" };
+    const U1 = { role: "user", content: "remember this: the session's first message", timestamp: 1_000 };
+    // Same millisecond as U1 (the host stamps with Date.now(), which can tie).
+    const tie = { role: "user", content: "remember this: a new message in the same millisecond", timestamp: 1_000 };
+    // Stamped before U1: the host does not sort a snapshot by timestamp.
+    const earlier = { role: "user", content: "remember this: a new message stamped earlier", timestamp: 500 };
+    // A role the scan never offers for capture, stamped after everything else.
+    const tool = { role: "toolResult", toolCallId: "call-1", toolName: "read", content: [{ type: "text", text: "the tool's output" }], isError: false, timestamp: 9_000 };
+    const next = { role: "user", content: "remember this: a new message stamped before the tool result", timestamp: 5_000 };
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [U1] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [U1, tie, earlier] }, ctx);
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [U1, tie, earlier, tool] }, ctx);
+    await api._fire("agent_end", { runId: "run-4", success: true, messages: [U1, tie, earlier, tool, next] }, ctx);
+
+    const by = (needle: string) => puts(calls).filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    expect(by("the session's first message")).toEqual(["run-1"]);
+    expect(by("in the same millisecond")).toEqual(["run-2"]);
+    expect(by("stamped earlier")).toEqual(["run-2"]);
+    expect(by("stamped before the tool result")).toEqual(["run-4"]);
+    expect(puts(calls)).toHaveLength(4); // the tool result is never captured
+  });
+
+  test("flair#2560 (mutation: a live identity is evicted): a snapshot over sessionMessageCap distinct messages, across several runs: the message each run appends is captured and nothing earlier is captured again", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-over-cap" };
+    const cap = captureBounds.sessionMessageCap; // the default, 4,096
+    const size = cap + 4;
+    // Two trigger messages at the very start (the identities an eviction
+    // would drop first), plain notes after them, and a trigger message last.
+    const base = Array.from({ length: size }, (_, i) => ({
+      role: "user",
+      content: i === 0 || i === 1 ? `remember this: early decision ${i}` : i === size - 1 ? "remember this: the first run's own message" : `a plain note number ${i}`,
+      timestamp: i,
+    }));
+    const own2 = { role: "user", content: "remember this: the second run's own message", timestamp: size };
+    const own3 = { role: "assistant", content: "remember this: the third run's own message", timestamp: size + 1 };
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: base }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [...base, own2] }, ctx);
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [...base, own2, own3] }, ctx);
+
+    const by = (needle: string) => puts(calls).filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    expect(by("early decision 0")).toEqual(["run-1"]);
+    expect(by("early decision 1")).toEqual(["run-1"]);
+    expect(by("the first run's own message")).toEqual(["run-1"]);
+    expect(by("the second run's own message")).toEqual(["run-2"]);
+    expect(by("the third run's own message")).toEqual(["run-3"]);
+    expect(puts(calls)).toHaveLength(5);
+    // The bound is max(cap, the snapshot's distinct messages): all are live.
+    expect(captureInternals.sessionIdentityCount?.() ?? -1).toBe(size + 2);
+  });
+
+  test("flair#2560 (mutation: oldest first; mutation: a capped message recorded as seen): a run's cap is spent from the last snapshot position, and the message it left out is captured by the next capture scan", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-cap-spent" };
+    const say = (text: string, timestamp: number) => ({ role: "user", content: `remember this: ${text}`, timestamp });
+    const U0 = say("the session's opening message", 0);
+    // Run 2 holds four new eligible messages; the cap (autoCaptureMaxPerSession,
+    // default 3) takes the three at the last positions of the snapshot.
+    const run2 = [say("run two, message a", 1), say("run two, message b", 2), say("run two, message c", 3), say("run two, message d", 4)];
+    const e = say("run three's own message", 5);
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [U0] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [U0, ...run2] }, ctx);
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [U0, ...run2, e] }, ctx);
+
+    const by = (needle: string) => puts(calls).filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    expect(by("opening message")).toEqual(["run-1"]);
+    expect(by("message d")).toEqual(["run-2"]);
+    expect(by("message c")).toEqual(["run-2"]);
+    expect(by("message b")).toEqual(["run-2"]);
+    // Left out by run 2's cap and not recorded as seen: run 3 captures it.
+    expect(by("message a")).toEqual(["run-3"]);
+    expect(by("run three's own message")).toEqual(["run-3"]);
+  });
+
+  test("flair#2560 (mutation: a later cap settles a deferred message): successive capped scans leave the same message deferred until a scan reaches it", async () => {
+    writeKey("A");
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true, autoCaptureMaxPerSession: 1 }, config: captureConfig });
+    (await loadPlugin()).register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-repeated-cap" };
+    const say = (text: string, timestamp: number) => ({ role: "user", content: `remember this: ${text}`, timestamp });
+    const opening = say("the opening message", 0);
+    const waiting = say("waiting through caps", 1);
+    const second = say("the second run message", 2);
+    const third = say("the third run message", 3);
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [opening] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [opening, waiting, second] }, ctx);
+    expect(captureInternals.sessionDeferredCount()).toBe(1);
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [opening, waiting, second, third] }, ctx);
+    expect(captureInternals.sessionDeferredCount()).toBe(1);
+    expect(puts(calls).map(sourceOf)).toEqual(["run-1", "run-2", "run-3"]);
+    expect(puts(calls).some((c) => contentOf(c).includes("waiting through caps"))).toBe(false);
+    await api._fire("agent_end", { runId: "run-4", success: true, messages: [opening, waiting, second, third] }, ctx);
+    expect(puts(calls).filter((c) => contentOf(c).includes("waiting through caps")).map(sourceOf)).toEqual(["run-4"]);
+    expect(captureInternals.sessionDeferredCount()).toBe(0);
+  });
+
+  test("flair#2560 cold start (mutation: a cold scan leaves capped messages unseen): a session's first scan captures at most the run's cap, from the last eligible position, and records the rest as seen", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-cold" };
+    // A snapshot as a gateway restart leaves it: five eligible messages the
+    // plugin has no state for.
+    const old = [1, 2, 3, 4, 5].map((i) => ({ role: "user", content: `remember this: an older message ${i}`, timestamp: i }));
+    const next = { role: "user", content: "remember this: the next run's own message", timestamp: 6 };
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: old }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [...old, next] }, ctx);
+
+    const by = (needle: string) => puts(calls).filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    for (const i of [5, 4, 3]) expect(by(`an older message ${i}`)).toEqual(["run-1"]);
+    // Beyond the cap in the cold scan: recorded as seen, so a later scan of
+    // this retained session state does not offer them again.
+    for (const i of [2, 1]) expect(by(`an older message ${i}`)).toEqual([]);
+    expect(by("the next run's own message")).toEqual(["run-2"]);
+  });
+
+  test("flair#2560 (mutation: the deduplicated flag is ignored): a capture Flair flags deduplicated is counted, with a log line at the 1st, 2nd, 4th, ... one", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    installFetchStub((c) => (c.method === "PUT" && /\/Memory\//.test(c.url) ? { body: { written: true, deduplicated: true, matchedId: "A-earlier" } } : {}));
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-repeats" };
+    const msgs = [1, 2, 3, 4].map((i) => ({ role: "user", content: `remember this: a repeated message ${i}`, timestamp: i }));
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: msgs.slice(0, 3) }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: msgs }, ctx);
+
+    const lines = api._warnText().split("\n").filter((l: string) => l.includes("stored a near-duplicate of an existing memory"));
+    expect(lines.map((l: string) => l.match(/; (\d+) such capture/)?.[1])).toEqual(["1", "2", "4"]);
+    expect(lines[0]).toContain("for agent A");
+  });
+
+  test("flair#2560: a refused scan settles a message an earlier cap deferred", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-deferred" };
+    const say = (text: string, timestamp: number) => ({ role: "user", content: `remember this: ${text}`, timestamp });
+    const U0 = say("the opening message", 0);
+    const run2 = [say("run two's deferred message a", 1), say("run two's kept message b", 2), say("run two's kept message c", 3), say("run two's kept message d", 4)];
+    const failed = say("the failed run's message", 5);
+    const next = say("the next run's message", 6);
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [U0] }, ctx);
+    // Run 2's cap leaves message a unseen.
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [U0, ...run2] }, ctx);
+    // Run 3 is refused: it settles the deferred identity too.
+    await api._fire("agent_end", { runId: "run-3", success: false, messages: [U0, ...run2, failed] }, ctx);
+    await api._fire("agent_end", { runId: "run-4", success: true, messages: [U0, ...run2, failed, next] }, ctx);
+
+    const by = (needle: string) => puts(calls).filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    expect(by("deferred message a")).toEqual([]);
+    expect(by("the failed run's message")).toEqual([]);
+    expect(by("the next run's message")).toEqual(["run-4"]);
+    for (const k of ["kept message b", "kept message c", "kept message d"]) expect(by(k)).toEqual(["run-2"]);
+  });
+
+  test("flair#2560 (mutation: refused deferred occurrences left unseen): a refused run appends an identical deferred copy and a later scan captures neither copy", async () => {
+    const { dist, version: hostVersion } = supportedRunnerHost();
+    const entry = runnerEntry(dist);
+    expect(entry).toBeDefined();
+    const { createHookRunner } = await import(pathToFileURL(join(dist, entry!)).href);
+    writeKey("A");
+    const calls = installFetchStub();
+    const api = createMockApi({ hostVersion, pluginConfig: { autoCapture: true, autoCaptureMaxPerSession: 1 }, config: captureConfig });
+    (await loadPlugin()).register(api as any);
+    const typedHooks = [...api._hooks].flatMap(([hookName, handlers]) =>
+      handlers.map((handler) => ({ hookName, handler, pluginId: api.id })),
+    );
+    const runner = createHookRunner({ typedHooks }, { catchErrors: false });
+    const ctx = { agentId: "A", sessionId: "sess-deferred-identical-refusal" };
+    const opening = { role: "user", content: "a plain opening note", timestamp: 0 };
+    const waiting = { role: "user", content: "remember this: deferred identical copy", timestamp: 1 };
+    const kept = { role: "user", content: "remember this: the capture cap is spent here", timestamp: 2 };
+    try {
+      await runner.runAgentEnd({ runId: "run-1", success: true, messages: [opening] }, ctx);
+      await runner.runAgentEnd({ runId: "run-2", success: true, messages: [opening, waiting, kept] }, ctx);
+      expect(captureInternals.sessionDeferredCount()).toBe(1);
+      const snapshot = [opening, waiting, kept, { ...waiting }];
+      await runner.runAgentEnd({ runId: "run-3", success: false, messages: snapshot }, ctx);
+      await runner.runAgentEnd({ runId: "run-4", success: true, messages: snapshot }, ctx);
+      expect(puts(calls).some((c) => contentOf(c).includes("deferred identical copy"))).toBe(false);
+      await runner.runAgentEnd({ runId: "run-5", success: true, messages: [...snapshot, { ...waiting }] }, ctx);
+      expect(puts(calls).filter((c) => contentOf(c).includes("deferred identical copy")).map(sourceOf)).toEqual(["run-5"]);
+      expect(puts(calls).filter((c) => contentOf(c).includes("the capture cap is spent here")).map(sourceOf)).toEqual(["run-2"]);
+    } finally {
+      await runner.runGatewayStop({}, {});
+    }
+  });
+
+  test("flair#2560: abort before a deferred message's write starts settles it", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const before = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-deferred-abort" };
+    const say = (text: string, timestamp: number) => ({ role: "user", content: `remember this: ${text}`, timestamp });
+    const U0 = say("the opening message", 0);
+    const run2 = [say("run two's deferred message a", 1), say("run two's kept message b", 2), say("run two's kept message c", 3), say("run two's kept message d", 4)];
+    const e = say("the aborted run's message e", 5);
+    const f = say("the next run's message f", 6);
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [U0] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [U0, ...run2] }, ctx);
+    // Run 3's first write (e, the last position) is held; the run is aborted
+    // meanwhile, so its scan reaches message a after the run is refused.
+    const d = defer();
+    const after = installFetchStub(undefined, { deferUntil: d.gate });
+    const p3 = api._handler("agent_end")({ runId: "run-3", success: true, messages: [U0, ...run2, e] }, ctx);
+    await waitFor(() => puts(after).length === 1);
+    await api._fire("model_call_ended", { runId: "run-3", failureKind: "aborted" }, { agentId: "A" });
+    d.release();
+    await p3;
+    await api._fire("agent_end", { runId: "run-4", success: true, messages: [U0, ...run2, e, f] }, ctx);
+
+    const all = [...puts(before), ...puts(after)];
+    const by = (needle: string) => all.filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    expect(by("deferred message a")).toEqual([]);
+    expect(by("the next run's message f")).toEqual(["run-4"]);
+  });
+
+  test("flair#2560 (mutation: a discarded write leaves the message deferred): when a run is aborted while a deferred message's own write is in flight, the message is recorded as skipped and not captured again", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const before = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-deferred-in-flight" };
+    const say = (text: string, timestamp: number) => ({ role: "user", content: `remember this: ${text}`, timestamp });
+    const U0 = say("the opening message", 0);
+    const run2 = [say("run two's deferred message a", 1), say("run two's kept message b", 2), say("run two's kept message c", 3), say("run two's kept message d", 4)];
+    const f = say("the next run's message f", 6);
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [U0] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [U0, ...run2] }, ctx);
+    // Run 3 adds nothing new, so its only write is message a's, and it is held;
+    // the run is aborted while that write is in flight.
+    const d = defer();
+    const after = installFetchStub(undefined, { deferUntil: d.gate });
+    const p3 = api._handler("agent_end")({ runId: "run-3", success: true, messages: [U0, ...run2] }, ctx);
+    await waitFor(() => puts(after).length === 1);
+    expect(contentOf(puts(after)[0])).toContain("deferred message a");
+    await api._fire("model_call_ended", { runId: "run-3", failureKind: "aborted" }, { agentId: "A" });
+    d.release(); // the stub ignores the signal, so the write resolves after the abort
+    await p3;
+    await api._fire("agent_end", { runId: "run-4", success: true, messages: [U0, ...run2, f] }, ctx);
+
+    const all = [...puts(before), ...puts(after)];
+    const by = (needle: string) => all.filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    // The in-flight write reached the stub; its result was discarded, and the
+    // message was recorded as skipped, so run 4 does not write it again.
+    expect(by("deferred message a")).toEqual(["run-3"]);
+    expect(by("the next run's message f")).toEqual(["run-4"]);
+    expect(api._warnText()).toMatch(/discarded a capture for run run-3 \(agent A\) that completed after the run was aborted/);
+  });
+
+  test("flair#2560 (mutation: deferred is never pruned): entries stay within max(sessionMessageCap, D) and deferred holds only last-accounted-snapshot identities", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.sessionMessageCap = 2;
+    const ctx = { agentId: "A", sessionId: "sess-two-sets" };
+    const U0 = { role: "user", content: "a plain opening note", timestamp: 0 };
+    const eligible = [1, 2, 3, 4, 5, 6].map((i) => ({ role: "user", content: `remember this: eligible message number ${i}`, timestamp: i }));
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [U0] }, ctx);
+    // D = 7. The run's cap (3) takes the last three positions; the other three
+    // eligible messages are deferred.
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [U0, ...eligible] }, ctx);
+    const entries = captureInternals.sessionIdentityCount?.() ?? -1;
+    const deferred = captureInternals.sessionDeferredCount?.() ?? -1;
+    expect(entries).toBe(4); // U0 and the three captured, all in the snapshot
+    expect(deferred).toBe(3);
+    expect(entries).toBeLessThanOrEqual(Math.max(2, 7));
+    expect(deferred).toBeLessThanOrEqual(7);
+    expect(entries + deferred).toBe(7); // in this fixture the two sets are disjoint and cover the snapshot
+    // A rewritten snapshot without them: deferred is pruned, entries trimmed to the cap.
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [{ role: "user", content: "a plain note after a rewrite", timestamp: 9 }] }, ctx);
+    expect(captureInternals.sessionDeferredCount?.() ?? -1).toBe(0);
+    expect(captureInternals.sessionIdentityCount?.() ?? -1).toBe(2);
+  });
+
+  test("flair#2560 (mutation: NUL-joined fields): role and timestamp separators do not alias identities", async () => {
+    const { messageIdentity } = await loadModule();
+    const content = "remember this: separator regression";
+    expect(messageIdentity({ role: "user", content, timestamp: "foo\0n1" })).not.toBe(
+      messageIdentity({ role: "user\0sfoo", content, timestamp: 1 }),
+    );
+  });
+
+  test("flair#2560 (mutation: NUL-joined fields): real host runner: a recorded malformed role does not suppress the valid user message", async () => {
+    const { dist, version: hostVersion } = supportedRunnerHost();
+    const entry = runnerEntry(dist);
+    expect(entry).toBeDefined();
+    const { createHookRunner } = await import(pathToFileURL(join(dist, entry!)).href);
+    writeKey("A");
+    const calls = installFetchStub();
+    const api = createMockApi({ hostVersion, pluginConfig: { autoCapture: true }, config: captureConfig });
+    (await loadPlugin()).register(api as any);
+    const typedHooks = [...api._hooks].flatMap(([hookName, handlers]) =>
+      handlers.map((handler) => ({ hookName, handler, pluginId: api.id })),
+    );
+    const runner = createHookRunner({ typedHooks }, { catchErrors: false });
+    const ctx = { agentId: "A", sessionId: "sess-separator" };
+    const content = "remember this: separator regression";
+    const malformed = { role: "user\0sfoo", content, timestamp: 1 };
+    const valid = { role: "user", content, timestamp: "foo\0n1" };
+    try {
+      await runner.runAgentEnd({ runId: "run-1", success: true, messages: [malformed] }, ctx);
+      expect(captureInternals.sessionIdentityCount()).toBe(1);
+      expect(puts(calls)).toHaveLength(0);
+      await runner.runAgentEnd({ runId: "run-2", success: true, messages: [valid] }, ctx);
+      await runner.runAgentEnd({ runId: "run-3", success: true, messages: [valid] }, ctx);
+      expect(puts(calls).map(sourceOf)).toEqual(["run-2"]);
+    } finally {
+      await runner.runGatewayStop({}, {});
+    }
+  });
+
+  test("flair#2560 (mutation: untyped timestamp): a numeric and a string timestamp give different identities", async () => {
+    const { messageIdentity } = await loadModule();
+    const msg = { role: "user", content: "remember this: one message" };
+    expect(messageIdentity({ ...msg, timestamp: 1 })).not.toBe(messageIdentity({ ...msg, timestamp: "1" }));
+    expect(messageIdentity({ ...msg, timestamp: 1 })).toBe(messageIdentity({ ...msg, timestamp: 1 }));
+  });
+
+  test("flair#2560 (mutation: a 32-bit power-of-two check): the repeat log points are exactly the powers of two, for any count", async () => {
+    const { isRepeatLogPoint } = await loadModule();
+    let points = 0;
+    for (let n = 1n; n <= 1024n; n++) if (isRepeatLogPoint(n)) points++;
+    expect(points).toBe(11); // floor(log2 1024) + 1
+    expect(isRepeatLogPoint(0n)).toBe(false);
+    // Past 32 bits: 2^32 and 2^53 are points; 2^32 + 1 and 2^32 + 2 are not.
+    expect([2n ** 32n, 2n ** 32n + 1n, 2n ** 32n + 2n, 2n ** 53n, 2n ** 53n + 1n].map(isRepeatLogPoint)).toEqual([true, false, false, true, false]);
+  });
+});
+
+// ── flair#1940 seam — the plugin's run-id check vs the server's validator ────
+
+/** The server's verdict on the pointer an OpenClaw capture would claim for `id`. */
+const serverAccepts = (id: string): boolean => validateHostSource({ v: 1, host: "openclaw", kind: "run", id }).ok;
+
+describe("flair#1940 seam — the plugin's run-id check agrees with the server validator", () => {
+  // [run id, label, the SERVER's verdict]. The server column is asserted too, so
+  // the table cannot pass vacuously (two checks that both accept everything).
+  const CASES: Array<[string, string, boolean]> = [
+    ["1a2b3c4d-0000-4000-8000-000000000000", "a uuid", true],
+    [randomUUID(), "a typical OpenClaw run id (crypto.randomUUID)", true],
+    ["inject-msg_01HZXK2", "an inject-<messageId> run id", true],
+    ["cron:job-7:0123456789abcdef", "a <sourceKey>:<sha16> run id", true],
+    ["run-1a2b3c4d", "a prefixed run id", true],
+    ["a", "one character (lower bound)", true],
+    ["a".repeat(256), "256 characters (upper bound)", true],
+    ["Az09._:/@#-", "every punctuation class the grammar allows", true],
+    ["", "empty", false],
+    ["a".repeat(257), "257 characters", false],
+    ["bad run id", "spaces", false],
+    ["run]1", "']'", false],
+    ["run[1", "'['", false],
+    ["run\n1", "newline", false],
+    ["run\r\n1", "CRLF", false],
+    ["run\t1", "tab", false],
+    ["run\u0000", "NUL", false],
+    ["run\u0007", "BEL", false],
+    ["run\u0085", "NEL (C1 control)", false],
+    ["run\u202E1", "RLO bidi override", false],
+    ["run\u200E1", "LRM bidi mark", false],
+    ["run\"1", "double quote", false],
+    ["run\\1", "backslash", false],
+    ["run%201", "percent", false],
+    ["run+1", "plus", false],
+    ["caf\u00E9", "non-ASCII, NFC (precomposed e-acute)", false],
+    ["cafe\u0301", "non-ASCII, NFD (e + combining acute)", false],
+    ["\u212Bngstrom", "U+212B ANGSTROM SIGN (NFC -> A-ring, still non-ASCII)", false],
+    ["\uFF32un", "fullwidth R (an NFKC fold only; NFC leaves it)", false],
+    ["run-\u{1F600}", "astral emoji", false],
+    ["run-\uD800", "lone surrogate", false],
+    // NFC maps U+212A KELVIN SIGN to ASCII "K": the server normalises BEFORE its
+    // grammar check, so it ACCEPTS these (and stores the "K" form).
+    ["run-\u212A", "U+212A KELVIN SIGN (NFC -> ASCII K)", true],
+    ["a".repeat(255) + "\u212A", "255 chars + KELVIN SIGN (256 after NFC)", true],
+  ];
+
+  test("named inputs: the server's verdict is the expected one, and the plugin's matches it", async () => {
+    const { captureHostSource } = await loadModule();
+    const wrongServer: string[] = [];
+    const disagree: string[] = [];
+    for (const [id, label, expected] of CASES) {
+      const server = serverAccepts(id);
+      if (server !== expected) wrongServer.push(label);
+      const pluginAccepts = captureHostSource(id) !== null;
+      if (pluginAccepts !== server) disagree.push(`${label}: plugin ${pluginAccepts ? "accepts" : "refuses"}, server ${server ? "accepts" : "refuses"}`);
+    }
+    expect(wrongServer).toEqual([]); // assertion: the table pins the server's real verdicts
+    expect(disagree).toEqual([]); // assertion: the plugin decides every input the way the server does
+  });
+
+  test("every code point (U+0000..U+10FFFF, lone surrogates included) inside a run id: one verdict", async () => {
+    const { captureHostSource } = await loadModule();
+    const disagree: string[] = [];
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      // fromCharCode for the surrogate range yields the lone code unit.
+      const c = cp >= 0xd800 && cp <= 0xdfff ? String.fromCharCode(cp) : String.fromCodePoint(cp);
+      const id = `run-${c}-1`;
+      if ((captureHostSource(id) !== null) !== serverAccepts(id)) disagree.push(`U+${cp.toString(16).toUpperCase().padStart(4, "0")}`);
+    }
+    expect(disagree).toEqual([]); // assertion: no code point splits the plugin from the server
+  });
+
+  test("an accepted run id: the pointer the client writes ({v:1, ...}) is one the server accepts, with the run id verbatim", async () => {
+    const { captureHostSource } = await loadModule();
+    for (const [id, label, expected] of CASES) {
+      if (!expected) continue;
+      const pointer = captureHostSource(id);
+      expect(pointer, label).toEqual({ host: "openclaw", kind: "run", id }); // assertion: the id is the run id verbatim
+      const r = validateHostSource({ v: 1, ...pointer });
+      expect(r.ok, label).toBe(true); // assertion: the exact written pointer passes the server
+      if (r.ok) expect(r.value.id, label).toBe(id.normalize("NFC")); // assertion: the server stores the NFC form
+    }
   });
 });
 
@@ -2209,5 +3574,107 @@ describe("slice 2 round 13 — gateway_stop refuses admission until the next reg
     expect(captureInternals.runCount()).toBe(0);
     expect(captureInternals.recordOf("A", "never-seen")).toBeUndefined();
     expect(api._warnText()).toMatch(/the gateway is stopping/);
+  });
+});
+
+// ─── flair#2537 — memory_store replies report the STORED (redacted) content ───
+//
+// A redacted write's response carries `stored`, the post-redaction text that
+// write committed; the SDK builds the result from it (flair#2467). The reply
+// previews that text and never reads the row after the write: here a read
+// returns a later write's text, so a reply built from a read would show it. A
+// write the server did not redact gets the reply it always had. The real-Harper
+// counterpart is test/integration/write-reply-redaction-2537.test.ts.
+describe("flair#2537 — memory_store replies report the STORED (redacted) content", () => {
+  const TOKEN = `ghp_${"a".repeat(24)}`;
+  const ORIGINAL = `deploy note: use token ${TOKEN} for the CI job`;
+  const STORED = "deploy note: use token [redacted] for the CI job";
+  const LATER_WRITE = "a later write to the same row";
+  const WITHHELD = "Preview: none. The server redacted 1 value(s) in this write; the stored text was not returned.";
+  const memoryReads = (calls: Call[]): Call[] =>
+    calls.filter((c) => c.method === "GET" && /\/Memory\//.test(c.url));
+
+  async function storeWith(
+    write: (call: Call) => Record<string, unknown>,
+    text: string,
+  ): Promise<{ res: any; calls: Call[] }> {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub((call) => {
+      if (call.method === "GET") return { body: { id: call.url.split("/Memory/")[1], content: LATER_WRITE, agentId: "A" } };
+      return { body: write(call) };
+    });
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" })!;
+    const res = await store.execute("1", { text });
+    return { res, calls };
+  }
+
+  test("a redacted write previews the stored text from the write response and states the count, with no read", async () => {
+    const { res, calls } = await storeWith(
+      (call) => ({ id: (call.body as any)?.id, written: true, deduplicated: false, redactedValues: 1, stored: { content: STORED } }),
+      ORIGINAL,
+    );
+    const id = res.details.id;
+    expect(res.content[0].text).toBe(
+      [`Memory stored (id: ${id})`, `Preview: ${STORED}`, "Redacted 1 credential-shaped value(s) before storing."].join("\n"),
+    );
+    expect(res.details.redactedValues).toBe(1);
+    expect(res.details.contentWithheld).toBeUndefined();
+    expect(res.details.errors).toEqual([]);
+    expect(memoryReads(calls).length).toBe(0);
+  });
+
+  test("a redacted near-duplicate names the match and previews the stored text, not the input", async () => {
+    const { res } = await storeWith(
+      (call) => ({ id: (call.body as any)?.id, written: true, deduplicated: true, matchedId: "A-older", redactedValues: 1, stored: { content: STORED } }),
+      ORIGINAL,
+    );
+    const id = res.details.id;
+    expect(res.content[0].text).toBe(
+      [`Memory stored (id: ${id}) — similar to existing memory id=A-older`, `Preview: ${STORED}`, "Redacted 1 credential-shaped value(s) before storing."].join("\n"),
+    );
+    expect(res.content[0].text).not.toContain(TOKEN);
+  });
+
+  test("a count without stored text shows no preview, states the count and sets contentWithheld", async () => {
+    const { res, calls } = await storeWith(
+      (call) => ({ id: (call.body as any)?.id, written: true, deduplicated: false, redactedValues: 1 }),
+      ORIGINAL,
+    );
+    const text = res.content[0].text;
+    expect(text).toContain(WITHHELD);
+    expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain(LATER_WRITE);
+    expect(res.details.written).toBe(true);
+    expect(res.details.contentWithheld).toBe(true);
+    expect(res.details.redactedValues).toBe(1);
+    expect(memoryReads(calls).length).toBe(0);
+  });
+
+  test("a `stored` with no content shows no preview and sets contentWithheld (flair#2561)", async () => {
+    const { res, calls } = await storeWith(
+      (call) => ({ id: (call.body as any)?.id, written: true, deduplicated: false, redactedValues: 1, stored: { summary: "a stored summary" } }),
+      ORIGINAL,
+    );
+    const text = res.content[0].text;
+    expect(text).toContain(WITHHELD);
+    expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain("a stored summary");
+    expect(res.details.contentWithheld).toBe(true);
+    expect(memoryReads(calls).length).toBe(0);
+  });
+
+  test("a write the server did not redact gets the reply it always had", async () => {
+    const plain = await storeWith((call) => ({ id: (call.body as any)?.id, written: true, deduplicated: false }), "plain note");
+    expect(plain.res.content[0].text).toBe(`Memory stored (id: ${plain.res.details.id})`);
+    expect(plain.res.details.redactedValues).toBeUndefined();
+    expect(memoryReads(plain.calls).length).toBe(0);
+    const dup = await storeWith(
+      (call) => ({ id: (call.body as any)?.id, written: true, deduplicated: true, matchedId: "A-older" }),
+      "plain note",
+    );
+    expect(dup.res.content[0].text).toBe(`Memory stored (id: ${dup.res.details.id}) — similar to existing memory id=A-older: plain note`);
   });
 });

@@ -52,10 +52,6 @@
     "required": []
   },
   "contracts": {
-    "tools": [
-      { "name": "memory_search" },
-      { "name": "memory_store" },
-      { "name": "memory_get" }
-    ]
+    "tools": ["memory_search", "memory_store", "memory_get"]
   }
 }

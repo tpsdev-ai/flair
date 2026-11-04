@@ -6,6 +6,7 @@
  * in SyncLog.skippedReasons so operators can grep for them.
  */
 import { effectiveAgentStatus } from "./agent-status-guard.js";
+import { ADMIN_ROLE } from "./agent-admin.js";
 
 export interface SyncRecord {
   table: string;
@@ -57,25 +58,140 @@ export type SkipReason =
   // "unknown_table").
   | "pointer_not_federated"
   // ─── flair#2108 (an inbound Agent `status` that differs from the stored one) ──
-  // Emitted by FederationSync.post before the raw put, for a record that passed
-  // the earlier sync checks: an inbound Agent record
+  // Emitted by FederationSync.post's merge plan for a record that passed the
+  // earlier sync checks: an inbound Agent record
   // whose effective status (a missing `status` counts as "active") differs from
   // an existing local Agent's effective stored status, also when the record is older than the stored row and would
   // lose the last-write-wins merge. The federation path carries no verified
   // administrator authority for that principal, so the whole record is skipped
   // rather than merged without `status`.
   | "agent_status_not_federated"
+  // ─── flair#2266 (pending-key guard) ──
+  // A record reaching the merge plan with publicKey different from stored `pending`,
+  // unless the status guard refused it first. Earlier validation keeps its reason.
+  | "agent_pending_key_not_federated"
+  // flair#2665: an inbound Agent record that would change an existing row's
+  // publicKey or home (originatorInstanceId) when the batch-verified sender is
+  // not the row's stored home (non-retryable).
+  | "agent_identity_not_from_home"
+  // flair#2665: an inbound Agent record that would create a row whose id the
+  // receiver's FLAIR_ADMIN_AGENTS names (non-retryable).
+  | "agent_admin_id_not_federated"
   // Emitted by FederationSync.post before the row is read: the payload's id is
   // missing or is not the envelope's id, so the record is not applied.
   | "id_mismatch"
   | "invalid_expiry"
-  // Emitted by FederationSync.post for a Memory record the merge could not
-  // apply because the row it read is no longer the stored one — a delete, a
-  // purge or a same-id replace with a new incarnation token committed between
-  // the read and the write, or any change committed to the row after the merge
-  // staged its write. Nothing was written (flair#2441). Other synced tables do
-  // not run this confirmation and never emit it.
-  | "merge_target_changed";
+  // Emitted by FederationSync.post when row confirmation fails for a planned
+  // merge write.
+  // The initial check compares the whole stored row for every synced table;
+  // the final check compares the committed row with the in-transaction read. A
+  // change committed after that final check is not seen. Nothing was written on
+  // a refusal (flair#2441, flair#2450, flair#2475).
+  | "merge_target_changed"
+  // flair#2478 slice 3c: a Memory merge could not take the row's per-id write
+  // lock (held, or the id's earlier write outcome is unresolved). Nothing was
+  // written; the skip is returned in the response's refused list, the
+  // best-effort SyncLog row records it in skippedReasons when that write
+  // succeeds, and a later re-offer can merge it.
+  | "merge_target_busy"
+  // ─── flair#2455 slice 1: the reasons recordSkip already emitted as bare
+  // strings. Typing them closes the union at the sites that produced them;
+  // the exhaustive SKIP_REASON_CLASS map below then forces a retryable /
+  // non-retryable decision on every future addition.
+  | "merge_error" // a per-record merge threw (see FederationSync.post's catch)
+  | "invalid_agent_id" // an Agent row whose id fails isValidAgentId (AGENT_ID_ERROR)
+  | "skill_not_federated" // a skill-tagged Memory is a local, gated artifact
+  | "seed_id_not_federated" // a reserved seed id is never merged
+  | "content_suffix_id_not_federated" // a Memory id ending in `.content`
+  // ─── flair#2578 slice 1: office-wide Presence, receiver and local guard ──
+  // Presence replication (spoke → hub) is behind ONE default-off receive flag.
+  // With the flag off, an eligible Presence record reaching receipt skips as
+  // presence_receive_disabled; earlier key/classifier refusals answer first.
+  | "presence_receive_disabled" // the receive flag is off (non-retryable)
+  // The batch-verified SENDER is the only home authority (never the wire
+  // originatorInstanceId). The local Agent row for data.agentId must be homed on
+  // that sender (Sherlock F1, Kern 2).
+  | "presence_agent_not_replicated" // the Agent row has not reached this receiver yet (retryable)
+  | "presence_agent_homed_elsewhere" // the Agent row's home is another instance, or null (non-retryable)
+  // Presence-specific merge (Sherlock F5, Kern 4): an older heartbeat never
+  // replaces a newer one (non-retryable).
+  | "presence_stale_heartbeat"
+  // Failed field validation (non-retryable).
+  | "presence_invalid_shape"
+  // The inbound heartbeat/activity stamp is later than the receiver's clock plus
+  // the same allowance classifyRecord uses (Sherlock NEW-1; non-retryable).
+  | "presence_future_timestamp"
+;
+
+/**
+ * Every SkipReason's retry class (flair#2455 design rev 2, K1/S3).
+ *
+ * The `satisfies Record<SkipReason, …>` makes this map EXHAUSTIVE: adding a
+ * member to {@link SkipReason} without giving it a class here is a type error,
+ * so no reason can silently default to non-retryable — which is the shape the
+ * original bug came from.
+ *
+ * "retryable" means a later re-offer of the SAME record can merge: contention
+ * can clear (`merge_target_changed`), transient storage failures can heal
+ * (`merge_error`), receiver time catches up (`future_timestamp`), and an
+ * authorized pairing can supply the key (`unknown_originator_key`; a retry
+ * never changes trust). The other reasons are classified non-retryable.
+ */
+export const SKIP_REASON_CLASS = {
+  unknown_table: "non_retryable",
+  non_originator: "non_retryable",
+  future_timestamp: "retryable",
+  no_op_same_hash: "non_retryable",
+  unknown_originator_key: "retryable",
+  invalid_signature: "non_retryable",
+  missing_signature: "non_retryable",
+  principal_mismatch: "non_retryable",
+  pointer_not_federated: "non_retryable",
+  agent_status_not_federated: "non_retryable",
+  agent_pending_key_not_federated: "non_retryable",
+  agent_identity_not_from_home: "non_retryable",
+  agent_admin_id_not_federated: "non_retryable",
+  id_mismatch: "non_retryable",
+  invalid_expiry: "non_retryable",
+  merge_target_changed: "retryable",
+  merge_target_busy: "retryable",
+  merge_error: "retryable",
+  invalid_agent_id: "non_retryable",
+  skill_not_federated: "non_retryable",
+  seed_id_not_federated: "non_retryable",
+  content_suffix_id_not_federated: "non_retryable",
+  presence_receive_disabled: "non_retryable",
+  presence_agent_not_replicated: "retryable",
+  presence_agent_homed_elsewhere: "non_retryable",
+  presence_stale_heartbeat: "non_retryable",
+  presence_invalid_shape: "non_retryable",
+  presence_future_timestamp: "non_retryable",
+} as const satisfies Record<SkipReason, "retryable" | "non_retryable">;
+
+/**
+ * The retryable subset of {@link SkipReason}, DERIVED from
+ * {@link SKIP_REASON_CLASS} so the two cannot drift apart.
+ */
+export type RetryableSkipReason = {
+  [K in SkipReason]: (typeof SKIP_REASON_CLASS)[K] extends "retryable" ? K : never;
+}[SkipReason];
+
+/** Every SkipReason, as a value — for validating a receiver-supplied reason string. */
+export const SKIP_REASONS: ReadonlySet<SkipReason> = new Set(
+  Object.keys(SKIP_REASON_CLASS) as SkipReason[],
+);
+
+/** The retryable SkipReasons, as a value. */
+export const RETRYABLE_SKIP_REASONS: ReadonlySet<RetryableSkipReason> = new Set(
+  (Object.keys(SKIP_REASON_CLASS) as SkipReason[]).filter(
+    (reason) => SKIP_REASON_CLASS[reason] === "retryable",
+  ) as RetryableSkipReason[],
+);
+
+/** Is `value` one of the closed SkipReason strings? */
+export function isSkipReason(value: unknown): value is SkipReason {
+  return typeof value === "string" && SKIP_REASONS.has(value as SkipReason);
+}
 
 /**
  * Static policy for every table FederationSync will merge.
@@ -101,6 +217,13 @@ export const FEDERATION_TABLE_POLICY = {
   // hardcoded set), but the policy + owner-field land now so S2 is not a schema
   // or policy migration (the design's ship-order, flair#1521 §12).
   Message: { principalOwning: true },
+  // flair#2578 slice 1: Receive-side support for planned spoke-to-hub Presence
+  // replication; the sender follows in a later slice.
+  // Presence carries `agentId` (the row's primary key), no `principalId`, so it
+  // is not principal-owning; its receive-side authority is P1's home binding to
+  // the batch-verified sender. Registered here so the receive tableMap can carry
+  // it; the sender ships in a later slice.
+  Presence: { principalOwning: false },
 } as const;
 
 export type FederationSyncTable = keyof typeof FEDERATION_TABLE_POLICY;
@@ -289,4 +412,117 @@ export function inboundChangesExistingPrincipalStatus(
   const data = record.data;
   if (!data || typeof data !== "object") return false;
   return effectiveAgentStatus(data.status) !== effectiveAgentStatus(local.status);
+}
+
+/** The stored `publicKey` value of an Agent row seeded but not yet registered. */
+export const PENDING_PUBLIC_KEY = "pending";
+
+/**
+ * flair#2266: true for an inbound Agent record carrying a `publicKey` different
+ * from an existing local row's stored `pending`, regardless of timestamps.
+ */
+export function inboundChangesExistingPendingKey(
+  record: SyncRecord,
+  local: Record<string, any> | null,
+): boolean {
+  if (record.table !== "Agent" || local == null) return false;
+  if (local.publicKey !== PENDING_PUBLIC_KEY) return false;
+  const data = record.data;
+  if (!data || typeof data !== "object") return false;
+  return Object.prototype.hasOwnProperty.call(data, "publicKey") && (data as any).publicKey !== local.publicKey;
+}
+
+const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+
+/** A missing, null or empty home all mean "no recorded home". */
+function sameAgentHome(a: unknown, b: unknown): boolean {
+  const none = (v: unknown) => v === null || v === undefined || v === "";
+  return (none(a) && none(b)) || a === b;
+}
+
+/**
+ * flair#2665: whether `senderInstanceId` (the batch-verified sender, not a
+ * field of the record) is the stored Agent row's home (`originatorInstanceId`).
+ * A row with no recorded home has no sender that matches.
+ */
+export function senderIsAgentHome(local: Record<string, any> | null, senderInstanceId: string): boolean {
+  const home = local?.originatorInstanceId;
+  return typeof home === "string" && home.length > 0 && home === senderInstanceId;
+}
+
+/**
+ * flair#2665: true for an inbound Agent record that would change an existing
+ * local row's `publicKey` or home (`originatorInstanceId`), regardless of
+ * timestamps.
+ */
+export function inboundChangesAgentIdentity(
+  record: SyncRecord,
+  local: Record<string, any> | null,
+): boolean {
+  if (record.table !== "Agent" || local == null) return false;
+  const data = record.data;
+  if (!data || typeof data !== "object") return false;
+  if (hasOwn(data, "publicKey") && (data as any).publicKey !== local.publicKey) return true;
+  return hasOwn(data, "originatorInstanceId") && !sameAgentHome((data as any).originatorInstanceId, local.originatorInstanceId);
+}
+
+/**
+ * flair#2665: the refusal for an inbound Agent record that would change an
+ * existing row's `publicKey` or home when the batch-verified sender is not that
+ * row's stored home, else null.
+ */
+export function agentIdentityRefusal(
+  record: SyncRecord,
+  local: Record<string, any> | null,
+  senderInstanceId: string,
+): SkipReason | null {
+  if (!inboundChangesAgentIdentity(record, local)) return null;
+  return senderIsAgentHome(local, senderInstanceId) ? null : "agent_identity_not_from_home";
+}
+
+/**
+ * flair#2665: the refusal for an inbound Agent record that would create a row
+ * (`local` is null) whose id is in `configuredAdminIds`, else null. The caller
+ * passes resources/agent-admin.ts's configuredAdminAgentIds(), the set
+ * resources/agent-auth.ts's agentIsAdmin() admits by id.
+ */
+export function agentAdminIdCreateRefusal(
+  record: SyncRecord,
+  local: Record<string, any> | null,
+  configuredAdminIds: ReadonlySet<string>,
+): SkipReason | null {
+  if (record.table !== "Agent" || local != null) return null;
+  return configuredAdminIds.has(record.id) ? "agent_admin_id_not_federated" : null;
+}
+
+/**
+ * flair#2665: admin state (`role` equal to ADMIN_ROLE, `admin: true`) is the
+ * receiving instance's own. Applied to the row a federation merge is
+ * about to write for an Agent record (mutates and returns `merged`):
+ *   - a NEW row (`stored` is null) is written without admin state: a `role` equal to
+ *     ADMIN_ROLE is removed and an `admin: true` mirror becomes false;
+ *   - an EXISTING row keeps its stored `role` when the merged one would change
+ *     whether the row is an administrator, and keeps its stored `admin` mirror
+ *     when the merged one's `admin: true` state differs from the stored one's.
+ * A `role` label follows the merge when the stored and incoming roles are both
+ * non-admin.
+ */
+export function keepReceiverAgentAuthority(
+  merged: Record<string, any>,
+  stored: Record<string, any> | null,
+): Record<string, any> {
+  if (stored == null) {
+    if (merged.role === ADMIN_ROLE) delete merged.role;
+    if (merged.admin === true) merged.admin = false;
+    return merged;
+  }
+  if ((merged.role === ADMIN_ROLE) !== (stored.role === ADMIN_ROLE)) {
+    if (hasOwn(stored, "role")) merged.role = stored.role;
+    else delete merged.role;
+  }
+  if ((merged.admin === true) !== (stored.admin === true)) {
+    if (hasOwn(stored, "admin")) merged.admin = stored.admin;
+    else delete merged.admin;
+  }
+  return merged;
 }

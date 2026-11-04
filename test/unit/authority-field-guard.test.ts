@@ -5,7 +5,7 @@ import { AUTHORITY_FIELDS, guardAuthorityFields, stripAuthorityFields } from "..
 import { writerHelperCalls } from "../helpers/raw-table-writers";
 
 describe("workflow authority guard", () => {
-  test("each verdict field rejects creation, replacement and clearing", async () => {
+  test("each authority field rejects creation, replacement and clearing", async () => {
     for (const field of AUTHORITY_FIELDS.Memory) {
       for (const value of ["forged", null, ""]) {
         expect((await guardAuthorityFields(() => undefined, { [field]: value }, "Memory"))?.status).toBe(403);
@@ -33,6 +33,22 @@ describe("workflow authority guard", () => {
     expect(await guardAuthorityFields(() => stored, omitted, "Memory")).toBeNull();
     expect(omitted.promotionStatus).toBeNull();
   });
+  test("a MemoryCandidate body carrying content keeps the recorded promoted-row identity", async () => {
+    const stored = { claim: "distilled", promotedRowId: "row-1", promotedRowInstanceToken: "token-1" };
+    const patch: Record<string, unknown> = { content: "an extra attribute" };
+    expect(await guardAuthorityFields(() => stored, patch, "MemoryCandidate")).toBeNull();
+    expect(patch).toMatchObject({ promotedRowId: "row-1", promotedRowInstanceToken: "token-1" });
+    const put: Record<string, unknown> = { claim: "distilled", content: "another extra attribute" };
+    expect(await guardAuthorityFields(() => stored, put, "MemoryCandidate")).toBeNull();
+    expect(put).toMatchObject({ promotedRowId: "row-1", promotedRowInstanceToken: "token-1" });
+  });
+  test("write-back markers reject forgery and tolerate the stored echo", async () => {
+    const stored = { content: "text", writeBackWriteId: "server-attempt" };
+    expect((await guardAuthorityFields(() => stored, { writeBackWriteId: "forged" }, "Memory"))?.status).toBe(403);
+    const echo = { ...stored };
+    expect(await guardAuthorityFields(() => stored, echo, "Memory")).toBeNull();
+    expect(echo.writeBackWriteId).toBe("server-attempt");
+  });
   test("a failed stored-state read cannot authorize a write", async () => {
     await expect(guardAuthorityFields(() => { throw new Error("unavailable"); }, {}, "Memory")).rejects.toThrow("unavailable");
   });
@@ -49,7 +65,7 @@ describe("workflow authority guard", () => {
     }
   });
   test("stripAuthorityFields drops every registered stamp and leaves the rest", () => {
-    const row: Record<string, unknown> = { content: "keep", promotionStatus: "approved", promotedAt: "t", promotedBy: "r", durability: "standard" };
+    const row: Record<string, unknown> = { content: "keep", promotionStatus: "approved", promotedAt: "t", promotedBy: "r", writeBackWriteId: "attempt", durability: "standard" };
     stripAuthorityFields(row, "Memory");
     expect(row).toEqual({ content: "keep", durability: "standard" });
   });
@@ -79,20 +95,32 @@ interface RawMemoryWriter {
 
 const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kind: WriterKind }> = [
   { file: "resources/MemoryFeed.ts", via: "write-back", needle: 'label: "MemoryFeed.ingest"', kind: "strip" },
-  { file: "resources/MemoryFeed.ts", via: "direct-put", needle: "put(row, c)", kind: "echo" },
-  // flair#2441: a Memory merge runs through the write-back helper; every other
-  // synced table's merge stays the plain `table.put(mergedData)`.
+  { file: "resources/MemoryFeed.ts", via: "alias-source", needle: "table.put(row, shared)", kind: "strip" },
+  { file: "resources/MemoryFeed.ts", via: "direct-update", needle: "update(id, { expiresAt", kind: "echo" },
+  // flair#2450: every synced table's merge runs through the write-back helper.
   { file: "resources/Federation.ts", via: "write-back", needle: "mergedData", kind: "federation-merge" },
-  { file: "resources/Federation.ts", via: "alias-source", needle: "put(mergedData)", kind: "federation-merge" },
+  // flair#2578 slice 1: the Presence receipt branch's write-back — a federation
+  // merge of a peer's Presence row (its table is always Presence).
+  { file: "resources/Federation.ts", via: "write-back", needle: "mergePresenceReceipt(row", kind: "federation-merge" },
   { file: "resources/promotion-stamp.ts", via: "write-back", needle: 'label: "promotion-stamp"', kind: "trusted-stamp" },
-  { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "put(row, stagedContext)", kind: "trusted-stamp" },
+  { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "update(id, update, stagedContext)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "put(closed, c)", kind: "echo" },
-  { file: "resources/Memory.ts", via: "direct-put", needle: "embedding, embeddingModel: model, updatedAt }, owned)", kind: "echo" },
+  // Skill DELETE retry preserves the freshly read row's authority fields.
+  { file: "resources/Memory.ts", via: "alias-source", needle: "table.put(closed, c)", kind: "echo" },
+  // flair#2564: the grant-authorized close staged in the successor's transaction restates
+  // the predecessor row with the close patch, like the owned close above.
+  { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(closed, shared)", kind: "echo" },
+  // The re-embed's field-only update: the vector, its model and updatedAt, the
+  // hash of the text it embedded (flair#2465), plus a fresh instanceToken for a
+  // legacy row that has none (flair#2478) — no authority field. The needle names
+  // both the token spread and the hash call.
+  { file: "resources/Memory.ts", via: "direct-update", needle: "update(id, reembedUpdate, owned)", kind: "echo" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(content, c)", kind: "trusted-stamp" },
+  { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(reindexRow, c)", kind: "admin-restate" },
   { file: "resources/Memory.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },
-  { file: "resources/MemoryMaintenance.ts", via: "direct-update", needle: "archivedRow, c", kind: "echo" },
-  { file: "resources/usage-recording.ts", via: "write-back", needle: 'label: "usage-recording"', kind: "echo" },
-  { file: "resources/AgentSeed.ts", via: "direct-put", needle: "put(record)", kind: "seed" },
+  { file: "resources/MemoryMaintenance.ts", via: "direct-update", needle: "archivePatch, c", kind: "echo" },
+  { file: "resources/usage-recording.ts", via: "write-back", needle: 'label: "usage-recording"', kind: "trusted-stamp" },
+  { file: "resources/AgentSeed.ts", via: "direct-put", needle: "put(record, c)", kind: "seed" },
   { file: "resources/auth-middleware.ts", via: "write-back", needle: 'label: "backfillEmbedding"', kind: "single-field" },
   { file: "resources/MemoryReflect.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },
   { file: "resources/table-helpers.ts", via: "write-back", needle: 'label: opts.label ?? "patchRecord"', kind: "single-field" },
@@ -235,7 +263,6 @@ describe("raw flair.Memory handle coverage", () => {
     expect(writers.length).toBeGreaterThan(5);
     expect(writers.some((w) => w.file === "resources/MemoryFeed.ts" && w.via === "write-back")).toBe(true);
     expect(writers.some((w) => w.file === "resources/Federation.ts" && w.via === "write-back" && w.excerpt.includes("mergedData"))).toBe(true);
-    expect(writers.some((w) => w.file === "resources/Federation.ts" && w.via === "alias-source" && w.excerpt.includes("mergedData"))).toBe(true);
   });
 
   test("every raw Memory writer is classified; unclassified goes red", () => {

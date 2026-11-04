@@ -3,17 +3,21 @@
  *
  * The embedding-stamp migration re-embeds a stale Memory row whose id ends in
  * `.content` through the raw table handle (regenContentSuffixRow in
- * resources/migrations/embedding-stamp.ts): it re-reads the row, compares it
- * with the row it embedded, and writes the new vector in one owned
- * transaction. This case changes the row's content AFTER that transaction has
- * read it and BEFORE it writes: the spawned Harper carries the test-only pause
+ * resources/migrations/embedding-stamp.ts): it re-reads the row, STAGES an
+ * incremental update of only the embedding fields, then confirms the committed
+ * row is still the one it read — all in one owned transaction. This case changes
+ * the row's content while that transaction is paused AFTER staging its write and
+ * BEFORE its confirm: the confirm reads the committed row, which is no longer
+ * the row the migration read and embedded, so the transaction aborts and nothing
+ * is written. A change committed after that confirm and before the commit is not
+ * seen (Harper has no compare-and-set; PR residual-gap note).
+ *
+ * The spawned Harper carries the test-only pause
  * (resources/txn-pause-point.ts, enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION
  * and FLAIR_TEST_PAUSE_DIR, set in the test process's environment while this
  * file starts its Harper, then restored), the test arms it
  * before the row exists, waits until a migration cycle is paused inside that
- * transaction, commits a competing content change, then releases it. The change
- * is visible at the committed re-read, which aborts; a change after that re-read
- * and before commit follows Harper's timestamp order (PR residual-gap note).
+ * transaction, commits a competing content change, then releases it.
  *
  * The competing content is kept, and the row stays pending: it keeps its stale
  * stamp and vector rather than being stamped current with the vector of the
@@ -23,7 +27,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const POINT = "embedding-stamp-content-suffix";
 const LEGACY_ID = "esc-legacy.content";
@@ -77,21 +81,7 @@ beforeAll(async () => {
   // Armed before the row exists, so whichever cycle first re-embeds it (the
   // boot pass or a follow-up recheck) pauses.
   writeFileSync(join(pauseDir, `arm.${POINT}`), "");
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper();
-  } finally {
-    // The spawned Harper has its copy; no later Harper in this process inherits it.
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
   authHeader = "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
   await opsCall({
     operation: "insert", database: "flair", table: "Memory",
@@ -105,7 +95,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper).catch(() => {});
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2307 — the `.content`-suffix re-embed under a change committed after its read (real Harper)", () => {
   it("the competing content is kept, and the row stays pending with its stale stamp", async () => {

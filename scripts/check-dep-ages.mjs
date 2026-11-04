@@ -2,9 +2,14 @@
 /**
  * check-dep-ages.mjs — supply-chain bake-time gate.
  *
- * The checked fields are `dependencies`, `optionalDependencies` and
- * `overrides` (root and every workspace package.json). The gate checks exact
- * override declarations, including conditional rules, not installed versions.
+ * The checked fields are `dependencies`, `devDependencies`,
+ * `optionalDependencies` and `overrides` (the root package.json and each
+ * packages/<name>/package.json; a bun.lock workspace outside those fails the
+ * gate). An exact pin is checked at its declared version, except in
+ * `devDependencies`, where exact pins are not checked. A range is checked at
+ * the version bun.lock resolves it to (resolveRangedDeps in the collector); a
+ * range the gate cannot resolve fails it, and an override range with no
+ * installed copy in its scope is named, with nothing to check.
  *
  * THIS SCRIPT IS THE CLI ENTRY POINT. It imports the pure gate logic from
  * scripts/lib/check-dep-ages-collect.mjs and always runs the gate.
@@ -15,8 +20,8 @@
  *
  * `--ci` marks THIS invocation as the CI gate (the workflow passes it). The CI
  * gate scans the checked-out repository whatever the environment says, so it
- * REFUSES to run (exit 2, naming FLAIR_CHECK_DEP_AGES_ROOT) when that override
- * is PRESENT (even empty) alongside `--ci`.
+ * refuses FLAIR_CHECK_DEP_AGES_ROOT, FLAIR_DEP_MIN_AGE_DAYS and
+ * FLAIR_DEP_KEEP_CURRENT when present (even empty) alongside `--ci`.
  *
  * The gate accepts ONLY no arguments or exactly `--ci`; any other argument
  * exits 2, so a typo cannot silently run WITHOUT the CI guard.
@@ -30,7 +35,7 @@
  *   0 — all checked deps older than the threshold (or nothing to check)
  *   1 — at least one dep too fresh
  *   2 — registry fetch failure (treated as fail, not warn — better safe), a
- *       REFUSED CI run (the fixture-root override present together with `--ci`),
+ *       refused CI environment, non-empty or malformed `resolutions`,
  *       an unexpected argument, an unsupported dependency or `overrides` form, or an invalid
  *       or expired exemption allowlist entry
  */
@@ -40,9 +45,12 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   collectDeps,
-  collectNonExactDeps,
+  collectRangedDeps,
   collectUnsupportedDeps,
   collectUnsupportedOverrides,
+  lockWorkspaces,
+  parseBunLockText,
+  resolveRangedDeps,
 } from "./lib/check-dep-ages-collect.mjs";
 
 const ARGS = process.argv.slice(2);
@@ -160,23 +168,37 @@ function readAllowlist(root) {
 
 // ── Main gate logic (always runs — no main-detection guard) ──────────────────
 
+/** The declarations of a checked version: one line per manifest with an exact pin, then one line per ranged declaration with where it sits. */
+function declarationLines(entry) {
+  return [
+    ...entry.declaredIn.map((p) => `    declared in ${p}`),
+    ...(entry.ranges ?? []).map((r) => `    declared in ${r.declaredIn} ${r.at} (range "${r.spec}")`),
+  ];
+}
+
 async function main() {
-  // The CI gate scans the CHECKED-OUT repository, whatever the environment
-  // says. FLAIR_CHECK_DEP_AGES_ROOT exists so tests can point the gate at a
-  // fixture repository; honouring it on a CI run would let a stray variable
-  // divert the gate away from the tree under review. The workflow declares
-  // itself with an explicit --ci flag, and we refuse when the override is
-  // PRESENT (even empty) before scanning or fetching. A PRESENCE test, not a
-  // truthiness test: an empty value would otherwise slip through and resolve
-  // the root to "".
-  if (IS_CI_GATE && process.env.FLAIR_CHECK_DEP_AGES_ROOT !== undefined) {
-    console.error(
-      "FLAIR_CHECK_DEP_AGES_ROOT is present, but the CI gate must scan the checked-out repository.",
-    );
-    console.error(
-      "Refusing to run. Unset FLAIR_CHECK_DEP_AGES_ROOT: it is for tests, which point the gate at a fixture repository and do not pass --ci.",
-    );
-    process.exit(2);
+  if (IS_CI_GATE) {
+    for (const variable of ["FLAIR_CHECK_DEP_AGES_ROOT", "FLAIR_DEP_MIN_AGE_DAYS", "FLAIR_DEP_KEEP_CURRENT"]) {
+      if (process.env[variable] !== undefined) {
+        console.error(`${variable} is present. Refusing to run: --ci requires the checked-out repository and committed policy defaults.`);
+        process.exit(2);
+      }
+    }
+    // A registry override decides where publish dates come from. Under --ci it is accepted only
+    // when it names a loopback host (the tests serve a fixture registry there; the gate does not
+    // check what serves it); any other host is refused.
+    const registryOverride = process.env.FLAIR_NPM_REGISTRY;
+    if (registryOverride !== undefined) {
+      let host = "";
+      try {
+        const url = new URL(registryOverride);
+        if (url.protocol === "http:" || url.protocol === "https:") host = url.hostname;
+      } catch {}
+      if (!["127.0.0.1", "localhost", "[::1]"].includes(host)) {
+        console.error(`FLAIR_NPM_REGISTRY is ${JSON.stringify(registryOverride)}. Refusing to run: under --ci a registry override is accepted only when it names a loopback host (127.0.0.1, localhost or [::1]).`);
+        process.exit(2);
+      }
+    }
   }
 
   const MIN_AGE_DAYS = Number(process.env.FLAIR_DEP_MIN_AGE_DAYS ?? "7");
@@ -220,6 +242,21 @@ async function main() {
     }
   }
 
+  for (const { pkg, path } of allPkgs) {
+    if (pkg.resolutions === undefined) continue;
+    if (pkg.resolutions === null || typeof pkg.resolutions !== "object" || Array.isArray(pkg.resolutions)) {
+      console.error(`${path} resolutions must be an empty object.`);
+      process.exit(2);
+    }
+    const names = Object.keys(pkg.resolutions);
+    if (names.length > 0) {
+      for (const name of names) {
+        console.error(`${path} resolutions[${JSON.stringify(name)}] is unsupported.`);
+      }
+      process.exit(2);
+    }
+  }
+
   const unsupportedDeps = collectUnsupportedDeps(allPkgs);
   if (unsupportedDeps.length > 0) {
     console.error("Unsupported dependency entries:");
@@ -241,7 +278,95 @@ async function main() {
   }
 
   const toCheck = collectDeps(allPkgs, KEEP_CURRENT);
-  const nonExact = collectNonExactDeps(allPkgs);
+
+  // Ranges are checked at the versions resolveRangedDeps finds in bun.lock, and
+  // each workspace the lock records must be a manifest scanned above. The lock
+  // is read when it exists, and is required when a checked ranged declaration
+  // exists or the root package.json declares "workspaces", so a repo with exact
+  // pins only and no workspaces needs no lockfile.
+  const ranged = collectRangedDeps(allPkgs, KEEP_CURRENT);
+  const lockRequired = ranged.length > 0 || allPkgs[0].pkg.workspaces !== undefined;
+  const lockPath = join(REPO_ROOT, "bun.lock");
+  let lockText;
+  try {
+    lockText = readFileSync(lockPath, "utf8");
+  } catch (err) {
+    if (lockRequired || err?.code !== "ENOENT") {
+      if (ranged.length > 0) {
+        console.error("Cannot read bun.lock, which ranged declarations are age-checked against:");
+        console.error("");
+        for (const r of ranged) {
+          console.error(`    ${r.declaredIn} ${r.at} "${r.spec}"`);
+        }
+      } else {
+        console.error("Cannot read bun.lock:");
+      }
+      console.error("");
+      console.error(`${err?.message ?? err}`);
+      process.exit(2);
+    }
+  }
+  if (lockText !== undefined) {
+    let lock;
+    try {
+      lock = parseBunLockText(lockText);
+    } catch (err) {
+      console.error(`Cannot parse ${lockPath}:`);
+      console.error("");
+      console.error(`${err?.message ?? err}`);
+      process.exit(2);
+    }
+    // Each workspace the lock records must be a manifest the scan above read.
+    const scannedDirs = new Set(allPkgs.map(({ path }) => (dirname(path) === "." ? "" : dirname(path))));
+    const unscanned = Object.keys(lockWorkspaces(lock)).filter((key) => key !== "" && !scannedDirs.has(key));
+    if (unscanned.length > 0) {
+      console.error("bun.lock workspaces the gate does not scan:");
+      console.error("");
+      for (const key of unscanned) {
+        console.error(`    ${key}`);
+      }
+      console.error("");
+      console.error("The gate reads the root package.json and packages/<name>/package.json. Move each");
+      console.error("workspace listed to packages/<name>, or extend the manifest scan in");
+      console.error("scripts/check-dep-ages.mjs to read it.");
+      process.exit(2);
+    }
+    const { resolved, unresolved, uninstalled } = resolveRangedDeps(ranged, lock);
+    // An overrides rule with no installed copy in its scope has no version to
+    // check; name it in the output, before any fail-closed exit below. A range
+    // the gate cannot resolve has no version it can check: fail closed.
+    if (uninstalled.length > 0) {
+      console.log("Override ranges with no installed copy in their scope (nothing to age-check):");
+      for (const u of uninstalled) {
+        console.log(`    ${u.declaredIn} ${u.at} "${u.spec}"`);
+      }
+      console.log("");
+    }
+    if (unresolved.length > 0) {
+      console.error("Ranged declarations the gate cannot resolve through bun.lock:");
+      console.error("");
+      for (const u of unresolved) {
+        console.error(`    ${u.declaredIn} ${u.at} "${u.spec}": ${u.reason}`);
+      }
+      console.error("");
+      console.error("A range is age-checked at the version bun.lock resolves it to; these cannot be");
+      console.error("resolved, so the gate fails closed. (An override range with no installed copy");
+      console.error("in its scope is not a failure: it is listed, with nothing to check.)");
+      process.exit(2);
+    }
+    for (const r of resolved) {
+      const key = `${r.name}@${r.version}`;
+      let entry = toCheck.get(key);
+      if (!entry) {
+        entry = { name: r.name, version: r.version, declaredIn: [] };
+        toCheck.set(key, entry);
+      }
+      if (!entry.ranges) entry.ranges = [];
+      if (!entry.ranges.some((d) => d.declaredIn === r.declaredIn && d.at === r.at)) {
+        entry.ranges.push({ declaredIn: r.declaredIn, at: r.at, spec: r.spec });
+      }
+    }
+  }
 
   const allowlist = readAllowlist(REPO_ROOT);
   if (allowlist.expired.length > 0) {
@@ -255,16 +380,8 @@ async function main() {
     process.exit(2);
   }
 
-  if (nonExact.length > 0) {
-    console.log("Not age-checked (ranges):");
-    for (const o of nonExact) {
-      console.log(`    ${o.name} "${o.spec}" (declared in ${o.declaredIn})`);
-    }
-    console.log("");
-  }
-
   if (toCheck.size === 0) {
-    console.log("✓ No external pinned production deps to check.");
+    console.log("✓ No external dependency versions to check.");
     if (KEEP_CURRENT.size > 0) {
       console.log(
         `(${KEEP_CURRENT.size} packages on the keep-current allow-list: ${[...KEEP_CURRENT].sort().join(", ")})`,
@@ -274,7 +391,7 @@ async function main() {
   }
 
   console.log(
-    `Checking ${toCheck.size} pinned production deps against ${MIN_AGE_DAYS}-day bake-time policy...`,
+    `Checking ${toCheck.size} external dependency versions against ${MIN_AGE_DAYS}-day bake-time policy...`,
   );
   if (KEEP_CURRENT.size > 0) {
     console.log(
@@ -387,25 +504,27 @@ async function main() {
   }
 
   if (exempted.length > 0) {
-    console.log("Exempted fresh pins (dated exemption, see docs/supply-chain-policy.md):");
+    console.log("Exempted fresh dependency versions (dated exemption, see docs/supply-chain-policy.md):");
     console.log("");
     for (const f of exempted.sort((a, b) => b.publishedAt - a.publishedAt)) {
       const days = f.ageDays.toFixed(1);
       console.log(
-        `    ${f.name}@${f.version}    — published ${days} days ago (policy: >=${MIN_AGE_DAYS} days); exempt until ${f.entry.expires} (${f.entry.ghsa.join(", ")})`,
+        `    ${f.name}@${f.version}    — published ${new Date(f.publishedAt).toISOString().slice(0, 10)} (${days} days ago; policy: >=${MIN_AGE_DAYS} days); exempt until ${f.entry.expires} (${f.entry.ghsa.join(", ")})`,
       );
-      for (const p of f.declaredIn) console.log(`    declared in ${p}`);
+      for (const line of declarationLines(f)) console.log(line);
     }
     console.log("");
   }
 
   if (stillFresh.length > 0) {
-    console.error("Pinned production deps younger than the bake-time policy:");
+    console.error("Dependency versions younger than the bake-time policy:");
     console.error("");
     for (const f of stillFresh.sort((a, b) => b.publishedAt - a.publishedAt)) {
       const days = f.ageDays.toFixed(1);
-      console.error(`    ${f.name}@${f.version}    — published ${days} days ago (policy: >=${MIN_AGE_DAYS} days)`);
-      for (const p of f.declaredIn) console.error(`    declared in ${p}`);
+      console.error(
+        `    ${f.name}@${f.version}    — published ${new Date(f.publishedAt).toISOString().slice(0, 10)} (${days} days ago; policy: >=${MIN_AGE_DAYS} days)`,
+      );
+      for (const line of declarationLines(f)) console.error(line);
     }
     console.error(
       "",
@@ -430,7 +549,7 @@ async function main() {
 
   if (exempted.length === 0) {
     console.log(
-      `All ${toCheck.size} external pinned production deps are at least ${MIN_AGE_DAYS} days old.`,
+      `All ${toCheck.size} external dependency versions are at least ${MIN_AGE_DAYS} days old.`,
     );
   } else {
     const names = exempted
@@ -438,7 +557,7 @@ async function main() {
       .sort()
       .join(", ");
     console.log(
-      `${toCheck.size - exempted.length} of ${toCheck.size} external pinned production deps are at least ${MIN_AGE_DAYS} days old; ${exempted.length} exemption(s) applied: ${names}.`,
+      `${toCheck.size - exempted.length} of ${toCheck.size} external dependency versions are at least ${MIN_AGE_DAYS} days old; ${exempted.length} exemption(s) applied: ${names}.`,
     );
   }
 }

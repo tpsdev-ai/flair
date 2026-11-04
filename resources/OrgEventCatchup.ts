@@ -34,6 +34,7 @@ import {
   collectCatchupEvents,
   pageCatchupEvents,
 } from "./org-event-catchup-lib.js";
+import { refuseRewrittenAgentId } from "./path-id-rewrite.js";
 
 function queryValue(pathInfo: any, name: string): string | null {
   if (typeof pathInfo !== "object" || pathInfo === null) return null;
@@ -143,6 +144,8 @@ export class OrgEventCatchup extends Resource {
         { status: 400, headers: { "Content-Type": "application/json" } },
       );
     }
+    const rewritten = refuseRewrittenAgentId(ctx, participantId);
+    if (rewritten) return rewritten;
 
     // Auth: internal calls and admins pass unfiltered; a verified agent may only
     // fetch its own catchup feed; anonymous is denied. allowRead() already
@@ -194,6 +197,8 @@ export class OrgEventCatchup extends Resource {
         { status: 400, headers: { "Content-Type": "application/json" } },
       );
     }
+    const rewritten = refuseRewrittenAgentId(ctx, participantId);
+    if (rewritten) return rewritten;
     if (ownerDenied(auth, participantId)) return forbidden();
 
     const position = content && typeof content === "object"

@@ -1,0 +1,1 @@
+- **A refused auto-promotion stamp no longer marks the candidate promoted.** When the isolated stamp reports failure, the sweep records `stamp_refused` and leaves the candidate pending.

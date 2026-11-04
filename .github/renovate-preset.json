@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Shared org preset for tpsdev-ai repositories. Establishes the supply-chain posture: pin version updates, enforce a 7-day bake-time cooldown, and assign group names to minor, patch, pin and digest updates for the listed matchManagers: bun, npm, pep621, pip_requirements, pip_setup, poetry, github-actions, dockerfile and docker-compose; the one major update it groups is the CodeQL Action (github-actions manager), assigned the group name `github/codeql-action` by a rule placed after the majors rule. Every update is proposal-only (automerge: false) \u2014 it must pass the full CI suite + K&S review before merge. See https://github.com/tpsdev-ai/flair/blob/main/docs/supply-chain-policy.md. Docker image digest pins are PROPOSED via Renovate's docker:pinDigests preset for Dockerfiles, compose files and workflow container/service images (in current Renovate the preset exempts argocd, devcontainer, helmv3 and pyenv); like every update here they are PRs, never automerged, so the protection \u2014 a republished tag cannot change the bytes we build or test on \u2014 holds for an image once its pin PR is merged.",
+  "description": "Shared org preset for tpsdev-ai repositories. The preset preserves declared version ranges, configures `minimumReleaseAge` to seven days by default, and groups `minor`, `patch`, `pin`, and `digest` updates for the explicitly listed managers; the one major update it groups is the CodeQL Action (github-actions manager), assigned the group name `github/codeql-action` by a rule placed after the majors rule. Age-check support depends on the manager, datasource, package, and update type; explicit exceptions apply. Every update is proposal-only (automerge: false) \u2014 it must pass the full CI suite + K&S review before merge. See https://github.com/tpsdev-ai/flair/blob/main/docs/supply-chain-policy.md. Docker image digest pins are PROPOSED via Renovate's docker:pinDigests preset for Dockerfiles, compose files and workflow container/service images (in current Renovate the preset exempts argocd, devcontainer, helmv3 and pyenv); like every update here they are PRs, never automerged, so the protection \u2014 a republished tag cannot change the bytes we build or test on \u2014 holds for an image once its pin PR is merged.",
   "extends": [
     "config:recommended",
     ":dependencyDashboard",
@@ -14,7 +14,7 @@
   ],
   "prConcurrentLimit": 5,
   "prHourlyLimit": 2,
-  "rangeStrategy": "pin",
+  "rangeStrategy": "replace",
   "minimumReleaseAge": "7 days",
   "internalChecksFilter": "strict",
   "labels": [

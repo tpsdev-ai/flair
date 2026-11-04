@@ -22,6 +22,7 @@ export {
   isUnresolvedEnvValue,
   mcpOAuthEnabledIn,
   issuerFromEnv,
+  mcpOAuthEnabledFromComponentEnv,
   redirectUriForIssuer,
   validateRedirectIssuer,
   readMcpProviderReadiness,

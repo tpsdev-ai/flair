@@ -27,19 +27,45 @@
  * not this rule's business — no-forge attribution on creation is each resource's
  * own job. The decision itself is the pure `isForbiddenOwnerFieldChange`
  * (record-owner-guard.ts), so it is unit-tested without a Harper instance.
+ *
+ * ─── Read-failure scope ─────────────────────────────────────────────────────
+ *
+ * For addressed single-record HTTP PUT/PATCH, Harper loads the row through
+ * `Table.getResource` → `resource._loadRecord` before the resource method runs;
+ * a no-argument `super.get()` then returns the cached row. If reached before
+ * that load, the non-admin write guard checks the body id before stored ownership.
+ * Its stored-row read failure returns `owner_check_unavailable`. The
+ * real-Harper test injects an initial load failure: a non-admin agent gets that
+ * named refusal, and an administrator gets Harper's own 500. It does not cover
+ * collection paths.
+ *
+ * This guard returns `owner_check_unavailable` only when a non-admin agent's
+ * `getExisting` thunk throws or rejects. Admin/internal callers return before
+ * the thunk; unauthenticated callers receive 401 before it.
+ *
+ * Soul first reads through `resolveStoredRow` and passes an already-resolved row
+ * to this guard. That resolver's `stored_row_lookup_failed` (500) is a separate
+ * refusal for a read this guard does not backstop.
  */
 import { resolveAgentAuth } from "./agent-auth.js";
-import { isForbiddenOwnerFieldChange } from "./record-owner-guard.js";
+import { isForbiddenOwnerFieldChange, ownerCheckUnavailable } from "./record-owner-guard.js";
+
+// The named refusal and its constant live in record-owner-guard.ts, which has
+// no authentication-module dependency, so the owner-scoped write guard can use
+// them without importing this module;
+// re-exported here for this module's existing importers.
+export { OWNER_CHECK_UNAVAILABLE_ERROR, ownerCheckUnavailable } from "./record-owner-guard.js";
 
 /**
  * Enforce owner-field immutability for one write.
  *
  * @param self        the resource instance (`this`)
- * @param getExisting a thunk that returns the STORED record — pass `() => super.get()`
- *                    so the raw base-table read is used rather than any get() override
+ * @param getExisting a thunk returning stored state, e.g. `() => super.get()`
+ *                    or Soul's already-resolved row
  * @param content     the write content (the caller's claim)
  * @param ownerField  the column naming the owning principal for this table
- * @returns a 403 Response to send, or null to proceed
+ * @returns a Response to send (401 unauthenticated, 403 owner-field change,
+ *          400/503 non-admin agent's guard-thunk failure), or null to proceed
  */
 export async function guardOwnerFieldImmutable(
   self: any,
@@ -64,9 +90,15 @@ export async function guardOwnerFieldImmutable(
     );
   }
 
-  const existing = (await Promise.resolve(getExisting()).catch(() => null)) as
-    | Record<string, unknown>
-    | null;
+  // A read that RESOLVED to null/undefined is "no stored row" (a create, which
+  // this rule leaves to each resource). A read that THREW or rejected is a
+  // FAILURE, and the guard refuses it rather than reading it as "no stored row".
+  let existing: Record<string, unknown> | null;
+  try {
+    existing = ((await Promise.resolve(getExisting())) ?? null) as Record<string, unknown> | null;
+  } catch (err) {
+    return ownerCheckUnavailable(err);
+  }
 
   if (isForbiddenOwnerFieldChange(existing, content, ownerField, auth.agentId)) {
     return new Response(

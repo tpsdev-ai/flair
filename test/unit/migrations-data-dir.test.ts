@@ -254,7 +254,7 @@ describe("resolveWritableMigrationDataDir", () => {
       `console.log(JSON.stringify({ dataDir: r.dataDir, first: r.tried[0] }));`,
     ].join("\n");
     const child = Bun.spawnSync([process.execPath, "-e", script], {
-      env: { ...process.env, HOME: home },
+      env: { ...({ ...process.env, HOME: home }), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise migrations-data-dir process fixture arguments" },
     });
     expect(child.exitCode).toBe(0);
     const out = JSON.parse(child.stdout.toString().trim()) as {
@@ -280,7 +280,7 @@ describe("resolveWritableMigrationDataDir", () => {
     const script = `import { resolveWritableMigrationDataDir } from ${JSON.stringify(moduleUrl)};
 console.log(JSON.stringify(resolveWritableMigrationDataDir({ ROOTPATH: ${JSON.stringify(instance)} })));`;
     const child = Bun.spawnSync([process.execPath, "-e", script], {
-      env: { ...process.env, HOME: home },
+      env: { ...({ ...process.env, HOME: home }), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise migrations-data-dir process fixture arguments" },
     });
     expect(child.exitCode).toBe(0);
     const out = JSON.parse(child.stdout.toString().trim());

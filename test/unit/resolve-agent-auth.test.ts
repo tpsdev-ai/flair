@@ -89,6 +89,90 @@ describe("resolveAgentAuth — internal vs anonymous", () => {
   });
 });
 
+// ─── a context a protocol layer built is never internal ──────────────────────
+//
+// Harper's MQTT layer hands every action of a session a context it builds
+// itself: { session, socket, user, authorize: true, request? } — `request` only
+// for MQTT over WebSocket. On Harper's TCP or TLS listener there is no HTTP
+// request, so such a context would otherwise land on the final `internal`
+// return (resources/protocol-context.ts).
+
+/** A stand-in for Harper's MQTT session object (DurableSubscriptionsSession). */
+const mqttSession = () => ({ sessionId: "client-1", addSubscription: async () => undefined });
+
+describe("resolveAgentAuth — protocol-layer contexts", () => {
+  it("an MQTT session's context without an HTTP request → anonymous, whatever user CONNECT produced", async () => {
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: {}, user: superUser, authorize: true }))
+      .toEqual({ kind: "anonymous" });
+    // Harper clears `authorize` after its first entry call; the session still marks the context.
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: {}, user: superUser, authorize: false }))
+      .toEqual({ kind: "anonymous" });
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: undefined, user: undefined }))
+      .toEqual({ kind: "anonymous" });
+  });
+
+  it("a context still carrying authorize: true with no HTTP request (Harper's MCP subscription shape) → anonymous", async () => {
+    expect(await resolveAgentAuth({ user: superUser, authorize: true, request: { id: "x", isCollection: false } }))
+      .toEqual({ kind: "anonymous" });
+  });
+
+  it("an MQTT-over-WebSocket context is resolved from its upgrade request", async () => {
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: {}, user: superUser, authorize: true, request: getShape() }))
+      .toEqual({ kind: "anonymous" });
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: {}, request: { tpsAgent: "agent-9", tpsAgentIsAdmin: true } }))
+      .toEqual({ kind: "agent", agentId: "agent-9", isAdmin: true });
+  });
+
+  // Harper's native MCP application tools (components/mcp/tools/application.ts
+  // `buildContext()`) build `{ user, authorize: true, checkPermission }` for
+  // every call; Resource clears `authorize` before the allow* hooks and the
+  // handler run, and leaves `checkPermission`.
+  const applicationToolContext = (user: any) => ({ user, authorize: true, checkPermission: user?.role?.permission ?? {} });
+
+  it("a native MCP application tool's context → anonymous, with authorize still true and after Harper clears it, whatever Harper user it carries", async () => {
+    for (const user of [perAgentUser, superUser, undefined]) {
+      const context = applicationToolContext(user);
+      expect(await resolveAgentAuth(context)).toEqual({ kind: "anonymous" });
+      context.authorize = false as any;
+      expect(await resolveAgentAuth(context)).toEqual({ kind: "anonymous" });
+      // Harper's transaction() adds the transaction to the same object.
+      expect(await resolveAgentAuth({ ...context, transaction: {} })).toEqual({ kind: "anonymous" });
+    }
+  });
+
+  it("a context whose authorize has become false but still carries checkPermission is not admitted by the admin or verified gates", async () => {
+    const context = { user: superUser, authorize: false, checkPermission: superUser.role.permission };
+    expect(await allowAdmin(context)).toBe(false);
+    expect(await allowVerified(context)).toBe(false);
+  });
+
+  it("the checkPermission marker leaves HTTP, in-process and MQTT resolution as it was", async () => {
+    // An HTTP request is decided from its headers whatever else the context carries.
+    expect(await resolveAgentAuth({ ...getShape(), checkPermission: {} })).toEqual({ kind: "anonymous" });
+    expect(await resolveAgentAuth({ request: getShape(), checkPermission: {} })).toEqual({ kind: "anonymous" });
+    expect(await resolveAgentAuth({ ...getShape(BASIC), user: superUser, checkPermission: {} }))
+      .toEqual({ kind: "agent", agentId: "admin", isAdmin: true });
+    // In-process contexts are unchanged.
+    expect(await resolveAgentAuth(internalContext())).toEqual({ kind: "internal" });
+    expect(await resolveAgentAuth(agentContext("agent-7"))).toEqual({ kind: "agent", agentId: "agent-7", isAdmin: false });
+    expect(await resolveAgentAuth(adminContext("ops"))).toEqual({ kind: "agent", agentId: "ops", isAdmin: true });
+    // MQTT session contexts are unchanged.
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: {}, user: superUser, authorize: false }))
+      .toEqual({ kind: "anonymous" });
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: {}, request: { tpsAgent: "agent-9", tpsAgentIsAdmin: false } }))
+      .toEqual({ kind: "agent", agentId: "agent-9", isAdmin: false });
+    // A requestless context with no marker is still the trusted internal call.
+    expect(await resolveAgentAuth({ user: superUser, authorize: false })).toEqual({ kind: "internal" });
+  });
+
+  it("a context with no request and no protocol-layer marker is still the trusted internal call", async () => {
+    expect(await resolveAgentAuth({})).toEqual({ kind: "internal" });
+    expect(await resolveAgentAuth({ user: superUser, authorize: false })).toEqual({ kind: "internal" });
+    // A `session` that is not an MQTT session object (no socket, no subscriptions) does not mark it.
+    expect(await resolveAgentAuth({ session: { id: "cookie-session" } })).toEqual({ kind: "internal" });
+  });
+});
+
 // ─── gate annotations (unchanged) ─────────────────────────────────────────────
 
 describe("resolveAgentAuth — gate annotations (handler phase)", () => {
@@ -138,7 +222,7 @@ describe("resolveAgentAuth — resources/in-process.ts's agentContext()", () => 
     expect(await resolveAgentAuth(internalContext())).toEqual({ kind: "internal" });
   });
 
-  it("NO context → internal, which is ADMIN-EQUIVALENT (the embedding hazard)", async () => {
+  it("NO context → internal, the unfiltered verdict (the embedding hazard)", async () => {
     // Not a weaker call — an unfiltered one.
     expect(await resolveAgentAuth(undefined)).toEqual({ kind: "internal" });
   });
@@ -150,7 +234,8 @@ describe("resolveAgentAuth — resources/in-process.ts's agentContext()", () => 
 // guard can never be "simplified away" without its justification failing loudly
 // in the same run. `resolveAgentAuth` tests `tpsAgent` for TRUTHINESS, so an id
 // that came back undefined is indistinguishable from no identity at all — and
-// that is the trusted, unfiltered verdict. It even passes the ADMIN-only gate.
+// that is the trusted, unfiltered verdict. It passes the agent-facing gate
+// (allowVerified) and is refused by the ADMIN-only gate (allowAdmin, flair#2837).
 //
 // If any of these ever stop holding, resources/in-process.ts's runtime guards
 // have become unnecessary and should be revisited deliberately, not by accident.
@@ -163,10 +248,10 @@ describe("resolveAgentAuth — a missing/empty tpsAgent is INDISTINGUISHABLE fro
     });
   }
 
-  it("and that verdict PASSES the admin-only gate — a forgotten id is a superuser", async () => {
+  it("its verdict still passes the agent-facing gate, but the ADMIN-only gate refuses it (flair#2837)", async () => {
     const forgotten = { request: { tpsAgent: undefined, tpsAgentIsAdmin: false } };
     expect(await allowVerified(forgotten)).toBe(true);
-    expect(await allowAdmin(forgotten)).toBe(true);
+    expect(await allowAdmin(forgotten)).toBe(false);
   });
 
   it("POSITIVE CONTROL: a real id resolves to that agent, so the above is not a broken harness", async () => {
@@ -273,4 +358,16 @@ describe("hasCredentialEvidence — recognizes every credential-bearing header s
   it("header carried on the context object itself (PUT/POST context shape) → true", () => {
     expect(hasCredentialEvidence(asObjectShape("Basic abc"))).toBe(true);
   });
+});
+
+it("AgentKeyRegister refuses a gate-anonymous Harper Bearer admin with 401", async () => {
+  const { AgentKeyRegister } = await import("../../resources/AgentKeyRegister.ts");
+  const resource = new AgentKeyRegister() as any;
+  resource.getContext = () => ({
+    user: superUser,
+    request: { ...asObjectShape("Bearer operation-token"), tpsAnonymous: true, user: superUser },
+  });
+  const response = await resource.post({});
+  expect(response.status).toBe(401);
+  expect(await response.json()).toMatchObject({ error: "authentication required" });
 });

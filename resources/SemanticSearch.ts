@@ -1,7 +1,7 @@
 import { Resource, databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
-import { isEmbeddingSpaceUniform, spaceGuardDiagnostics } from "./embedding-space-guard.js";
+import { embeddingSpaceVerdict, spaceGuardWarning, type EmbeddingSpaceVerdict } from "./embedding-space-guard.js";
 import { withDetachedTxn } from "./table-helpers.js";
 import { applyHitStats, noteSearchHits } from "./hit-tracking.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
@@ -135,7 +135,11 @@ export class SemanticSearch extends Resource {
     const mode = retrievalMode();
 
     // Generate query embedding
-    let qEmb = queryEmbedding;
+    // bm25-only ranks on the lexical leg alone and never uses a query embedding
+    // (the core ignores one), so a supplied embedding is dropped here: no guard
+    // consult below, and no state warning for an embedding this mode would not
+    // use (flair#2530).
+    let qEmb = mode === "bm25-only" ? undefined : queryEmbedding;
     if (!qEmb && q && mode !== "bm25-only") {
       // Always attempt embedding generation — getEmbedding() handles init internally.
       // Don't gate on getMode() which may return "none" before init completes in worker threads.
@@ -146,22 +150,41 @@ export class SemanticSearch extends Resource {
     }
 
     // ─── Vector-space uniformity guard (embedding-space-guard slice 1) ────────
-    // If the store is NOT uniform in the current embedding space (a mixed-space
-    // corpus during a re-embed / model change), cosining the query against
-    // stored vectors returns garbage — Harper zero-pads a mismatched-dimension
-    // vector and returns a bogus score instead of throwing; same-dims /
-    // different-space is silent garbage too. REFUSE the embedding leg and
-    // degrade to keyword-only LOUDLY: drop qEmb so retrieveCandidates takes the
-    // keyword-only branch (reusing the existing mode:'none' graceful-degrade
-    // contract), and surface a structured warning naming both spaces + the
-    // `flair reembed` remedy below. Never serve mixed-space vectors, never
-    // merely log. Consulted through the SAME single chokepoint the write-time
-    // dedup leg uses (resources/embedding-space-guard.ts) — O(1) on the uniform
-    // happy path.
-    let spaceGuardDegraded = false;
-    if (qEmb && !(await isEmbeddingSpaceUniform())) {
-      qEmb = undefined;
-      spaceGuardDegraded = true;
+    // A non-uniform guard verdict refuses the query embedding. Its scan counts
+    // arrays and typed arrays without trusted stamps, including empty ones.
+    // Take the same path for every non-uniform state — REFUSE the embedding leg and
+    // degrade LOUDLY: drop qEmb so retrieveCandidates takes the keyword-only
+    // branch (reusing the existing mode:'none' graceful-degrade contract) when
+    // the request has query text, return no results when it has none, and
+    // surface a structured warning that NAMES the state (mixed / excluded /
+    // not-yet-verified / scan-failed) below. The query is cosined against the
+    // stored corpus only while the guard reads `uniform`: the last published
+    // scan found no foreign stamp and no stored vector without a trusted
+    // current-space stamp, and no guard-notified write has since marked that
+    // count stale. The writes that notify are Memory POST, PUT and PATCH (a PATCH
+    // when it changes the vector or the stamp), the re-embed PATCH, the reindex
+    // PUT, skill version writes made through Memory, the FederationSync merge and
+    // the auto-embed backfill. Writes that carry over an existing row's
+    // non-empty vector and stamp, such as the supersede close, the skill
+    // predecessor close and a FeedMemories skill successor, do not notify; when
+    // the carried vector is empty they clear it to null, also without notifying
+    // (that can only remove a vector, never add one). A raw
+    // operations-API insert is seen only by the next scan. (This is
+    // stamp metadata only: a caller-supplied `queryEmbedding` carries no space
+    // provenance, so its bytes are not verified either — flair#2573 slice 2.)
+    // Consulted through the SAME single chokepoint the write-time dedup leg
+    // uses — O(1) on the verified-uniform happy path. The consult, and so the
+    // state warning, happens only when a query embedding is available
+    // (supplied, or generated from `q`) outside bm25-only mode; bm25-only (whose
+    // supplied embedding was dropped above) and a failed embedding generation
+    // never reach it.
+    let spaceGuardVerdict: EmbeddingSpaceVerdict | null = null;
+    if (qEmb) {
+      const verdict = await embeddingSpaceVerdict();
+      if (!verdict.uniform) {
+        qEmb = undefined;
+        spaceGuardVerdict = verdict;
+      }
     }
 
     // ─── Temporal intent detection ────────────────────────────────────────────
@@ -251,6 +274,8 @@ export class SemanticSearch extends Resource {
         plan,
         tag,
         scoring,
+        // flair#2530: a guard-degraded plan has no embedding leg; say why.
+        ...(spaceGuardVerdict ? { _warning: spaceGuardWarning(spaceGuardVerdict, "plan") } : {}),
       };
     }
 
@@ -272,7 +297,10 @@ export class SemanticSearch extends Resource {
     const ctx = (this as any).getContext?.();
 
     let legs: { hnsw: string[]; bm25: string[]; fused: string[] } | undefined;
-    const filteredResults = await retrieveCandidates({
+    // flair#2530: when the refused query embedding was the request's only
+    // ranking signal (no `q`), retrieve nothing. Calling retrieveCandidates with
+    // neither signal would return its unranked corpus listing.
+    const filteredResults = spaceGuardVerdict && !q ? [] : await retrieveCandidates({
       queryEmbedding: qEmb,
       q,
       conditions,
@@ -285,7 +313,7 @@ export class SemanticSearch extends Resource {
       minScore,
       agentId,
       isAllowed: scope?.isAllowed,
-      mode,
+      mode: spaceGuardVerdict && mode === "vector-only" ? "bm25-only" : mode,
       ctx,
       onLegs: includeLegs ? (l) => { legs = l; } : undefined,
       // flair#744 slice 1: the trust block needs `provenance`, which the
@@ -350,6 +378,7 @@ export class SemanticSearch extends Resource {
           bestScore: abstention.bestScore,
           threshold: abstention.threshold,
           results: [],
+          ...(spaceGuardVerdict ? { _warning: spaceGuardWarning(spaceGuardVerdict, q ? "keyword" : "none") } : {}),
         };
       }
     }
@@ -416,12 +445,8 @@ export class SemanticSearch extends Resource {
       response.bestScore = abstention.bestScore;
       response.threshold = abstention.threshold;
     }
-    if (spaceGuardDegraded) {
-      const diag = spaceGuardDiagnostics();
-      response._warning =
-        `semantic search unavailable — the store has mixed embedding spaces ` +
-        `(current: ${diag.current}; found: ${diag.found.join(", ")}); results are keyword-only. ` +
-        `Reconcile to one space with: flair reembed --stale-only`;
+    if (spaceGuardVerdict) {
+      response._warning = spaceGuardWarning(spaceGuardVerdict, q ? "keyword" : "none");
     } else if (!qEmb && q && getMode() === "none") {
       response._warning = "semantic search unavailable — results are keyword-only";
     }

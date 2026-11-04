@@ -1,5 +1,6 @@
 export const ROOT: string;
 export const ROOT_STEP_TIMEOUT_MS: number;
+export const N8N_STEP_TIMEOUT_MS: number;
 export const LANE_SHARDS: number;
 export const WORKSPACE_PACKAGES: string[];
 export const NON_JS_TEST_PACKAGES: string[];

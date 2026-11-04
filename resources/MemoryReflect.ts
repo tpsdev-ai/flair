@@ -52,8 +52,15 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { setImmediate as yieldToRequests } from "node:timers/promises";
-import { isAdmin, allowVerified } from "./agent-auth.js";
-import { patchRecordSilent } from "./table-helpers.js";
+import { annotatedCallerIsAdmin, allowVerified } from "./agent-auth.js";
+import { patchRecord } from "./table-helpers.js";
+import { withMemoryWriteLockOnce } from "./memory-write-lock.js";
+import { verifyCommittedFields } from "./write-back.js";
+
+/** The per-id Memory write-lock store (flair#2478). */
+function memoryLockStore(): unknown {
+  return (databases as any)?.flair?.Memory?.primaryStore;
+}
 import { txnPausePoint } from "./txn-pause-point.js";
 import {
   buildReflectionPrompt,
@@ -109,12 +116,12 @@ export class ReflectMemories extends Resource {
     // Authenticated identity comes from getContext().request, not this.request
     // (see SemanticSearch / MemoryBootstrap for the same bug class). The prior
     // check was silently bypassed — bob could reflect on alice's memories and
-    // mutate alice's records via the lastReflected patchRecordSilent below.
+    // mutate alice's records through the lastReflected stamp below.
     const ctx = (this as any).getContext?.();
     const request = ctx?.request ?? ctx;
     const actorId: string | undefined = request?.tpsAgent;
     const callerIsAdmin: boolean = request?.tpsAgentIsAdmin === true
-      || (actorId ? await isAdmin(actorId) : false);
+      || (await annotatedCallerIsAdmin(request));
 
     // Same actor rules for both modes (spec §3A item 9) — resolved once via
     // the shared, tested helper before either branch runs.
@@ -301,17 +308,21 @@ export class ReflectMemories extends Resource {
         }
         const toStage = dedupeCandidates(staleIntentResult.kept, existingPendingClaims);
 
-        // generatedBy: GenerateResult in the pinned harper 5.1.17 has
-        // no model/backend-id field (content/finishReason/usage/toolCalls/trace
-        // only) — the "from the generate result if available" branch is
-        // unreachable in this version, so this always falls back to the
-        // configured logical name, matching Harper's own default routing name.
+        // generatedBy: Harper's GenerateResult carries no model or backend id
+        // (content, toolCalls, finishReason, usage and trace only; re-checked
+        // against harper 5.3.1's types), so this uses the configured logical
+        // name, matching Harper's own default routing name.
         const resolvedModel = configuredModel ?? "default";
         const generatedAt = new Date().toISOString();
         // Write-window atomicity (#1263): generate has already succeeded.
         // Each MemoryCandidate.put is its own short commit. A throw mid-loop
         // leaves earlier puts durable and skips lastReflected (never reached).
-        // lastReflected is patchRecordSilent — it cannot fail the request.
+        // The stamp runs patchRecord under withMemoryWriteLockOnce. A held lock
+        // is logged. After patchRecord returns, the explicit verification logs
+        // an unreadable or mismatching row as unconfirmed; an error from
+        // patchRecord's helper is logged as a write-back refusal. Either failure
+        // may follow a committed write. A stamp failure does not fail the
+        // request.
         // 502/503 stay generate-only (no_backend / distillation_failed).
         const staged: any[] = [];
         for (const c of toStage) {
@@ -343,15 +354,55 @@ export class ReflectMemories extends Resource {
         // Stamp after a successful generate on execute runs only. Prompt-only
         // and 502/503/abort leave lastReflected unset so the next night retries
         // the same sources instead of permanently skipping them (#1515 Bugbot).
+        //
+        // flair#2478 slice 3b: each source stamp takes that id's per-id Memory
+        // write lock, once and without waiting, and reads the committed row
+        // under it. A held id, an outcome-unknown marker or a store with no
+        // lock skips that source and reports it; a stamp is an automatic
+        // writer, and its incremental update preserves the owner's other
+        // fields while updating `lastReflected`. The patch is an
+        // incremental update of `lastReflected`, and its committed row is
+        // confirmed before the lock is released. A stamp failure cannot fail
+        // the request.
         if (shouldStampLastReflected({ execute, generateSucceeded: true })) {
           const now = new Date().toISOString();
+          const table = (databases as any).flair.Memory;
           for (const memory of memories) {
             const reflectPatch = { lastReflected: now };
             stripUndeclaredMemoryAttributes(reflectPatch);
-            patchRecordSilent((databases as any).flair.Memory, memory.id, reflectPatch, {
-              pausePre: () => txnPausePoint("reflect-sources-pre"), pausePoint: () => txnPausePoint("reflect-sources"), expectedRow: memory,
-              matches: (row) => row != null && GATHER_SELECT.every((key) => isDeepStrictEqual(row[key], memory[key])),
-            });
+            try {
+              const outcome = await withMemoryWriteLockOnce(memoryLockStore(), [String(memory.id)], async () => {
+                const stored = await table.get(String(memory.id), {});
+                if (stored == null) return { kind: "gone" as const };
+                try {
+                  await patchRecord((databases as any).flair.Memory, String(memory.id), reflectPatch, {
+                    pausePre: () => txnPausePoint("reflect-sources-pre"),
+                    pausePoint: () => txnPausePoint("reflect-sources"),
+                    pauseAfterStage: () => txnPausePoint("reflect-sources-staged"),
+                    pauseBeforeCommit: () => txnPausePoint("reflect-sources-commit"),
+                    expectedRow: stored,
+                    matches: (row) => row != null && GATHER_SELECT.every((key) => isDeepStrictEqual(row[key], memory[key])),
+                  });
+                } catch (err) {
+                  logger.warn?.(`MemoryReflect: lastReflected stamp skipped for ${memory.id} (write-back refused: ${(err as Error)?.name ?? "error"})`);
+                  return { kind: "failed" as const };
+                }
+                const verdict = await verifyCommittedFields(table, String(memory.id), stored, reflectPatch);
+                if (verdict !== "shown") {
+                  logger.warn?.(`MemoryReflect: lastReflected stamp skipped for ${memory.id} (unconfirmed: ${verdict})`);
+                  return { kind: "unconfirmed" as const };
+                }
+                // Test-only: the update committed and the lock is still held.
+                const committed = txnPausePoint("reflect-sources-committed");
+                if (committed) await committed;
+                return { kind: "stamped" as const };
+              }, { phase: "reflect-sources" });
+              if (outcome.kind !== "done") {
+                logger.warn?.(`MemoryReflect: lastReflected stamp skipped for ${memory.id} (${outcome.kind})`);
+              }
+            } catch (err) {
+              logger.warn?.(`MemoryReflect: lastReflected stamp skipped for ${memory.id} (${(err as Error)?.name ?? "error"})`);
+            }
           }
         }
 

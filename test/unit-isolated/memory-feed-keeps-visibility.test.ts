@@ -4,19 +4,25 @@
  */
 import { describe, expect, test, beforeEach, afterAll, mock } from "bun:test";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
+import { memoryWriteOutcomeUnknown, resetMemoryWriteOutcomeUnknownForTest } from "../../resources/memory-write-lock.ts";
+import { WRITE_RESPONSE_WITHHELD, WRITE_RESPONSE_WITHHELD_MESSAGE } from "../../resources/memory-write-response.ts";
 import { installFakeHarperTransaction } from "../helpers/fake-harper-txn";
 
 let memoryStore: Map<string, any>;
 let getCount = 0;
 let failGetAt: number | null = null;
+let writeRace: "conflict" | "unconfirmed" | undefined;
+/** Storage stages the write but withholds its result (returns a Response) (flair#2857). */
+let putWithholds = false;
 
 // Model Harper's global transaction (the write-back helper reaches it there).
-const txn = installFakeHarperTransaction((id, row) => memoryStore.set(id, row));
+const txn = installFakeHarperTransaction((id, row) => memoryStore.set(id, writeRace === "unconfirmed" ? { ...row, content: "competing" } : row));
 afterAll(() => txn.restore());
 
 const databasesMock = {
   flair: {
     Memory: {
+      primaryStore: { tryLock: () => true, unlock: () => {}, resetReadTxn: () => {} },
       get: async (id: string) => {
         getCount++;
         if (failGetAt !== null && getCount === failGetAt) throw new Error("storage unavailable");
@@ -25,6 +31,11 @@ const databasesMock = {
       // Harper PUT semantics: the stored row IS the record (full replacement);
       // a write inside the owned transaction is staged (lands on commit).
       put: async (record: any) => {
+        if (writeRace === "conflict") memoryStore.set(record.id, { ...memoryStore.get(record.id), instanceToken: "replacement" });
+        if (putWithholds) {
+          txn.stage(record.id, { ...record });
+          return Response.json({ id: record.id });
+        }
         if (txn.stage(record.id, { ...record })) return record;
         memoryStore.set(record.id, { ...record });
         return record;
@@ -57,8 +68,50 @@ beforeEach(() => {
   memoryStore = new Map();
   getCount = 0;
   failGetAt = null;
+  writeRace = undefined;
+  putWithholds = false;
+  resetMemoryWriteOutcomeUnknownForTest("owned");
   memoryStore.set("owned", { id: "owned", agentId: "alice", content: "owner-only note", durability: "standard", visibility: "private" });
 });
+
+test("an unconfirmed feed write marks the id outcome-unknown, and the next write to that id is refused", async () => {
+  writeRace = "unconfirmed";
+  const first = await feed().post({ id: "owned", agentId: "alice", content: "submitted" });
+  expect(first.status).toBe(409);
+  expect(await first.json()).toMatchObject({ error: "feed_write_unconfirmed" });
+  expect(memoryWriteOutcomeUnknown("owned")).toBe(true);
+
+  const next = await feed().post({ id: "owned", agentId: "alice", content: "retry after the unknown outcome" });
+  expect(next.status).toBe(503);
+  expect(await next.json()).toMatchObject({ error: "write_outcome_unknown" });
+  expect(memoryStore.get("owned").content).toBe("competing");
+});
+
+test("a withheld feed write result records the id outcome-unknown (flair#2857)", async () => {
+  putWithholds = true;
+  const response = await feed().post({ id: "owned", agentId: "alice", content: "submitted" });
+  expect(response).toBeInstanceOf(Response);
+  expect((response as Response).status).toBe(500);
+  expect(await (response as Response).json()).toEqual({ error: WRITE_RESPONSE_WITHHELD, message: WRITE_RESPONSE_WITHHELD_MESSAGE });
+  expect(memoryWriteOutcomeUnknown("owned")).toBe(true);
+});
+
+test("a confirmed feed write records no marker (control)", async () => {
+  const response = await feed().post({ id: "owned", agentId: "alice", content: "submitted" });
+  expect(response).not.toBeInstanceOf(Response);
+  expect(memoryWriteOutcomeUnknown("owned")).toBe(false);
+});
+
+for (const outcome of ["conflict", "unconfirmed"] as const) {
+  test(`FeedMemories answers ${outcome} after a ${outcome === "conflict" ? "pre-commit" : "post-commit"} race`, async () => {
+    writeRace = outcome;
+    const response = await feed().post({ id: "owned", agentId: "alice", content: "submitted" });
+    expect(response).toBeInstanceOf(Response);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: outcome === "conflict" ? "feed_target_changed" : "feed_write_unconfirmed", outcome });
+    expect(memoryStore.get("owned").content).toBe(outcome === "conflict" ? "owner-only note" : "competing");
+  });
+}
 
 describe("FeedMemories.post preserves stored visibility on an update", () => {
   test("a changed-content update keeps the stored visibility", async () => {

@@ -30,7 +30,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import {
   MACHINE_REVIEWER_ADK_AUTO_PROMOTE,
   isMachineReviewerId,
@@ -158,7 +158,7 @@ describe("ADK auto-promote — unattended own-memory promotion (#1205b-2)", () =
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("Req 1 — target 'soul' is REFUSED server-side (checked in beforeAll) and no Soul row is ever written", async () => {
     // The refusal itself is asserted in beforeAll (400 auto_promote_target_locked).

@@ -13,7 +13,7 @@ import { REM_DEDUP_STATS_PATH } from "./dedup-cluster.js";
 import { hybridEnabled, retrievalMode } from "./bm25.js";
 import { bm25IndexEnabled, bm25IndexInRetrievalPath, bm25IndexStatus } from "./bm25-index-service.js";
 import { bm25DisabledWarning } from "./bm25-status.js";
-import { normalizeStamp } from "./embedding-space-guard.js";
+import { normalizeStamp, spaceGuardState } from "./embedding-space-guard.js";
 import { getModelId } from "./embeddings-provider.js";
 import { describeStampOutstanding, EMBEDDING_STAMP_ID } from "./migrations/stamp-outstanding.js";
 import { buildPublicHealthBody, resolveSearchReadiness, type ResourceRegistry, type SearchReadiness } from "./search-readiness.js";
@@ -122,6 +122,17 @@ export class Health extends Resource {
       version: build?.version ?? resolveVersion(),
       buildCommit: build?.commit ?? null,
     }));
+    // flair#2530 — the query-time embedding-space guard's state, for `flair
+    // doctor`. Sync, no scan, no vector read. `state` is one of
+    // uniform | mixed | unverified | scan-failed | excluded; `reason` is the
+    // bounded error
+    // of the last failed scan (on scan-failed, or on mixed when a scan failed
+    // before or after the foreign stamp was seen); `excluded` is the last
+    // published count of arrays or typed arrays, empty included, without a trusted
+    // current-space stamp (null until a scan publishes one). Calls that consult a
+    // non-uniform verdict skip vector comparisons against the stored corpus
+    // (flair#2559). The field is on the 503 body too; doctor reads it there.
+    body.embeddingSpace = spaceGuardState();
     const multiWorker = multiWorkerHealthField(multiWorkerCondition());
     let status = readiness.status;
     if (multiWorker) {
@@ -794,6 +805,9 @@ export class HealthDetail extends Resource {
         lastCycleError: redactReason(rawSnapshot.lastCycleError),
         migrations: rawSnapshot.migrations.map((m) => ({
           ...m,
+          // Row ids are operator detail, like the state-file path below:
+          // verified non-admin callers get the count only (flair#2840).
+          unconfirmedIds: undefined,
           reason: m.state === "completed" && m.reason
             ? "recorded complete; not re-verified this boot"
             : redactReason(m.reason),
@@ -834,6 +848,11 @@ export class HealthDetail extends Resource {
       for (const m of snapshot.migrations) {
         if (m.state === "halted" || m.state === "failed") {
           warnings.push({ level: "warn", message: `migration '${m.id}' ${m.state}${m.reason ? `: ${m.reason}` : ""} — see \`flair doctor\`` });
+        } else if (m.state === "completed" && (m.rowsUnconfirmed ?? 0) > 0) {
+          warnings.push({
+            level: "warn",
+            message: `migration '${m.id}' completed with ${m.rowsUnconfirmed} row(s) it could not confirm`,
+          });
         }
       }
       // The boot trigger sets `scheduled` synchronously at module load, so

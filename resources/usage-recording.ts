@@ -54,9 +54,11 @@
  *     unfiltered.
  */
 import { databases } from "harper";
-import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
+import { withKeyLock } from "./key-lock.js";
 import { withDetachedTxn } from "./table-helpers.js";
+import { withOwnedTransaction } from "./request-transaction.js";
 import { WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
+import { withMemoryWriteLockOnce } from "./memory-write-lock.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import type { ReadScope, ScopableRecord } from "./memory-read-scope.js";
@@ -74,6 +76,23 @@ export const MAX_USAGE_IDS_PER_CALL = 20;
 export type CanReadMemory = (record: ScopableRecord | null | undefined) => boolean;
 
 /**
+ * The named refusal of a contribution whose ledger READ failed. The read is the
+ * decision "does this (agent, memory) pair already have a row?" — an error is
+ * NOT evidence there is none. Treating it as "no row" would upsert over whatever
+ * row is stored and bump the count a second time, so this contribution is
+ * aborted instead (no ledger write, no count change) and the batch logs the
+ * failure; the other ids in the batch are unaffected.
+ */
+export class UsageLedgerReadError extends Error {
+  readonly ledgerId: string;
+  constructor(ledgerId: string, cause: unknown) {
+    super(`usage ledger row read failed for ${ledgerId}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "UsageLedgerReadError";
+    this.ledgerId = ledgerId;
+  }
+}
+
+/**
  * One (agentId, memoryId) contribution — the shared ledger-write core.
  *
  * READ-SCOPE GATE: `canRead` is the contributing agent's read-scope predicate
@@ -88,27 +107,31 @@ export type CanReadMemory = (record: ScopableRecord | null | undefined) => boole
  * Ledger-row-create FIRST, THEN the Memory.usageCount bump — so a crash
  * between the two leaves the SAFE failure state (ledger row exists, count
  * not yet bumped: a later retry just re-checks and no-ops) rather than the
- * reverse (count bumped, no ledger row → a retry would double-count).
+ * reverse (count bumped, no ledger row → a retry would double-count). The
+ * ledger READ that decides all this FAILS CLOSED: an error is not "no row", so
+ * that contribution aborts (named UsageLedgerReadError, no ledger write, no
+ * count change) rather than upsert over the stored row and bump again.
  *
- * The MemoryUsage ledger reads and its row create keep the withDetachedTxn
- * discipline — one wrap per discrete Harper call (table-helpers.ts's
- * withDetachedTxn doc): a request that reads/writes MULTIPLE tables in
- * sequence can otherwise inherit a closed transaction from a prior call's
- * drained chain. The count bump does not wrap its own calls: it runs through
- * the shared write-back helper (writeBackCommittedRow, below), which opens a
- * transaction this call OWNS and reads, builds and writes the row inside it.
+ * The ledger read and any create share an owned transaction. The count bump
+ * uses a separate owned transaction through writeBackCommittedRow.
+ *
+ * flair#2478: the whole contribution runs under the memory id's per-id write
+ * lock (resources/memory-write-lock.ts), taken before the ledger lock and once
+ * without waiting. The count bump is then decided on a committed row that an
+ * ordinary owner PUT, PATCH or DELETE in the same Harper process, which holds
+ * the lock until it commits, cannot change under it. Not serialized with it: a
+ * composed PUT that commits after releasing its lock, and a raw operations
+ * write. A contribution that cannot take that lock, or the ledger lock,
+ * writes nothing for that id and is logged as skipped.
  *
  * The count bump is the shared write-back helper (write-back.ts): the row is
  * read inside a transaction this call OWNS, the bump is built from THAT read,
- * and the committed row is re-read before commit. A row deleted or purged
- * between the read and the write is not bumped and NOT re-created (the plan
- * skips an absent row). A same-id replace is refused, never overwritten: an
- * identity change the in-transaction read already sees throws
- * WriteBackConflictError at once (no retry). Only a change to the committed
- * row found by the re-read after the bump is staged retries, from a fresh
- * read, at most WRITE_BACK_ATTEMPTS attempts in all (then
- * WriteBackConflictError). recordUsageBatch / recordCitations log either
- * refusal with the reason `stored_row_changed`. The earlier read only decides
+ * and the committed row is re-read before commit. The plan skips an absent
+ * row or one outside the agent's read scope before any identity comparison.
+ * For a row the plan does not skip, an identity change the in-transaction read
+ * already sees throws WriteBackConflictError at once (no retry). Only a
+ * pre-commit conflict retries. A post-commit mismatch is terminal and
+ * unconfirmed. The earlier read only decides
  * the read-scope gate above; it never authorizes the count write on its own.
  *
  * Called by recordUsageBatch() (POST /RecordUsage, explicit usage feedback)
@@ -123,50 +146,119 @@ export async function recordUsageContribution(
   now: string,
   canRead: CanReadMemory,
 ): Promise<void> {
+  // Global lock order (flair#2478): the sorted Memory id locks first, then the
+  // usage ledger. Memory.put() records its citations after releasing its target
+  // id's lock, so a citation holds no other Memory id lock when it tries this
+  // one. The whole contribution — the ledger check, any ledger create
+  // and the count bump — runs under the memory id's write lock, taken once with
+  // no wait: the count bump's decision is then made on a committed row an
+  // ordinary owner PUT or PATCH cannot change under it (the writes it does not
+  // serialize are named above).
+  // Test-only: before this contribution tries the memory id's lock.
+  const beforeLock = txnPausePoint("usage-contribution-lock");
+  if (beforeLock) await beforeLock;
+  const memoryOutcome = await withMemoryWriteLockOnce(
+    (databases as any)?.flair?.Memory?.primaryStore,
+    [memoryId],
+    async () => {
+      // Within one Harper process, the per-(agentId, memoryId) lock serializes
+      // contributions across the ledger check, any create and any count bump.
+      const store = (databases as any)?.flair?.MemoryUsage?.primaryStore;
+      return withKeyLock(
+        store,
+        [USAGE_LEDGER_LOCK_NAMESPACE, agentId, memoryId],
+        () => recordUsageContributionLocked(ctx, agentId, memoryId, attribution, now, canRead),
+        USAGE_LOCK_ATTEMPTS,
+        USAGE_LOCK_WAIT_MS,
+      );
+    },
+    { phase: "usage-count" },
+  );
+  // The memory lock could not be acquired (a held id, an outcome-unknown
+  // marker, or a store with no lock): this contribution writes nothing and is
+  // skipped, never written unserialized over an owner's write. It is reported
+  // here; the caller still gets its recorded response. Other ids in the same
+  // batch may already have been credited.
+  if (memoryOutcome.kind !== "done") {
+    console.warn("[usage-recording] contribution skipped: %s for memory %s", memoryOutcome.kind, memoryId);
+    return;
+  }
+  // The ledger lock could not be acquired: same skip, same report.
+  if (memoryOutcome.value.kind !== "done") {
+    console.warn("[usage-recording] contribution skipped: usage_ledger_%s for memory %s", memoryOutcome.value.kind, memoryId);
+    return;
+  }
+
+  // Test-only: pause after the ledger lock releases and the owned transaction
+  // commits, before this request's transaction commits (flair#2333).
+  const committed = txnPausePoint("usage-ledger-lock-released");
+  if (committed) await committed;
+}
+
+/** The per-(agentId, memoryId) lock namespace and wait (resources/key-lock.ts). */
+const USAGE_LEDGER_LOCK_NAMESPACE = "flair-usage-ledger";
+const USAGE_LOCK_ATTEMPTS = 200;
+const USAGE_LOCK_WAIT_MS = 10;
+
+/**
+ * The ledger check, the ledger create and the count bump, run while holding the
+ * (agentId, memoryId) lock: see `recordUsageContribution` for the whole contract.
+ * Split out so the whole check-and-write runs under the lock; it is never called
+ * outside it.
+ */
+async function recordUsageContributionLocked(
+  ctx: any,
+  agentId: string,
+  memoryId: string,
+  attribution: string | undefined,
+  now: string,
+  canRead: CanReadMemory,
+): Promise<void> {
   const ledgerId = `${agentId}:${memoryId}`;
 
-  // Bypasses resources/MemoryUsage.ts's own auth wrapper by design — this
-  // IS the trusted internal caller that resource's module doc describes
-  // (same "raw table object" pattern resources/Memory.ts uses for
-  // MemoryGrant).
-  const existingContribution = await withDetachedTxn(ctx, () =>
-    (databases as any).flair.MemoryUsage.get(ledgerId),
-  ).catch(() => null);
-  if (existingContribution) return; // already counted by this agent — silent no-op
+  // Within one Harper process, the ledger check and any create share an owned
+  // transaction that commits before the contribution lock releases. The count
+  // bump uses a separate owned transaction.
+  const prepared = await withOwnedTransaction(ctx, async (owned) => {
+    // Bypasses resources/MemoryUsage.ts's own auth wrapper by design — this
+    // IS the trusted internal caller that resource's module doc describes
+    // (same "raw table object" pattern resources/Memory.ts uses for
+    // MemoryGrant). The read DECIDES whether a row is already there, so a
+    // failed read is not "no row": abort this contribution (fail closed,
+    // named) rather than upsert over the stored row and bump the count again.
+    let existingContribution: any;
+    try {
+      existingContribution = await (databases as any).flair.MemoryUsage.get(ledgerId, owned);
+    } catch (err) {
+      throw new UsageLedgerReadError(ledgerId, err);
+    }
+    if (existingContribution) return null; // already counted by this agent — silent no-op
 
-  // Absent, unreadable, or a failed read: ONE silent no-op branch (no
-  // enumeration). A read failure is never evidence the memory is readable.
-  const memory = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(memoryId)).catch(() => null);
-  if (!memory || !canRead(memory)) return;
+    // Test-only: pause after finding no ledger row. Creation and the count bump
+    // still require their read-scope gates and successful writes.
+    const pause = txnPausePoint("usage-contribution-claim");
+    if (pause) await pause;
 
-  const ledgerRecord: Record<string, unknown> = { id: ledgerId, agentId, memoryId, createdAt: now };
-  if (attribution) ledgerRecord.attribution = attribution;
-  // .put(), not .post(): Harper's raw TableResource has no default post()
-  // implementation for a static-style (non-`isCollection`-instantiated)
-  // call — confirmed live ("The MemoryUsage does not have a post method
-  // implemented", statusCode 405) — the SAME class of gotcha
-  // resources/Memory.ts documents for HTTP POST, but here it bites even
-  // this in-process call. Irrelevant anyway: ledgerId is already a
-  // deterministic composite key, so this is a create-with-explicit-id —
-  // exactly what PUT (upsert) is for, not an auto-generated-id insert.
-  await withDetachedTxn(ctx, () => (databases as any).flair.MemoryUsage.put(ledgerRecord));
+    // Absent, unreadable, or a failed read: ONE silent no-op branch (no
+    // enumeration). A read failure is never evidence the memory is readable.
+    const memory = await (databases as any).flair.Memory.get(memoryId, owned).catch(() => null);
+    if (!memory || !canRead(memory)) return null;
 
-  // Targeted usageCount-ONLY bump: read-full-record, merge just this one
-  // field, write — against the RAW Memory table, NEVER Memory.put() (the
-  // resource class): that would 403 this cross-agent write via its
-  // ownership check, and bypassing that check directly would risk letting
-  // this write path smuggle OTHER field changes through instead of just the
-  // count (RecordUsage.ts module doc's "WHY THIS IS ITS OWN ENDPOINT").
-  // Targeted usageCount-ONLY bump: a full-row read-modify-write through the
-  // shared helper, against the RAW Memory table, NEVER Memory.put() (the
-  // resource class): that would 403 this cross-agent write via its ownership
-  // check, and bypassing that check directly would risk letting this write
-  // path smuggle OTHER field changes through instead of just the count
-  // (RecordUsage.ts module doc's "WHY THIS IS ITS OWN ENDPOINT"). The helper
-  // confirms, inside its own transaction, that the stored row is still the one
-  // this contribution was checked against (flair#2441): a row deleted or purged
-  // after the read is not re-created (the plan skips an absent row), a same-id
-  // replace is refused, and a row in a scope that no longer reads is skipped.
+    const ledgerRecord: Record<string, unknown> = { id: ledgerId, agentId, memoryId, createdAt: now };
+    if (attribution) ledgerRecord.attribution = attribution;
+    // .put(), not .post(): Harper's raw TableResource has no default post()
+    // implementation for a static-style (non-`isCollection`-instantiated)
+    // call — confirmed live ("The MemoryUsage does not have a post method
+    // implemented", statusCode 405) — the SAME class of gotcha
+    // resources/Memory.ts documents for HTTP POST, but here it bites even
+    // this in-process call. Irrelevant anyway: ledgerId is already a
+    // deterministic composite key, so this is a create-with-explicit-id —
+    // exactly what PUT (upsert) is for, not an auto-generated-id insert.
+    await (databases as any).flair.MemoryUsage.put(ledgerRecord, owned);
+    return memory;
+  });
+  if (!prepared) return;
+
   await writeBackCommittedRow(
     (databases as any).flair.Memory,
     memoryId,
@@ -176,9 +268,7 @@ export async function recordUsageContribution(
       // above stays). The count is only ever bumped on a row in the agent's
       // read scope.
       if (!row || !canRead(row)) return { skip: true };
-      const usageRow = { ...row, usageCount: (row.usageCount ?? 0) + 1 };
-      stripUndeclaredMemoryAttributes(usageRow);
-      return { write: usageRow };
+      return { idempotent: false, commitMarkerField: "writeBackWriteId", update: { usageCount: (row.usageCount ?? 0) + 1 } };
     },
     {
       ctx,
@@ -186,9 +276,12 @@ export async function recordUsageContribution(
       // The row the contribution was checked against is the basis: the helper
       // refuses when the stored row is no longer it (a delete, a purge, or a
       // same-id replace with a new token).
-      expectedRow: memory,
+      expectedRow: prepared,
       pausePre: () => txnPausePoint("usage-count-pre"),
       pausePoint: () => txnPausePoint("usage-count"),
+      pauseAfterStage: () => txnPausePoint("usage-count-staged"),
+      pauseBeforeCommit: () => txnPausePoint("usage-count-commit"),
+      pauseBeforeVerify: () => txnPausePoint("usage-count-verify"),
     },
   );
 }
@@ -298,15 +391,16 @@ export async function recordCitations(
       if (!record || !scope.isAllowed(record)) continue;
       await recordFn(ctx, auth.agentId, id, undefined, now, scope.isAllowed);
     } catch (err) {
-      // Never let one bad id stop the batch — same no-op-on-error discipline
-      // as RecordUsage.post()'s loop, log server-side only.
+      // Log per-id failures without stopping the batch.
       if (err instanceof WriteBackConflictError) {
-        // flair#2441: the stored row is no longer the one read (a same-id
-        // replace, or a change found on every attempt); the count bump was
-        // refused and nothing was written.
-        console.error("recordCitations: not credited, stored_row_changed (no-op)", { memoryId: id, reason: "stored_row_changed", err });
+        console.error("recordCitations: %s, %s", err.outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed", err.outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", { memoryId: id, reason: err.outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", outcome: err.outcome, err });
+      } else if (err instanceof UsageLedgerReadError) {
+        // flair#2333: the ledger read that decides whether this pair already
+        // has a row failed — not "no row". This contribution is aborted (no
+        // ledger write, no count bump); the other ids stand.
+        console.error("recordCitations: not credited, ledger read failed (no-op)", { memoryId: id, ledgerId: err.ledgerId, reason: "ledger_read_failed", err });
       } else {
-        console.error("recordCitations: failed to credit (no-op)", { memoryId: id, err });
+        console.error("recordCitations: failed to credit", { memoryId: id, err });
       }
     }
   }
@@ -354,17 +448,15 @@ export async function recordUsageBatch(
     try {
       await recordFn(ctx, agentId, memoryId, attribution, now, scope.isAllowed);
     } catch (err) {
-      // Never let one bad id fail the whole batch, and never let an internal
-      // error leak existence information either — log server-side, collapse
-      // to the same no-op the response already returns for every other
-      // outcome.
+      // Log per-id failures without changing the response.
       if (err instanceof WriteBackConflictError) {
-        // flair#2441: the stored row is no longer the one read (a same-id
-        // replace, or a change found on every attempt); the count bump was
-        // refused and nothing was written.
-        console.error("RecordUsage.post: not recorded, stored_row_changed (treated as no-op)", { memoryId, reason: "stored_row_changed", err });
+        console.error("RecordUsage.post: %s, %s", err.outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed", err.outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", { memoryId, reason: err.outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", outcome: err.outcome, err });
+      } else if (err instanceof UsageLedgerReadError) {
+        // flair#2333: the ledger read failed — not "no row". This contribution
+        // is aborted (no ledger write, no count bump); the other ids stand.
+        console.error("RecordUsage.post: not recorded, ledger read failed (treated as no-op)", { memoryId, ledgerId: err.ledgerId, reason: "ledger_read_failed", err });
       } else {
-        console.error("RecordUsage.post: failed to record usage (treated as no-op)", { memoryId, err });
+        console.error("RecordUsage.post: failed to record usage", { memoryId, err });
       }
     }
   }

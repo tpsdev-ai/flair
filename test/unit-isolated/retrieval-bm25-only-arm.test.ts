@@ -97,10 +97,13 @@ const databasesMock = {
 mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { retrieveCandidates } = await import("../../resources/semantic-retrieval-core.ts");
+const { getModelId } = await import("../../resources/embeddings-provider.ts");
 
 // ─── Fixture: the two legs point in opposite directions ──────────────────────
 
 const AGENT = "agent-a";
+// These fixtures need trusted stamps to pass the returned-set filter.
+const CURRENT = getModelId();
 
 const qText = "apples oranges";
 // 4-dim unit embeddings: the query vector is [1,0,0,0].
@@ -114,8 +117,8 @@ const lexContent = "apples oranges harvest season";   // shares the query's toke
 function seed() {
   memoryStore = new Map();
   getCalls = [];
-  memoryStore.set("vec", { id: "vec", agentId: AGENT, content: vecContent, embedding: eVec, durability: "standard", createdAt: new Date().toISOString() });
-  memoryStore.set("lex", { id: "lex", agentId: AGENT, content: lexContent, embedding: eLex, durability: "standard", createdAt: new Date().toISOString() });
+  memoryStore.set("vec", { id: "vec", agentId: AGENT, content: vecContent, embedding: eVec, embeddingModel: CURRENT, durability: "standard", createdAt: new Date().toISOString() });
+  memoryStore.set("lex", { id: "lex", agentId: AGENT, content: lexContent, embedding: eLex, embeddingModel: CURRENT, durability: "standard", createdAt: new Date().toISOString() });
 }
 
 const baseConditions = [

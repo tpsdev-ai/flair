@@ -33,12 +33,38 @@ type Memory @table(database: "flair") {
                                # write) but never DECLARED in this schema, so it was storable but not
                                # queryable — Harper's Table.search({conditions}) rejects a condition on
                                # an undeclared attribute ("X is not a defined attribute"), which the
-                               # zero-touch migration runner's bounded detect()/countPending()/run()
-                               # queries (resources/migrations/embedding-stamp.ts: `embeddingModel
-                               # not_equal <current>`) need in order to stay O(1)-bounded rather than a
-                               # full-corpus scan on every boot. Purely additive — existing rows already
+                               # zero-touch migration runner's `embeddingModel not_equals <current>` query
+                               # (resources/migrations/embedding-stamp.ts) needs. Since flair#2465 only
+                               # detect() runs that query (first, before a scan); countPending() and run()
+                               # scan the whole table directly. Purely additive — existing rows already
                                # carry this value on disk; declaring it queryable changes nothing about
                                # what's written or how embeddings/prefixes behave (#689's gate untouched).
+  embeddedContentHash: String @indexed  # flair#2465: a stored text hash —
+                               # `computeContentHash(agentId, skillEmbedText(row))`, the function that
+                               # defines `contentHash`, applied to the field the row embeds from
+                               # (`trigger` for a skill-tagged row with a non-empty trigger, else
+                               # `content`). NEWLY COMPUTED over the text embedded when the server
+                               # computes a vector on a guarded path (Memory POST/PUT/PATCH embed,
+                               # re-embed PATCH, stamp migration fallback, auto-embed backfill) for a row
+                               # with a non-empty owner; null for an empty owner. RETAINED, not
+                               # recomputed, by a PUT/PATCH that carries a vector or stores one accepted
+                               # from the caller and by a skill successor that carries the stored
+                               # vector: a preserved value that may describe an earlier server-computed
+                               # vector. A POST or PUT create that stores a vector accepted from the
+                               # caller stores null; when redaction changes the text, the supplied
+                               # vector is discarded and the redacted text is embedded afresh, with a
+                               # new hash when that yields a vector.
+                               # An admin PATCH create drops a submitted value and can leave the field
+                               # absent; a `_reindex` PUT keeps the stored value and refuses a differing
+                               # one; a value received through federation is an unverified peer
+                               # assertion. The stamp migration treats a row as current when
+                               # `embeddingModel` is current-space AND this value is absent or equals the
+                               # EXPECTED hash of the row's current text; it re-queues a row whose value
+                               # differs (a live per-row scan). Nullable/additive: an absent value
+                               # bypasses only the hash comparison, as a matching one passes it; either
+                               # way the row still needs a current-space model. Distinct from
+                               # `contentHash`, which the feed stamps over `content` and an ordinary
+                               # Memory write does not maintain.
   tags: [String] @indexed
   durability: String @indexed
   source: String
@@ -72,17 +98,18 @@ type Memory @table(database: "flair") {
                                # /RecordUsage (resources/RecordUsage.ts) and citation-on-write
                                # (resources/Memory.ts post()/put() → recordCitations(), which also
                                # validates each cited id against the writer's read scope,
-                               # flair#775). It does a targeted get-then-put increment on this
-                               # field alone (never through Memory.put() — see RecordUsage.ts's
+                               # flair#775). It increments through the raw table (see RecordUsage.ts's
                                # module doc for why: usage feedback writes to ANOTHER agent's
                                # memory, and Memory's ownership check would 403 every legit
                                # call). Drives usageBoost in resources/scoring.ts, which replaces
                                # retrievalBoost in compositeScore (retrievalCount was the
                                # contaminated "retrieval counted as usage" signal root-caused in
                                # flair#623).
+  writeBackWriteId: String
   promotionStatus: String   # null | "pending" | "approved" | "rejected"
   promotedAt: String
   promotedBy: String        # authenticated agentId who approved
+  promotionContentHash: String  # server-only SHA-256 of the stored, post-redaction content at stamping time (flair#2478)
   archived: Boolean @indexed
   archivedAt: String
   archivedBy: String        # authenticated agentId who archived
@@ -366,6 +393,10 @@ type MemoryCandidate @table(database: "flair") @export {
   visibilityRationale: String      # flair#1257 slice 3: the team-relevance justification paired with
                                    # visibilityRuling — the auditable "why shared" recorded on the candidate.
                                    # Nullable/additive, same clean-upgrade contract as scopeTag above.
+  promotedRowId: String            # flair#2645: id of the Memory row the auto-promote sweep wrote for this
+                                   # candidate. Server-written; a later sweep reuses only the row this names.
+  promotedRowInstanceToken: String # flair#2645: that row's server-stamped incarnation token, recorded with the
+                                   # id. Nullable/additive — candidates written before this read null.
 }
 
 # Asset — binary blobs (screenshots, images) stored out-of-record via Harper's

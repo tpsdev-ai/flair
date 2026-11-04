@@ -4,7 +4,8 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const agent = (id: string) => ({ id, ...nacl.sign.keyPair() });
 const owner = agent("authority-owner"), other = agent("authority-other");
@@ -26,10 +27,22 @@ async function op(body: Record<string, unknown>) {
 async function seed(table: string, records: Record<string, unknown>[]) {
   return op({ operation: "upsert", database: "flair", table, records });
 }
+/** Seed an approved row through the trusted review workflow. */
+async function seedApproved(claim: string): Promise<string> {
+  const candidateId = `authority-echo-${randomUUID()}`;
+  await seed("MemoryCandidate", [{ id: candidateId, agentId: owner.id, claim, status: "pending", generatedAt: now, createdAt: now, sourceMemoryIds: [], visibilityRuling: "private" }]);
+  const promoted = await request(owner, "POST", "/PromoteMemoryCandidate", { candidateId, rationale: "verified" });
+  expect(promoted.status, await promoted.clone().text()).toBe(200);
+  const { memoryId, decidedAt } = (await promoted.json()) as { memoryId: string; decidedAt: string };
+  const stored = await readUntil(memoryId, (row) => row?.promotionStatus === "approved" && row?.promotedAt === decidedAt && row?.promotedBy === owner.id);
+  expect(stored).toBeDefined();
+  expect(stored.promotionStatus).toBe("approved");
+  expect(stored.promotedAt).toBeTruthy();
+  expect(stored.promotedAt).toBe(decidedAt);
+  expect(stored.promotedBy).toBe(owner.id);
+  return memoryId;
+}
 const read = async (id: string) => (await op({ operation: "search_by_id", database: "flair", table: "Memory", ids: [id], get_attributes: ["*"] }))[0];
-/** HTTP PUT/PATCH can 200 before ops search_by_id sees the commit (native-spawn
- *  deferred-txn / ops-wumd class). Poll the same ops read the assertions use;
- *  the expected content/stamps do not change. */
 async function readUntil(id: string, pred: (row: any) => boolean): Promise<any> {
   const deadline = Date.now() + 5_000;
   let row = await read(id);
@@ -43,11 +56,11 @@ beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires isolated Harper; unset HARPER_HTTP_URL");
   harper = await startHarper();
   await seed("Agent", [owner, other].map(a => ({ id: a.id, name: a.id, role: "agent", publicKey: Buffer.from(a.publicKey).toString("base64"), createdAt: now })));
-}, 120_000);
-afterAll(async () => { if (harper) await stopHarper(harper); });
+}, HARPER_START_BUDGET_MS);
+afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
 describe("Memory authority fields over HTTP", () => {
-  test("direct PUT and PATCH cannot forge, clear or replace workflow stamps", async () => {
+  test("PUT and PATCH reject changed authority-field values", async () => {
     await seed("Memory", [{ id: "stamped", agentId: owner.id, content: "original", durability: "persistent", createdAt: now, promotionStatus: "approved", promotedAt: now, promotedBy: "trusted-reviewer" }]);
     for (const method of ["PUT", "PATCH"]) {
       for (const field of ["promotionStatus", "promotedAt", "promotedBy"]) {
@@ -65,6 +78,20 @@ describe("Memory authority fields over HTTP", () => {
       expect(await read(`new-${field}`)).toBeUndefined();
     }
   }, 30_000);
+  test("request bodies cannot set a write-back marker", async () => {
+    const id = "authority-write-marker";
+    await seed("Memory", [{ id, agentId: owner.id, content: "marker guard", createdAt: now, writeBackWriteId: "stored-attempt" }]);
+    for (const method of ["PUT", "PATCH"]) {
+      for (const value of ["forged", null]) {
+        expect((await request(owner, method, `/Memory/${id}`, { writeBackWriteId: value })).status).toBe(method === "PATCH" ? 204 : 403);
+        expect((await read(id)).writeBackWriteId).toBe("stored-attempt");
+      }
+    }
+    expect((await request(owner, "POST", "/Memory", { id: `${id}-post`, agentId: owner.id, content: "forged marker", writeBackWriteId: "forged" })).status).toBe(403);
+    expect((await request(owner, "POST", "/FeedMemories", { id: `${id}-feed`, content: "forged feed marker", writeBackWriteId: "forged" })).status).toBe(403);
+    const row = await read(id);
+    expect(row.writeBackWriteId).toBe("stored-attempt");
+  }, 60_000);
   test("administrator REST writes cannot manufacture verdicts either", async () => {
     for (const method of ["PUT", "PATCH"]) {
       const response = await fetch(`${harper.httpURL}/Memory/stamped`, {
@@ -87,21 +114,21 @@ describe("Memory authority fields over HTTP", () => {
   }, 120_000);
   test("a content-changing write cannot keep an echoed approved verdict", async () => {
     // Own row — do not reuse "stamped" after the prior test's ops-blob PUT.
-    await seed("Memory", [{ id: "stamped-echo", agentId: owner.id, content: "original", durability: "persistent", createdAt: now, promotionStatus: "approved", promotedAt: now, promotedBy: "trusted-reviewer" }]);
-    const existing = await read("stamped-echo");
-    const put = await request(owner, "PUT", "/Memory/stamped-echo", {
-      id: "stamped-echo", agentId: owner.id, content: "unreviewed claim under an echoed stamp",
+    const echoId = await seedApproved("original");
+    const existing = await read(echoId);
+    const put = await request(owner, "PUT", `/Memory/${echoId}`, {
+      id: echoId, agentId: owner.id, content: "unreviewed claim under an echoed stamp",
       durability: "persistent", promotionStatus: existing.promotionStatus, promotedAt: existing.promotedAt, promotedBy: existing.promotedBy,
     });
     expect(put.status, await put.clone().text()).toBe(200);
-    const afterPut = await readUntil("stamped-echo", (row) => row?.content === "unreviewed claim under an echoed stamp");
+    const afterPut = await readUntil(echoId, (row) => row?.content === "unreviewed claim under an echoed stamp");
     expect(afterPut.content).toBe("unreviewed claim under an echoed stamp");
     expect(afterPut.promotionStatus).toBeFalsy();
     expect(afterPut.promotedBy).toBeFalsy();
-    await seed("Memory", [{ id: "stamped-patch", agentId: owner.id, content: "original", durability: "persistent", createdAt: now, promotionStatus: "approved", promotedAt: now, promotedBy: "trusted-reviewer" }]);
-    const patch = await request(owner, "PATCH", "/Memory/stamped-patch", { content: "patched unreviewed claim" });
+    const patchId = await seedApproved("original");
+    const patch = await request(owner, "PATCH", `/Memory/${patchId}`, { content: "patched unreviewed claim" });
     expect(patch.status, await patch.clone().text()).toBe(204);
-    const afterPatch = await readUntil("stamped-patch", (row) => row?.content === "patched unreviewed claim");
+    const afterPatch = await readUntil(patchId, (row) => row?.content === "patched unreviewed claim");
     expect(afterPatch.content).toBe("patched unreviewed claim");
     expect(afterPatch.promotionStatus).toBeFalsy();
   }, 120_000);
@@ -145,8 +172,9 @@ describe("Memory authority fields over HTTP", () => {
     try {
       await writeFile(join(home, `${owner.id}.key`), owner.secretKey.slice(0, 32), { mode: 0o600 });
       const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(FLAIR_|HARPER_|HDB_|FABRIC_)/.test(key)));
-      const child = Bun.spawn(["bun", "dist/cli.js", "rem", "promote", "cli-candidate", "--to", "memory", "--rationale", "verified rollback procedure"], {
-        env: { ...env, HOME: home, FLAIR_URL: harper.httpURL, FLAIR_AGENT_ID: owner.id, FLAIR_KEY_DIR: home }, stdout: "pipe", stderr: "pipe",
+      const childEnv = { ...env, HOME: home, FLAIR_URL: harper.httpURL, FLAIR_AGENT_ID: owner.id, FLAIR_KEY_DIR: home };
+      const child = Bun.spawn([nodeBin({ env: childEnv }), "dist/cli.js", "rem", "promote", "cli-candidate", "--to", "memory", "--rationale", "verified rollback procedure"], {
+        env: childEnv, stdout: "pipe", stderr: "pipe", timeout: 20_000,
       });
       const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
       expect(code, stderr).toBe(0);

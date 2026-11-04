@@ -8,7 +8,7 @@ import {
   makeClient,
   type FlairCredentials,
 } from "../../packages/n8n-nodes-flair/src/client";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent {
   id: string;
@@ -110,7 +110,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("n8n signs as the credential's agent (flair#1942)", () => {
   test("the writer's own agent reads both its memories — the writes landed signed", async () => {

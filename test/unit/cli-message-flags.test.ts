@@ -50,6 +50,7 @@
 // text, and the one-to-one test fails when an entry matches no finding or more
 // than one, or a finding matches more than one entry. So a second message with an exempted flag is
 // not covered by the first one's entry, and a fixed defect's entry has to go.
+import { shellScript } from "../helpers/shell-script.ts";
 import { describe, expect, test, spyOn } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -694,17 +695,24 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
   // flag in the same file must fail, whether it copies the original literal
   // exactly (the entry then matches two findings) or words it differently (a
   // finding no entry covers). The unmutated file is the control.
-  test("flair#2123: both inline-admin-password warnings give the history-safe remedy", async () => {
+  test("agent list and rotate-key warn only for inline admin passwords", async () => {
     const home = mkdtempSync(join(tmpdir(), "flair-inline-password-warning-"));
     const warning =
       "warning: --admin-pass passed inline. Use FLAIR_ADMIN_PASS without typing its value into a recorded " +
       "shell line (for example, read it from the admin-pass file).";
-    const rows = [
-      ["agent", "list", "--admin-pass", "test-only-inline-pass", "--port", "2"],
-      ["agent", "rotate-key", "warning-test", "--admin-pass", "test-only-inline-pass", "--ops-port", "1", "--keys-dir", join(home, "keys")],
+    const password = "test-only-inline-pass";
+    const passFile = join(home, "admin-pass");
+    writeFileSync(passFile, `${password}\n`, { mode: 0o600 });
+    const commands = [
+      ["agent", "list", "--port", "2"],
+      ["agent", "rotate-key", "warning-test", "--ops-port", "1", "--keys-dir", join(home, "keys")],
     ];
+    const rows = commands.flatMap((argv) => [
+      { argv: [...argv, "--admin-pass", password], warns: true },
+      { argv: [...argv, "--admin-pass-file", passFile], warns: false },
+    ]);
     try {
-      for (const argv of rows) {
+      for (const { argv, warns } of rows) {
         const env: Record<string, string> = { ...process.env, HOME: home } as Record<string, string>;
         for (const key of ["FLAIR_ADMIN_PASS", "FLAIR_OPS_TARGET", "FLAIR_TARGET", "HDB_ADMIN_PASSWORD"]) delete env[key];
         const child = Bun.spawn(["bun", join(REPO, "src/cli.ts"), ...argv], {
@@ -715,7 +723,8 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
         });
         const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited]);
         expect(exitCode).not.toBe(0);
-        expect(stderr.split(warning)).toHaveLength(2);
+        expect(stderr.split(warning)).toHaveLength(warns ? 2 : 1);
+        expect(stderr).not.toContain(password);
         expect(stderr).not.toContain("the FLAIR_ADMIN_PASS env to keep secrets out of shell history");
       }
     } finally {
@@ -725,11 +734,13 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
 
   // flair#2124: capture the same next-steps printer the deploy action calls.
   // Execute its example through a POSIX shell and the real commander entry point
-  // with an owner-only password file. The URL includes shell metacharacters and
-  // an embedded quote; reaching the Agent read path proves --target stayed one
-  // value through shell parsing and passed the remote credential guard.
+  // with an owner-only password file. The URL's path includes shell
+  // metacharacters and an embedded quote (the printer shows a target as
+  // scheme, host, port and path, so a query would not be printed); reaching the
+  // Agent read path proves --target stayed one value through shell parsing and
+  // passed the remote credential guard.
   test("flair#2124: the emitted deploy example reaches the Agent read path", async () => {
-    const target = "http://127.0.0.1:2/path?owner=O'Brien&mode=deploy";
+    const target = "http://127.0.0.1:2/path/O'Brien&mode=deploy";
     const output: string[] = [];
     const log = spyOn(console, "log").mockImplementation((line: unknown) => { output.push(String(line)); });
     try {
@@ -739,7 +750,7 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
     }
     const line = output.find((l) => l.trim().startsWith("flair agent add "));
     expect(line).toBeTruthy();
-    expect(line).toContain(`--target 'http://127.0.0.1:2/path?owner=O'\\''Brien&mode=deploy'`);
+    expect(line).toContain(`--target 'http://127.0.0.1:2/path/O'\\''Brien&mode=deploy'`);
     const accepted = registry.get("agent add");
     expect(accepted).toBeTruthy();
     for (const flag of line!.match(FLAG_TOKEN) ?? []) expect(accepted!.has(flag)).toBe(true);
@@ -757,7 +768,7 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
       const env: Record<string, string> = { ...process.env, HOME: home } as Record<string, string>;
       delete env.FLAIR_ADMIN_PASS;
       delete env.FLAIR_OPS_TARGET;
-      const child = Bun.spawn(["/bin/sh", "-c", shellCommand], {
+      const child = Bun.spawn(["/bin/sh", shellScript(shellCommand)], {
         timeout: 20_000,
         env,
         stdout: "pipe",
@@ -773,6 +784,20 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
       rmSync(home, { recursive: true, force: true });
     }
   }, 30_000);
+
+  test("the deploy next-steps line prints the target as scheme, host, port and path only", () => {
+    const output: string[] = [];
+    const log = spyOn(console, "log").mockImplementation((line: unknown) => { output.push(String(line)); });
+    try {
+      printDeployNextSteps("https://deployer:not-a-real-secret@flair.example.invalid/flair?token=not-a-real-secret#not-a-real-secret");
+    } finally {
+      log.mockRestore();
+    }
+    const line = output.find((l) => l.trim().startsWith("flair agent add "));
+    expect(line).toContain("--target 'https://flair.example.invalid/flair'");
+    expect(output.join("\n")).not.toContain("not-a-real-secret");
+    expect(output.join("\n")).not.toContain("deployer");
+  });
 
   // A mutation run against the real sources: one bogus flag put back into one
   // message must be found, in the command it belongs to; the unmutated file is
@@ -792,7 +817,9 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
       file: "src/lib/mcp-enable.ts",
       from: "Environment, then re-run with --confirm-secrets-applied.",
       to: "Environment, then re-run with --confirm-secrets-applied-now.",
-      expected: "--confirm-secrets-applied-now → 18 commands in reach",
+      // flair#2283: `flair doctor` and `flair deploy` now import this module for
+      // the shared discovery discriminator, widening the fallback reach.
+      expected: "--confirm-secrets-applied-now → 36 commands in reach",
     },
   ];
   for (const row of mutationRows) {

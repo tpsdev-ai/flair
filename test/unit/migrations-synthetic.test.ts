@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, mock } from "bun:test";
 import { makeFakeWriteBack } from "../helpers/fake-write-back";
+import { memoryLockDouble } from "../helpers/memory-lock-double";
 
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
@@ -27,20 +28,36 @@ const makeMigration = (getTable: () => any, writeBack = makeFakeWriteBack()) =>
 
 type Row = Record<string, unknown> & { id: string };
 
+/** One write the fake table received, by method and the field names it named. */
+type TableWrite = { method: "put" | "update"; id: string; fields: string[] };
+
 function makeFakeMemoryTable(seed: Row[]) {
   const store = new Map<string, Row>(seed.map((r) => [r.id, { ...r }]));
   const puts: Row[] = [];
+  const writes: TableWrite[] = [];
   return {
     store,
     puts,
+    writes,
     table: {
+      // flair#2478: the stamp write runs under the row's per-id Memory lock.
+      primaryStore: memoryLockDouble(),
       async get(id: string) {
         return store.has(id) ? { ...store.get(id)! } : null;
       },
       async put(content: Row) {
         store.set(content.id, { ...content });
         puts.push({ ...content });
+        writes.push({ method: "put", id: content.id, fields: Object.keys(content).sort() });
         return content;
+      },
+      async update(id: string, patch: Record<string, unknown>) {
+        const current = store.get(id) ?? { id };
+        const merged = { ...current, ...patch } as Row;
+        store.set(id, { ...merged });
+        puts.push({ ...merged });
+        writes.push({ method: "update", id, fields: Object.keys(patch).sort() });
+        return merged;
       },
       search(query: any): AsyncIterable<Row> {
         const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
@@ -118,7 +135,7 @@ describe("synthetic migration — detect/run/marker convergence (the full runner
     expect(await m.countPending()).toBe(1);
   });
 
-  it("run() stamps `source` to the target marker via a full-record merge, preserving other fields", async () => {
+  it("run() stamps `source` to the target marker with a source-only update, preserving other fields", async () => {
     const { table, store } = makeFakeMemoryTable([
       { id: "s1", content: "x", agentId: RESERVED_TEST_AGENT_ID, tags: ["keep-me"], source: "not-yet" },
     ]);
@@ -206,3 +223,14 @@ describe("synthetic migration — simulated write-back retry (flair#2354)", () =
     expect(store.get("s1")?.agentId).toBe("replacement-owner");
     expect(store.get("s1")?.source).toBe("pending");
   });
+
+describe("synthetic migration — the stamp is a field-only update (flair#2494)", () => {
+  it("stamps `source` with exactly one incremental update naming only source, never a full-row put", async () => {
+    const { table, writes } = makeFakeMemoryTable([
+      { id: "s1", content: "x", agentId: RESERVED_TEST_AGENT_ID, tags: ["keep-me"], source: "not-yet" },
+    ]);
+    const m = makeMigration(() => table);
+    expect((await m.run(50)).processed).toBe(1);
+    expect(writes).toEqual([{ method: "update", id: "s1", fields: ["source"] }]);
+  });
+});

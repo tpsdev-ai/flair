@@ -154,3 +154,84 @@ describe("flair#2359 — Agent PATCH refuses an id outside the shared rule, stor
     expect(agentStore.size).toBe(0);
   });
 });
+
+describe("guarded home refusal messages", () => {
+  async function withTransactionMock(work: () => Promise<void>): Promise<void> {
+    const globals = globalThis as any;
+    const saved = globals.transaction;
+    globals.transaction = async (_ctx: unknown, fn: () => Promise<unknown>) => fn();
+    try {
+      await work();
+    } finally {
+      globals.transaction = saved;
+    }
+  }
+
+  it("a failed Instance read reports that a canonical row could not be confirmed", async () => {
+    const saved = databasesMock.flair.Instance.search;
+    databasesMock.flair.Instance.search = () => { throw new Error("read failed"); };
+    try {
+      await withTransactionMock(async () => {
+        const res = await makeAgent(undefined).patch({ id: "known-id", flairStampHome: true });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual({
+          error: "agent_home_stamp_no_instance",
+          message: "could not confirm a single canonical Instance row to stamp as the home; the row was not written",
+        });
+        expect(agentStore.size).toBe(0);
+      });
+    } finally {
+      databasesMock.flair.Instance.search = saved;
+    }
+  });
+
+  it("a stored home with an unresolved local ID reports a differing home", async () => {
+    instanceRow = null;
+    const row = { id: "known-id", name: "Known", publicKey: "test-key", createdAt: "2026-01-01", originatorInstanceId: "stored-home" };
+    agentStore.set(row.id, row);
+    const table = databasesMock.flair.Agent as any;
+    table.update = async () => { throw new Error("unexpected write"); };
+    try {
+      await withTransactionMock(async () => {
+        const res = await makeAgent(undefined).patch({ id: row.id, flairPrincipalWriteBack: true });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual({
+          error: "originator_instance_immutable",
+          message: "originator_instance_immutable: the stored home differs from the resolved local ID; refusing to change it",
+        });
+        expect(agentStore.get(row.id)).toEqual(row);
+      });
+    } finally {
+      delete table.update;
+    }
+  });
+
+  it("an absent row reports that a stored row could not be confirmed", async () => {
+    const table = databasesMock.flair.Agent as any;
+    table.update = async () => { throw new Error("unexpected write"); };
+    try {
+      await withTransactionMock(async () => {
+        const res = await makeAgent(undefined).patch({ id: "known-id", flairPrincipalWriteBack: true });
+        expect(res.status).toBe(404);
+        expect((await res.json()).message).toBe("agent_principal_write_back_no_row: could not confirm a stored agent row; the write-back was refused and did not re-create it");
+        expect(agentStore.size).toBe(0);
+      });
+    } finally {
+      delete table.update;
+    }
+  });
+
+  it("a missing target does not assert that a stored home differs", async () => {
+    const res = await makeAgent(undefined).patch({ flairPrincipalWriteBack: true });
+    expect(res.status).toBe(409);
+    expect((await res.json()).message).toBe("could not confirm an eligible agent row for write-back; refusing to change it");
+  });
+
+  it("an unavailable table writer does not assert that a stored home differs", async () => {
+    await withTransactionMock(async () => {
+      const res = await makeAgent(undefined).patch({ id: "known-id", flairPrincipalWriteBack: true });
+      expect(res.status).toBe(409);
+      expect((await res.json()).message).toBe("could not confirm an eligible agent row for write-back; refusing to change it");
+    });
+  });
+});

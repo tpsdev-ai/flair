@@ -36,7 +36,7 @@ function makeLockTree(): { dir: string; lock: string } {
  *  RocksDB uses fcntl(F_SETLK), NOT flock(2) — so the holder must use fcntl too. */
 function holdLock(lock: string): ChildProcess {
   const script = `import fcntl,time\nf=open(${JSON.stringify(lock)},'r+')\nfcntl.lockf(f,fcntl.LOCK_EX|fcntl.LOCK_NB)\ntime.sleep(30)`;
-  return spawn("python3", ["-c", script], { detached: true, stdio: "ignore" });
+  return spawn("python3", ["-c", script], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise harper-lifecycle-lock process fixture arguments" }, detached: true, stdio: "ignore" });
 }
 
 /** Release the lock by killing the whole process group. */

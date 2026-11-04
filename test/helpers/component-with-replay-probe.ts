@@ -43,6 +43,13 @@ export const OAUTH_SINGLE_USE_PROBE: ProbeFiles = {
   out: "oauth-single-use-probe-2145",
 };
 
+/** flair#2688's OrgEventCatchup read recorder (test/integration/a2a-message-stream-2688.test.ts). */
+export const CATCHUP_READ_PROBE: ProbeFiles = {
+  source: join("test", "fixtures", "catchup-read-probe-2688", "probe.js"),
+  target: join("dist", "resources", "zz-catchup-read-probe-2688.js"),
+  out: "catchup-read-probe-2688",
+};
+
 export interface ProbeComponent {
   /** Pass as `startHarper({ cwd })`. */
   dir: string;

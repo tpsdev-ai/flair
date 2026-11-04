@@ -4,7 +4,8 @@
  * embedding: each owned write re-reads the full row. Isolated: owns the
  * harper, write-back and Memory mocks.
  */
-import { expect, mock, test } from "bun:test";
+import { beforeEach, expect, mock, test } from "bun:test";
+import { memoryLockDouble } from "../helpers/memory-lock-double.ts";
 
 const IDENTITY = ["id", "agentId", "instanceToken", "contentHash", "createdAt"];
 const rows = [
@@ -12,25 +13,37 @@ const rows = [
   { id: "r2", agentId: "agent-a", content: "two", contentHash: "h2", createdAt: "2026-01-02T00:00:00.000Z", instanceToken: "t2", embedding: [0.3, 0.4], embeddingModel: "model-a" },
 ];
 const expectedRows: any[] = [];
+let simulateWrite = false;
+let missingIndex = false;
+beforeEach(() => {
+  expectedRows.length = 0;
+  simulateWrite = false;
+  missingIndex = false;
+});
 
 mock.module("harper", () => ({
   Resource: class {},
   databases: {
     flair: {
       Memory: {
-        search: () => (async function* () { for (const row of rows) yield { ...row }; })(),
+        primaryStore: memoryLockDouble(),
+        search: (query?: any) => (async function* () { for (const row of rows) if (!query || !missingIndex) yield { ...row }; })(),
         get: async (id: string) => rows.find((row) => row.id === id) ?? null,
         put: async () => {},
       },
     },
   },
 }));
-mock.module("../../resources/agent-auth.ts", () => ({ isAdmin: async () => true, allowAdmin: async () => true }));
+mock.module("../../resources/agent-auth.ts", () => ({ annotatedCallerIsAdmin: async () => true, allowAdmin: async () => true }));
 mock.module("../../resources/Memory.ts", () => ({ buildReindexRow: (content: any) => ({ row: content }) }));
 mock.module("../../resources/write-back.ts", () => ({
+  WriteBackConflictError: class extends Error {
+    constructor(label: string, id: string, _attempts: number, readonly outcome: "conflict" | "unconfirmed" = "conflict") { super(`${label}: ${id} ${outcome}`); }
+  },
   writeBackIdentity: (row: Record<string, unknown>) => Object.fromEntries(IDENTITY.map((field) => [field, row[field]])),
-  writeBackCommittedRow: async (_table: unknown, _id: string, _plan: unknown, opts: any) => {
+  writeBackCommittedRow: async (_table: unknown, id: string, plan: any, opts: any) => {
     expectedRows.push(opts.expectedRow);
+    if (simulateWrite) return plan(rows.find(row => row.id === id));
     return { skip: true };
   },
 }));
@@ -48,3 +61,19 @@ test("each write-back is handed only the identity fields of its scanned row", as
     expect(expected.instanceToken).toBe(rows[i].instanceToken);
   }
 });
+
+for (const missing of [false, true]) {
+  test(`reindex count requires an agentId index result (missing: ${missing})`, async () => {
+    simulateWrite = true;
+    missingIndex = missing;
+    const r: any = new (MemoryReindex as any)();
+    r.getContext = () => ({ request: { headers: new Headers({ "x-tps-agent": "admin" }) } });
+    const result = await r.post({});
+    expect(result.stats.reindexed).toBe(missing ? 0 : rows.length);
+    expect(result.stats.errors).toBe(missing ? rows.length : 0);
+    if (missing) {
+      expect(result.stats.errorSamples[0].message).toContain("was confirmed after commit but is now absent from the agentId index query (index unconfirmed)");
+      expect(result.stats.errorSamples[0].outcome).toBe("unconfirmed");
+    }
+  });
+}

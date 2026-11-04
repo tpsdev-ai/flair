@@ -155,6 +155,14 @@ for (const scenario of ["own-stopped", "own-stopped-real-free"] as const) {
     const { result, events, actions } = runPlain(scenario);
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stderr).toMatch(new RegExp(`port ${HTTP_PORT}(, pid 4242)?: TCP readiness check failed`));
+    // flair#2568: this init spawned nothing — it found the instance running —
+    // so the diagnostic names a single check and claims neither a wait nor a
+    // spawned instance.
+    expect(result.stderr).toContain(
+      "TCP readiness check failed: no listener (phase: TCP readiness check of an instance this init did not spawn; checked once, no wait).",
+    );
+    expect(result.stderr).not.toContain("spawned instance to listen");
+    expect(result.stderr).not.toMatch(/still free after \d+ms/);
     expect(result.stderr).not.toMatch(/has a listener|occupied|not attributed|attribution to this data directory/);
     expect(actions).toEqual([]);
     expect(events.some(e => e.kind === "auth")).toBe(false);

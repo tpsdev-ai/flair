@@ -14,7 +14,7 @@ import { TPS_ED25519_ROUTES } from "../helpers/tps-ed25519-routes.ts";
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID, randomBytes } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureFlairPairInitiatorRole } from "../../src/cli";
 
 // ─── Crypto / header helpers (same pattern as ed25519-auth-hnsw.test.ts) ─────
@@ -237,7 +237,7 @@ describe("auth-middleware e2e (real Harper)", () => {
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // AUTH INVARIANTS: no Authorization header → auth rejection on guarded paths.

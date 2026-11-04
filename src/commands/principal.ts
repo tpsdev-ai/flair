@@ -29,10 +29,11 @@ import {
   defaultKeysDir,
   resolveLocalAdminPass,
   resolveAdminUser,
+  addAdminPassOptions,
 } from "../lib/auth-resolve.js";
 import { resolveOpsUrl } from "../lib/mcp-enable.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
-import { agentHomeEndpoint, planAgentHomeWrite, readStoredAgentHome, resolveTargetInstanceId } from "../lib/agent-home.js";
+import { agentHomeEndpoint, planAgentHomeWrite, readStoredAgentHome, resolveTargetInstanceId, AGENT_HOME_IMMUTABLE_ERROR, AGENT_PRINCIPAL_WRITE_BACK_FIELD, AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR } from "../lib/agent-home.js";
 import { fetchErrorLabel, redactUrl } from "./federation.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
@@ -50,6 +51,8 @@ export type PrincipalCli = {
   pubKeyPath: (agentId: string, keysDir: string) => string;
   relativeTime: (iso: string | null | undefined) => string;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
+  resolveHttpPort: (opts: { port?: string | number; dataDir?: string }, mode?: "address" | "create") => number;
+  resolveAgentHomeTarget: (opts: { port?: string | number; opsPort?: string | number; dataDir?: string }) => { httpPort: number; opsPort: number };
 };
 
 let cli: PrincipalCli;
@@ -67,6 +70,8 @@ const pubKeyPath = (agentId: string, keysDir: string): string => cli.pubKeyPath(
 const relativeTime = (iso: string | null | undefined): string => cli.relativeTime(iso);
 const resolveOpsPort = (opts: { opsPort?: string | number; port?: string | number }): number =>
   cli.resolveOpsPort(opts);
+const resolveAgentHomeTarget = (opts: { port?: string | number; opsPort?: string | number; dataDir?: string }): { httpPort: number; opsPort: number } =>
+  cli.resolveAgentHomeTarget(opts);
 
 const PRINCIPAL_OPS_TIMEOUT_MS = 10_000;
 
@@ -218,8 +223,7 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
 
 /** Both state verbs accept the same target and admin credentials. */
 function registerPrincipalStatusCommand(command: Command, status: "active" | "deactivated"): void {
-  command
-    .option("--admin-pass <pass>", "Admin password; required explicitly for a remote --instance")
+  addAdminPassOptions(command, "Admin password; required explicitly for a remote --instance")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port (local target)")
     .option("--instance <url>", "Remote Flair instance (else FLAIR_URL); its ops API is derived as in mcp enable")
@@ -253,16 +257,18 @@ export function register(program: Command): void {
 
   const principal = program.command("principal").description("Manage principals (humans and agents)");
 
-  principal
-    .command("add <id>")
-    .description("Create a new principal")
-    .option("--kind <kind>", "Principal kind: human or agent", "agent")
-    .option("--name <name>", "Display name (defaults to id)")
-    .option("--admin", "Grant admin privileges")
-    .option("--trust <tier>", "Default trust tier: endorsed, corroborated, or unverified")
-    .option("--runtime <runtime>", "Runtime: openclaw, claude-code, headless, external")
-    .option("--port <port>", "Harper HTTP port")
-    .option("--admin-pass <pass>", "Admin password for registration")
+  addAdminPassOptions(
+    principal
+      .command("add <id>")
+      .description("Create a new principal")
+      .option("--kind <kind>", "Principal kind: human or agent", "agent")
+      .option("--name <name>", "Display name (defaults to id)")
+      .option("--admin", "Grant admin privileges")
+      .option("--trust <tier>", "Default trust tier: endorsed, corroborated, or unverified")
+      .option("--runtime <runtime>", "Runtime: openclaw, claude-code, headless, external")
+      .option("--port <port>", "Harper HTTP port"),
+    "Admin password for registration",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .option("--ops-port <port>", "Harper operations API port")
@@ -275,7 +281,24 @@ export function register(program: Command): void {
         console.error(`Error: ${invalidAgentIdMessage(id)}`);
         process.exit(1);
       }
-      const opsPort = resolveOpsPort(opts);
+      // flair#2474 — pair the ops port and the HTTP port. `principal add` reads
+      // the stored home through the ops API and sends its guarded write-back to
+      // the Agent RESOURCE on the HTTP port; resolving the two INDEPENDENTLY
+      // would let `--ops-port` name one instance and `--port` another, so the
+      // home is read from the first and written to the second. A target the
+      // configured pair contradicts, or one with a single port named and no
+      // complete configured pair, is refused by name (`ambiguous_instance_target`)
+      // BEFORE any key file is written or any insert attempted. Two named ports
+      // that match neither side of the configured pair are used as given, without
+      // verification (see resolveAgentHomeTarget).
+      let target: { httpPort: number; opsPort: number };
+      try {
+        target = resolveAgentHomeTarget(opts);
+      } catch (err: any) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+      }
+      const opsPort = target.opsPort;
       const keysDir: string = opts.keysDir ?? defaultKeysDir();
       const adminUser = resolveAdminUser(opts.adminUser);
       const kind: string = opts.kind ?? "agent";
@@ -284,9 +307,6 @@ export function register(program: Command): void {
       const trustTier: string = opts.trust ?? (isAdmin ? "endorsed" : "unverified");
       const runtime: string | undefined = opts.runtime;
 
-      // #590 — same local-only fallback as `agent add`: FLAIR_ADMIN_PASS env, then
-      // the secure ~/.flair/admin-pass file (mode 0600). `principal add` has no
-      // --target/--ops-target (always localhost), so the fallback always applies.
       let adminPass: string | undefined;
       try {
         adminPass = resolveLocalAdminPass(opts.adminPass);
@@ -327,14 +347,25 @@ export function register(program: Command): void {
       // Insert via operations API with Principal fields
       const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
-      // flair#2433 — a NEW row's home is THIS instance's federation id,
-      // resolved through the one shared rule. An upsert over an existing row
-      // never writes a home: read it first and refuse a change with a named
-      // error (the home is immutable after create). A failed read is
-      // UNREADABLE, not "no home", and is refused the same way.
-      const homeEndpoint = agentHomeEndpoint(opsPort, adminUser, adminPass);
-      const home = await resolveTargetInstanceId(homeEndpoint);
-      const existingHome = await readStoredAgentHome({ opsUrl: `http://127.0.0.1:${opsPort}/`, authHeader: auth, id });
+      // flair#2433 / flair#2473 — the HOME ASSIGNMENT on a create is THIS
+      // instance's federation id, resolved through the one shared rule, and it
+      // rides on the `insert` itself — so a row created at write time carries it,
+      // even one deleted since this read. That assignment is CREATE-ONLY: an
+      // insert over a row that already exists is SKIPPED by Harper, so this insert
+      // does not replace a stored home (other fields of an existing row may still
+      // be updated by the write-back below). A row with a home that DIFFERS from
+      // this instance's is refused with `originator_instance_immutable` when this
+      // command's reads or the resource's reads see it; an insert the operations
+      // API reports neither inserted nor skipped is a failure, not a success. A
+      // failed read is UNREADABLE, not "no home", and refused.
+      const opsUrl = `http://127.0.0.1:${opsPort}/`;
+      // The instance's HTTP port, where the Agent RESOURCE lives. The write-back
+      // goes to the resource (a guarded REST PATCH), not the raw ops API, so it
+      // runs in an owned transaction (flair#2473). `target` pairs this with the
+      // ops port above (flair#2474).
+      const httpUrl = `http://127.0.0.1:${target.httpPort}/`;
+      const home = await resolveTargetInstanceId(agentHomeEndpoint(opsPort, adminUser, adminPass));
+      const existingHome = await readStoredAgentHome({ opsUrl, authHeader: auth, id });
       const homePlan = planAgentHomeWrite(existingHome, home, id);
       if (homePlan.refuse) {
         console.error(`Error: ${homePlan.message}`);
@@ -360,19 +391,77 @@ export function register(program: Command): void {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-      // Only a create stamps a home; over a found row the stored value stands.
-      const homeWrite = homePlan as Extract<typeof homePlan, { refuse: false }>;
-      if (homeWrite.stamp) record.originatorInstanceId = homeWrite.home;
 
-      const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      // 1) Create-only. The home rides on THIS insert (so a row the insert
+      //    creates at write time carries it); over an existing row the insert is
+      //    skipped and the stored home stands.
+      const createRecord = { ...record, originatorInstanceId: home };
+      const createRes = await fetch(opsUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: auth },
-        body: JSON.stringify({ operation: "upsert", database: "flair", table: "Agent", records: [record] }),
+        body: JSON.stringify({ operation: "insert", database: "flair", table: "Agent", records: [createRecord] }),
       });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        console.error(`Error: ${res.status} ${text}`);
+      if (!createRes.ok) {
+        const text = await createRes.text().catch(() => "");
+        console.error(`Error: ${createRes.status} ${text}`);
         process.exit(1);
+      }
+      const createBody = (await createRes.json().catch(() => null)) as
+        | { inserted_hashes?: unknown[]; skipped_hashes?: unknown[] }
+        | null;
+      const inserted = Array.isArray(createBody?.inserted_hashes) && createBody.inserted_hashes.map(String).includes(id);
+      const createSkipped = Array.isArray(createBody?.skipped_hashes) && createBody.skipped_hashes.map(String).includes(id);
+      if (!inserted) {
+        if (!createSkipped) {
+          console.error(
+            `Error: the create for principal '${id}' was not confirmed by the operations API (${JSON.stringify(createBody)}); no row is known to have been written.`,
+          );
+          process.exit(1);
+        }
+        // The row already exists — the one this read found, or one that APPEARED
+        // since. Its stored home STANDS. Re-read it now: a row this re-read sees
+        // with a home that differs from this instance's is refused here, before
+        // any write-back; an unreadable re-read is refused too.
+        const liveHome = await readStoredAgentHome({ opsUrl, authHeader: auth, id });
+        const livePlan = planAgentHomeWrite(liveHome, home, id);
+        if (livePlan.refuse) {
+          console.error(`Error: ${livePlan.message}`);
+          process.exit(1);
+        }
+        // Write back WITHOUT the home field, so THIS write does not change a
+        // stored home; other fields are written when the write-back is admitted
+        // and succeeds. The write goes to the Agent RESOURCE (a REST PATCH, never the
+        // raw ops API): the resource runs it in a fresh owned transaction (the
+        // request's transaction is detached), writes ONLY an allow-list of fields
+        // (a home or a federation stamp in the body is never carried), STAGES it,
+        // then re-reads the COMMITTED row and ABORTS — with
+        // `originator_instance_immutable` if a non-empty string stored home differs from
+        // the resolved local ID, or `agent_principal_write_back_no_row` if no row
+        // is returned — so a differing stored home seen by those reads is not changed,
+        // and a row they find deleted is not re-created (flair#2473). This write uses no
+        // compare-and-set, so a change committed after that confirmation read and
+        // before the commit is not seen: this narrows the race rather than closing
+        // it (per-id serialization: flair#2478).
+        const writeBackRes = await fetch(`${httpUrl}Agent/${encodeURIComponent(id)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({ ...record, [AGENT_PRINCIPAL_WRITE_BACK_FIELD]: true }),
+        });
+        if (!writeBackRes.ok) {
+          const body = (await writeBackRes.json().catch(() => null)) as { error?: unknown; message?: unknown } | null;
+          if (body?.error === AGENT_HOME_IMMUTABLE_ERROR) {
+            console.error(`Error: ${typeof body.message === "string" && body.message.length > 0 ? body.message : AGENT_HOME_IMMUTABLE_ERROR}`);
+          } else if (body?.error === AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR) {
+            console.error(
+              `Error: the write-back for principal '${id}' was refused: could not confirm a stored agent row, so it was not changed and not re-created. Re-run 'flair principal add ${id}' to create it afresh.`,
+            );
+          } else {
+            console.error(
+              `Error: the write-back for principal '${id}' failed (${writeBackRes.status}${body?.message ? `: ${String(body.message)}` : ""}); no row is known to have been changed. Re-run 'flair principal add ${id}'.`,
+            );
+          }
+          process.exit(1);
+        }
       }
 
       console.log(`✅ Principal '${id}' created`);
@@ -384,11 +473,13 @@ export function register(program: Command): void {
       console.log(`   Private key: ${privPath}`);
     });
 
-  principal
-    .command("list")
-    .description("List all principals")
-    .option("--kind <kind>", "Filter by kind: human or agent")
-    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+  addAdminPassOptions(
+    principal
+      .command("list")
+      .description("List all principals")
+      .option("--kind <kind>", "Filter by kind: human or agent"),
+    "Admin password (or set FLAIR_ADMIN_PASS)",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper operations API port")
@@ -528,10 +619,7 @@ export function register(program: Command): void {
     "active",
   );
 
-  principal
-    .command("promote <id> <tier>")
-    .description("Change a principal's trust tier (endorsed, corroborated, unverified)")
-    .option("--admin-pass <pass>", "Admin password")
+  addAdminPassOptions(principal.command("promote <id> <tier>").description("Change a principal's trust tier (endorsed, corroborated, unverified)"), "Admin password")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, tier: string, opts) => {
@@ -610,17 +698,19 @@ export function register(program: Command): void {
     "machine's local credentials and are never sent to a remote instance)";
   const MAPPING_ADMIN_USER_HELP = "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)";
 
-  principal
-    .command("link <principal>")
-    .description(
-      "Map one IdP login to an existing principal on an already-enabled instance — the identity-mapping step " +
-        "`flair mcp enable` runs, and nothing else. " + MAPPING_TARGET_HELP,
-    )
-    .option("--idp-subject <login>", "The login the identity provider reports for this person (GitHub: the username)")
-    .option("--idp-provider <name>", "Upstream IdP provider", "github")
-    .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
-    .option("--replace", "Move a subject that is already mapped to a different principal")
-    .option("--admin-pass <pass>", MAPPING_ADMIN_PASS_HELP)
+  addAdminPassOptions(
+    principal
+      .command("link <principal>")
+      .description(
+        "Map one IdP login to an existing principal on an already-enabled instance — the identity-mapping step " +
+          "`flair mcp enable` runs, and nothing else. " + MAPPING_TARGET_HELP,
+      )
+      .option("--idp-subject <login>", "The login the identity provider reports for this person (GitHub: the username)")
+      .option("--idp-provider <name>", "Upstream IdP provider", "github")
+      .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
+      .option("--replace", "Move a subject that is already mapped to a different principal"),
+    MAPPING_ADMIN_PASS_HELP,
+  )
     .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
     .action(async (principalId: string, opts) => {
       if (!opts.idpSubject) {
@@ -645,15 +735,17 @@ export function register(program: Command): void {
       }
     });
 
-  principal
-    .command("unlink <principal>")
-    .description(
-      "Revoke one IdP login's mapping; success requires confirmed updates and no resolvable subject mapping on readback. " + MAPPING_TARGET_HELP,
-    )
-    .option("--idp-subject <login>", "The login the identity provider reports for this person (GitHub: the username)")
-    .option("--idp-provider <name>", "Upstream IdP provider the mapping carries", "github")
-    .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
-    .option("--admin-pass <pass>", MAPPING_ADMIN_PASS_HELP)
+  addAdminPassOptions(
+    principal
+      .command("unlink <principal>")
+      .description(
+        "Revoke one IdP login's mapping; success requires confirmed updates and no resolvable subject mapping on readback. " + MAPPING_TARGET_HELP,
+      )
+      .option("--idp-subject <login>", "The login the identity provider reports for this person (GitHub: the username)")
+      .option("--idp-provider <name>", "Upstream IdP provider the mapping carries", "github")
+      .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP),
+    MAPPING_ADMIN_PASS_HELP,
+  )
     .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
     .action(async (principalId: string, opts) => {
       if (!opts.idpSubject) {
@@ -677,13 +769,15 @@ export function register(program: Command): void {
       }
     });
 
-  principal
-    .command("links <principal>")
-    .description(
-      "List a principal's current IdP mappings on an already-enabled instance. " + MAPPING_TARGET_HELP,
-    )
-    .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
-    .option("--admin-pass <pass>", MAPPING_ADMIN_PASS_HELP)
+  addAdminPassOptions(
+    principal
+      .command("links <principal>")
+      .description(
+        "List a principal's current IdP mappings on an already-enabled instance. " + MAPPING_TARGET_HELP,
+      )
+      .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP),
+    MAPPING_ADMIN_PASS_HELP,
+  )
     .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
     .action(async (principalId: string, opts) => {
       const target = mappingTarget(opts, "flair principal links");

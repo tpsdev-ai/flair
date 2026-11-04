@@ -1,0 +1,1 @@
+- `soul.changed` and `skill.changed` OrgEvents are appended in the same transaction as each version appended by Flair's Soul and skill application writers, with an allowlisted `detail` and no hashes for private skills.

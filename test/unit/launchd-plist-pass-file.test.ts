@@ -17,6 +17,7 @@
  * reads a real plist. Fixtures use placeholder credentials only.
  */
 
+import { shellScript } from "../helpers/shell-script.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import {
   mkdtempSync,
@@ -31,7 +32,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   buildLaunchdPlist,
   writeFileAtomic,
@@ -97,7 +98,7 @@ function parsePlist(plistText: string): any {
   const path = join(tmp, "probe.plist");
   writeFileSync(path, plistText);
   const dump = "import plistlib,json,sys;json.dump(plistlib.load(open(sys.argv[1],'rb')),sys.stdout)";
-  const json = execFileSync("python3", ["-c", dump, path], { encoding: "utf-8", stdio: "pipe" });
+  const json = execFileSync("python3", ["-c", dump, path], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-pass-file process fixture arguments" }, encoding: "utf-8", stdio: "pipe" });
   return JSON.parse(json);
 }
 
@@ -231,7 +232,7 @@ describe("launcher script — non-interactive start", () => {
     writeFileSync(adminPassFile, "PLACEHOLDER-password\n");
     chmodSync(adminPassFile, 0o600);
 
-    const out = execFileSync("sh", [LAUNCHER, adminPassFile, fakeNode, "/opt/flair/harper.js"], {
+    const out = execFileSync("sh", [LAUNCHER, adminPassFile, fakeNode, "/opt/flair/harper.js"], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-pass-file process fixture arguments" },
       encoding: "utf-8",
     });
     expect(out).toContain("PASS=PLACEHOLDER-password");
@@ -243,7 +244,7 @@ describe("launcher script — non-interactive start", () => {
     writeFileSync(fakeNode, "#!/bin/sh\nexit 0\n");
     chmodSync(fakeNode, 0o755);
     expect(() =>
-      execFileSync("sh", [LAUNCHER, join(tmp, "nope"), fakeNode, "/opt/flair/harper.js"], { stdio: "pipe" }),
+      execFileSync("sh", [LAUNCHER, join(tmp, "nope"), fakeNode, "/opt/flair/harper.js"], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-pass-file process fixture arguments" }, stdio: "pipe" }),
     ).toThrow();
   });
 
@@ -254,7 +255,7 @@ describe("launcher script — non-interactive start", () => {
     const empty = join(tmp, "empty");
     writeFileSync(empty, "");
     expect(() =>
-      execFileSync("sh", [LAUNCHER, empty, fakeNode, "/opt/flair/harper.js"], { stdio: "pipe" }),
+      execFileSync("sh", [LAUNCHER, empty, fakeNode, "/opt/flair/harper.js"], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-pass-file process fixture arguments" }, stdio: "pipe" }),
     ).toThrow();
   });
 
@@ -269,7 +270,7 @@ describe("launcher script — non-interactive start", () => {
     writeFileSync(drifted, "PLACEHOLDER-password\n");
     chmodSync(drifted, 0o644);
     expect(() =>
-      execFileSync("sh", [LAUNCHER, drifted, fakeNode, "/opt/flair/harper.js"], { stdio: "pipe" }),
+      execFileSync("sh", [LAUNCHER, drifted, fakeNode, "/opt/flair/harper.js"], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-pass-file process fixture arguments" }, stdio: "pipe" }),
     ).toThrow();
   });
 
@@ -281,7 +282,7 @@ describe("launcher script — non-interactive start", () => {
     writeFileSync(groupReadable, "PLACEHOLDER-password\n");
     chmodSync(groupReadable, 0o660);
     expect(() =>
-      execFileSync("sh", [LAUNCHER, groupReadable, fakeNode, "/opt/flair/harper.js"], { stdio: "pipe" }),
+      execFileSync("sh", [LAUNCHER, groupReadable, fakeNode, "/opt/flair/harper.js"], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-pass-file process fixture arguments" }, stdio: "pipe" }),
     ).toThrow();
   });
 
@@ -293,7 +294,7 @@ describe("launcher script — non-interactive start", () => {
     writeFileSync(unreadable, "PLACEHOLDER-password\n");
     chmodSync(unreadable, 0o000);
     expect(() =>
-      execFileSync("sh", [LAUNCHER, unreadable, fakeNode, "/opt/flair/harper.js"], { stdio: "pipe" }),
+      execFileSync("sh", [LAUNCHER, unreadable, fakeNode, "/opt/flair/harper.js"], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-pass-file process fixture arguments" }, stdio: "pipe" }),
     ).toThrow();
   });
 });
@@ -326,27 +327,44 @@ describe("launcher script — never a second instance on a served data directory
   function launch(f: ReturnType<typeof fixture>) {
     return spawnSync("sh", [LAUNCHER, f.adminPassFile, f.fakeNode, "/opt/flair/harper.js"], {
       encoding: "utf-8",
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ROOTPATH: f.rootPath },
+      env: { ...({ PATH: process.env.PATH ?? "/usr/bin:/bin", ROOTPATH: f.rootPath }), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-pass-file process fixture arguments" },
     });
   }
 
-  test("hdb.pid names a LIVE process whose command line is not Harper-shaped (flair#2056) -> the launcher execs the fake node", () => {
+  test("hdb.pid names a LIVE process whose command line is not Harper-shaped (flair#2056) -> the launcher execs the fake node", async () => {
     const f = fixture();
-    // A live pid this test owns: the test runner itself, whose command line is
-    // not node or bun followed by a Harper entry path, so the launcher does not
-    // refuse and execs the fake node. See
-    // test/unit/launcher-pid-identity-2056.test.ts for the refusal of a Harper-shaped process.
-    writeFileSync(join(f.rootPath, "hdb.pid"), String(process.pid));
-    const r = launch(f);
-    expect(r.status).toBe(0);
-    expect(existsSync(f.marker)).toBe(true);
-    // The pid file is left as it was.
-    expect(readFileSync(join(f.rootPath, "hdb.pid"), "utf-8")).toBe(String(process.pid));
+    // A live process this test owns, `sleep 60`: its command line is not node
+    // or bun followed by a Harper entry path, so the launcher does not refuse
+    // and execs the fake node. See test/unit/launcher-pid-identity-2056.test.ts
+    // for the refusal of a Harper-shaped process. (Not this test runner's own
+    // pid: a runner given several test files can have `harper` in its command
+    // line, which the launcher treats as possibly this instance, flair#2697.)
+    const sleeper = spawn("sleep", ["60"], { stdio: "ignore" });
+    const pid = sleeper.pid as number;
+    try {
+      for (let i = 0; i < 100; i++) {
+        const line = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf-8", timeout: 5_000 }).stdout.trim();
+        if (line.startsWith("sleep")) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      writeFileSync(join(f.rootPath, "hdb.pid"), String(pid));
+      const r = launch(f);
+      expect(r.status).toBe(0);
+      expect(existsSync(f.marker)).toBe(true);
+      // flair#2697: the pid file is moved aside, content unchanged, so Harper's
+      // own hdb.pid check does not refuse on the live, unrelated pid.
+      expect(existsSync(join(f.rootPath, "hdb.pid"))).toBe(false);
+      const stale = readdirSync(f.rootPath).filter((n) => n.startsWith("hdb.pid.stale-"));
+      expect(stale.length).toBe(1);
+      expect(readFileSync(join(f.rootPath, stale[0]), "utf-8")).toBe(String(pid));
+    } finally {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    }
   });
 
   test("CONTROL: hdb.pid names a DEAD process -> the launcher starts Harper as before", () => {
     const f = fixture();
-    const dead = spawnSync("sh", ["-c", "echo $$"], { encoding: "utf-8" }).stdout.trim();
+    const dead = spawnSync("sh", [shellScript("echo $$")], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-pass-file process fixture arguments" }, encoding: "utf-8" }).stdout.trim();
     writeFileSync(join(f.rootPath, "hdb.pid"), dead);
     const r = launch(f);
     expect(r.status).toBe(0);

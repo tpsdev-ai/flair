@@ -1,7 +1,9 @@
 /**
  * Env / argv config for the wake-runner. There is no participant or
  * foreign-feed field. With Ed25519, `FLAIR_AGENT_ID` identifies the signer
- * and its feed; with admin Basic credentials and no key, it selects the feed.
+ * and its feed. Admin Basic credentials are accepted only for `--dry-run`:
+ * no Cursor create, receipt write or ack; the catchup read may create an
+ * AgentReadPosition. A live cycle requires the agent's own signing key.
  */
 
 const CURSOR_ENV_TYPES = ["cloud", "pool", "machine"] as const;
@@ -108,7 +110,7 @@ command also works; do not point an automation at "start a crew agent" directly
 — that path has no idempotent agentId and can double-launch.
 
 Identity:
-  FLAIR_AGENT_ID     required. A signed runner drains its own feed; with admin Basic credentials and no key, selects the feed by ID (no --participant flag).
+  FLAIR_AGENT_ID     required. A live run drains its own feed and requires the Ed25519 key for this id; admin Basic credentials are accepted only with --dry-run (no --participant flag).
   FLAIR_URL          Flair HTTP origin (default http://localhost:19926)
   FLAIR_KEY_PATH     Ed25519 key (default ~/.flair/keys/<id>.key)
 
@@ -122,7 +124,7 @@ Cursor:
   CURSOR_AUTO_CREATE_PR  true to open a PR when the run completes
 
 Idempotency:
-  Each OrgEvent id maps to one Cursor agentId (bc-<sha256 uuid>). Re-POST is 409
-  and is treated as already-handed-off, then acked. Redelivery cannot start a
-  second agent.
+  Each OrgEvent id maps to one Cursor agentId (bc-<sha256 uuid>). A 409 classified
+  as an agent-id conflict is treated as already handed off; ack still depends
+  on the receipt outcome.
 `;

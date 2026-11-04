@@ -70,5 +70,5 @@ describe("A1' — declared attributes only", () => {
 
 
 test("the server-stamped Memory field list includes skillSubjectId", () => {
-  expect([...SERVER_STAMPED_MEMORY_FIELDS]).toEqual(["instanceToken", "provenance", "skillSubjectId"]);
+  expect([...SERVER_STAMPED_MEMORY_FIELDS]).toEqual(["writeBackWriteId", "instanceToken", "provenance", "skillSubjectId"]);
 });

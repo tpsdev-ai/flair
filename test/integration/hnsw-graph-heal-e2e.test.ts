@@ -55,7 +55,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, mkdir, rm, readdir, readFile, writeFile, symlink, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 // ── Tunables ────────────────────────────────────────────────────────────────
@@ -248,7 +248,7 @@ describe("recall HNSW graph-heal — schema-driven clean rebuild (real Harper)",
     if (harper) await stopHarper(harper, { keepInstallDir: true }).catch(() => {});
     await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
     await rm(overlayDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("the bare-schema build serves recall correctly and persists a bare HNSW descriptor (no explicit M)", () => {
     console.log(

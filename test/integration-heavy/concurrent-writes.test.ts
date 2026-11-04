@@ -15,7 +15,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent {
   id: string;
@@ -105,7 +105,7 @@ describe("Concurrent writes → immediate read consistency", () => {
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("50 parallel PUT /Memory writes all succeed", async () => {
     const writes = Array.from({ length: COUNT }, (_, i) => {

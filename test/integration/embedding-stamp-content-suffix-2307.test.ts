@@ -2,7 +2,7 @@
  * embedding-stamp-content-suffix-2307.test.ts — flair#2307 item 5, real Harper.
  *
  * The embedding-stamp migration re-embeds a stale Memory row through a
- * loopback `PUT /Memory/:id`. A legacy row whose id already ends in the
+ * loopback `PATCH /Memory/:id`. A legacy row whose id already ends in the
  * `.content` property suffix cannot be addressed that way (Harper's REST by-id
  * path reads the suffix as a selector, and the by-id write guard refuses the
  * id), so before this change the row stayed pending and /HealthDetail kept
@@ -13,7 +13,7 @@
  * A suffixed SKILL row must get the vector Memory's write paths give a skill:
  * the vector of its `trigger`, not of its `content`. Two ordinary stale rows
  * whose content is that trigger text and that content text are re-embedded by
- * the migration's loopback `PUT /Memory/:id` (Memory.put's own embed path), and
+ * the migration's loopback `PATCH /Memory/:id` (Memory's PATCH re-embed path), and
  * serve as the engine's reference vectors for the two texts.
  *
  * The provider-failure, no-text, concurrent edit and deletion paths are pinned
@@ -21,7 +21,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { rm } from "node:fs/promises";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const EMBEDDING_STAMP_ID = "embedding-stamp";
@@ -37,6 +37,7 @@ const CURRENT_MODEL_ID = getModelId();
 let harper: HarperInstance;
 let installDir: string;
 let authHeader: string;
+let legacyCreatedAt: string;
 
 async function opsCall(body: Record<string, unknown>): Promise<any> {
   const res = await fetch(harper.opsURL, {
@@ -82,6 +83,7 @@ describe("flair#2307 item 5 — a `.content`-suffixed legacy row converges (real
 
     // A legacy row whose id already ends in `.content` and whose embedding
     // stamp is stale.
+    legacyCreatedAt = new Date().toISOString();
     await opsCall({
       operation: "insert",
       database: "flair",
@@ -93,7 +95,7 @@ describe("flair#2307 item 5 — a `.content`-suffixed legacy row converges (real
           content: "embedding-stamp-content-suffix-marker",
           embedding: [0.1, 0.1, 0.1],
           embeddingModel: "some-ancient-model-v0",
-          createdAt: new Date().toISOString(),
+          createdAt: legacyCreatedAt,
         },
         {
           id: SKILL_ID,
@@ -133,7 +135,7 @@ describe("flair#2307 item 5 — a `.content`-suffixed legacy row converges (real
   afterAll(async () => {
     if (harper) await stopHarper(harper).catch(() => {});
     await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   it("the row is re-embedded, and /HealthDetail stops naming the migration", async () => {
     const deadline = Date.now() + 120_000;
@@ -159,6 +161,12 @@ describe("flair#2307 item 5 — a `.content`-suffixed legacy row converges (real
     expect(record.embeddingModel).toBe(CURRENT_MODEL_ID);
     expect(Array.isArray(record.embedding)).toBe(true);
     expect(record.content).toBe("embedding-stamp-content-suffix-marker"); // derived-only
+    // flair#2465: the content-suffix re-embed writes only the embedding fields —
+    // an incremental update, not the full-row put it used to stage — so it stamps
+    // `updatedAt` (which the old full-row put never wrote) and the seeded
+    // `createdAt` is still the row's.
+    expect(typeof record.updatedAt, "the content-suffix re-embed did not stamp updatedAt (full-row put?)").toBe("string");
+    expect(record.createdAt, "the content-suffix re-embed changed the seeded createdAt").toBe(legacyCreatedAt);
 
     const detail = await healthDetail();
     const named = (detail?.warnings ?? []).some((w: any) => String(w?.message ?? "").includes(`migration '${EMBEDDING_STAMP_ID}' is outstanding`));

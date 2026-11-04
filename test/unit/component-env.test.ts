@@ -12,6 +12,7 @@ import {
   COMPONENT_ENV_FILENAME,
   NEVER_GENERATED_SECRET_KEYS,
   PUBLIC_URL_KEY,
+  MCP_ISSUER_KEY,
   assertNoSecretKeysAdded,
   describePublicUrlFinding,
   DURABLE_PUBLIC_URL_LOCATION,
@@ -100,6 +101,43 @@ describe("env parsing", () => {
     expect(looksLikeSecretKey("SOME_API_KEY")).toBe(true);
     expect(looksLikeSecretKey("FLAIR_PUBLIC_URL")).toBe(false);
     expect(looksLikeSecretKey("HTTP_PORT")).toBe(false);
+  });
+});
+
+// File parsing is last-wins; Harper's process environment can override the file.
+// These cases call the doctor helper and reproduce deploy's issuer expression.
+describe("duplicate assignments — helper and issuer-expression checks", () => {
+  // The operator's file: the stale/loopback value first, the corrected public URL
+  // appended below it.
+  const text =
+    "FLAIR_PUBLIC_URL=http://127.0.0.1:9980\n" +
+    "FLAIR_PUBLIC_URL=https://actual.example.com\n";
+
+  test("readEnvValue returns the last assignment in the file", () => {
+    expect(readEnvValue(text, PUBLIC_URL_KEY)).toBe("https://actual.example.com");
+  });
+
+  test("describePublicUrlFinding reports drift from the last file value with no process override", () => {
+    // The helper sees the last file value and no process-environment override.
+    const finding = describePublicUrlFinding({
+      advertisedIssuer: "http://127.0.0.1:9980",
+      componentEnvValue: readEnvValue(text, PUBLIC_URL_KEY),
+      processEnvValue: null,
+      componentEnvPath: "/opt/flair/.env",
+    })!;
+    expect(finding.isIssue).toBe(true);
+    expect(finding.icon).toBe("error");
+    expect(finding.message).toContain("/opt/flair/.env");
+  });
+
+  test("deploy's issuer expression selects the last file value", () => {
+    // The exact expression deploy() evaluates over its shipped `.env`.
+    const deployedKnownIssuers = [
+      readEnvValue(text, PUBLIC_URL_KEY),
+      readEnvValue(text, MCP_ISSUER_KEY),
+    ].filter((issuer): issuer is string => typeof issuer === "string" && issuer.trim() !== "");
+    expect(deployedKnownIssuers).toEqual(["https://actual.example.com"]);
+    expect(deployedKnownIssuers).not.toContain("http://127.0.0.1:9980");
   });
 });
 

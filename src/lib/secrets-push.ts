@@ -45,6 +45,7 @@
  * endpoint that may not exist costs a silent flag-OFF boot, which is the exact
  * failure this automation is meant to remove.
  */
+import { constants, createPublicKey, publicEncrypt } from "node:crypto";
 import { sealSecret } from "./secret-envelope.js";
 
 export interface SecretsCapability {
@@ -112,7 +113,14 @@ export async function probeSecretsCapability(
      // treated exactly like unavailable — see the failure-direction note above.
     return { available: false, reason: "the target answered the probe without a usable public key — using the staged-file flow" };
    }
-  return { available: true, reason: "target supports env-secrets; pushing over the ops API", publicKeyPem: pem };
+  try {
+    const key = createPublicKey(pem);
+    if (key.asymmetricKeyType !== "rsa") throw new Error("not an RSA key");
+    publicEncrypt({ key, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" }, Buffer.alloc(32));
+  } catch {
+    return { available: false, reason: "the target answered the probe with an invalid or unusable RSA public key — using the staged-file flow" };
+  }
+  return { available: true, reason: "target provided a usable RSA public key; attempting push over the ops API", publicKeyPem: pem };
 }
 
 /** Pull the PEM out of whatever shape the operation returns, without guessing
@@ -129,6 +137,10 @@ export interface PushedSecret {
   name: string;
   ok: boolean;
   detail?: string;
+  /** "local-failure" before sending; "push" for a refused response;
+   *  "push-unconfirmed" without a confirmed response; "confirm" for unconfirmed
+   *  read-back. Absent when ok. */
+  kind?: "local-failure" | "push" | "push-unconfirmed" | "confirm";
 }
 
 /**
@@ -141,46 +153,62 @@ export async function pushSecrets(
   authHeader: string,
   vars: Record<string, string>,
   publicKeyPem: string,
-  deps: { fetchImpl?: typeof fetch } = {},
+  deps: { fetchImpl?: typeof fetch; sealImpl?: typeof sealSecret } = {},
 ): Promise<{ allOk: boolean; results: PushedSecret[] }> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const results: PushedSecret[] = [];
   for (const [name, value] of Object.entries(vars)) {
+    let envelope: string;
     try {
-      const r = await opsCall(
+      envelope = (deps.sealImpl ?? sealSecret)(value, publicKeyPem);
+    } catch {
+      results.push({ name, ok: false, kind: "local-failure", detail: "local encryption failure: nothing was sent, nothing stored by this attempt" });
+      continue;
+    }
+    // Without a confirmed response, the push outcome is unknown: it may have stored.
+    let r;
+    try {
+      r = await opsCall(
         opsUrl,
         authHeader,
-         { operation: "set_secret", name, envelope: sealSecret(value, publicKeyPem), processEnv: true },
+         { operation: "set_secret", name, envelope, processEnv: true },
         fetchImpl,
        );
-      const err = String(r.json?.error ?? "").slice(0, 140);
-      if (!r.ok) {
-        results.push({ name, ok: false, detail: `HTTP ${r.status}${err ? `: ${err}` : ""}` });
-        continue;
-       }
+    } catch (err: any) {
+      results.push({ name, ok: false, kind: "push-unconfirmed", detail: `push outcome could not be confirmed (it may have been stored): ${String(err?.message ?? err).slice(0, 140)}` });
+      continue;
+     }
+    const err = String(r.json?.error ?? "").slice(0, 140);
+    if (!r.ok) {
+      results.push({ name, ok: false, kind: "push", detail: `HTTP ${r.status}${err ? `: ${err}` : ""}` });
+      continue;
+     }
 
-      // Read back one pushed row to verify processEnv actually materialised.
-      // A 200 from set_secret is not proof — core silently ignores unknown
-      // params, so the row can be accepted and still land inert.
-      const verify = await opsCall(
+    // A successful set_secret response does not confirm storage with processEnv=true.
+    // Read-back failures belong to the confirm stage.
+    let verify;
+    try {
+      verify = await opsCall(
         opsUrl,
         authHeader,
           { operation: "search_by_value", database: "system", table: "hdb_secret", search_attribute: "name", search_value: name, get_attributes: ["name", "processEnv"] },
         fetchImpl,
         );
-      if (!verify.ok) {
-        results.push({ name, ok: false, detail: `push returned 200 but verify failed HTTP ${verify.status}` });
-        continue;
-        }
-      const row = Array.isArray(verify.json) ? verify.json[0] : verify.json?.[0];
-      if (!row || (row as Record<string, unknown>).processEnv !== true) {
-        results.push({ name, ok: false, detail: `push returned 200 but read-back shows processEnv is ${row?.processEnv ?? "missing"}, not true — secret is inert` });
-        continue;
-        }
-      results.push({ name, ok: true });
-     } catch (err: any) {
-      results.push({ name, ok: false, detail: String(err?.message ?? err).slice(0, 140) });
+    } catch (verifyErr: any) {
+      // A thrown read-back leaves storage with processEnv=true unconfirmed.
+      results.push({ name, ok: false, kind: "confirm", detail: `push returned HTTP ${r.status} but the read-back threw (${String(verifyErr?.message ?? verifyErr).slice(0, 120)}) — whether the row carries processEnv=true could not be confirmed` });
+      continue;
      }
+    if (!verify.ok) {
+      results.push({ name, ok: false, kind: "confirm", detail: `push returned HTTP ${r.status} but verify failed HTTP ${verify.status}` });
+      continue;
+      }
+    const row = Array.isArray(verify.json) ? verify.json[0] : verify.json?.[0];
+    if (!row || (row as Record<string, unknown>).processEnv !== true) {
+      results.push({ name, ok: false, kind: "confirm", detail: `push returned HTTP ${r.status} but read-back shows processEnv is ${row?.processEnv ?? "missing"}, not true — storage with processEnv=true could not be confirmed` });
+      continue;
+      }
+    results.push({ name, ok: true });
     }
   return { allOk: results.every((x) => x.ok), results };
 }

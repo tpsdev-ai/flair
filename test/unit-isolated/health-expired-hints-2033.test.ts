@@ -4,6 +4,7 @@
  * Run in its own process because module mocks are process-global.
  */
 import { afterEach, beforeEach, expect, mock, setSystemTime, spyOn, test } from "bun:test";
+import { memoryLockDouble } from "../helpers/memory-lock-double";
 
 const NOW = Date.parse("2026-09-28T12:00:00Z");
 const HOME = "/fixture/flair-2033";
@@ -60,13 +61,16 @@ mock.module("harper", () => ({
         yield* rows;
       },
       get: async (id: string) => rows.find((r) => r.id === id) ?? null,
-      update: async (id: string, row: Record<string, unknown>, ctx: any) => {
+      update: async (id: string, patch: Record<string, unknown>, ctx: any) => {
         expect(ctx?.transaction?.open).toBe(1);
         const index = rows.findIndex((r) => r.id === id);
         if (index < 0) throw new Error("update requires an existing row");
-        rows[index] = structuredClone(row);
+        // Harper's `update` merges the patch into the stored row (flair#2470
+        // made the maintenance archive patch only `archived`/`archivedAt`).
+        rows[index] = { ...rows[index], ...structuredClone(patch) };
       },
       delete: async () => { throw new Error("validTo cleanup must not delete"); },
+      primaryStore: memoryLockDouble(),
     },
     MemoryHostSource: {
       search: async function* () {},
@@ -80,7 +84,7 @@ mock.module("harper", () => ({
 }));
 mock.module("../../resources/agent-auth.js", () => ({
   allowVerified: async () => true,
-  isAdmin: async () => false,
+  annotatedCallerIsAdmin: async () => false,
   resolveAgentAuth: async () => ({ kind: "internal" }),
 }));
 mock.module("../../resources/build-info.js", () => ({ resolveBuildInfo: () => null }));
@@ -100,7 +104,7 @@ mock.module("../../resources/bm25-index-service.js", () => ({
   bm25IndexStatus: () => ({}),
   noteMemoryUpsert: () => {}, noteMemoryDelete: () => {},
 }));
-mock.module("../../resources/embedding-space-guard.js", () => ({ normalizeStamp: (s: string) => s }));
+mock.module("../../resources/embedding-space-guard.js", () => ({ normalizeStamp: (s: string) => s, spaceGuardState: () => ({ state: "uniform", reason: null }) }));
 mock.module("../../resources/embeddings-provider.js", () => ({ getModelId: () => "fixture-model" }));
 mock.module("../../resources/migrations/stamp-outstanding.js", () => ({
   describeStampOutstanding: () => ({ outstanding: false }), EMBEDDING_STAMP_ID: "fixture",

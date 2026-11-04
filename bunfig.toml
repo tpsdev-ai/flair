@@ -6,4 +6,4 @@
 # shared helper's `afterEach`/`afterAll` registered from an importing test file
 # covers only that file, and bun evaluates every matched file in one process, so
 # a lazily-registered hook would miss the rest (flair#1889).
-preload = ["./test/helpers/sandbox-home.ts", "./test/helpers/temp-dir.ts"]
+preload = ["./test/helpers/bun-harper-spawn-guard.ts", "./test/helpers/sandbox-home.ts", "./test/helpers/temp-dir.ts"]

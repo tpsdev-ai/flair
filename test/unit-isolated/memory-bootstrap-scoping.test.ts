@@ -70,7 +70,11 @@ function matchesCondition(record: any, cond: any): boolean {
   return true;
 }
 
-let memoryStore: Map<string, any>;
+// Initialized at module scope: the embedding-space guard's boot pre-warm scans
+// `databases.flair.Memory` before the first test runs, and an undefined store
+// would make that scan throw and leave the task-relevant leg keyword-only
+// (flair#2559). An empty store is vacuously uniform under the stamp check.
+let memoryStore: Map<string, any> = new Map();
 // flair#2141 — when set, the skill-row read (a Memory search on the `skill`
 // tag) fails, for the failed-read case: "call" throws from the search call,
 // "iterate" from the first read of its results.
@@ -78,6 +82,10 @@ let failSkillRowRead: false | "call" | "iterate" = false;
 let memoryGrants: any[];
 let soulStore: Map<string, any> = new Map();
 let orgEventStore: any[] = [];
+// flair#2448 item 3 — the MemoryHostSource pointer rows the gated bootstrap join
+// reads. Empty in every pre-#2448 test, so loadPointerRows finds no row (the
+// same result as the table being absent) and no other test's bytes change.
+let pointerStore: Map<string, any> = new Map();
 // flair#2141 S1 — Agent records by id (the org-skill eligibility read) and the
 // OrgSkillAssignment rows; `failOrgRead` makes the org-assignment read throw.
 let agentStore: Map<string, any> = new Map();
@@ -160,6 +168,21 @@ const databasesMock = {
       },
     },
     Relationship: { search: () => emptyGen() },
+    // flair#2448 item 3 — the pointer table the gated bootstrap join reads. Only
+    // `search` is reached (loadPointerRows); a row is matched by `memoryId` for
+    // both the single-id equals query and the set `or` query.
+    MemoryHostSource: {
+      search: (query: any) => {
+        const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
+        const wanted = conditions.filter((c: any) => c?.attribute === "memoryId").map((c: any) => c.value);
+        async function* gen() {
+          for (const row of pointerStore.values()) {
+            if (wanted.length === 0 || wanted.includes(row.memoryId)) yield row;
+          }
+        }
+        return gen();
+      },
+    },
     OrgEvent: {
       search: (query?: any) => {
         const cond = query?.conditions?.find((c: any) => c.attribute === "createdAt");
@@ -203,6 +226,7 @@ function reset() {
   memoryGrants = [];
   soulStore = new Map();
   orgEventStore = [];
+  pointerStore = new Map();
   agentStore = new Map();
   orgSkillStore = [];
   failOrgRead = false;
@@ -378,7 +402,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     // + currentTask (mocked getEmbedding → cosine 1.0 tops the fused pool).
     memoryStore.set("shared-attr", {
       id: "shared-attr", agentId: "agent-owner", content: "TEAMMATE-ATTR-FINDING",
-      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
 
@@ -415,7 +439,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     // reaches the teammate section where it renders — see the note above.
     memoryStore.set("shared-flagged", {
       id: "shared-flagged", agentId: "agent-owner", content: "TEAMMATE-FLAGGED-FINDING",
-      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
       _safetyFlags: ["prompt_injection"],
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
@@ -441,7 +465,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     reset();
     memoryStore.set("teammate-task", {
       id: "teammate-task", agentId: "agent-owner", content: "TEAMMATE-TASK-RELEVANT-FINDING",
-      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
 
@@ -459,7 +483,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     reset();
     memoryStore.set("own-task", {
       id: "own-task", agentId: "agent-grantee", content: "MY-OWN-TASK-RELEVANT-FINDING",
-      durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
@@ -477,11 +501,11 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     reset();
     memoryStore.set("own-task-2", {
       id: "own-task-2", agentId: "agent-grantee", content: "MIXED-OWN-FINDING",
-      durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
     memoryStore.set("teammate-task-2", {
       id: "teammate-task-2", agentId: "agent-owner", content: "MIXED-TEAMMATE-FINDING",
-      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
 
@@ -499,7 +523,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     reset();
     memoryStore.set("teammate-private-task", {
       id: "teammate-private-task", agentId: "agent-owner", content: "TEAMMATE-PRIVATE-TASK-FINDING",
-      visibility: "private", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "private", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
 
@@ -529,7 +553,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     // verified in-org agent regardless.
     memoryStore.set("ungranted-shared-task", {
       id: "ungranted-shared-task", agentId: "agent-owner", content: "UNGRANTED-TEAMMATE-TASK-FINDING",
-      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
@@ -549,7 +573,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     // memory that isn't theirs, regardless of any grant history.
     memoryStore.set("ungranted-private-task", {
       id: "ungranted-private-task", agentId: "agent-owner", content: "UNGRANTED-TEAMMATE-PRIVATE-FINDING",
-      visibility: "private", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "private", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
@@ -653,7 +677,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     // (own-only) permanent section yet still reaches the scored teammate path.
     memoryStore.set("teammate-perm-task", {
       id: "teammate-perm-task", agentId: "agent-owner", content: "TEAMMATE-PERMANENT-TASK-FINDING",
-      visibility: "shared", durability: "permanent", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "shared", durability: "permanent", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
 
@@ -799,7 +823,7 @@ describe("small task budgets (#1431)", () => {
   it("retrieves below the former 200-token gate and reports records that cannot fit", async () => {
     reset();
     memoryStore.set("small", { id: "small", agentId: "small-budget", content: "Check the CI date.",
-      durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING });
+      durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model" });
     const b = makeBootstrap(agentCtx("small-budget"));
     const small = await b.post({ agentId: "small-budget", currentTask: "CI date", maxTokens: 180, includeSoul: false });
     expect(small.memories.map((m: any) => m.id)).toContain("small");
@@ -1450,5 +1474,106 @@ describe("formatMemory bytes", () => {
   it("a sourced item appends one space and the citation", () => {
     const hostSource = { v: 1, host: "openclaw", kind: "run", id: "run-123456789abc" };
     expect(formatMemory({ content: "body", hostSource })).toBe("\u{1F4DD} body [via openclaw/run run-1234 (unverified)]");
+  });
+});
+
+// flair#2448 item 2 — bootstrap's `?? m` fallback. The gated pointer join maps
+// each input row through the pointer projection (it does not drop rows), so the
+// reachable trigger for the fallback is a caller the join does not run for:
+// pointerRenders() then returns an empty map and the lookup is undefined. This
+// drives the REAL BootstrapMemories.post() for such a caller and asserts the
+// memory still renders, uncited, byte-identical to the unsourced format
+// (formatMemory with no hostSource).
+describe("flair#2448 — bootstrap renders a memory the pointer join yields no row for, uncited", () => {
+  it("post() renders the row as read (`?? m`) when the join does not run", async () => {
+    reset();
+    const createdAt = new Date().toISOString();
+    const day = createdAt.slice(0, 10);
+    memoryStore.set("m-fallback", {
+      id: "m-fallback",
+      agentId: "agent-fb",
+      content: "FALLBACK-VALUE-MEMORY",
+      durability: "standard",
+      createdAt,
+    });
+    // An admin/operator context is a caller the gated join does not run for
+    // (MemoryBootstrap: `hostSourceReader = authenticatedAgent && !callerIsAdmin
+    // ? authenticatedAgent : undefined`); pointerRenders() then returns an empty
+    // map, so the lookup falls through to `?? m`.
+    const b = makeBootstrap(agentCtx("agent-fb", true));
+    const res: any = await b.post({ agentId: "agent-fb", includeSoul: false });
+    const line = String(res.context ?? "")
+      .split("\n")
+      .find((l) => l.includes("FALLBACK-VALUE-MEMORY")) ?? "";
+    expect(line, "the memory the join yields no row for still renders").not.toBe("");
+    // Byte-for-byte the unsourced format: no citation appended.
+    expect(line).toBe(`\u{1F4DD} FALLBACK-VALUE-MEMORY (${day})`);
+  });
+
+  it("the `?? m` fallback value formats to the unsourced bytes (real formatMemory)", () => {
+    expect(formatMemory({ content: "FALLBACK-VALUE-MEMORY", durability: "standard", createdAt: "2026-01-01T00:00:00.000Z" })).toBe(
+      "\u{1F4DD} FALLBACK-VALUE-MEMORY (2026-01-01)",
+    );
+  });
+});
+
+// flair#2448 item 3 (decision) — the structured MCP bootstrap containers
+// (`leanMemory`) and the admin bootstrap carry NO host-source pointer. The
+// pointer is a citation aid for the agent-facing RENDERED bootstrap. This
+// pins that shape through the REAL BootstrapMemories.post(): a sourced memory
+// whose pointer the caller may see cites in the prose line, while its structured
+// `memories` container entry omits `hostSource`/`hostSourceScope`/
+// `hostSourceVisibility` — so a future change that put the pointer on the
+// container fails here rather than passing as a silent shape change.
+const SOURCED_CANONICAL = JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "run-123456789abc" });
+
+describe("flair#2448 — structured bootstrap containers carry no host-source pointer", () => {
+  const seedSourced = (createdAt: string) => {
+    memoryStore.set("m-src", {
+      id: "m-src",
+      agentId: "agent-a",
+      content: "SOURCED-CONTAINER-MEMORY",
+      durability: "standard",
+      createdAt,
+      instanceToken: "tok-1",
+    });
+    pointerStore.set("m-src", {
+      memoryId: "m-src",
+      hostSource: SOURCED_CANONICAL,
+      scopeAtWrite: null, // author-only
+      authorId: "agent-a",
+      memoryInstanceToken: "tok-1",
+      receivedAt: createdAt,
+    });
+  };
+
+  it("a non-admin owner's sourced memory cites in prose but its container entry omits the pointer", async () => {
+    reset();
+    const createdAt = new Date().toISOString();
+    seedSourced(createdAt);
+    const b = makeBootstrap(agentCtx("agent-a", false));
+    const res: any = await b.post({ agentId: "agent-a", includeSoul: false });
+    const line = String(res.context ?? "")
+      .split("\n")
+      .find((l) => l.includes("SOURCED-CONTAINER-MEMORY")) ?? "";
+    expect(line, "the rendered prose cites the pointer the caller may see").toContain("[via openclaw/run");
+    const struct = ((res.memories as any[]) ?? []).find((m) => m.id === "m-src");
+    expect(struct, "the sourced memory is in the structured container").toBeDefined();
+    expect(struct, "the container omits hostSource").not.toHaveProperty("hostSource");
+    expect(struct, "the container omits hostSourceScope").not.toHaveProperty("hostSourceScope");
+    expect(struct, "the container omits hostSourceVisibility").not.toHaveProperty("hostSourceVisibility");
+  });
+
+  it("the admin bootstrap's container entry omits the pointer as well", async () => {
+    reset();
+    const createdAt = new Date().toISOString();
+    seedSourced(createdAt);
+    const b = makeBootstrap(agentCtx("agent-a", true));
+    const res: any = await b.post({ agentId: "agent-a", includeSoul: false });
+    const struct = ((res.memories as any[]) ?? []).find((m) => m.id === "m-src");
+    expect(struct, "the sourced memory is in the structured container").toBeDefined();
+    expect(struct, "the admin container omits hostSource").not.toHaveProperty("hostSource");
+    expect(struct, "the admin container omits hostSourceScope").not.toHaveProperty("hostSourceScope");
+    expect(struct, "the admin container omits hostSourceVisibility").not.toHaveProperty("hostSourceVisibility");
   });
 });

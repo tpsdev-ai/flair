@@ -171,6 +171,31 @@ registered identities.
 
 3. **Restart flair.** `/mcp` mounts, OAuth-guarded.
 
+4. **Upgrading an instance that still holds the old staged value.** When the
+   component loads `FLAIR_MCP_OAUTH=1`, its MCP AS is disabled. Correct the value without re-running IdP intake
+   or changing the identity mapping:
+
+   `--admin-pass <target-admin-password>` is required.
+
+   ```bash
+   flair mcp enable --instance https://your-public-origin --refresh-flag --admin-pass <target-admin-password>
+   ```
+
+   It ATTEMPTS an encrypted
+   `FLAIR_MCP_OAUTH=true` push: it probes for a usable public key, attempts the update,
+   and checks the secret row's `processEnv` marker before restart and discovery
+   checks: the target's own discovery document must advertise that issuer with
+   the MCP token endpoint, and
+   the public document read at that issuer must match the same normalized issuer and its token
+   endpoint. When the update could not be pushed or confirmed — a failed capability
+   probe, a local encryption failure, a refused or unconfirmed push, or
+   a push whose read-back could not confirm storage with `processEnv=true` — it attempts a 0600
+   one-var fallback file. Refresh uses a separate default filename; an explicit
+   `--secrets-path` can select `mcp enable`'s path. An occupied explicit path
+   is refused before probing; an occupied default path is refused when the fallback is
+   needed — in both cases by name rather than truncated (the writer opens
+   exclusively). These fallback outcomes exit non-zero.
+
 ## Sherlock's 4 requirements — how they are met
 
 1. **Token lifetime.** `mcp.accessTokenTtl: 900` (5–15 min) in the AS config +

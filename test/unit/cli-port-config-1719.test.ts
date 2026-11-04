@@ -153,7 +153,8 @@ describe("flair#1719 — readPortFromConfig reads what the operator wrote", () =
     const script = `import { readPortFromConfig } from ${JSON.stringify(cliPath)}; console.log(String(readPortFromConfig()));`;
     try {
       const proc = Bun.spawn(["bun", "-e", script], {
-        env: { ...process.env, HOME: home, FLAIR_URL: "", FLAIR_TARGET: "" },
+        env: { ...process.env, HOME: home, FLAIR_URL: "", FLAIR_TARGET: "",
+          FLAIR_TEST_ALLOW_BUN_HARPER: "read source CLI config in a Bun evaluation fixture" },
         stdout: "pipe", stderr: "pipe",
       });
       const out = await new Response(proc.stdout).text();

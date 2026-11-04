@@ -20,7 +20,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { componentWithReplayProbe, OAUTH_SINGLE_USE_PROBE, type ProbeComponent } from "../helpers/component-with-replay-probe";
 
 const WORKERS = 2;
@@ -85,7 +85,7 @@ describe(`OAuth single-use records are instance-shared across ${WORKERS} Harper 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     composed?.cleanup();
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("the instance runs two workers, and OAuthSingleUse has the retention expiration and the store's methods", () => {
     expect(result.workerCount).toBe(WORKERS); // assertion: not a vacuous one-worker run

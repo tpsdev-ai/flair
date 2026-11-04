@@ -1,21 +1,24 @@
+import { normalizeEmptyEmbedding } from "./memory-embedding-value.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { Resource, databases } from "harper";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
+import { subscribeInProcess } from "./table-subscription-policy.js";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
 import { FORBIDDEN, UNAUTH, stampAttribution } from "./record-type-kit.js";
 import { guardAuthorityFields, stripAuthorityFields } from "./authority-field-guard.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, refuseSkillWriteSource, skillScanGate } from "./skill-write.js";
-import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, runSkillVersionWrite, skillVersionVisibility, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
+import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, runSkillVersionWrite, skillVersionVisibility, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { extractPointerInputs } from "./memory-host-source.js";
 import { deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
-import { redactMemoryWrite } from "./memory-redaction.js";
+import { redactMemoryWrite, redactSkillWrite } from "./memory-redaction.js";
+import { REDACTION_RULES, WRITE_RESPONSE_WITHHELD, buildFromAllowlist, feedResponseFields, storageResult, suppliedMemoryFields } from "./memory-write-response.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { reservedSeedFeedWriteDenial, reservedSeedSubjectDenial, writeTargetIds } from "./seed-reservation.js";
@@ -24,6 +27,26 @@ import { WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { stripInlinePointerFields } from "./host-source-visibility.js";
+import { applyPromotionBinding } from "./promotion-binding.js";
+import { markMemoryWriteOutcomeUnknown, memoryLockRefusal, memoryBusyResponse, memoryLockUnavailableResponse, withMemoryWriteLock, withMemoryWriteLockOnce, writeOutcomeUnknownResponse, type MemoryLockOutcome } from "./memory-write-lock.js";
+
+/** The per-id Memory write-lock store (flair#2478). */
+function memoryLockStore(): unknown {
+  return (databases as any)?.flair?.Memory?.primaryStore;
+}
+
+/** How many times a skill feed write re-resolves its live head and acquires the
+ *  per-id locks with the new head included (flair#2927). */
+const SKILL_HEAD_LOCK_ATTEMPTS = 3;
+
+/** Suppress an absent or mismatched promotion binding on a fed event's row
+ *  value (flair#2478 slice 2). Non-object values and events pass through. */
+function promotionBoundEvent(event: any): any {
+  const value = event?.value;
+  if (value == null || typeof value !== "object") return event;
+  const bound = applyPromotionBinding(value);
+  return bound === value ? event : { ...event, value: bound };
+}
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -40,6 +63,11 @@ export class FeedMemories extends Resource {
     if (auth.kind === "anonymous") {
       return UNAUTH();
     }
+
+    // flair#2561: the non-null-valued fields this request supplies, read from
+    // the body as sent, before anything is merged into it; the response
+    // reports only named primitive fields (feedWriteResponse).
+    const supplied = suppliedMemoryFields(content);
 
     const seedDenial = reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes]);
     if (seedDenial) return seedDenial;
@@ -70,11 +98,13 @@ export class FeedMemories extends Resource {
     if (attr.denied) return attr.denied;
 
     // The feed writes the raw table without the embedding-space latch, so a
-    // body may not supply the embedding stamp.
-    if (content?.embedding !== undefined || content?.embeddingModel !== undefined) {
+    // body may not supply the embedding stamp. flair#2465: nor
+    // `embeddedContentHash`; a Feed skill successor may only retain the stored
+    // row's value (prepareSkillBody).
+    if (content?.embedding !== undefined || content?.embeddingModel !== undefined || content?.embeddedContentHash !== undefined) {
       return Response.json({
         error: "feed_embedding_not_writable",
-        message: "a feed write may not set embedding or embeddingModel; omit both fields",
+        message: "a feed write may not set embedding, embeddingModel or embeddedContentHash; omit these fields",
       }, { status: 400 });
     }
 
@@ -106,13 +136,12 @@ export class FeedMemories extends Resource {
       }
     }
 
-    // flair#2407: this raw-table ingest is a Memory write too; redact
-    // credential-shaped text before the skill body is prepared, before the
-    // content hash is computed from it and before the row is stored.
-    const redactedValues = redactMemoryWrite(content).count;
-    const preparedSkill = await prepareSkillBody(content, existingRecord);
+    const preparedSkill = await prepareSkillBody(content, existingRecord, auth);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
+    let redactedValues = redactMemoryWrite(content).count;
+    // Duplicate top-level metadata keys are refused; otherwise redact name/description and tags.
+    redactedValues += redactSkillWrite(content);
     const agentId = content.agentId;
     const body = String(content?.content ?? "");
     if (!agentId || !body) {
@@ -207,47 +236,121 @@ export class FeedMemories extends Resource {
       if (seedLineageDenial) return seedLineageDenial;
       const addressedId = addressed ? String(addressed.id) : predecessor ? String(predecessor.id) : null;
       const captured: { row: Record<string, any> | null; closed: Record<string, any> | null } = { row: null, closed: null };
-      const outcome = await runSkillVersionWrite({
-        ctx,
-        subjectId,
-        agentId,
-        head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
-        plan: async (head, shared) => {
-          const stale = await validateSkillSnapshots(addressed, predecessor, content.id ?? null, shared);
-          if (stale) return stale;
-          const denied = await authorizeSkillOwners(ctx, auth, [addressed, predecessor, head ?? content], shared);
-          if (denied) return denied;
-          if ((addressed || predecessor) && !head) return skillWriteConflict("skill_head_missing");
-          if (predecessor && (!addressed || content.supersedes !== addressed.supersedes) && head?.id !== predecessor.id) return skillWriteConflict("skill_predecessor_stale");
-          if (addressed && head?.id !== addressed.id) return skillWriteConflict("skill_target_stale");
-          const successor = buildSkillSuccessorRow({
-            base: { ...content, agentId: head?.agentId ?? agentId }, predecessorRow: head, successorId, subjectId,
-            supersedes: head ? String(head.id) : null, now,
+      // flair#2927: a skill-tagged feed write writes Memory rows too — the
+      // successor, the row it addresses and the row it closes — so it takes
+      // the same per-id Memory write lock (and marker check) as the ordinary
+      // write-back below. Locking the successor id as well keeps one rule
+      // for the branch: every Memory row this write writes is held.
+      // The live head is resolved before the acquisition and its id joins the
+      // lock set, because it is the row the write closes when the addressed id
+      // is absent. Under the locks the head is resolved again; a head that is
+      // not one of the held ids releases and retries with the new head. The
+      // write is refused skill_head_moved only if the resolved head stays
+      // outside the held set through the final attempt.
+      // One acquisition per attempt, taken before the version writer's
+      // instruction lock.
+      const baseLockIds = [successorId, addressedId, predecessor ? String(predecessor.id) : null]
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+      const HEAD_MOVED = Symbol("skill-head-moved");
+      let locked: MemoryLockOutcome<{ response: Response } | typeof HEAD_MOVED> | undefined;
+      let preLockDenial: Response | null = null;
+      for (let attempt = 0; attempt < SKILL_HEAD_LOCK_ATTEMPTS; attempt++) {
+        const preHead = await resolveSkillHead(subjectId, addressedId, {});
+        const resolvedPause = txnPausePoint("skill-head-resolved");
+        if (resolvedPause) await resolvedPause;
+        // flair#2927: a head or predecessor this request does not own is
+        // authorized before any lock or marker is checked on it, so a caller
+        // without a write grant gets the ownership refusal whether that row is
+        // free, held or marked; the plan re-checks authority under the locks.
+        const preDenied = await authorizeSkillOwners(ctx, auth, [preHead, predecessor], {});
+        if (preDenied) {
+          preLockDenial = preDenied;
+          break;
+        }
+        const attemptIds = preHead && !baseLockIds.includes(String(preHead.id))
+          ? [...baseLockIds, String(preHead.id)]
+          : [...baseLockIds];
+        const heldIds = new Set(attemptIds);
+        locked = await withMemoryWriteLock(memoryLockStore(), attemptIds, async () => {
+          const attemptedWriteIds = new Set<string>();
+          let headMoved = false;
+          const outcome = await runSkillVersionWrite({
+            ctx,
+            subjectId,
+            agentId,
+            head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
+            plan: async (head, shared) => {
+              if (head && !heldIds.has(String(head.id))) {
+                headMoved = true;
+                return skillWriteConflict("skill_head_moved");
+              }
+              const stale = await validateSkillSnapshots(addressed, predecessor, content.id ?? null, shared);
+              if (stale) return stale;
+              const denied = await authorizeSkillOwners(ctx, auth, [addressed, predecessor, head ?? content], shared);
+              if (denied) return denied;
+              if ((addressed || predecessor) && !head) return skillWriteConflict("skill_head_missing");
+              if (predecessor && (!addressed || content.supersedes !== addressed.supersedes) && head?.id !== predecessor.id) return skillWriteConflict("skill_predecessor_stale");
+              if (addressed && head?.id !== addressed.id) return skillWriteConflict("skill_target_stale");
+              const successor = buildSkillSuccessorRow({
+                auth,
+                base: { ...content, agentId: head?.agentId ?? agentId }, predecessorRow: head, successorId, subjectId,
+                supersedes: head ? String(head.id) : null, now,
+              });
+              successor.provenance = buildProvenance(auth, successor.createdAt, content);
+              stripAuthorityFields(successor, "Memory");
+              await applyOriginatorInstanceId(successor, head);
+              applyFederationBookkeeping(successor, head);
+              captured.row = successor;
+              captured.closed = head;
+              const value = typeof successor.content === "string" ? successor.content : null;
+              const visibility = skillVersionVisibility(successor);
+              if (!head) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility, grantedClose: null };
+              // flair#2511: a grant-authorized cross-agent close of `head` stands on the "write" grant
+              // authorizeSkillOwners read above; the writer re-checks it after the
+              // close is staged.
+              return { kind: "update", predecessor: head, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility, grantedClose: grantedSkillClose(head, ctx, auth) };
+            },
+            hooks: {
+              ...defaultSkillHooks,
+              createSuccessor: (successor, shared) => {
+                attemptedWriteIds.add(String(successor.id));
+                return defaultSkillHooks.createSuccessor!(successor, shared);
+              },
+              closePredecessor: (predecessor, patch, shared) => {
+                attemptedWriteIds.add(String(predecessor.id));
+                return defaultSkillHooks.closePredecessor!(predecessor, patch, shared);
+              },
+              authorizeClose: (row, shared) => authorizeSkillOwners(ctx, auth, [row], shared),
+              pointer: async (shared) => {
+                if (captured.closed) await deletePointerRowViaTable(String(captured.closed.id), shared);
+                return null;
+              },
+            },
           });
-          successor.provenance = buildProvenance(auth, successor.createdAt, content);
-          stripAuthorityFields(successor, "Memory");
-          await applyOriginatorInstanceId(successor, head);
-          applyFederationBookkeeping(successor, head);
-          captured.row = successor;
-          captured.closed = head;
-          const value = typeof successor.content === "string" ? successor.content : null;
-          const visibility = skillVersionVisibility(successor);
-          if (!head) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
-          return { kind: "update", predecessor: head, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility };
-        },
-        hooks: {
-          ...defaultSkillHooks,
-          pointer: async (shared) => {
-            if (captured.closed) await deletePointerRowViaTable(String(captured.closed.id), shared);
-            return null;
-          },
-        },
-      });
-      if (!outcome.ok) return outcome.response;
-      const written = captured.row;
-      if (captured.closed) noteMemoryDelete(String(captured.closed.id));
-      if (written) noteMemoryUpsert(written);
-      return withRedactedValues(written ?? { id: successorId, written: true, durability: "persistent" }, redactedValues);
+          if (!outcome.ok) {
+            if (headMoved) return HEAD_MOVED;
+            // flair#2927: record the attempted ids outcome-unknown when storage
+            // withheld the write result, when the skill writer could not confirm
+            // its undo (`skill_update_compensation_failed`), or when the refusal
+            // body has no readable error code.
+            const code = await responseErrorCode(outcome.response);
+            if (code === null || code === WRITE_RESPONSE_WITHHELD || code === "skill_update_compensation_failed") {
+              for (const id of attemptedWriteIds) markMemoryWriteOutcomeUnknown(id);
+            }
+            return { response: outcome.response };
+          }
+          const written = captured.row;
+          if (captured.closed) noteMemoryDelete(String(captured.closed.id));
+          if (written) noteMemoryUpsert(written);
+          return { response: feedWriteResponse(written ?? { id: successorId, written: true, durability: "persistent" }, redactedValues, supplied) };
+        }, { phase: "feed-skill-ingest" });
+        if (locked.kind !== "done" || locked.value !== HEAD_MOVED) break;
+      }
+      if (preLockDenial) return preLockDenial;
+      if (!locked) return memoryLockUnavailableResponse();
+      if (locked.kind !== "done") return memoryLockRefusal(locked, agentId)!;
+      if (locked.value === HEAD_MOVED) return skillWriteConflict("skill_head_moved");
+      return locked.value.response;
     }
 
     const now = new Date().toISOString();
@@ -256,9 +359,10 @@ export class FeedMemories extends Resource {
     const existing = await findExistingMemoryByContentHash((databases as any).flair.Memory.search(), agentId, contentHash);
     if (existing) {
       if (existing.durability === "ephemeral" && existing.expiresAt == null) {
-        return withRedactedValues(await repairDeduplicatedExpiry(ctx, existing), redactedValues);
+        const repaired = await repairDeduplicatedExpiry(ctx, existing);
+        return repaired instanceof Response ? repaired : feedWriteResponse(repaired, redactedValues, supplied);
       }
-      return withRedactedValues(existing, redactedValues);
+      return feedWriteResponse(existing, redactedValues, supplied);
     }
 
     const record = {
@@ -299,72 +403,140 @@ export class FeedMemories extends Resource {
     // caller-supplied server-stamped field (instanceToken, provenance), then
     // PRESERVE the existing row's incarnation token, else generate one.
     stripServerStampedFields(record);
-    let refusal: Response | undefined;
-    let outcome: Awaited<ReturnType<typeof writeBackCommittedRow>>;
-    try {
-      outcome = await writeBackCommittedRow(
-        (databases as any).flair.Memory,
-        record.id,
-        async (priorById: any) => {
-          if (priorById && priorById.agentId !== agentId) {
-            refusal = FORBIDDEN("forbidden: cannot write a feed memory owned by another agent");
-            return { skip: true };
+    // flair#2478 slice 3b: the ordinary (non-skill) write-back runs under the
+    // id's per-id Memory write lock, so its read, decision and commit sit on one
+    // committed basis. The feed write is a foreground client write: a held key
+    // waits its budget and can answer `503 memory_busy`; a marked id answers
+    // `503 write_outcome_unknown` at once; a store with no lock answers
+    // `503 memory_lock_unavailable`. The write-back confirms its committed row
+    // as before; when storage withholds the write result (flair#2857), or its
+    // read-back of that row fails or does not show the write (409
+    // `feed_write_unconfirmed`), it records the id outcome-unknown before the
+    // lock is released (flair#2806). An omitted id is generated; a
+    // caller-supplied id can contend.
+    const locked = await withMemoryWriteLock(
+      memoryLockStore(),
+      [String(record.id)],
+      async (): Promise<{ response: Response } | { written: Record<string, any> }> => {
+        let refusal: Response | undefined;
+        let outcome: Awaited<ReturnType<typeof writeBackCommittedRow>>;
+        const table = (databases as any).flair.Memory;
+        try {
+          outcome = await writeBackCommittedRow(
+            {
+              get: (id, shared) => table.get(id, shared),
+              put: async (row, shared) => {
+                normalizeEmptyEmbedding(row);
+                const result = storageResult(await table.put(row, shared));
+                if (result instanceof Response) {
+                  // flair#2857: storage withheld this write's result (a Response
+                  // instead of the row), so whether the row holds the write is
+                  // unconfirmed. Record the id's outcome-unknown marker inside
+                  // its lock, as the failed or mismatching read-back below does.
+                  markMemoryWriteOutcomeUnknown(record.id);
+                  refusal = result;
+                }
+              },
+            },
+            record.id,
+            async (priorById: any) => {
+              if (priorById && priorById.agentId !== agentId) {
+                refusal = FORBIDDEN("forbidden: cannot write a feed memory owned by another agent");
+                return { skip: true };
+              }
+              const written: Record<string, any> = { ...record };
+              if (visibilityOmitted) {
+                const stored = priorById?.visibility;
+                if (stored === PRIVATE_VISIBILITY || stored === SHARED_VISIBILITY) written.visibility = stored;
+                else if (durability === "ephemeral") written.visibility = PRIVATE_VISIBILITY;
+                else delete written.visibility;
+                const tierError = assertVisibilityAllowedForDurability(durability, written.visibility);
+                if (tierError) {
+                  refusal = Response.json({ error: "invalid_visibility_for_durability", message: tierError }, { status: 400 });
+                  return { skip: true };
+                }
+              }
+              written.instanceToken = priorById?.instanceToken ?? randomUUID();
+              // Feed ingest writes the INCOMING authored record as a full row (a
+              // semantic re-authoring on POST /FeedMemories): the stored row is
+              // REPLACED, not patched, and provenance is re-stamped from the resolved
+              // (trusted) identity and ONE server clock read (inside buildProvenance)
+              // rather than carrying the stored blob forward — a legacy row whose
+              // `verified.timestamp` came from a client `createdAt` must not keep
+              // presenting that value after a new write (flair#1960 r2). The feed
+              // body's own `createdAt` is recorded only as the CLAIM
+              // `provenance.claimed.createdAt`, never as a verified timestamp. The
+              // values this re-authoring derives from the stored row (the incarnation
+              // token, an omitted visibility, a carried expiry, the originator-instance and
+              // federation bookkeeping) are carried across; it never writes back a
+              // stale echo of the content it read, and it is a foreground client
+              // write, so the field-only rule for background stamps (flair#2470) does
+              // not apply to it.
+              written.provenance = buildProvenance(auth, written.createdAt, content);
+              // flair#1965 r2: this raw table write REPLACES the row, bypassing the
+              // Memory resource's write methods, so the create/update rule is
+              // applied here explicitly: a CREATE (no stored row) stamps this
+              // instance's own id and ignores any body value; an UPDATE keeps the
+              // STORED value (a body value neither replaces nor clears it). The
+              // receiver-side federation bookkeeping (`_originatorInstanceId` et al.)
+              // is likewise unsettable from a body — it stands as stored, or is
+              // dropped on a create. See resources/originator-instance.ts.
+              await applyOriginatorInstanceId(written, priorById);
+              applyFederationBookkeeping(written, priorById);
+              const expiryError = stampEphemeralExpiry(written, priorById);
+              if (expiryError) {
+                refusal = Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
+                return { skip: true };
+              }
+              return { idempotent: false, commitMarkerField: "writeBackWriteId", write: written };
+            },
+            {
+              ctx, label: "MemoryFeed.ingest",
+              pausePre: () => txnPausePoint("feed-ingest-pre"),
+              pausePoint: () => txnPausePoint("feed-ingest"),
+              pauseAfterStage: () => txnPausePoint("feed-ingest-staged"),
+              pauseBeforeCommit: () => txnPausePoint("feed-ingest-commit"),
+              // Test-only: after the commit, before the read-back.
+              pauseBeforeVerify: () => txnPausePoint("feed-ingest-verify"),
+              expectedRow: existingRecord,
+            },
+          );
+        } catch (err) {
+          if (refusal) return { response: refusal };
+          if (err instanceof WriteBackConflictError) {
+            if (err.outcome === "conflict") return { response: feedTargetChanged(record.id) };
+            // flair#2806: the commit resolved and the read-back does not show the
+            // write, so the row may hold it. Record the id's outcome-unknown
+            // marker here, inside the id's lock, as the owner PUT and PATCH do
+            // (writeOutcomeUnknownFor), so a later write to the id answers
+            // 503 write_outcome_unknown until restart.
+            markMemoryWriteOutcomeUnknown(record.id);
+            return {
+              response: Response.json({
+                error: "feed_write_unconfirmed", outcome: err.outcome, message: err.message,
+              }, { status: 409 }),
+            };
           }
-          const written: Record<string, any> = { ...record };
-          if (visibilityOmitted) {
-            const stored = priorById?.visibility;
-            if (stored === PRIVATE_VISIBILITY || stored === SHARED_VISIBILITY) written.visibility = stored;
-            else if (durability === "ephemeral") written.visibility = PRIVATE_VISIBILITY;
-            else delete written.visibility;
-            const tierError = assertVisibilityAllowedForDurability(durability, written.visibility);
-            if (tierError) {
-              refusal = Response.json({ error: "invalid_visibility_for_durability", message: tierError }, { status: 400 });
-              return { skip: true };
-            }
-          }
-          written.instanceToken = priorById?.instanceToken ?? randomUUID();
-          // Feed ingest is a full-row write: it REPLACES the stored row, so a
-          // re-ingest with new content is a semantic re-authoring. Re-stamp
-          // provenance from the resolved (trusted) identity and ONE server clock
-          // read (inside buildProvenance) rather than carrying the stored blob
-          // forward — a legacy row whose `verified.timestamp` came from a client
-          // `createdAt` must not keep presenting that value after a new write
-          // (flair#1960 r2). The feed body's own `createdAt` is recorded only as
-          // the CLAIM `provenance.claimed.createdAt`, never as a verified
-          // timestamp. The incarnation token is retained above when present (a
-          // re-ingest is not a reincarnation), so only `provenance` is
-          // re-derived.
-          written.provenance = buildProvenance(auth, written.createdAt, content);
-          // flair#1965 r2: this raw table write REPLACES the row, bypassing the
-          // Memory resource's write methods, so the create/update rule is
-          // applied here explicitly: a CREATE (no stored row) stamps this
-          // instance's own id and ignores any body value; an UPDATE keeps the
-          // STORED value (a body value neither replaces nor clears it). The
-          // receiver-side federation bookkeeping (`_originatorInstanceId` et al.)
-          // is likewise unsettable from a body — it stands as stored, or is
-          // dropped on a create. See resources/originator-instance.ts.
-          await applyOriginatorInstanceId(written, priorById);
-          applyFederationBookkeeping(written, priorById);
-          const expiryError = stampEphemeralExpiry(written, priorById);
-          if (expiryError) {
-            refusal = Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
-            return { skip: true };
-          }
-          return { write: written };
-        },
-        { ctx, label: "MemoryFeed.ingest", pausePre: () => txnPausePoint("feed-ingest-pre"), pausePoint: () => txnPausePoint("feed-ingest"), expectedRow: existingRecord },
-      );
-    } catch (err) {
-      // The target row was replaced, or kept changing: nothing was written.
-      if (err instanceof WriteBackConflictError) return feedTargetChanged(record.id);
-      throw err;
-    }
-    if (refusal) return refusal;
-    if ("skip" in outcome) return feedTargetChanged(record.id);
-    const written = outcome.write;
+          throw err;
+        }
+        if (refusal) return { response: refusal };
+        if ("skip" in outcome) return { response: feedTargetChanged(record.id) };
+        if (!("write" in outcome)) throw new Error("MemoryFeed.ingest: expected a full-record write plan");
+        // Test-only: the write committed and the lock is still held.
+        const committed = txnPausePoint("feed-ingest-committed");
+        if (committed) await committed;
+        return { written: outcome.write };
+      },
+      { phase: "feed-ingest" },
+    );
+    if (locked.kind === "busy") return memoryBusyResponse(agentId);
+    if (locked.kind === "unknown") return writeOutcomeUnknownResponse();
+    if (locked.kind === "unavailable") return memoryLockUnavailableResponse();
+    if ("response" in locked.value) return locked.value.response;
+    const written = locked.value.written;
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(written);
-    return withRedactedValues(written, redactedValues);
+    return feedWriteResponse(written, redactedValues, supplied);
   }
 
   // Subscription admission: verified agents, admins and trusted internal
@@ -390,7 +562,7 @@ export class FeedMemories extends Resource {
    * Two layers decide what a non-admin subscriber receives:
    *
    * 1. Harper's synchronous `SubscriptionRequest.rowFilter`, set to the
-   *    predicate. In the pinned Harper (5.2.8) the filter is evaluated on the
+   *    predicate. In Harper 5.2.8 the filter is evaluated on the
    *    full stored row for the rows replayed when the subscription opens, for
    *    every live change (an update is re-read from the primary store and
    *    delivered as a full-row `put`) and for reload re-deliveries; a history
@@ -420,14 +592,14 @@ export class FeedMemories extends Resource {
     }
 
     if (auth.kind === "internal" || auth.isAdmin) {
-      const subscription = await (databases as any).flair.Memory.subscribe(target);
+      const subscription = await subscribeInProcess((databases as any).flair.Memory, target);
 
       if (!incomingMessages) {
         return subscription;
       }
 
       for await (const event of subscription) {
-        yield event;
+        yield promotionBoundEvent(event);
       }
       return;
     }
@@ -438,13 +610,13 @@ export class FeedMemories extends Resource {
     // Harper's own Resource.connect() makes.
     const callerRequest = (this.constructor as any).loadAsInstance === false ? target : incomingMessages;
     const request = scopedSubscriptionRequest(callerRequest, (record: any) => scope.isAllowed(record));
-    const subscription = await (databases as any).flair.Memory.subscribe(request);
+    const subscription = await subscribeInProcess((databases as any).flair.Memory, request);
     const readStored = (id: any) => (databases as any).flair.Memory.get(id);
     const replaysHistory = request.startTime !== undefined || request.previousCount !== undefined;
     for await (const event of subscription) {
       if (!(await readableRowEvent(event, auth.agentId, scope.isAllowed, readStored))) continue;
       if (replaysHistory && !(await storedRowReadable(event?.id, auth.agentId, scope.isAllowed, readStored))) continue;
-      yield event;
+      yield promotionBoundEvent(event);
     }
   }
 }
@@ -560,12 +732,11 @@ const FEED_DEDUP_REPAIR_ATTEMPTS = 3;
 
 export const FEED_TARGET_CHANGED_ERROR = "feed_target_changed";
 
-/** A retryable 409: the row a feed write targets changed during the request,
- *  so nothing was written. */
 function feedTargetChanged(id: string): Response {
   return Response.json({
     error: FEED_TARGET_CHANGED_ERROR,
-    message: `the stored row ${JSON.stringify(id)} this write targets changed during the request; retry the write`,
+    outcome: "conflict",
+    message: `the stored row ${JSON.stringify(id)} this write targets changed during the request; write not applied; retry the write`,
   }, { status: 409 });
 }
 
@@ -582,14 +753,22 @@ function isDedupMatch(row: any, match: any): boolean {
     row.agentId === match.agentId && row.contentHash === match.contentHash;
 }
 
-/**
- * flair#2407: a response-only copy of a feed result carrying the redaction
- * count. The stored row is not modified. A Response, a non-object result or a
- * zero count is returned unchanged.
- */
-function withRedactedValues(result: any, redactedValues: number): any {
-  if (redactedValues <= 0 || result instanceof Response || !result || typeof result !== "object") return result;
-  return { ...result, redactedValues };
+/** The `error` code of a refused write's JSON body, or null (never a pass:
+ *  the caller treats an unreadable body as an unknown outcome). */
+async function responseErrorCode(response: Response): Promise<string | null> {
+  try {
+    const body = await response.clone().json();
+    return typeof (body as any)?.error === "string" ? (body as any).error : null;
+  } catch {
+    return null;
+  }
+}
+
+function feedWriteResponse(result: any, redactedValues: number, supplied: ReadonlySet<string>): any {
+  const response = feedResponseFields(result, supplied);
+  if (response instanceof Response || redactedValues <= 0) return response;
+  const redaction = buildFromAllowlist({ redactedValues }, REDACTION_RULES);
+  return redaction instanceof Response ? redaction : Object.assign(response, redaction);
 }
 
 /**
@@ -603,16 +782,39 @@ function withRedactedValues(result: any, redactedValues: number): any {
  * committed read must equal the transaction's read before the write, else the
  * repair starts over (FEED_DEDUP_REPAIR_ATTEMPTS attempts, then the 409). A
  * change committed after that read and before the commit follows Harper's
- * timestamp order. After the commit, an owned read must show the match with
- * the written expiry (else the 409); that row is returned. Returned rows carry
- * no inline pointer fields (stripInlinePointerFields).
+ * timestamp order. A storage result that withholds the update's result records
+ * the id outcome-unknown and returns that result (500 write_response_withheld)
+ * (flair#2857). After the commit, an owned read that shows the match with the
+ * written expiry returns that row; a read that does not show it is refused
+ * (409 FEED_DEDUP_TARGET_CHANGED_ERROR), and a read that fails rethrows, so the
+ * request answers 500. Returned rows carry no inline pointer fields
+ * (stripInlinePointerFields).
  */
 async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> {
   const id = String(match.id);
   const idDenial = reservedSeedFeedWriteDenial("Memory", [id]) ?? refuseContentSuffixId([id]);
   if (idDenial) return idDenial;
+  // flair#2478 slice 3b: the repair is an automatic writer. It takes the id's
+  // per-id Memory write lock once and without waiting; a held id, an
+  // outcome-unknown marker or a store with no lock skips the repair and
+  // reports it, and returns the matched, unrepaired row with its inline
+  // pointer fields removed, from which the caller builds the normal
+  // allowlisted feed response. A later feed write repairs it only if the row
+  // still matches and still lacks an expiry.
+  const locked = await withMemoryWriteLockOnce(
+    memoryLockStore(),
+    [id],
+    () => repairDeduplicatedExpiryLocked(ctx, match, id),
+    { phase: "feed-dedup-repair" },
+  );
+  if (locked.kind === "done") return locked.value;
+  console.warn("[MemoryFeed] dedup expiry repair skipped: %s (id %s)", locked.kind, id);
+  return stripInlinePointerFields(match);
+}
+
+async function repairDeduplicatedExpiryLocked(ctx: unknown, match: any, id: string): Promise<any> {
   for (let attempt = 1; attempt <= FEED_DEDUP_REPAIR_ATTEMPTS; attempt++) {
-    const outcome: { kind: "changed" } | { kind: "retry" } | { kind: "current"; row: any } | { kind: "written"; row: any } =
+    const outcome: { kind: "withheld"; response: Response } | { kind: "changed" } | { kind: "retry" } | { kind: "current"; row: any } | { kind: "written"; row: any } =
       await withOwnedTransaction(ctx, async (c) => {
         const stored = await (databases as any).flair.Memory.get(id, c);
         if (!isDedupMatch(stored, match)) return { kind: "changed" as const };
@@ -623,20 +825,55 @@ async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> 
         // The committed row, in an explicit fresh context (not this transaction's snapshot).
         const committed = await (databases as any).flair.Memory.get(id, {});
         if (!isDeepStrictEqual(committed, stored)) return { kind: "retry" as const };
+        // Test-only: the last confirmation passed and the transaction has not
+        // committed yet.
+        const commitPoint = txnPausePoint("feed-dedup-repair-commit");
+        if (commitPoint) await commitPoint;
         const row: any = { ...stored };
         // A stored null is "no expiry": drop it so the shared rule stamps a fresh
         // tier TTL rather than refusing the null as malformed.
         delete row.expiresAt;
         const error = stampEphemeralExpiry(row);
         if (error) throw new Error(`flair: deduplicated ephemeral row ${id} could not be repaired (${error})`);
-        await (databases as any).flair.Memory.put(row, c);
+        // Only `expiresAt`: an incremental update, never a
+        // full-row put of the row read above (flair#2470).
+        const result = storageResult(await (databases as any).flair.Memory.update(id, { expiresAt: row.expiresAt }, c));
+        if (result instanceof Response) {
+          // flair#2857: storage withheld the update's result (a Response instead
+          // of the row), so whether the row holds the expiry is unconfirmed.
+          // Record the id's outcome-unknown marker inside its lock, as the
+          // confirmation branches below do.
+          markMemoryWriteOutcomeUnknown(id);
+          return { kind: "withheld" as const, response: result };
+        }
+        // Test-only: the update is staged and the lock is still held.
+        const staged = txnPausePoint("feed-dedup-repair-staged");
+        if (staged) await staged;
         return { kind: "written" as const, row };
       });
+    if (outcome.kind === "withheld") return outcome.response;
     if (outcome.kind === "retry") continue;
     if (outcome.kind === "changed") return feedDedupTargetChanged(id);
     if (outcome.kind === "current") return stripInlinePointerFields(outcome.row);
-    const confirmed = await withOwnedTransaction(ctx, async (c) => (databases as any).flair.Memory.get(id, c));
-    if (!isDedupMatch(confirmed, match) || confirmed.expiresAt !== outcome.row.expiresAt) return feedDedupTargetChanged(id);
+    // Test-only: the update committed and the lock is still held.
+    const committedPoint = txnPausePoint("feed-dedup-repair-committed");
+    if (committedPoint) await committedPoint;
+    let confirmed: any;
+    try {
+      confirmed = await withOwnedTransaction(ctx, async (c) => (databases as any).flair.Memory.get(id, c));
+    } catch (err) {
+      // flair#2806: the update committed and this confirmation read failed, so
+      // the row may hold the expiry. Record the id's outcome-unknown marker
+      // inside the lock, as the ordinary feed write-back and the owner writes do.
+      markMemoryWriteOutcomeUnknown(id);
+      throw err;
+    }
+    if (!isDedupMatch(confirmed, match) || confirmed.expiresAt !== outcome.row.expiresAt) {
+      // flair#2806: the update committed and this read does not show it on the
+      // matched row. Record the marker inside the lock, as for a failed read.
+      markMemoryWriteOutcomeUnknown(id);
+      return feedDedupTargetChanged(id);
+    }
     return stripInlinePointerFields(confirmed);
   }
   return feedDedupTargetChanged(id);

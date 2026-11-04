@@ -24,7 +24,9 @@
  * others' records only when non-private) rather than a stubbed rule.
  */
 import { mock, describe, it, expect } from "bun:test";
+import { format } from "node:util";
 import type { AgentAuthVerdict } from "../../resources/agent-auth.ts";
+import { WriteBackConflictError } from "../../resources/write-back.ts";
 
 // resources/usage-recording.ts imports `databases` from harper,
 // whose module chain throws when loaded outside a Harper runtime (the same
@@ -43,6 +45,31 @@ const { recordCitations, recordUsageBatch, isLedgerRowVisible, readableLedgerRow
 const CITER_ID = "agt_citer";
 const AGENT: AgentAuthVerdict = { kind: "agent", agentId: CITER_ID, isAdmin: false };
 const NOW = "2026-07-21T00:00:00.000Z";
+
+for (const outcome of ["conflict", "unconfirmed"] as const) {
+  for (const surface of ["recordCitations", "recordUsageBatch"] as const) {
+    it(`${surface} logs ${outcome} for the contribution count write`, async () => {
+      const saved = console.error;
+      const logs: any[][] = [];
+      console.error = (...args: any[]) => { logs.push(args); };
+      const record = async () => { throw new WriteBackConflictError("usage-recording", "m1", 1, outcome); };
+      try {
+        if (surface === "recordCitations") {
+          await recordCitations({}, AGENT, ["m1"], NOW, record, async () => ({ id: "m1", agentId: CITER_ID }));
+        } else {
+          await recordUsageBatch({}, CITER_ID, ["m1"], undefined, NOW, record);
+        }
+      } finally { console.error = saved; }
+      expect(logs).toHaveLength(1);
+      // The log uses a constant format string; assert on the message as printed.
+      const [fmt, phrase, reason, detail] = logs[0];
+      expect(format(fmt, phrase, reason)).toContain(outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed");
+      expect(reason).toBe(outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed");
+      expect(detail).toMatchObject({ memoryId: "m1", reason: outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", outcome });
+      expect(detail.err.message).toContain(outcome === "conflict" ? "no write committed by this attempt" : "unconfirmed after commit");
+    });
+  }
+}
 
 interface Call {
   agentId: string;

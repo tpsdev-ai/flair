@@ -38,8 +38,17 @@
 // (plus an occurrence ordinal — never `file:line`); keys are unique, so one
 // entry covers exactly one call; the run is DIFFED against the committed
 // baseline, so a PR cannot add an offender together with its own exception; and
-// an entry that no longer offends FAILS, so the list can only shrink. There is
+// an entry that no longer offends FAILS. New exception keys FAIL. There is
 // no skip flag and no whole-file skip.
+//
+// A RE-KEY IS NOT AN ADDED EXCEPTION (flair#2854). An added key is paired
+// ONE-TO-ONE with a removed baseline key of identical file, fingerprint, kind
+// and occurrence, and reported as RE-KEYED without failing, ONLY when the
+// scanned working-tree file is byte-identical to its blob at the trusted base
+// ref. Pairing consumes both keys. Only
+// `spawn-no-timeout` is re-keyable: a case-level kind's scope names the case
+// that owns the defect, and a fix in one case must never cover a regression in
+// another, so those keys keep strict identity.
 //
 // SCOPE — EVERY SPAWN FAMILY THIS REPO USES (flair#1825). The node
 // `child_process` family (spawn / spawnSync / exec / execFile / fork and their
@@ -49,9 +58,10 @@
 // The scanner masks string/template/regex CONTENTS for call matching, so a
 // `Bun.spawn(...)` quoted in a string is not mistaken for a call.
 //
-// SCANNING. Test files are read as TEXT, not parsed: no AST dependency, so the
-// gate runs before `bun install`. That makes one thing load-bearing — the
-// scanner must not confuse code with prose. Comments are masked (an apostrophe
+// SCANNING. Call matching runs on the source TEXT after masking, and the mask
+// comes from TypeScript's parser (the lockfile's `typescript`), so the gate
+// needs `bun install` first (the CI job installs it). That makes one thing
+// load-bearing: the scanner must not confuse code with prose. Comments are masked (an apostrophe
 // in "it's not in stderr" otherwise opens a string that swallows the case's
 // closing paren), and string / template / regex literals are skipped when
 // matching brackets (a regex like `/required option '--agent/` does the same).
@@ -68,6 +78,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isUnitTestFile } from "./test-files.mjs";
+import ts from "typescript";
 
 /**
  * The trusted baseline of exceptions (flair#1825). It replaces the old in-script
@@ -77,11 +88,13 @@ import { isUnitTestFile } from "./test-files.mjs";
 export const BASELINE_PATH = join(dirname(fileURLToPath(import.meta.url)), "cli-spawn-budgets.baseline.json");
 
 /**
- * The ONE commit whose base legitimately has no baseline file: the origin/main
- * sha this gate's baseline was introduced from (flair#1825). The seed path is
- * taken ONLY when the base ref resolves to exactly this sha. Any OTHER base with
- * no baseline file is a hard failure — a base ref repointed at any pre-baseline
- * commit must not be enough. Full 40-char sha, read with `git merge-base`.
+ * The seed-introduction anchor: the origin/main sha this gate's baseline was
+ * introduced from (flair#1825). The seed path is taken ONLY when the base ref
+ * resolves to this sha or to a commit that descends from it. Any OTHER base with
+ * no baseline file is a hard failure — a base ref repointed at a commit outside
+ * that history must not be enough. Full 40-char sha: `git rev-parse` resolves
+ * the base ref (and this sha), and `git merge-base --is-ancestor` checks that the
+ * base descends from it.
  */
 export const SEED_INTRODUCTION_BASE = "4904699d80b55d9f299fe8e061aa80e4de8e9edc";
 
@@ -148,7 +161,7 @@ function skipRegex(src, i) {
       j += 2;
       continue;
     }
-    if (c === "\n") return i; // never closed on this line — treat as division
+    if (LINE_BREAK_CHARS.has(c)) return i; // never closed on this line — treat as division
     if (c === "[") inClass = true;
     else if (c === "]") inClass = false;
     else if (c === "/" && !inClass) return j;
@@ -157,95 +170,187 @@ function skipRegex(src, i) {
   return i;
 }
 
+/** The name `findSpawnCalls` parses a source under when the caller names no file. */
+const UNNAMED_SOURCE = "source.ts";
+
+/** TypeScript's ScriptKind for a test file name, by extension (case-insensitive). */
+function scriptKindFor(fileName) {
+  const ext = /\.([^./\\]+)$/.exec(fileName)?.[1]?.toLowerCase();
+  if (ext === "tsx") return ts.ScriptKind.TSX;
+  if (ext === "jsx") return ts.ScriptKind.JSX;
+  if (ext === "js" || ext === "mjs" || ext === "cjs") return ts.ScriptKind.JS;
+  return ts.ScriptKind.TS;
+}
+
 /**
- * Like maskComments, but ALSO blanks the CONTENTS of string / regex literals and
- * the literal TEXT of template literals (same length). Used for spawn-CALL
- * matching, so a `Bun.spawn(...)` mentioned inside a plain string is not
- * mistaken for a call. A template's `${…}` EXPRESSIONS are left as CODE — a
- * `Bun.spawn(...)` of the CLI entry there IS a real call (flair#1825). The
- * argv/options TEXT a call reports is sliced from the ORIGINAL source, so the
- * CLI-entry and timeout checks still read real literal text.
+ * A file the parser reports a syntax error in is refused with an error naming
+ * it: the scan never falls back to the unmasked text.
  */
-function maskLiteralsAndComments(src) {
+function parseSourceFile(src, fileName = UNNAMED_SOURCE) {
+  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, scriptKindFor(fileName));
+  const diagnostics = sf.parseDiagnostics;
+  if (!Array.isArray(diagnostics)) {
+    throw new Error(
+      `cannot read TypeScript's parse diagnostics for ${fileName} (typescript ${ts.version}); ` +
+        "refusing to scan it unmasked (flair#2774).",
+    );
+  }
+  if (diagnostics.length > 0) {
+    const first = diagnostics[0];
+    const { line, character } = sf.getLineAndCharacterOfPosition(first.start ?? 0);
+    throw new Error(
+      `${fileName}:${line + 1}:${character + 1}: TypeScript cannot parse this file ` +
+        `(${ts.flattenDiagnosticMessageText(first.messageText, " ")}); refusing to scan it unmasked (flair#2774).`,
+    );
+  }
+  return sf;
+}
+
+/**
+ * Whether `fileName` selects a script kind in which TypeScript parses JSX:
+ * `.tsx` and `.jsx` (`ScriptKind.TSX` / `ScriptKind.JSX`), and `.js`, `.mjs`
+ * and `.cjs` (`ScriptKind.JS`, which TypeScript also parses as the JSX
+ * language variant). `.ts`, `.mts` and `.cts` are parsed as standard
+ * TypeScript and cannot contain JSX.
+ */
+function isJsxFileName(fileName) {
+  const kind = scriptKindFor(fileName);
+  return kind === ts.ScriptKind.TSX || kind === ts.ScriptKind.JSX || kind === ts.ScriptKind.JS;
+}
+
+/**
+ * Every character TypeScript's line map treats as a line break: `\n`, `\r`,
+ * U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR). A `\r\n` pair is
+ * two of these characters. The three maskers below keep exactly this set, so a
+ * masked copy reports the same line and character for every position as the
+ * original (flair#2808). The text walks end a line at any of them; a regex
+ * spells the set as `\n\r\u2028\u2029` inside a character class.
+ */
+const LINE_BREAK_CHARS = new Set(["\n", "\r", "\u2028", "\u2029"]);
+
+/** Index of the first `LINE_BREAK_CHARS` character at or after `from`, or -1. */
+function indexOfLineBreak(src, from) {
+  for (let j = from; j < src.length; j++) if (LINE_BREAK_CHARS.has(src[j])) return j;
+  return -1;
+}
+
+/** The 1-based line of `index`, counted as TypeScript's line map counts it (a `\r\n` pair is one break). */
+function lineNumberAt(src, index) {
+  let line = 1;
+  for (let j = 0; j < index && j < src.length; j++) {
+    if (LINE_BREAK_CHARS.has(src[j]) && !(src[j] === "\r" && src[j + 1] === "\n")) line++;
+  }
+  return line;
+}
+
+/**
+ * The source with every JSX TEXT node replaced by spaces, keeping its length and
+ * its line breaks (flair#2808). JSX text is prose to the parser, not code: an
+ * apostrophe, quote or `//` in it otherwise opens a string or a comment in the
+ * text-based walks and swallows the closing paren of the call or case around
+ * it. Each `JsxText` node is masked from `pos` to `end`, replacing every
+ * character except the four in `LINE_BREAK_CHARS` with a space, so lengths and
+ * line/column positions stay aligned. A JSX attribute's string value is blanked
+ * the same way (its quotes are kept, so the masked source still parses) in
+ * either quote style: JSX attribute strings have no escape sequences, so the
+ * text walks must not read a trailing backslash as escaping the closing quote
+ * (flair#2854). The value's range is TypeScript's `StringLiteral`, so its quote
+ * style is the parser's, not a scan's.
+ */
+export function maskJsxText(src, fileName = UNNAMED_SOURCE) {
+  if (!isJsxFileName(fileName)) return src;
+  const sf = parseSourceFile(src, fileName);
+  const out = src.split("");
+  let masked = false;
+  const blank = (from, to) => {
+    for (let j = from; j < to && j < src.length; j++) if (!LINE_BREAK_CHARS.has(src[j])) out[j] = " ";
+  };
+  const visit = (node) => {
+    if (node.kind === ts.SyntaxKind.JsxText) {
+      masked = true;
+      blank(node.pos, node.end);
+      return;
+    }
+    // A JSX attribute string has no escape sequences: its value ends at the next
+    // matching quote, so a trailing backslash is part of the value (flair#2854).
+    // The value is a StringLiteral in the AST in either quote style; blank its
+    // interior so the text-based walks never read that backslash as an escaping
+    // backslash. The quotes stay, so the masked source still parses as JSX.
+    if (node.kind === ts.SyntaxKind.StringLiteral && node.parent && node.parent.kind === ts.SyntaxKind.JsxAttribute) {
+      const start = node.getStart(sf);
+      const quote = src[start];
+      if ((quote === '"' || quote === "'") && src[node.end - 1] === quote && node.end - 1 > start + 1) {
+        masked = true;
+        blank(start + 1, node.end - 1);
+      }
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return masked ? out.join("") : src;
+}
+
+/**
+ * The source as TypeScript's parser reads it, with every comment and the text of
+ * every string literal, template literal and regex literal replaced by spaces
+ * (flair#2774). Line breaks (the four in `LINE_BREAK_CHARS`) and length are
+ * kept, so every index and every line/column position still points at the same
+ * character. A template's `${` and `}` and the expressions between them
+ * stay as code: a `Bun.spawn(...)` of the CLI entry there IS a real call
+ * (flair#1825). Used for spawn-CALL matching, so a `Bun.spawn(...)` mentioned in
+ * a string or comment is not mistaken for a call. The argv/options TEXT a call
+ * reports is sliced from the ORIGINAL source, so the CLI-entry check still reads
+ * real literal text.
+ */
+export function maskLiteralsAndComments(src, fileName = UNNAMED_SOURCE, sf = parseSourceFile(src, fileName)) {
   const out = src.split("");
   const blank = (from, to) => {
-    for (let j = from; j < to && j < src.length; j++) if (src[j] !== "\n") out[j] = " ";
+    for (let j = from; j < to && j < src.length; j++) if (!LINE_BREAK_CHARS.has(src[j])) out[j] = " ";
   };
-  let i = 0;
-  while (i < src.length) {
-    const ch = src[i];
-    if (ch === '"' || ch === "'") {
-      const end = skipNonCode(src, i);
-      blank(i, end);
-      i = end > i ? end : i + 1;
-      continue;
+  // Every comment sits in the trivia between two tokens, and TypeScript reports
+  // it as a TRAILING comment range of the earlier token or a LEADING range of
+  // the later one (a comment that starts on the earlier token's line, even a
+  // multiline block, is returned whole as a trailing range). Visiting every node
+  // and token (getChildren includes the tokens) and masking both kinds of range
+  // therefore reaches every comment, inside template expressions too. A JSDoc
+  // comment is one of those ranges; its parsed nodes are skipped.
+  const leadingDone = new Set();
+  const trailingDone = new Set();
+  const visit = (node) => {
+    if (node.kind >= ts.SyntaxKind.FirstJSDocNode && node.kind <= ts.SyntaxKind.LastJSDocNode) return;
+    if (!leadingDone.has(node.pos)) {
+      leadingDone.add(node.pos);
+      for (const r of ts.getLeadingCommentRanges(src, node.pos) ?? []) blank(r.pos, r.end);
     }
-    if (ch === "`") {
-      // Template: blank the literal TEXT, but leave `${…}` expressions as code.
-      out[i] = " "; // opening backtick
-      let j = i + 1;
-      while (j < src.length) {
-        if (src[j] === "\\") {
-          blank(j, j + 2);
-          j += 2;
-          continue;
-        }
-        if (src[j] === "`") {
-          out[j] = " "; // closing backtick
-          j++;
-          break;
-        }
-        if (src[j] === "$" && src[j + 1] === "{") {
-          j += 2;
-          let depth = 1;
-          while (j < src.length && depth > 0) {
-            if (src[j] === "{") depth++;
-            else if (src[j] === "}") {
-              depth--;
-              if (depth === 0) {
-                j++;
-                break;
-              }
-            }
-            j++;
-          }
-          continue;
-        }
-        if (src[j] !== "\n") out[j] = " ";
-        j++;
-      }
-      i = j;
-      continue;
+    if (!trailingDone.has(node.end)) {
+      trailingDone.add(node.end);
+      for (const r of ts.getTrailingCommentRanges(src, node.end) ?? []) blank(r.pos, r.end);
     }
-    if (ch === "/" && src[i + 1] === "/") {
-      while (i < src.length && src[i] !== "\n") {
-        out[i] = " ";
-        i++;
-      }
-      continue;
+    const children = node.getChildren(sf);
+    if (children.length > 0) {
+      for (const child of children) visit(child);
+      return;
     }
-    if (ch === "/" && src[i + 1] === "*") {
-      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) {
-        if (src[i] !== "\n") out[i] = " ";
-        i++;
-      }
-      if (i < src.length) {
-        out[i] = " ";
-        out[i + 1] = " ";
-        i += 2;
-      }
-      continue;
+    const start = node.getStart(sf);
+    switch (node.kind) {
+      case ts.SyntaxKind.StringLiteral:
+      case ts.SyntaxKind.NoSubstitutionTemplateLiteral:
+      case ts.SyntaxKind.RegularExpressionLiteral:
+        blank(start, node.end);
+        break;
+      case ts.SyntaxKind.TemplateHead: // `text${ — keep the `${`
+        blank(start, node.end - 2);
+        break;
+      case ts.SyntaxKind.TemplateMiddle: // }text${ — keep the `}` and the `${`
+        blank(start + 1, node.end - 2);
+        break;
+      case ts.SyntaxKind.TemplateTail: // }text` — keep the `}`
+        blank(start + 1, node.end);
+        break;
     }
-    if (ch === "/" && regexCanStart(src, i)) {
-      const j = skipRegex(src, i);
-      if (j !== i) {
-        blank(i, j + 1);
-        i = j + 1;
-        continue;
-      }
-    }
-    i++;
-  }
+  };
+  visit(sf);
   return out.join("");
 }
 
@@ -266,7 +371,7 @@ function skipNonCode(src, i) {
     return src.length;
   }
   if (ch === "/" && src[i + 1] === "/") {
-    const nl = src.indexOf("\n", i);
+    const nl = indexOfLineBreak(src, i);
     return nl === -1 ? src.length : nl;
   }
   if (ch === "/" && src[i + 1] === "*") {
@@ -283,10 +388,11 @@ function skipNonCode(src, i) {
 /**
  * The source with every COMMENT body replaced by spaces (same length, so every
  * index still points at the same character). String and regex literals are left
- * alone — the CLI-entry and `timeout:` checks are literal text checks — but the
- * bracket walks skip their contents via `skipNonCode`.
+ * alone — the CLI-entry check reads their literal text — but the bracket walks
+ * skip their contents via `skipNonCode`. A spawn's deadline is not read here:
+ * it comes from the parsed options object literal (flair#2782).
  */
-function maskComments(src) {
+export function maskComments(src) {
   const out = src.split("");
   let i = 0;
   while (i < src.length) {
@@ -300,7 +406,7 @@ function maskComments(src) {
       continue;
     }
     if (ch === "/" && src[i + 1] === "/") {
-      while (i < src.length && src[i] !== "\n") {
+      while (i < src.length && !LINE_BREAK_CHARS.has(src[i])) {
         out[i] = " ";
         i++;
       }
@@ -308,7 +414,7 @@ function maskComments(src) {
     }
     if (ch === "/" && src[i + 1] === "*") {
       while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) {
-        if (src[i] !== "\n") out[i] = " ";
+        if (!LINE_BREAK_CHARS.has(src[i])) out[i] = " ";
         i++;
       }
       if (i < src.length) {
@@ -534,25 +640,117 @@ function textNamesCliEntry(text, ids) {
   return false;
 }
 
+/** Every call expression in the file, keyed by the index of its `(` (flair#2782). */
+function callExpressionsByOpenParen(sf) {
+  const byOpen = new Map();
+  const visit = (node) => {
+    if (ts.isCallExpression(node)) byOpen.set(node.arguments.pos - 1, node);
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return byOpen;
+}
+
+/** `expr` without its parentheses and `as` / `satisfies` / non-null (`!`) wrappers. */
+function stripWrappers(expr) {
+  let e = expr;
+  while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isNonNullExpression(e)) {
+    e = e.expression;
+  }
+  return e;
+}
+
+/**
+ * The call's argument at `index`, wrappers stripped; null when there is no call,
+ * no argument there, or a spread argument at or before it (after a spread, the
+ * scanner declines to determine positions).
+ */
+function argumentAt(call, index) {
+  if (!call) return null;
+  const args = call.arguments;
+  for (let i = 0; i <= index && i < args.length; i++) if (ts.isSpreadElement(args[i])) return null;
+  return index < args.length ? stripWrappers(args[index]) : null;
+}
+
+/**
+ * The options argument of a call whose runtime reads options at `optionsIndex`
+ * only after an argv array at `argvIndex`, or null (flair#2782). The argv
+ * argument, wrappers stripped, must be an array literal: `Bun.spawn({ cmd }, …)`
+ * and `spawnSync(command, options, …)` select the overload that ignores the
+ * later argument.
+ */
+function optionsAfterArgv(call, argvIndex, optionsIndex) {
+  const argv = argumentAt(call, argvIndex);
+  return argv && ts.isArrayLiteralExpression(argv) ? argumentAt(call, optionsIndex) : null;
+}
+
+/** An identifier or string-literal property key equal to `key`. */
+function propertyNameIs(name, key) {
+  return (ts.isIdentifier(name) || ts.isStringLiteral(name)) && name.text === key;
+}
+
+/**
+ * The deadline the gate reads from an options object literal, or null
+ * (flair#2782). The literal must have no spread, no computed key, no method, no
+ * get/set accessor and no property named `__proto__`, and exactly one property
+ * named `timeout`, a plain `timeout: <value>` assignment whose value is a
+ * numeric literal whose source text `timeoutLiteralMs` accepts: `0`, `5e3`,
+ * `undefined`, `null`, `void 0` and any other value are no deadline (flair#1825
+ * r6).
+ */
+function objectLiteralDeadlineMs(obj) {
+  let timeoutProp = null;
+  let count = 0;
+  for (const prop of obj.properties) {
+    if (ts.isSpreadAssignment(prop)) return null;
+    if (ts.isGetAccessorDeclaration(prop) || ts.isSetAccessorDeclaration(prop) || ts.isMethodDeclaration(prop)) return null;
+    if (!prop.name || ts.isComputedPropertyName(prop.name)) return null;
+    if (propertyNameIs(prop.name, "__proto__")) return null;
+    if (propertyNameIs(prop.name, "timeout")) {
+      timeoutProp = prop;
+      count++;
+    }
+  }
+  if (count !== 1 || !ts.isPropertyAssignment(timeoutProp)) return null;
+  return ts.isNumericLiteral(timeoutProp.initializer) ? timeoutLiteralMs(timeoutProp.initializer.getText()) : null;
+}
+
+/**
+ * The deadline the gate reads from a spawn's options argument, or null
+ * (flair#2782). Only an object literal written in the call (wrappers stripped)
+ * is read; an identifier or any other expression, including a larger expression
+ * containing a literal (`{ timeout: 5000 } && {}`), is no deadline.
+ */
+function optionsDeadlineMs(arg) {
+  return arg && ts.isObjectLiteralExpression(arg) ? objectLiteralDeadlineMs(arg) : null;
+}
+
 /** All spawn-family calls in the file (node forms + Bun forms), with CLI-entry targeting. */
-export function findSpawnCalls(source) {
-  const scan = maskLiteralsAndComments(source);
-  const ids = cliEntryIdentifiers(source);
-  const aliases = aliasedSpawnFns(source);
+export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
+  // JSX text is masked first, so the literal masker and the text-based
+  // identifier scans see prose as spaces (flair#2808). Indices still point at
+  // the original source, which the call text is sliced from.
+  const jsxSafe = maskJsxText(source, fileName);
+  const sf = parseSourceFile(jsxSafe, fileName);
+  const scan = maskLiteralsAndComments(jsxSafe, fileName, sf);
+  const callsByOpen = callExpressionsByOpenParen(sf);
+  const ids = cliEntryIdentifiers(jsxSafe);
+  const aliases = aliasedSpawnFns(jsxSafe);
   const constDecls = new Map();
-  for (const m of scan.matchAll(/(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g)) {
+  for (const m of scan.matchAll(/(?:^|[\n\r\u2028\u2029])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g)) {
     const after = m.index + m[0].length;
-    const lineEnd = source.indexOf("\n", after);
-    constDecls.set(m[1], source.slice(after, lineEnd === -1 ? source.length : lineEnd));
+    const lineEnd = indexOfLineBreak(source, after);
+    constDecls.set(m[1], { start: after, end: lineEnd === -1 ? source.length : lineEnd });
   }
   const calls = [];
-  const lineOf = (index) => source.slice(0, index).split("\n").length;
+  const optionsArgOf = new Map();
+  const lineOf = (index) => lineNumberAt(source, index);
   const textAt = (span) => (span ? source.slice(span.start, span.end) : "");
-  const resolveOptText = (optSpan) => {
-    const own = textAt(optSpan);
-    const trimmed = own.trim();
-    if (optSpan && /^[A-Za-z_$][\w$]*$/.test(trimmed)) return constDecls.get(trimmed) ?? "";
-    return own;
+  // The options span itself, or the one-line initializer of the identifier it names.
+  const resolveOptSpan = (optSpan) => {
+    const trimmed = textAt(optSpan).trim();
+    if (optSpan && /^[A-Za-z_$][\w$]*$/.test(trimmed)) return constDecls.get(trimmed) ?? null;
+    return optSpan ?? null;
   };
   // Bun.spawn / Bun.spawnSync — argv array FIRST, options SECOND (flair#1825).
   for (const m of scan.matchAll(/(^|[^\w$.])Bun\.(spawn|spawnSync)\s*\(/g)) {
@@ -561,18 +759,17 @@ export function findSpawnCalls(source) {
     const args = topLevelArgs(scan, open);
     if (!args) continue;
     const argvText = BUN_ARGV_ARG_INDICES.map((i) => textAt(args.spans[i])).join(" ");
-    const optText = resolveOptText(args.spans[BUN_OPTIONS_ARG_INDEX]);
-    calls.push({
+    const optText = textAt(resolveOptSpan(args.spans[BUN_OPTIONS_ARG_INDEX]));
+    const callStart = m.index + (m[1]?.length ?? 0);
+    const call = {
       fn,
-      index: m.index,
-      line: lineOf(m.index),
+      index: callStart,
+      line: lineOf(callStart),
       text: `${argvText} ; ${optText}`,
-      // The OPTIONS text is kept separately: a `timeout` is read from HERE only,
-      // never from argv (round 9 item 2).
-      optText,
       isCliEntry: textNamesCliEntry(argvText, ids),
-      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optText),
-    });
+    };
+    calls.push(call);
+    optionsArgOf.set(call, optionsAfterArgv(callsByOpen.get(open), BUN_ARGV_ARG_INDICES[0], BUN_OPTIONS_ARG_INDEX));
   }
   // node child_process forms — bare, or via a named alias (flair#1825).
   for (const m of scan.matchAll(/(^|[^\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
@@ -583,26 +780,27 @@ export function findSpawnCalls(source) {
     const args = topLevelArgs(scan, open);
     if (!args) continue;
     const argvText = (ARGV_ARG_INDICES.get(fn) ?? [0, 1]).map((i) => textAt(args.spans[i])).join(" ");
-    const optText = resolveOptText(args.spans[OPTIONS_ARG_INDEX.get(fn)]);
-    calls.push({
+    const optText = textAt(resolveOptSpan(args.spans[OPTIONS_ARG_INDEX.get(fn)]));
+    const callStart = m.index + (m[1]?.length ?? 0);
+    const call = {
       fn: raw,
-      index: m.index,
-      line: lineOf(m.index),
+      index: callStart,
+      line: lineOf(callStart),
       text: `${argvText} ; ${optText}`,
-      optText,
       isCliEntry: textNamesCliEntry(argvText, ids),
-      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optText),
-    });
+    };
+    calls.push(call);
+    // `spawn`/`spawnSync`/`execFile`/`execFileSync` read options third only after an
+    // argv array; `exec`/`execSync`/`fork` read them second.
+    const optIndex = OPTIONS_ARG_INDEX.get(fn);
+    const ast = callsByOpen.get(open);
+    optionsArgOf.set(call, optIndex === 2 ? optionsAfterArgv(ast, 1, optIndex) : argumentAt(ast, optIndex));
   }
-  // A numeric `timeout:` value, so a case budget can be checked against the sum
-  // of the waits inside it (flair#1825).
+  // The deadline the gate reads from each spawn's options argument (flair#2782), so
+  // a case budget can be checked against the sum of the waits inside it
+  // (flair#1825). A `timeout` inside argv is never read (round 9 item 2).
   for (const call of calls) {
-    // OPTIONS ONLY: an argv element must never decide `hasTimeout` (round 9 item 2).
-    const m = (call.optText ?? "").match(/(?:^|[^\w$.])timeout\s*[:=]\s*([^\s,;)}\]]+)/);
-    // ONLY the EXACT token `[1-9][0-9]*` (underscores allowed) is a deadline:
-    // `timeout: 0` is NO timeout (node and Bun), and `1e999` / `10000-10000` are
-    // expressions, not positive integers — all are unbounded (flair#1825 r6).
-    call.timeoutMs = m ? timeoutLiteralMs(m[1]) : null;
+    call.timeoutMs = optionsDeadlineMs(optionsArgOf.get(call));
     call.hasTimeout = call.timeoutMs !== null;
   }
   return { calls, ids };
@@ -624,7 +822,7 @@ function bodyBraceFrom(src, from) {
       continue;
     }
     if (src[i] === "{") {
-      const lineEnd = src.indexOf("\n", i);
+      const lineEnd = indexOfLineBreak(src, i);
       if (src.slice(i + 1, lineEnd === -1 ? src.length : lineEnd).trim() === "") return i;
     }
     i++;
@@ -633,10 +831,27 @@ function bodyBraceFrom(src, from) {
 }
 
 /** File-local function/arrow bodies `{ name, start, end }` (for scope attribution). */
-export function functionBodies(source) {
+export function functionBodies(source, fileName = UNNAMED_SOURCE) {
   const src = maskComments(source);
+  // Parse the source itself (the walks read the comment-masked copy): masking
+  // comments is a text walk, and re-parsing its output can trip on a nested
+  // template literal. Indices are shared, so the AST and `src` line up.
+  const sf = parseSourceFile(source, fileName);
+  const arrowFunctions = [];
+  const collectArrows = (node) => {
+    if (
+      node.kind === ts.SyntaxKind.ArrowFunction &&
+      node.parent &&
+      ts.isVariableDeclaration(node.parent) &&
+      ts.isIdentifier(node.parent.name)
+    ) {
+      arrowFunctions.push({ name: node.parent.name.text, node });
+    }
+    ts.forEachChild(node, collectArrows);
+  };
+  collectArrows(sf);
   const bodies = [];
-  for (const m of src.matchAll(/(?:^|\n)\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
+  for (const m of src.matchAll(/(?:^|[\n\r\u2028\u2029])\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
     const open = src.indexOf("(", m.index);
     const bodyOpen = bodyBraceFrom(src, open);
     if (bodyOpen === -1) continue;
@@ -647,7 +862,7 @@ export function functionBodies(source) {
   // ONE-LINE function bodies (round 7 item 2): `function f(...) { … }` wholly on
   // one line — appended AFTER the existing detection so multiline bodies are
   // unchanged (no fingerprint ripple).
-  for (const m of src.matchAll(/(?:^|\n)[ \t]*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{([^}\n]*)\}/g)) {
+  for (const m of src.matchAll(/(?:^|[\n\r\u2028\u2029])[ \t]*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{([^}\n\r\u2028\u2029]*)\}/g)) {
     const open = src.indexOf("{", m.index);
     const close = src.indexOf("}", open);
     if (open !== -1 && close !== -1) {
@@ -660,35 +875,41 @@ export function functionBodies(source) {
     }
   }
   for (const m of src.matchAll(
-    /(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/g,
+    /(?:^|[\n\r\u2028\u2029])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/g,
   )) {
-    const arrowEnd = m.index + m[0].length;
-    const bodyOpen = bodyBraceFrom(src, arrowEnd);
-    if (bodyOpen !== -1 && src.slice(arrowEnd, bodyOpen).trim() === "") {
-      const bodyClose = matchBrace(src, bodyOpen);
-      if (bodyClose === -1) continue;
-      bodies.push({ name: m[1], start: bodyOpen, end: bodyClose });
-    } else {
-      const lineEnd = src.indexOf("\n", arrowEnd);
-      bodies.push({ name: m[1], start: arrowEnd, end: lineEnd === -1 ? src.length : lineEnd });
-    }
+    // The body's real extent is the AST's: an expression body may continue
+    // past the `=>`'s line (a spawn on the next line, or a parenthesized body
+    // spanning lines), and a line break is not its end (flair#2842).
+    const arrow = arrowFunctions.find(
+      (a) => a.name === m[1] && a.node.getStart(sf) >= m.index && a.node.getStart(sf) < m.index + m[0].length,
+    );
+    if (!arrow) continue;
+    const body = arrow.node.body;
+    // A block body keeps the brace-to-brace range (the closing brace is
+    // excluded, as the text walks expect); an expression body ends after its
+    // last token (flair#2842).
+    bodies.push({
+      name: m[1],
+      start: body.getStart(sf),
+      end: ts.isBlock(body) ? body.getEnd() - 1 : body.getEnd(),
+    });
   }
   return bodies;
 }
 
 /** File-local functions whose body contains a CLI-entry spawn, transitively. */
-export function localHelpersThatSpawn(source, calls) {
+export function localHelpersThatSpawn(source, calls, fileName = UNNAMED_SOURCE) {
   const src = maskComments(source);
   const spawnIdx = calls.filter((c) => c.isCliEntry).map((c) => c.index);
   const helpers = new Set();
   if (spawnIdx.length === 0) return helpers;
-  const bodies = functionBodies(source);
+  const bodies = functionBodies(source, fileName);
   let added = true;
   while (added) {
     added = false;
     for (const body of bodies) {
       const text = src.slice(body.start, body.end);
-      const direct = spawnIdx.some((i) => i > body.start && i < body.end);
+      const direct = spawnIdx.some((i) => i >= body.start && i < body.end);
       const via = [...helpers].some((h) => identifierCalled(text, h));
       if ((direct || via) && !helpers.has(body.name)) {
         helpers.add(body.name);
@@ -700,9 +921,9 @@ export function localHelpersThatSpawn(source, calls) {
 }
 
 /** `it()` / `test()` cases, with whether each reaches a CLI-entry spawn. */
-/** A wait deadline is the EXACT token `[1-9][0-9]*` (underscores allowed). An
- *  exponent (`1e999`), a trailing operator (`10000-10000`), `0`, or any other
- *  expression is NOT a positive integer → null (unbounded, flair#1825 round 6). */
+/** A spawn deadline is read from a `timeout: <numeric literal>` property of an
+ *  inline object literal options argument (flair#2782); `timeoutLiteralMs` decides
+ *  whether that literal is a positive integer. A non-literal value is no deadline. */
 // ONE strict literal for EVERY site (round 7 item 4): no leading zero, no
 // leading/trailing/double underscore, at most 15 digits so the value is finite
 // and safe. Anything else — `0`, `1__000`, `_1000`, `1e999`, `10000-10000`, a
@@ -735,7 +956,7 @@ export function sumWaitsMs(body, calls, open, close, extraBodies = []) {
   let sum = 0;
   for (const c of calls) {
     if (!c.timeoutMs) continue;
-    const inside = (c.index > open && c.index < close) || extraBodies.some((b) => c.index > b.start && c.index < b.end);
+    const inside = (c.index > open && c.index < close) || extraBodies.some((b) => c.index >= b.start && c.index < b.end);
     if (inside) sum += c.timeoutMs;
   }
   for (const m of body.matchAll(/AbortSignal\.timeout\s*\(\s*([^\s)]+)/g)) {
@@ -826,7 +1047,7 @@ function isMethodDefinition(body, fetchStart, close) {
   if (!["{", ",", ";"].includes(prevChar) && prevWord !== "async") return false;
   const rest = body.slice(close + 1);
   const braceAt = rest.search(/\S/);
-  return braceAt !== -1 && rest[braceAt] === "{" && !/\n/.test(rest.slice(0, braceAt));
+  return braceAt !== -1 && rest[braceAt] === "{" && !/[\n\r\u2028\u2029]/.test(rest.slice(0, braceAt));
 }
 
 export function firstUnboundedFetch(body, src = body) {
@@ -881,12 +1102,12 @@ export function findCases(source, calls, helpers, bodies = []) {
     const waitsText = caseBody + "\n" + reach.map((b) => src.slice(b.start, b.end)).join("\n");
     // The CLI-entry calls this case reaches (directly, or through a helper).
     const reached = calls.filter(
-      (c) => c.isCliEntry && ((c.index > open && c.index < args.close) || reach.some((b) => c.index > b.start && c.index < b.end)),
+      (c) => c.isCliEntry && ((c.index > open && c.index < args.close) || reach.some((b) => c.index >= b.start && c.index < b.end)),
     );
     const budgetText = args.spans[2]?.text ?? "";
     cases.push({
       fn: m[2],
-      line: src.slice(0, m.index).split("\n").length,
+      line: lineNumberAt(src, m.index + (m[1]?.length ?? 0)),
       name: (args.spans[0]?.text.trim() ?? "").replace(/^["'`]|["'`]$/g, ""),
       argCount: args.spans.length,
       reachesSpawn: reaches,
@@ -933,7 +1154,7 @@ export function offenderKey(o) {
 function scopeOf(index, bodies, cases) {
   let best = null;
   for (const b of bodies) {
-    if (index > b.start && index < b.end && (!best || b.start >= best.start)) best = b;
+    if (index >= b.start && index < b.end && (!best || b.start >= best.start)) best = b;
   }
   if (best) return best.name;
   let bestCase = null;
@@ -943,11 +1164,16 @@ function scopeOf(index, bodies, cases) {
   return bestCase ? bestCase.name : "<module>";
 }
 
-export function analyzeTestFile(source) {
-  const { calls, ids } = findSpawnCalls(source);
-  const helpers = localHelpersThatSpawn(source, calls);
-  const bodies = functionBodies(source);
-  const cases = findCases(source, calls, helpers, bodies);
+export function analyzeTestFile(source, fileName = UNNAMED_SOURCE) {
+  const { calls, ids } = findSpawnCalls(source, fileName);
+  // The case/helper walks match brackets in TEXT, so they read the source with
+  // JSX text masked in every file kind TypeScript parses JSX in (tsx, jsx,
+  // js/mjs/cjs); the mask keeps length and line breaks, so every index still
+  // points at the original character.
+  const jsxSafe = maskJsxText(source, fileName);
+  const helpers = localHelpersThatSpawn(jsxSafe, calls, fileName);
+  const bodies = functionBodies(jsxSafe, fileName);
+  const cases = findCases(jsxSafe, calls, helpers, bodies);
   for (const call of calls) call.scope = scopeOf(call.index, bodies, cases);
   return { calls, ids, helpers, cases, bodies };
 }
@@ -981,7 +1207,7 @@ export function scanTree(root) {
   for (const file of files) {
     const rel = relative(root, file);
     const src = readFileSync(file, "utf8");
-    const { calls, cases } = analyzeTestFile(src);
+    const { calls, cases } = analyzeTestFile(src, rel);
     for (const call of calls) {
       if (call.isCliEntry && !call.hasTimeout) {
         spawnOffenders.push({
@@ -1115,7 +1341,7 @@ const BASELINE_REL = "scripts/ci/cli-spawn-budgets.baseline.json";
 
 /** Resolve a ref to its full 40-char commit sha in `root`; hard-fail if invalid. */
 export function resolveRef(ref, root) {
-  const r = spawnSync("git", ["-C", root, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { encoding: "utf8" });
+  const r = spawnSync("git", ["-C", root, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "resolve a trusted git ref with literal revision syntax" }, encoding: "utf8" });
   if (r.status !== 0) {
     throw new Error(
       `invalid base ref '${ref}': cannot resolve it in ${root}` +
@@ -1132,7 +1358,7 @@ export function resolveRef(ref, root) {
  * both shas — never a silent "not an ancestor".
  */
 export function isAncestor(ancestor, descendant, root) {
-  const r = spawnSync("git", ["-C", root, "merge-base", "--is-ancestor", ancestor, descendant], { encoding: "utf8" });
+  const r = spawnSync("git", ["-C", root, "merge-base", "--is-ancestor", ancestor, descendant], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "resolve a trusted git ref with literal revision syntax" }, encoding: "utf8" });
   if (r.status === 0) return true;
   if (r.status === 1) return false;
   throw new Error(
@@ -1148,7 +1374,7 @@ export function isAncestor(ancestor, descendant, root) {
  * EMPTY). Nothing else may be treated as "no baseline". */
 export function loadBaselineAtRef(ref, root) {
   resolveRef(ref, root);
-  const res = spawnSync("git", ["-C", root, "show", `${ref}:${BASELINE_REL}`], { encoding: "utf8" });
+  const res = spawnSync("git", ["-C", root, "show", `${ref}:${BASELINE_REL}`], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "resolve a trusted git ref with literal revision syntax" }, encoding: "utf8" });
   if (res.status === 0) return JSON.parse(res.stdout);
   // A valid ref whose tree has no baseline file → the base baseline is EMPTY.
   if (/does not exist|exists on disk, but not in/i.test(res.stderr ?? "")) return null;
@@ -1162,10 +1388,72 @@ export function readPrBaseline(root) {
   return JSON.parse(readFileSync(join(root, BASELINE_REL), "utf8"));
 }
 
-/** Entries a PR ADDED relative to the trusted base. A PR may only REMOVE. */
+/** True only when `file` in the PR working tree is byte-identical to its blob at `baseSha`.
+ *
+ * FAIL CLOSED: a missing blob, an unreadable blob or an unreadable file answers
+ * false, so the addition stays ADDED-EX.
+ */
+function fileByteIdenticalAtBase(root, baseSha, file, cache) {
+  if (cache.has(file)) return cache.get(file);
+  const res = spawnSync("git", ["-C", root, "show", `${baseSha}:${file}`], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "resolve a trusted git ref with literal revision syntax" }, encoding: "buffer" });
+  let same = false;
+  if (res.status === 0 && Buffer.isBuffer(res.stdout)) {
+    try {
+      same = readFileSync(join(root, file)).equals(res.stdout);
+    } catch {
+      same = false;
+    }
+  }
+  cache.set(file, same);
+  return same;
+}
+
+/** Entries with exception keys absent from the trusted base. */
 export function addedExceptions(baseEntries, prEntries) {
   const baseKeys = new Set(baseEntries.map(offenderKey));
   return prEntries.filter((e) => !baseKeys.has(offenderKey(e)));
+}
+
+function rekeyIdentity(e) {
+  return [e.file, e.fingerprint, e.kind, String(e.occurrence ?? 0)].join(" | ");
+}
+
+/**
+ * Split the PR's added exception keys into re-keys and ADDED-EX
+ * (flair#2854).
+ *
+ * An added key is a re-key when it pairs one-to-one with a REMOVED baseline key
+ * (in the base, absent from the PR) of identical file, fingerprint, kind and
+ * occurrence, AND the scanned working-tree file is byte-identical to its blob
+ * at the trusted base ref. Only `spawn-no-timeout` qualifies, because its scope is
+ * derived attribution; the case-level kinds keep strict identity. Pairing
+ * consumes both keys, so two added keys against one removed key are one re-key
+ * and one addition, never two re-keys. `fileUnchanged` must answer true only
+ * for a file it has verified unchanged; an unreadable or missing blob answers
+ * false, so the addition stays ADDED-EX.
+ */
+export function classifyAddedExceptions(baseEntries, prEntries, fileUnchanged = () => false) {
+  const baseKeys = new Set(baseEntries.map(offenderKey));
+  const prKeys = new Set(prEntries.map(offenderKey));
+  const addedEntries = prEntries.filter((e) => !baseKeys.has(offenderKey(e)));
+  const removedEntries = baseEntries.filter((e) => !prKeys.has(offenderKey(e)));
+  const pool = new Map();
+  for (const e of removedEntries) {
+    if (e.kind !== "spawn-no-timeout") continue;
+    const id = rekeyIdentity(e);
+    const list = pool.get(id);
+    if (list) list.push(e);
+    else pool.set(id, [e]);
+  }
+  const added = [];
+  const rekeyed = [];
+  for (const e of addedEntries) {
+    const eligible = e.kind === "spawn-no-timeout" && fileUnchanged(e.file);
+    const list = eligible ? pool.get(rekeyIdentity(e)) : undefined;
+    if (list && list.length > 0) rekeyed.push({ from: list.shift(), to: e });
+    else added.push(e);
+  }
+  return { added, rekeyed };
 }
 
 /**
@@ -1192,7 +1480,7 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seed
   // The PR copy is the working list: new offenders, multiplicity, and stale
   // entries are measured against it.
   const diff = diffAgainstBaseline(spawnOffenders, caseOffenders, prEntries);
-  // Added exceptions: the PR copy may only REMOVE relative to the base. When the
+  // Added exception keys are rejected relative to the base. When the
   // base has NO baseline file the base baseline is EMPTY, so EVERY PR entry is an
   // addition → fail — UNLESS the base DESCENDS from the seed-introduction anchor
   // (flair#1825). An exact-sha equality can never survive main moving. The anchor
@@ -1200,8 +1488,12 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seed
   // dead code (a follow-up removes it — first slice of #1921).
   let anchored = false;
   let added;
+  let rekeyed = [];
   if (basePresent) {
-    added = addedExceptions(baseEntries, prEntries);
+    const fileCache = new Map();
+    ({ added, rekeyed } = classifyAddedExceptions(baseEntries, prEntries, (file) =>
+      fileByteIdenticalAtBase(root, baseSha, file, fileCache),
+    ));
   } else {
     let anchorSha;
     try {
@@ -1236,6 +1528,7 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seed
     baseEntries: baseEntries ?? [],
     errors,
     added,
+    rekeyed,
     ...diff,
     ok: errors.length === 0 && diff.ok && added.length === 0,
   };
@@ -1262,7 +1555,7 @@ if (isMain) {
     process.stderr.write(`check-cli-spawn-budgets: ${err.message}\n`);
     process.exit(1);
   }
-  const { files, spawnOffenders, caseOffenders, baseRef, baseSha, basePresent, defaulted, seedAccepted, allowEntries, errors, added, newOffenders, staleEntries, ok } = result;
+  const { files, spawnOffenders, caseOffenders, baseRef, baseSha, basePresent, defaulted, seedAccepted, allowEntries, errors, added, rekeyed, newOffenders, staleEntries, ok } = result;
   if (seedAccepted) {
     // Say EXACTLY what the predicate guarantees: the base is named by its own sha
     // and DESCENDS from the anchor — it does not "resolve to" it, and a descendant
@@ -1289,12 +1582,17 @@ if (isMain) {
   for (const o of staleEntries) {
     process.stdout.write(`  STALE    ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}\n`);
   }
+  for (const r of rekeyed) {
+    process.stdout.write(
+      `  RE-KEYED ${r.to.file}  ${r.from.scope} -> ${r.to.scope}  ${r.to.kind}  ${r.to.fingerprint.slice(0, 50)}\n`,
+    );
+  }
   for (const o of added) {
-    process.stdout.write(`  ADDED-EX ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}  (a PR may only REMOVE baseline entries)\n`);
+    process.stdout.write(`  ADDED-EX ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}  (new exception key)\n`);
   }
   process.stdout.write(
     `check-cli-spawn-budgets: ${spawnOffenders.length} spawn(s) with no timeout, ${caseOffenders.length} case(s) offending, ` +
-      `${allowEntries.length} allowed at ${baseRef} — ${newOffenders.length} new, ${staleEntries.length} stale, ${added.length} added-exception.\n`,
+      `${allowEntries.length} allowed at ${baseRef} — ${newOffenders.length} new, ${staleEntries.length} stale, ${added.length} added-exception, ${rekeyed.length} re-keyed.\n`,
   );
   process.exit(ok ? 0 : 1);
 }

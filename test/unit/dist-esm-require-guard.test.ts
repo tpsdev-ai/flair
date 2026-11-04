@@ -18,6 +18,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { load as loadYaml } from "js-yaml";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "check-dist-esm-require.mjs");
@@ -191,10 +192,14 @@ describe("check-dist-esm-require — corpus safety (a check that scans nothing m
 describe("check-dist-esm-require — CI wiring", () => {
   const job = jobBlock("dist-esm-guard");
 
-  test("a blocking job builds dist and runs the checker", () => {
+  test("a CI job runs the checker against a built dist", () => {
     expect(job).toContain("scripts/check-dist-esm-require.mjs");
-    expect(job).toMatch(/bun run build\b/);
-    expect(job).toMatch(/bun run build:cli\b/);
+    // flair#2540 — pack-smoke and dist-esm-guard share the build job's artifact.
+    expect(job).toContain("name: flair-dist");
+    const builder = jobBlock("build");
+    expect(builder).toMatch(/bun run build\b/);
+    expect(builder).toMatch(/bun run build:cli\b/);
+    expect(builder).toContain("name: flair-dist");
   });
 
   test("the lane is not softened", () => {
@@ -208,4 +213,65 @@ describe("check-dist-esm-require — CI wiring", () => {
     expect(body).not.toMatch(/\|\|\s*true/);
     expect(body).not.toMatch(/\|\|\s*echo/);
   });
+});
+
+describe("install-weight — docs-only workflow contract", () => {
+  type Job = { if?: string; needs?: unknown; steps: { if?: string; run?: string }[] };
+  const workflow = loadYaml(TEST_YML) as { jobs: Record<string, Job> };
+  const manifest = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { files: string[] };
+  const job = workflow.jobs["install-weight"];
+
+  test("docs-only PRs do not skip install-weight", () => {
+    expect(manifest.files).toContain("docs/");
+    expect(manifest.files).toContain("README.md");
+    expect(job).toBeDefined();
+    expect(job.if).toBeUndefined();
+    expect(job.needs).toBeUndefined();
+    const measurement = job.steps.find((step) => step.run?.includes("scripts/check-install-weight.mjs"));
+    expect(measurement).toBeDefined();
+    expect(measurement?.if).toBeUndefined();
+  });
+
+  test.each(manifest.files)("shipped manifest entry %s cannot trigger a docs-only install-weight skip", (path) => {
+    expect(path.length).toBeGreaterThan(0);
+    expect(job.if).toBeUndefined();
+    expect(job.needs).toBeUndefined();
+    for (const step of job.steps) expect(step.if ?? "").not.toContain("docs_only");
+  });
+});
+
+describe("shared dist consumers — dependency setup", () => {
+  type Step = { uses?: string; run?: string; if?: unknown; with?: Record<string, string> };
+  const workflow = loadYaml(TEST_YML) as { jobs: Record<string, { steps?: Step[] }> };
+  const consumers = Object.entries(workflow.jobs).filter(([, job]) =>
+    job.steps?.some((step) => step.uses?.startsWith("actions/download-artifact@") && step.with?.name === "flair-dist"),
+  );
+
+  test("pack-smoke and dist-esm-guard download the shared dist", () => {
+    expect(consumers.map(([name]) => name)).toEqual(["pack-smoke", "dist-esm-guard"]);
+  });
+
+  for (const [name, job] of consumers) {
+    test(`${name} installs frozen dependencies before consuming shared dist`, () => {
+      const steps = job.steps ?? [];
+      const bun = steps.findIndex((step) => step.uses?.startsWith("oven-sh/setup-bun@"));
+      const cache = steps.findIndex((step) => step.uses?.startsWith("actions/cache@") && step.with?.path?.includes("node_modules"));
+      const install = steps.findIndex((step) => step.run === "sfw bun install --frozen-lockfile");
+      const download = steps.findIndex((step) => step.uses?.startsWith("actions/download-artifact@") && step.with?.name === "flair-dist");
+      expect(bun).toBeGreaterThanOrEqual(0);
+      expect(cache).toBeGreaterThan(bun);
+      expect(steps[cache].with).toEqual({
+        path: "node_modules\npackages/*/node_modules\n",
+        key: "node-modules-${{ runner.os }}-${{ hashFiles('bun.lock') }}",
+        "restore-keys": "node-modules-${{ runner.os }}-\n",
+      });
+      expect(install).toBeGreaterThan(cache);
+      expect(download).toBeGreaterThan(install);
+      expect(steps[install].if).toBeUndefined();
+      expect(steps.some((step) => /bun run build/.test(step.run ?? ""))).toBe(false);
+      const checks = steps.flatMap((step, index) => /node scripts\/check-(imports|dist-esm-require)\.mjs dist/.test(step.run ?? "") ? [index] : []);
+      expect(checks.length).toBeGreaterThan(0);
+      for (const check of checks) expect(check).toBeGreaterThan(download);
+    });
+  }
 });

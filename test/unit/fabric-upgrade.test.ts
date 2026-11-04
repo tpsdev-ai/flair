@@ -316,6 +316,27 @@ describe("fabricUpgrade --check", () => {
 // ─── fabricUpgrade: full run reuses deploy() with the right options ──────────
 
 describe("fabricUpgrade (deploy path)", () => {
+  test("passes --keep-mqtt-config through to deploy(); by default deploy() applies its MQTT-off step", async () => {
+    const { deps, calls } = mockDeps();
+    await fabricUpgrade({ target: "https://fabric", fabricUser: "admin", fabricPassword: "pw" }, deps);
+    await fabricUpgrade({ target: "https://fabric", fabricUser: "admin", fabricPassword: "pw", keepMqttConfig: true }, deps);
+    expect(calls.deploy.map((d) => d.keepMqttConfig ?? false)).toEqual([false, true]);
+  });
+
+  test("passes --no-verify through to deploy() (verify: false), and leaves deploy()'s default otherwise", async () => {
+    const { deps, calls } = mockDeps();
+    await fabricUpgrade({ target: "https://fabric", fabricUser: "admin", fabricPassword: "pw", verify: false }, deps);
+    await fabricUpgrade({ target: "https://fabric", fabricUser: "admin", fabricPassword: "pw", verify: true }, deps);
+    await fabricUpgrade({ target: "https://fabric", fabricUser: "admin", fabricPassword: "pw" }, deps);
+    expect(calls.deploy.map((d) => d.verify)).toEqual([false, true, undefined]);
+  });
+
+  test("passes the resolved operations API URL through to deploy()", async () => {
+    const { deps, calls } = mockDeps();
+    await fabricUpgrade({ target: "https://fabric", fabricUser: "admin", fabricPassword: "pw", opsUrl: "https://ops.fabric:9925" }, deps);
+    expect(calls.deploy[0].opsUrl).toBe("https://ops.fabric:9925");
+  });
+
   test("stages, confirms Harper fix version, then calls deploy() with packageRoot", async () => {
     const { deps, calls } = mockDeps();
     const result = await fabricUpgrade(

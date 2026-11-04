@@ -1,3 +1,4 @@
+import { shellScript } from "../helpers/shell-script.ts";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -17,6 +18,11 @@ import { tempDir } from "../helpers/temp-dir.ts";
  * running mid-sweep leaves the directory behind for the unit lane's temp-dir
  * leak guard. `maintenance.auto=false` keeps git from spawning that command;
  * `gc.auto=0` disables the gc task behind it.
+ *
+ * git also reads the legacy `GIT_CONFIG_PARAMETERS` carrier; an inherited
+ * entry there can reappear after the indexed pairs and turn maintenance back
+ * on (flair#2486), so the same two settings are appended to that carrier as
+ * well.
  */
 function noAutomaticMaintenance(inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const raw = inherited.GIT_CONFIG_COUNT;
@@ -24,7 +30,7 @@ function noAutomaticMaintenance(inherited: NodeJS.ProcessEnv = process.env): Nod
     throw new Error(`GIT_CONFIG_COUNT is not a non-negative integer: ${JSON.stringify(raw)}`);
   }
   const n = raw ? Number(raw) : 0;
-  return {
+  const env: NodeJS.ProcessEnv = {
     ...inherited,
     GIT_CONFIG_COUNT: String(n + 2),
     [`GIT_CONFIG_KEY_${n}`]: "maintenance.auto",
@@ -32,6 +38,11 @@ function noAutomaticMaintenance(inherited: NodeJS.ProcessEnv = process.env): Nod
     [`GIT_CONFIG_KEY_${n + 1}`]: "gc.auto",
     [`GIT_CONFIG_VALUE_${n + 1}`]: "0",
   };
+  const legacy = inherited.GIT_CONFIG_PARAMETERS;
+  if (legacy !== undefined && legacy !== "") {
+    env.GIT_CONFIG_PARAMETERS = `${legacy} 'maintenance.auto=false' 'gc.auto=0'`;
+  }
+  return env;
 }
 
 interface Step {
@@ -62,13 +73,13 @@ function runVersion(ref: string, projectVersion: string, input?: string) {
   writeFileSync(join(cwd, "packages/adk-flair/pyproject.toml"), `[project]\nversion = "${projectVersion}"\n`);
   const output = join(cwd, "output");
   writeFileSync(output, "");
-  const resolved = spawnSync("bash", ["-e", "-o", "pipefail", "-c", resolve.run!], {
+  const resolved = spawnSync("bash", ["-e", "-o", "pipefail", shellScript(resolve.run!)], {
     cwd, encoding: "utf8",
     env: { ...process.env, EVENT: input === undefined ? "push" : "workflow_dispatch", REF_NAME: ref, INPUT_VERSION: input ?? "", GITHUB_OUTPUT: output },
   });
   if (resolved.status !== 0) return { status: resolved.status, text: resolved.stdout + resolved.stderr, version: "" };
   const version = readFileSync(output, "utf8").trim().replace(/^version=/, "");
-  const checked = spawnSync("bash", ["-e", "-o", "pipefail", "-c", guard.run!], {
+  const checked = spawnSync("bash", ["-e", "-o", "pipefail", shellScript(guard.run!)], {
     cwd, encoding: "utf8", env: { ...process.env, VERSION: version },
   });
   return { status: checked.status, text: resolved.stdout + resolved.stderr + checked.stdout + checked.stderr, version };
@@ -136,6 +147,31 @@ describe("adk-flair publishing", () => {
     }
   });
 
+  test("the fixture's git reads maintenance off under an inherited config that turns it on", () => {
+    const cwd = tempDir("flair-adk-maintenance-");
+    const repo = join(cwd, "repo");
+    const home = join(cwd, "home");
+    mkdirSync(home);
+    // Each of these would turn automatic maintenance on if it reached git: a
+    // global config, an indexed GIT_CONFIG_* pair, and the legacy
+    // GIT_CONFIG_PARAMETERS.
+    writeFileSync(join(home, ".gitconfig"), "[maintenance]\n\tauto = true\n[gc]\n\tauto = 9999\n");
+    const env = noAutomaticMaintenance({
+      ...process.env,
+      HOME: home,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "maintenance.auto", GIT_CONFIG_VALUE_0: "true",
+      GIT_CONFIG_PARAMETERS: "'maintenance.auto=true' 'gc.auto=9999'",
+    });
+    const init = spawnSync("git", ["init", "-q", repo], { env, encoding: "utf8" });
+    expect(init.status, init.stderr).toBe(0);
+    for (const [key, expected] of [["maintenance.auto", "false"], ["gc.auto", "0"]] as const) {
+      const read = spawnSync("git", ["-C", repo, "config", "--get", key], { env, encoding: "utf8" });
+      expect(read.status, `${key}: ${read.stderr}`).toBe(0);
+      expect(read.stdout.trim(), key).toBe(expected);
+    }
+  });
+
   for (const mode of ["accepted", "rejected", "fetch failure"] as const) {
     test(`ancestry guard: ${mode}`, () => {
       const cwd = tempDir("flair-adk-ancestry-");
@@ -161,7 +197,7 @@ describe("adk-flair publishing", () => {
       git(["remote", "add", "origin", mode === "fetch failure" ? join(cwd, "absent") : origin], checkout);
       const rejected = commit(checkout, "rejected");
       const sha = mode === "rejected" ? rejected : accepted;
-      const result = spawnSync("bash", ["-c", ancestry.run!], {
+      const result = spawnSync("bash", [shellScript(ancestry.run!)], {
         cwd: checkout, encoding: "utf8", env: { ...noAutomaticMaintenance(), GITHUB_SHA: sha },
       });
       const text = result.stdout + result.stderr;
@@ -196,7 +232,7 @@ while [ "$#" -gt 0 ]; do
 done
 exit "$LOOKUP_EXIT"
 `, { mode: 0o755 });
-      const result = spawnSync("bash", ["-c", verify.run!], {
+      const result = spawnSync("bash", [shellScript(verify.run!)], {
         cwd, encoding: "utf8",
         env: { ...process.env, PATH: `${cwd}:${process.env.PATH}`, VERSION: "0.59.0", RUNNER_TEMP: cwd, LOOKUP_ARGS: args,
           LOOKUP_BODY: scenario === "invalid JSON" ? "invalid" : JSON.stringify({ urls }),

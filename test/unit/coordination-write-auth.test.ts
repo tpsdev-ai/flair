@@ -31,11 +31,22 @@
  * mock/import avoids that entirely.
  */
 
-import { mock, describe, it, expect, beforeEach } from "bun:test";
+import { mock, describe, it, expect, beforeEach, afterEach, setSystemTime } from "bun:test";
 
 // Capture what each resource ultimately persists.
 let workspacePut: any = null;
 let orgEventPut: any = null;
+let orgEventPatch: { id: unknown; content: any } | null = null;
+const READ_FAILS_MARKER = "read-fails";
+const DELETE_FAILS_MARKER = "delete-fails";
+const DELETE_DROPPED_MARKER = "delete-dropped";
+let afterEventSelection: (() => void) | undefined;
+let beforeEventWrite: ((ctx: any) => void) | undefined;
+let afterEventCommit: (() => void) | undefined;
+
+// In-memory OrgEvent store, keyed by id — backs OrgEvent.post()'s ownership read
+// (`databases.flair.OrgEvent.get`) and static put().
+let orgEventStore: Map<string, any>;
 
 // In-memory WorkspaceState store, keyed by id — backs get()/search() for the
 // allowRead/get() ownership-scoping tests below. post()/put() still also set
@@ -102,9 +113,33 @@ class BaseWorkspaceState {
   static delete(id: any) { workspaceStore.delete(id); return Promise.resolve(true); }
 }
 class BaseOrgEvent {
-  async put(content: any) { orgEventPut = content; return { ok: true, ...content }; }
-  async get(_id: any) { return null; }
-  async delete(_id: any) { return { ok: true }; }
+  async put(content: any) { orgEventPut = content; orgEventStore.set(content.id, { ...content }); return { ok: true, ...content }; }
+  // A no-argument get() reads the row the instance addresses (Harper's loaded row).
+  async get(id: any) { return orgEventStore.get(id ?? (this as any).getId?.()) ?? null; }
+  async delete(id: any) { orgEventStore.delete(id); return { ok: true }; }
+  // PATCH merges into the row the instance addresses, creating it when absent
+  // (the table-patch-policy guard is not part of this mock).
+  async patch(content: any) {
+    const id = (this as any).getId?.();
+    orgEventPatch = { id, content: { ...content } };
+    orgEventStore.set(id, { ...(orgEventStore.get(id) ?? { id }), ...content });
+    return undefined;
+  }
+  // OrgEvent.post() and the createdAt check read the stored row through the
+  // static table call (`databases.flair.OrgEvent.get(id, {})`), which Harper
+  // exposes. An id carrying READ_FAILS_MARKER makes that read reject.
+  static get(id: any, ctx?: any) {
+    if (typeof id === "string" && id.includes(READ_FAILS_MARKER)) return Promise.reject(new Error("injected stored-row read failure"));
+    return ctx?.transaction?.writes?.get(id) ?? orgEventStore.get(id) ?? null;
+  }
+  static delete(id: any, ctx?: any) {
+    if (typeof id === "string" && id.includes(DELETE_FAILS_MARKER)) return Promise.reject(new Error("injected delete failure"));
+    if (id !== DELETE_DROPPED_MARKER) {
+      if (ctx?.transaction?.deletes) ctx.transaction.deletes.push(id);
+      else orgEventStore.delete(id);
+    }
+    return Promise.resolve({ ok: true });
+  }
 }
 
 const databasesMock = {
@@ -112,8 +147,21 @@ const databasesMock = {
     WorkspaceState: BaseWorkspaceState,
     OrgEvent: Object.assign(BaseOrgEvent, {
       // OrgEvent.post() calls `databases.flair.OrgEvent.put(content)` directly
-      // (Harper-5 upsert), so the static put must capture too.
-      put: async (content: any) => { orgEventPut = content; return { ok: true, ...content }; },
+      // (Harper-5 upsert), so the static put must capture AND persist too.
+      put: async (content: any, ctx?: any) => {
+        orgEventPut = content;
+        beforeEventWrite?.(ctx);
+        for (const row of Array.isArray(content) ? content : [content]) {
+          (ctx?.transaction?.writes ?? orgEventStore).set(row.id, { ...row });
+        }
+        return { ok: true, ...content };
+      },
+      patch: async (id: any, content: any, ctx?: any) => {
+        orgEventPatch = { id, content: { ...content } };
+        beforeEventWrite?.(ctx);
+        (ctx?.transaction?.writes ?? orgEventStore).set(id, { ...(orgEventStore.get(id) ?? { id }), ...content });
+      },
+      search: async function* () { yield* orgEventStore.values(); afterEventSelection?.(); },
     }),
     Agent: { get: async () => null, search: async () => [] },
   },
@@ -123,11 +171,26 @@ mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => nu
 
 // Harper assigns `transaction` onto the global at load; the owner-delete
 // confirmation (resources/owner-delete-recheck.ts) creates one when the caller
-// has none. This mock's delete is not staged, so the stand-in just runs the cb.
-(globalThis as any).transaction = (_ctx: any, cb: () => any) => cb();
+// has none. OrgEvent deletes stage until this owned callback commits.
+(globalThis as any).transaction = async (ctx: any, cb: () => any) => {
+  const previous = ctx.transaction;
+  const deletes: string[] = [];
+  const writes = new Map();
+  ctx.transaction = { open: 1, deletes, writes };
+  try {
+    const result = await cb();
+    for (const [id, row] of writes) orgEventStore.set(id, row);
+    for (const id of deletes) orgEventStore.delete(id);
+    afterEventCommit?.();
+    return result;
+  } finally {
+    ctx.transaction = previous;
+  }
+};
 
 const { WorkspaceState } = await import("../../resources/WorkspaceState.ts");
 const { OrgEvent } = await import("../../resources/OrgEvent.ts");
+const { OrgEventMaintenance } = await import("../../resources/OrgEventMaintenance.ts");
 
 // Build a resource instance whose getContext() returns the given auth context.
 function makeWorkspace(ctxRequest: any) {
@@ -135,9 +198,10 @@ function makeWorkspace(ctxRequest: any) {
   r.getContext = () => ({ request: ctxRequest });
   return r;
 }
-function makeOrgEvent(ctxRequest: any) {
+function makeOrgEvent(ctxRequest: any, id?: string) {
   const r: any = new (OrgEvent as any)();
   r.getContext = () => ({ request: ctxRequest });
+  if (id !== undefined) r.getId = () => id;
   return r;
 }
 
@@ -147,7 +211,12 @@ const anonCtx = () => ({ tpsAnonymous: true });
 beforeEach(() => {
   workspacePut = null;
   orgEventPut = null;
+  orgEventPatch = null;
+  afterEventSelection = undefined;
+  beforeEventWrite = undefined;
+  afterEventCommit = undefined;
   workspaceStore = new Map();
+  orgEventStore = new Map();
 });
 
 describe("WorkspaceState.post() — agent-self attribution (no forging)", () => {
@@ -211,6 +280,240 @@ describe("OrgEvent.post() — agent-self attribution (no forging)", () => {
     const oe = makeOrgEvent(agentCtx("agent-alpha"));
     await oe.post({ authorId: "agent-victim", kind: "status", summary: "x" });
     expect(String(orgEventPut.id).startsWith("agent-alpha-")).toBe(true);
+  });
+});
+
+// ─── OrgEvent.post() id ownership + collision-resistant ids (flair#2333 N2/H9) ───────────────
+describe("OrgEvent.post() — refuses a non-admin POST for a row observed at the guard's lookup as owned by another agent (N2)", () => {
+  it("refuses a POST for a row observed at the guard's lookup as owned by another agent", async () => {
+    orgEventStore.set("owned-1", { id: "owned-1", authorId: "agent-a", kind: "status", summary: "original" });
+    const oe = makeOrgEvent(agentCtx("agent-b"));
+    const res = await oe.post({ id: "owned-1", kind: "coord.claim", summary: "overwrite attempt" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    expect(orgEventStore.get("owned-1").summary).toBe("original");
+    expect(orgEventStore.get("owned-1").authorId).toBe("agent-a");
+  });
+
+  it("refuses a POST claiming the observed owner's authorId", async () => {
+    orgEventStore.set("owned-2", { id: "owned-2", authorId: "agent-a", kind: "status", summary: "original" });
+    const oe = makeOrgEvent(agentCtx("agent-b"));
+    const res = await oe.post({ id: "owned-2", authorId: "agent-a", kind: "coord.claim", summary: "forged" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    expect(orgEventStore.get("owned-2").authorId).toBe("agent-a");
+  });
+
+  it("allows an agent to write an id it already owns", async () => {
+    orgEventStore.set("mine-1", { id: "mine-1", authorId: "agent-b", kind: "status", summary: "before" });
+    const oe = makeOrgEvent(agentCtx("agent-b"));
+    const res = await oe.post({ id: "mine-1", kind: "status", summary: "after" });
+    expect(res instanceof Response).toBe(false);
+    expect(orgEventStore.get("mine-1").summary).toBe("after");
+  });
+
+  it("an admin may write an id owned by another agent", async () => {
+    orgEventStore.set("owned-3", { id: "owned-3", authorId: "agent-a", kind: "status", summary: "original" });
+    const oe = makeOrgEvent(agentCtx("admin-1", true));
+    const res = await oe.post({ id: "owned-3", authorId: "agent-a", kind: "status", summary: "admin edit" });
+    expect(res instanceof Response).toBe(false);
+    expect(orgEventStore.get("owned-3").summary).toBe("admin edit");
+  });
+});
+
+describe("OrgEvent.post() — avoids deterministic same-millisecond collisions (random UUID, H9)", () => {
+  afterEach(() => { setSystemTime(); });
+
+  it("avoids deterministic same-millisecond collisions (random UUID)", async () => {
+    setSystemTime(new Date("2026-10-11T00:00:00.000Z"));
+    const oe = makeOrgEvent(agentCtx("agent-alpha"));
+    await oe.post({ kind: "status", summary: "first" });
+    const first = String(orgEventPut.id);
+    await oe.post({ kind: "status", summary: "second" });
+    const second = String(orgEventPut.id);
+    expect(second).not.toBe(first);
+    expect(orgEventStore.size).toBe(2);
+    expect([...orgEventStore.values()].map((r) => r.summary).sort()).toEqual(["first", "second"]);
+  });
+});
+
+// ─── OrgEvent createdAt: assigned by the server on create; a write that ──────
+// reaches the createdAt check cannot change it (an internal call is not checked)
+describe("OrgEvent — the server assigns createdAt on create, a write that reaches the createdAt check cannot change it, and an id the check does not read is refused", () => {
+  const SERVER_NOW = "2026-10-13T12:00:00.000Z";
+  const STORED_AT = "2026-10-01T09:30:00.000Z";
+  const FUTURE = "2099-01-01T00:00:00.000Z";
+  const PAST = "2001-01-01T00:00:00.000Z";
+  const seed = (id: string, authorId = "agent-alpha") =>
+    orgEventStore.set(id, { id, authorId, kind: "status", summary: "stored", createdAt: STORED_AT });
+  /** put() throws its createdAt refusal; this returns whatever the call settled to. */
+  const settle = async (p: Promise<unknown>) => { try { return await p; } catch (e) { return e; } };
+  const errorOf = async (res: unknown) => JSON.parse(await (res as Response).clone().text()).error;
+
+  beforeEach(() => { setSystemTime(new Date(SERVER_NOW)); });
+  afterEach(() => { setSystemTime(); });
+
+  for (const [label, createdAt] of [["future", FUTURE], ["past", PAST]] as const) {
+    it(`POST create with a ${label} createdAt stores the server time`, async () => {
+      const res = await makeOrgEvent(agentCtx("agent-alpha")).post({ kind: "status", summary: "x", createdAt });
+      expect(res instanceof Response).toBe(false);
+      expect(orgEventPut.createdAt).toBe(SERVER_NOW);
+    });
+
+    it(`PUT create with a ${label} createdAt stores the server time`, async () => {
+      const res = await settle(makeOrgEvent(agentCtx("agent-alpha"), "new-1").put({ id: "new-1", authorId: "agent-alpha", kind: "status", summary: "x", createdAt }));
+      expect(res instanceof Response).toBe(false);
+      expect(orgEventStore.get("new-1").createdAt).toBe(SERVER_NOW);
+    });
+
+    it(`an admin PUT create with a ${label} createdAt stores the server time`, async () => {
+      const res = await settle(makeOrgEvent(agentCtx("admin-1", true), "new-2").put({ id: "new-2", authorId: "agent-beta", kind: "status", summary: "x", createdAt }));
+      expect(res instanceof Response).toBe(false);
+      expect(orgEventStore.get("new-2").createdAt).toBe(SERVER_NOW);
+    });
+
+    it(`an admin PATCH that creates a row with a ${label} createdAt stores the server time`, async () => {
+      const res = await makeOrgEvent(agentCtx("admin-1", true), "new-3").patch({ authorId: "admin-1", kind: "status", summary: "x", createdAt });
+      expect(res instanceof Response).toBe(false);
+      expect(orgEventStore.get("new-3").createdAt).toBe(SERVER_NOW);
+    });
+  }
+
+  it("POST to an existing own id without createdAt keeps the stored value", async () => {
+    seed("own-1");
+    const res = await makeOrgEvent(agentCtx("agent-alpha")).post({ id: "own-1", kind: "status", summary: "after" });
+    expect(res instanceof Response).toBe(false);
+    expect(orgEventStore.get("own-1")).toMatchObject({ summary: "after", createdAt: STORED_AT });
+  });
+
+  it("POST to an existing own id with a different createdAt is refused (409) and the row is unchanged", async () => {
+    seed("own-2");
+    const before = { ...orgEventStore.get("own-2") };
+    const res = await makeOrgEvent(agentCtx("agent-alpha")).post({ id: "own-2", kind: "status", summary: "after", createdAt: PAST });
+    expect((res as Response).status).toBe(409);
+    expect(await errorOf(res)).toBe("created_at_immutable");
+    expect(orgEventStore.get("own-2")).toEqual(before);
+    expect(orgEventPut).toBeNull();
+  });
+
+  it("PUT update without createdAt keeps the stored value", async () => {
+    seed("own-3");
+    const res = await settle(makeOrgEvent(agentCtx("agent-alpha"), "own-3").put({ id: "own-3", authorId: "agent-alpha", kind: "status", summary: "after" }));
+    expect(res instanceof Response).toBe(false);
+    expect(orgEventStore.get("own-3")).toMatchObject({ summary: "after", createdAt: STORED_AT });
+  });
+
+  for (const [who, ctx] of [["an agent", agentCtx("agent-alpha")], ["an admin", agentCtx("admin-1", true)]] as const) {
+    it(`PUT update by ${who} that changes createdAt is refused (409) and the row is unchanged`, async () => {
+      seed("own-4");
+      const before = { ...orgEventStore.get("own-4") };
+      const res = await settle(makeOrgEvent(ctx, "own-4").put({ id: "own-4", authorId: "agent-alpha", kind: "status", summary: "after", createdAt: FUTURE }));
+      expect(res).toBeInstanceOf(Response);
+      expect((res as Response).status).toBe(409);
+      expect(await errorOf(res)).toBe("created_at_immutable");
+      expect(orgEventStore.get("own-4")).toEqual(before);
+      expect(orgEventPut).toBeNull();
+    });
+
+    it(`PATCH by ${who} that changes createdAt is refused (409) and the row is unchanged`, async () => {
+      seed("own-5");
+      const before = { ...orgEventStore.get("own-5") };
+      const res = await makeOrgEvent(ctx, "own-5").patch({ summary: "after", createdAt: PAST });
+      expect((res as Response).status).toBe(409);
+      expect(await errorOf(res)).toBe("created_at_immutable");
+      expect(orgEventStore.get("own-5")).toEqual(before);
+      expect(orgEventPatch).toBeNull();
+    });
+  }
+
+  it("PATCH without createdAt keeps the stored value", async () => {
+    seed("own-6");
+    const res = await makeOrgEvent(agentCtx("agent-alpha"), "own-6").patch({ summary: "after" });
+    expect(res instanceof Response).toBe(false);
+    expect(orgEventPatch!.content).toEqual({ summary: "after" });
+    expect(orgEventStore.get("own-6")).toMatchObject({ summary: "after", createdAt: STORED_AT });
+  });
+
+  it("an admin PUT of an array body applies the rule to each element under its own id", async () => {
+    seed("arr-old", "admin-1");
+    const created = await settle(makeOrgEvent(agentCtx("admin-1", true), "path-id").put([
+      { id: "arr-new", authorId: "admin-1", kind: "status", summary: "x", createdAt: FUTURE },
+      { id: "arr-old", authorId: "admin-1", kind: "status", summary: "y" },
+    ]));
+    expect(created instanceof Response).toBe(false);
+    expect(orgEventPut.map((r: any) => r.createdAt)).toEqual([SERVER_NOW, STORED_AT]);
+
+    orgEventPut = null;
+    const before = { ...orgEventStore.get("arr-old") };
+    const refused = await settle(makeOrgEvent(agentCtx("admin-1", true), "path-id").put([
+      { id: "arr-new-2", authorId: "admin-1", kind: "status", summary: "x" },
+      { id: "arr-old", authorId: "admin-1", kind: "status", summary: "z", createdAt: PAST },
+    ]));
+    expect((refused as Response).status).toBe(409);
+    expect(orgEventPut).toBeNull();
+    expect(orgEventStore.get("arr-old")).toEqual(before);
+  });
+
+  it("a write whose stored-event read fails is refused (503) and nothing is written", async () => {
+    const id = `${READ_FAILS_MARKER}-1`;
+    const admin = agentCtx("admin-1", true);
+    const posted = await makeOrgEvent(admin).post({ id, authorId: "admin-1", kind: "status", summary: "x" });
+    const put = await settle(makeOrgEvent(admin, id).put({ id, authorId: "admin-1", kind: "status", summary: "x" }));
+    const patched = await makeOrgEvent(admin, id).patch({ summary: "x" });
+    for (const res of [posted, put, patched]) {
+      expect((res as Response).status).toBe(503);
+      expect(await errorOf(res)).toBe("created_at_check_unavailable");
+    }
+    expect(orgEventPut).toBeNull();
+    expect(orgEventPatch).toBeNull();
+  });
+
+  it("a record whose id the check does not read is refused with invalid_event_id (400) before any write", async () => {
+    orgEventStore.set("", { id: "", authorId: "agent-alpha", kind: "status", summary: "stored", createdAt: STORED_AT });
+    const before = { ...orgEventStore.get("") };
+    for (const ctx of [agentCtx("agent-alpha"), agentCtx("admin-1", true)]) {
+      const results = [
+        // PUT naming the empty id, with createdAt changed and omitted.
+        await settle(makeOrgEvent(ctx, "").put({ id: "", authorId: "agent-alpha", kind: "status", summary: "x", createdAt: PAST })),
+        await settle(makeOrgEvent(ctx, "").put({ id: "", authorId: "agent-alpha", kind: "status", summary: "x" })),
+        // An array body with one such element refuses the whole write (an
+        // array body reaches this check only for an administrator; a non-admin
+        // agent's is refused earlier by attribution).
+        ...(ctx.tpsAgentIsAdmin ? [await settle(makeOrgEvent(ctx, "arr-path").put([
+          { id: "ok-new", authorId: "agent-alpha", kind: "status", summary: "x" },
+          { id: "", authorId: "agent-alpha", kind: "status", summary: "x" },
+        ]))] : []),
+        // POST naming an id that is not a non-empty string or array of strings.
+        await makeOrgEvent(ctx).post({ id: [], authorId: "agent-alpha", kind: "status", summary: "x" }),
+        // PATCH of the empty id, and of a resource with no id.
+        await makeOrgEvent(ctx, "").patch({ summary: "x", createdAt: PAST }),
+        await makeOrgEvent(ctx).patch({ summary: "x" }),
+      ];
+      for (const res of results) {
+        expect((res as Response).status).toBe(400);
+        expect(await errorOf(res)).toBe("invalid_event_id");
+      }
+    }
+    expect(orgEventPut).toBeNull();
+    expect(orgEventPatch).toBeNull();
+    expect(orgEventStore.get("")).toEqual(before);
+    expect(orgEventStore.has("ok-new")).toBe(false);
+  });
+
+  it("an internal call keeps the createdAt it supplies on PUT and PATCH; POST stamps the server time", async () => {
+    seed("int-1");
+    const internal = (id?: string) => {
+      const r: any = new (OrgEvent as any)();
+      r.getContext = () => undefined;
+      if (id !== undefined) r.getId = () => id;
+      return r;
+    };
+    await internal("int-2").put({ id: "int-2", authorId: "flair-migrations", kind: "migration", summary: "x", createdAt: PAST });
+    expect(orgEventStore.get("int-2").createdAt).toBe(PAST);
+    await internal("int-1").patch({ createdAt: FUTURE });
+    expect(orgEventStore.get("int-1").createdAt).toBe(FUTURE);
+    await internal().post({ authorId: "flair-migrations", kind: "migration", summary: "y", createdAt: PAST });
+    expect(orgEventPut.createdAt).toBe(SERVER_NOW);
   });
 });
 
@@ -398,3 +701,185 @@ describe("WorkspaceState.search() — boolean-injection guard (authz-hardening s
 // prepend — `query.conditions = [agentIdCondition, ...existing]` — made the
 // test FAIL (observed "ws-theirs" in the result), confirming the guard is
 // not vacuously true.  Reverted before commit.
+
+describe("OrgEvent projected collection DELETE", () => {
+  for (const urlParams of [false, true]) {
+    for (const select of ["summary", ["summary"], Object.assign(["summary"], { asArray: true })]) {
+      it(`refuses a reserved selection with ${urlParams ? "URLSearchParams" : "object"} target and ${typeof select === "string" ? "scalar" : (select as any).asArray ? "array" : "object"} projection`, async () => {
+        const row = { id: "ordinary-id", kind: "soul.changed", summary: "reserved", authorId: "agent-alpha", createdAt: "2026-01-01T00:00:00.000Z" };
+        orgEventStore.set(row.id, row);
+        const oe = makeOrgEvent(agentCtx("admin", true));
+        oe.search = async function* (query: any) {
+          for (const stored of orgEventStore.values()) {
+            yield query.select ? { summary: stored.summary } : stored;
+          }
+        };
+        const target = Object.assign(urlParams ? new URLSearchParams() : {}, { isCollection: true, select });
+        const res = await oe.delete(target);
+        expect(res).toBeInstanceOf(Response);
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ error: "reserved_event" });
+        expect(orgEventStore.get(row.id)).toEqual(row);
+        expect(target.select).toEqual(select);
+      });
+    }
+  }
+});
+
+describe("OrgEvent allow* hooks refuse reserved markers visible in their arguments", () => {
+  it("refuses a reserved record and admits an ordinary one for the dispatch hooks Harper calls", async () => {
+    const oe: any = new (OrgEvent as any)();
+    const reserved = { id: "instruction-change:x", kind: "soul.changed" };
+    const ordinary = { id: "ordinary-1", kind: "status" };
+    // Harper 5.3.1 calls allowCreate/allowUpdate/allowDelete; there is no allowPatch hook.
+    for (const hook of ["allowCreate", "allowUpdate"] as const) {
+      expect(await oe[hook](null, reserved, {}), hook).toBe(false);
+      expect(await oe[hook](null, [ordinary], {}), hook).toBe(true);
+      expect(await oe[hook](null, [ordinary, reserved], {}), hook).toBe(false);
+    }
+    // allowDelete receives the request target, not a stored row.
+    expect(oe.allowDelete(null, { id: "instruction-change:x" }, {}), "allowDelete reserved id").toBe(false);
+    expect(oe.allowDelete(null, { id: "ordinary-1" }, {}), "allowDelete ordinary id").toBe(true);
+  });
+});
+
+describe("OrgEvent promised hook arguments", () => {
+  it("resolves promised reserved and ordinary records", async () => {
+    const oe: any = new (OrgEvent as any)();
+    for (const hook of ["allowCreate", "allowUpdate"]) {
+      expect(await oe[hook](null, Promise.resolve({ id: "ordinary", kind: "soul.changed" }), {})).toBe(false);
+      expect(await oe[hook](null, Promise.resolve({ id: "instruction-change:x", kind: "status" }), {})).toBe(false);
+      expect(await oe[hook](null, Promise.resolve({ id: "ordinary", kind: "status" }), {})).toBe(true);
+    }
+  });
+});
+
+describe("OrgEvent transaction and outcome checks", () => {
+  const settle = async (p: Promise<any>) => { try { return await p; } catch (err) { return err; } };
+  const errorOf = async (response: Response) => (await response.clone().json()).error;
+  for (const method of ["post", "put", "patch"]) {
+    it(`${method}: confirmation uses the prepared row after the request object changes`, async () => {
+      const id = "event-prepared";
+      const content = {
+        id, authorId: "agent-alpha", kind: "status", summary: "prepared",
+        createdAt: "2999-01-01T00:00:00.000Z", expiresAt: "2999-02-01T00:00:00.000Z",
+      };
+      afterEventCommit = () => {
+        content.id = "changed-request-id";
+        content.authorId = "changed-request-author";
+        content.createdAt = "2999-01-01T00:00:00.000Z";
+        content.expiresAt = "2999-03-01T00:00:00.000Z";
+      };
+      const result = await settle(makeOrgEvent(agentCtx("agent-alpha", true), id)[method](content));
+      expect(result instanceof Response).toBe(false);
+      expect(orgEventStore.get(id)).toMatchObject({
+        id, authorId: "agent-alpha", expiresAt: "2999-02-01T00:00:00.000Z",
+      });
+      expect(orgEventStore.get(id).createdAt).not.toBe(content.createdAt);
+    });
+
+    it(`${method}: a reserved row committed after the transaction read is kept`, async () => {
+      const id = "event-race";
+      const reserved = { id, authorId: "agent-alpha", kind: "soul.changed", summary: "reserved", createdAt: "2026-01-01T00:00:00.000Z" };
+      beforeEventWrite = (ctx) => {
+        expect(ctx.transaction.open).toBe(1);
+        orgEventStore.set(id, reserved);
+      };
+      const result = await settle(makeOrgEvent(agentCtx("agent-alpha"), id)[method]({
+        id, authorId: "agent-alpha", kind: "status", summary: "attempted",
+      }));
+      expect(result.status).toBe(403);
+      expect(await errorOf(result)).toBe("reserved_event");
+      expect(orgEventStore.get(id)).toEqual(reserved);
+    });
+
+    it(`${method}: a lost committed outcome is refused by name`, async () => {
+      const id = "event-lost";
+      const newer = { id, authorId: "agent-alpha", kind: "status", summary: "newer", createdAt: "2026-01-01T00:00:00.000Z" };
+      afterEventCommit = () => orgEventStore.set(id, newer);
+      const result = await settle(makeOrgEvent(agentCtx("agent-alpha"), id)[method]({
+        id, authorId: "agent-alpha", kind: "status", summary: "attempted",
+      }));
+      expect(result.status).toBe(409);
+      expect(await errorOf(result)).toBe("stored_row_changed");
+      expect(orgEventStore.get(id)).toEqual(newer);
+    });
+
+    it(`${method}: an extra field from another committed write prevents success`, async () => {
+      const id = "event-extra";
+      afterEventCommit = () => orgEventStore.set(id, { ...orgEventStore.get(id), detail: "newer" });
+      const result = await settle(makeOrgEvent(agentCtx("agent-alpha"), id)[method]({
+        id, authorId: "agent-alpha", kind: "status", summary: "attempted",
+      }));
+      expect(result.status).toBe(409);
+      expect(await errorOf(result)).toBe("stored_row_changed");
+      expect(orgEventStore.get(id).detail).toBe("newer");
+    });
+  }
+});
+
+describe("OrgEventMaintenance.post() authorizes from getContext()", () => {
+  it("refuses a non-admin agent that reaches post() directly, not through allowCreate", async () => {
+    const r: any = new (OrgEventMaintenance as any)();
+    r.getContext = () => ({ request: agentCtx("agent-a") });
+    // Harper passes the request target as the second argument. An empty target
+    // resolves to the trusted internal verdict if it is mistaken for the auth
+    // context, so this call fails unless post() reads getContext().
+    const res: any = await r.post({}, {});
+    expect(res?.status).toBe(403);
+  });
+});
+
+describe("OrgEventMaintenance deletion counts", () => {
+  it("counts committed absence and reports an injected failure separately", async () => {
+    for (const id of [DELETE_FAILS_MARKER, "deleted-after-failure"]) {
+      orgEventStore.set(id, {
+        id, authorId: "agent-a", kind: "status", summary: "expired",
+        createdAt: "2000-01-01T00:00:00.000Z", expiresAt: "2001-01-01T00:00:00.000Z",
+      });
+    }
+    const r: any = new (OrgEventMaintenance as any)();
+    r.getContext = () => ({ request: agentCtx("agent-admin", true) });
+    expect(await r.post({})).toEqual({ deleted: 1, skipped: 0, failed: 1 });
+    expect(orgEventStore.has(DELETE_FAILS_MARKER)).toBe(true);
+    expect(orgEventStore.has("deleted-after-failure")).toBe(false);
+  });
+});
+
+describe("OrgEventMaintenance skipped selections", () => {
+  const id = "expiry-selection";
+  const expired = () => ({ id, authorId: "agent-a", kind: "status", summary: "expired",
+    createdAt: "2000-01-01T00:00:00.000Z", expiresAt: "2001-01-01T00:00:00.000Z" });
+  const sweep = () => {
+    const r: any = new (OrgEventMaintenance as any)();
+    r.getContext = () => ({ request: agentCtx("agent-admin", true) });
+    return r.post({});
+  };
+
+  for (const [name, change] of [
+    ["reserved kind", { kind: "soul.changed" }],
+    ["changed identity", { createdAt: "2002-01-01T00:00:00.000Z" }],
+    ["future expiry", { expiresAt: "9999-01-01T00:00:00.000Z" }],
+    ["removed expiry", { expiresAt: null }],
+  ] as const) {
+    it(`skips a selection with ${name} at its transactional read`, async () => {
+      orgEventStore.set(id, expired());
+      const newer = { ...expired(), ...change };
+      afterEventSelection = () => { orgEventStore.set(id, newer); };
+      expect(await sweep()).toEqual({ deleted: 0, skipped: 1, failed: 0 });
+      expect(orgEventStore.get(id)).toEqual(newer);
+    });
+  }
+
+  it("skips a selection removed before its transactional read", async () => {
+    orgEventStore.set(id, expired());
+    afterEventSelection = () => { orgEventStore.delete(id); };
+    expect(await sweep()).toEqual({ deleted: 0, skipped: 1, failed: 0 });
+  });
+
+  it("skips a resolved delete whose committed row remains", async () => {
+    orgEventStore.set(DELETE_DROPPED_MARKER, { ...expired(), id: DELETE_DROPPED_MARKER });
+    expect(await sweep()).toEqual({ deleted: 0, skipped: 1, failed: 0 });
+    expect(orgEventStore.has(DELETE_DROPPED_MARKER)).toBe(true);
+  });
+});

@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { b64ToArrayBuffer } from "../../resources/b64.js";
 
 // Test the auth header regex parsing (same pattern used in auth-middleware.ts)
@@ -228,15 +230,10 @@ describe("federation pairing token lifecycle", () => {
   });
 });
 
-// Test the re-pairing path still works without token
+// An otherwise valid, non-revoked re-pair, with and without a supplied token,
+// is exercised end-to-end on real Harper in
+// test/integration/federation-peer-trust-2333.test.ts.
 describe("federation re-pairing", () => {
-  test("re-pairing skips token check when peer already exists", () => {
-    // Simulate: existing peer found, same public key → skip token
-    const existingPeer = { id: "spoke_1", publicKey: "same_pubkey", status: "paired" };
-    const incomingPublicKey = "same_pubkey";
-    expect(existingPeer.publicKey === incomingPublicKey).toBe(true);
-  });
-
   test("re-pairing with mismatched key returns 409", () => {
     const existingPeer = { id: "spoke_1", publicKey: "original_pubkey" };
     const incomingPublicKey = "different_pubkey";
@@ -334,5 +331,33 @@ describe("Basic auth super_user path", () => {
     expect(adminPass !== null).toBe(false);
     // Path 2 can still match
     expect(harperUser?.role?.permission?.super_user === true).toBe(true);
+  });
+});
+
+// RFC 9110 §11.1: authentication scheme names are case-insensitive, so
+// "basic", "BASIC" and "Basic" must all select the Basic branch. The
+// middleware reads this through ONE case-insensitive predicate, used both by
+// the /FederationPair public-bypass test and by the Basic branch itself. With a
+// case-SENSITIVE test (`startsWith("Basic ")`), a lower- or mixed-case
+// credential on /FederationPair would take the public bypass and skip the
+// Basic branch. For an authenticated bootstrap Basic caller supplying a valid
+// token, FederationPair compares the annotated caller with the token's bootstrap user.
+describe("auth middleware: the Basic scheme name is case-insensitive (RFC 9110)", () => {
+  test("basic/BASIC select the Basic branch — the middleware's scheme check is case-insensitive, in both places", () => {
+    const src = readFileSync(join(import.meta.dir, "../../resources/auth-middleware.ts"), "utf8");
+    const grammar = readFileSync(join(import.meta.dir, "../../resources/basic-auth-header.ts"), "utf8");
+    // ONE case-insensitive predicate, defined with the Basic header grammar…
+    expect(grammar).toContain("export const BASIC_AUTH_HEADER_RE = /^Basic /i;");
+    expect(src).toContain("const isBasic = BASIC_AUTH_HEADER_RE.test(header)");
+    // …used by BOTH the /FederationPair bypass and the Basic branch, and the
+    // case-sensitive exact match is gone.
+    expect(src).toContain('routedDecisionPath === "/FederationPair" && !isBasic');
+    expect(src).toContain("if (isBasic) {");
+    expect(src).not.toContain('startsWith("Basic ")');
+    const isBasic = (h: string) => /^Basic /i.test(h);
+    for (const scheme of ["Basic", "basic", "BASIC", "BaSiC"]) {
+      expect(isBasic(`${scheme} dXNlcjpwYXNz`)).toBe(true);
+    }
+    expect(isBasic("Bearer dXNlcjpwYXNz")).toBe(false);
   });
 });

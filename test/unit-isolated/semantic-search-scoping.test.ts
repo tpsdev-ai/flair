@@ -70,7 +70,12 @@ function matchesCondition(record: any, cond: any): boolean {
   return true;
 }
 
-let memoryStore: Map<string, any>;
+// Initialized at module scope (not left undefined for reset()): the
+// embedding-space guard's boot pre-warm scans `databases.flair.Memory` before
+// the first test runs (flair#2530 — an unknown verdict now fails closed), and an
+// undefined `memoryStore` would make that scan throw and leave the recall leg
+// keyword-only. A fresh empty store is vacuously uniform under the stamp check.
+let memoryStore: Map<string, any> = new Map();
 let pointerStore: Map<string, any>;
 let memoryGrants: any[];
 
@@ -285,11 +290,11 @@ describe("SemanticSearch.post() — centralized read-scoping", () => {
       // Orthogonal to qEmb — the pre-fix `?? 1` fallback and the fixed
       // point-lookup cosine computation would BOTH read as "not similar" here,
       // so this record is a control: it must never be mistaken for a match.
-      memoryStore.set("m-orthogonal", { id: "m-orthogonal", agentId: "agent-1", content: "unrelated", visibility: "private", embedding: [0, 1, 0] });
+      memoryStore.set("m-orthogonal", { id: "m-orthogonal", agentId: "agent-1", content: "unrelated", visibility: "private", embedding: [0, 1, 0], embeddingModel: "mock-embedding-model" });
       // Identical to qEmb — cosineSimilarity == 1 exactly. Pre-fix this record
       // would score 0 (distanceToSimilarity(undefined ?? 1) === 0); post-fix it
       // must score a real positive similarity via the embedding point-lookup.
-      memoryStore.set("m-identical", { id: "m-identical", agentId: "agent-1", content: "matches the query", visibility: "private", embedding: [1, 0, 0] });
+      memoryStore.set("m-identical", { id: "m-identical", agentId: "agent-1", content: "matches the query", visibility: "private", embedding: [1, 0, 0], embeddingModel: "mock-embedding-model" });
 
       const s = makeSearch(agentCtx("agent-1"));
       const res: any = await s.post({ queryEmbedding: qEmb, scoring: "raw", limit: 10 });

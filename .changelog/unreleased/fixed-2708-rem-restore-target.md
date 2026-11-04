@@ -1,0 +1,3 @@
+- **A live replay (`flair rem restore --apply` without `--dry-run`) writes to one resolved target and carries the admin credential it resolved.** The writes go to `FLAIR_URL`'s scheme, host, port and path (a loopback host pinned to 127.0.0.1), or to the local instance when it is unset; each Memory, Soul and candidate read, delete and write of a live replay carries `--admin-pass`, `--admin-pass-file` or the default, so no local admin-password file is needed when a flag gives one.
+
+  A non-loopback dry run without either flag reads signed-only: `FLAIR_ADMIN_PASS` and the local admin-password file are read only for a loopback target. Restore refuses a target URL carrying user info, a query or a fragment, prints none of their values, and does not follow redirects (#2708).

@@ -21,7 +21,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -54,7 +54,7 @@ async function registerAgent(harper: HarperInstance, agent: TestAgent): Promise<
   expect(res.status, `Agent insert for ${agent.id} returned ${res.status}`).toBe(200);
 }
 
-/** Signed PUT to /Memory/<id> — the only HTTP-reachable create/update path. */
+/** Signed PUT to /Memory/<id> — the write path these tests use. */
 async function putMemory(harper: HarperInstance, agent: TestAgent, id: string, body: Record<string, any>): Promise<Response> {
   const path = `/Memory/${id}`;
   return fetch(`${harper.httpURL}${path}`, {
@@ -99,7 +99,7 @@ describe("flair#1182 part 1 — self-describing bootstrap empty-state (+ resolve
     harper = await startHarper();
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("empty-state: an authenticated caller with NO data still gets the container keys + resolved identity + task hint", async () => {
     const agent = mkAgent(`bootstrap-1182-empty-${randomUUID()}`);

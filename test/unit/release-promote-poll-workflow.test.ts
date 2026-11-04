@@ -144,11 +144,11 @@ describe("release-promote-poll — round 2: derivation, payload version, all pag
       const p2 = join(dir, "p2.json");
       writeFileSync(p1, JSON.stringify([{ ref: "v0.1.0", payload: { version: "0.1.0" } }]));
       writeFileSync(p2, JSON.stringify([{ ref: "v0.2.0", payload: { version: "0.2.0" } }]));
-      const flat = spawnSync("jq", ["-s", "add // [] | map(.ref)", p1, p2], { encoding: "utf8" });
+      const flat = spawnSync("jq", ["-s", "add // [] | map(.ref)", p1, p2], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-promote-poll-workflow process fixture arguments" }, encoding: "utf8" });
       expect(flat.status, String(flat.stderr)).toBe(0);
       const refs = JSON.parse(flat.stdout) as string[];
       expect(refs).toContain("v0.2.0"); // assertion: the page-2 marker is seen
-      const old = spawnSync("jq", ["-s", ".[0] | map(.ref)", p1, p2], { encoding: "utf8" });
+      const old = spawnSync("jq", ["-s", ".[0] | map(.ref)", p1, p2], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-promote-poll-workflow process fixture arguments" }, encoding: "utf8" });
       expect(JSON.parse(old.stdout) as string[]).not.toContain("v0.2.0"); // the old bug
     } finally {
       rmSync(dir, { recursive: true, force: true });

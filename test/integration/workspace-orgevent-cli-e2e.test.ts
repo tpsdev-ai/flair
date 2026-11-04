@@ -2,33 +2,32 @@
  * workspace-orgevent-cli-e2e.test.ts — real-Harper integration coverage for
  * `flair workspace set` and `flair orgevent` (flair#679).
  *
- * Bug (`flair workspace set`, CONFIRMED against a real spawned Harper below):
- * it sent a bare `POST /WorkspaceState` (collection-level, no id in the URL).
- * WorkspaceState.post() (resources/WorkspaceState.ts) delegates to
- * `super.post(content)` — the Harper-generated table class's OWN post()
- * implementation, which 405s a collection POST with "does not have a post
- * method implemented to handle HTTP method POST" (same restriction
- * resources/Memory.ts documents, already fixed the same way for `soul set`
- * #498 — see test/integration/onboarding-smoke.test.ts, which this file's
- * structure mirrors). Table writes over real HTTP require `PUT /<Table>/<id>`
- * with the id in the URL.
+ * Bug (`flair workspace set`, flair#679): it sent a bare `POST /WorkspaceState`
+ * (collection-level, no id in the URL). WorkspaceState.post()
+ * (resources/WorkspaceState.ts) delegates to `super.post(content)`, the
+ * Harper-generated table class's own post(); through Harper 5.1.x that 405'd a
+ * collection POST with "does not have a post method
+ * implemented to handle HTTP method POST" (`soul set` was moved to PUT the same
+ * way in #498: see test/integration/onboarding-smoke.test.ts, which this file's
+ * structure mirrors). The Harper this repo now pins accepts that request (the "sanity"
+ * test below asserts it, harper#1956). The CLI writes with
+ * `PUT /<Table>/<id>`, the id in the URL, which works on both.
  *
  * CORRECTION to the issue's premise (measured, not assumed — see the "sanity"
  * tests below): `flair orgevent`'s bare `POST /OrgEvent` does NOT currently
  * 405. OrgEvent.post() (resources/OrgEvent.ts) does NOT delegate to
- * `super.post()` — it generates its own id/createdAt and calls
- * `databases.flair.OrgEvent.put(content)` directly, which Harper's REST layer
- * DOES route a real HTTP POST to. So today's shipped `flair orgevent` exits 0
- * and writes successfully. It is still switched to PUT/{id} here because (a)
- * that's what the issue and the fix instructions specify, (b) it makes
- * OrgEvent's write path consistent with every other table resource
- * (WorkspaceState, Memory, Soul) instead of relying on an accident of
+ * `super.post()`. Harper's REST layer routes a real HTTP POST to
+ * OrgEvent.post(), which generates a default id when the body carries none and
+ * stores the event through `_store()`.
+ * So today's shipped `flair orgevent` exits 0 and writes successfully. It is
+ * still switched to PUT/{id} here because (a) that's what the issue and the fix
+ * instructions specify, and (b) it makes the CLI's OrgEvent write the same as
+ * its `flair workspace set` and `soul set` writes instead of relying on an accident of
  * OrgEvent.post()'s specific implementation — a future refactor that made
  * OrgEvent.post() delegate to super.post() (mirroring WorkspaceState.post())
- * would silently reintroduce this exact 405 with zero CLI-side change to
- * notice it, and (c) client-generated `${agentId}-${randomUUID()}` ids avoid
- * the same-millisecond collision risk of post()'s own
- * `${authorId}-${isoTimestamp}` default.
+ * would have reintroduced this 405 on Harper through 5.1.x with zero CLI-side
+ * change to notice it. (Both id paths now carry a random UUID: the CLI's
+ * `${agentId}-${randomUUID()}` and OrgEvent.post()'s own default, flair#2333.)
  *
  * The bug was INVISIBLE to the mock-HTTP-server unit suites
  * (test/unit/workspace-set.test.ts, test/unit/orgevent-cli.test.ts) — a mock
@@ -42,27 +41,17 @@
  */
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawnCli } from "../helpers/build-cli-once.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { httpStatus } from "../helpers/http-status";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 
 // flair#1807: the CLI child's OWN deadline, and the per-case budget above it.
-// This is the integration lane's own invocation (`bun test
-// test/integration/*.test.ts`): the shared Harper boot is paid ONCE in
-// beforeAll, so what a case spends is one CLI child against that live Harper.
-// Measured here over three runs, a case's CLI child takes 0.14-0.31 s, so the
-// budget is the 20 s child deadline + well under a second of work + a wide
-// margin = 25 s. Before this a case had no budget at all (bun's 5 s default)
-// and the child's only bound was a manual 30 s kill that discarded the child's
-// output.
 const CHILD_DEADLINE_MS = 20_000;
-const CASE_BUDGET_MS = 25_000;
 
-const CLI = join(process.cwd(), "dist", "cli.js");
 const AGENT_ID = "flair679-e2e-agent";
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
 
@@ -83,7 +72,7 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
   const opsPort = new URL(harper.opsURL).port;
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const child = spawn(process.execPath, [CLI, ...args], {
+    const child = spawnCli(args, {
       env: {
         ...process.env,
         HOME: cliHome,
@@ -95,7 +84,7 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
       },
       // flair#1807: the child carries its OWN deadline (it replaces the manual
       // 30 s kill this used to arm); a signal kill is named, with its output.
-      timeout: CHILD_DEADLINE_MS,
+      timeout: 20_000,
     });
     let stdout = "";
     let stderr = "";
@@ -140,12 +129,12 @@ beforeAll(async () => {
     "--ops-port", new URL(harper.opsURL).port,
   ]);
   if (add.code !== 0) throw new Error(`agent add failed:\n${add.stdout}\n${add.stderr}`);
-}, 120_000);
+}, HARPER_START_BUDGET_MS);
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (cliHome) await rm(cliHome, { recursive: true, force: true, maxRetries: 4 });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
   // Structural sanity check FIRST, measured against the real spawned Harper
@@ -191,6 +180,7 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     const id = `${AGENT_ID}:cp679-fix`;
     const res = await fetch(`${harper.httpURL}/WorkspaceState/${id}`, {
       headers: { Authorization: adminAuthHeader() },
+      signal: AbortSignal.timeout(5_000),
     });
     expect(res.status).toBe(200);
     const ws = await res.json() as Record<string, unknown>;
@@ -201,7 +191,7 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     expect(ws.taskId).toBe("679");
     expect(ws.summary).toBe("fixing bare POST 405 for flair#679");
     expect(typeof ws.createdAt).toBe("string");
-  }, CASE_BUDGET_MS);
+  }, 30_000);
 
   test("workspace set is idempotent per (agentId, ref) — a second call overwrites the same row", async () => {
     const r = await runCli(
@@ -213,21 +203,23 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     const id = `${AGENT_ID}:cp679-fix`;
     const res = await fetch(`${harper.httpURL}/WorkspaceState/${id}`, {
       headers: { Authorization: adminAuthHeader() },
+      signal: AbortSignal.timeout(5_000),
     });
     expect(res.status).toBe(200);
     const ws = await res.json() as Record<string, unknown>;
     expect(ws.phase).toBe("review");
     expect(ws.summary).toBe("second write, same ref");
-  }, CASE_BUDGET_MS);
+  }, 30_000);
 
-  // UNLIKE WorkspaceState, a bare POST /OrgEvent does NOT 405 today — measured
-  // directly (this test), and confirmed by running the ORIGINAL (pre-fix)
-  // `flair orgevent` CLI against a real spawned Harper: it exits 0 and writes
-  // successfully. See the module doc's "CORRECTION to the issue's premise"
-  // for why OrgEvent.post() (resources/OrgEvent.ts) doesn't hit the same gap
-  // WorkspaceState.post() does, and why this CLI command is still switched to
-  // PUT/{id} despite its current POST path already working.
-  test("sanity: a bare POST /OrgEvent collection write does NOT 405 today (unlike WorkspaceState) — this is why orgevent still needs the PUT fix for FUTURE-proofing, not a currently-broken write", async () => {
+  // A bare POST /OrgEvent does not 405: measured directly (this test), and the
+  // ORIGINAL (pre-fix) `flair orgevent` CLI exited 0 and wrote successfully
+  // against a real spawned Harper. Through Harper 5.1.x this differed from
+  // WorkspaceState (whose post() delegates to super.post() and 405'd); on the
+  // Harper this repo now pins both are accepted. See the module doc's
+  // "CORRECTION to the issue's premise" for why OrgEvent.post()
+  // (resources/OrgEvent.ts) never hit that gap, and why this CLI command still
+  // writes with PUT/{id}.
+  test("sanity: a bare POST /OrgEvent collection write does not 405 (it did not on Harper through 5.1.x either); orgevent writes with PUT for consistency, not to fix a broken write", async () => {
     const res = await fetch(`${harper.httpURL}/OrgEvent`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: adminAuthHeader() },
@@ -260,6 +252,7 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     // write actually landed, not just that the CLI exited 0.
     const res = await fetch(`${harper.httpURL}/OrgEvent/${id}`, {
       headers: { Authorization: adminAuthHeader() },
+      signal: AbortSignal.timeout(5_000),
     });
     expect(res.status).toBe(200);
     const ev = await res.json() as Record<string, unknown>;
@@ -269,9 +262,9 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     expect(ev.summary).toBe("flair#679 e2e verification");
     expect(ev.targetIds).toEqual(["flint"]);
     expect(typeof ev.createdAt).toBe("string");
-  }, CASE_BUDGET_MS);
+  }, 30_000);
 
-  test("orgevent generates a fresh id per call — two publishes never collide", async () => {
+  test("orgevent generates a fresh id per call — two publishes are collision-resistant", async () => {
     const r1 = await runCli(["orgevent", "--kind", "status", "--summary", "first"], { FLAIR_AGENT_ID: AGENT_ID });
     const r2 = await runCli(["orgevent", "--kind", "status", "--summary", "second"], { FLAIR_AGENT_ID: AGENT_ID });
     expect(r1.code).toBe(0);
@@ -279,5 +272,5 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     const id1 = r1.stdout.match(/id:\s*(\S+)/)![1];
     const id2 = r2.stdout.match(/id:\s*(\S+)/)![1];
     expect(id1).not.toBe(id2);
-  }, CASE_BUDGET_MS);
+  }, 45_000);
 });

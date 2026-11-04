@@ -1,5 +1,6 @@
 import { Resource, databases } from 'harper';
 import { allowVerified } from './agent-auth.js';
+import { subscribeInProcess } from './table-subscription-policy.js';
 
 export class FeedSouls extends Resource {
   // Self-authorize the subscription via the Ed25519 agent verify (auth reshape
@@ -10,7 +11,7 @@ export class FeedSouls extends Resource {
   }
 
   async *connect(target: any, incomingMessages: any) {
-    const subscription = await (databases as any).flair.Soul.subscribe(target);
+    const subscription = await subscribeInProcess((databases as any).flair.Soul, target);
     
     if (!incomingMessages) {
       return subscription;

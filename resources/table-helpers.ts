@@ -13,7 +13,7 @@
  */
 import { writeBackCommittedRow, type WriteBackOptions } from "./write-back.js";
 
-export type PatchRecordOptions = Partial<Pick<WriteBackOptions, "ctx" | "pausePre" | "pausePoint" | "label" | "attempts" | "expectedRow" | "matches">>;
+export type PatchRecordOptions = Partial<Pick<WriteBackOptions, "ctx" | "pausePre" | "pausePoint" | "pauseAfterStage" | "pauseBeforeCommit" | "label" | "attempts" | "expectedRow" | "matches">>;
 
 export async function patchRecord(
   table: any,
@@ -26,7 +26,8 @@ export async function patchRecord(
     id,
     (existing) => {
       if (!existing) throw new Error(`Record ${id} not found`);
-      return { write: { ...existing, ...patch } };
+      // The lastReflected stamp updates only the patch's fields.
+      return { idempotent: true, update: patch };
     },
     { ...opts, label: opts.label ?? "patchRecord" },
   );

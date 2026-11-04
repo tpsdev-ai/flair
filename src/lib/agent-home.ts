@@ -20,17 +20,45 @@
  */
 import {
   decideInstanceAnswer,
+  readableInstanceRows,
   readInstanceRows,
   type InstanceIdentityRow,
   type OpsEndpoint,
 } from "./instance-identity-row.js";
 import { isValidAgentId } from "./agent-id-rule.js";
+import {
+  AGENT_HOME_STAMP_FIELD,
+  isHomeLessAgentRow,
+  isSyncOriginatedAgentRow,
+} from "./agent-home-fields.js";
 
 /** The operator command that back-fills the home on home-less rows that carry no federation-sync provenance. */
 export const AGENT_HOME_STAMP_COMMAND = "flair agent stamp-home";
 
 /** The remedy line doctor prints: the dry run is the bare command; only --apply writes. */
 export const AGENT_HOME_STAMP_REMEDY = `${AGENT_HOME_STAMP_COMMAND} (dry run; add --apply to stamp)`;
+
+/**
+ * The request-body control field the remedy sends to the Agent resource
+ * (flair#2472): a guarded home stamp. The resource reads it, applies the stamp
+ * inside a FRESH OWNED transaction (the request's own transaction is detached for
+ * that scope), and drops it before the write — it is a control field, not a
+ * stored column. Re-exported so callers of this module keep
+ * one import site; the implementations live in agent-home-fields.ts (the
+ * dependency-free module the Agent resource imports directly).
+ */
+export {
+  AGENT_HOME_FIELD,
+  AGENT_HOME_STAMP_FIELD,
+  AGENT_HOME_STAMP_PAUSE_POINT,
+  AGENT_PRINCIPAL_WRITE_BACK_FIELD,
+  AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR,
+  AGENT_PRINCIPAL_WRITE_BACK_PAUSE_POINT,
+  isForeignAgentHome,
+  isHomeLessAgentRow,
+  isSyncOriginatedAgentRow,
+  pickPrincipalWriteBackFields,
+} from "./agent-home-fields.js";
 
 /** The ops endpoint of an instance the CLI is about to write to. */
 export function agentHomeEndpoint(
@@ -90,6 +118,91 @@ export async function resolveTargetInstanceIdentity(endpoint: OpsEndpoint): Prom
 }
 
 /**
+ * Every `flair.Instance` row an HTTP endpoint reports, read through its REST
+ * `/Instance/` resource with admin Basic auth. Throws on a non-2xx, a body that
+ * is not a row list, or an entry without a usable id — a read that established
+ * nothing, never a read of zero rows (the same rule `readInstanceRows` follows
+ * on the ops side). Uses the ONE reader (`readableInstanceRows`).
+ */
+export async function readInstanceRowsViaHttp(
+  httpBase: string,
+  adminUser: string,
+  adminPass: string,
+  fetchImpl?: typeof fetch,
+): Promise<InstanceIdentityRow[]> {
+  const fetchFn = fetchImpl ?? fetch;
+  const res = await fetchFn(`${httpBase.replace(/\/+$/, "")}/Instance/`, {
+    headers: { Authorization: `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}` },
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error(`GET /Instance/ answered HTTP ${res.status}`);
+  const data = await res.json();
+  const rows = Array.isArray(data) ? data : Array.isArray(data?.results) ? data.results : null;
+  if (rows === null) throw new Error("GET /Instance/ answered a body that is not a row list");
+  return readableInstanceRows(rows);
+}
+
+/**
+ * The instance identity an HTTP endpoint reports (flair#2483), decided by the
+ * SAME rule as the ops-API read: exactly one nameable `flair.Instance` row is an
+ * identity; no row, several rows, or a read that did not happen is not.
+ */
+export async function readHttpInstanceIdentity(
+  httpBase: string,
+  adminUser: string,
+  adminPass: string,
+  fetchImpl?: typeof fetch,
+): Promise<TargetInstanceIdentity> {
+  let rows: InstanceIdentityRow[];
+  try {
+    rows = await readInstanceRowsViaHttp(httpBase, adminUser, adminPass, fetchImpl);
+  } catch {
+    return { kind: "unreadable" };
+  }
+  const decision = decideInstanceAnswer(rows);
+  if (decision.kind === "answer") return { kind: "one", id: decision.row.id };
+  if (decision.kind === "refuse-multiple") return { kind: "multiple", count: decision.rows.length };
+  return { kind: "none" };
+}
+
+/** Whether two endpoints report the same instance: one id, two different ids, or not establishable (flair#2483). */
+export type ProbedPairIdentity =
+  | { kind: "same"; id: string }
+  | { kind: "different"; httpId: string; opsId: string }
+  | { kind: "unestablished"; detail: string };
+
+/** A one-line description of a single endpoint's identity state, for a refusal reason. */
+function describeIdentityState(id: TargetInstanceIdentity): string {
+  switch (id.kind) {
+    case "one": return "one instance identity";
+    case "none": return "no instance identity";
+    case "multiple": return `${id.count} instance identity rows`;
+    case "unreadable": return "an instance identity it could not read";
+  }
+}
+
+/**
+ * The instance-identity comparison doctor adds to its configuration check
+ * before the roster and home reads (flair#2483): the identity the probed HTTP
+ * port reports against the identity the candidate ops endpoint reports. Only
+ * two SINGLE, EQUAL ids are `same`. Two different single ids are `different`.
+ * Anything else — no row (a fresh install), several rows, or an unreadable read
+ * on either side — is `unestablished`. The caller refuses only on `different`;
+ * the configuration check (src/lib/local-instance-pair.ts) decides the rest.
+ */
+export function decideProbedPairIdentity(http: TargetInstanceIdentity, ops: TargetInstanceIdentity): ProbedPairIdentity {
+  if (http.kind === "one" && ops.kind === "one") {
+    return http.id === ops.id
+      ? { kind: "same", id: http.id }
+      : { kind: "different", httpId: http.id, opsId: ops.id };
+  }
+  return {
+    kind: "unestablished",
+    detail: `the probed HTTP port reports ${describeIdentityState(http)}, the ops endpoint reports ${describeIdentityState(ops)}`,
+  };
+}
+
+/**
  * Stamp an Agent create record with the creating instance's id, ignoring any
  * value the record already carries. `home` of null writes an explicit null (the
  * local-origin state), never a stale body value.
@@ -137,29 +250,9 @@ export async function readAgentHomeRows(args: {
   }
 }
 
-/**
- * Whether an inbound federation merge wrote this row (`_syncedFrom`,
- * `_originatorInstanceId` — resources/Federation.ts's receiver-side stamps). Such
- * a row did NOT originate on this instance, so nothing here may stamp a home on
- * it: that would attribute a peer's row to this instance.
- */
-export function isSyncOriginatedAgentRow(row: Record<string, unknown> | null | undefined): boolean {
-  if (!row) return false;
-  return (
-    (typeof row._syncedFrom === "string" && row._syncedFrom.length > 0) ||
-    (typeof row._originatorInstanceId === "string" && row._originatorInstanceId.length > 0)
-  );
-}
-
 /** A row's id as a string, or null when it carries no usable id. */
 export function agentRowId(row: { id?: unknown }): string | null {
   return typeof row?.id === "string" && row.id.length > 0 ? row.id : null;
-}
-
-/** A row is home-less when `originatorInstanceId` is null, absent or empty. */
-export function isHomeLessAgentRow(row: Record<string, unknown>): boolean {
-  const home = row.originatorInstanceId;
-  return home === null || home === undefined || home === "";
 }
 
 /** The home decision over a full Agent row read: what is home-less, and what the remedy may stamp. */
@@ -303,7 +396,7 @@ export interface AgentHomeStampResult {
   plan: AgentHomePlan;
   /** The ids whose home was stamped and read back (empty on a dry run). */
   stamped: string[];
-  /** The planned ids left unwritten because the row, re-read just before its write, carried sync provenance. */
+  /** The planned ids not counted as stamped, excluding `vanished`. */
   skipped: string[];
   /** The planned ids whose row was gone when re-read just before its write. */
   vanished: string[];
@@ -312,7 +405,7 @@ export interface AgentHomeStampResult {
 /** The lines `flair agent stamp-home --apply` prints for the rows it left unwritten. */
 export function stampLeftoverLines(result: Pick<AgentHomeStampResult, "skipped" | "vanished">): string[] {
   return [
-    ...result.skipped.map((id) => `     list only (sync-originated): ${id}`),
+    ...result.skipped.map((id) => `     not counted as stamped: ${id}`),
     ...result.vanished.map((id) => `     skipped (no longer present): ${id}`),
   ];
 }
@@ -344,14 +437,30 @@ async function readAgentRowForStamp(args: {
 
 /**
  * Back-fill the home on home-less Agent rows with no sync provenance
- * (flair#2433). Reads the roster, plans the stamps, and — with `apply` — writes
- * the local id on each stampable row and reads it back before counting it. A
- * sync-originated row (or one with no home at all to attribute) is never written.
- * `localInstanceId` is the value resolved through the one shared rule (a null
- * refuses the write; there is nothing to stamp).
+ * (flair#2433, flair#2472). Reads the roster, plans the stamps, and — with
+ * `apply` — asks the Agent resource (a REST PATCH, `httpUrl`) to stamp each
+ * stampable row, then reads it back before counting it.
+ *
+ * The stamp's decision is made INSIDE the resource, in a FRESH OWNED transaction
+ * (the request's own transaction is detached for that scope): the resource reads
+ * the row there and stamps only when it is still home-less and carries no
+ * federation-sync provenance, writing the id the CURRENT `Instance` table names
+ * (failure to confirm a single canonical Instance row is refused by name); it then
+ * re-reads the committed row and aborts if that read sees a home, provenance, or
+ * no row. The CLI's own read is a plan/report, never the write's authority: a
+ * row the resource's reads see gain a home or provenance is left alone, and a
+ * row they find gone is reported vanished (a stamp never creates). A change
+ * committed after the resource's confirmation read and before its commit is not
+ * seen (flair#2478). A row is counted `stamped` only when the resource reports
+ * that it applied the stamp (`stamped: true`) AND the read-back shows this
+ * instance's home with no provenance.
+ *
+ * `localInstanceId` is the value resolved through the one shared rule; a null
+ * ends the run with no write (there is nothing to stamp).
  */
 export async function runAgentHomeStamp(args: {
   opsUrl: string;
+  httpUrl: string;
   authHeader: string;
   localInstanceId: string | null;
   apply: boolean;
@@ -371,6 +480,7 @@ export async function runAgentHomeStamp(args: {
   if (args.localInstanceId === null) return { ok: false, reason: "no-canonical-id", plan, stamped: [], skipped: [], vanished: [] };
   const fetchImpl = args.fetchImpl ?? fetch;
   const timeoutMs = args.timeoutMs ?? 10_000;
+  const stampUrl = `${args.httpUrl.replace(/\/$/, "")}/Agent/`;
   const stamped: string[] = [];
   const skipped: string[] = [];
   const vanished: string[] = [];
@@ -390,27 +500,45 @@ export async function runAgentHomeStamp(args: {
       skipped.push(id);
       continue;
     }
-    const res = await fetchImpl(args.opsUrl, {
-      method: "POST",
+    if (!isHomeLessAgentRow(current)) {
+      // Gained a home since the plan read. Listed, never overwritten.
+      skipped.push(id);
+      continue;
+    }
+    // The guarded write: the Agent resource re-checks home-lessness and
+    // provenance inside a fresh owned transaction and stamps the id the current
+    // Instance table names. A 404 is reported as vanished.
+    const res = await fetchImpl(`${stampUrl}${encodeURIComponent(id)}`, {
+      method: "PATCH",
       headers: { "Content-Type": "application/json", Authorization: args.authHeader },
-      body: JSON.stringify({
-        operation: "update",
-        database: "flair",
-        table: "Agent",
-        records: [{ id, originatorInstanceId: args.localInstanceId }],
-      }),
+      body: JSON.stringify({ id, originatorInstanceId: args.localInstanceId, [AGENT_HOME_STAMP_FIELD]: true }),
       signal: AbortSignal.timeout(timeoutMs),
     });
+    if (res.status === 404) {
+      vanished.push(id);
+      continue;
+    }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new Error(`Failed to stamp the home on agent '${id}' (${res.status}): ${text}`);
     }
-    // Verify the write landed: an unconfirmed stamp is not a stamp.
-    const back = await readStoredAgentHome({ opsUrl: args.opsUrl, authHeader: args.authHeader, id, fetchImpl, timeoutMs });
-    if (back.state !== "found" || back.home !== args.localInstanceId) {
-      throw new Error(`The home stamp for agent '${id}' was not confirmed (read back: ${JSON.stringify(back)}).`);
+    // The resource confirms whether IT applied the stamp (`stamped: true`), and
+    // the decision is made inside its fresh owned transaction. A read-back that
+    // merely shows this instance's home is NOT that confirmation: another writer
+    // may have set the same home, or a later merge may own the row. Count a row
+    // stamped only when the resource applied it AND the read-back still shows
+    // this instance's home with no provenance.
+    const body = (await res.json().catch(() => null)) as { stamped?: unknown } | null;
+    const applied = body?.stamped === true;
+    const back = await readAgentRowForStamp({ opsUrl: args.opsUrl, authHeader: args.authHeader, id, fetchImpl, timeoutMs });
+    if (back === "unreadable") {
+      throw new Error(`The home stamp for agent '${id}' was not confirmed (the read-back failed).`);
     }
-    stamped.push(id);
+    if (applied && back !== null && !isSyncOriginatedAgentRow(back) && back.originatorInstanceId === args.localInstanceId) {
+      stamped.push(id);
+    } else {
+      skipped.push(id);
+    }
   }
   return { ok: true, plan, stamped, skipped, vanished };
 }

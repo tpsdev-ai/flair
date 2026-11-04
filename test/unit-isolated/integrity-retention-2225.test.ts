@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { bindIntegrityCli, register } from "../../src/commands/integrity";
 import { emptyCheckpoint, type MemoryRowLite, type DeletionRecordLite } from "../../src/lib/memory-integrity";
 import { tempDir } from "../helpers/temp-dir";
+import { opsTable } from "../helpers/ops-table";
 
 function fixture() {
   const path = join(tempDir("flair-integrity-retention-"), "checkpoint.json");
@@ -14,19 +15,24 @@ function fixture() {
   let pruneResponse: unknown;
   const batches: string[][] = [];
   const fetchMock = spyOn(globalThis, "fetch").mockImplementation((async (_url: any, init: any) => {
-    const { operation, table, hash_values } = JSON.parse(init.body);
+    const body = JSON.parse(init.body);
+    const { operation, hash_values, sql } = body;
     if (operation === "delete") {
-      expect(table).toBe("MemoryDeletionHistory");
+      expect(body.table).toBe("MemoryDeletionHistory");
       expect(JSON.parse(readFileSync(path, "utf8")).historyIds.length).toBeLessThanOrEqual(rows.length);
       batches.push(hash_values);
       if (pruneResponse !== undefined) return new Response(JSON.stringify(pruneResponse));
       for (const id of hash_values) expect(deletions.delete(id)).toBe(true);
       return new Response(JSON.stringify({ deleted_hashes: hash_values }));
     }
+    const table = opsTable(body);
     if (table === "MemoryDeletionHistory" && race) { const run = race; race = undefined; run(); }
     const selected = table === "Memory" ? rows : [...deletions.values()];
     if (operation === "describe_table") return new Response(JSON.stringify({ record_count: selected.length }));
-    if (operation === "sql") return new Response(JSON.stringify([{ n: selected.length }]));
+    if (operation === "sql") {
+      if (/COUNT\(\*\)/i.test(String(sql))) return new Response(JSON.stringify([{ n: selected.length }]));
+      return new Response(JSON.stringify(selected));
+    }
     const response = new Response(JSON.stringify(selected));
     return response;
   }) as typeof fetch);

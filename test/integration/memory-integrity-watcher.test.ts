@@ -17,8 +17,9 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const CLI = join(REPO_ROOT, "dist", "cli.js");
@@ -88,12 +89,13 @@ interface CheckResult {
 }
 
 function runCheck(opts: { opsPort?: string } = {}): CheckResult {
+  const env = { ...process.env, HOME: home, FLAIR_ADMIN_PASS: harper.admin.password, FLAIR_ADMIN_USER: harper.admin.username };
   const r = spawnSync(
-    process.execPath,
+    nodeBin({ env }),
     [CLI, "integrity", "check", "--json", "--ops-port", opts.opsPort ?? new URL(harper.opsURL).port],
     {
       encoding: "utf-8",
-      env: { ...process.env, HOME: home, FLAIR_ADMIN_PASS: harper.admin.password, FLAIR_ADMIN_USER: harper.admin.username },
+      env,
       timeout: 90_000,
       killSignal: "SIGTERM",
     },
@@ -117,7 +119,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (home) rmSync(home, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2213 — integrity watcher on a real Harper", () => {
   test("baseline: a first scan establishes the checkpoint (0600, outside the DB)", async () => {

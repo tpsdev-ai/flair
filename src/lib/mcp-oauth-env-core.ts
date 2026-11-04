@@ -47,6 +47,25 @@ export function issuerFromEnv(env: Record<string, string | undefined>): string |
   return isUnresolvedEnvValue(raw) ? null : raw!.trim();
 }
 
+/**
+ * The locally inferred `FLAIR_MCP_OAUTH` for an instance, decided the way Harper's
+ * shipped `loadEnv` settings decide it: the component `.env` beside `config.yaml`
+ * (flair#1152 makes the on/off choice live there, not in the packed file),
+ * overlaid with the process environment, which wins.
+ *
+ * `envText` is the `.env` content or null when there is none; `overlay` is the
+ * environment to prefer (the operator's `process.env` for `flair doctor`). This
+ * decides only report severity. With no readable file, the overlay decides.
+ */
+export function mcpOAuthEnabledFromComponentEnv(
+  envText: string | null,
+  overlay: Record<string, string | undefined> = {},
+): boolean {
+  const env = { ...parseMcpComponentEnv(envText ?? "") } as Record<string, string | undefined>;
+  for (const [key, value] of Object.entries(overlay)) if (value !== undefined) env[key] = value;
+  return mcpOAuthEnabledIn(env);
+}
+
 export function validateRedirectIssuer(issuer: string | null | undefined): { redirect: string | null; reason?: string } {
   if (isUnresolvedEnvValue(issuer)) return { redirect: null, reason: "missing-issuer" };
   let url: URL;

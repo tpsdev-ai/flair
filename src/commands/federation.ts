@@ -12,6 +12,7 @@
  * non-strict entry into the strict check.
  */
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { normalizeHubUrl } from "../lib/hub-url.js";
 import { PEER_STATUS, isPeerMemberStatus } from "../lib/peer-status.js";
 import { protoSafeRecord } from "../lib/proto-safe-record.js";
 import { Command } from "commander";
@@ -28,17 +29,41 @@ import {
   rewriteFederationPairLocalAccessError,
 } from "../lib/federation-pair-access.js";
 import {
+  ApiHttpError,
+  apiErrorRawBody,
   defaultAdminPassPath,
   isLocalBase,
-  resolveAdminPassFromSources,
   resolveAdminUser,
-  ADMIN_PASS_FILE_FLAG,
-  ADMIN_PASS_FILE_HELP,
-  ADMIN_PASS_FLAG,
-  ADMIN_PASS_HELP,
+  addAdminPassOptions,
+  applyAdminPassFile,
+  ApiRequestOutcomeUnknown,
 } from "../lib/auth-resolve.js";
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "../federation/scheduler.js";
 import { FEDERATION_MEMORY_SELECT } from "../lib/federation-memory-attributes.js";
+import { retryEntryKey } from "../lib/federation-retry-row.js";
+import {
+  MEMORY_RETRY_REASONS,
+  dueRetryRows,
+  retryOfferProblem,
+  retryRowConfirmation,
+  retryRowForAttempt,
+  retryRowForRefusal,
+  retryRowMalformedness,
+  terminalRetryRow,
+  type RetryQueueRow,
+  type RetryRowMalformedness,
+} from "../lib/federation-retry-queue.js";
+import {
+  presenceCursorMs,
+  presenceSendEnabled,
+  presenceWatermarkMs,
+  presenceWireRecord,
+  PRESENCE_SEND_FUTURE_ALLOWANCE_MS,
+  PRESENCE_SEND_OVERLAP_MS,
+  PRESENCE_SEND_RECEIVE_DISABLED_SKIP_REASON,
+  PRESENCE_SEND_RETRYABLE_SKIP_REASONS,
+  selectPresenceRowsToSend,
+} from "../federation/presence-send.js";
 import {
   decideInstancePrune,
   formatInstanceRow,
@@ -58,7 +83,6 @@ export type FederationCli = {
   resolveBaseUrl: (opts: { target?: string; url?: string; port?: string | number }) => string;
   resolveEffectiveOpsUrl: (opts: { target?: string; opsTarget?: string }) => string | undefined;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
-  applyAdminPassFile: (opts: { adminPass?: string; adminPassFile?: string }) => void;
   addSharedCredentialOptions: (cmd: Command) => Command;
   addSharedIdentityOption: (cmd: Command) => Command;
   shouldShowInlineSecretWarning: (
@@ -91,39 +115,24 @@ function resolveEffectiveOpsUrl(opts: { target?: string; opsTarget?: string }): 
 function resolveOpsPort(opts: { opsPort?: string | number; port?: string | number }): number {
   return cli.resolveOpsPort(opts);
 }
-function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
-  cli.applyAdminPassFile(opts);
-}
 
 /** `federation token` / `federation pair` credential flags (flair#1873).
  *  The flag/help strings live in auth-resolve.ts next to the resolver, shared
  *  with every sibling command's credential options (flair#1910). */
 
 /**
- * Resolve `federation token`/`pair`'s admin password through the SAME reader
- * `flair backup` uses (`readAdminPassFileSecure`), with the precedence the
- * usage text states: an explicit `--admin-pass-file` or `--admin-pass` over
- * `FLAIR_ADMIN_PASS`; combining the file and the flag is a usage error. The resolved value is written back to
- * `opts.adminPass`, the slot the ops preflight and `loadInstanceSecretKey`
- * read — mirroring `applyAdminPassFile` for the sibling commands. Never prints
- * the value.
+ * `federation token`/`pair`'s admin password: an explicit `--admin-pass-file`
+ * or `--admin-pass` was already applied to `opts.adminPass` by
+ * addAdminPassOptions' preAction hook (which also refuses both at once); the
+ * environment is the fallback. Never prints the value.
  */
 function resolveFederationAdminPass(
-  opts: { adminPass?: string; adminPassFile?: string },
+  opts: { adminPass?: string },
   envPass: string | undefined,
 ): string {
-  try {
-    const pass = resolveAdminPassFromSources({
-      adminPassFile: opts.adminPassFile,
-      adminPass: opts.adminPass,
-      envPass,
-    });
-    if (pass) opts.adminPass = pass;
-    return pass;
-  } catch (err: any) {
-    console.error(`Error: ${err.message}`);
-    process.exit(1);
-  }
+  const pass = opts.adminPass ?? envPass ?? "";
+  if (pass) opts.adminPass = pass;
+  return pass;
 }
 function addSharedCredentialOptions(cmd: Command): Command {
   return cli.addSharedCredentialOptions(cmd);
@@ -138,6 +147,26 @@ function shouldShowInlineSecretWarning(
   flagName: string,
 ): boolean {
   return cli.shouldShowInlineSecretWarning(optValue, fromEnv, secretFlagNames, flagName);
+}
+
+/**
+ * Apply the admin-password pair inherited by `federation sync status` and
+ * `federation sync disable`. The parent (`flair federation sync`) declares the
+ * pair, so commander stores the values there.
+ * Resolve an explicitly supplied pair before the action body runs and store the
+ * password on the leaf, where `status` reads it for its request. `enable`
+ * stores the path only and does not call this.
+ */
+function applyInheritedAdminPass(actionCommand: Command): void {
+  const inherited = actionCommand.parent?.opts() as
+    | { adminPass?: string; adminPassFile?: string }
+    | undefined;
+  if (!inherited) return;
+  if (inherited.adminPass === undefined && inherited.adminPassFile === undefined) return;
+  const opts = { adminPass: inherited.adminPass, adminPassFile: inherited.adminPassFile };
+  applyAdminPassFile(opts);
+  actionCommand.setOptionValue("adminPass", opts.adminPass);
+  actionCommand.setOptionValue("adminPassFile", opts.adminPassFile);
 }
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
@@ -403,7 +432,7 @@ const signBodyFresh = signRequestBody;
 /**
  * Persist last-contact on the local Peer row after confirmed hub contact.
  *
- * Callers must invoke this only after a FederationSync 200 (sendBatch or the
+ * Callers must invoke this only after a successful FederationSync response (sendBatch or the
  * no-change liveness ping). lastSyncAt is the value HealthDetail counts as
  * `connected` (flair#1499 / flair#1146) AND the spoke's OUTBOUND sync cursor
  * (`federation sync` re-sends from it) — so a frozen value re-sends from the
@@ -468,6 +497,54 @@ export async function persistLocalPeerLastSyncAt(args: {
 }
 
 /**
+ * Attempt the Presence watermark update after contact. Presence has no `updatedAt`, so
+ * the row cursor over `lastHeartbeatAt` / `activityUpdatedAt` is compared against
+ * this field instead of `lastSyncAt`.
+ *
+ * Same shape and same result contract as {@link persistLocalPeerLastSyncAt}: a
+ * field-only `update` carrying `{id, presenceLastSyncAt, updatedAt}`, so it
+ * cannot revert `publicKey`/`status` or re-create a deleted row, and HTTP 200 is
+ * not success — the id must appear in `update_hashes`; otherwise the update is
+ * unconfirmed (a committed update with an unreadable response also reads as
+ * unconfirmed), unless Harper explicitly reports a miss.
+ * Callers invoke it only after contact — a confirmed batch, or a successful
+ * liveness ping on a no-change pass.
+ */
+export async function persistLocalPeerPresenceSyncAt(args: {
+  opsEndpoint: string;
+  auth: string;
+  peerId: string;
+  presenceLastSyncAt: string;
+}): Promise<{ ok: boolean; status: number; error?: string }> {
+  const headers = { "Content-Type": "application/json", Authorization: args.auth };
+  const updateRes = await fetch(`${args.opsEndpoint}/`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      operation: "update",
+      database: "flair",
+      table: "Peer",
+      records: [{ id: args.peerId, presenceLastSyncAt: args.presenceLastSyncAt, updatedAt: args.presenceLastSyncAt }],
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!updateRes.ok) {
+    const txt = await updateRes.text().catch(() => "");
+    return { ok: false, status: updateRes.status, error: txt.slice(0, 200) };
+  }
+  const parsed = (await updateRes.json().catch(() => null)) as { update_hashes?: unknown } | null;
+  const matched = !!parsed && Array.isArray(parsed.update_hashes) && parsed.update_hashes.includes(args.peerId);
+  if (!matched) {
+    return {
+      ok: false,
+      status: updateRes.status,
+      error: `Presence watermark update for Peer ${args.peerId} was not confirmed.`,
+    };
+  }
+  return { ok: true, status: updateRes.status };
+}
+
+/**
  * The most recent CONTACT with any peer (max of peer.lastSyncAt), or null.
  *
  * Contact, not merge: a sync that reaches the peer and legitimately has
@@ -479,11 +556,20 @@ export async function persistLocalPeerLastSyncAt(args: {
  * Returns null on ANY failure. A driver verdict is a diagnostic aid; it must
  * never be the reason `federation status` fails.
  */
-async function latestPeerContact(opts: { target?: string }): Promise<string | null> {
+async function latestPeerContact(opts: { target?: string; adminPass?: string; adminUser?: string }): Promise<string | null> {
   try {
     const target = resolveTarget(opts);
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
-    const { peers } = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+    const requestOptions: { baseUrl?: string; explicitAdminPass?: string; adminUser?: string } = {};
+    if (baseUrl) requestOptions.baseUrl = baseUrl;
+    if (opts.adminPass) requestOptions.explicitAdminPass = opts.adminPass;
+    if (opts.adminUser) requestOptions.adminUser = opts.adminUser;
+    const { peers } = await api(
+      "GET",
+      "/FederationPeers",
+      undefined,
+      Object.keys(requestOptions).length ? requestOptions : undefined,
+    );
     let best: number | null = null;
     for (const p of peers ?? []) {
       if (!p?.lastSyncAt) continue;
@@ -532,6 +618,10 @@ export function describeFederationStatusFetchFailed(url: string, setting: string
  *  `TypeError: fetch failed`, Bun's `Unable to connect…`, or a cause
  *  carrying a connect/DNS errno. Auth and HTTP errors stay out. */
 export function isFederationStatusConnectFailure(err: unknown): boolean {
+  // Every ApiHttpError is excluded: the ones sendJsonRequest raises are built
+  // only after a response arrived, so that connection did not fail, whatever
+  // the body says (flair#2764).
+  if (err instanceof ApiHttpError) return false;
   const msg = err instanceof Error ? err.message : String(err);
   if (/\bfetch failed\b/i.test(msg)) return true;
   if (/unable to connect/i.test(msg)) return true;
@@ -565,11 +655,11 @@ export function isFederationStatusAuthFailure(err: unknown): boolean {
     const status = (err as { status?: unknown }).status;
     if (status === 401 || status === 403) return true;
   }
-  const m = err instanceof Error
+  const m = apiErrorRawBody(err) || (err instanceof Error
     ? err.message
     : String(typeof err === "object" && err && "message" in err
       ? (err as { message?: unknown }).message ?? err
-      : err);
+      : err));
   return m.includes("missing_or_invalid_authorization") || /(?:^|\D)401(?:\D|$)/.test(m);
 }
 
@@ -585,11 +675,11 @@ export function isFederationStatusAuthRemedy(err: unknown): boolean {
   if (typeof err === "object" && "status" in err && (err as { status?: unknown }).status === 401) {
     return true;
   }
-  const m = err instanceof Error
+  const m = apiErrorRawBody(err) || (err instanceof Error
     ? err.message
     : String(typeof err === "object" && err && "message" in err
       ? (err as { message?: unknown }).message ?? err
-      : err);
+      : err));
   return m.includes("missing_or_invalid_authorization") || /(?:^|\D)401(?:\D|$)/.test(m);
 }
 
@@ -652,6 +742,79 @@ export function parseTokenFromFile(filePath: string): {
   };
 }
 
+/**
+ * The counts of one FederationSync batch response, or null when they are not
+ * counts (flair#2455 rev 2.1 N2).
+ *
+ * The response body is receiver-authored. Its `merged` and `skipped` reach the
+ * sender's success log and the watch loop's line, so each must be an integer
+ * from 0 to the number of records in the batch it answers; anything else
+ * (text, a fraction, a negative, a count larger than the batch, a missing
+ * field) makes the whole response invalid. Their sum must also be at most the
+ * batch size: a receiver cannot report more outcomes than records it was
+ * offered. The bound is "at most", not "equal", because older receivers send
+ * counts without refusal lists and indeterminate rows fall in neither count.
+ * The caller reports a rejection in local text, never a received value that is
+ * not an in-range count.
+ */
+export function parseSyncBatchCounts(body: unknown, batchSize: number): { merged: number; skipped: number } | null {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+  const { merged, skipped } = body as { merged?: unknown; skipped?: unknown };
+  if (!isSyncBatchCount(merged, batchSize) || !isSyncBatchCount(skipped, batchSize)) return null;
+  if (merged + skipped > batchSize) return null;
+  return { merged, skipped };
+}
+
+function isSyncBatchCount(v: unknown, batchSize: number): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= batchSize;
+}
+
+/** Local text naming why a batch response's counts were rejected: the table
+ *  and, when both counts are in range individually, their values. Other
+ *  receiver-authored values stay out of the message. */
+export function describeSyncBatchCountsRejection(body: unknown, batchSize: number, table: string): string {
+  const counts = body !== null && typeof body === "object" && !Array.isArray(body)
+    ? (body as { merged?: unknown; skipped?: unknown })
+    : {};
+  if (isSyncBatchCount(counts.merged, batchSize) && isSyncBatchCount(counts.skipped, batchSize)) {
+    return `${table}: merged ${counts.merged} + skipped ${counts.skipped} exceeds ${batchSize} records offered`;
+  }
+  return `${table}: merged/skipped are not counts from 0 to ${batchSize}`;
+}
+
+/** One receiver-authored refusal from a FederationSync batch: which record the
+ *  receiver refused and under which name. Only well-formed entries are kept; a
+ *  refused field that is absent or not an array of {table,id,reason} strings is
+ *  ignored (the sender acts on a retryable name, never on a shape it invented). */
+export function parseSyncBatchRefused(body: unknown): Array<{ table: string; id: string; reason: string }> {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return [];
+  const refused = (body as { refused?: unknown }).refused;
+  if (!Array.isArray(refused)) return [];
+  const out: Array<{ table: string; id: string; reason: string }> = [];
+  for (const entry of refused) {
+    if (entry === null || typeof entry !== "object") continue;
+    const { table, id, reason } = entry as { table?: unknown; id?: unknown; reason?: unknown };
+    if (typeof table !== "string" || typeof id !== "string" || typeof reason !== "string") continue;
+    out.push({ table, id, reason });
+  }
+  return out;
+}
+
+/** Keep well-formed indeterminate entries from a FederationSync batch. */
+export function parseSyncBatchIndeterminate(body: unknown): Array<{ table: string; id: string }> {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return [];
+  const indeterminate = (body as { indeterminate?: unknown }).indeterminate;
+  if (!Array.isArray(indeterminate)) return [];
+  const out: Array<{ table: string; id: string }> = [];
+  for (const entry of indeterminate) {
+    if (entry === null || typeof entry !== "object") continue;
+    const { table, id } = entry as { table?: unknown; id?: unknown };
+    if (typeof table !== "string" || typeof id !== "string") continue;
+    out.push({ table, id });
+  }
+  return out;
+}
+
 export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number; skipped: number; error?: Error }> {
   const target = resolveTarget(opts);
   const baseUrl = target ? target.replace(/\/$/, "") : undefined;
@@ -688,7 +851,221 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
     const tables = ["Memory", "Soul", "Agent", "Relationship"];
     const instance = await api("GET", "/FederationInstance", undefined, apiOpts);
-    const hubUrl = hub.endpoint ?? hub.id;
+
+    // ── federation retry bookkeeping (flair#2797) ─────────────────────────
+    // An eligible generic Memory row the hub refused for a retryable reason is
+    // kept in FederationRetry and offered again on a later cycle while its
+    // pending row is valid, its backoff is due and the source row is still
+    // eligible, independent of the since cursor. A source the cursor selects
+    // that also has a pending row gets the same treatment: a valid row's
+    // attempt is reserved before the send and the outcome updates or resolves
+    // it; a malformed row is reported and left as stored. A non-retryable
+    // refusal ends the obligation; the retry path in one sender run does not
+    // select a terminal row again, and concurrent sender runs for one peer are
+    // not serialized (a separate issue).
+    const retryHeaders = { "Content-Type": "application/json", Authorization: auth };
+    // One projection for every Memory read: the cursor query and the retry
+    // re-read must not differ in what a row exposes to the signed batch.
+    const memorySelect = [...FEDERATION_MEMORY_SELECT];
+    const pendingRetries = new Map<string, RetryQueueRow>();
+    /** Pending rows whose attempt this run reserved before sending. */
+    const reservedOffers = new Set<string>();
+    /** Pending retry rows to reserve when their batch is reached. */
+    const reservationTargets = new Map<string, RetryQueueRow>();
+    /** Retry row ids already reported malformed in this run. */
+    const reportedMalformedRetries = new Set<string>();
+
+    function reportMalformedRetryRow(id: string, malformed: RetryRowMalformedness): void {
+      if (reportedMalformedRetries.has(id)) return;
+      reportedMalformedRetries.add(id);
+      console.warn(`⚠️  FederationRetry row ${id} is malformed (${malformed.problem}: ${malformed.field}); left as stored.`);
+    }
+
+    async function loadPendingRetries(): Promise<void> {
+      const res = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: retryHeaders,
+        body: JSON.stringify({
+          operation: "search_by_conditions",
+          schema: "flair",
+          table: "FederationRetry",
+          operator: "and",
+          conditions: [
+            { search_attribute: "peerId", search_type: "equals", search_value: hub.id },
+            { search_attribute: "table", search_type: "equals", search_value: "Memory" },
+            { search_attribute: "state", search_type: "equals", search_value: "pending" },
+          ],
+          get_attributes: ["*"],
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`FederationRetry read failed (${res.status})`);
+      const list = await res.json() as unknown;
+      if (!Array.isArray(list)) throw new Error("FederationRetry read failed: body is not a row list");
+      for (const row of list as RetryQueueRow[]) pendingRetries.set(row.id, row);
+    }
+
+    /** Read the stored retry rows for `keys`, whatever their state. */
+    async function readStoredRetryRows(keys: string[]): Promise<Map<string, Record<string, unknown>>> {
+      const out = new Map<string, Record<string, unknown>>();
+      if (keys.length === 0) return out;
+      const res = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: retryHeaders,
+        body: JSON.stringify({ operation: "search_by_hash", database: "flair", table: "FederationRetry", hash_values: keys, get_attributes: ["*"] }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`FederationRetry read failed (${res.status})`);
+      const rows = await res.json() as unknown;
+      if (!Array.isArray(rows)) throw new Error("FederationRetry read failed: body is not a row list");
+      for (const row of rows as Array<Record<string, unknown>>) {
+        if (typeof row.id === "string") out.set(row.id, row);
+      }
+      return out;
+    }
+
+    /** Read one retry row back and check it with retryRowConfirmation. */
+    async function confirmRetryRow(operation: "upsert" | "update", record: Record<string, unknown>): Promise<void> {
+      const read = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: retryHeaders,
+        body: JSON.stringify({ operation: "search_by_hash", database: "flair", table: "FederationRetry", hash_values: [record.id], get_attributes: ["*"] }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!read.ok) throw new Error(`FederationRetry read-back failed (${read.status})`);
+      const rows = await read.json() as unknown;
+      if (!Array.isArray(rows)) throw new Error("FederationRetry read-back failed: body is not a row list");
+      const stored = (rows as any[]).find((r) => r.id === record.id) ?? null;
+      const mismatch = retryRowConfirmation(record, stored);
+      if (mismatch !== null) {
+        throw new Error(`FederationRetry ${operation} was not confirmed for ${String(record.id)} (${mismatch})`);
+      }
+    }
+
+    /** Write one retry row; an unconfirmed write is an error, never a silent success. */
+    async function writeRetryRow(operation: "upsert" | "update", record: Record<string, unknown>): Promise<void> {
+      const res = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: retryHeaders,
+        body: JSON.stringify({ operation, database: "flair", table: "FederationRetry", records: [record] }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`FederationRetry ${operation} failed (${res.status})`);
+      if (operation === "update") {
+        const body = await res.json().catch(() => null) as any;
+        if (!Array.isArray(body?.update_hashes) || !body.update_hashes.map(String).includes(String(record.id))) {
+          throw new Error(`FederationRetry update was not confirmed for ${String(record.id)}`);
+        }
+      }
+      // The upsert answer does not name the row and an update's hash only says
+      // it matched one. Read the row back: a write the sender cannot see is not
+      // a recorded obligation.
+      await confirmRetryRow(operation, record);
+    }
+
+    async function retireRetry(row: RetryQueueRow, resolution: string, nowIso = new Date().toISOString()): Promise<void> {
+      await writeRetryRow("update", terminalRetryRow(row, resolution, nowIso));
+      pendingRetries.delete(row.id);
+    }
+
+    async function loadMemoryRow(id: string): Promise<any | null> {
+      const res = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: retryHeaders,
+        body: JSON.stringify({
+          operation: "search_by_conditions",
+          schema: "flair",
+          table: "Memory",
+          operator: "and",
+          conditions: [{ search_attribute: "id", search_type: "equals", search_value: id }],
+          get_attributes: memorySelect,
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`Memory read failed (${res.status})`);
+      const rows = await res.json() as unknown;
+      if (!Array.isArray(rows)) throw new Error("Memory read failed: body is not a row list");
+      return (rows as any[])[0] ?? null;
+    }
+
+    async function applyMemoryOutcomes(
+      batch: any[],
+      result: { refused: Array<{ table: string; id: string; reason: string }>; indeterminate: Array<{ table: string; id: string }> },
+    ): Promise<void> {
+      const keyOf = (table: string, id: string) => JSON.stringify([table, id]);
+      const refused = new Map(result.refused.map((r) => [keyOf(r.table, r.id), r.reason]));
+      const undecided = new Set(result.indeterminate.map((r) => keyOf(r.table, r.id)));
+      const nowIso = new Date().toISOString();
+      // Read what is stored for this batch whatever each row's state: a
+      // malformed row is left as stored and its outcome write is skipped.
+      const storedRows = await readStoredRetryRows(
+        batch.filter((record) => record.table === "Memory").map((record) => retryEntryKey(hub.id, "Memory", record.id)),
+      );
+      for (const record of batch) {
+        if (record.table !== "Memory") continue;
+        const key = retryEntryKey(hub.id, "Memory", record.id);
+        const attemptReserved = reservedOffers.delete(key);
+        const prior = pendingRetries.get(key) ?? null;
+        const stored = storedRows.get(key) ?? null;
+        if (stored !== null) {
+          const malformed = retryRowMalformedness(stored);
+          if (malformed !== null) {
+            reportMalformedRetryRow(key, malformed);
+            continue;
+          }
+        }
+        // A row the shared validator names malformed is reported before the
+        // offer and left as stored: the outcome does not transition it.
+        if (prior !== null && retryOfferProblem(prior) !== null) continue;
+        if (undecided.has(keyOf(record.table, record.id))) {
+          // The receiver did not decide this record. Offering it again is safe
+          // (the merge is idempotent); `retry_unknown` is the sender's own name.
+          // A first offer records the obligation too, or the cursor advance
+          // would lose it.
+          const row = retryRowForRefusal({ peerId: hub.id, recordId: record.id, reason: "retry_unknown", nowIso, existing: prior, attemptReserved });
+          await writeRetryRow("upsert", row);
+          pendingRetries.set(String(row.id), row as unknown as RetryQueueRow);
+          continue;
+        }
+        const reason = refused.get(keyOf(record.table, record.id));
+        if (reason !== undefined) {
+          if (MEMORY_RETRY_REASONS.has(reason)) {
+            const row = retryRowForRefusal({ peerId: hub.id, recordId: record.id, reason, nowIso, existing: prior, attemptReserved });
+            await writeRetryRow("upsert", row);
+            pendingRetries.set(String(row.id), row as unknown as RetryQueueRow);
+          } else if (prior) {
+            await retireRetry(prior, "refused_terminal", nowIso);
+          }
+          continue;
+        }
+        if (prior) await retireRetry(prior, "merged", nowIso);
+      }
+    }
+
+    /**
+     * Reserve one attempt for each Memory record in `batch` that selection recorded
+     * in `reservationTargets` (a record with a valid pending retry row).
+     * Called immediately before that batch is sent, so a
+     * batch the run never reaches leaves its rows' attempts and lastAttemptAt
+     * as stored. A reservation write that fails throws here, before the send.
+     */
+    async function reserveBatchAttempts(batch: any[]): Promise<void> {
+      const nowIso = new Date().toISOString();
+      for (const record of batch) {
+        if (record.table !== "Memory") continue;
+        const pending = reservationTargets.get(String(record.id));
+        if (!pending) continue;
+        reservationTargets.delete(String(record.id));
+        const reserved = retryRowForAttempt(pending, nowIso);
+        await writeRetryRow("upsert", reserved);
+        pendingRetries.set(String(reserved.id), reserved as unknown as RetryQueueRow);
+        reservedOffers.add(String(reserved.id));
+      }
+    }
+
+    await loadPendingRetries();
+    // A stored endpoint with a trailing slash still yields `<hub>/FederationSync`.
+    const hubUrl = normalizeHubUrl(hub.endpoint ?? hub.id);
 
     // ── Batching constants ──────────────────────────────────────────────
     // 2MB JSON budget (server cap is 10MB; 2MB leaves headroom for headers
@@ -717,7 +1094,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     // a healthy 50-record batch merges in <2s — so a trip means a real stall,
     // and we split-and-retry rather than wait it out.
     const BATCH_TIMEOUT_MS = 45_000;
-    async function sendBatch(batch: any[]): Promise<{ merged: number; skipped: number }> {
+    async function sendBatch(batch: any[], validatePresence = false): Promise<{ merged: number; skipped: number; refused: Array<{ table: string; id: string; reason: string }>; indeterminate: Array<{ table: string; id: string }> }> {
       if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
       const syncBody: Record<string, any> = { instanceId: instance.id, records: batch, lamportClock: Date.now() };
       const signedSyncBody = signBodyFresh(syncBody, secretKey);
@@ -729,9 +1106,14 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         batch.length > 1 && (status === null || TIMEOUT_STATUSES.has(status));
       const split = async () => {
         const mid = Math.floor(batch.length / 2);
-        const left = await sendBatch(batch.slice(0, mid));
-        const right = await sendBatch(batch.slice(mid));
-        return { merged: left.merged + right.merged, skipped: left.skipped + right.skipped };
+        const left = await sendBatch(batch.slice(0, mid), validatePresence);
+        const right = await sendBatch(batch.slice(mid), validatePresence);
+        return {
+          merged: left.merged + right.merged,
+          skipped: left.skipped + right.skipped,
+          refused: [...left.refused, ...right.refused],
+          indeterminate: [...left.indeterminate, ...right.indeterminate],
+        };
       };
 
       let syncRes: Response;
@@ -749,10 +1131,53 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
       if (!syncRes.ok) {
         if (splittable(syncRes.status)) return await split();
-        const text = await syncRes.text().catch(() => "");
-        throw new Error(`Sync batch failed: ${syncRes.status} ${text}`);
+        // flair#2455 rev 2.1 N2: the receiver's response body is receiver-authored
+        // text and is never logged. Report the status only.
+        throw new Error(`Sync batch failed: HTTP ${syncRes.status}`);
       }
-      return await syncRes.json() as { merged: number; skipped: number };
+      // A 200 is still receiver-authored: a body that is not JSON (the parser's
+      // own error quotes part of it) or whose counts are not counts is an
+      // invalid response, reported in local text only (flair#2455 N2).
+      let body: unknown;
+      try {
+        body = await syncRes.json();
+      } catch {
+        throw new Error(`Sync batch failed: invalid response (HTTP ${syncRes.status}, body is not JSON)`);
+      }
+      const counts = parseSyncBatchCounts(body, batch.length);
+      if (!counts) {
+        const table = typeof batch[0]?.table === "string" ? batch[0].table : "batch";
+        throw new Error(
+          `Sync batch failed: invalid response (HTTP ${syncRes.status}, ${describeSyncBatchCountsRejection(body, batch.length, table)})`,
+        );
+      }
+      const refused = parseSyncBatchRefused(body);
+      const indeterminate = parseSyncBatchIndeterminate(body);
+      // A Memory batch changes the sender's retry state and advances its
+      // cursor, so its response must account for every offered record. Presence
+      // already requires the same. Other generic tables are checked on their
+      // counts.
+      if (validatePresence || batch[0]?.table === "Memory") {
+        const outcomeBody = body as { refused?: unknown; indeterminate?: unknown };
+        const validList = (raw: unknown, parsed: readonly unknown[]) =>
+          raw === undefined || (Array.isArray(raw) && raw.length === parsed.length);
+        const key = (row: { table: string; id: string }) => JSON.stringify([row.table, row.id]);
+        const offered = new Set(batch.map(key));
+        const unresolved = [...refused, ...indeterminate].map(key);
+        if (
+          !validList(outcomeBody.refused, refused) ||
+          !validList(outcomeBody.indeterminate, indeterminate) ||
+          unresolved.some((entry) => !offered.has(entry)) ||
+          new Set(unresolved).size !== unresolved.length ||
+          counts.skipped !== refused.length ||
+          counts.merged + refused.length + indeterminate.length !== batch.length
+        ) {
+          throw new Error(
+            `Sync batch failed: invalid response (HTTP ${syncRes.status}, outcomes do not account for ${batch.length} offered records)`,
+          );
+        }
+      }
+      return { ...counts, refused, indeterminate };
     }
 
     let totalBatches = 0;
@@ -776,7 +1201,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           res = await fetch(`${opsEndpoint}/`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: auth },
-            body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions: [query], get_attributes: table === "Memory" ? [...FEDERATION_MEMORY_SELECT] : ["*"] }),
+            body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions: [query], get_attributes: table === "Memory" ? memorySelect : ["*"] }),
             signal: AbortSignal.timeout(15_000),
           });
         } catch (err: any) {
@@ -798,6 +1223,43 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         const federable = sinceCursor.filter((r: any) => table !== "Memory" || !isFederationPrivateVisibility(r.visibility));
         if (table === "Memory") privateHeldBack += sinceCursor.length - federable.length;
         rows = rows.concat(federable);
+      }
+      if (table === "Memory" && pendingRetries.size > 0) {
+        // Re-offer the pending rows whose backoff has elapsed. A row still
+        // selected by the since cursor is offered once (the set below). A row
+        // that is gone or has become private ends its obligation here.
+        const seen = new Set(rows.map((r: any) => r.id));
+        for (const pending of pendingRetries.values()) {
+          const malformed = retryRowMalformedness(pending as Record<string, unknown>);
+          if (malformed !== null) reportMalformedRetryRow(pending.id, malformed);
+        }
+        // A source the cursor selects that also has a valid pending row is
+        // offered now — a new change is not a retry, so the backoff does not
+        // hold it back. Its attempt is reserved immediately before the batch
+        // carrying it is sent, as on the re-offer path. A malformed row
+        // reserves nothing.
+        for (const row of rows) {
+          const pending = pendingRetries.get(retryEntryKey(hub.id, "Memory", row.id));
+          if (!pending || retryOfferProblem(pending) !== null) continue;
+          reservationTargets.set(String(row.id), pending);
+        }
+        for (const pending of dueRetryRows([...pendingRetries.values()], Date.now())) {
+          if (seen.has(pending.recordId)) continue;
+          const row = await loadMemoryRow(pending.recordId);
+          if (!row) {
+            await retireRetry(pending, "source_deleted");
+            continue;
+          }
+          if (isFederationPrivateVisibility(row.visibility)) {
+            await retireRetry(pending, "source_ineligible");
+            continue;
+          }
+          // An unconfirmed send keeps the reservation; retry backoff applies
+          // while the row remains behind the cursor.
+          reservationTargets.set(String(row.id), pending);
+          rows.push(row);
+          seen.add(pending.recordId);
+        }
       }
       if (rows.length === 0) continue;
 
@@ -860,7 +1322,9 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         const srBytes = JSON.stringify(sr).length;
 
         if (batch.length >= BUDGET_RECORDS || (batch.length > 0 && batchBytes + srBytes > BUDGET_BYTES)) {
+          if (table === "Memory") await reserveBatchAttempts(batch);
           const result = await sendBatch(batch);
+          if (table === "Memory") await applyMemoryOutcomes(batch, result);
           totalMerged += result.merged;
           totalSkipped += result.skipped;
           totalBatches++;
@@ -874,7 +1338,9 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
 
       // Send final partial batch for this table
       if (batch.length > 0) {
+        if (table === "Memory") await reserveBatchAttempts(batch);
         const result = await sendBatch(batch);
+        if (table === "Memory") await applyMemoryOutcomes(batch, result);
         totalMerged += result.merged;
         totalSkipped += result.skipped;
         totalBatches++;
@@ -882,7 +1348,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     }
 
     // lastSyncAt is contact, not "the driver ran" (flair#1146). Persist only
-    // after a FederationSync 200 — sendBatch already threw on non-ok, so
+    // after a successful FederationSync response — sendBatch already threw on non-ok or invalid JSON, so
     // totalBatches > 0 means the hub answered. The no-change path must ping
     // first; a failed ping leaves the stamp untouched → unknown.
     const stampLocalContact = async () => {
@@ -898,6 +1364,125 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         }
       } catch (advErr: any) {
         console.warn(`⚠️  Local hub.lastSyncAt advance error: ${advErr?.message ?? advErr}. Next poll will re-send memories.`);
+      }
+    };
+
+    const genericBatches = totalBatches;
+    const failPresence = async (err: unknown) => {
+      if (genericBatches > 0) await stampLocalContact();
+      return { pushed: totalMerged, skipped: totalSkipped, error: err instanceof Error ? err : new Error(String(err)) };
+    };
+
+    // ── flair#2578 slice 2: Presence push (P6) ──────────────────────────────
+    // Presence has no updatedAt/createdAt, so the generic cursor above cannot
+    // select it. Home rows travel by their OWN per-table watermark on
+    // lastHeartbeatAt / activityUpdatedAt, sent AFTER the generic tables so the
+    // receiver can bind Presence to an accepted Agent row.
+    // A scan, send or response failure returns before watermark persistence.
+    let presenceAdvanceMs: number | null = null;
+    let presenceCapMs = Number.POSITIVE_INFINITY;
+    try {
+      if (presenceSendEnabled()) {
+        const presenceScanAtMs = Date.now();
+        const presenceRes = await fetch(`${opsEndpoint}/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({ operation: "sql", sql: "SELECT * FROM flair.Presence" }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!presenceRes.ok) {
+          const text = await presenceRes.text().catch(() => "");
+          throw new Error(`Presence scan failed (${presenceRes.status}): ${text.slice(0, 200)}`);
+        }
+        const parsed = await presenceRes.json() as any;
+        const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.results) ? parsed.results : null;
+        if (!list) {
+          throw new Error("Presence scan failed: body is not a row list");
+        }
+        const presenceRows = list;
+        const watermarkMs = presenceWatermarkMs(hub.presenceLastSyncAt);
+        // Clamp selection to scan time.
+        const effectiveWatermarkMs = Math.min(watermarkMs, presenceScanAtMs);
+        // Re-scan from the effective watermark minus the overlap.
+        const scanFloorMs = Math.max(0, effectiveWatermarkMs - PRESENCE_SEND_OVERLAP_MS);
+        const toSend = selectPresenceRowsToSend(presenceRows, instance.id, scanFloorMs);
+        if (toSend.length === 0 && watermarkMs > effectiveWatermarkMs) {
+          presenceAdvanceMs = effectiveWatermarkMs;
+        }
+        if (toSend.length > 0) {
+          if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
+          let presenceBatch: any[] = [];
+          let presenceBatchBytes = 0;
+          // Overlap resends retain the effective watermark unless capped below.
+          let advanceMs = effectiveWatermarkMs;
+          const flushPresence = async () => {
+            const result = await sendBatch(presenceBatch, true);
+            totalMerged += result.merged;
+            totalSkipped += result.skipped;
+            totalBatches++;
+            // Cap the candidate below retryable refusals, and below a row
+            // refused because the hub's Presence receipt is off: enabling it
+            // later must not need a new heartbeat to re-offer that row.
+            for (const refusal of result.refused) {
+              if (refusal.table !== "Presence") continue;
+              if (!PRESENCE_SEND_RETRYABLE_SKIP_REASONS.has(refusal.reason) &&
+                  refusal.reason !== PRESENCE_SEND_RECEIVE_DISABLED_SKIP_REASON) continue;
+              const sent = presenceBatch.find((r) => r.id === refusal.id);
+              if (!sent) continue;
+              const refusedCursor = Date.parse(sent.updatedAt);
+              if (Number.isFinite(refusedCursor)) presenceCapMs = Math.min(presenceCapMs, refusedCursor - 1);
+            }
+            // Apply the same cap to indeterminate outcomes.
+            for (const undecided of result.indeterminate) {
+              if (undecided.table !== "Presence") continue;
+              const sent = presenceBatch.find((r) => r.id === undecided.id);
+              if (!sent) continue;
+              const undecidedCursor = Date.parse(sent.updatedAt);
+              if (Number.isFinite(undecidedCursor)) presenceCapMs = Math.min(presenceCapMs, undecidedCursor - 1);
+            }
+            presenceBatch = [];
+            presenceBatchBytes = 0;
+          };
+          for (const row of toSend) {
+            const cursor = presenceCursorMs(row);
+            // A row dated more than the receiver's future allowance past this
+            // scan is left out of the batch: the receiver may refuse it, and
+            // its cursor must not count toward the watermark.
+            if (cursor != null && cursor > presenceScanAtMs + PRESENCE_SEND_FUTURE_ALLOWANCE_MS) continue;
+            const payload = presenceWireRecord(row, instance.id);
+            if (!payload) continue;
+            const sr = { ...payload, signature: signBody(payload, secretKey) };
+            const srBytes = JSON.stringify(sr).length;
+            if (presenceBatch.length >= BUDGET_RECORDS || (presenceBatch.length > 0 && presenceBatchBytes + srBytes > BUDGET_BYTES)) {
+              await flushPresence();
+            }
+            presenceBatch.push(sr);
+            presenceBatchBytes += srBytes;
+            // Clamp the candidate to scan time.
+            if (cursor != null && Math.min(cursor, presenceScanAtMs) > advanceMs) advanceMs = Math.min(cursor, presenceScanAtMs);
+          }
+          if (presenceBatch.length > 0) await flushPresence();
+          presenceAdvanceMs = Math.min(advanceMs, presenceCapMs);
+        }
+      }
+    } catch (err) {
+      return await failPresence(err);
+    }
+
+    // Attempt the watermark update after contact.
+    const persistPresence = async (presenceMs: number) => {
+      try {
+        const advanced = await persistLocalPeerPresenceSyncAt({
+          opsEndpoint,
+          auth,
+          peerId: hub.id,
+          presenceLastSyncAt: new Date(presenceMs).toISOString(),
+        });
+        if (!advanced.ok) {
+          console.warn(`⚠️  Local hub.presenceLastSyncAt advance failed (${advanced.status}): ${advanced.error ?? ""}.`);
+        }
+      } catch (advErr: any) {
+        console.warn(`⚠️  Local hub.presenceLastSyncAt advance error: ${advErr?.message ?? advErr}.`);
       }
     };
 
@@ -920,8 +1505,8 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           signal: AbortSignal.timeout(10_000),
         });
         if (!pingRes.ok) {
-          const txt = await pingRes.text().catch(() => "");
-          console.warn(`⚠️  Liveness ping to hub failed (${pingRes.status}): ${txt.slice(0, 200)}. Hub won't update spoke liveness.`);
+          // flair#2455 rev 2.1 N2: no receiver-authored body in the sender's log.
+          console.warn(`⚠️  Liveness ping to hub failed (HTTP ${pingRes.status}). Hub won't update spoke liveness.`);
         } else {
           pingOk = true;
         }
@@ -929,6 +1514,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         console.warn(`⚠️  Liveness ping error: ${pingErr?.message ?? pingErr}. Hub won't update spoke liveness.`);
       }
       if (pingOk) await stampLocalContact();
+      if (pingOk && presenceAdvanceMs != null) await persistPresence(presenceAdvanceMs);
 
       // flair#1232: "No changes" is true only when nothing was found since
       // the cursor. If rows were found and every one was withheld as private,
@@ -943,6 +1529,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     }
 
     await stampLocalContact();
+    if (presenceAdvanceMs != null) await persistPresence(presenceAdvanceMs);
     console.log(`✅ Synced ${totalMerged} records (${totalSkipped} skipped) across ${totalBatches} batches`);
     return { pushed: totalMerged, skipped: totalSkipped };
   } catch (err: any) {
@@ -1043,6 +1630,18 @@ export function register(program: Command): void {
         peersErr = rewriteFederationStatusFetchFailed(err, baseUrl, urlSetting);
       }
 
+      // Federation retry rows (flair#2455): the sender's pending, terminal and
+      // malformed retry rows, read through the admin-only /FederationRetries
+      // resource. null = unverifiable (the read failed), like peers.
+      let retries: { pending: any[]; terminal: any[]; malformed: any[] } | null = null;
+      let retriesErr: any = null;
+      try {
+        const r = await api("GET", "/FederationRetries", undefined, { baseUrl });
+        retries = { pending: r.pending ?? [], terminal: r.terminal ?? [], malformed: r.malformed ?? [] };
+      } catch (err) {
+        retriesErr = err;
+      }
+
       // Auth-shaped failures stay FATAL even when the other read succeeded:
       // both endpoints sit behind the same allowAdmin gate, so a 401/403 is a
       // property of the session's credentials, not of one endpoint — and
@@ -1105,16 +1704,18 @@ export function register(program: Command): void {
         console.log(render.asJSON({
           instance,
           peers,
+          retries,
           driver,
           driverAssessment: assessment,
           // flair#1233: name what could not be read, so a partial result is
           // distinguishable from "verified absent" (instance/peers stay null
           // when their read failed).
-          ...(instanceErr || peersErr
+          ...(instanceErr || peersErr || retriesErr
             ? {
                 unverifiable: {
                   ...(instanceErr ? { instance: String(instanceErr.message ?? instanceErr) } : {}),
                   ...(peersErr ? { peers: String(peersErr.message ?? peersErr) } : {}),
+                  ...(retriesErr ? { retries: String(retriesErr.message ?? retriesErr) } : {}),
                 },
               }
             : {}),
@@ -1144,6 +1745,52 @@ export function register(program: Command): void {
         console.log(render.kv("Instance", `${render.icons.warn} unverifiable — ${render.wrap(render.c.dim, String(instanceErr?.message ?? instanceErr))}`));
       }
 
+      // Federation retry rows (flair#2455): the sender's retry bookkeeping per
+      // peer, table and record. Rendered after the peer table, and also on the
+      // two early returns below (no peers configured; a peer read that fails
+      // while the instance read succeeds). The fatal exits above (an instance or
+      // peer read auth failure, or both those reads failing) render nothing. A
+      // retry-row read that fails, including on auth, renders the section as
+      // unverifiable and does not by itself make the command exit non-zero.
+      // No production sender path creates rows yet; admin-written rows show.
+      // Once the sender is active, it re-offers pending rows; a terminal row
+      // ended with a named resolution; a malformed row breaks a sender
+      // convention and is never transitioned.
+      const renderRetrySection = (): void => {
+        if (retriesErr) {
+          console.log();
+          console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "Federation retries unverifiable — the retry read failed.")}`);
+          console.log(`  ${render.wrap(render.c.dim, String(retriesErr?.message ?? retriesErr))}`);
+          return;
+        }
+        if (!retries || (retries.pending.length === 0 && retries.terminal.length === 0 && retries.malformed.length === 0)) return;
+        console.log();
+        console.log(render.wrap(render.c.bold, "Federation retries"));
+        const retryCols: render.TableColumn[] = [
+          { label: "state", key: "state" },
+          { label: "peer", key: "peerId" },
+          { label: "table", key: "table" },
+          { label: "id", key: "id" },
+          { label: "reason", key: "reason", format: (v) => String(v ?? "—") },
+          { label: "attempts", key: "attempts", format: (v) => String(v ?? "—") },
+          { label: "bound", key: "bound", format: (v) => String(v ?? "—") },
+          { label: "resolution", key: "resolution", format: (v) => String(v ?? "—") },
+        ];
+        if (retries.pending.length > 0 || retries.terminal.length > 0) {
+          console.log(render.table(retryCols, [...retries.pending, ...retries.terminal] as Array<Record<string, unknown>>));
+        }
+        if (retries.malformed.length > 0) {
+          console.log();
+          console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, `${retries.malformed.length} malformed retry row${retries.malformed.length === 1 ? "" : "s"}: not pending, never transitioned.`)}`);
+          const malformedCols: render.TableColumn[] = [
+            { label: "problem", key: "problem" },
+            { label: "key", key: "key", format: (v) => String(v ?? "—") },
+            { label: "state", key: "state", format: (v) => String(v ?? "—") },
+          ];
+          console.log(render.table(malformedCols, retries.malformed as Array<Record<string, unknown>>));
+        }
+      };
+
       if (peers === null) {
         // Peer read failed but the instance rendered — say so explicitly
         // instead of aborting: "unverifiable" is a different claim from "no
@@ -1151,11 +1798,13 @@ export function register(program: Command): void {
         console.log();
         console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "Peers unverifiable — the peer read failed. This says nothing about whether peers exist or sync runs.")}`);
         console.log(`  ${render.wrap(render.c.dim, String(peersErr?.message ?? peersErr))}`);
+        renderRetrySection();
         return;
       }
 
       if (peers.length === 0) {
         console.log(`\n${render.icons.info} ${render.wrap(render.c.dim, "No peers configured. Use 'flair federation pair' to connect to a hub.")}`);
+        renderRetrySection();
         return;
       }
 
@@ -1226,6 +1875,8 @@ export function register(program: Command): void {
         },
       ];
       console.log(render.table(cols, peers as Array<Record<string, unknown>>));
+
+      renderRetrySection();
 
       // Stale warning is gated on lastMergeAt (real progress), not lastSyncAt.
       // A peer that "syncs" every 5min but hasn't merged a record in 24h is
@@ -1355,19 +2006,23 @@ export function register(program: Command): void {
       if (failures > 0) process.exit(1);
     });
 
-  federation
-    .command("pair <hub-url>")
-    .description("Pair this spoke with a hub instance")
-    .option("--port <port>", "Harper HTTP port")
-    .option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP)
-    .option("--admin-pass <pass>", ADMIN_PASS_HELP)
+  addAdminPassOptions(
+    federation
+      .command("pair <hub-url>")
+      .description("Pair this spoke with a hub instance")
+      .option("--port <port>", "Harper HTTP port"),
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--token <token>", "One-time pairing token from hub admin (env: FLAIR_PAIRING_TOKEN) [deprecated: use --token-from]")
     .option("--token-from <file>", "Read bootstrap triple from JSON file (use '-' for stdin)")
     .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
     .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
-    .action(async (hubUrl: string, opts: any) => {
+    .action(async (hubUrlArg: string, opts: any) => {
+      // Strip trailing slashes once, before the hub URL is used or stored, so a
+      // trailing slash on the typed URL does not add an empty path segment to
+      // the appended pairing route or the stored hub-peer endpoint.
+      const hubUrl = normalizeHubUrl(hubUrlArg);
       const target = resolveTarget(opts);
       // flair#1873: resolve the SPOKE admin credential FIRST, before any
       // request. `--admin-pass-file` is read in-process (mode 0600 enforced),
@@ -1631,12 +2286,12 @@ export function register(program: Command): void {
       }
     });
 
-  federation
-    .command("token")
-    .description("Generate a one-time pairing token (run on the hub)")
-    .option("--port <port>", "Harper HTTP port")
-    .option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP)
-    .option("--admin-pass <pass>", ADMIN_PASS_HELP)
+  addAdminPassOptions(
+    federation
+      .command("token")
+      .description("Generate a one-time pairing token (run on the hub)")
+      .option("--port <port>", "Harper HTTP port"),
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--ttl <minutes>", "Token TTL in minutes (default: 60)", "60")
@@ -1742,7 +2397,6 @@ export function register(program: Command): void {
   ).action(async (opts: any) => {
       // --admin-pass-file resolves into the same `adminPass` slot the inline
       // flag uses, so the scheduler never has to embed a secret in a unit file.
-      applyAdminPassFile(opts);
       const r = await runFederationSyncOnce(opts);
       if (r.error) {
         console.error(`Error: ${r.error.message}`);
@@ -1829,6 +2483,7 @@ export function register(program: Command): void {
     .command("disable")
     .description("Remove the sync driver (peers and sync history are preserved)")
     .option("--remove-shim", "Also delete the ~/.flair/bin/flair-federation-sync shim")
+    .hook("preAction", (_thisCommand, actionCommand) => applyInheritedAdminPass(actionCommand))
     .action(async (opts: any) => {
       const { disableScheduler } = await import("../federation/scheduler.js");
       try {
@@ -1859,6 +2514,7 @@ export function register(program: Command): void {
     // `flair federation sync` owns them and commander binds them there. They
     // still work on this command, via optsWithGlobals() below.
     .option("--json", "Emit JSON")
+    .hook("preAction", (_thisCommand, actionCommand) => applyInheritedAdminPass(actionCommand))
     .action(async (_opts: any, cmd: any) => {
       // See the comment on `enable` above: `--target`/`--port` live on the
       // parent, so commander binds them there and only optsWithGlobals() sees
@@ -1887,12 +2543,14 @@ export function register(program: Command): void {
       }
     });
 
-  federation
-    .command("watch")
-    .description("Run federation sync in a loop (foreground daemon)")
-    .option("--interval <seconds>", "Seconds between syncs", "30")
-    .option("--port <port>", "Harper HTTP port")
-    .option("--admin-pass <pass>", "Admin password")
+  addAdminPassOptions(
+    federation
+      .command("watch")
+      .description("Run federation sync in a loop (foreground daemon)")
+      .option("--interval <seconds>", "Seconds between syncs", "30")
+      .option("--port <port>", "Harper HTTP port"),
+    "Admin password",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--target <url>", "Remote Flair URL")
@@ -1962,29 +2620,71 @@ export function register(program: Command): void {
         return;
       }
 
-      // Apply path. Delete each peer via the Harper ops API. We use the
-      // domain-socket form when local; otherwise we fall back to the resource
-      // DELETE which requires admin auth.
+      // Apply path: delete each peer's `flair.Peer` row through the admin-only
+      // `/Peer/{id}` REST resource and read it back to confirm it is gone.
       let deleted = 0;
       let errors = 0;
+      let unknown = 0;
+      const requestOptions = baseUrl ? { baseUrl } : undefined;
+      // The DELETE's own body is not evidence, so a 2xx whose body is empty or
+      // not JSON must not throw: the server may already have deleted the row.
+      const deleteOptions = { ...(requestOptions ?? {}), tolerateUnparsedSuccessBody: true };
       for (const p of candidates) {
+        let refusal: ApiHttpError | undefined;
         try {
-          const res = await api("DELETE", `/FederationPeers/${encodeRecordId(p.id)}`, undefined, baseUrl ? { baseUrl } : undefined);
-          const ok = res?.ok ?? res?.deleted ?? true;
-          if (ok) {
-            deleted++;
-            const ts = p.lastSyncAt ?? p.pairedAt ?? "never";
-            console.log(`Deleted ${p.id} (last seen ${ts}).`);
-          } else {
-            errors++;
-            console.log(`Failed to delete ${p.id}: ${JSON.stringify(res)}`);
-          }
+          await api("DELETE", `/Peer/${encodeRecordId(p.id)}`, undefined, deleteOptions);
         } catch (e: any) {
+          if (e instanceof ApiRequestOutcomeUnknown) {
+            // An expired request is reported as an unknown outcome, like every
+            // other non-GET/HEAD request through the shared REST sender: the client cannot tell
+            // whether the server acted. Count it apart from a definite failure
+            // and exit 3 for it (unknown outranks a known failure, as rem's
+            // `unresolved` does).
+            unknown++;
+            console.log(`Unknown outcome for ${p.id}: ${e.message}`);
+            continue;
+          }
+          if (e instanceof ApiHttpError) refusal = e;
+          else {
+            errors++;
+            console.log(`Failed to delete ${p.id}: ${e.message}`);
+            continue;
+          }
+        }
+
+        // 404 or a null body means absent; a row means it is still there. A
+        // read failure after a successful DELETE is an unknown outcome.
+        let present: boolean;
+        try {
+          const row = await api("GET", `/Peer/${encodeRecordId(p.id)}`, undefined, requestOptions);
+          present = row != null;
+        } catch (e: any) {
+          if (e instanceof ApiHttpError && e.status === 404) present = false;
+          else if (refusal) {
+            errors++;
+            console.log(`Failed to delete ${p.id}: ${refusal.message}`);
+            continue;
+          } else {
+            unknown++;
+            console.log(`Unknown outcome for ${p.id}: the delete returned, but reading the row back failed: ${e.message}`);
+            continue;
+          }
+        }
+
+        if (refusal) {
           errors++;
-          console.log(`Failed to delete ${p.id}: ${e.message}`);
+          console.log(`Failed to delete ${p.id}: ${refusal.message}`);
+        } else if (!present) {
+          deleted++;
+          const ts = p.lastSyncAt ?? p.pairedAt ?? "never";
+          console.log(`Deleted ${p.id} (last seen ${ts}).`);
+        } else {
+          errors++;
+          console.log(`Failed to delete ${p.id}: the row is still present after the DELETE.`);
         }
       }
-      console.log(`${deleted} peer(s) deleted; ${errors} error(s).`);
+      console.log(`${deleted} peer(s) deleted; ${errors} error(s); ${unknown} unknown outcome(s).`);
+      if (unknown > 0) process.exit(3);
       if (errors > 0) process.exit(1);
     });
 
@@ -2003,7 +2703,6 @@ export function register(program: Command): void {
   const instanceOpsEndpoint = (opts: any): OpsEndpoint => {
     // --admin-pass-file resolves into the same `adminPass` slot the inline flag
     // uses (the shared idiom: the secret stays out of ps and shell history).
-    applyAdminPassFile(opts);
     const opsUrl = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     return { opsUrl, credentials: { user: resolveAdminUser(opts.adminUser), pass: adminPass } };
@@ -2135,7 +2834,6 @@ export function register(program: Command): void {
         .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)"),
     ),
   ).action(async (opts: any) => {
-      applyAdminPassFile(opts);
       const target = resolveTarget(opts);
       const baseUrl = target ? target.replace(/\/$/, "") : undefined;
       const waitSeconds = Number(opts.wait) || 60;
@@ -2154,7 +2852,7 @@ export function register(program: Command): void {
         peerId: opts.peer,
         baseUrl,
         syncOpts: opts,
-        // GET /FederationPeers is allowAdmin. applyAdminPassFile already
+        // GET /FederationPeers is allowAdmin. The preAction hook already
         // folded --admin-pass-file into opts.adminPass; without this the
         // injected api only sees { baseUrl } and flag-only creds never
         // reach the listing (UNVERIFIABLE, check never runs).

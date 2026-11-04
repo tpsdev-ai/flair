@@ -138,6 +138,9 @@ export interface MemoryRowLite {
   id: string;
   durability: string;
   instanceToken?: string | null;
+  /** Present when the read asked for stored timestamps (flair#2216 compare-nodes). */
+  createdAt?: string | null;
+  updatedAt?: string | null;
 }
 
 export interface DeletionRecordLite {

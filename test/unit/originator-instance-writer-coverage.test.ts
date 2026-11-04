@@ -22,11 +22,9 @@
  *
  * The literal idiom cannot see a writer that resolves the table handle through a
  * variable first (the federation merge builds `{ Memory: databases.flair.Memory,
- * ... }` and hands `table` to the shared write-back helper for a Memory row, or
- * calls `table.put(...)` for any other synced table); the helper site is
- * enumerated by the helper scan and resolves to the `?` table key (see
- * writeBackTable), and the plain put is listed as an explicit DYNAMIC exception
- * below, asserted to still exist. Harper's administrator
+ * ... }` and hands `table` to the shared write-back helper for every synced
+ * table); the helper site is enumerated by the helper scan and resolves to the
+ * `?` table key (see writeBackTable). Harper's administrator
  * ops API (`:9925`) is outside the repo and cannot be enumerated here.
  *
  * Verified by a mutation: appending an unstamped `(databases as any).flair.Soul.put(...)`
@@ -112,7 +110,7 @@ const POLICY: Record<string, PolicyEntry | PolicyEntry[]> = {
   "resources/AgentSeed.ts|Memory|put": { count: 1, disposition: "stamped-create", note: "POST /AgentSeed raw starter-Memory create" },
   "resources/XAA.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "IdP principal raw Agent create" },
   "resources/mcp-handler.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "JIT OAuth principal raw Agent create" },
-  "resources/MemoryFeed.ts|Memory|write-back": { count: 1, disposition: "stamped-create", note: "POST /FeedMemories raw Memory create/update, through the shared write-back helper (flair#2354); its plan applies applyOriginatorInstanceId" },
+  "resources/MemoryFeed.ts|?|write-back": { count: 1, disposition: "stamped-create", note: "POST /FeedMemories raw Memory create/update, through the shared write-back helper (flair#2354); its plan applies applyOriginatorInstanceId" },
   "resources/auth-middleware.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "embedding backfill on an EXISTING row, through the shared write-back helper (flair#2354)" },
   "resources/MemoryReindex.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "admin reindex re-PUT of an EXISTING row; buildReindexRow keeps the stored originatorInstanceId (flair#2354)" },
   "resources/promotion-stamp.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "auto-promotion verdict stamp on the row its Memory write produced (flair#2354)" },
@@ -120,31 +118,15 @@ const POLICY: Record<string, PolicyEntry | PolicyEntry[]> = {
   "resources/table-helpers.ts|?|write-back": { count: 1, disposition: "update-only", note: "patchRecord: merges a patch into an EXISTING row of the table its caller passes; it throws when the row is absent" },
   "resources/migrations/visibility-backfill.ts|?|write-back": { count: 1, disposition: "update-only", note: "boot migration re-PUT of EXISTING rows of its injected table" },
   "resources/migrations/synthetic-test-migration.ts|?|write-back": { count: 1, disposition: "update-only", note: "test-only boot migration re-PUT of EXISTING rows of its injected table" },
-  "resources/MemoryFeed.ts|Memory|put": [
-    { count: 1, disposition: "update-only", note: "dedup expiry repair of an EXISTING row (flair#2358)" },
-  ],
   "resources/skill-version-write.ts|Memory|put": { count: 2, disposition: "resource-internal", note: "Memory and FeedMemories stamp successors in their transaction plans; predecessor closes retain stored stamps." },
   // Update-only / resource-internal raw writes — they re-write an existing row.
   "resources/Memory.ts|Memory|post": { count: 1, disposition: "resource-internal", note: "Memory writeMemoryRowPost fallback (content already stamped)" },
-  "resources/Memory.ts|Memory|put": { count: 3, disposition: "resource-internal", note: "Memory.put shared-txn persist + closeSupersededRecord + re-embed" },
+  "resources/Memory.ts|Memory|put": { count: 4, disposition: "resource-internal", note: "Memory.put shared-txn persist + closeSupersededRecord + stageGrantedClose + the admin _reindex re-PUT (flair#2450); the re-embed is an incremental update (flair#2465), not a put" },
   "resources/Memory.ts|Memory|delete": { count: 1, disposition: "resource-internal", note: "Memory.delete raw table delete" },
   "resources/MemoryMaintenance.ts|Memory|delete": { count: 1, disposition: "resource-internal", note: "reap/delete of existing rows" },
-  "resources/usage-recording.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "usage counters on an EXISTING row, through the shared write-back helper (flair#2441)" },
-  "resources/Federation.ts|?|write-back": { count: 1, disposition: "federation-merge", note: "FederationSync.post merge: re-writes the row it read through the shared write-back helper; a verified peer's own originatorInstanceId is preserved, never locally stamped (flair#2441)" },
+  "resources/usage-recording.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "usage counter and commit marker on an EXISTING row, through the shared write-back helper (flair#2441)" },
+  "resources/Federation.ts|?|write-back": { count: 2, disposition: "federation-merge", note: "FederationSync.post merge: re-writes the row it read through the shared write-back helper, for every synced table (flair#2441, flair#2450); the Presence receipt branch (flair#2578) is a second such write-back call" },
 };
-
-/**
- * Raw synced-table writers that resolve the table handle through a VARIABLE, so
- * the literal idiom above cannot see them. Each is an explicit exception to the
- * stamping rule (reviewed), and is asserted to still exist.
- */
-const DYNAMIC_RAW_WRITE_EXCEPTIONS: Array<{ file: string; marker: string; note: string }> = [
-  {
-    file: "resources/Federation.ts",
-    marker: "table.put(mergedData)",
-    note: "FederationSync.post merge of every non-Memory synced table — applies a verified, non-revoked peer's rows via a resolved table handle (a Memory merge is the write-back entry above, flair#2441)",
-  },
-];
 
 /** Directory scan (recursive), skipping test files. */
 function resourceSources(root = "resources"): string[] {
@@ -303,7 +285,7 @@ test("every raw synced-table write site under resources/ has a reviewed policy e
   expect({ undetectedInPolicy, countMismatch, stale }).toEqual({ undetectedInPolicy: [], countMismatch: [], stale: [] });
 });
 
-test("every stamped raw create writer applies the shared rule; dynamic exceptions still exist", () => {
+test("every stamped raw create writer applies the shared rule", () => {
   const missingStamp = Object.entries(POLICY)
     .filter(([, entry]) => [entry].flat().some((e) => e.disposition === "stamped-create"))
     .filter(([key]) => {
@@ -313,11 +295,6 @@ test("every stamped raw create writer applies the shared rule; dynamic exception
     })
     .map(([key]) => key);
   expect(missingStamp).toEqual([]);
-
-  const missingDynamic = DYNAMIC_RAW_WRITE_EXCEPTIONS
-    .filter(({ file, marker }) => !readFileSync(file, "utf8").includes(marker))
-    .map(({ file }) => file);
-  expect(missingDynamic).toEqual([]);
 });
 
 // The four resource writers (Memory, Soul, Agent, Relationship) are checked on

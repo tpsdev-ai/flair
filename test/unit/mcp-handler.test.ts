@@ -4,7 +4,8 @@
  * These are the auth-critical assertions the integration harness can't make at
  * the unit level:
  *
- *   - tools/list returns EXACTLY the 14 curated tools (no raw CRUD, no extras).
+ *   - tools/list returns EXACTLY the curated TOOLS definitions the caller may
+ *     list (no raw CRUD, no extras).
  *   - sub → Agent resolution: an existing Credential(kind:"idp", idpSubject=sub)
  *     maps to its principalId; an unknown sub with JIT OFF is DENIED (not run as
  *     anonymous/admin); an unknown sub with JIT ON provisions a NON-admin agent.
@@ -20,6 +21,7 @@
  */
 
 import { mock, describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test";
+import { conform } from "../helpers/mcp-conformance";
 
 // ─── Capture state for the mocked handlers ───────────────────────────────────
 let lastCall: { resource: string; ctx: any; args: any } | null = null;
@@ -83,18 +85,63 @@ function makeHandlerMock(resource: string, method: string) {
 //     `new Cls(undefined, ctx).get(id)` fail loudly (undefined → 404).
 // A double whose instance-get returns canned data (as this one used to) is
 // easier to satisfy than the real class and cannot catch this class of bug.
+// flair#2537, flair#2541 — the server's response to a write whose body carries
+// "REDACT-ME": `redactedValues` and `stored`, the post-redaction text that
+// write committed (flair#2467). "WITHHELD" models a server that reports the
+// count without `stored`. Any other body gets the response it always had.
+// flair#2561: "SUMMARY-ONLY" models a `stored` that holds a summary and no
+// content; "WITH-SUMMARY" a response that also carries the body's own
+// `summary` beside a `stored` that holds only the content.
+const REDACTED_ROW_ID = "mock-redacted-row";
+function redactedWriteResponse(body: any): Record<string, unknown> {
+  const content = typeof body?.content === "string" ? body.content : "";
+  if (!content.includes("REDACT-ME")) return {};
+  let stored: Record<string, string> | undefined = { content: content.replaceAll("REDACT-ME", "[redacted]") };
+  for (const field of ["summary", "trigger"] as const) {
+    const v = body?.[field];
+    if (typeof v === "string" && v.includes("REDACT-ME")) stored[field] = v.replaceAll("REDACT-ME", "[redacted]");
+  }
+  if (content.includes("WITHHELD")) stored = undefined;
+  else if (content.includes("SUMMARY-ONLY")) stored = { summary: "a stored summary" };
+  return {
+    // Always this id: Memory.get throws on it, so an echo that read the row after
+    // the write would fail (flair#2537).
+    id: REDACTED_ROW_ID,
+    written: true,
+    redactedValues: 1,
+    ...(content.includes("WITH-SUMMARY") ? { summary: "a summary REDACT-ME" } : {}),
+    ...(stored ? { stored } : {}),
+  };
+}
+
+// A row whose stored content still carries the credential-shaped text: the
+// shape a pre-flair#2407 row has, which a basement/restore re-put redacts.
+const LEGACY_ROW_ID = "mock-legacy-row";
+
 class MemoryMock extends HarperShapedBase {
-  async post(args: any) { lastCall = { resource: "Memory.post", ctx: this._ctx, args, isCollection: this.isCollection } as any; return { ok: true, resource: "Memory.post", agentId: this._ctx?.request?.tpsAgent }; }
+  async post(args: any) {
+    lastCall = { resource: "Memory.post", ctx: this._ctx, args, isCollection: this.isCollection } as any;
+    return { ok: true, resource: "Memory.post", agentId: this._ctx?.request?.tpsAgent, ...redactedWriteResponse(args) };
+  }
   // flair#1181 — the default memory_update merge now writes via the STATIC
   // `Cls.put(merged, ctx)` transactional path (the instance put on an unloaded
   // `new Cls(undefined, ctx)` throws "Invalid primary key type: undefined").
   // The instance put below is left for faithfulness but is no longer reached.
-  static async put(record: any, ctx: any) { lastCall = { resource: "Memory.put", ctx, args: record }; return { ok: true, resource: "Memory.put", agentId: ctx?.request?.tpsAgent }; }
+  static async put(record: any, ctx: any) { lastCall = { resource: "Memory.put", ctx, args: record }; return { ok: true, resource: "Memory.put", agentId: ctx?.request?.tpsAgent, ...redactedWriteResponse(record) }; }
   async put(args: any) { lastCall = { resource: "Memory.put#instance", ctx: this._ctx, args }; return { ok: true, resource: "Memory.put#instance", agentId: this._ctx?.request?.tpsAgent }; }
   static async get(target: any, ctx: any) {
     const id = typeof target === "string" ? target : target?.id;
     lastCall = { resource: "Memory.get", ctx, args: id };
     if (id === "missing-id") return null;
+    // flair#2541 — a row whose stored content predates the redaction. The
+    // basement/restore re-put is what redacts it, and the reply reports what
+    // THAT write stored, never this pre-write value.
+    if (id === LEGACY_ROW_ID) {
+      return { id, agentId: ctx?.request?.tpsAgent, content: "legacy with REDACT-ME", ok: true, resource: "Memory.get", embedding: [0.11, 0.22, 0.33] };
+    }
+    // flair#2537 — a read of the row a redacted write just wrote fails, so a
+    // reply that read after the write would surface as a JSON-RPC error.
+    if (id === REDACTED_ROW_ID) throw new Error("read after the write");
     // flair#1188 — a real by-id load returns the FULL stored row, INCLUDING the
     // raw `embedding` vector. Modeled here so memory_get's default-strip (and
     // its includeEmbedding opt-in) is exercised against a record that actually
@@ -151,6 +198,14 @@ function storeCredential(id: any, fields: any, merge: boolean): void {
   else credentials = credentials.map((c, j) => (j === i ? (merge ? { ...c, ...fields, id } : { ...fields, id }) : c));
 }
 
+/** A Harper search's `conditions` (default operator "and"): the row matches when every condition holds. */
+function credentialMatches(row: any, query: any): boolean {
+  return (query?.conditions ?? []).every((c: any) => {
+    if (c.comparator !== "equals") throw new Error(`fake Credential.search: unsupported comparator ${c.comparator}`);
+    return row?.[c.attribute] === c.value;
+  });
+}
+
 // Constructable no-op base classes so the REAL resource modules (which do
 // `class X extends databases.flair.X` or `extends Resource`) link + load — we
 // then OVERRIDE them via __setHandlers, so these bases are never actually hit by
@@ -159,9 +214,9 @@ class NoopBase { constructor(_id?: any, _ctx?: any) {} }
 const databasesMock = {
   flair: {
     Credential: Object.assign(class extends NoopBase {}, {
-      search: async function* (_q: any) {
+      search: async function* (q: any) {
         if (credentialSearchError) throw credentialSearchError;
-        for (const c of credentials) yield c;
+        for (const c of credentials) if (credentialMatches(c, q)) yield c;
       },
       put: async (r: any) => { puts.push({ table: "Credential", record: r }); storeCredential(r.id, r, false); return r; },
       get: async (id: any, _ctx?: any) => credentials.find((c) => c?.id === id) ?? null,
@@ -237,8 +292,8 @@ afterAll(() => {
 });
 
 // ─── tools/list ──────────────────────────────────────────────────────────────
-describe("tools/list — exactly the 18 curated tools", () => {
-  it("returns the pinned tool names", async () => {
+describe("tools/list — the advertised tool definitions", () => {
+  it("returns the pinned tool names for a token subject with no principal", async () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: "s" }));
     const body = await parse(res);
     const names = body.result.tools.map((t: any) => t.name).sort();
@@ -259,13 +314,26 @@ describe("tools/list — exactly the 18 curated tools", () => {
       "skill_search",
       "skill_store",
       "soul_get",
-      "soul_set",
       "team_directory",
     ]);
     // No raw create_/delete_ resource mutators leaked in. (memory_update
     // itself is a curated semantic tool, not a raw `update_<resource>`
     // mutator — it's explicitly allow-listed here rather than excluded.)
     expect(names.some((n: string) => /^(create|delete)_/.test(n))).toBe(false);
+  });
+
+  it("omits soul_set for a resolved agent principal, admin or not (flair#2689)", async () => {
+    for (const role of ["agent", "admin"]) {
+      credentials = [{ id: `cred-${role}`, principalId: `agt_${role}`, kind: "idp", idpSubject: `sub-${role}`, status: "active" }];
+      agents = { [`agt_${role}`]: { id: `agt_${role}`, role, status: "active" } };
+      const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: `sub-${role}` }));
+      const body = await parse(res);
+      const names = body.result.tools.map((t: any) => t.name);
+      expect(names).not.toContain("soul_set");
+      // Every other tool is still advertised: the gate removes soul_set only.
+      expect(names).toContain("soul_get");
+      expect(names.length).toBe(17);
+    }
   });
 
   it("record_usage schema states the memoryId+memoryIds merge contract (flair#1410)", async () => {
@@ -277,6 +345,81 @@ describe("tools/list — exactly the 18 curated tools", () => {
     expect(tool.description).toMatch(/memoryId.*memoryIds/);
     expect(tool.inputSchema.properties.memoryId.description).toMatch(/[Mm]erged/);
     expect(tool.inputSchema.properties.memoryIds.description).toMatch(/[Mm]erged/);
+  });
+});
+
+// ─── tools/list — a caller whose principal cannot be resolved (flair#2760) ───
+describe("tools/list — a failed or refused resolution answers the tools/call error (flair#2760)", () => {
+  beforeEach(() => {
+    credentials = [{ id: "cred_erin", principalId: "agt_erin", kind: "idp", idpSubject: "sub-erin", status: "active" }];
+    agents["agt_erin"] = { id: "agt_erin", status: "active" };
+  });
+
+  /** A tools/list and a tools/call of a known tool by the same token subject. */
+  async function listAndCall(sub: string) {
+    const list = await parse(await mcpHandler(post({ jsonrpc: "2.0", id: 21, method: "tools/list" }, { sub })));
+    const call = await parse(await mcpHandler(post(
+      { jsonrpc: "2.0", id: 21, method: "tools/call", params: { name: "memory_search", arguments: { query: "hi" } } },
+      { sub },
+    )));
+    return { list, call };
+  }
+
+  async function ungatedToolNames(): Promise<string[]> {
+    const { TOOLS } = await import("../../resources/mcp-tools.ts");
+    return Object.keys(TOOLS).filter((name) => name !== "soul_set").sort();
+  }
+
+  it("a failed credential read: tools/list returns the tools/call error and no list, and provisions nothing with JIT on", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    credentialSearchError = new Error("storage unavailable");
+    const { list, call } = await listAndCall("sub-erin");
+    expect(list.result).toBeUndefined();
+    expect(list.id).toBe(21);
+    expect(list.error?.code).toBe(-32000);
+    expect(list.error?.message).toContain("the credential for this token's subject could not be read");
+    expect(list.error).toEqual(call.error);
+    expect(lastCall).toBeNull();
+    expect(puts).toEqual([]);
+  });
+
+  const failures: [string, () => void, number, string][] = [
+    ["a failed read of the principal's status", () => { agentGetError = new Error("storage unavailable"); }, -32000, "the status of principal 'agt_erin' could not be read"],
+    ["a deactivated principal", () => { agents["agt_erin"] = { id: "agt_erin", status: "deactivated" }; }, -32001, "principal 'agt_erin' is deactivated"],
+    ["a credential naming a principal that does not exist", () => { delete agents["agt_erin"]; }, -32001, "principal 'agt_erin', which does not exist"],
+    ["a subject whose only credential is revoked", () => { credentials = [{ ...credentials[0], status: "revoked" }]; }, -32001, "cred_erin"],
+    [
+      "an error that is not a refusal",
+      () => { agents["agt_erin"] = { id: "agt_erin", status: "active", get role(): string { throw new Error("unreadable field"); } }; },
+      -32000,
+      "the token subject could not be resolved to a principal",
+    ],
+  ];
+  for (const [label, arrange, code, text] of failures) {
+    it(`${label}: tools/list returns the tools/call error and no list`, async () => {
+      arrange();
+      const { list, call } = await listAndCall("sub-erin");
+      expect(list.result).toBeUndefined();
+      expect(list.error?.code).toBe(code);
+      expect(list.error?.message).toContain(text);
+      expect(list.error).toEqual(call.error);
+      expect(lastCall).toBeNull();
+    });
+  }
+
+  it("an unmapped subject still lists every ungated tool and writes nothing, with JIT on", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    const body = await parse(await mcpHandler(post({ jsonrpc: "2.0", id: 22, method: "tools/list" }, { sub: "sub-unmapped" })));
+    expect(body.error).toBeUndefined();
+    expect(body.result.tools.map((t: any) => t.name).sort()).toEqual(await ungatedToolNames());
+    expect(await resolveAgentFromSub("sub-unmapped", undefined, false)).toBeNull();
+    expect(puts).toEqual([]);
+  });
+
+  it("a mapped, active agent still lists every tool but soul_set", async () => {
+    const body = await parse(await mcpHandler(post({ jsonrpc: "2.0", id: 23, method: "tools/list" }, { sub: "sub-erin" })));
+    expect(body.error).toBeUndefined();
+    expect(body.result.tools.map((t: any) => t.name).sort()).toEqual(await ungatedToolNames());
   });
 });
 
@@ -324,9 +467,67 @@ describe("resolveAgentFromSub", () => {
     expect(agent).toEqual({ agentId: "agt_mirror", isAdmin: false });
   });
 
-  it("revoked Credential is skipped", async () => {
-    credentials = [{ principalId: "agt_x", kind: "idp", idpSubject: "sub-x", status: "revoked" }];
-    expect(await resolveAgentFromSub("sub-x")).toBeNull();
+  // ─── flair#2503 — the credential-status allowlist ───────────────────────────
+  //
+  // A Credential is usable only when its status is exactly "active"
+  // (src/lib/credential-status-rule.ts, the same predicate the linker uses and
+  // XAA's jwt-bearer grant applies). A matching row whose status is "revoked",
+  // missing, empty or any other value maps nothing. When it is the subject's
+  // only row, as here, resolution is refused by name and nothing is linked or
+  // resolved. On origin/main a revoked row was SKIPPED (returning null, so JIT,
+  // when enabled, could re-create the mapping) and a principal-bearing row with
+  // a missing/unknown status was served as a live mapping.
+  for (const [label, status] of [["revoked", "revoked"], ["missing", undefined], ["unknown", "disabled"]] as const) {
+    it(`${label} status → refused by name, nothing linked or resolved`, async () => {
+      process.env.FLAIR_MCP_JIT_PROVISION = "1"; // JIT ON: a non-active row must not fall through to it
+      credentials = [{ id: `cred-${label}`, principalId: "agt_x", kind: "idp", idpSubject: "sub-x", ...(status === undefined ? {} : { status }) }];
+      agents["agt_x"] = { id: "agt_x", status: "active" };
+      const err = (await resolveAgentFromSub("sub-x").then(() => null, (e) => e)) as (Error & { rpcCode?: number }) | null;
+      expect(err, "a non-active mapping must be refused, not resolved").toBeInstanceOf(PrincipalRefusedError);
+      expect(err!.rpcCode).toBe(-32001);
+      expect(err!.message).toContain(`cred-${label}`); // the actor
+      expect(err!.message).toContain(status === undefined ? "no status" : `status "${status}"`); // the state
+      expect(err!.message).toContain(`usable only when its status is "active"`); // the rule
+      expect(err!.message).toMatch(/re-link/); // the remedy
+      expect(puts, "nothing linked (no JIT) or resolved").toHaveLength(0);
+      expect(credentials[0].status, "the mapping row is unchanged").toBe(status);
+    });
+  }
+
+  // A matching row that names no principal maps nothing, whatever its status,
+  // and it prevents JIT fallback: JIT provisioning runs only when NO IdP
+  // Credential row matches the subject. The resolver scans for an active,
+  // principal-bearing row and refuses the call by name only if none maps; here
+  // the principal-less row is the subject's only row. The schema requires
+  // principalId; the resolver does not rely on that to exclude such a row (the
+  // integration suite exercises the empty-string form real storage accepts).
+  for (const [label, status] of [["revoked", "revoked"], ["missing", undefined], ["active", "active"]] as const) {
+    it(`principal-less row, ${label} status, JIT ON → refused by name; no Agent or Credential written`, async () => {
+      process.env.FLAIR_MCP_JIT_PROVISION = "1";
+      const row = { id: `cred-nop-${label}`, kind: "idp", idpSubject: "sub-nop", ...(status === undefined ? {} : { status }) };
+      credentials = [{ ...row }];
+      const err = (await resolveAgentFromSub("sub-nop").then(() => null, (e) => e)) as (Error & { rpcCode?: number }) | null;
+      expect(err, "a principal-less row must be refused, not resolved or provisioned").toBeInstanceOf(PrincipalRefusedError);
+      expect(err!.rpcCode).toBe(-32001);
+      expect(err!.message).toContain(row.id); // the actor
+      expect(err!.message).toContain("names no principal"); // the state
+      expect(err!.message).toContain(status === undefined ? "no status" : `status "${status}"`);
+      expect(err!.message).toMatch(/re-link/); // the remedy
+      expect(puts, "no Agent and no Credential were written (JIT did not run)").toHaveLength(0);
+      expect(agents, "no principal was created").toEqual({});
+      expect(credentials, "the row is unchanged and still the only one").toEqual([row]);
+    });
+  }
+
+  it("a principal-less row does not hide an ACTIVE principal-bearing mapping for the same subject", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    credentials = [
+      { id: "cred-nop", kind: "idp", idpSubject: "sub-alice", status: "active" },
+      { id: "cred-alice", principalId: "agt_alice", kind: "idp", idpSubject: "sub-alice", status: "active" },
+    ];
+    agents["agt_alice"] = { id: "agt_alice", status: "active" };
+    expect(await resolveAgentFromSub("sub-alice")).toEqual({ agentId: "agt_alice", isAdmin: false });
+    expect(puts).toHaveLength(0);
   });
 
   it("unknown sub, JIT OFF → null (DENY, no provisioning)", async () => {
@@ -1345,4 +1546,212 @@ describe("checkToolArguments — every native tool's declared property types are
     }
     expect(checked).toBeGreaterThan(40);
   });
+});
+
+// ─── flair#2537 — write replies report the STORED (redacted) content ──────────
+//
+// A redacted write's response carries `stored`, the post-redaction text that
+// write committed. The /mcp echo takes the text from it and never reads the
+// row after the write: MemoryMock's read of the written row throws, so a read
+// would turn the reply into a JSON-RPC error. The real-Harper counterpart is
+// test/integration/write-reply-redaction-2537.test.ts.
+describe("flair#2537 — /mcp write replies report the STORED (redacted) content", () => {
+  beforeEach(() => {
+    credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+    agents["agt_bob"] = { id: "agt_bob", status: "active" };
+  });
+
+  function call(name: string, args: Record<string, unknown>) {
+    return mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+      { sub: "sub-bob" },
+    ));
+  }
+
+  it("memory_store's echo carries the stored text and the count from the write response, with no read after it", async () => {
+    const body = await parse(await call("memory_store", { content: "a note with REDACT-ME inside" }));
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.post");
+    const echo = body.result.structuredContent;
+    expect(echo.content).toBe("a note with [redacted] inside");
+    expect(echo.redactedValues).toBe(1);
+    expect(echo.stored).toBeUndefined();
+    expect(echo.contentWithheld).toBeUndefined();
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("memory_update's in-place echo carries the stored text and the count, with no read after the write", async () => {
+    const body = await parse(await call("memory_update", { id: "mem-1", content: "update with REDACT-ME inside" }));
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.put");
+    const echo = body.result.structuredContent;
+    expect(echo.content).toBe("update with [redacted] inside");
+    expect(echo.redactedValues).toBe(1);
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("a count without stored text gives a successful echo with no content and contentWithheld, never the input", async () => {
+    const body = await parse(await call("memory_store", { content: "a note with REDACT-ME and WITHHELD" }));
+    expect(body.error).toBeUndefined();
+    expect(body.result.isError).toBe(false);
+    expect(lastCall?.resource).toBe("Memory.post");
+    const echo = body.result.structuredContent;
+    expect(echo.written).toBe(true);
+    expect(echo.content).toBeUndefined();
+    expect(echo.contentWithheld).toBe(true);
+    expect(echo.redactedValues).toBe(1);
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("a `stored` with a summary and no content gives an echo with no text and contentWithheld (flair#2561)", async () => {
+    const body = await parse(await call("memory_store", { content: "a note with REDACT-ME and SUMMARY-ONLY" }));
+    expect(body.error).toBeUndefined();
+    const echo = body.result.structuredContent;
+    expect(echo.written).toBe(true);
+    expect(echo.contentWithheld).toBe(true);
+    expect(echo.redactedValues).toBe(1);
+    for (const field of ["content", "summary", "trigger", "stored"]) expect(field in echo, field).toBe(false);
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("a `stored` with only the content gives an echo with that content and no summary or trigger (flair#2561)", async () => {
+    const body = await parse(await call("memory_store", { content: "a note with REDACT-ME and WITH-SUMMARY" }));
+    expect(body.error).toBeUndefined();
+    const echo = body.result.structuredContent;
+    expect(echo.content).toBe("a note with [redacted] and WITH-SUMMARY");
+    expect(echo.contentWithheld).toBeUndefined();
+    expect("summary" in echo || "trigger" in echo).toBe(false);
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("a write the server did not redact returns its response unchanged", async () => {
+    const body = await parse(await call("memory_store", { content: "a plain note" }));
+    expect(lastCall?.resource).toBe("Memory.post");
+    expect(body.result.structuredContent).toEqual({ ok: true, resource: "Memory.post", agentId: "agt_bob" });
+  });
+});
+
+// ─── flair#2541 — skill_store / memory_basement / memory_restore write replies ─
+//
+// A redacted write's response carries `stored`, the post-redaction text that
+// write committed. Each tool's /mcp echo takes the text from it, reports the
+// count, and makes no read after the write. The real-Harper counterpart is
+// test/integration/write-reply-redaction-2541.test.ts.
+describe("flair#2541 — /mcp skill_store / memory_basement / memory_restore write echoes", () => {
+  beforeEach(() => {
+    credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+    agents["agt_bob"] = { id: "agt_bob", status: "active" };
+  });
+
+  function call(name: string, args: Record<string, unknown>) {
+    return mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+      { sub: "sub-bob" },
+    ));
+  }
+
+  it("skill_store's echo carries the stored content and trigger with the count, never the input", async () => {
+    const body = await parse(await call("skill_store", { content: "a skill with REDACT-ME", trigger: "when REDACT-ME" }));
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.post");
+    const echo = body.result.structuredContent;
+    expect(echo.content).toBe("a skill with [redacted]");
+    expect(echo.trigger).toBe("when [redacted]");
+    expect(echo.redactedValues).toBe(1);
+    expect(echo.stored).toBeUndefined();
+    expect(echo.contentWithheld).toBeUndefined();
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("memory_basement's echo carries the stored text the re-put redacted, never the row's pre-write value", async () => {
+    const body = await parse(await call("memory_basement", { id: LEGACY_ROW_ID }));
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.put");
+    const echo = body.result.structuredContent;
+    expect(echo.content).toBe("legacy with [redacted]");
+    expect(echo.redactedValues).toBe(1);
+    expect(echo.stored).toBeUndefined();
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("memory_restore's echo carries the stored text the re-put redacted, never the row's pre-write value", async () => {
+    const body = await parse(await call("memory_restore", { id: LEGACY_ROW_ID }));
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.put");
+    const echo = body.result.structuredContent;
+    expect(echo.content).toBe("legacy with [redacted]");
+    expect(echo.redactedValues).toBe(1);
+    expect(echo.stored).toBeUndefined();
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("a count without stored text omits the fields and sets contentWithheld, never the input", async () => {
+    const body = await parse(await call("skill_store", { content: "a skill with REDACT-ME and WITHHELD" }));
+    expect(body.error).toBeUndefined();
+    expect(body.result.isError).toBe(false);
+    const echo = body.result.structuredContent;
+    expect(echo.written).toBe(true);
+    expect(echo.content).toBeUndefined();
+    expect(echo.contentWithheld).toBe(true);
+    expect(echo.redactedValues).toBe(1);
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("a write the server did not redact returns its response unchanged", async () => {
+    const body = await parse(await call("memory_basement", { id: "mem-1" }));
+    expect(lastCall?.resource).toBe("Memory.put");
+    expect(body.result.structuredContent).toEqual({ ok: true, resource: "Memory.put", agentId: "agt_bob" });
+  });
+});
+
+// ─── flair#2575 — the archive tools' contract matches the reply they return ──
+//
+// `memory_basement` / `memory_restore` answer with the Memory write result
+// (`id`, `written`). Their contract must declare
+// exactly those required fields, and the shipped reply must carry them. The
+// real-Harper counterpart is test/integration/skill-write-redaction-2575.test.ts.
+describe("flair#2575 — the archive tools' contract matches their write reply", () => {
+  beforeEach(() => {
+    credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+    agents["agt_bob"] = { id: "agt_bob", status: "active" };
+  });
+
+  // A Memory double whose put answers with the real server's reply shape.
+  class ArchiveReplyMemory extends HarperShapedBase {
+    static async put(record: any, ctx: any) {
+      lastCall = { resource: "Memory.put", ctx, args: record };
+      return { id: record?.id, written: true };
+    }
+    static async get(target: any, ctx: any) {
+      const id = typeof target === "string" ? target : target?.id;
+      return { id, agentId: ctx?.request?.tpsAgent, content: "a plain note", tags: [], archived: false };
+    }
+  }
+
+  function call(name: string, args: Record<string, unknown>) {
+    return mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+      { sub: "sub-bob" },
+    ));
+  }
+
+  for (const name of ["memory_basement", "memory_restore"] as const) {
+    it(`${name}: requiredFields are id/written and the reply carries them`, async () => {
+      const { TOOLS } = await import("../../resources/mcp-tools.ts");
+      const restore = __setHandlers({ Memory: ArchiveReplyMemory as any });
+      try {
+        const contract = TOOLS[name].contract;
+        expect(contract.requiredFields).toEqual(["id", "written"]);
+        expect(contract.fieldTypes).toEqual({ id: "string", written: "boolean" });
+        const body = await parse(await call(name, { id: "mem-1" }));
+        expect(body.error).toBeUndefined();
+        const echo = body.result.structuredContent;
+        conform(name, echo, contract as any);
+        expect(echo.id).toBe("mem-1");
+        expect(echo.written).toBe(true);
+      } finally {
+        restore();
+      }
+    });
+  }
 });

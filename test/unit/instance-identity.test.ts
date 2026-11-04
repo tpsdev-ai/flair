@@ -33,7 +33,7 @@ const databasesMock = {
 
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: databasesMock, Resource: class {} }));
 
-const { localInstanceId, _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
+const { localInstanceId, currentInstanceId, _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
 
 beforeEach(() => {
   instanceRow = null;
@@ -106,5 +106,30 @@ describe("localInstanceId() — caching (a write must not pay a DB lookup every 
     const afterReset = await localInstanceId();
     expect(afterReset).toBe("flair_after_reset");
     expect(searchCallCount).toBe(2);
+  });
+});
+
+describe("currentInstanceId() — the Instance table as it is now (flair#2472)", () => {
+  it("reads the table on every call: after localInstanceId() cached an id, a removed row answers null", async () => {
+    instanceRow = { id: "flair_cached" };
+    expect(await localInstanceId()).toBe("flair_cached");
+    instanceRow = null; // the row is removed after the cache was warmed
+    expect(await localInstanceId(), "the cached accessor is expected to keep its id").toBe("flair_cached");
+    const callsBefore = searchCallCount;
+    expect(await currentInstanceId()).toBeNull();
+    expect(searchCallCount).toBe(callsBefore + 1); // a fresh read, not the cache
+  });
+
+  it("answers the current single row, and never writes it into localInstanceId()'s cache", async () => {
+    instanceRow = { id: "flair_first" };
+    expect(await localInstanceId()).toBe("flair_first");
+    instanceRow = { id: "flair_second" };
+    expect(await currentInstanceId()).toBe("flair_second");
+    expect(await localInstanceId()).toBe("flair_first");
+  });
+
+  it("answers null when the read fails", async () => {
+    throwOnSearch = true;
+    expect(await currentInstanceId()).toBeNull();
   });
 });

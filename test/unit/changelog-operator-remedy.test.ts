@@ -1,3 +1,4 @@
+import { shellScript } from "../helpers/shell-script.ts";
 import { expect, test } from "bun:test";
 import {
   copyFileSync,
@@ -129,7 +130,7 @@ test("release preview renders and fails visibly", () => {
   symlinkSync(process.execPath, join(root, "bin/node"));
 
   const run = () => {
-    const result = spawnSync("/bin/bash", ["-c", block[1]], {
+    const result = spawnSync("/bin/bash", [shellScript(block[1])], {
       cwd: root,
       env: {
         ROOT: root,

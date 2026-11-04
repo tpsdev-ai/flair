@@ -22,7 +22,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -51,15 +51,7 @@ const ARCHIVED_ID = "hybrid-noq-archived";
 
 describe("SemanticSearch no-q/no-embedding listing (hybrid flag ON — regression guard)", () => {
   beforeAll(async () => {
-    // Spawn with the flag ON from the start — startHarper() inherits
-    // process.env at spawn time, so this must be set before the call.
-    const prev = process.env.FLAIR_HYBRID_RETRIEVAL;
-    process.env.FLAIR_HYBRID_RETRIEVAL = "true";
-    try {
-      harper = await startHarper();
-    } finally {
-      if (prev === undefined) delete process.env.FLAIR_HYBRID_RETRIEVAL; else process.env.FLAIR_HYBRID_RETRIEVAL = prev;
-    }
+    harper = await startHarper({ serverEnv: { FLAIR_HYBRID_RETRIEVAL: "true" } });
 
     const res = await adminOp(harper, {
       operation: "insert", database: "flair", table: "Agent",
@@ -78,7 +70,7 @@ describe("SemanticSearch no-q/no-embedding listing (hybrid flag ON — regressio
     }
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("no q, no queryEmbedding → full scoped listing (not empty), archived still excluded", async () => {
     const path = "/SemanticSearch";

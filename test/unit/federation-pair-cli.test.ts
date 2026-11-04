@@ -494,7 +494,7 @@ describe("federation pair — spoke credential checked before the hub (flair#187
     }) as unknown as typeof fetch;
   }
 
-  async function runPair(extraArgs: string[]): Promise<{ exit: string | null; stderr: string[] }> {
+  async function runPair(extraArgs: string[], hub: string = HUB_URL): Promise<{ exit: string | null; stderr: string[] }> {
     const stderr: string[] = [];
     const origErr = console.error;
     const origLog = console.log;
@@ -508,7 +508,7 @@ describe("federation pair — spoke credential checked before the hub (flair#187
     }) as typeof process.exit;
     try {
       await program.parseAsync([
-        "node", "flair", "federation", "pair", HUB_URL,
+        "node", "flair", "federation", "pair", hub,
         "--token-from", tokenFile, "--ops-target", OPS_URL, ...extraArgs,
       ]);
     } catch (e: any) {
@@ -604,6 +604,28 @@ describe("federation pair — spoke credential checked before the hub (flair#187
     expect(calls[1]!.url.includes("/FederationPair")).toBe(true);
     expect(calls[2]!.url.startsWith(OPS_URL)).toBe(true);
     expect(calls[2]!.body?.operation).toBe("upsert");
+  });
+
+  test("a hub URL typed with trailing slashes: the hub request and the stored endpoint carry no empty path segment", async () => {
+    for (const typed of [`${HUB_URL}/`, `${HUB_URL}//`, `${HUB_URL}/flair/`]) {
+      seedKey();
+      installFetch();
+      responder = (call) => {
+        if (call.url.includes("/FederationPair")) {
+          return jsonResponse(200, { instance: { id: "hub-peer", publicKey: "hub-public-key-1875" } });
+        }
+        if (call.body?.operation === "user_info") return jsonResponse(200, superUserInfo);
+        return jsonResponse(200, []);
+      };
+      const { exit } = await runPair(["--admin-pass", "right-pass"], typed);
+      expect(exit, typed).toBeNull();
+      const stripped = typed.replace(/\/+$/, "");
+      const hubCall = calls.find((c) => c.url.includes("/FederationPair"));
+      expect(hubCall?.url, typed).toBe(`${stripped}/FederationPair`);
+      expect(new URL(hubCall!.url).pathname.includes("//"), typed).toBe(false);
+      const upsert = calls.find((c) => c.body?.operation === "upsert");
+      expect(upsert?.body?.records?.[0]?.endpoint, typed).toBe(stripped);
+    }
   });
 
   test("(d) a Peer upsert 500 after a hub 200 → exit 1, and the message names the consumed token", async () => {

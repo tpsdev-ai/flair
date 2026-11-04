@@ -21,8 +21,9 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const CLI = join(REPO_ROOT, "dist", "cli.js");
@@ -76,9 +77,10 @@ async function historyIds(): Promise<string[]> {
 interface Run { code: number | null; json: any; out: string }
 
 function runCli(args: string[]): Run {
-  const r = spawnSync(process.execPath, [CLI, ...args], {
+  const env = { ...process.env, HOME: home, FLAIR_ADMIN_PASS: harper.admin.password, FLAIR_ADMIN_USER: harper.admin.username };
+  const r = spawnSync(nodeBin({ env }), [CLI, ...args], {
     encoding: "utf-8",
-    env: { ...process.env, HOME: home, FLAIR_ADMIN_PASS: harper.admin.password, FLAIR_ADMIN_USER: harper.admin.username },
+    env,
     timeout: 90_000,
     killSignal: "SIGTERM",
   });
@@ -100,7 +102,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (home) rmSync(home, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2229 — deletion-history bounded read and retention on a real Harper", () => {
   test("the deletion-history table declares replicate: true explicitly", async () => {
@@ -208,5 +210,19 @@ describe("flair#2229 — deletion-history bounded read and retention on a real H
     expect(dry.json?.planned).toBe(1);
     expect(dry.json?.pruned).toBe(0);
     expect(await historyIds()).toEqual(before);
+  }, 150_000);
+
+  test("(a) a plain scan keeps a history row a checkpoint still needs (flair#2487)", async () => {
+    rmSync(checkpointPath(), { force: true });
+    const token = await insertMemory("keep-row", "permanent");
+    expect(runCheck().json?.status).toBe("baseline");
+    const watermark = JSON.parse(readFileSync(checkpointPath(), "utf8")).watermark as string;
+    // A still-needed row: its memory is present with a matching token, so the scan
+    // reads it again next scan and its own retention must leave it in place.
+    await insertHistory("h-keep", "keep-row", token, new Date(Date.parse(watermark) - 60_000).toISOString());
+    const r = runCheck();
+    expect(r.code, r.out).toBe(0);
+    expect(r.json?.status).toBe("healthy");
+    expect(await historyIds(), "the plain scan removed a history row it still needs").toContain("h-keep");
   }, 150_000);
 });

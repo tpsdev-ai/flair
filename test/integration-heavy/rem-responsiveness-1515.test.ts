@@ -108,7 +108,9 @@ test("nightly dedup includes live rows and serves reads during its vector sweep"
     expect(result.status).toBe("completed");
     expect(result.logRow.errors).toEqual([]);
     expect(result.logRow.candidates).toHaveLength(1);
-    expect(result.logRow.dedup!.totalMemoriesInClusters).toBeGreaterThanOrEqual(3);
+    const dedup = result.logRow.dedup!;
+    if (dedup.clusterCount === null) throw new Error("dedup counts unexpectedly withheld");
+    expect(dedup.totalMemoriesInClusters).toBeGreaterThanOrEqual(3);
     expect(modelRequests).toEqual(["/api/generate"]);
     expect(observations).toHaveLength(2);
     for (const observation of observations) {

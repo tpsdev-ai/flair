@@ -69,7 +69,7 @@ function runInit(f: Fixture, args: string[], listener: "unknown" | "foreign" | "
     await program.parseAsync(${JSON.stringify(argv)}, { from: "user" });
   `;
   return spawnSync(runtime, ["--input-type=module", "-e", script], {
-    cwd: ROOT, env, encoding: "utf8", timeout: 20_000,
+    cwd: ROOT, env: { ...(env), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise init-skip-start-safety process fixture arguments" }, encoding: "utf8", timeout: 20_000,
   });
 }
 
@@ -205,7 +205,7 @@ describe("local init skip-start safety through the built CLI", () => {
       await program.parseAsync(${JSON.stringify(["init", "--port", String(HTTP_PORT), "--ops-port", String(OPS_PORT),
         "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md", "--skip-start", "--agent", "canary"])}, { from: "user" });
     `;
-    const result = spawnSync("bun", ["--eval", script], { cwd: f.home, env, encoding: "utf8", timeout: 20_000 });
+    const result = spawnSync("bun", ["--eval", script], { cwd: f.home, env: { ...(env), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise init-skip-start-safety process fixture arguments" }, encoding: "utf8", timeout: 20_000 });
     expect(result.error).toBeUndefined();
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(JSON.parse(readFileSync(actions, "utf8"))).toEqual(["install"]);

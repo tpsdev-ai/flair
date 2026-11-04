@@ -1,3 +1,4 @@
+import { nodeBin } from "../helpers/node-runtime.ts";
 /**
  * flair#2113 review — what `flair mcp enable` prints when it succeeds.
  *
@@ -57,7 +58,7 @@ async function runEnable(
   writeFileSync(configPath, config);
   mkdirSync(join(tmp, "home"));
   // Started like flair starts Harper: `... run .` in the application directory.
-  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)", "run", "."], { cwd: tmp, stdio: "ignore" });
+  const child = spawn(nodeBin(), ["-e", "setTimeout(() => {}, 60000)", "run", "."], { cwd: tmp, stdio: "ignore" });
   const origCwd = process.cwd();
   const origHome = process.env.HOME;
   const origFetch = globalThis.fetch;

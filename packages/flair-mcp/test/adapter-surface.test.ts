@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   STDIO_TOOL_DESCRIPTORS,
   descriptorNames,
+  toStdioMcpToolDef,
 } from "../src/tool-descriptors/index.js";
 import {
   ADAPTER_TOOL_NAMES,
@@ -58,6 +59,30 @@ describe("adapter-surface derivation (flair#1580)", () => {
       ADAPTER_TOOL_NAMES,
     );
     expect(drifted.missingFromAdapter).toContain("brand_new_tool");
+  });
+
+  test("memory_store's stdio schema omits hostSource, hostSourceScope and sessionId (flair#2448)", () => {
+    // The adapter advertises memory_store by registering `toStdioMcpToolDef(d)`
+    // for the stdio descriptor (adapter-tools.ts registerStdioTools) — build the
+    // schema the same way rather than asserting a hand-copied expectation. The
+    // omission rides on the descriptor's `stdioOmitProperties`; no other test
+    // asserts these three fields are dropped at the stdio surface.
+    const descriptor = STDIO_TOOL_DESCRIPTORS.find((d) => d.name === "memory_store");
+    expect(descriptor).toBeDefined();
+    const advertised = toStdioMcpToolDef(descriptor!);
+    for (const field of ["hostSource", "hostSourceScope", "sessionId"] as const) {
+      expect(
+        advertised.inputSchema.properties,
+        `the stdio memory_store schema must not advertise ${field}`,
+      ).not.toHaveProperty(field);
+      expect(
+        advertised.inputSchema.required ?? [],
+        `the stdio memory_store schema must not require ${field}`,
+      ).not.toContain(field);
+    }
+    // The schema is otherwise unchanged: `content` remains, and remains required.
+    expect(advertised.inputSchema.properties).toHaveProperty("content");
+    expect(advertised.inputSchema.required).toEqual(["content"]);
   });
 
   test("a stale exemption fails rather than hiding future drift", () => {

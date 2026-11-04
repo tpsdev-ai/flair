@@ -20,6 +20,7 @@ import { Resource, databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { makeAuthGate, makeScopedSearch, FORBIDDEN, UNAUTH, NOT_FOUND } from "./record-type-kit.js";
 import { localInstanceId } from "./instance-identity.js";
+import { refuseRewrittenAgentId } from "./path-id-rewrite.js";
 import {
   relaySend,
   relayInbox,
@@ -29,11 +30,12 @@ import {
   type RelayDeps,
 } from "./relay-ops.js";
 
-function relayDeps(): RelayDeps {
+function relayDeps(ctx?: any): RelayDeps {
   return {
     messages: (databases as any).flair.Message,
     agents: (databases as any).flair.Agent,
     resolveOrg: localInstanceId,
+    ctx,
   };
 }
 
@@ -84,8 +86,9 @@ export class Message extends (databases as any).flair.Message {
   }
 
   async post(content: any) {
-    const auth = await resolveAgentAuth(ctxOf(this));
-    return relaySend(relayDeps(), auth, content ?? {});
+    const ctx = ctxOf(this);
+    const auth = await resolveAgentAuth(ctx);
+    return relaySend(relayDeps(ctx), auth, content ?? {});
   }
 
   /** Scope a non-admin agent's collection read to the messages it is a party
@@ -160,7 +163,10 @@ export class MessageInbox extends Resource {
   }
   async get(pathInfo?: any) {
     const auth = await resolveAgentAuth(ctxOf(this));
-    return relayInbox(relayDeps(), auth, pathId(pathInfo));
+    const to = pathId(pathInfo);
+    const rewritten = to === undefined ? null : refuseRewrittenAgentId(ctxOf(this), to);
+    if (rewritten) return rewritten;
+    return relayInbox(relayDeps(), auth, to);
   }
 }
 
@@ -194,7 +200,10 @@ export class MessageDeadLetter extends Resource {
   }
   async get(pathInfo?: any) {
     const auth = await resolveAgentAuth(ctxOf(this));
-    return relayDeadLetters(relayDeps(), auth, pathId(pathInfo));
+    const from = pathId(pathInfo);
+    const rewritten = from === undefined ? null : refuseRewrittenAgentId(ctxOf(this), from);
+    if (rewritten) return rewritten;
+    return relayDeadLetters(relayDeps(), auth, from);
   }
 }
 

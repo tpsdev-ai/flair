@@ -23,7 +23,7 @@ import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import {
   currentSeed,
@@ -34,6 +34,7 @@ import {
   type SeedCurrent,
 } from "../../src/lib/skill-seed.js";
 import { USING_FLAIR_SKILL_CONTENT, usingFlairSkillHash } from "../../src/lib/using-flair-skill.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
 const mkAgent = (id: string): TestAgent => {
@@ -137,8 +138,9 @@ function restOpts() {
 
 /** Run the built CLI's `flair init` against this test's instance, HOME-isolated. */
 function runInit() {
+  const env = { ...process.env, HOME: scratchHome, FLAIR_TARGET: "", FLAIR_OPS_TARGET: "" };
   const res = spawnSync(
-    process.execPath,
+    nodeBin({ env, cwd: ROOT }),
     [CLI, "init", "--target", harper.httpURL, "--ops-target", harper.opsURL,
       "--admin-user", harper.admin.username, "--admin-pass", harper.admin.password, "--force"],
     {
@@ -146,7 +148,7 @@ function runInit() {
       encoding: "utf8",
       timeout: 90_000,
       killSignal: "SIGKILL",
-      env: { ...process.env, HOME: scratchHome, FLAIR_TARGET: "", FLAIR_OPS_TARGET: "" },
+      env,
     },
   );
   return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
@@ -175,7 +177,7 @@ describe("flair#2141 S2 — the seed's fixed ids belong to the operator", () => 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     if (scratchHome) { try { rmSync(scratchHome, { recursive: true, force: true }); } catch {} }
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("an agent cannot create the seed row through PUT, POST or PATCH /Memory, or POST /FeedMemories", async () => {
     expectReserved(await asAgent(AGENT, "PUT", ROW_PATH, skillBody(AGENT)), "PUT /Memory/<seed>");

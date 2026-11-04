@@ -27,7 +27,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { FlairClient } from "../../packages/flair-client/src/client";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
@@ -68,7 +68,7 @@ describe("flair#1189 — preserveHistory successor RESETS retrievalCount + lastR
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     if (keyDir) await rm(keyDir, { recursive: true, force: true, maxRetries: 4 });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("a memory_update {preserveHistory:true} mints a successor with retrievalCount 0 and a lastRetrieved that never predates its own createdAt", async () => {
     const agent = mkAgent(`retstats-1189-${randomUUID()}`);

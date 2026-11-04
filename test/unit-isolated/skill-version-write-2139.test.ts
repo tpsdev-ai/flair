@@ -5,6 +5,7 @@ type Row = Record<string, any>;
 const store = new Map<string, Row>();       // InstructionVersion rows
 const memoryStore = new Map<string, Row>(); // Memory rows
 const pointers = new Map<string, Row>();
+const eventStore = new Map<string, Row>();
 const locks = new Set<string>();
 let failNextAppend = false;
 let hideHead = false;
@@ -33,7 +34,23 @@ const InstructionVersionTable = {
   },
 };
 
+const OrgEventTable = {
+  async *search() {},
+  async create(record: Row, ctx: any): Promise<void> {
+    const rows = ctx?.transaction?.events ?? eventStore;
+    if (rows.has(record.id)) throw new Error("Record already exists");
+    rows.set(record.id, { ...record });
+  },
+  async delete(id: string, ctx: any): Promise<void> {
+    (ctx?.transaction?.events ?? eventStore).delete(id);
+  },
+};
+
 const MemoryTable = {
+  async put(row: Row, ctx?: any) {
+    (ctx?.transaction?.memories ?? memoryStore).set(row.id, { ...row });
+    return row;
+  },
   async *search(query: any, ctx?: any): AsyncGenerator<Row> {
     const conds: any[] = query?.conditions ?? [];
     for (const row of [...(ctx?.transaction?.memories ?? memoryStore).values()]) {
@@ -48,6 +65,7 @@ mock.module("harper", () => ({
   databases: {
     flair: {
       InstructionVersion: InstructionVersionTable,
+      OrgEvent: OrgEventTable,
       Memory: MemoryTable,
       MemoryCandidate: { async *search() {} },
       Soul: { async *search() {} },
@@ -62,13 +80,15 @@ function mockTransaction(ctx: any, cb: (txn: any) => any): any {
   if (context.transaction && context.transaction.open === 1) return cb(context.transaction);
   const txn: any = {
     open: 1, saveCommits: false, aborted: false,
-    versions: new Map(store), memories: new Map(memoryStore), pointers: new Map(pointers),
+    addWrite(write: any) { write.commit(1, null); return write; },
+    versions: new Map(store), memories: new Map(memoryStore), pointers: new Map(pointers), events: new Map(eventStore),
     abort() { this.open = 0; this.aborted = true; },
     commit() {
       this.open = 0;
       store.clear(); for (const [id, row] of this.versions) store.set(id, row);
       memoryStore.clear(); for (const [id, row] of this.memories) memoryStore.set(id, row);
       pointers.clear(); for (const [id, row] of this.pointers) pointers.set(id, row);
+      eventStore.clear(); for (const [id, row] of this.events) eventStore.set(id, row);
     },
   };
   context.transaction = txn;
@@ -81,7 +101,8 @@ function mockTransaction(ctx: any, cb: (txn: any) => any): any {
   return result;
 }
 
-const { runSkillVersionWrite, resolveSkillHead, closedSkillPayloadReadable } = await import("../../resources/skill-version-write.ts");
+const { runSkillVersionWrite, resolveSkillHead, closedSkillPayloadReadable, defaultSkillHooks, prepareSkillBody, buildSkillSuccessorRow } = await import("../../resources/skill-version-write.ts");
+const { discardSuppliedVector, hasSuppliedEmbedding, suppliesEmbeddingModel } = await import("../../resources/memory-supplied-vector.ts");
 const { recordDigest, valueDigest } = await import("../../resources/instruction-version-record.ts");
 const { deriveSkillSubjectId } = await import("../../resources/skill-subject.ts");
 
@@ -93,7 +114,7 @@ function failHook<T>(message: string): () => Promise<T> {
 }
 
 beforeEach(() => {
-  store.clear(); memoryStore.clear(); locks.clear(); pointers.clear();
+  store.clear(); memoryStore.clear(); locks.clear(); pointers.clear(); eventStore.clear();
   failNextAppend = false; hideHead = false;
   (globalThis as any).transaction = mockTransaction;
 });
@@ -114,6 +135,72 @@ function liveSkill(id: string, subjectId: string | null, content: string, visibi
   return { id, agentId: "agent-a", tags: ["skill"], trigger: "t", content, visibility, durability: "persistent", createdAt: "2020-01-01T00:00:00.000Z", ...(subjectId ? { skillSubjectId: subjectId } : {}) };
 }
 
+describe("skill POST version writes in a caller transaction", () => {
+  test("a pointer refusal can release the caller context before rollback", async () => {
+    const ctx = agentCtx() as any;
+    const successor = liveSkill("joined", "joined", "joined content");
+    const transaction = {
+      open: 1, saveCommits: false, memories: new Map(), versions: new Map(),
+      abort() {
+        this.open = 0;
+        this.memories.clear();
+        this.versions.clear();
+        delete ctx.transaction;
+      },
+    };
+    ctx.transaction = transaction;
+    const result = await runSkillVersionWrite({
+      ctx, joinCallerTransaction: true, subjectId: "joined", agentId: "agent-a",
+      head: (shared) => resolveSkillHead("joined", null, shared),
+      plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: successor.content, visibility: "shared", grantedClose: null }),
+      hooks: {
+        createSuccessor, closePredecessor,
+        pointer: async () => {
+          transaction.abort();
+          return Response.json({ error: "pointer_write_failed" }, { status: 500 });
+        },
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("pointer refusal answered success");
+    expect(result.response.status).toBe(500);
+    expect(await result.response.json()).toEqual({ error: "pointer_write_failed" });
+    expect(ctx.transaction).toBeUndefined();
+    expect(transaction.memories.size).toBe(0);
+    expect(transaction.versions.size).toBe(0);
+    expect(memoryStore.size).toBe(0);
+    expect(store.size).toBe(0);
+  });
+
+  for (const abort of [true, false]) {
+    test(`the successor and version follow the caller's ${abort ? "abort" : "commit"}`, async () => {
+      const ctx = agentCtx();
+      const successor = liveSkill("joined", "joined", "joined content");
+      const write = mockTransaction(ctx, async () => {
+        const transaction = (ctx as any).transaction;
+        const result = await runSkillVersionWrite({
+          ctx, joinCallerTransaction: true, subjectId: "joined", agentId: "agent-a",
+          head: (shared) => resolveSkillHead("joined", null, shared),
+          plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: successor.content, visibility: "shared", grantedClose: null }),
+          hooks: { createSuccessor, closePredecessor },
+        });
+        expect(result.ok).toBe(true);
+        expect((ctx as any).transaction).toBe(transaction);
+        expect(transaction.open).toBe(1);
+        expect(memoryStore.has("joined")).toBe(false);
+        expect(store.has("skill:joined:1")).toBe(false);
+        expect(transaction.memories.get("joined")).toEqual(successor);
+        expect(transaction.versions.get("skill:joined:1").memoryId).toBe("joined");
+        if (abort) throw new Error("caller abort");
+      });
+      if (abort) await expect(write).rejects.toThrow("caller abort");
+      else await write;
+      expect(memoryStore.has("joined")).toBe(!abort);
+      expect(store.has("skill:joined:1")).toBe(!abort);
+    });
+  }
+});
+
 describe("flair#2139 S2 — skill version write: create", () => {
   test("a first create appends a create version referencing the successor", async () => {
     const successor = liveSkill("m1", null, "c1");
@@ -121,7 +208,7 @@ describe("flair#2139 S2 — skill version write: create", () => {
     const res = await runSkillVersionWrite({
       ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: "c1", visibility: "shared" }),
+      plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: "c1", visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor },
     });
     expect(res.ok).toBe(true);
@@ -144,7 +231,7 @@ describe("flair#2139 S2 — skill version write: create", () => {
     await runSkillVersionWrite({
       ctx: operatorCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: "c1", visibility: "shared" }),
+      plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: "c1", visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor },
     });
     const v = store.get("skill:m1:1")!;
@@ -164,7 +251,7 @@ describe("flair#2139 S2 — skill version write: supersede and delete", () => {
       head: (shared) => resolveSkillHead("m1", null, shared),
       plan: (head) => {
         expect(head?.id).toBe("m1");
-        return { kind: "update", predecessor: head, successor, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared" };
+        return { kind: "update", predecessor: head, successor, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared", grantedClose: null };
       },
       hooks: { createSuccessor, closePredecessor },
     });
@@ -177,12 +264,30 @@ describe("flair#2139 S2 — skill version write: supersede and delete", () => {
     expect(memoryStore.get("m2")!.skillSubjectId).toBe("m1");
   });
 
+  for (const status of [200, 409]) {
+    test(`delete close Response status ${status} returns write_response_withheld without a version append`, async () => {
+      memoryStore.set("m1", liveSkill("m1", "m1", "c1"));
+      const result = await runSkillVersionWrite({
+        ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
+        head: (shared) => resolveSkillHead("m1", null, shared),
+        plan: (head) => ({ kind: "delete", predecessor: head!, closePatch: { validTo: "t" }, value: null, visibility: "shared", grantedClose: null }),
+        hooks: { createSuccessor, closePredecessor: async () => Response.json({ embedding: [1] }, { status }) },
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected a refusal");
+      expect(result.response.status).toBe(500);
+      expect((await result.response.json()).error).toBe("write_response_withheld");
+      expect(memoryStore.get("m1")!.validTo).toBeUndefined();
+      expect(store.size).toBe(0);
+    });
+  }
+
   test("a logical delete closes the head and appends a tombstone with no payload", async () => {
     memoryStore.set("m1", liveSkill("m1", "m1", "c1"));
     const res = await runSkillVersionWrite({
       ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: (head) => ({ kind: "delete", predecessor: head!, closePatch: { validTo: "2020-01-09T00:00:00.000Z" }, value: null, visibility: "shared" }),
+      plan: (head) => ({ kind: "delete", predecessor: head!, closePatch: { validTo: "2020-01-09T00:00:00.000Z" }, value: null, visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor },
     });
     expect(res.ok).toBe(true);
@@ -207,9 +312,27 @@ describe("flair#2139 S2 — skill version write atomicity", () => {
     return runSkillVersionWrite({
       ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: () => ({ kind: "update", predecessor: memoryStore.get("m1") ?? null, successor, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared" }),
+      plan: () => ({ kind: "update", predecessor: memoryStore.get("m1") ?? null, successor, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor, ...overrides },
     });
+  }
+
+  for (const hook of ["createSuccessor", "closePredecessor"]) {
+    for (const status of [200, 409]) {
+      test(`${hook} Response status ${status} returns write_response_withheld without a version append`, async () => {
+        const result = await attemptUpdate({ [hook]: async () => Response.json({ embedding: [1] }, { status }) });
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("expected a refusal");
+        expect(result.response.status).toBe(500);
+        expect(await result.response.json()).toEqual({
+          error: "write_response_withheld",
+          message: "the server does not report this write's result; read the row to see what is stored",
+        });
+        expect(memoryStore.get("m1")!.validTo).toBeUndefined();
+        expect(memoryStore.has("m2")).toBe(false);
+        expect(store.size).toBe(0);
+      });
+    }
   }
 
   test("a successor-write failure leaves NO successor, NO close and NO version", async () => {
@@ -266,7 +389,7 @@ describe("flair#2139 S2 — skill version write atomicity", () => {
     const res = await runSkillVersionWrite({
       ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: () => ({ kind: "update", predecessor: memoryStore.get("m1") ?? null, successor, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared" }),
+      plan: () => ({ kind: "update", predecessor: memoryStore.get("m1") ?? null, successor, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor },
     });
     expect(res.ok).toBe(false);
@@ -282,14 +405,14 @@ describe("flair#2139 S2 — skill version write atomicity", () => {
     await runSkillVersionWrite({
       ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: (head) => ({ kind: "update", predecessor: head, successor: s2, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared" }),
+      plan: (head) => ({ kind: "update", predecessor: head, successor: s2, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor },
     });
     const s3 = { ...liveSkill("m3", "m1", "c3"), supersedes: "m2", createdAt: "2020-01-03T00:00:00.000Z" };
     await runSkillVersionWrite({
       ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: (head) => ({ kind: "update", predecessor: head, successor: s3, closePatch: { validTo: "2020-01-03T00:00:00.000Z" }, value: "c3", visibility: "shared" }),
+      plan: (head) => ({ kind: "update", predecessor: head, successor: s3, closePatch: { validTo: "2020-01-03T00:00:00.000Z" }, value: "c3", visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor },
     });
     const v1 = store.get("skill:m1:1")!;
@@ -324,4 +447,70 @@ test("a live successor does not bypass a missing or inconsistent version authori
   expect(await closedSkillPayloadReadable(root, "reader")).toBe(false);
   authority.agentId = "agent-a";
   expect(await closedSkillPayloadReadable(root, "reader")).toBe(true);
+});
+
+for (const empty of [[], new Float32Array(0), new Uint8Array(0)]) {
+  test(`skill successor and predecessor writes store empty ${empty.constructor.name} as null`, async () => {
+    const successor = { ...liveSkill("successor", "root", "new"), embedding: empty };
+    const predecessor = { ...liveSkill("root", "root", "old"), embedding: empty };
+    await defaultSkillHooks.createSuccessor!(successor, {});
+    await defaultSkillHooks.closePredecessor!(predecessor, { validTo: new Date().toISOString() }, {});
+    expect(memoryStore.get("successor")?.embedding).toBeNull();
+    expect(memoryStore.get("root")?.embedding).toBeNull();
+  });
+}
+
+describe("carried skill vector stamps", () => {
+  const stored = { tags: ["skill"], content: "procedure", trigger: "when needed", embedding: [1, 2, 3], embeddingModel: "stored-model" };
+
+  test("a non-admin supplied vector without a stamp discards the inherited skill stamp", async () => {
+    const auth = { kind: "agent" as const, agentId: "agent-a", isAdmin: false };
+    const input = { embedding: [4, 5, 6] };
+    const supplied = { vector: hasSuppliedEmbedding(input.embedding), stamp: suppliesEmbeddingModel(input) };
+    const prepared = await prepareSkillBody(input, stored, auth);
+    if (prepared instanceof Response) throw new Error(await prepared.text());
+    expect(prepared.content.embedding).toEqual(input.embedding);
+    expect(prepared.content.embeddingModel).toBe(stored.embeddingModel);
+    expect(discardSuppliedVector(prepared.content, auth, supplied)).toBe(true);
+    expect(prepared.content).not.toHaveProperty("embedding");
+    expect(prepared.content).not.toHaveProperty("embeddingModel");
+    const successor = buildSkillSuccessorRow({
+      auth, base: prepared.content, predecessorRow: stored, successorId: "successor", subjectId: "skill",
+      supersedes: "skill", now: new Date().toISOString(),
+    });
+    expect(successor).not.toHaveProperty("embedding");
+    expect(successor).not.toHaveProperty("embeddingModel");
+  });
+
+  test.each([
+    { label: "administrator", auth: { kind: "agent" as const, agentId: "admin", isAdmin: true } },
+    { label: "trusted in-process caller", auth: { kind: "internal" as const } },
+  ])("$label keeps its replacement stamp", async ({ auth }) => {
+    const prepared = await prepareSkillBody({ embeddingModel: "replacement-model" }, stored, auth);
+    if (prepared instanceof Response) throw new Error(await prepared.text());
+    expect(discardSuppliedVector(prepared.content, auth, { vector: false, stamp: true })).toBe(false);
+    expect(prepared.content.embedding).toEqual(stored.embedding);
+    expect(prepared.content.embeddingModel).toBe("replacement-model");
+    const successor = buildSkillSuccessorRow({
+      auth, base: { embeddingModel: "replacement-model" }, predecessorRow: stored, successorId: "successor",
+      subjectId: "skill", supersedes: "skill", now: new Date().toISOString(),
+    });
+    expect(successor.embedding).toEqual(stored.embedding);
+    expect(successor.embeddingModel).toBe("replacement-model");
+  });
+
+  test.each(["stored-model", undefined])("a non-admin retains the stored stamp %s", async (stamp) => {
+    const source = { ...stored, embeddingModel: stamp };
+    const prepared = await prepareSkillBody({ embeddingModel: "replacement-model" }, source, { kind: "agent", agentId: "agent-a", isAdmin: false });
+    if (prepared instanceof Response) throw new Error(await prepared.text());
+    expect(discardSuppliedVector(prepared.content, { kind: "agent", agentId: "agent-a", isAdmin: false }, { vector: false, stamp: true })).toBe(false);
+    expect(prepared.content.embedding).toEqual(stored.embedding);
+    expect(prepared.content.embeddingModel).toBe(stamp);
+    const successor = buildSkillSuccessorRow({
+      auth: { kind: "agent", agentId: "agent-a", isAdmin: false }, base: prepared.content, predecessorRow: source,
+      successorId: "successor", subjectId: "skill", supersedes: "skill", now: new Date().toISOString(),
+    });
+    expect(successor.embedding).toEqual(stored.embedding);
+    expect(successor.embeddingModel).toBe(stamp);
+  });
 });

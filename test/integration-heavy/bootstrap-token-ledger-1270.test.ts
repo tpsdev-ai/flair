@@ -46,7 +46,7 @@ import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 // The same estimator the handler budgets and reports with (single source,
 // harper-free) — reconstruction must be same-estimator or it proves nothing.
 import { estimateTokens } from "../../resources/token-estimate";
@@ -284,7 +284,7 @@ describe("flair#1270 — bootstrap payload token ledger (trustTokens/eventsToken
     if (harper) await stopHarper(harper);
     if (dataDir) await rm(dataDir, { recursive: true, force: true, maxRetries: 4 });
     if (appDir) await rm(appDir, { recursive: true, force: true });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("connector path, trust on: every ledger counter reconstructs exactly, the identity reconciles, and budgetCap still holds", async () => {
     const body = await tool("bootstrap", {

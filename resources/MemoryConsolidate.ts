@@ -17,7 +17,7 @@
  */
 
 import { Resource, databases } from "harper";
-import { isAdmin, allowVerified } from "./agent-auth.js";
+import { annotatedCallerIsAdmin, allowVerified } from "./agent-auth.js";
 import { evaluate, parseDuration, type Suggestion, type Candidate } from "./memory-consolidate-lib.js";
 import { applyHitStats } from "./hit-tracking.js";
 
@@ -39,7 +39,7 @@ export class ConsolidateMemories extends Resource {
     const request = ctx?.request ?? ctx;
     const actorId: string | undefined = request?.tpsAgent;
     const callerIsAdmin: boolean = request?.tpsAgentIsAdmin === true
-      || (actorId ? await isAdmin(actorId) : false);
+      || (await annotatedCallerIsAdmin(request));
 
     if (!bodyAgentId && !actorId) {
       return new Response(JSON.stringify({ error: "agentId required" }), { status: 400 });

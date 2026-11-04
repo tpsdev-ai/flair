@@ -1,4 +1,4 @@
-export { FlairClient, FlairError, canonicalRelationshipId, encodeRecordId } from "./client.js";
+export { FlairClient, FlairError, MissingSigningKeyError, canonicalRelationshipId, encodeRecordId } from "./client.js";
 export {
   loadPrivateKey,
   loadPrivateKeyBounded,

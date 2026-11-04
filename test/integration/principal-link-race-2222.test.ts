@@ -9,7 +9,7 @@
 // ops port it was started on, checked before the first call.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import {
   linkPrincipalMapping,
   unlinkPrincipalMapping,
@@ -110,7 +110,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
-});
+}, HARPER_STOP_BUDGET_MS);
 
 /** Seed exactly one active mapping: subject → (principalId, provider). */
 async function seedMapping(principalId: string, provider = PROVIDER): Promise<string> {

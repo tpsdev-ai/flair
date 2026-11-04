@@ -16,6 +16,7 @@ import {
   defaultReadPositionTable,
   getReadPosition,
 } from "./agent-read-position.js";
+import { refuseRewrittenAgentId } from "./path-id-rewrite.js";
 
 function pathAgentId(pathInfo: any, resource?: { getId?: () => string }): string | null {
   return (
@@ -62,6 +63,8 @@ export class AgentReadPosition extends Resource {
         { status: 400, headers: { "Content-Type": "application/json" } },
       );
     }
+    const rewritten = refuseRewrittenAgentId((this as any).getContext?.(), agentId);
+    if (rewritten) return rewritten;
     if (ownerDenied(auth, agentId)) return denyOwner();
 
     const stream = queryValue(pathInfo, "stream") || ORG_EVENT_STREAM;
@@ -82,6 +85,8 @@ export class AgentReadPosition extends Resource {
         { status: 400, headers: { "Content-Type": "application/json" } },
       );
     }
+    const rewritten = refuseRewrittenAgentId((this as any).getContext?.(), agentId);
+    if (rewritten) return rewritten;
     if (ownerDenied(auth, agentId)) return denyOwner();
 
     const stream = (content && typeof content === "object" && content.stream) || ORG_EVENT_STREAM;

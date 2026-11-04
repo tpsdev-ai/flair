@@ -212,16 +212,6 @@ describe("pairing token body auth", () => {
     expect(notFound).toBe(true);
   });
 
-  test("re-pairing path skips token (existing peer found)", () => {
-    // Existing peer with matching pubkey — re-pair without token.
-    // Body signature still required to prove key ownership.
-    const existing = { id: "spoke_1", publicKey: "same_pubkey" };
-    const incoming = { instanceId: "spoke_1", publicKey: "same_pubkey" };
-
-    expect(existing.id).toBe(incoming.instanceId);
-    expect(existing.publicKey).toBe(incoming.publicKey);
-  });
-
   test("re-pairing with mismatched key is rejected (409)", () => {
     const existing = { id: "spoke_1", publicKey: "original_key" };
     const incoming = { instanceId: "spoke_1", publicKey: "different_key" };
