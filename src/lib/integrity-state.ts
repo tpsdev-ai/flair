@@ -28,7 +28,6 @@
  */
 import {
   closeSync,
-  existsSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -87,8 +86,7 @@ export const INTEGRITY_REASONS = [
 ] as const;
 export type IntegrityReason = (typeof INTEGRITY_REASONS)[number];
 
-/** The remedy paired with each reason. Kept here so a caller cannot invent a
- *  reason without the operator-facing action. */
+/** The remedy paired with each reason. */
 export const INTEGRITY_REASON_REMEDIES: Record<IntegrityReason, string> = {
   uninitialized: "Enroll this watch explicitly.",
   checkpoint_incompatible: "Enroll explicitly with compatible software; archive the legacy state.",
@@ -327,12 +325,14 @@ function checkManagedEntry(
   path: string,
   kind: "dir" | "file",
   operatorUid: number,
+  allowAbsent = false,
 ): CustodyCheck {
   let st: Stats;
   try {
     st = lstatSync(path);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" && allowAbsent) return { ok: true };
     const reason: IntegrityReason = code === "ENOENT" ? "checkpoint_missing" : "unavailable";
     return { ok: false, reason, detail: `cannot stat ${path}: ${err instanceof Error ? err.message : String(err)}` };
   }
@@ -363,8 +363,7 @@ function uidCanReadKeyOrWriteState(serverUid: number, operatorUid: number): bool
   return false;
 }
 
-/** The custody predicate. Evaluated at enrollment, at every open and at the
- *  start of every commit. All failures map to a reason from the fixed union. */
+/** The custody predicate. */
 export function checkCustody(opts: CustodyCheckOptions): CustodyCheck {
   const { paths, serverUid, operatorUid, machineId } = opts;
   const requireFiles = opts.requireFiles ?? true;
@@ -396,22 +395,18 @@ export function checkCustody(opts: CustodyCheckOptions): CustodyCheck {
     if (!key.ok) return key;
     const registry = checkManagedEntry(paths.registryPath, "file", operatorUid);
     if (!registry.ok) return registry;
-    if (existsSync(paths.generationsDir)) {
-      const gens = checkManagedEntry(paths.generationsDir, "dir", operatorUid);
-      if (!gens.ok) return gens;
-      const listed = listGenerationFiles(paths.generationsDir);
-      if (listed.kind === "error") return { ok: false, reason: listed.reason, detail: listed.detail };
-      if (opts.checkGenerations && listed.kind === "ok") {
-        for (const name of listed.files) {
-          const gen = checkManagedEntry(join(paths.generationsDir, name), "file", operatorUid);
-          if (!gen.ok) return gen;
-        }
+    const gens = checkManagedEntry(paths.generationsDir, "dir", operatorUid, true);
+    if (!gens.ok) return gens;
+    const listed = listGenerationFiles(paths.generationsDir);
+    if (listed.kind === "error") return { ok: false, reason: listed.reason, detail: listed.detail };
+    if (opts.checkGenerations && listed.kind === "ok") {
+      for (const name of listed.files) {
+        const gen = checkManagedEntry(join(paths.generationsDir, name), "file", operatorUid);
+        if (!gen.ok) return gen;
       }
     }
-    if (existsSync(paths.currentPath)) {
-      const current = checkManagedEntry(paths.currentPath, "file", operatorUid);
-      if (!current.ok) return current;
-    }
+    const current = checkManagedEntry(paths.currentPath, "file", operatorUid, true);
+    if (!current.ok) return current;
   }
   return { ok: true };
 }
@@ -700,6 +695,25 @@ function validateCurrentShape(value: unknown): value is IntegrityCurrentPointer 
     typeof c.hmac === "string";
 }
 
+type CustodyRecord = IntegrityRegistry | IntegrityCheckpointV3 | IntegrityCurrentPointer;
+
+function prepareIntegrityRecord<T extends CustodyRecord>(
+  build: () => Omit<T, "hmac">,
+  key: Buffer,
+): T {
+  const record = Object.assign(Object.create(null), JSON.parse(canonicalJson(build())), { hmac: "" }) as T & Record<string, unknown>;
+  const counters = record.kind === "registry"
+    ? [record.sequence, ...record.entries.map((entry) => entry.sequence)]
+    : [record.generation, ...(record.kind === "checkpoint" ? Object.values(record.baseline.byDurability) : [])];
+  if (counters.some((value) => !Number.isSafeInteger(value))) {
+    throw new RangeError("integrity sequence, generation or count exceeds the safe integer range");
+  }
+  const validator: (value: unknown) => boolean = record.kind === "registry" ? validateRegistryShape
+    : record.kind === "checkpoint" ? validateCheckpointShape : validateCurrentShape;
+  if (!validator(record)) throw new TypeError(`invalid v3 integrity ${record.kind} shape`);
+  return signIntegrityRecord(record, key) as T;
+}
+
 function readSignedJson<T>(
   path: string,
   validator: (value: unknown) => value is T,
@@ -781,7 +795,7 @@ export interface IntegrityStateOptions {
   machineId?: string;
   enrollmentId?: string;
   newCustody?: boolean;
-  /** Test seam only: check every retained generation file for ACLs. */
+  /** Check every retained generation file for ACLs. */
   checkGenerations?: boolean;
 }
 
@@ -812,12 +826,12 @@ function resolveServerUid(opts: IntegrityStateOptions): { ok: true; uid: number;
   return { ok: true, uid: opts.serverUid, source: opts.serverUidSource };
 }
 
-function readKey(paths: IntegrityPaths): { ok: true; key: Buffer } | { ok: false; reason: IntegrityReason; detail: string } {
+function readKey(paths: IntegrityPaths): { ok: true; key: Buffer } | { ok: false; reason: IntegrityReason; detail: string; absent?: boolean } {
   let key: Buffer;
   try {
     key = readFileSync(paths.keyPath);
   } catch (err) {
-    return { ok: false, reason: "unavailable", detail: `cannot read the custody key: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, reason: "unavailable", absent: (err as NodeJS.ErrnoException).code === "ENOENT", detail: `cannot read the custody key: ${msg(err)}` };
   }
   if (key.length !== 32) {
     return { ok: false, reason: "custody_invalid", detail: `the custody key is ${key.length} bytes, expected 32` };
@@ -943,7 +957,7 @@ function reconcileUncertainMarker(paths: IntegrityPaths, key: Buffer, checkpoint
 
 function createInitialRegistry(key: Buffer, operatorUid: number, machineId: string): IntegrityRegistry {
   const enrollmentId = `enr_${randomBytes(16).toString("hex")}`;
-  return signIntegrityRecord({
+  return prepareIntegrityRecord<IntegrityRegistry>(() => ({
     version: INTEGRITY_STATE_VERSION,
     kind: "registry",
     sequence: 1,
@@ -955,7 +969,7 @@ function createInitialRegistry(key: Buffer, operatorUid: number, machineId: stri
       machineId,
       status: "active",
     }],
-  } satisfies Omit<IntegrityRegistry, "hmac">, key);
+  }), key);
 }
 
 function writeInitialRegistry(
@@ -1093,13 +1107,21 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
   const fsCheck = assertSupportedLocalFilesystem(paths.custodyDir);
   if (!fsCheck.ok) return fail("custody_invalid", fsCheck.reason);
 
-  if (existsSync(paths.registryPath)) {
+  let registryPresent: boolean;
+  try {
+    lstatSync(paths.registryPath);
+    registryPresent = true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      return fail("unavailable", `cannot inspect the registry: ${msg(err)}`);
+    }
+    registryPresent = false;
+  }
+  if (registryPresent) {
     const registryEntry = checkManagedEntry(paths.registryPath, "file", uid);
     if (!registryEntry.ok) return fail(registryEntry.reason, registryEntry.detail);
-    if (existsSync(paths.keyPath)) {
-      const keyEntry = checkManagedEntry(paths.keyPath, "file", uid);
-      if (!keyEntry.ok) return fail(keyEntry.reason, keyEntry.detail);
-    }
+    const keyEntry = checkManagedEntry(paths.keyPath, "file", uid, true);
+    if (!keyEntry.ok) return fail(keyEntry.reason, keyEntry.detail);
     const key = readKey(paths);
     if (!key.ok) return fail(key.reason, key.detail);
     const read = readRegistry(paths, key.key);
@@ -1121,10 +1143,7 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
   try {
     initialRegistry = createInitialRegistry(keyBytes, uid, machineId);
   } catch (err) {
-    return fail("custody_invalid", `the initial registry is not plain JSON: ${msg(err)}`);
-  }
-  if (!validateRegistryShape(initialRegistry)) {
-    return fail("custody_invalid", "the initial registry is not a valid v3 integrity registry");
+    return fail("custody_invalid", `cannot prepare the initial registry: ${msg(err)}`);
   }
 
   try {
@@ -1162,8 +1181,7 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
   return openWithRegistry(paths, key.key, registry, opts, uid, machineId, derived.uid, derived.source, true);
 }
 
-/** Open existing custody and recover an interrupted commit before returning.
- *  Custody is rechecked on every open. */
+/** Open existing custody and recover an interrupted commit. */
 export function openIntegrityState(opts: IntegrityStateOptions): IntegrityStateResult {
   const uid = opts.operatorUid ?? currentUid();
   if (uid === null) return fail("custody_invalid", "the process has no uid; custody cannot be verified");
@@ -1175,20 +1193,20 @@ export function openIntegrityState(opts: IntegrityStateOptions): IntegrityStateR
   }
 
   const paths = integrityPaths(opts.custodyDir);
+  for (const [managed, kind] of [
+    [paths.custodyDir, "dir"], [paths.generationsDir, "dir"],
+    [paths.keyPath, "file"], [paths.registryPath, "file"], [paths.currentPath, "file"],
+  ] as const) {
+    const check = checkManagedEntry(managed, kind, uid, true);
+    if (!check.ok) return fail(check.reason, check.detail);
+  }
+
   const fsCheck = ensureLocalFilesystem(paths);
   if (!fsCheck.ok) return fail(fsCheck.reason, fsCheck.detail);
 
-  // Refuse a symlinked or wrongly-moded managed file BEFORE reading it.
-  for (const [managed, kind] of [[paths.keyPath, "file"], [paths.registryPath, "file"], [paths.currentPath, "file"]] as const) {
-    if (existsSync(managed)) {
-      const check = checkManagedEntry(managed, kind, uid);
-      if (!check.ok) return fail(check.reason, check.detail);
-    }
-  }
-
   const key = readKey(paths);
   if (!key.ok) {
-    if (key.reason === "unavailable" && !existsSync(paths.keyPath)) {
+    if (key.reason === "unavailable" && key.absent) {
       const history = hasGenerationHistory(paths);
       if (history.kind === "error") return fail(history.reason, history.detail);
       if (history.kind === "yes") return fail("custody_invalid", "the key is absent while generation history exists");
@@ -1291,35 +1309,24 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   }
 
   const nextGeneration = opts.expectedGeneration + 1;
-  const checkpointPayload = checkpointPayloadFor(opts, nextGeneration);
   let checkpoint: IntegrityCheckpointV3;
   let pointer: IntegrityCurrentPointer;
   let generationBytes: Uint8Array;
   try {
-    checkpoint = signIntegrityRecord(checkpointPayload, state.key);
-    pointer = signIntegrityRecord({
+    checkpoint = prepareIntegrityRecord<IntegrityCheckpointV3>(() => checkpointPayloadFor(opts, nextGeneration), state.key);
+    pointer = prepareIntegrityRecord<IntegrityCurrentPointer>(() => ({
       version: INTEGRITY_STATE_VERSION,
       kind: "current",
       enrollmentId: state.enrollment.enrollmentId,
       generation: nextGeneration,
-    } satisfies Omit<IntegrityCurrentPointer, "hmac">, state.key);
+    }), state.key);
     generationBytes = jsonBytes(checkpoint);
   } catch (err) {
     return {
       ok: false,
       status: "commit_failed",
       reason: "checkpoint_incompatible",
-      detail: `the checkpoint payload is not plain JSON: ${msg(err)}`,
-      remedy: INTEGRITY_REASON_REMEDIES.checkpoint_incompatible,
-    };
-  }
-
-  if (!validateCheckpointShape(checkpoint)) {
-    return {
-      ok: false,
-      status: "commit_failed",
-      reason: "checkpoint_incompatible",
-      detail: "the checkpoint is not a valid v3 integrity checkpoint",
+      detail: `cannot prepare the checkpoint: ${msg(err)}`,
       remedy: INTEGRITY_REASON_REMEDIES.checkpoint_incompatible,
     };
   }
@@ -1492,14 +1499,14 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
     if (!entry) return holdMessage("custody_invalid", `enrollment ${enrollmentId} is not registered`);
     if (entry.status === "tombstoned") return holdMessage("custody_invalid", `enrollment ${enrollmentId} is already tombstoned`);
     nextSequence = registry.sequence + 1;
-    const updated = signIntegrityRecord({
+    const updated = prepareIntegrityRecord<IntegrityRegistry>(() => ({
       version: INTEGRITY_STATE_VERSION,
       kind: "registry",
       sequence: nextSequence,
       entries: registry.entries.map((candidate) => candidate.enrollmentId === enrollmentId
         ? { ...candidate, status: "tombstoned" as const, tombstonedAt: new Date().toISOString() }
         : candidate),
-    } satisfies Omit<IntegrityRegistry, "hmac">, state.key);
+    }), state.key);
     return { write: jsonBytes(updated) };
   };
   const stage = (): (() => void) => {

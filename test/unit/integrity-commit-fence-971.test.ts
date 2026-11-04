@@ -1,11 +1,6 @@
 /**
  * integrity-commit-fence-971.test.ts — flair#971 slice 1a, invariant 7.
  *
- * Proves the commit fence on `withConfigCriticalSection`: competing writers
- * hold on the pre-scan generation, a failure before the rename leaves CURRENT
- * unchanged, a staged generation is never commit evidence on its own, a
- * post-rename fsync warning is `commit_uncertain`, and the next open reconciles
- * an uncertain commit before proceeding.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import {
@@ -237,14 +232,14 @@ describe("commit-fence (invariant 7)", () => {
     if (afterRetry.ok) expect(afterRetry.state.generation).toBe(2);
   });
 
-  it("reports a post-rename directory-fsync warning as commit_uncertain, never success", () => {
+  it("reports a hook throw before directory fsync as commit_uncertain", () => {
     const state = init();
     commit(state, 0);
     const uncertain = commitGeneration({
       state,
       expectedGeneration: 1,
       checkpoint: payload(),
-      testHooks: { afterRename: () => { throw new Error("injected post-rename fsync failure"); } },
+      testHooks: { afterRename: () => { throw new Error("injected hook failure before directory fsync"); } },
     });
     expect(uncertain.ok).toBe(false);
     if (uncertain.ok) return;

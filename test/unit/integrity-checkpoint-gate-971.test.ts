@@ -10,6 +10,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -20,6 +21,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import ts from "typescript";
 
 import {
   INTEGRITY_REASONS,
@@ -32,6 +34,7 @@ import {
   integrityPaths,
   machineIdentity,
   openIntegrityState,
+  signIntegrityRecord,
   tombstoneEnrollment,
   type IntegrityStateOptions,
 } from "../../src/lib/integrity-state.ts";
@@ -95,6 +98,22 @@ function commitFirst(state = init(), expectedGeneration = 0) {
 }
 
 describe("checkpoint-gate (invariant 1)", () => {
+  it("calls the signer only inside prepareIntegrityRecord", () => {
+    const path = join(import.meta.dirname, "../../src/lib/integrity-state.ts");
+    const source = ts.createSourceFile(path, readFileSync(path, "utf-8"), ts.ScriptTarget.Latest, true);
+    const calls: { owner: string; line: number }[] = [];
+    function visit(node: ts.Node, owner = "module"): void {
+      if (ts.isFunctionDeclaration(node)) owner = node.name?.text ?? "anonymous";
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "signIntegrityRecord") {
+        calls.push({ owner, line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1 });
+      }
+      ts.forEachChild(node, (child) => visit(child, owner));
+    }
+    visit(source);
+    expect(calls.filter((call) => call.owner !== "prepareIntegrityRecord")).toEqual([]);
+    expect(calls).toHaveLength(1);
+  });
+
   it("fixes the twelve reason strings and pairs each with a remedy", () => {
     expect(INTEGRITY_REASONS).toEqual([
       "uninitialized",
@@ -206,6 +225,23 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(result.detail).toContain("symlink");
   });
 
+  for (const filename of ["registry.json", "CURRENT"]) {
+    it(`refuses a dangling ${filename} symlink at open and custody check`, () => {
+      const state = init();
+      const path = join(custodyDir, filename);
+      rmSync(path, { force: true });
+      symlinkSync(join(root, "absent-target"), path);
+      const opened = openIntegrityState(options({ newCustody: false }));
+      expect(opened).toMatchObject({ ok: false, reason: "custody_invalid" });
+      if (!opened.ok) expect(opened.detail).toBe(`${path} is a symlink`);
+      const custody = checkCustody({
+        paths: state.paths, serverUid: SERVER_UID, operatorUid: OPERATOR_UID, machineId: MACHINE,
+      });
+      expect(custody).toMatchObject({ ok: false, reason: "custody_invalid" });
+      if (!custody.ok) expect(custody.detail).toBe(`${path} is a symlink`);
+    });
+  }
+
   it("refuses a symlinked custody directory", () => {
     init();
     const real = join(root, "custody-real");
@@ -294,6 +330,32 @@ describe("checkpoint-gate (invariant 1)", () => {
     if (!opened.ok) expect(opened.reason).toBe("custody_invalid");
   });
 
+  it("refuses tombstone sequence overflow without changing custody files and reopens the registry", () => {
+    const state = init();
+    commitFirst(state);
+    const paths = state.paths;
+    const registry = JSON.parse(readFileSync(paths.registryPath, "utf-8"));
+    registry.sequence = Number.MAX_SAFE_INTEGER;
+    writeFileSync(paths.registryPath, `${canonicalJson(signIntegrityRecord(registry, state.key))}\n`);
+    const before = readFileSync(paths.registryPath);
+    const pointerBefore = readFileSync(paths.currentPath);
+    const generationBefore = readFileSync(generationPath(paths.generationsDir, 1));
+    const entriesBefore = readdirSync(paths.custodyDir).sort();
+    const generationsBefore = readdirSync(paths.generationsDir).sort();
+    expect(openIntegrityState(options({ newCustody: false })).ok).toBe(true);
+    const result = tombstoneEnrollment({ ...options(), expectedSequence: Number.MAX_SAFE_INTEGER });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.detail).toContain("safe integer range");
+    expect(readFileSync(paths.registryPath)).toEqual(before);
+    expect(readFileSync(paths.currentPath)).toEqual(pointerBefore);
+    expect(readFileSync(generationPath(paths.generationsDir, 1))).toEqual(generationBefore);
+    expect(readdirSync(paths.custodyDir).sort()).toEqual(entriesBefore);
+    expect(readdirSync(paths.generationsDir).sort()).toEqual(generationsBefore);
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    expect(reopened.ok).toBe(true);
+    if (reopened.ok) expect(reopened.state.registry.sequence).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
   it("N5: an absent registry with generation history is custody_invalid, never uninitialized", () => {
     const state = init();
     commitFirst(state);
@@ -379,7 +441,7 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(lstatSync(custodyDir, { throwIfNoEntry: false })).toBeUndefined();
   });
 
-  it("refuses an unreadable generation history instead of reading it as none", () => {
+  it("refuses a regular file at the generation directory", () => {
     const state = init();
     commitFirst(state);
     const paths = integrityPaths(custodyDir);
@@ -390,8 +452,8 @@ describe("checkpoint-gate (invariant 1)", () => {
     const opened = openIntegrityState(options({ newCustody: false }));
     expect(opened.ok).toBe(false);
     if (!opened.ok) {
-      expect(opened.reason).toBe("unavailable");
-      expect(opened.detail).toContain("cannot list");
+      expect(opened.reason).toBe("custody_invalid");
+      expect(opened.detail).toContain("not a plain dir");
     }
   });
 

@@ -194,9 +194,8 @@ export interface ConfigSectionOptions {
    *  does not land (a throw or a pre-rename failure). Added for the integrity
    *  generation/registry protocol (flair#971); existing sinks leave it unset. */
   stage?: (bytes: Uint8Array, identity: ConfigObservation) => void | (() => void);
-  /** Runs under the lock immediately after a successful replacement. A throw
-   *  is reported as a post-rename cleanup warning (the replacement is
-   *  committed). Used by the integrity protocol to clear its intent marker. */
+  /** Runs under the lock after replacement with no cleanup warning.
+   *  A throw becomes a cleanup warning. */
   onCommitted?: () => void;
   /** TEST-ONLY deterministic barriers at the production read/write boundary.
    *  Inert unless a fixture sets them. `afterPreObserve` fires between the
@@ -214,9 +213,8 @@ export interface ConfigSectionOptions {
     afterRead?: (attempt: number) => void;
     afterTempCreate?: (tempPath: string) => void;
     afterFsync?: (tempPath: string) => void;
-    /** TEST-ONLY: fires AFTER the rename landed and BEFORE the parent
-     *  directory fsync. A throw is reported as a post-rename cleanup warning,
-     *  exactly as a real directory-fsync failure is. */
+    /** TEST-ONLY: runs after rename, before directory fsync.
+     *  A throw skips that fsync and returns a cleanup warning. */
     afterRename?: (targetPath: string) => void;
   };
 }
@@ -263,9 +261,7 @@ export type FilesystemSupport =
   | { ok: true; type: string }
   | { ok: false; reason: string };
 
-/** Whether a Linux statfs magic is one of the recognized local filesystems.
- *  Exported so the refusal policy can be pinned without mounting a network
- *  filesystem. */
+/** Whether a Linux statfs magic is allowlisted. */
 export function isSupportedLocalFilesystemType(type: number): boolean {
   return Object.hasOwn(LOCAL_FILESYSTEM_TYPES, type);
 }
@@ -363,7 +359,6 @@ export function classifyDarwinFilesystem(
   return { ok: true, type: entry.type.toLowerCase() };
 }
 
-/** Check the nearest existing ancestor against the filesystem allowlist. */
 export function assertSupportedLocalFilesystem(targetPath: string): FilesystemSupport {
   let probe = resolve(targetPath);
   // Bounded: `/` exists on every supported host; stop at the root.
@@ -396,7 +391,7 @@ export function assertSupportedLocalFilesystem(targetPath: string): FilesystemSu
   }
   const name = isSupportedLocalFilesystemType(st.type) ? LOCAL_FILESYSTEM_TYPES[st.type] : undefined;
   if (!name) {
-    return { ok: false, reason: `filesystem type 0x${st.type.toString(16)} at ${probe} is not a recognized local filesystem` };
+    return { ok: false, reason: `filesystem type 0x${st.type.toString(16)} at ${probe} is not allowlisted for custody` };
   }
   return { ok: true, type: name };
 }
