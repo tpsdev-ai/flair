@@ -1442,6 +1442,20 @@ test("an alias passed as an argument is an unaccounted use, not a silent pass", 
   expect(inventory.unaccountedAliasUses).toEqual(["fixture.ts:3: R"]);
 });
 
+test("an alias passed to a function in another module is an unaccounted use", () => {
+  const policyFile = "resources/soul-write-policy.ts";
+  const soulFile = "resources/Soul.ts";
+  const policy = ts.createSourceFile(policyFile,
+    'export function callWith(callee: any) { return callee({ error: "x" }, { status: 403 }); }',
+    ts.ScriptTarget.Latest, true);
+  const soul = ts.createSourceFile(soulFile,
+    'import { callWith } from "./soul-write-policy.js";\nconst R = Response;\ncallWith(R);',
+    ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([[policyFile, policy], [soulFile, soul]]));
+  expect([...inventory.codes]).toEqual([]);
+  expect(inventory.unaccountedAliasUses).toEqual([`${soulFile}:3: R`]);
+});
+
 test("an alias stored in an object property is an unaccounted use, not a silent pass", () => {
   const source = ts.createSourceFile("fixture.ts",
     'const o = { r: Response };\no.r.json({ error: "x" }, { status: 403 });', ts.ScriptTarget.Latest, true);
