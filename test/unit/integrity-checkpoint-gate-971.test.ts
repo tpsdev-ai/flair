@@ -35,6 +35,7 @@ import {
   machineIdentity,
   openIntegrityState,
   signIntegrityRecord,
+  verifyIntegrityRecord,
   tombstoneEnrollment,
   type IntegrityStateOptions,
 } from "../../src/lib/integrity-state.ts";
@@ -112,6 +113,39 @@ describe("checkpoint-gate (invariant 1)", () => {
     visit(source);
     expect(calls.filter((call) => call.owner !== "prepareIntegrityRecord")).toEqual([]);
     expect(calls).toHaveLength(1);
+  });
+
+  it("preserves an own __proto__ key in the prepared current record", () => {
+    const path = join(import.meta.dirname, "../../src/lib/integrity-state.ts");
+    const source = ts.createSourceFile(path, readFileSync(path, "utf-8"), ts.ScriptTarget.Latest, true);
+    const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) &&
+      ["prepareIntegrityRecord", "validateCurrentShape"].includes(node.name?.text ?? ""));
+    expect(declarations).toHaveLength(2);
+    const code = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    let signed = false;
+    const prepare = new Function("canonicalJson", "signIntegrityRecord", `${code}\nreturn prepareIntegrityRecord;`)(
+      canonicalJson,
+      (record: Record<string, unknown>, key: Buffer) => {
+        expect(Object.hasOwn(record, "__proto__")).toBe(true);
+        expect(Object.getOwnPropertyDescriptor(record, "__proto__")).toEqual({
+          value: { marker: true }, writable: true, enumerable: true, configurable: true,
+        });
+        expect(Object.getPrototypeOf(record)).toBe(null);
+        expect(record.hmac).toBe("");
+        signed = true;
+        return signIntegrityRecord(record, key);
+      },
+    ) as (build: () => Record<string, unknown>, key: Buffer) => Record<string, unknown>;
+    const key = Buffer.alloc(32, 7);
+    const record = prepare(() => ({
+      version: 3, kind: "current", enrollmentId: "enr-test", generation: 1,
+      ["__proto__"]: { marker: true },
+    }), key);
+    expect(signed).toBe(true);
+    expect(Object.hasOwn(record, "__proto__")).toBe(true);
+    expect(verifyIntegrityRecord(record, key)).toBe(true);
   });
 
   it("fixes the twelve reason strings and pairs each with a remedy", () => {

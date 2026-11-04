@@ -701,7 +701,9 @@ function prepareIntegrityRecord<T extends CustodyRecord>(
   build: () => Omit<T, "hmac">,
   key: Buffer,
 ): T {
-  const record = Object.assign(Object.create(null), JSON.parse(canonicalJson(build())), { hmac: "" }) as T & Record<string, unknown>;
+  const record = Object.create(null) as T & Record<string, unknown>;
+  for (const [field, value] of Object.entries(JSON.parse(canonicalJson(build())))) record[field] = value;
+  record.hmac = "";
   const counters = record.kind === "registry"
     ? [record.sequence, ...record.entries.map((entry) => entry.sequence)]
     : [record.generation, ...(record.kind === "checkpoint" ? Object.values(record.baseline.byDurability) : [])];
