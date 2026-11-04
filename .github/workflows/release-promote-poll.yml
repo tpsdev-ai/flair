@@ -246,14 +246,25 @@ jobs:
             fi
             echo "v${version}: READY"
             if gh api "repos/${REPO}/actions/workflows/release-promote.yml" >/dev/null 2>&1; then
-              # Match only the non-dry-run title across all pages. This is a
+              REF_ERROR="$(mktemp)"
+              if ! gh api "repos/${REPO}/contents/.github/workflows/release-promote.yml?ref=${ref}" >/dev/null 2>"${REF_ERROR}"; then
+                if grep -Eq '\(HTTP 404\)$' "${REF_ERROR}"; then
+                  echo "${version}" >> "${HANDLED}"
+                  echo "  v${version}: would dispatch: the tag predates the release machinery"
+                  continue
+                fi
+                cat "${REF_ERROR}" >&2
+                echo "release-promote-poll: ERROR — could not verify release-promote.yml at ${ref}; refusing to dispatch" >&2
+                exit 1
+              fi
+              # Match only the tag non-dry-run title across all pages. This is a
               # list-then-dispatch check, not a reservation.
               RUNS="$(mktemp)"
               if ! gh api --paginate "repos/${REPO}/actions/workflows/release-promote.yml/runs?per_page=100" > "${RUNS}"; then
                 echo "release-promote-poll: ERROR — could not list runs of release-promote.yml; refusing to dispatch for v${version} (unknown is not 'no run')" >&2
                 exit 1
               fi
-              ALREADY="$(jq -s -r --arg t "release-promote v${version}" 'if length > 0 and all(.[]; (.workflow_runs | type) == "array") then [.[].workflow_runs[]] | any(.display_title == $t and (.status == "queued" or .status == "in_progress" or (.status == "completed" and .conclusion == "success"))) else "invalid" end' "${RUNS}")"
+              ALREADY="$(jq -s -r --arg t "release-promote tag v${version}" 'if length > 0 and all(.[]; (.workflow_runs | type) == "array") then [.[].workflow_runs[]] | any(.display_title == $t and (.status == "queued" or .status == "in_progress" or (.status == "completed" and .conclusion == "success"))) else "invalid" end' "${RUNS}")"
               if [ "${ALREADY}" != "true" ] && [ "${ALREADY}" != "false" ]; then
                 echo "release-promote-poll: ERROR — could not interpret the release-promote.yml run list for v${version}; refusing to dispatch" >&2
                 exit 1
@@ -263,7 +274,7 @@ jobs:
                 echo "  v${version}: a non-dry-run promotion is queued, in progress or successful — not dispatching again"
                 continue
               fi
-              NEEDS_REVIEW="$(jq -s -r --arg t "release-promote v${version}" '[.[].workflow_runs[]] | any(.display_title == $t)' "${RUNS}")"
+              NEEDS_REVIEW="$(jq -s -r --arg t "release-promote tag v${version}" '[.[].workflow_runs[]] | any(.display_title == $t)' "${RUNS}")"
               if [ "${NEEDS_REVIEW}" = "true" ]; then
                 echo "${version}" >> "${HANDLED}"
                 echo "::warning::v${version}: a non-dry-run promotion requires human review — not dispatching again; a human must inspect the run before retrying"

@@ -35,6 +35,12 @@ import {
   strayUnreleasedEntries,
 } from "./changelog-fragments.mjs";
 import { changeTouchesPublished } from "./published-paths.mjs";
+import {
+  isDependencyOnlyChange,
+  isRenovateDependencyCommit,
+  isRenovateLogin,
+  RENOVATE_LOGIN,
+} from "./dependency-change.mjs";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "../..");
 const IN_CI = !!process.env.GITHUB_ACTIONS;
@@ -355,8 +361,9 @@ defineCheck("changelog-unreleased", null, () => {
     });
   }
 
-  // How much work has landed since the last release?
+  // How much work has landed since the tag selected by git describe?
   let commitsSinceTag = null;
+  let excludedRenovateCommits = 0;
   try {
     const tag = execFileSync("git", ["describe", "--tags", "--abbrev=0", "--match", "v*"],
       { cwd: ROOT, env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "pass the literal release-tag glob to git describe" }, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
@@ -364,11 +371,25 @@ defineCheck("changelog-unreleased", null, () => {
     // string here means git succeeded and told us nothing. Treated as unmet, not
     // as "zero commits since the tag" — the difference is a dark check.
     if (!tag) throw new Error("git describe returned no v* tag");
-    const subjects = execFileSync("git", ["log", `${tag}..HEAD`, "--pretty=%s"],
+    const log = execFileSync("git", ["log", `${tag}..HEAD`, "--pretty=%H%x00%s"],
       { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
-    commitsSinceTag = subjects
-      ? subjects.split("\n").filter((s) => /^(feat|fix)(\(|!|:)/.test(s)).length
-      : 0;
+    const rows = log
+      ? log.split("\n").map((line) => {
+        const [sha, ...rest] = line.split("\0");
+        return { sha, subject: rest.join("\0") };
+      })
+      : [];
+    // Exclude eligible feat/fix commits from the missing-fragment count, and
+    // track how many were excluded so the per-change rule can report a skip
+    // when it cannot cover them either.
+    commitsSinceTag = rows.filter(({ sha, subject }) => {
+      if (!/^(feat|fix)(\(|!|:)/.test(subject)) return false;
+      if (isRenovateDependencyCommit(sha, ROOT)) {
+        excludedRenovateCommits++;
+        return false;
+      }
+      return true;
+    }).length;
   } catch (err) {
     // No tags, shallow clone, or not a git repo. The stray-entry rule above DID
     // run; the "work landed with nothing written down" rule did not — which is
@@ -377,7 +398,7 @@ defineCheck("changelog-unreleased", null, () => {
     // specifically so this path is never taken there; if it is, the workflow has
     // drifted away from the gate and that is worth failing over.
     return { failures, scanned: null, skips: [skip(
-      `could not resolve the last v* tag (${err?.message ?? err}), so 'feat/fix commits landed since the release with no changelog fragment' was NOT checked.`,
+      `could not check the since-tag feat/fix history (${err?.message ?? err}), so the fragment rule was NOT checked.`,
       "git fetch --tags --unshallow  (CI uses actions/checkout with fetch-depth: 0)",
     )] };
   }
@@ -417,6 +438,7 @@ defineCheck("changelog-unreleased", null, () => {
   //
   // Default true so a missing merge-base does not become an unpublished escape.
   let thisChangeShips = true;
+  let changedPaths = null;
   const baseRef = process.env.GITHUB_BASE_REF
     ? `origin/${process.env.GITHUB_BASE_REF}`
     : "origin/main";
@@ -425,19 +447,26 @@ defineCheck("changelog-unreleased", null, () => {
     base = execFileSync("git", ["merge-base", "HEAD", baseRef],
       { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
     if (base) {
-      const changed = execFileSync("git", ["diff", "--name-only", `${base}..HEAD`],
-        { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
-      const changedPaths = changed ? changed.split("\n") : [];
+      const changed = execFileSync("git", ["diff", "--no-renames", "--name-only", "-z", `${base}..HEAD`],
+        { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString();
+      changedPaths = changed.split("\0").filter((p) => p !== "");
       thisChangeShips = changeTouchesPublished(changedPaths, ROOT);
     }
   } catch {
     // merge-base or diff unavailable — leave thisChangeShips true (fail-closed).
   }
 
-  if (commitsSinceTag !== null && commitsSinceTag > 0 && !hasContent && thisChangeShips) {
+  // ── Renovate dependency waiver (flair#2872) ──────────────────────────────────
+  // Both halves must hold: the login supplied by the workflow, and
+  // changed Git paths with accepted basenames. The waiver predicate reads that
+  // login, not commit metadata; an empty or missing value does not waive.
+  const waiverApplies = isRenovateLogin(process.env.FLAIR_PR_AUTHOR_LOGIN) &&
+    changedPaths !== null && isDependencyOnlyChange(changedPaths);
+
+  if (commitsSinceTag !== null && commitsSinceTag > 0 && !hasContent && thisChangeShips && !waiverApplies) {
     failures.push({
       file: `${FRAGMENT_DIR_REL}/`, line: 1,
-      msg: `no changelog fragments staged, but ${commitsSinceTag} feat/fix commit(s) have landed since the last release tag. Add ${FRAGMENT_DIR_REL}/<category>-<slug>.md describing what changed (categories: ${CATEGORIES.join(", ")}).`,
+      msg: `no changelog fragments staged, but ${commitsSinceTag} feat/fix commit(s) have landed since the tag selected by git describe. Add ${FRAGMENT_DIR_REL}/<category>-<slug>.md describing what changed (categories: ${CATEGORIES.join(", ")}).`,
     });
   }
 
@@ -458,6 +487,8 @@ defineCheck("changelog-unreleased", null, () => {
   // add a fragment? A fragment must be ADDED (--diff-filter=A) — editing someone
   // else's staged entry is not writing your own. And only if the change touches
   // a published path: a scripts/-only fix is not a changelog event.
+  let perChangeRuleRan = false;
+  let perChangeRuleError = null;
   try {
     if (base) {
       const range = `${base}..HEAD`;
@@ -470,20 +501,32 @@ defineCheck("changelog-unreleased", null, () => {
         ["diff", "--diff-filter=A", "--name-only", range, "--", `${FRAGMENT_DIR_REL}/`],
         { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
       const addedCount = added ? added.split("\n").filter((p) => !/\/README\.md$/.test(p)).length : 0;
+      perChangeRuleRan = true;
 
       if (thisChangeShips && changeCommits > 0 && addedCount === 0) {
-        failures.push({
-          file: `${FRAGMENT_DIR_REL}/`, line: 1,
-          msg: `this change has ${changeCommits} feat/fix commit(s) since ${baseRef} but adds no changelog fragment. The directory being non-empty is not enough — an entry already there belongs to someone else's change. Add ${FRAGMENT_DIR_REL}/<category>-<slug>.md (categories: ${CATEGORIES.join(", ")}).`,
-        });
+        if (waiverApplies) {
+          console.log(`  ↷ changelog-unreleased: waived the per-PR fragment requirement — FLAIR_PR_AUTHOR_LOGIN matches ${RENOVATE_LOGIN} and every changed Git basename exactly matches package.json, bun.lock, bun.lockb, package-lock.json, or npm-shrinkwrap.json.`);
+        } else {
+          failures.push({
+            file: `${FRAGMENT_DIR_REL}/`, line: 1,
+            msg: `this change has ${changeCommits} feat/fix commit(s) since ${baseRef} but adds no changelog fragment. The directory being non-empty is not enough — an entry already there belongs to someone else's change. Add ${FRAGMENT_DIR_REL}/<category>-<slug>.md (categories: ${CATEGORIES.join(", ")}).`,
+          });
+        }
       }
     }
-  } catch {
-    // No base ref reachable — a shallow clone, a detached build, or a repo with
-    // no `origin`. The since-tag rule above still ran, so coverage is partial
-    // rather than absent, and the release-cut case is still guarded. Deliberately
-    // not a skip: skips suppress the whole check, and the half that DID run is
-    // the half that catches an empty directory at a release.
+  } catch (err) {
+    perChangeRuleError = err;
+  }
+
+  // With no fragments, excluded Renovate commits need the per-change rule.
+  // (The release-PR exception above returns before this point.)
+  if (!hasContent && !perChangeRuleRan && excludedRenovateCommits > 0) {
+    return { failures, scanned: null, skips: [skip(
+      `the per-change fragment rule did not run (${perChangeRuleError ? `git read failed: ${perChangeRuleError?.message ?? perChangeRuleError}` : `no merge base with ${baseRef}`}), and ${excludedRenovateCommits} feat/fix commit(s) were excluded from the since-tag count as Renovate dependency commits, so no rule checked them.`,
+      perChangeRuleError
+        ? "resolve the reported git error and rerun"
+        : `fetch the full history including ${baseRef} (CI: fetch-depth: 0; local: git fetch --unshallow if shallow, and fetch the base ref)`,
+    )] };
   }
 
   return failures;

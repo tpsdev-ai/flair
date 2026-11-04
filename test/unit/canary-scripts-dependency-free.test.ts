@@ -11,14 +11,9 @@
  * credential-less runner that NEVER installs this repo's dependencies, so any
  * bare package specifier in a script it runs is a hard crash at module load.
  *
- * This is the CLASS guard, not a check of that one file. It walks every script
- * the canary runs — `node scripts/...` invocations in the workflow, the
- * `scripts/ci/*.sh` helpers the workflow calls, and the node scripts those shell
- * scripts invoke — follows relative imports transitively, and asserts every
- * import specifier is a `node:` builtin or a relative path.
- *
- * A bare specifier anywhere in that closure is a dependency the canary cannot
- * resolve. Adding `import x from "semver"` to any canary script turns this red.
+ * The walker records literal `node scripts/...` calls and `scripts/...*.sh`
+ * paths, their supported `$SCRIPT_DIR` siblings, and relative imports.
+ * Bare package specifiers in the recorded modules fail this check.
  */
 
 import { beforeAll, describe, expect, test } from "bun:test";

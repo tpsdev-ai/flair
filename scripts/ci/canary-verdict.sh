@@ -349,7 +349,7 @@ while IFS= read -r _line; do
   _SKEW_PREV[\${#_SKEW_PREV[@]}]="\$_line"
 done < "\$PREV_LATEST"
 set +e
-node scripts/ci/registry-latest-skew.mjs ${VERSION} --await ${SKEW_AWAIT_S} "\${_SKEW_PREV[@]}"
+node scripts/ci/registry-latest-skew.mjs ${VERSION} --await ${SKEW_AWAIT_S} \${_SKEW_PREV[@]+"\${_SKEW_PREV[@]}"}
 _skew=\$?
 set -e
 if [ "\$_skew" -ne 0 ]; then

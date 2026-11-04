@@ -171,7 +171,7 @@ describe("release-promote-poll — round 2: derivation, payload version, all pag
 describe("release-promote-poll — visible-run check (#1928 slice 2)", () => {
   const runScript = () => (job("poll").steps ?? []).map((s) => s.run ?? "").join("\n");
 
-  test("the READY dispatch checks non-dry-run attempts and refuses an unreadable run list", () => {
+  test("the READY dispatch checks tag non-dry-run attempts and refuses an unreadable run list", () => {
     const script = runScript();
     expect(script).toContain("release-promote.yml/runs");
     expect(script).toContain("not dispatching again");
@@ -206,25 +206,25 @@ describe("release-promote-poll — visible-run check (#1928 slice 2)", () => {
   }
   const page = (...runs: unknown[]) => ({ total_count: 999, workflow_runs: runs });
 
-  test("ALREADY matches only queued, in-progress or successful non-dry-run titles", () => {
+  test("ALREADY matches only queued, in-progress or successful tag non-dry-run titles", () => {
     for (const state of [{ status: "queued" }, { status: "in_progress" }, { status: "completed", conclusion: "success" }]) {
-      expect(already([page({ display_title: "release-promote v1.2.3", head_branch: null, ...state })])).toBe("true");
-      expect(already([page({ display_title: "release-promote v1.2.3 (dry run)", head_branch: "v1.2.3", ...state })])).toBe("false");
+      expect(already([page({ display_title: "release-promote tag v1.2.3", head_branch: "v1.2.3", ...state })])).toBe("true");
+      expect(already([page({ display_title: "release-promote tag v1.2.3 (dry run)", head_branch: "v1.2.3", ...state })])).toBe("false");
       expect(already([page({ display_title: "other", head_branch: "v1.2.3", ...state })])).toBe("false");
-      expect(already([page({ display_title: "release-promote v1.2.2", head_branch: "v1.2.2", ...state })])).toBe("false");
+      expect(already([page({ display_title: "release-promote tag v1.2.2", head_branch: "v1.2.2", ...state })])).toBe("false");
     }
-    expect(already([page({ display_title: "release-promote v1.2.3", status: "completed", conclusion: "failure" })])).toBe("false");
+    expect(already([page({ display_title: "release-promote tag v1.2.3", status: "completed", conclusion: "failure" })])).toBe("false");
     expect(already([page()])).toBe("false");
   });
 
   test("BEHAVIOURAL: every page is flattened into ONE decision — a match on page two is found", () => {
     const p1 = page(
-      ...Array.from({ length: 100 }, (_, i) => ({ display_title: `release-promote v0.0.${i}`, head_branch: `v0.0.${i}` })),
+      ...Array.from({ length: 100 }, (_, i) => ({ display_title: `release-promote tag v0.0.${i}`, head_branch: `v0.0.${i}` })),
     );
-    const p2 = page({ display_title: "release-promote v1.2.3", head_branch: "v1.2.3", status: "in_progress" });
+    const p2 = page({ display_title: "release-promote tag v1.2.3", head_branch: "v1.2.3", status: "in_progress" });
     expect(already([p1, p2])).toBe("true");
     // …and two pages with no match anywhere are ONE "false", not one value per page.
-    expect(already([p1, page({ display_title: "release-promote v1.2.2", head_branch: "v1.2.2" })])).toBe("false");
+    expect(already([p1, page({ display_title: "release-promote tag v1.2.2", head_branch: "v1.2.2" })])).toBe("false");
   });
 
   test("BEHAVIOURAL: an uninterpretable run list is never read as 'no run'", () => {
@@ -458,7 +458,7 @@ function setDigest(version: string, pkgs: string[]): string {
   return createHash("sha256").update(rows.join("")).digest("hex");
 }
 /** Run the real "Poll and dispatch" step in a fixture tree; returns the dispatches it made. */
-function runPoll(markers: unknown[], boundary: { ok: string; reason?: string }, runs: unknown[] = []) {
+function runPoll(markers: unknown[], boundary: { ok: string; reason?: string }, runs: unknown[] = [], refStatus = 200) {
   const dir = mkdtempSync(join(tmpdir(), "poll-run-"));
   try {
     mkdirSync(join(dir, "scripts", "ci"), { recursive: true });
@@ -477,9 +477,13 @@ function runPoll(markers: unknown[], boundary: { ok: string; reason?: string }, 
       {
         [`repos/${R}/deployments`]: markers,
         [`repos/${R}/actions/workflows/release-promote.yml`]: { id: 1 },
+        [`repos/${R}/contents/.github/workflows/release-promote.yml`]: { type: "file" },
         [`repos/${R}/actions/workflows/release-promote.yml/runs`]: { total_count: runs.length, workflow_runs: runs },
       },
-      `if [ "$1" = "workflow" ] && [ "$2" = "run" ]; then echo "$*" >> ${JSON.stringify(dispatches)}; exit 0; fi
+      `if [ "$1" = "api" ] && [[ "$2" == *"/contents/.github/workflows/release-promote.yml?ref="* ]]; then
+  if [ "${refStatus}" != "200" ]; then echo "gh: contents request failed (HTTP ${refStatus})" >&2; exit 1; fi
+fi
+if [ "$1" = "workflow" ] && [ "$2" = "run" ]; then echo "$*" >> ${JSON.stringify(dispatches)}; exit 0; fi
 if [ "$1" = "api" ] && [[ "$*" == *"environment=promoted"* ]]; then echo '[]'; exit 0; fi`,
     );
     const sh = join(dir, "poll.sh");
@@ -512,7 +516,7 @@ const marker = (version: string) => ({ ref: `v${version}`, payload: { version, p
 describe("release-promote-poll — each version is dispatched at most once per poll", () => {
   test.each(["queued", "in_progress", "completed"])("a manual dry run (%s) does not suppress the real dispatch", (status) => {
     const r = runPoll([marker("1.2.3")], { ok: "true" }, [{
-      display_title: "release-promote v1.2.3 (dry run)", head_branch: "v1.2.3", status, conclusion: status === "completed" ? "success" : null,
+      display_title: "release-promote tag v1.2.3 (dry run)", head_branch: "v1.2.3", status, conclusion: status === "completed" ? "success" : null,
     }]);
     expect(r.status, r.log).toBe(0);
     expect(r.dispatches).toEqual(["workflow run release-promote.yml --ref v1.2.3 -f dry_run=false"]);
@@ -520,7 +524,7 @@ describe("release-promote-poll — each version is dispatched at most once per p
 
   test.each(["queued", "in_progress", "completed"])("a real promotion (%s; success when completed) suppresses dispatch", (status) => {
     const r = runPoll([marker("1.2.3")], { ok: "true" }, [{
-      display_title: "release-promote v1.2.3", head_branch: "v1.2.3", status, conclusion: status === "completed" ? "success" : null,
+      display_title: "release-promote tag v1.2.3", head_branch: "v1.2.3", status, conclusion: status === "completed" ? "success" : null,
     }]);
     expect(r.status, r.log).toBe(0);
     expect(r.dispatches).toEqual([]);
@@ -531,7 +535,7 @@ describe("release-promote-poll — each version is dispatched at most once per p
   test.each(["failure", "cancelled", "timed_out", "action_required", "neutral", "skipped", "stale", null])(
     "a completed real attempt (%s) requires human review without redispatch", (conclusion) => {
       const r = runPoll([marker("1.2.3")], { ok: "true" }, [{
-        display_title: "release-promote v1.2.3", head_branch: "v1.2.3", status: "completed", conclusion,
+        display_title: "release-promote tag v1.2.3", head_branch: "v1.2.3", status: "completed", conclusion,
       }]);
       expect(r.status, r.log).toBe(0);
       expect(r.dispatches).toEqual([]);
@@ -548,10 +552,38 @@ describe("release-promote-poll — each version is dispatched at most once per p
   });
 
   test.each(["waiting", "pending", "requested", "unknown", null])("a real attempt with status %s requires human review", (status) => {
-    const r = runPoll([marker("1.2.3")], { ok: "true" }, [{ display_title: "release-promote v1.2.3", status }]);
+    const r = runPoll([marker("1.2.3")], { ok: "true" }, [{ display_title: "release-promote tag v1.2.3", status }]);
     expect(r.status, r.log).toBe(0);
     expect(r.dispatches).toEqual([]);
     expect(r.log).toContain("a human must inspect the run before retrying");
+  });
+
+  test.each(["queued", "in_progress", "completed"])("a branch non-dry-run attempt (%s; failure when completed) does not suppress tag dispatch", (status) => {
+    const promote = yaml.load(readFileSync(join(REPO, ".github/workflows/release-promote.yml"), "utf8")) as { "run-name": string };
+    const title = promote["run-name"]
+      .replace("${{ github.ref_type }}", "branch")
+      .replace("${{ github.ref_name }}", "v1.2.3")
+      .replace("${{ inputs.dry_run && ' (dry run)' || '' }}", "");
+    const r = runPoll([marker("1.2.3")], { ok: "true" }, [{
+      display_title: title, head_branch: "v1.2.3", status, conclusion: status === "completed" ? "failure" : null,
+    }]);
+    expect(r.status, r.log).toBe(0);
+    expect(r.dispatches).toEqual(["workflow run release-promote.yml --ref v1.2.3 -f dry_run=false"]);
+  });
+
+  test("a pre-machinery tag is skipped with exit 0", () => {
+    const r = runPoll([marker("1.2.3")], { ok: "true" }, [], 404);
+    expect(r.status, r.log).toBe(0);
+    expect(r.dispatches).toEqual([]);
+    expect(r.log).toContain("would dispatch: the tag predates the release machinery");
+  });
+
+  test.each([403, 429, 500, 503])("a tag workflow lookup HTTP %s fails closed", (status) => {
+    const r = runPoll([marker("1.2.3")], { ok: "true" }, [], status);
+    expect(r.status, r.log).toBe(1);
+    expect(r.dispatches).toEqual([]);
+    expect(r.log).toContain("could not verify release-promote.yml at v1.2.3; refusing to dispatch");
+    expect(r.log).not.toContain("the tag predates");
   });
 
   test("duplicate marker rows for one version dispatch it once", () => {

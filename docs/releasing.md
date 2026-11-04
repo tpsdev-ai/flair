@@ -63,18 +63,18 @@ a bug in the script — add the file to `SOURCE_VERSION_FILES` in
 **The changelog is assembled, not hand-promoted.** Entries land during development as one
 file per change under `.changelog/unreleased/` (flair#835 — a shared `[Unreleased]` block
 conflicted on every concurrent PR, and resolving a conflict dismisses approvals). The
-release script runs:
-
-```bash
-node scripts/changelog-fragments.mjs promote 0.11.0
-```
-
-which writes a `## [0.11.0] - <date>` section from the fragments — Keep a Changelog category
-order, filename order within a category, entry bodies copied verbatim — and deletes the
-fragment files. Released history above it is not touched. It **refuses** to run when the
-fragment directory is empty (nothing to release) or when someone hand-wrote an entry into
-`## [Unreleased]` that the step would otherwise silently overwrite. Preview any time with
-`node scripts/changelog-fragments.mjs render`.
+release script invokes `bash scripts/release-promote-changelog.sh "$VERSION"`, which
+passes `--with-dependencies` to `changelog-fragments.mjs promote` and forwards any
+`--allow-no-release-tag` argument.
+The `### Dependencies` section lists `feat`/`fix` commits since the tag selected by
+`git describe` whose recorded author name matches `renovate[bot]` and whose changed
+Git basenames are all `package.json`, `bun.lock`, `bun.lockb`, `package-lock.json`, or
+`npm-shrinkwrap.json`.
+Pass `--allow-no-release-tag` to `release.sh` to permit release PR preparation when
+there is no `v*` tag.
+Promotion refuses when there are neither fragments nor eligible dependency commits,
+or when `## [Unreleased]` contains hand-written entries it would overwrite.
+Preview fragments with `node scripts/changelog-fragments.mjs render`.
 
 ### Phase 2 — tag the release
 
@@ -228,14 +228,14 @@ rulesets and the `release-promote` environment with its `NPM_TOKEN`), this phase
 for you. The unprivileged
 [`release-promote-poll`](../.github/workflows/release-promote-poll.yml) poll requires
 a valid `release-attempt` marker, public tarballs for every lockstep package matching
-the certified package-set digest, no visible non-dry-run attempt for the version, and
+the certified package-set digest, the workflow at the tag, no visible non-dry-run tag attempt for the version, and
 passing [settings checks](#the-promote-boundary-flair1928) before dispatching the privileged
 [`release-promote`](../.github/workflows/release-promote.yml) workflow on the version's
 tag ref, and that workflow calls the
 [`post-publish canary`](../.github/workflows/canary.yml) — the same one below; its
 definition resolves at the tag and its workspace runs the default branch's scripts at a
 pinned commit — before it promotes anything. The poll ignores dry runs and dispatches
-each version at most once per poll. A visible non-dry-run attempt prevents redispatch;
+each version at most once per poll. A visible non-dry-run tag attempt prevents redispatch;
 a failed attempt logs that a human must inspect it. Re-running it is an operator step
 (replace `v1.2.3` with the release tag):
 
@@ -433,7 +433,7 @@ by a repository admin before the first automated promote:
 
 Before adding `NPM_TOKEN`, audit the creation actors, other actors' rule exceptions,
 and existing `v*` tags: every existing tag that carries a `release-promote.yml` must carry
-a copy reviewed on main. Older tags that predate the workflow need nothing.
+a copy reviewed on main. The poll logs "would dispatch: the tag predates the release machinery" and skips older tags without the workflow.
 
 The checks inside `release-promote.yml` and `canary.yml` are **defence in depth**, not
 the boundary. They compare the executed files with `origin/main`, run repository scripts
@@ -507,13 +507,15 @@ the four pieces the privileged promote job (slice 2) stands on; it holds no npm 
   `packages/*/package.json`); that derivation FAILS CLOSED — a non-zero exit or an
   empty list is an error exit that names the cause, never a silent "ready". It
   reads every `release-attempt` / `promoted` marker across ALL pages
-  (`--paginate`, flattened), and for each pending marker takes the version from the
-  MARKER PAYLOAD (never main's `package.json`, which moves on after a release;
+  (`--paginate`, flattened). No workflow writes `promoted` records; an admin who
+  promotes by hand may record one so the poll skips that version. For each pending
+  marker it takes the version from the MARKER PAYLOAD (never main's `package.json`,
+  which moves on after a release;
   never the ref alone — the ref must equal `v<payload.version>` or the marker is
   refused). It requires EVERY lockstep package `<name>@<version>` to be public and
   to re-derive the certified package-set digest (ALL-form: one missing/odd package
   is NOT READY, exit 0, the package named). Dispatch also requires the workflow
-  to exist, no visible non-dry-run attempt for the version, and passing settings checks.
+  to exist on the default branch and the tag, no visible non-dry-run tag attempt for the version, and passing settings checks.
   Every run is a schedule run of the default branch's copy of the file, so
   `github.sha` is always a main sha. **The poll's outputs are
   never an input to what gets promoted** — the privileged job re-derives everything
@@ -560,7 +562,7 @@ inside the workflow, each a test in `test/unit/release-promote-workflow.test.ts`
 
 **Non-dry-run attempts; at most once per poll.** In `release-promote-poll.yml`
 (`test/unit/release-promote-poll-workflow.test.ts`), across all run-list pages, the
-poll matches the title `release-promote v<version>`, without the `(dry run)` suffix.
+poll matches the title `release-promote tag v<version>`, without the `(dry run)` suffix.
 Queued, in-progress or successfully completed runs prevent dispatch. Other matching
 runs require human review without automatic redispatch. Within one poll it
 dispatches each version at most once, whatever the number of marker rows. A failed

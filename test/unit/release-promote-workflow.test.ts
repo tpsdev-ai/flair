@@ -211,10 +211,10 @@ describe("release-promote — the privileged job's credential and boundary", () 
     expect(steps.findIndex((s) => s.id === "guard"), "the guard is the first step after checkout").toBe(1);
   });
 
-  test("the guard compares EVERY executed file: both workflow definitions, the canary's script closure, this workflow's scripts", () => {
-    // Derived, not listed: the canary's closure is walked from canary.yml (the
-    // same walk as the dependency-free guard), so a new canary helper that is not
-    // compared turns this red.
+  test("the guard compares both workflows, the recorded canary closure and this workflow's scripts", () => {
+    // The walker records node scripts/... calls, literal scripts/...*.sh paths,
+    // node "$SCRIPT_DIR/...mjs" and "$SCRIPT_DIR/...sh" siblings, and relative imports.
+    // An unguarded addition in those forms turns this red.
     const closure = canaryScriptClosure();
     const own = [...raw.matchAll(/\b(?:node|bash)\s+(scripts\/[A-Za-z0-9._/-]+\.(?:mjs|sh))/g)].map((m) => m[1]!);
     expect(own).toContain("scripts/ci/canary-verdict.sh");
@@ -286,8 +286,8 @@ describe("release-promote — every re-derivation fails closed", () => {
     expect(dryStep?.if).toContain("inputs.dry_run == true");
   });
 
-  test("the run-name distinguishes dry runs from real promotions", () => {
-    expect(wf["run-name"]).toBe("release-promote ${{ github.ref_name }}${{ inputs.dry_run && ' (dry run)' || '' }}");
+  test("the run-name includes the ref type and distinguishes dry runs", () => {
+    expect(wf["run-name"]).toBe("release-promote ${{ github.ref_type }} ${{ github.ref_name }}${{ inputs.dry_run && ' (dry run)' || '' }}");
   });
 });
 
@@ -614,6 +614,30 @@ describe("release-promote — the machinery-recency guard and the materialisatio
     expect(readFileSync(join(trusted, "scripts/ci/canary-verdict.sh"), "utf8")).toBe(
       "# HONEST scripts/ci/canary-verdict.sh\n",
     );
+  });
+
+  test("main advancing machinery names both causes and the manual Phase 5 procedure", () => {
+    const fx = gitFixture();
+    const sha = git(fx.src, "rev-parse", "HEAD");
+    tag(fx, "v1.2.3", sha);
+    commitPush(fx, { [BOOT]: "# updated on main\n" });
+    const g = runStep(runOf("promote", "guard"), workspaceAt(fx, sha), { GITHUB_SHA: sha });
+    expect(g.status, g.log).toBe(1);
+    expect(g.log).toContain("main has advanced this file since the tag, or the tag's copy was altered");
+    expect(g.log).toContain("manual block path (docs/releasing.md, Phase 5)");
+  });
+
+  test("an annotated tag object on main passes both ancestor checks", () => {
+    const fx = gitFixture();
+    git(fx.src, "tag", "-a", "v1.2.3", "-m", "annotated");
+    git(fx.src, "push", "-q", "origin", "refs/tags/v1.2.3");
+    const sha = git(fx.src, "rev-parse", "refs/tags/v1.2.3");
+    expect(git(fx.src, "cat-file", "-t", sha)).toBe("tag");
+    const ws = workspaceAt(fx, sha);
+    const guard = runStep(runOf("promote", "guard"), ws, { GITHUB_SHA: sha });
+    expect(guard.status, guard.log).toBe(0);
+    const pin = runStep(runOf("prepare", "trusted"), ws, { GITHUB_SHA: sha });
+    expect(pin.status, pin.log).toBe(0);
   });
 
   test.each([BOOT, PLUGIN, "scripts/ci/canary-verdict.sh", ".github/workflows/canary.yml"])(

@@ -1,7 +1,7 @@
 - **A privileged `release-promote` workflow runs the canary and promotes the certified package set.**
   The poll's automatic dispatch on the version's tag ref requires a valid marker,
   public tarballs for every lockstep package matching the certified package-set
-  digest, and no visible non-dry-run attempt for the version.
+  digest, the workflow at that tag, and no visible non-dry-run tag attempt for the version.
   The poll checks both pinned tag rulesets are active, target tags, have no exclusions
   and carry the expected rule types and patterns, and requires
   `current_user_can_bypass=never` for its own token on the immutable ruleset.
@@ -9,7 +9,7 @@
   It also checks the `release-promote` environment has a `v*`-only tag policy.
   On the normal staged-release path, npm approval is the human action when no
   environment reviewers are configured; the poll does not check an approval record.
-  The poll ignores dry runs and does not redispatch a visible non-dry-run attempt.
+  The poll matches the tag non-dry-run title and skips tags without the workflow.
   It dispatches each version at most once per poll; a failed attempt logs that a
   human must inspect it before retrying. If a settings check fails, the poll
   dispatches nothing and fails when a ready version reaches the dispatch. GitHub runs the tag's copy of the

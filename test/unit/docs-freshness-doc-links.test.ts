@@ -12,15 +12,10 @@ import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { docsFreshnessScriptFiles } from "../helpers/docs-freshness-scripts.ts";
+
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT_REL = join("scripts", "docs-freshness-check.mjs");
-const SCRIPT_FILES = [
-  "docs-freshness-check.mjs",
-  "changelog-fragments.mjs",
-  "changelog-release-notes.mjs",
-  "changelog-extract.mjs",
-  "published-paths.mjs",
-];
 
 const created: string[] = [];
 
@@ -41,7 +36,7 @@ function makeFixture(opts: {
   created.push(dir);
 
   mkdirSync(join(dir, "scripts"), { recursive: true });
-  for (const f of SCRIPT_FILES) {
+  for (const f of docsFreshnessScriptFiles(REPO_ROOT)) {
     cpSync(join(REPO_ROOT, "scripts", f), join(dir, "scripts", f));
   }
 

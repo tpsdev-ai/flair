@@ -2251,6 +2251,8 @@ jobs:
       - name: Build CLI
         run: bun run build:cli
       - run: node scripts/docs-freshness-check.mjs
+        env:
+          FLAIR_PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
 
   # flair#1807: the CLI spawn-budget gate. Every test that spawns the CLI entry
   # must carry its own child deadline (a `timeout:` on the spawn), and the case

@@ -76,8 +76,8 @@ on:
         default: true
         type: boolean
 
-# The poll matches the non-dry-run title.
-run-name: release-promote ${{ github.ref_name }}${{ inputs.dry_run && ' (dry run)' || '' }}
+# The poll matches the tag non-dry-run title.
+run-name: release-promote ${{ github.ref_type }} ${{ github.ref_name }}${{ inputs.dry_run && ' (dry run)' || '' }}
 
 # Default to NOTHING. Each job opts into exactly what it needs.
 permissions: {}
@@ -167,6 +167,7 @@ jobs:
             echo "::error::release-promote: could not read the release-attempt markers; refusing to promote on an unverified marker."
             exit 1
           fi
+          # Select the oldest matching row from the newest-first deployment list.
           MARKER="$(jq -sc --arg ref "v${VERSION}" 'add // [] | map(select(.ref == $ref)) | last' "$DEPLOYMENTS")"
           if [ -z "$MARKER" ] || [ "$MARKER" = "null" ]; then
             echo "::error::release-promote: no release-attempt marker for v${VERSION}; staging cannot be verified for this version. Refusing to promote."
@@ -282,7 +283,7 @@ jobs:
               exit 1
             fi
             if ! git diff --quiet origin/main -- "$f"; then
-              echo "::error::release-promote: '$f' at the tag differs from origin/main; refusing to promote with stale or tampered release machinery."
+              echo "::error::release-promote: '$f' at the tag differs from origin/main; refusing: main has advanced this file since the tag, or the tag's copy was altered. If main advanced, promote with the manual block path (docs/releasing.md, Phase 5)."
               exit 1
             fi
           done
@@ -360,6 +361,7 @@ jobs:
             echo "::error::release-promote: could not read the release-attempt markers; refusing to promote on an unverified marker."
             exit 1
           fi
+          # Select the oldest matching row from the newest-first deployment list.
           MARKER="$(jq -sc --arg ref "v${VERSION}" 'add // [] | map(select(.ref == $ref)) | last' "$DEPLOYMENTS")"
           if [ -z "$MARKER" ] || [ "$MARKER" = "null" ]; then
             echo "::error::release-promote: no release-attempt marker for v${VERSION}; staging cannot be verified for this version. Refusing to promote."
