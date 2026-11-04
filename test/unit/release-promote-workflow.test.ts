@@ -1075,7 +1075,7 @@ describe("release-promote — the promote job runs a known npm (exact pin, verif
     }
     const token = steps().findIndex((s) => JSON.stringify(s.env ?? {}).includes("NPM_TOKEN"));
     expect(pinIndex(), "npm is pinned before the token step").toBeLessThan(token);
-    // …and after the guard, which stays the FIRST act.
+    // …and after the guard.
     expect(pinIndex()).toBeGreaterThan(steps().findIndex((s) => s.id === "guard"));
   });
 

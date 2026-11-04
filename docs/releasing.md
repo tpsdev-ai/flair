@@ -542,8 +542,8 @@ inside the workflow, each a test in `test/unit/release-promote-workflow.test.ts`
   if that move fails no later step runs a repository script: an inline step emits the
   FAIL verdict. The promote job materialises a SEPARATE tree from its own pinned
   `origin/main`. (The canary does run the PUBLISHED Flair and plugin packages it
-  installs: that is its test.) The promote job's first act requires both workflow files
-  and every executed repository script (the canary's script closure included) to be
+  installs: that is its test.) After checkout, the promote job first checks that both workflow files
+  and every executed repository script (the canary's script closure included) are
   byte-identical between the tag and `origin/main`. `.github/CODEOWNERS` names the
   release trust root as their reviewer; that is enforced as far as the repository's
   rules require code-owner review.

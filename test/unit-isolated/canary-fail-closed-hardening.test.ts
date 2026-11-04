@@ -717,7 +717,7 @@ describe("item 1 (A1c of #1671, round 5): a mid-promote failure RESTORES the mov
     expect(moves.length).toBe(2);
     expect(moves[0]).toContain(PACKAGES[0]);
     expect(moves[1]).toContain(PACKAGES[1]);
-    // The RESTORE lines restore each moved package to its PREVIOUS latest (0.55.0).
+    // The printed RESTORE commands name the previous `latest` values; no restore runs here.
     expect(r.stderr).toContain(`npm dist-tag add ${PACKAGES[0]}@0.55.0 latest`);
     expect(r.stderr).toContain(`npm dist-tag add ${PACKAGES[1]}@0.55.0 latest`);
     // Never a delete, and the not-moved set is named (the failed package included).
