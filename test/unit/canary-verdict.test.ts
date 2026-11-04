@@ -397,7 +397,7 @@ describe("canary-verdict — a version older than latest at the pre-move read is
     expect(check).toContain("is superseded");
     const verdict = (cur: string) => {
       const sh = `set -e\n_p=@tpsdev-ai/flair\n_cur=${cur}\n${check}\necho allowed\n`;
-      const out = spawnSync(process.platform === "darwin" ? "/bin/bash" : "bash", ["-c", sh], { encoding: "utf8" });
+      const out = spawnSync(process.platform === "darwin" ? "/bin/bash" : "bash", ["-s"], { input: sh, encoding: "utf8" });
       return out.status === 0 && out.stdout.trim() === "allowed" ? "allowed" : out.stderr.includes("is superseded") ? "refused" : `?${out.status}`;
     };
     for (const cur of ["1.2.2", "1.2.3", "1.2.3-rc.1", "0.99.99", "0.0.1"]) expect(verdict(cur), cur).toBe("allowed");
