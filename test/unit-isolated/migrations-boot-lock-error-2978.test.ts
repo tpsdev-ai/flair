@@ -17,7 +17,7 @@ import {
   listMigrationProgress,
 } from "../../resources/migrations/progress.ts";
 
-/** Counts `waitForTablesReady`'s access, so a quiet boot can be observed as having run. */
+/** Counts accesses to the mock table's `search` getter. */
 let tableChecks = 0;
 const table = {
   get search() {
@@ -66,7 +66,7 @@ function bootLog(): string {
   return errors.mock.calls.flat().join("\n");
 }
 
-/** Waits for the failure path's terminal phase. */
+/** Waits for cycle phase `done`. */
 async function waitForCycleDone(): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (getCycleStatus().phase !== "done" && Date.now() < deadline) {
@@ -75,7 +75,7 @@ async function waitForCycleDone(): Promise<void> {
   expect(getCycleStatus().phase).toBe("done");
 }
 
-/** Waits until a newly scheduled boot has passed the table-ready gate, then lets it finish. */
+/** Waits for a table-search access, then 50 ms. */
 async function waitForBootAttempt(): Promise<void> {
   const before = tableChecks;
   const deadline = Date.now() + 5_000;
