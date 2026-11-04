@@ -192,20 +192,26 @@ describe("archive admission refuses a row that does not match its table's schema
   });
 });
 
-/** Every column of `type <name>` in `schema`, with the JS value its type holds. */
-function schemaColumns(schemaPath: string, table: string): Array<[string, { type: RestoreColumnType; required: boolean }]> {
-  const lines = readFileSync(join(root, schemaPath), "utf8").split("\n");
+/** Every column of `type <name>` in `schemaText`, with the JS value its type holds. */
+function schemaColumnsFromText(schemaText: string, table: string, label: string): Array<[string, { type: RestoreColumnType; required: boolean }]> {
+  const lines = schemaText.split("\n");
   const start = lines.findIndex((line) => new RegExp(`^type ${table} @table`).test(line));
   expect(start).toBeGreaterThan(-1);
   const columns: Array<[string, { type: RestoreColumnType; required: boolean }]> = [];
   for (let i = start + 1; i < lines.length; i++) {
-    if (/^\}/.test(lines[i])) break;
-    const match = /^ {2}([A-Za-z_][A-Za-z0-9_]*):\s*(\[[A-Za-z]+\]|[A-Za-z]+)(!?)/.exec(lines[i]);
-    if (!match) continue;
+    const line = lines[i];
+    if (/^\s*\}\s*$/.test(line)) break;
+    if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue;
+    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*):\s*(\[[A-Za-z]+\]|[A-Za-z]+)(!?)/.exec(line);
+    if (!match) throw new Error(`${label}:${i + 1}: expected a field, got ${JSON.stringify(line)}`);
     const type = match[2].startsWith("[") ? `${match[2].slice(1, -1)}[]` : match[2];
     columns.push([match[1], { type: type as RestoreColumnType, required: match[3] === "!" }]);
   }
   return columns;
+}
+
+function schemaColumns(schemaPath: string, table: string): Array<[string, { type: RestoreColumnType; required: boolean }]> {
+  return schemaColumnsFromText(readFileSync(join(root, schemaPath), "utf8"), table, schemaPath);
 }
 
 describe("the restore field table matches the GraphQL schema (flair#2953)", () => {
@@ -225,7 +231,7 @@ describe("the restore field table matches the GraphQL schema (flair#2953)", () =
       }
     });
 
-    test(`each required ${table} column the write supplies is assigned by the resource`, () => {
+    test(`each required ${table} column the write supplies is assigned by the resource${table === "Agent" ? " from the stored row (a row lacking it is refused)" : ""}`, () => {
       const resource = { Agent: "resources/Agent.ts", Soul: "resources/Soul.ts", Memory: "resources/Memory.ts" }[table];
       const source = readFileSync(join(root, resource), "utf8");
       for (const field of RESTORE_WRITE_SUPPLIED_FIELDS[table]) {
@@ -234,4 +240,19 @@ describe("the restore field table matches the GraphQL schema (flair#2953)", () =
       }
     });
   }
+
+  test("a field indented with a tab or four spaces is a field, not a skipped line", () => {
+    const schema = readFileSync(join(root, "schemas/memory.graphql"), "utf8");
+    const fixture = schema
+      .replace(/^  value: String!/m, "\tvalue: String!")
+      .replace(/^  priority: String/m, "    priority: String");
+    const names = schemaColumnsFromText(fixture, "Soul", "memory.graphql fixture").map(([name]) => name);
+    expect(names).toContain("value");
+    expect(names).toContain("priority");
+  });
+
+  test("an unparsed line inside a table block fails naming the line", () => {
+    const fixture = "type Soul @table {\n  id: ID\n  this is not a field\n}\n";
+    expect(() => schemaColumnsFromText(fixture, "Soul", "fixture.graphql")).toThrow(/fixture\.graphql:3:/);
+  });
 });

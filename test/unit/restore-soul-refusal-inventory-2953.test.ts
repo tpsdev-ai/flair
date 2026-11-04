@@ -2,26 +2,30 @@
  * restore-soul-refusal-inventory-2953.test.ts — the Soul write-refusal
  * inventory behind `flair restore --replace` (flair#2953).
  *
- * The source set is the relative-import closure of resources/Soul.ts.
- * Every syntactic reference to `Response` in a construction or call position
- * (bare, `globalThis.Response`, `<x>.Response`, or a top-level alias of one)
- * is counted, and each is either classified or recorded as an unresolved site.
- * A separate pass counts the `Response` tokens in every callee expression
- * (including a computed member, a cast and a parenthesised form) without
- * consulting the classifier, and the test asserts classified + unresolved
- * equals that independent count. For new Response and Response.json, only no
- * init (default 200) or a plain, unwrapped object literal with no spread or
- * computed keys is classified; every property is read to prove status absent
- * or statically numeric. Every other init, every other static method
- * (`Response.redirect`) and `Response.error()` (status 0) is unresolved and
- * fails with file:line unless listed with a reason. Recognised status-taking
- * helpers require statically numeric status arguments; their unresolved
- * definitions must also be listed. A function that forwards one of its
- * parameters into a callee the inventory cannot resolve (a method call, a
- * computed callee, a callee outside the closure), including through a
- * parenthesis, an `as` cast or a non-null assertion, is opaque: listed by name
- * with a reason, or the test fails naming it. Refusal codes must be
- * preflighted, admission-refused or listed out of scope.
+ * The source set is the relative-import closure of resources/Soul.ts. Every
+ * Response identifier token in the import closure's source is accounted for;
+ * a name built at runtime (e.g. from strings) is not seen — #2970 replaces
+ * this inventory with a server dry run.
+ *
+ * The tokens come from TypeScript's scanner over each module's raw text
+ * (trivia and comments skipped; string and template literal contents are not
+ * identifiers), independently of the AST classifier. For each token the
+ * classifier records one disposition: a classified Response construction or
+ * call, an unresolved site, an alias definition it follows (and whose uses it
+ * classifies), a type reference, or an `instanceof` check. Any lexical token
+ * without a disposition fails, naming file:line. For new Response and
+ * Response.json, only no init (default 200) or a plain, unwrapped object
+ * literal with no spread or computed keys is classified; every property is
+ * read to prove status absent or statically numeric. Every other init, every
+ * other static method (`Response.redirect`) and `Response.error()` (status 0)
+ * is unresolved and fails with file:line unless listed with a reason.
+ * Recognised status-taking helpers require statically numeric status
+ * arguments; their unresolved definitions must also be listed. A function that
+ * forwards one of its parameters into a callee the inventory cannot resolve (a
+ * method call, a computed callee, a callee outside the closure), including
+ * through a parenthesis, an `as` cast or a non-null assertion, is opaque:
+ * listed by name with a reason, or the test fails naming it. Refusal codes
+ * must be preflighted, admission-refused or listed out of scope.
  */
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
@@ -107,14 +111,26 @@ interface RefusalInventory {
   /** Refusal code → the file:line of the first site that produces it. */
   codes: Map<string, string>;
   unresolved: Map<string, string>;
-  /** Response references (construction or call position). */
+  /** Construction or call sites that reference Response directly or through an alias. */
   occurrences: number;
-  /** Response tokens counted independently of `responseCallee`. */
-  responseReferences: number;
-  /** References `responseShape` classified (a status list it proved). */
+  /** Lexical `Response` identifier tokens in the source set. */
+  lexicalTokens: number;
+  /** Tokens whose construction or call `responseShape` classified (a status list it proved). */
   classified: number;
-  /** References recorded as unresolved. */
+  /** Tokens recorded as unresolved references. */
   unresolvedReferences: number;
+  /** Tokens that define an alias the classifier follows. */
+  aliasDefinitions: number;
+  /** Tokens in a type position, which cannot produce a refusal. */
+  typeReferences: number;
+  /** Tokens in an `instanceof` check, which cannot produce a refusal. */
+  checkReferences: number;
+  /** Alias uses classified or unresolved (there is no Response token at the use). */
+  aliasSites: number;
+  /** Lexical tokens with no disposition, as file:line. */
+  unaccounted: string[];
+  /** Dispositions with no lexical token; must stay empty. */
+  notLexical: string[];
   /** Functions forwarding a parameter into a callee the inventory cannot resolve. */
   opaque: Map<string, string>;
 }
@@ -137,19 +153,57 @@ function forwardedIdentifier(expression: ts.Expression | undefined): ts.Identifi
   return null;
 }
 
+type ResponseAlias = { kind: "constructor" } | { kind: "method"; method: string };
+
+interface LexicalToken {
+  file: string;
+  pos: number;
+  line: number;
+}
+
 /**
- * Count every `Response` token in a callee expression without consulting the
- * classifier: the identifier itself, a `Response` property name (`x.Response`),
- * a token inside parentheses, a cast, a computed member or a top-level alias.
+ * Every `Response` identifier token in `raw`, from TypeScript's scanner and
+ * independent of the AST: trivia and comments are skipped, and the contents of
+ * a string or template literal are not identifiers.
  */
-function responseReferencesIn(expression: ts.Expression, aliases: Set<string> | undefined): number {
-  let count = 0;
+function lexicalResponseTokens(file: string, raw: string): LexicalToken[] {
+  const tokens: LexicalToken[] = [];
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.Standard, raw);
+  // `scan()` does not re-enter a template after a substitution's closing brace;
+  // `reScanTemplateToken` does. Track the brace depth at each `${` so a `}`
+  // closing an object literal is not mistaken for the substitution's close.
+  const substitutions: number[] = [];
+  let braces = 0;
+  for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
+    if (token === ts.SyntaxKind.OpenBraceToken) {
+      braces++;
+    } else if (token === ts.SyntaxKind.CloseBraceToken) {
+      if (substitutions.length > 0 && braces === substitutions[substitutions.length - 1]) {
+        token = scanner.reScanTemplateToken(false);
+        if (token === ts.SyntaxKind.TemplateTail) substitutions.pop();
+        continue;
+      }
+      braces--;
+    } else if (token === ts.SyntaxKind.TemplateHead) {
+      substitutions.push(braces);
+    }
+    if (token === ts.SyntaxKind.Identifier && scanner.getTokenText() === "Response") {
+      const pos = scanner.getTokenStart();
+      tokens.push({ file, pos, line: raw.slice(0, pos).split("\n").length });
+    }
+  }
+  return tokens;
+}
+
+/** Every `Response` identifier inside an expression, whatever form it takes. */
+function responseIdentifiersIn(expression: ts.Expression): ts.Identifier[] {
+  const found: ts.Identifier[] = [];
   const visit = (node: ts.Node): void => {
-    if (ts.isIdentifier(node) && (node.text === "Response" || aliases?.has(node.text) === true)) count++;
+    if (ts.isIdentifier(node) && node.text === "Response") found.push(node);
     ts.forEachChild(node, visit);
   };
   visit(expression);
-  return count;
+  return found;
 }
 
 function parametersOf(fn: FnNode): Set<string> {
@@ -186,45 +240,78 @@ function isResponseReferenceName(expression: ts.Expression): boolean {
   return ts.isPropertyAccessExpression(expression) && expression.name.text === "Response";
 }
 
-/** Whether a `new`/call's callee is the Response constructor, directly or through a top-level alias. */
-function responseCallee(file: string, callee: ts.Expression, aliases: Map<string, Set<string>>): boolean {
-  if (isResponseReferenceName(callee)) return true;
-  if (ts.isIdentifier(callee)) return aliases.get(file)?.has(callee.text) === true;
-  // `Response.json(...)` and `Response.redirect(...)`, and the same on an alias.
+/** The Response constructor or static method a `new`/call's callee names, directly or through an alias. */
+function responseCallee(file: string, callee: ts.Expression, aliases: Map<string, Map<string, ResponseAlias>>): ResponseAlias | null {
+  const local = aliases.get(file);
+  if (isResponseReferenceName(callee)) return { kind: "constructor" };
   if (ts.isPropertyAccessExpression(callee)) {
-    if (isResponseReferenceName(callee.expression)) return true;
-    return ts.isIdentifier(callee.expression) && aliases.get(file)?.has(callee.expression.text) === true;
+    if (isResponseReferenceName(callee.expression)) return { kind: "method", method: callee.name.text };
+    if (ts.isIdentifier(callee.expression)) {
+      const alias = local?.get(callee.expression.text);
+      if (alias?.kind === "constructor") return { kind: "method", method: callee.name.text };
+    }
+    return null;
   }
-  return false;
+  if (ts.isIdentifier(callee)) return local?.get(callee.text) ?? null;
+  return null;
 }
 
 function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   const importAliases = new Map<string, Map<string, { file: string; name: string }>>();
   const topLevelConsts = new Map<string, Map<string, ts.Expression>>();
-  const responseAliases = new Map<string, Set<string>>();
+  const responseAliases = new Map<string, Map<string, ResponseAlias>>();
+  const exportedAliases = new Map<string, Map<string, ResponseAlias>>();
+  const aliasConsts = new Map<string, Array<{ name: string; initializer: ts.Expression }>>();
+  const aliasDestructured = new Map<string, Array<{ name: string; property: string; initializer: ts.Expression }>>();
+  const aliasImports = new Map<string, Array<{ localName: string; importedName: string; targetFile: string }>>();
+  const aliasLocalExports = new Map<string, Array<{ exportedName: string; localName: string }>>();
+  const aliasReExports = new Map<string, Array<{ exportedName: string; importedName: string; targetFile: string }>>();
+  const aliasStarExports = new Map<string, string[]>();
+  const aliasExportDeclarations = new Map<string, Set<string>>();
   const functions: FnRecord[] = [];
   const functionsByName = new Map<string, FnRecord>();
 
   for (const [file, source] of sources) {
     const aliases = new Map<string, { file: string; name: string }>();
     const constants = new Map<string, ts.Expression>();
-    const responseNames = new Set<string>();
+    const consts: Array<{ name: string; initializer: ts.Expression }> = [];
+    const destructured: Array<{ name: string; property: string; initializer: ts.Expression }> = [];
+    const imports: Array<{ localName: string; importedName: string; targetFile: string }> = [];
+    const localExports: Array<{ exportedName: string; localName: string }> = [];
+    const reExports: Array<{ exportedName: string; importedName: string; targetFile: string }> = [];
+    const starExports: string[] = [];
+    const exportDeclarations = new Set<string>();
     for (const statement of source.statements) {
       if (ts.isImportDeclaration(statement) && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
         const target = resolveRelative(file, statement.moduleSpecifier.text);
         const bindings = statement.importClause?.namedBindings;
         if (target && bindings && ts.isNamedImports(bindings)) {
           for (const element of bindings.elements) {
-            aliases.set(element.name.text, { file: target, name: (element.propertyName ?? element.name).text });
+            const importedName = (element.propertyName ?? element.name).text;
+            aliases.set(element.name.text, { file: target, name: importedName });
+            imports.push({ localName: element.name.text, importedName, targetFile: target });
           }
+        }
+      }
+      if (ts.isExportDeclaration(statement)) {
+        const target = statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)
+          ? resolveRelative(file, statement.moduleSpecifier.text)
+          : null;
+        const clause = statement.exportClause;
+        if (clause && ts.isNamedExports(clause)) {
+          for (const element of clause.elements) {
+            const exportedName = element.name.text;
+            const localName = (element.propertyName ?? element.name).text;
+            if (target) reExports.push({ exportedName, importedName: localName, targetFile: target });
+            else localExports.push({ exportedName, localName });
+          }
+        } else if (!clause && target) {
+          starExports.push(target);
         }
       }
       if (ts.isVariableStatement(statement)) {
         for (const declaration of statement.declarationList.declarations) {
-          if (ts.isIdentifier(declaration.name) && declaration.initializer) {
-            constants.set(declaration.name.text, declaration.initializer);
-            if (isResponseReferenceName(declaration.initializer)) responseNames.add(declaration.name.text);
-          }
+          if (ts.isIdentifier(declaration.name) && declaration.initializer) constants.set(declaration.name.text, declaration.initializer);
         }
       }
       const addFunction = (name: string, fn: FnNode): void => {
@@ -245,11 +332,112 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
         }
       }
     }
+    const collectVariables = (node: ts.Node): void => {
+      if (ts.isVariableDeclaration(node) && node.initializer) {
+        const list = node.parent;
+        const statement = list && ts.isVariableDeclarationList(list) ? list.parent : undefined;
+        const exported = !!(statement && ts.isVariableStatement(statement) && statement.parent === source &&
+          (statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false));
+        if (ts.isIdentifier(node.name)) {
+          consts.push({ name: node.name.text, initializer: node.initializer });
+          if (exported) exportDeclarations.add(node.name.text);
+        } else if (ts.isObjectBindingPattern(node.name)) {
+          for (const element of node.name.elements) {
+            if (element.dotDotDotToken || !ts.isIdentifier(element.name)) continue;
+            const property = element.propertyName && (ts.isIdentifier(element.propertyName) || ts.isStringLiteral(element.propertyName))
+              ? element.propertyName.text
+              : element.name.text;
+            destructured.push({ name: element.name.text, property, initializer: node.initializer });
+            if (exported) exportDeclarations.add(element.name.text);
+          }
+        }
+      }
+      ts.forEachChild(node, collectVariables);
+    };
+    collectVariables(source);
     importAliases.set(file, aliases);
     topLevelConsts.set(file, constants);
-    responseAliases.set(file, responseNames);
+    responseAliases.set(file, new Map());
+    exportedAliases.set(file, new Map());
+    aliasConsts.set(file, consts);
+    aliasDestructured.set(file, destructured);
+    aliasImports.set(file, imports);
+    aliasLocalExports.set(file, localExports);
+    aliasReExports.set(file, reExports);
+    aliasStarExports.set(file, starExports);
+    aliasExportDeclarations.set(file, exportDeclarations);
   }
   for (const record of functions) if (!functionsByName.has(record.key)) functionsByName.set(record.key, record);
+
+  const unwrapAliasExpression = (expression: ts.Expression): ts.Expression => {
+    let current = expression;
+    while (ts.isParenthesizedExpression(current) || ts.isAsExpression(current) ||
+           ts.isTypeAssertionExpression(current) || ts.isNonNullExpression(current) ||
+           ts.isSatisfiesExpression(current)) {
+      current = current.expression;
+    }
+    return current;
+  };
+  const sameAliasMap = (left: Map<string, ResponseAlias>, right: Map<string, ResponseAlias>): boolean => {
+    if (left.size !== right.size) return false;
+    for (const [name, alias] of left) {
+      const other = right.get(name);
+      if (!other || other.kind !== alias.kind) return false;
+      if (alias.kind === "method" && other.kind === "method" && alias.method !== other.method) return false;
+    }
+    return true;
+  };
+  // Resolve local aliases, imports and exports to a fixpoint: `const { json } =
+  // Response`, `const R = Response as any`, `export { Response as R }` and a
+  // re-export from another module all name the same constructor or method.
+  for (let pass = 0; pass < 12; pass++) {
+    let mutated = false;
+    for (const file of sources.keys()) {
+      const local = new Map<string, ResponseAlias>();
+      const aliasOf = (expression: ts.Expression): ResponseAlias | null => {
+        const unwrapped = unwrapAliasExpression(expression);
+        if (isResponseReferenceName(unwrapped)) return { kind: "constructor" };
+        return ts.isIdentifier(unwrapped) ? (local.get(unwrapped.text) ?? null) : null;
+      };
+      for (const declaration of aliasConsts.get(file) ?? []) {
+        const alias = aliasOf(declaration.initializer);
+        if (alias) local.set(declaration.name, alias);
+      }
+      for (const declaration of aliasDestructured.get(file) ?? []) {
+        const base = aliasOf(declaration.initializer);
+        if (base?.kind === "constructor") local.set(declaration.name, { kind: "method", method: declaration.property });
+      }
+      for (const element of aliasImports.get(file) ?? []) {
+        const alias = exportedAliases.get(element.targetFile)?.get(element.importedName);
+        if (alias) local.set(element.localName, alias);
+      }
+      const exported = new Map<string, ResponseAlias>();
+      for (const name of aliasExportDeclarations.get(file) ?? []) {
+        const alias = local.get(name);
+        if (alias) exported.set(name, alias);
+      }
+      for (const element of aliasLocalExports.get(file) ?? []) {
+        const alias = element.localName === "Response" ? { kind: "constructor" as const } : local.get(element.localName);
+        if (alias) exported.set(element.exportedName, alias);
+      }
+      for (const element of aliasReExports.get(file) ?? []) {
+        const alias = exportedAliases.get(element.targetFile)?.get(element.importedName);
+        if (alias) exported.set(element.exportedName, alias);
+      }
+      for (const target of aliasStarExports.get(file) ?? []) {
+        for (const [name, alias] of exportedAliases.get(target) ?? []) if (!exported.has(name)) exported.set(name, alias);
+      }
+      if (!sameAliasMap(responseAliases.get(file)!, local)) {
+        responseAliases.set(file, local);
+        mutated = true;
+      }
+      if (!sameAliasMap(exportedAliases.get(file)!, exported)) {
+        exportedAliases.set(file, exported);
+        mutated = true;
+      }
+    }
+    if (!mutated) break;
+  }
 
   const resolveFunction = (file: string, name: string): FnRecord | null => {
     const local = functionsByName.get(`${file}:${name}`);
@@ -415,8 +603,9 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     return { status, statuses: status === undefined ? [200] : resolveNumbers(file, status) };
   };
 
-  const responseShape = (file: string, node: ts.Expression): ResponseShape | null => {
-    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Response") {
+  const responseShape = (file: string, node: ts.Expression, callee: ResponseAlias): ResponseShape | null => {
+    if (callee.kind === "constructor") {
+      if (!ts.isNewExpression(node)) return null;
       const init = node.arguments?.[1];
       if (node.arguments?.some(ts.isSpreadElement)) return { status: undefined, statuses: null, body: null };
       return {
@@ -424,19 +613,17 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
         body: node.arguments?.[0] ?? null,
       };
     }
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
-        ts.isIdentifier(node.expression.expression) && node.expression.expression.text === "Response") {
-      const method = node.expression.name.text;
-      if (method === "json") {
-        const init = node.arguments?.[1];
-        if (node.arguments.some(ts.isSpreadElement)) return { status: undefined, statuses: null, body: null };
-        return {
-          ...responseInit(file, init),
-          body: node.arguments?.[0] ?? null,
-        };
-      }
-      if (method === "error") return { status: undefined, statuses: null, body: null };
+    if (!ts.isCallExpression(node)) return null;
+    const method = callee.method;
+    if (method === "json") {
+      const init = node.arguments?.[1];
+      if (node.arguments.some(ts.isSpreadElement)) return { status: undefined, statuses: null, body: null };
+      return {
+        ...responseInit(file, init),
+        body: node.arguments?.[0] ?? null,
+      };
     }
+    if (method === "error") return { status: undefined, statuses: null, body: null };
     return null;
   };
 
@@ -446,7 +633,8 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     const parameters = parametersOf(record.fn);
     const visit = (node: ts.Node): void => {
       if (ts.isNewExpression(node) || ts.isCallExpression(node)) {
-        const shape = responseShape(record.file, node);
+        const callee = responseCallee(record.file, node.expression, responseAliases);
+        const shape = callee ? responseShape(record.file, node, callee) : null;
         const status = shape?.status;
         if (status && ts.isIdentifier(status) && parameters.has(status.text)) statusParam = status.text;
         const error = propertyOf(payloadOf(record.file, shape?.body), record.file, "error");
@@ -548,39 +736,72 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     visit(source);
   }
 
-  // (b) Every Response reference in a construction or call position is counted:
-  // no init (200), or a plain, unwrapped object literal without spread/computed
-  // keys, with every property read and status absent or statically numeric, is
-  // classified. Every other init, every other static method (Response.redirect),
-  // Response.error() (status 0), a globalThis/alias form and an unresolvable body
-  // are unresolved and fail with file:line unless listed with a reason.
-  // Status-taking helpers require static status arguments in (c).
+  // (b) The scanner's lexical tokens are accounted for one by one. Alias
+  // definitions are recorded first: `const R = Response as any`, `const
+  // { json } = Response`, `export { Response as R }` and an import or re-export
+  // binding. Then a construction or call through the constructor or a followed
+  // alias is classified or recorded unresolved. A token in no such position is
+  // left unaccounted, and the test fails naming file:line.
+  const accounted = new Map<string, string>();
+  const account = (file: string, node: ts.Node, kind: string): void => {
+    const key = `${file}:${node.getStart(node.getSourceFile())}`;
+    if (!accounted.has(key)) accounted.set(key, kind);
+  };
+  for (const [file, source] of sources) {
+    for (const declaration of aliasConsts.get(file) ?? []) {
+      if (!responseAliases.get(file)?.has(declaration.name)) continue;
+      for (const identifier of responseIdentifiersIn(declaration.initializer)) account(file, identifier, "alias");
+    }
+    for (const declaration of aliasDestructured.get(file) ?? []) {
+      if (!responseAliases.get(file)?.has(declaration.name)) continue;
+      for (const identifier of responseIdentifiersIn(declaration.initializer)) account(file, identifier, "alias");
+    }
+    const visitBindings = (node: ts.Node): void => {
+      if (ts.isImportSpecifier(node) || ts.isExportSpecifier(node)) {
+        const original = node.propertyName ?? node.name;
+        if (ts.isIdentifier(original) && original.text === "Response") account(file, original, "alias");
+      }
+      ts.forEachChild(node, visitBindings);
+    };
+    visitBindings(source);
+  }
+
   let occurrences = 0;
-  let responseReferences = 0;
   let classified = 0;
   let unresolvedReferences = 0;
+  let aliasSites = 0;
   for (const [file, source] of sources) {
     const visit = (node: ts.Node): void => {
       if (ts.isNewExpression(node) || ts.isCallExpression(node)) {
-        const references = responseReferencesIn(node.expression, responseAliases.get(file));
-        responseReferences += references;
-        if (references > 0) {
+        const direct = responseIdentifiersIn(node.expression);
+        const alias = responseCallee(file, node.expression, responseAliases);
+        if (direct.length > 0 || alias) {
           occurrences++;
-          const shape = responseCallee(file, node.expression, responseAliases) ? responseShape(file, node) : null;
-          if (shape && shape.statuses !== null) {
-            classified++;
-            if (shape.statuses.some((value) => value >= 400)) {
-              const error = propertyOf(payloadOf(file, shape.body), file, "error");
-              const holder = enclosingFunction(node);
-              if (!(holder && error && ts.isIdentifier(error) && sinkParamOf(holder) === error.text)) {
-                const values = resolveString(file, error);
-                if (values) for (const value of values) recordCode(value, file, lineOf(source, node));
-                else recordUnresolved(file, lineOf(source, node), "unresolvable refusal body");
+          if (alias) {
+            const shape = responseShape(file, node, alias);
+            if (shape && shape.statuses !== null) {
+              if (direct.length > 0) classified += direct.length;
+              else aliasSites++;
+              for (const identifier of direct) account(file, identifier, "classified");
+              if (shape.statuses.some((value) => value >= 400)) {
+                const error = propertyOf(payloadOf(file, shape.body), file, "error");
+                const holder = enclosingFunction(node);
+                if (!(holder && error && ts.isIdentifier(error) && sinkParamOf(holder) === error.text)) {
+                  const values = resolveString(file, error);
+                  if (values) for (const value of values) recordCode(value, file, lineOf(source, node));
+                  else recordUnresolved(file, lineOf(source, node), "unresolvable refusal body");
+                }
               }
+            } else {
+              if (direct.length > 0) unresolvedReferences += direct.length;
+              else aliasSites++;
+              for (const identifier of direct) account(file, identifier, "unresolved");
+              recordUnresolved(file, lineOf(source, node), shape ? "unresolvable Response status" : "unrecognised Response reference");
             }
           } else {
-            unresolvedReferences++;
-            recordUnresolved(file, lineOf(source, node), shape ? "unresolvable Response status" : "unrecognised Response reference");
+            unresolvedReferences += direct.length;
+            for (const identifier of direct) account(file, identifier, "unresolved");
+            recordUnresolved(file, lineOf(source, node), "unrecognised Response reference");
           }
         }
       }
@@ -588,6 +809,41 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     };
     visit(source);
   }
+
+  const isTypePosition = (node: ts.Node): boolean => {
+    let current: ts.Node | undefined = node.parent;
+    while (current) {
+      if (ts.isTypeNode(current)) return true;
+      if (ts.isExpression(current) || ts.isStatement(current) || ts.isSourceFile(current)) return false;
+      current = current.parent;
+    }
+    return false;
+  };
+  const isInstanceOfOperand = (node: ts.Node): boolean => {
+    const parent = node.parent;
+    return ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword;
+  };
+  for (const [file, source] of sources) {
+    const visit = (node: ts.Node): void => {
+      if (ts.isIdentifier(node) && node.text === "Response" && !accounted.has(`${file}:${node.getStart(source)}`)) {
+        if (isTypePosition(node)) account(file, node, "type");
+        else if (isInstanceOfOperand(node)) account(file, node, "check");
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+
+  const lexical = new Map<string, LexicalToken>();
+  for (const [file, source] of sources) {
+    for (const token of lexicalResponseTokens(file, source.text)) lexical.set(`${token.file}:${token.pos}`, token);
+  }
+  const count = (kind: string): number => [...accounted.values()].filter((value) => value === kind).length;
+  const unaccounted = [...lexical]
+    .filter(([key]) => !accounted.has(key))
+    .map(([, token]) => `${token.file}:${token.line}`)
+    .sort();
+  const notLexical = [...accounted.keys()].filter((key) => !lexical.has(key)).sort();
 
   // (c) Calls to a status-taking builder (`jsonResponse(400, { error: … })`).
   for (const record of functions) {
@@ -649,7 +905,11 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     visit(bodyOf(record.fn));
   }
 
-  return { codes, unresolved, occurrences, responseReferences, classified, unresolvedReferences, opaque };
+  return {
+    codes, unresolved, occurrences, lexicalTokens: lexical.size, classified, unresolvedReferences,
+    aliasDefinitions: count("alias"), typeReferences: count("type"), checkReferences: count("check"),
+    aliasSites, unaccounted, notLexical, opaque,
+  };
 }
 
 function enclosingFunction(node: ts.Node): FnNode | null {
@@ -712,7 +972,10 @@ const UNRESOLVED_SITES = new Map<string, string>([
 
 /**
  * Functions that forward one of their parameters into a callee the inventory
- * cannot resolve, with the reason the forwarding cannot hide a refusal.
+ * cannot resolve, each with what the inventory knows about that call. This is
+ * an explicit unresolved-call list, not a claim that forwarding cannot hide a
+ * refusal: `Soul.put -> this.validate` hides validator refusals from this
+ * inventory. #2970 replaces this inventory with a server dry run.
  * `file:name` matches the closure's own naming.
  */
 const OPAQUE_FUNCTIONS = new Map<string, string>([
@@ -821,10 +1084,15 @@ test("each unresolved site is listed by file:line with a reason", () => {
   expect(unexpected).toEqual([]);
 });
 
-test("every Response reference is classified or listed unresolved", () => {
+test("every Response identifier token in the import closure's source is accounted for; a name built at runtime (e.g. from strings) is not seen — #2970 replaces this inventory with a server dry run", () => {
   const inventory = buildInventory(collectSourceSet());
-  expect(inventory.responseReferences).toBeGreaterThan(0);
-  expect(inventory.classified + inventory.unresolvedReferences).toBe(inventory.responseReferences);
+  expect(inventory.lexicalTokens).toBeGreaterThan(0);
+  expect(inventory.unaccounted).toEqual([]);
+  expect(inventory.notLexical).toEqual([]);
+  expect(
+    inventory.classified + inventory.unresolvedReferences + inventory.aliasDefinitions +
+    inventory.typeReferences + inventory.checkReferences,
+  ).toBe(inventory.lexicalTokens);
 });
 
 test("each function that forwards a parameter into an unresolvable callee is opaque and listed", () => {
@@ -909,10 +1177,7 @@ test("Response.error is an unresolved refusal", () => {
 });
 
 test.each([
-  'new globalThis.Response(JSON.stringify({ error: "x" }), { status: 403 })',
   'Response.redirect("http://example.invalid/")',
-  'const R = Response; new R(JSON.stringify({ error: "x" }), { status: 403 })',
-  'const R = Response; R.json({ error: "x" }, { status: 403 })',
 ])('counts a Response form it does not classify as unresolved: %s', (expression) => {
   const source = ts.createSourceFile("fixture.ts", expression, ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
@@ -923,13 +1188,39 @@ test.each([
 });
 
 test.each([
+  'const R = Response; new R(JSON.stringify({ error: "x" }), { status: 403 })',
+  'const R = Response; R.json({ error: "x" }, { status: 403 })',
+  'const R = Response as any; R.json({ error: "x" }, { status: 403 })',
+  'const R = globalThis.Response; R.json({ error: "x" }, { status: 403 })',
+  'const { json } = Response; json({ error: "x" }, { status: 403 })',
+])('classifies a refusal through a followed alias: %s', (expression) => {
+  const source = ts.createSourceFile("fixture.ts", expression, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect(inventory.occurrences).toBe(1);
+  expect(inventory.aliasDefinitions).toBe(1);
+  expect(inventory.aliasSites).toBe(1);
+  expect([...inventory.codes]).toEqual([["x", "fixture.ts:1"]]);
+  expect([...inventory.unresolved]).toEqual([]);
+});
+
+test("classifies a Response construction through globalThis", () => {
+  const source = ts.createSourceFile("fixture.ts",
+    'new globalThis.Response(JSON.stringify({ error: "x" }), { status: 403 })', ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect(inventory.classified).toBe(1);
+  expect(inventory.aliasDefinitions).toBe(0);
+  expect([...inventory.codes]).toEqual([["x", "fixture.ts:1"]]);
+  expect([...inventory.unresolved]).toEqual([]);
+});
+
+test.each([
   'Response["json"]({ error: "x" }, { status: 403 })',
   '(Response as any).json({ error: "x" }, { status: 403 })',
   'new (Response as any)(JSON.stringify({ error: "x" }), { status: 403 })',
 ])('counts a Response form the classifier does not know as unresolved: %s', (expression) => {
   const source = ts.createSourceFile("fixture.ts", expression, ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
-  expect(inventory.responseReferences).toBe(1);
+  expect(inventory.lexicalTokens).toBe(1);
   expect(inventory.occurrences).toBe(1);
   expect(inventory.classified).toBe(0);
   expect(inventory.unresolvedReferences).toBe(1);

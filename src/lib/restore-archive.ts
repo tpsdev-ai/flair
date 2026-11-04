@@ -26,10 +26,11 @@
  * Schema admission (flair#2953): a row of a table restore writes is also
  * checked against that table's GraphQL schema (schemas/*.graphql). A `!`
  * column the row does not hold is refused, except a field the write supplies
- * itself (RESTORE_WRITE_SUPPLIED_FIELDS); every present non-null held column
- * must hold the JS value its declared type names. Replace mode deletes an
- * archived Memory or Soul row before writing it back, so a row these named
- * checks refuse is refused here, before the delete.
+ * itself (RESTORE_WRITE_SUPPLIED_FIELDS: Agent copies createdAt and publicKey
+ * from the stored row, so a stored row that lacks either refuses the PUT);
+ * every present non-null held column must hold the JS value its declared type
+ * names. Replace mode deletes an archived Memory or Soul row before writing it
+ * back, so a row these named checks refuse is refused here, before the delete.
  *
  * Archive diagnostics. `parseRestoreArchive` returns the first problem it
  * finds as one refusal with a JSON Pointer `location`. Decoding and JSON-syntax
