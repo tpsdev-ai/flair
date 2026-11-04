@@ -557,13 +557,15 @@ inside the workflow, each a test in `test/unit/release-promote-workflow.test.ts`
   pinned to the canary's exact version (11.19.1), installed from a job directory and
   verified with `npm --version` before the registry reads and tag moves that follow;
   another version is a refusal.
-- **Non-dry-run attempts; at most once per poll.** Across all run-list pages, the
-  poll matches the title `release-promote v<version>`, without the `(dry run)` suffix.
-  Queued, in-progress or successfully completed runs prevent dispatch. Other matching
-  runs require human review without automatic redispatch. Within one poll it
-  dispatches each version at most once, whatever the number of marker rows. A failed
-  or uninterpretable run-list read is an error. This is a list-then-dispatch check,
-  not a reservation.
+
+**Non-dry-run attempts; at most once per poll.** In `release-promote-poll.yml`
+(`test/unit/release-promote-poll-workflow.test.ts`), across all run-list pages, the
+poll matches the title `release-promote v<version>`, without the `(dry run)` suffix.
+Queued, in-progress or successfully completed runs prevent dispatch. Other matching
+runs require human review without automatic redispatch. Within one poll it
+dispatches each version at most once, whatever the number of marker rows. A failed
+or uninterpretable run-list read is an error. This is a list-then-dispatch check,
+not a reservation.
 
 **When the promote block fails.** Nothing is restored automatically (a restore cannot
 be told apart from clobbering a newer legitimate `latest`); the job fails and the run

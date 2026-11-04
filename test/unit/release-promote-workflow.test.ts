@@ -1173,6 +1173,7 @@ describe("canary.yml — a failed tree selection runs no repository script (cont
   test("after a SUCCESSFUL selection, a later failed check still reaches the scripted FAIL verdict", () => {
     for (const failAt of ["sha", "install", "boot", "plugin"]) {
       const ran = canaryRunPlan("success", failAt);
+      expect(ran.some((s) => s.id === failAt), `step ${failAt} is in the run plan`).toBe(true);
       expect(ran.some(isVerdict), `verdict after a failed ${failAt}`).toBe(true);
       expect(ran.some(isInlineFail), `no inline FAIL after a failed ${failAt}`).toBe(false);
     }
