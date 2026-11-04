@@ -564,7 +564,7 @@ function writeUncertainMarker(paths: IntegrityPaths, value: string, beforeWrite?
     writeNewDurable(paths.uncertainPath, Buffer.from(value, "utf-8"), 0o600, () => { created = true; });
   } catch (err) {
     if (created) {
-      try { clearUncertainMarker(paths); } catch { /* retain incomplete intent */ }
+      try { clearUncertainMarker(paths); } catch { }
     }
     throw err;
   }
@@ -1373,7 +1373,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     // Durable intent marker BEFORE publication: a post-rename fsync warning
     // then cannot lose the uncertainty. Failure here refuses the publication.
     writeUncertainMarker(state.paths, `${UNCERTAIN_COMMIT_PREFIX}${nextGeneration}`, opts.testHooks?.beforeUncertainMarkerWrite);
-    return () => { try { clearUncertainMarker(state.paths); } catch { /* leave it for the next open */ } };
+    return () => { try { clearUncertainMarker(state.paths); } catch { } };
   };
 
   let result: ConfigSectionResult;
@@ -1396,8 +1396,6 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
 
   if (result.status === "written") {
     if (result.cleanupWarning) {
-      // CURRENT is committed, but its directory fsync did not complete. The
-      // durable marker stays until the next open verifies and clears it.
       return {
         ok: false,
         status: "commit_uncertain",
@@ -1487,7 +1485,7 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
   };
   const stage = (): (() => void) => {
     writeUncertainMarker(state.paths, `${UNCERTAIN_REGISTRY_PREFIX}${nextSequence}`);
-    return () => { try { clearUncertainMarker(state.paths); } catch { /* leave it for the next open */ } };
+    return () => { try { clearUncertainMarker(state.paths); } catch { } };
   };
   let result: ConfigSectionResult;
   try {

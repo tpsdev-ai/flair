@@ -110,8 +110,17 @@ describe("macOS mount table classification", () => {
       if (!support.ok) expect(support.reason).toBe("unparseable df output");
     }
     expect(parseDfMountPoint(DATA_DF)).toBe("/System/Volumes/Data");
+    expect(parseDfMountPoint(DATA_DF.replace("512-blocks", "1024-blocks"))).toBe("/System/Volumes/Data");
     expect(parseDfMountPoint(NET_DF)).toBe("/Volumes/Net");
     expect(parseDfMountPoint(SPACE_DF)).toBe("/Volumes/Data Disk");
+  });
+
+  it("refuses a df header with unexpected columns", () => {
+    const output = DATA_DF.replace("Filesystem 512-blocks Used Available Capacity Mounted on", "Filesystem garbage");
+    expect(parseDfMountPoint(output)).toBeNull();
+    const support = classifyDarwinFilesystem("/Users/operator", APFS_LINE, () => output);
+    expect(support.ok).toBe(false);
+    if (!support.ok) expect(support.reason).toBe("unparseable df output");
   });
 
   it("requires exactly one mount entry equal to the df mount point", () => {

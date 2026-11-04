@@ -325,7 +325,7 @@ export function selectMountEntry(
 const DF_DATA_LINE = /^(.+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+%)\s+(.+)$/;
 
 /** The one non-data line `df -P` prefixes: its column header. */
-const DF_HEADER_LINE = /^Filesystem(\s|$)/;
+const DF_HEADER_LINE = /^Filesystem\s+(?:512|1024)-blocks\s+Used\s+Available\s+Capacity\s+Mounted\s+on$/;
 
 /** Parse `df -P` output. The output must be the header (optional) plus exactly
  *  one data row; any other nonempty line is a refusal, never skipped. */
