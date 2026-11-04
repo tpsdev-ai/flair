@@ -1,10 +1,7 @@
 /**
  * integrity-checkpoint-gate-971.test.ts — flair#971 slice 1a, invariant 1.
  *
- * Proves the v3 checkpoint gate: the fixed reason union, the custody predicate
- * (modes, symlinks, ACLs, recorded operator/machine, real uid denial), HMAC
- * verification, and the N5 anti-rebootstrap rule. No command or route is
- * exercised; the module under test is the library foundation.
+ * Tests the checkpoint gate and custody library.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import {
@@ -225,13 +222,9 @@ describe("checkpoint-gate (invariant 1)", () => {
     if (!result.ok) expect(result.reason).toBe("custody_invalid");
   });
 
-  // Both cases run for real in the CI step "Custody denial (root)": it installs
-  // setfacl when absent and runs this file as root.
   const hasSetfacl = spawnSync("setfacl", ["--version"], { encoding: "utf8" }).status === 0;
-  const aclName = hasSetfacl
-    ? "refuses an ACL grant on the key"
-    : "refuses an ACL grant on the key (skipped: setfacl is unavailable; the CI step \"Custody denial (root)\" installs and runs this case)";
-  (hasSetfacl ? it : it.skip)(aclName, () => {
+  (hasSetfacl || process.env.GITHUB_JOB === "custody-denial-root" ? it : it.skip)("refuses an ACL grant on the key", () => {
+    expect(hasSetfacl).toBe(true);
     init();
     const paths = integrityPaths(custodyDir);
     const granted = spawnSync("setfacl", ["-m", `u:${SERVER_UID}:r--`, paths.keyPath], { encoding: "utf8" });
@@ -368,7 +361,7 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(verdict.ok).toBe(true);
   });
 
-  it("refuses a server uid without a recorded measurement source", () => {
+  it("refuses a missing server uid or an empty source label", () => {
     const missing = initializeIntegrityCustody({ ...options(), serverUid: undefined });
     expect(missing.ok).toBe(false);
     if (!missing.ok) expect(missing.reason).toBe("custody_invalid");
@@ -416,32 +409,33 @@ describe("checkpoint-gate (invariant 1)", () => {
     }
   });
 
-  // The real denial. Mode arithmetic is not evidence: a child process with the
-  // server uid must fail to READ the key and fail to WRITE state. It runs as
-  // root in the CI step "Custody denial (root)"; a non-root host skips it with
-  // the reason below rather than pretending mode bits are a syscall. In the
-  // root run the operator is uid 0 and the recorded server uid is 65534, so the
-  // predicate's "the server must not be root" rule holds and the child drops to
-  // exactly that recorded uid. Bun 1.3.10 ignores spawnSync's uid/gid, so the
-  // drop goes through setpriv (util-linux) instead of the spawn options.
-  const isRoot = (process.getuid?.() ?? -1) === 0;
-  const denialName = isRoot
-    ? "server uid cannot read the key or write state (real denial)"
-    : "server uid cannot read the key or write state (skipped: runs as root in the CI step \"Custody denial (root)\"; skipped on a non-root host)";
-  (isRoot ? it : it.skip)(
-    denialName,
+  const uidProbe = spawnSync("setpriv", [
+    `--reuid=${SERVER_UID}`, `--regid=${SERVER_UID}`, "--clear-groups", "node", "-e",
+    `process.exit(process.getuid() === ${SERVER_UID} && process.getgid() === ${SERVER_UID} ? 0 : 1)`,
+  ], { encoding: "utf8", timeout: 15_000 });
+  (process.env.GITHUB_JOB === "custody-denial-root" || (process.platform === "linux" && uidProbe.status === 0) ? it : it.skip)(
+    "server uid cannot read the key or write state on accepted 0700 custody (real denial)",
     () => {
-      init();
-      // Let the child reach the key: the temp root and the custody directory
-      // are searchable, while the key stays 0600 and the directory unwritable,
-      // so the read fails on the key's mode and the write on the directory's,
-      // not on an unreachable parent.
+      expect(process.platform).toBe("linux");
+      expect(process.getuid?.()).toBe(0);
+      expect(uidProbe.error).toBeUndefined();
+      expect(uidProbe.status).toBe(0);
+      const state = init();
       chmodSync(root, 0o755);
-      chmodSync(custodyDir, 0o711);
       const paths = integrityPaths(custodyDir);
+      expect(statSync(custodyDir).mode & 0o777).toBe(0o700);
+      expect(checkCustody({
+        paths,
+        serverUid: SERVER_UID,
+        operatorUid: OPERATOR_UID,
+        machineId: MACHINE,
+        expectedOperatorUid: state.enrollment.operatorUid,
+        expectedMachineId: state.enrollment.machineId,
+      })).toEqual({ ok: true });
       const probe = join(custodyDir, "server-write-probe");
       const script = [
         "const fs = require('node:fs');",
+        `if (process.getuid() !== ${SERVER_UID} || process.getgid() !== ${SERVER_UID}) process.exit(4);`,
         "try { fs.readFileSync(process.argv[1]); } catch (e) {",
         "  if (e.code !== 'EACCES') process.exit(2);",
         "  try { fs.writeFileSync(process.argv[2], 'x'); } catch (e2) {",

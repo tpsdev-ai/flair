@@ -769,9 +769,7 @@ export type CommitGenerationResult =
 
 export interface IntegrityStateOptions {
   custodyDir: string;
-  /** The server uid, measured by the caller (`serverUidSource` names how).
-   *  Binding it to a live server process belongs to the enrollment slice;
-   *  this slice refuses an unmeasured value. */
+  /** Caller-supplied server uid; requires a nonempty `serverUidSource` label. */
   serverUid?: number;
   serverUidSource?: string;
   operatorUid?: number;

@@ -18,9 +18,8 @@
  *      the configured entry does not exist AND the parent resolves. A dangling
  *      symlink is not absence; EACCES / ELOOP / ENOTDIR are resolution ERRORS
  *      and HOLD, never "absent".
- *   2. LOCK: an `O_EXCL` create of `<resolvedTarget>.lock` (or the caller's
- *      explicit `lockPath`), beside the RESOLVED target so stable symlink
- *      aliases share one lock, computed once per attempt. Content is
+ *   2. LOCK: an `O_EXCL` create of `<resolvedTarget>.lock` unless the caller
+ *      supplies `lockPath`, computed once per attempt. Content is
  *      diagnostic only (`<pid> <iso> <hostname>`), never an authorization
  *      input. Bounded retry then a NAMED refusal. No reclaim, no age-out, no
  *      pid-liveness shortcut.
@@ -110,7 +109,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { hostname } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 // ── observations ────────────────────────────────────────────────────────────
 
@@ -313,31 +312,31 @@ export function parseMountLine(line: string): MountEntry | null {
   return { device, mountPoint, type, options };
 }
 
-/** Match the file's device to a recognized local mount's device. */
+/** Select exactly one entry at the covering mount point reported by df. */
 export function selectMountEntry(
   entries: MountEntry[],
-  realPath: string,
-  statDevice: (path: string) => number = (path) => statSync(path).dev,
+  mountPoint: string,
 ): MountEntry | null {
-  const device = statDevice(realPath);
-  if (!Number.isSafeInteger(device) || device < 0) throw new Error(`invalid device for ${realPath}`);
-  let selected: MountEntry | null = null;
-  for (const entry of entries) {
-    if (!isSupportedLocalFilesystemName(entry.type) || !entry.options.includes("local")) continue;
-    const mountDevice = statDevice(entry.mountPoint);
-    if (!Number.isSafeInteger(mountDevice) || mountDevice < 0) throw new Error(`invalid device for ${entry.mountPoint}`);
-    if (mountDevice !== device) continue;
-    if (selected !== null && selected.type !== entry.type) return null;
-    if (selected === null || entry.mountPoint.length > selected.mountPoint.length) selected = entry;
-  }
-  return selected;
+  const matches = entries.filter((entry) => entry.mountPoint === mountPoint);
+  return matches.length === 1 ? matches[0]! : null;
 }
 
-/** Classify a macOS path by device, accepting only local apfs or hfs mounts. */
+export function parseDfMountPoint(output: string): string | null {
+  const lines = output.split("\n").map((line) => /^(.+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+%)\s+(.+)$/.exec(line.trim())).filter((line) => line !== null);
+  return lines.length === 1 && lines[0]![6]!.startsWith("/") ? lines[0]![6]! : null;
+}
+
+function readDarwinDf(path: string): string {
+  return execFileSync("/bin/df", ["-P", path], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000, killSignal: "SIGKILL",
+  });
+}
+
+/** Classify the covering mount reported by df. */
 export function classifyDarwinFilesystem(
   realPath: string,
   mountOutput: string,
-  statDevice: (path: string) => number = (path) => statSync(path).dev,
+  readDf: (path: string) => string = readDarwinDf,
 ): FilesystemSupport {
   const entries: MountEntry[] = [];
   for (const line of mountOutput.split("\n")) {
@@ -346,21 +345,24 @@ export function classifyDarwinFilesystem(
     if (entry === null) return { ok: false, reason: "unparseable mount entry" };
     entries.push(entry);
   }
-  let entry: MountEntry | null;
+  let mountPoint: string | null;
   try {
-    entry = selectMountEntry(entries, realPath, statDevice);
+    mountPoint = parseDfMountPoint(readDf(realPath));
   } catch (err) {
-    return { ok: false, reason: `cannot inspect mount devices for ${realPath}: ${msg(err)}` };
+    return { ok: false, reason: `cannot read the covering mount for ${realPath}: ${msg(err)}` };
   }
-  if (entry === null) return { ok: false, reason: `no recognized local mount matches the device of ${realPath}` };
+  if (mountPoint === null) return { ok: false, reason: "unparseable df output" };
+  const entry = selectMountEntry(entries, mountPoint);
+  if (entry === null) return { ok: false, reason: `no unique mount entry for ${mountPoint}` };
+  if (!isSupportedLocalFilesystemName(entry.type) || !entry.options.includes("local")) {
+    return { ok: false, reason: `mount at ${mountPoint} is not a recognized local filesystem` };
+  }
   return { ok: true, type: entry.type.toLowerCase() };
 }
 
-/** Refuse a network or unrecognized filesystem. Resolves the nearest existing
- *  ancestor so an about-to-be-created custody directory is checked too. A
- *  failed probe is a refusal, never "local". */
+/** Check the nearest existing ancestor against the filesystem allowlist. */
 export function assertSupportedLocalFilesystem(targetPath: string): FilesystemSupport {
-  let probe = targetPath;
+  let probe = resolve(targetPath);
   // Bounded: `/` exists on every supported host; stop at the root.
   for (let i = 0; i < 256; i++) {
     if (existsSync(probe)) break;
@@ -369,10 +371,6 @@ export function assertSupportedLocalFilesystem(targetPath: string): FilesystemSu
     probe = parent;
   }
   if (process.platform === "darwin") {
-    // macOS reports the same numeric f_type for every local disk filesystem,
-    // so the mount table is the identifier: it names the type and marks a
-    // local disk with the `local` option. (`stat -f %T` is not usable: `-f`
-    // selects the output format, and `%T` is the file-type marker.)
     let realProbe: string;
     try {
       realProbe = realpathSync(probe);
@@ -381,7 +379,7 @@ export function assertSupportedLocalFilesystem(targetPath: string): FilesystemSu
     }
     let table: string;
     try {
-      table = execFileSync("/sbin/mount", [], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      table = execFileSync("/sbin/mount", [], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000, killSignal: "SIGKILL" });
     } catch (err) {
       return { ok: false, reason: `cannot read the mount table for ${realProbe}: ${msg(err)}` };
     }
