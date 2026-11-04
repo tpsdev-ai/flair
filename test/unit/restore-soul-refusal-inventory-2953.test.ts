@@ -2,13 +2,15 @@
  * restore-soul-refusal-inventory-2953.test.ts — the Soul write-refusal
  * inventory behind `flair restore --replace` (flair#2953).
  *
- * The replace preflight in src/commands/restore.ts duplicates the server's
- * Soul write policy. A refusal added to the write path after the preflight
- * would reopen the delete-then-refused window, so this inventory derives the
- * source set from imports and reads the refusal code at each refusal site. A
- * code found at a site must be preflighted, refused by archive admission, or
- * named out of scope here; an unlisted site whose argument is not a statically
- * known string fails instead of being skipped.
+ * The source set is the relative-import closure of resources/Soul.ts.
+ * For new Response and Response.json, only no init (default 200) or a
+ * plain, unwrapped object literal with no spread or computed keys is classified;
+ * every property is read to prove status absent or statically numeric.
+ * Every other init and Response.error() (status 0) is unresolved and fails
+ * with file:line unless listed with a reason. Recognised status-taking
+ * helpers require statically numeric status arguments; their unresolved
+ * definitions must also be listed. Refusal codes must be preflighted,
+ * admission-refused or listed out of scope.
  */
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
@@ -93,7 +95,6 @@ interface FnInfo {
 interface RefusalInventory {
   /** Refusal code → the file:line of the first site that produces it. */
   codes: Map<string, string>;
-  /** Sites whose refusal argument is not a statically known string. */
   unresolved: Map<string, string>;
 }
 
@@ -178,22 +179,32 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     return alias ? (functionsByName.get(`${alias.file}:${alias.name}`) ?? null) : null;
   };
 
-  /** The nearest preceding const/let/var in an enclosing scope, or a top-level const. */
-  const lookupVariable = (at: ts.Node, name: string): ts.Expression | null => {
+  const lookupVariable = (at: ts.Node, name: string, constantOnly = false): ts.Expression | null => {
     let parent: ts.Node | undefined = at.parent;
     while (parent) {
+      if (constantOnly) {
+        if (ts.isFunctionLike(parent) && parent.parameters.some((parameter) =>
+          !ts.isIdentifier(parameter.name) || parameter.name.text === name)) return null;
+        if (ts.isCatchClause(parent) || ts.isForStatement(parent) || ts.isForOfStatement(parent) || ts.isForInStatement(parent)) return null;
+      }
       const statements = ts.isSourceFile(parent) || ts.isBlock(parent) || ts.isModuleBlock(parent) ? parent.statements : null;
       if (statements) {
         for (const statement of statements) {
           if (!ts.isVariableStatement(statement)) continue;
           for (const declaration of statement.declarationList.declarations) {
-            if (ts.isIdentifier(declaration.name) && declaration.name.text === name && declaration.initializer) return declaration.initializer;
+            if (!ts.isIdentifier(declaration.name)) {
+              if (constantOnly) return null;
+              continue;
+            }
+            if (declaration.name.text !== name) continue;
+            if (constantOnly && (!(statement.declarationList.flags & ts.NodeFlags.Const) || declaration.getStart() >= at.getStart())) return null;
+            return declaration.initializer ?? null;
           }
         }
       }
       parent = parent.parent;
     }
-    return topLevelConsts.get(at.getSourceFile().fileName)?.get(name) ?? null;
+    return constantOnly ? null : (topLevelConsts.get(at.getSourceFile().fileName)?.get(name) ?? null);
   };
 
   const resolveString = (file: string, expression: ts.Expression | null | undefined, depth = 0): string[] | null => {
@@ -255,7 +266,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
       return whenTrue && whenFalse ? [...new Set([...whenTrue, ...whenFalse])] : null;
     }
     if (ts.isIdentifier(expression)) {
-      const local = lookupVariable(expression, expression.text);
+      const local = lookupVariable(expression, expression.text, true);
       return local ? resolveNumbers(file, local, depth + 1) : null;
     }
     return null;
@@ -298,41 +309,40 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     return null;
   };
 
-  /** A response construction the inventory can see: `new Response`, `Response.json` or `Response.error`. */
   type ResponseShape = {
     status: ts.Expression | undefined;
-    /** False when the init argument is present but not statically inspectable. */
-    statusKnown: boolean;
+    statuses: number[] | null;
     body: ts.Expression | null;
-    baseStatus: number;
   };
 
-  /** Whether an expression resolves to an object literal this inventory can read. */
-  const objectLiteralAt = (file: string, expression: ts.Expression | null | undefined, depth = 0): boolean => {
-    if (!expression || depth > 6) return false;
-    if (ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression) ||
-        ts.isSatisfiesExpression(expression) || ts.isNonNullExpression(expression)) {
-      return objectLiteralAt(file, expression.expression, depth + 1);
+  const responseInit = (file: string, init: ts.Expression | undefined): Pick<ResponseShape, "status" | "statuses"> => {
+    if (init === undefined) return { status: undefined, statuses: [200] };
+    if (!ts.isObjectLiteralExpression(init)) return { status: undefined, statuses: null };
+    let status: ts.Expression | undefined;
+    for (const property of init.properties) {
+      if (ts.isSpreadAssignment(property) || ts.isComputedPropertyName(property.name)) {
+        return { status: undefined, statuses: null };
+      }
+      const name = property.name;
+      if (!ts.isIdentifier(name) && !ts.isStringLiteral(name) && !ts.isNumericLiteral(name)) {
+        return { status: undefined, statuses: null };
+      }
+      if (name.text === "__proto__") return { status: undefined, statuses: null };
+      if (name.text !== "status") continue;
+      if (ts.isPropertyAssignment(property)) status = property.initializer;
+      else if (ts.isShorthandPropertyAssignment(property)) status = property.name;
+      else return { status: undefined, statuses: null };
     }
-    if (ts.isObjectLiteralExpression(expression)) return true;
-    if (ts.isConditionalExpression(expression)) {
-      return objectLiteralAt(file, expression.whenTrue, depth + 1) && objectLiteralAt(file, expression.whenFalse, depth + 1);
-    }
-    if (ts.isIdentifier(expression)) {
-      const local = lookupVariable(expression, expression.text);
-      return local ? objectLiteralAt(file, local, depth + 1) : false;
-    }
-    return false;
+    return { status, statuses: status === undefined ? [200] : resolveNumbers(file, status) };
   };
 
   const responseShape = (file: string, node: ts.Expression): ResponseShape | null => {
     if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Response") {
       const init = node.arguments?.[1];
+      if (node.arguments?.some(ts.isSpreadElement)) return { status: undefined, statuses: null, body: null };
       return {
-        status: init === undefined ? undefined : (propertyOf(init, file, "status") ?? undefined),
-        statusKnown: init === undefined || objectLiteralAt(file, init),
+        ...responseInit(file, init),
         body: node.arguments?.[0] ?? null,
-        baseStatus: 200,
       };
     }
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
@@ -340,19 +350,17 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
       const method = node.expression.name.text;
       if (method === "json") {
         const init = node.arguments?.[1];
+        if (node.arguments.some(ts.isSpreadElement)) return { status: undefined, statuses: null, body: null };
         return {
-          status: init === undefined ? undefined : (propertyOf(init, file, "status") ?? undefined),
-          statusKnown: init === undefined || objectLiteralAt(file, init),
+          ...responseInit(file, init),
           body: node.arguments?.[0] ?? null,
-          baseStatus: 200,
         };
       }
-      if (method === "error") return { status: undefined, statusKnown: true, body: null, baseStatus: 0 };
+      if (method === "error") return { status: undefined, statuses: null, body: null };
     }
     return null;
   };
 
-  /** Whether a function's body constructs a Response with a status >= 400, and from which parameter. */
   const describe = (record: FnRecord): FnInfo => {
     let statusParam: string | null = null;
     let messageParam: string | null = null;
@@ -459,23 +467,20 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     visit(source);
   }
 
-  // (b) Every Response construction (`new Response`, `Response.json`,
-  // `Response.error`) with a status >= 400. A construction whose status cannot
-  // be resolved statically fails, unless it is the definition of a
-  // status-taking builder, whose call sites pass (c) decides.
+  // (b) new Response/Response.json: no init (200), or a plain, unwrapped
+  // object literal without spread/computed keys, with every property read and status
+  // absent or statically numeric. Every other init and Response.error()
+  // (status 0) fails with file:line unless listed with a reason. Status-taking
+  // helpers require static status arguments in (c) and listed definitions.
   for (const [file, source] of sources) {
     const visit = (node: ts.Node): void => {
       if (ts.isNewExpression(node) || ts.isCallExpression(node)) {
         const shape = responseShape(file, node);
         if (shape) {
           const holder = enclosingFunction(node);
-          const parameters = holder ? parametersOf(holder) : new Set<string>();
-          const statuses = shape.status === undefined ? [shape.baseStatus] : resolveNumbers(file, shape.status);
-          if (!shape.statusKnown) {
+          const statuses = shape.statuses;
+          if (statuses === null) {
             recordUnresolved(file, lineOf(source, node), "unresolvable Response status");
-          } else if (statuses === null) {
-            const fromParameter = shape.status !== undefined && ts.isIdentifier(shape.status) && parameters.has(shape.status.text);
-            if (!fromParameter) recordUnresolved(file, lineOf(source, node), "unresolvable Response status");
           } else if (statuses.some((value) => value >= 400)) {
             const error = propertyOf(payloadOf(file, shape.body), file, "error");
             if (!(holder && error && ts.isIdentifier(error) && sinkParamOf(holder) === error.text)) {
@@ -495,31 +500,32 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   for (const record of functions) {
     const statusParam = info.get(record.key)!.statusParam;
     if (!statusParam) continue;
-    const source = sources.get(record.file)!;
-    const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && resolveFunction(record.file, node.expression.text)?.key === record.key) {
-        let index = -1;
-        record.fn.parameters.forEach((parameter, position) => {
-          if (ts.isIdentifier(parameter.name) && parameter.name.text === statusParam) index = position;
-        });
-        const statuses = index >= 0 ? resolveNumbers(record.file, node.arguments[index]) : null;
-        if (statuses && statuses.some((value) => value >= 400)) {
-          const body = node.arguments.find((argument) => {
-            if (ts.isObjectLiteralExpression(argument)) return true;
-            if (!ts.isIdentifier(argument)) return false;
-            const local = lookupVariable(argument, argument.text);
-            return !!local && ts.isObjectLiteralExpression(local);
+    for (const [file, source] of sources) {
+      const visit = (node: ts.Node): void => {
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && resolveFunction(file, node.expression.text)?.key === record.key) {
+          let index = -1;
+          record.fn.parameters.forEach((parameter, position) => {
+            if (ts.isIdentifier(parameter.name) && parameter.name.text === statusParam) index = position;
           });
-          const values = resolveString(record.file, propertyOf(body, record.file, "error"));
-          if (values) for (const value of values) recordCode(value, record.file, lineOf(source, node));
-          else recordUnresolved(record.file, lineOf(source, node), "unresolvable refusal body");
-        } else if (index >= 0 && statuses === null) {
-          recordUnresolved(record.file, lineOf(source, node), `unresolvable status argument: ${record.name}.${statusParam}`);
+          const statuses = index >= 0 ? resolveNumbers(file, node.arguments[index]) : null;
+          if (statuses && statuses.some((value) => value >= 400)) {
+            const body = node.arguments.find((argument) => {
+              if (ts.isObjectLiteralExpression(argument)) return true;
+              if (!ts.isIdentifier(argument)) return false;
+              const local = lookupVariable(argument, argument.text);
+              return !!local && ts.isObjectLiteralExpression(local);
+            });
+            const values = resolveString(file, propertyOf(body, file, "error"));
+            if (values) for (const value of values) recordCode(value, file, lineOf(source, node));
+            else recordUnresolved(file, lineOf(source, node), "unresolvable refusal body");
+          } else if (index >= 0 && statuses === null) {
+            recordUnresolved(file, lineOf(source, node), `unresolvable status argument: ${record.name}.${statusParam}`);
+          }
         }
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
+        ts.forEachChild(node, visit);
+      };
+      visit(source);
+    }
   }
 
   return { codes, unresolved };
@@ -576,8 +582,9 @@ const OUT_OF_SCOPE = new Map<string, string>([
   ["non_canonical_request_target", "request-target canonicalisation in the auth middleware; not a Soul write rule"],
 ]);
 
-/** Refusal sites whose message is built at runtime, with the reason it is accepted. */
-const RUNTIME_MESSAGES = new Map<string, string>([
+/** Unresolved sites accepted by file:line with a reason. */
+const UNRESOLVED_SITES = new Map<string, string>([
+  ["resources/instruction-version-record.ts:272", "jsonResponse forwards its status parameter; its call sites are checked for static statuses"],
   ["resources/record-owner-guard.ts:220", "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write"],
   ["resources/record-owner-guard.ts:231", "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write"],
 ]);
@@ -607,10 +614,11 @@ test("each refusal code found in the derived source set is preflighted, admissio
   expect(inventory.codes.size).toBe(listed.size);
 });
 
-test("a refusal site whose message is built at runtime is listed with a reason", () => {
+test("each unresolved site is listed by file:line with a reason", () => {
   const inventory = buildInventory(collectSourceSet());
+  for (const reason of UNRESOLVED_SITES.values()) expect(reason.trim()).not.toBe("");
   const unexpected = [...inventory.unresolved]
-    .filter(([at]) => !RUNTIME_MESSAGES.has(at))
+    .filter(([at]) => !UNRESOLVED_SITES.has(at))
     .map(([at, detail]) => `${at}: ${detail}`)
     .sort();
   expect(unexpected).toEqual([]);
@@ -625,4 +633,102 @@ test("restore --replace names each preflighted Soul write rule", () => {
   ]) {
     expect(source).toContain(marker);
   }
+});
+
+test.each([
+  'new Response()',
+  'Response.json({})',
+  'new Response(null, {})',
+  'Response.json({}, { headers: {} })',
+  'Response.json({}, { headers() {} })',
+])("classifies the default status: %s", (expression) => {
+  const source = ts.createSourceFile("fixture.ts", expression, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.codes]).toEqual([]);
+  expect([...inventory.unresolved]).toEqual([]);
+});
+
+test.each([
+  '{ status: 403 } as const',
+  '{ status: 403 } satisfies ResponseInit',
+  '({ status: 403 })',
+  '{ status: 403 }!',
+  '{ ...base, status: 403 }',
+  '{ status: 403, ...base }',
+  'flag ? { status: 200 } : { status: 403 }',
+  'flag && { status: 403 }',
+  'init',
+  'makeInit()',
+  'undefined',
+  '{ ["status"]: 403 }',
+  '{ status: 200, [key]: 403 }',
+  '{ get status() { return 403; } }',
+  '{ status: Date.now() }',
+  '{ __proto__: { status: 403 } }',
+])("leaves an unsupported init unresolved: %s", (init) => {
+  for (const expression of [
+    `new Response(JSON.stringify({ error: "x" }), ${init})`,
+    `Response.json({ error: "x" }, ${init})`,
+  ]) {
+    const source = ts.createSourceFile("fixture.ts", `const init = { status: 403 };\n${expression}`, ts.ScriptTarget.Latest, true);
+    const inventory = buildInventory(new Map([["fixture.ts", source]]));
+    expect([...inventory.unresolved]).toEqual([["fixture.ts:2", "unresolvable Response status"]]);
+  }
+});
+
+test.each([
+  'new Response(JSON.stringify({ error: "x" }), { status: 403 })',
+  'Response.json({ error: "x" }, { status: 403 })',
+  'const status = 403; Response.json({ error: "x" }, { status })',
+])("records a static refusal: %s", (expression) => {
+  const source = ts.createSourceFile("fixture.ts", expression, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.codes]).toEqual([["x", "fixture.ts:1"]]);
+  expect([...inventory.unresolved]).toEqual([]);
+});
+
+test("Response.error is an unresolved refusal", () => {
+  const source = ts.createSourceFile("fixture.ts", "Response.error()", ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable Response status"]]);
+});
+
+test.each(["403", "Date.now()"])("checks a status-taking helper call: %s", (status) => {
+  const source = ts.createSourceFile("fixture.ts", `
+function jsonResponse(status: number, body: any) { return new Response(JSON.stringify(body), { status }); }
+jsonResponse(${status}, { error: "x" });`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect(inventory.unresolved.get("fixture.ts:2")).toBe("unresolvable Response status");
+  if (status === "403") {
+    expect([...inventory.codes]).toEqual([["x", "fixture.ts:3"]]);
+    expect(inventory.unresolved.size).toBe(1);
+  } else {
+    expect(inventory.unresolved.get("fixture.ts:3")).toBe("unresolvable status argument: jsonResponse.status");
+  }
+});
+
+
+test.each([
+  'let status = 200; status = 403; Response.json({}, { status })',
+  'const status = 200; function f(status: number) { return Response.json({}, { status }); }',
+  'Response.json(...args)',
+  'new Response(...args)',
+])("leaves an unproven status unresolved: %s", (expression) => {
+  const source = ts.createSourceFile("fixture.ts", expression, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable Response status"]]);
+});
+
+test("checks imported status-taking helper calls", () => {
+  const builderFile = "resources/instruction-version-record.ts";
+  const builder = ts.createSourceFile(builderFile,
+    'export function jsonResponse(status: number, body: any) { return new Response(JSON.stringify(body), { status }); }',
+    ts.ScriptTarget.Latest, true);
+  const callerFile = "resources/Soul.ts";
+  const caller = ts.createSourceFile(callerFile,
+    'import { jsonResponse } from "./instruction-version-record.js"; jsonResponse(403, { error: "x" }); jsonResponse(Date.now(), {});',
+    ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([[builderFile, builder], [callerFile, caller]]));
+  expect([...inventory.codes]).toEqual([["x", "resources/Soul.ts:1"]]);
+  expect(inventory.unresolved.get("resources/Soul.ts:1")).toBe("unresolvable status argument: jsonResponse.status");
 });
