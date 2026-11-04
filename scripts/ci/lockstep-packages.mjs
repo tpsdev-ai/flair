@@ -107,9 +107,9 @@ if (invokedDirectly) {
     process.exit(2);
   }
   if (process.argv.includes("--validate-names")) {
-    const shellSafeName = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
+    const shellSafeName = /^(@[a-z0-9-][a-z0-9-._]*\/)?[a-z0-9-][a-z0-9-._]*$/;
     if (packages.some(name => name.length > 214 || !shellSafeName.test(name))) {
-      console.error("lockstep-packages: DID NOT RUN — package name must match the shell-safe name allowlist and be at most 214 characters");
+      console.error("lockstep-packages: DID NOT RUN — package name must match the shell-safe name allowlist: optional @scope/ prefix; scope and name start with a-z, 0-9 or - and continue with a-z, 0-9, -, . or _; at most 214 characters total");
       process.exit(2);
     }
   }

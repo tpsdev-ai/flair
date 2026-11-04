@@ -43,7 +43,7 @@ done
       expect(requests).toEqual(["/repos/octo/repo/contents/.github/workflows/release-promote.yml?ref=v1.2.3"]);
       expect(code, stderr).toBe(status === 503 ? 1 : 0);
       expect(stdout.includes("dispatchable")).toBe(status === 200);
-      expect(stdout.includes("would dispatch: the tag predates the release machinery")).toBe(status === 404);
+      expect(stdout.includes("the release-promote workflow is not available at this tag ref; not dispatching")).toBe(status === 404);
       if (status === 503) expect(stderr).toContain("refusing to dispatch");
     } finally {
       server?.stop(true);

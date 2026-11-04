@@ -279,7 +279,7 @@ jobs:
             scripts/ci/check-plugin-canary.mjs \
             scripts/lib/agent-identity.mjs ; do
             if [ ! -e "$f" ]; then
-              echo "::error::release-promote: '$f' is absent from the tag's tree; refusing to promote from a tree that predates the release machinery."
+              echo "::error::release-promote: '$f' is absent from the tag's tree; refusing to promote."
               exit 1
             fi
             if ! git diff --quiet origin/main -- "$f"; then

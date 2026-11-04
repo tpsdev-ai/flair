@@ -78,7 +78,7 @@ describe("canary-verdict — PASS is bound to ONE package-set digest (A1c, #1671
      // One promote LOOP over the lockstep set (`@tpsdev-ai/flair` LAST, so a partial
      // paste never leaves the CLI ahead of its client library). npm offers no atomic
      // all-or-none promote, so the loop stops at the FIRST failure and prints RESTORE
-     // lines for the already-moved packages (item 1, round 5).
+     // lines for the attempted packages (item 1, round 5).
     const promoteLines = blockLines.filter((l) => l.includes("npm dist-tag add "));
     expect(promoteLines.length).toBeGreaterThanOrEqual(1);
     expect(block).toContain('if ! npm dist-tag add "$_p@1.2.3" latest');
@@ -217,7 +217,7 @@ describe("canary-verdict — shell-safe name allowlist", () => {
       ...(emit ? ["--emit", "bash"] : [])], { cwd: root, encoding: "utf8" });
   }
 
-  test.each([".fixture", "Fixture", "z fixture", "fixture\nname", "@scope/fixture\n", "@scope/", "a".repeat(215)])(
+  test.each(["~", "~root", "@scope/~x", "a~b", ".fixture", "Fixture", "z fixture", "fixture\nname", "@scope/fixture\n", "@scope/", "a".repeat(215)])(
     "refuses name %j outside the shell-safe name allowlist before output", (name) => {
       for (const emit of [false, true]) {
         const r = runWithName(name, emit);
@@ -229,11 +229,24 @@ describe("canary-verdict — shell-safe name allowlist", () => {
     },
   );
 
-  test.each(["@scope/fixture-name", "fixture-name", "a".repeat(214)])("emits name %j from the shell-safe name allowlist", (name) => {
+  test.each([...PACKAGES, "@scope/fixture-name", "fixture-name", "-", "0", "a-._9", "@-0._/a-._9", "a".repeat(214)])("emitted loop preserves accepted name %j under bash", (name) => {
     const r = runWithName(name, true);
     expect(r.status).toBe(0);
     expect(r.stderr).toBe("");
-    expect(r.stdout).toContain(`for _p in ${[name, "fixture-valid"].sort().join(" ")}; do`);
+    const names = [...new Set([name, "fixture-valid"])].sort();
+    if (name === "@tpsdev-ai/flair") names.push(names.splice(names.indexOf(name), 1)[0]!);
+    const loops = r.stdout.split("\n").filter(line => line.startsWith("for _p in "));
+    const assignment = r.stdout.split("\n").find(line => line.startsWith("_LPKGS="));
+    expect(assignment).toBe(`_LPKGS="${names.join(" ")}"`);
+    expect(loops.length).toBeGreaterThan(0);
+    for (const loop of loops) {
+      expect([`for _p in ${names.join(" ")}; do`, "for _p in $_LPKGS; do"]).toContain(loop);
+      const words = spawnSync("bash", [], {
+        input: `${assignment}\n${loop}\n  printf '%s\\n' "$_p"\ndone\n`, encoding: "utf8",
+      });
+      expect(words.status, words.stderr).toBe(0);
+      expect(words.stdout).toBe(names.join("\n") + "\n");
+    }
   });
 });
 

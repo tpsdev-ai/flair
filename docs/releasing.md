@@ -433,7 +433,7 @@ by a repository admin before the first automated promote:
 
 Before adding `NPM_TOKEN`, audit the creation actors, other actors' rule exceptions,
 and existing `v*` tags: every existing tag that carries a `release-promote.yml` must carry
-a copy reviewed on main. The poll logs "would dispatch: the tag predates the release machinery" and skips older tags without the workflow.
+a copy reviewed on main. On a 404, the poll logs "the release-promote workflow is not available at this tag ref; not dispatching" and skips: the tag may predate the workflow, or the ref may not resolve.
 
 The checks inside `release-promote.yml` and `canary.yml` are **defence in depth**, not
 the boundary. They compare the executed files with `origin/main`, run repository scripts

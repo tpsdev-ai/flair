@@ -571,11 +571,11 @@ describe("release-promote-poll — each version is dispatched at most once per p
     expect(r.dispatches).toEqual(["workflow run release-promote.yml --ref v1.2.3 -f dry_run=false"]);
   });
 
-  test("a pre-machinery tag is skipped with exit 0", () => {
+  test("a tag workflow lookup HTTP 404 is skipped with exit 0", () => {
     const r = runPoll([marker("1.2.3")], { ok: "true" }, [], 404);
     expect(r.status, r.log).toBe(0);
     expect(r.dispatches).toEqual([]);
-    expect(r.log).toContain("would dispatch: the tag predates the release machinery");
+    expect(r.log).toContain("the release-promote workflow is not available at this tag ref; not dispatching");
   });
 
   test.each([403, 429, 500, 503])("a tag workflow lookup HTTP %s fails closed", (status) => {
@@ -583,7 +583,7 @@ describe("release-promote-poll — each version is dispatched at most once per p
     expect(r.status, r.log).toBe(1);
     expect(r.dispatches).toEqual([]);
     expect(r.log).toContain("could not verify release-promote.yml at v1.2.3; refusing to dispatch");
-    expect(r.log).not.toContain("the tag predates");
+    expect(r.log).not.toContain("the release-promote workflow is not available at this tag ref");
   });
 
   test("duplicate marker rows for one version dispatch it once", () => {

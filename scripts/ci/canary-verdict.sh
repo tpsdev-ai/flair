@@ -422,7 +422,7 @@ non-zero npm exit, an empty read, or a value that is not a version — or if any
 package's \`latest\` is already NEWER than \`${VERSION}\` at that pre-move read (a
 superseded version is refused), so it only reaches the moves with a clean PREVIOUS
 \`latest\` for every package — the values its RESTORE lines print.
-On the move-failure path it prints one RESTORE line per already-moved package
+On the move-failure path it prints one RESTORE line per attempted package
 (\`npm dist-tag add <pkg>@<previous> latest\`, never \`npm dist-tag rm\`) and then the
 packages it did NOT move; on the final-check path (every add call succeeded)
 the block runs the convergence check, which re-reads a package that is not yet at

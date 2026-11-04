@@ -641,7 +641,7 @@ describe("F4 (registry hasher, A1c of #1671): the emitted preflight refuses a ba
  });
 
 // ── item 1 (A1c of #1671, round 5): the RESTORE, not a delete. A mid-promote npm
-// failure STOPS the block; the block prints one RESTORE line per already-moved
+// failure STOPS the block; the block prints one RESTORE line per attempted
 // package — `npm dist-tag add <pkg>@<previous> latest` — and the packages NOT moved.
 // It never `npm dist-tag rm`s a tag. A failing skew check after every move prints the
 // same restore lines; a pre-move `dist-tag ls` failure stops BEFORE any move.

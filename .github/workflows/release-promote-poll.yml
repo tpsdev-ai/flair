@@ -250,7 +250,7 @@ jobs:
               if ! gh api "repos/${REPO}/contents/.github/workflows/release-promote.yml?ref=${ref}" >/dev/null 2>"${REF_ERROR}"; then
                 if grep -Eq '\(HTTP 404\)$' "${REF_ERROR}"; then
                   echo "${version}" >> "${HANDLED}"
-                  echo "  v${version}: would dispatch: the tag predates the release machinery"
+                  echo "  v${version}: the release-promote workflow is not available at this tag ref; not dispatching"
                   continue
                 fi
                 cat "${REF_ERROR}" >&2
