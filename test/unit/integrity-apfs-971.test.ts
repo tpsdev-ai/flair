@@ -10,7 +10,7 @@ import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { assertSupportedLocalFilesystem, classifyDarwinFilesystem, parseDfMountPoint, parseMountLine, selectMountEntry } from "../../src/lib/config-critical-section.ts";
+import { assertSupportedLocalFilesystem, classifyDarwinFilesystem, isSupportedLocalFilesystemType, parseDfMountPoint, parseMountLine, selectMountEntry } from "../../src/lib/config-critical-section.ts";
 import {
   commitGeneration,
   generationNumbers,
@@ -73,6 +73,15 @@ describe("macOS mount table classification", () => {
     const support = classifyDarwinFilesystem("/Users/operator", "not a mount line", () => DATA_DF);
     expect(support.ok).toBe(false);
     if (!support.ok) expect(support.reason).toContain("unparseable mount entry");
+  });
+
+  it("refuses tmpfs custody with a reason", () => {
+    expect(isSupportedLocalFilesystemType(0x01021994)).toBe(false);
+    expect(isSupportedLocalFilesystemType(0x858458f6)).toBe(false); // ramfs
+    expect(isSupportedLocalFilesystemType(0x794c7630)).toBe(true); // overlayfs
+    const support = classifyDarwinFilesystem("/Volumes/Net/custody", "tmpfs on /Volumes/Net (tmpfs, local)", () => NET_DF);
+    expect(support.ok).toBe(false);
+    if (!support.ok) expect(support.reason).toContain("not a recognized local filesystem");
   });
 
   it("refuses an apfs covering mount without local and accepts it with local", () => {

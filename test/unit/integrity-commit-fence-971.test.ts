@@ -406,13 +406,13 @@ describe("commit-fence (invariant 7)", () => {
     expect(existsSync(paths.currentPath)).toBe(false);
   });
 
-  it("keeps the registry intent marker when the tombstone's directory fsync fails", () => {
+  it("keeps the registry intent marker when the tombstone's pre-fsync hook throws", () => {
     const state = init();
     commit(state, 0);
     const result = tombstoneEnrollment({
       ...options({ newCustody: false }),
       expectedSequence: 1,
-      testHooks: { afterRename: () => { throw new Error("injected registry fsync failure"); } },
+      testHooks: { afterRename: () => { throw new Error("injected registry pre-fsync hook failure"); } },
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -460,7 +460,7 @@ describe("commit-fence (invariant 7)", () => {
     }
   }, 40_000);
 
-  it("refuses a commit when the machine identity drifted since open", () => {
+  it("refuses a commit when the host identity differs from the supplied identity", () => {
     const state = init({ machineId: "host-a" });
     const result = commitGeneration({ state, expectedGeneration: 0, checkpoint: payload() });
     expect(result.ok).toBe(false);
@@ -479,6 +479,30 @@ describe("commit-fence (invariant 7)", () => {
     if (!result.ok) expect(result.reason).toBe("checkpoint_incompatible");
     expect(generationNumbers(integrityPaths(custodyDir))).toEqual([]);
     expect(existsSync(integrityPaths(custodyDir).currentPath)).toBe(false);
+  });
+
+  it("refuses a negative durability count before staging", () => {
+    const state = init();
+    const checkpoint = payload();
+    checkpoint.baseline.byDurability.permanent = -1;
+    const result = commitGeneration({ state, expectedGeneration: 0, checkpoint });
+    expect(result).toMatchObject({ ok: false, reason: "checkpoint_incompatible" });
+    const paths = integrityPaths(custodyDir);
+    expect(readdirSync(paths.generationsDir)).toEqual([]);
+    expect(existsSync(paths.currentPath)).toBe(false);
+    expect(existsSync(paths.uncertainPath)).toBe(false);
+  });
+
+  it("refuses a present empty CURRENT before the first generation", () => {
+    const state = init();
+    const paths = integrityPaths(custodyDir);
+    writeFileSync(paths.currentPath, "", { mode: 0o600 });
+    const result = commitGeneration({ state, expectedGeneration: 0, checkpoint: payload() });
+    expect(result).toMatchObject({ ok: false, reason: "tampered" });
+    expect(readFileSync(paths.currentPath, "utf-8")).toBe("");
+    expect(readdirSync(paths.generationsDir)).toEqual([]);
+    expect(existsSync(paths.uncertainPath)).toBe(false);
+    expect(openIntegrityState(options({ newCustody: false }))).toMatchObject({ ok: false, reason: "tampered" });
   });
 
   it("refuses a changing getter before committing a checkpoint", () => {

@@ -9,8 +9,9 @@
  *     HMAC-SHA256 over a canonical JSON encoding with a custody key;
  *   - the fixed twelve-reason taxonomy (strings, not prose) for callers to
  *     report;
- *   - the custody predicate: key directory 0700, key and state files 0600,
- *     managed entries checked for symlinks and ACL grants, a caller-supplied
+ *   - the custody predicate: custody and generations directories 0700; key,
+ *     registry, CURRENT and generation files 0600; these entries checked for
+ *     symlinks and ACL grants; a caller-supplied
  *     server uid that can neither read the key nor write state, and the
  *     recorded operator uid and machine identity compared when custody is
  *     opened and when a generation is committed;
@@ -280,7 +281,6 @@ export interface CustodyCheckOptions {
   serverUid: number;
   operatorUid: number;
   machineId: string;
-  /** Values recorded at enrollment; when present they must match today's. */
   expectedOperatorUid?: number;
   expectedMachineId?: string;
   /** Skip key/registry existence checks while initializing. */
@@ -502,7 +502,7 @@ function jsonBytes(value: unknown): Uint8Array {
   return Buffer.from(`${canonicalJson(value)}\n`, "utf-8");
 }
 
-/** The ONE lock every custody state mutation takes. */
+/** Shared by registry publication, commit, tombstone and recovery. */
 function custodyLockPath(paths: IntegrityPaths): string {
   return join(paths.custodyDir, ".custody.lock");
 }
@@ -941,14 +941,9 @@ function reconcileUncertainMarker(paths: IntegrityPaths, key: Buffer, checkpoint
 
 // ── initialization and open ─────────────────────────────────────────────────
 
-function writeInitialRegistry(
-  paths: IntegrityPaths,
-  key: Buffer,
-  operatorUid: number,
-  machineId: string,
-): { ok: true; registry: IntegrityRegistry } | { ok: false; reason: IntegrityReason; detail: string } {
+function createInitialRegistry(key: Buffer, operatorUid: number, machineId: string): IntegrityRegistry {
   const enrollmentId = `enr_${randomBytes(16).toString("hex")}`;
-  const registry = signIntegrityRecord({
+  return signIntegrityRecord({
     version: INTEGRITY_STATE_VERSION,
     kind: "registry",
     sequence: 1,
@@ -961,6 +956,12 @@ function writeInitialRegistry(
       status: "active",
     }],
   } satisfies Omit<IntegrityRegistry, "hmac">, key);
+}
+
+function writeInitialRegistry(
+  paths: IntegrityPaths,
+  registry: IntegrityRegistry,
+): { ok: true; registry: IntegrityRegistry } | { ok: false; reason: IntegrityReason; detail: string } {
   const result = withConfigCriticalSection(paths.registryPath, (bytes) => {
     if (bytes !== null && bytes.byteLength > 0) {
       return { hold: "custody_invalid: the registry appeared during initialization" };
@@ -1115,6 +1116,17 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
     return fail("uninitialized", "first use requires an explicit new-custody flag");
   }
 
+  const keyBytes = randomBytes(32);
+  let initialRegistry: IntegrityRegistry;
+  try {
+    initialRegistry = createInitialRegistry(keyBytes, uid, machineId);
+  } catch (err) {
+    return fail("custody_invalid", `the initial registry is not plain JSON: ${msg(err)}`);
+  }
+  if (!validateRegistryShape(initialRegistry)) {
+    return fail("custody_invalid", "the initial registry is not a valid v3 integrity registry");
+  }
+
   try {
     mkdirSync(paths.custodyDir, { recursive: true, mode: 0o700 });
     const dir = checkCustody({ paths, serverUid: derived.uid, operatorUid: uid, machineId, requireFiles: false });
@@ -1124,7 +1136,7 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
     if (!generations.ok) return fail(generations.reason, generations.detail);
     const filesystem = ensureLocalFilesystem(paths);
     if (!filesystem.ok) return fail(filesystem.reason, filesystem.detail);
-    writeNewDurable(paths.keyPath, randomBytes(32), 0o600);
+    writeNewDurable(paths.keyPath, keyBytes, 0o600);
     fsyncDir(paths.custodyDir);
   } catch (err) {
     return fail("unavailable", `creating custody failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1132,7 +1144,7 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
 
   const key = readKey(paths);
   if (!key.ok) return fail(key.reason, key.detail);
-  const written = writeInitialRegistry(paths, key.key, uid, machineId);
+  const written = writeInitialRegistry(paths, initialRegistry);
   if (!written.ok) return fail(written.reason, written.detail);
   const registry = written.registry;
 
@@ -1244,9 +1256,6 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     return { ok: false, status: "commit_failed", reason: "commit_conflict", detail: "the expected generation is not a non-negative integer", remedy: INTEGRITY_REASON_REMEDIES.commit_conflict };
   }
 
-  // Re-measure the identity at commit time. The handle's recorded values were
-  // measured when it was opened; a drift since then must not stage a
-  // generation.
   const measuredOperatorUid = currentUid();
   if (measuredOperatorUid === null) {
     return { ok: false, status: "commit_failed", reason: "custody_invalid", detail: "the process has no uid", remedy: INTEGRITY_REASON_REMEDIES.custody_invalid };
@@ -1256,7 +1265,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   }
   const measuredMachineId = machineIdentity();
   if (measuredMachineId !== state.machineId) {
-    return { ok: false, status: "commit_failed", reason: "custody_invalid", detail: "the machine identity changed since the state was opened", remedy: INTEGRITY_REASON_REMEDIES.custody_invalid };
+    return { ok: false, status: "commit_failed", reason: "custody_invalid", detail: "the machine identity differs from the opened handle", remedy: INTEGRITY_REASON_REMEDIES.custody_invalid };
   }
 
   // Custody is rechecked at the start of the commit operation too, not only
@@ -1305,6 +1314,16 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     };
   }
 
+  if (!validateCheckpointShape(checkpoint)) {
+    return {
+      ok: false,
+      status: "commit_failed",
+      reason: "checkpoint_incompatible",
+      detail: "the checkpoint is not a valid v3 integrity checkpoint",
+      remedy: INTEGRITY_REASON_REMEDIES.checkpoint_incompatible,
+    };
+  }
+
   const decide = (bytes: Uint8Array | null): { write: Uint8Array } | { hold: string } => {
     const marker = readUncertainMarker(state.paths);
     if (marker.kind === "error") return holdMessage("unavailable", marker.detail);
@@ -1320,7 +1339,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
       return holdMessage("custody_invalid", "the enrollment sequence changed during the scan");
     }
 
-    if (bytes === null || bytes.byteLength === 0) {
+    if (bytes === null) {
       // CURRENT is absent. Generation one is publishable only into an empty
       // history: a retained entry (or a directory that cannot be listed) means
       // the absent pointer is lost evidence, not a fresh start.
@@ -1332,7 +1351,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     }
 
     let onDisk = 0;
-    if (bytes !== null && bytes.byteLength > 0) {
+    if (bytes !== null) {
       let parsed: unknown;
       try {
         parsed = JSON.parse(Buffer.from(bytes).toString("utf-8"));
@@ -1444,8 +1463,8 @@ export type TombstoneResult =
   | { ok: true; sequence: number }
   | { ok: false; status: "commit_conflict" | "commit_failed"; reason: IntegrityReason; detail: string; remedy: string };
 
-/** Tombstone an enrollment under the same custody lock as commit. The
- *  sequence is a compare-and-swap: a stale expectation holds. */
+/** Tombstone an enrollment under the same custody lock as commit, relying on
+ *  the opened handle's supplied identity. A stale sequence expectation holds. */
 export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
   const opened = openIntegrityState(opts);
   if (!opened.ok) return { ok: false, status: "commit_failed", reason: opened.reason, detail: opened.detail, remedy: opened.remedy };

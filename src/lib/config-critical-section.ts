@@ -180,10 +180,9 @@ export interface ConfigSectionOptions {
   maxAttempts?: number;
   /** Lock acquisition: bounded retry (default 40 × 50 ms). */
   lockRetry?: { attempts?: number; delayMs?: number };
-  /** Explicit lock path. When set, every mutator of a protocol passes the SAME
-   *  path so their state changes serialize together (flair#971 custody: commit,
-   *  tombstone, registry write and recovery). Defaults to
-   *  `<resolvedTarget>.lock`. */
+  /** Explicit lock path (default `<resolvedTarget>.lock`). Integrity uses the
+   *  same path for registry publication, commit, tombstone and recovery;
+   *  initial directory and key creation occur outside it. */
   lockPath?: string;
   /** In-lock staging for a protocol that must publish IMMUTABLE side records
    *  before the target replacement. Runs after `decide` returns a write and
@@ -244,22 +243,14 @@ export interface ConfigSectionResult {
 
 // ── filesystem support ──────────────────────────────────────────────────────
 
-/** Filesystems the integrity custody protocol accepts on Linux, keyed by the
- *  documented `statfs` magic numbers. The lock's O_EXCL create and rename
- *  guarantees are documented above for APFS and ext4/xfs; the rest are local
- *  filesystems with the same directory semantics. Anything not listed —
- *  including NFS, SMB/CIFS, FUSE and 9p — is refused, because on those the
- *  lock may not serialize and rename/fsync guarantees are weaker than this
- *  module claims. A caller that needs this refusal (the integrity protocol)
- *  runs the wrapper before creating a lock; the primitive itself keeps its
- *  documented NFS/SMB degradation. macOS is classified by NAME instead: its
- *  `f_type` is not a stable filesystem identifier (APFS reports 0x1a). */
+/** Linux custody allowlist, keyed by `statfs` magic. Overlayfs crash durability
+ *  depends on the upper layer's backing, which this check does not verify.
+ *  macOS is classified by mount-table name. */
 const LOCAL_FILESYSTEM_TYPES: Record<number, string> = {
   0xef53: "ext2/ext3/ext4",
   0x58465342: "xfs",
   0x9123683e: "btrfs",
   0x2fc12fc1: "zfs",
-  0x01021994: "tmpfs",
   0x794c7630: "overlayfs",
   0x3153464a: "jfs",
   0xf2f52010: "f2fs",

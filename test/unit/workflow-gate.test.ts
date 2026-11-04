@@ -126,7 +126,7 @@ function execute(script: string) {
 }
 
 describe("workflow coverage-gate checker — the adapter script on real bash", () => {
-  test.skipIf(!HAS_BASH)(`exits 0 only when both dependencies succeed${BASH_SKIP}`, () => {
+  test.skipIf(!HAS_BASH)(`exits 0 only when all dependencies succeed${BASH_SKIP}`, () => {
     const script = adapterScript(ADAPTER_WORKFLOW);
     const jobs = dependencyJobs(script);
     expect(jobs.sort()).toEqual(["custody-denial-root", "test-darwin-gated", "test-unit"]);

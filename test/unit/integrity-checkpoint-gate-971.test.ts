@@ -135,6 +135,14 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(lstatSync(custodyDir, { throwIfNoEntry: false })).toBeUndefined();
   });
 
+  it("refuses an invalid machine identity before creating custody files", () => {
+    for (const machineId of ["", 42 as unknown as string]) {
+      const result = initializeIntegrityCustody(options({ machineId }));
+      expect(result).toMatchObject({ ok: false, reason: "custody_invalid" });
+      expect(lstatSync(custodyDir, { throwIfNoEntry: false })).toBeUndefined();
+    }
+  });
+
   it("refuses a same-machine same-uid arrangement before creating anything", () => {
     const result = initializeIntegrityCustody(options({ serverUid: OPERATOR_UID }));
     expect(result.ok).toBe(false);
@@ -150,7 +158,7 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(result.reason).toBe("custody_invalid");
   });
 
-  it("rechecks the recorded machine identity at open", () => {
+  it("compares the supplied machine identity at open", () => {
     init();
     const result = openIntegrityState(options({ machineId: "host-b", newCustody: false }));
     expect(result.ok).toBe(false);
@@ -159,7 +167,7 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(result.detail).toContain("machine identity");
   });
 
-  it("rechecks the recorded operator uid at open", () => {
+  it("compares the supplied operator uid at open", () => {
     init();
     const result = openIntegrityState(options({ operatorUid: OPERATOR_UID + 1, newCustody: false }));
     expect(result.ok).toBe(false);
