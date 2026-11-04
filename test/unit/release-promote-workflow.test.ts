@@ -289,6 +289,11 @@ describe("release-promote — every re-derivation fails closed", () => {
   test("the run-name includes the ref type and distinguishes dry runs", () => {
     expect(wf["run-name"]).toBe("release-promote ${{ github.ref_type }} ${{ github.ref_name }}${{ inputs.dry_run && ' (dry run)' || '' }}");
   });
+
+  test("dry runs use a separate concurrency group and cancel-in-progress stays false", () => {
+    expect(wf.concurrency?.group).toBe("release-promote-${{ github.ref_name }}${{ inputs.dry_run && '-dry-run' || '' }}");
+    expect(wf.concurrency?.["cancel-in-progress"]).toBe(false);
+  });
 });
 
 // ── Behavioural: drive the real `derive` step with fixtures ──────────────────
