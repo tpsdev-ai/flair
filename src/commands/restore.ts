@@ -12,6 +12,7 @@ import { loadApprovedArchive } from "../lib/backup-approval-store.js";
 import type { RestoreArchive } from "../lib/restore-archive.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { comparePreservedFields } from "../lib/restore-verify.js";
+import { refuseSkillAssignmentWrite } from "../lib/skill-assignment-preflight.js";
 import { suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
 import { listAgentCandidates, requireLiveListing, type ApiCall } from "../rem/restore.js";
 import * as render from "../render.js";
@@ -201,6 +202,9 @@ addAdminPassOptions(
       // gone when the Souls are written. They are written back after the Souls,
       // so a live Memory row counts only when its id is not in the archive.
       // Every live candidate counts: replace never deletes MemoryCandidate rows.
+      //
+      // A concurrent same-agent write between this preflight and the PUT is not
+      // covered.
       const LEARNED_REFUSAL = "soul_value_is_learned_content";
       const writtenSouls = souls;
       const refusals: string[] = [];
@@ -214,11 +218,47 @@ addAdminPassOptions(
         );
       }
 
+      // The Soul PUT also refuses a row with no usable owner and a
+      // skill-assignment row refuseSkillAssignmentWrite refuses. The PUT
+      // normally runs after the live row's DELETE, so the skill rule sees no
+      // stored row (`existing` is undefined).
+      const writeRuleRefused = new Set<string>();
+      for (const row of writtenSouls) {
+        const id = String(row.id);
+        if (scopeRefused.has(id)) continue;
+        if (typeof row.agentId !== "string" || row.agentId === "") {
+          writeRuleRefused.add(id);
+          const valueBearing = typeof row.value === "string" && row.value !== "";
+          refusals.push(
+            `Error: Soul ${row.id}: the archived row `
+              + (valueBearing
+                ? "has no usable agentId, which the Soul owner rule refuses (soul_owner_required)"
+                : "has no usable agentId, which a Soul write requires")
+              + "; edit that row in the archive, then re-run; no rows were deleted",
+          );
+          continue;
+        }
+        const skillDenied = refuseSkillAssignmentWrite(row);
+        if (!skillDenied) continue;
+        writeRuleRefused.add(id);
+        let code = "skill-assignment";
+        try {
+          const body = (await skillDenied.json()) as { error?: unknown };
+          if (typeof body?.error === "string") code = body.error;
+        } catch {
+          /* keep the rule name */
+        }
+        refusals.push(
+          `Error: Soul ${row.id}: the archived row would be refused by the Soul skill-assignment rule (${code}); `
+            + "edit that row in the archive, then re-run; no rows were deleted",
+        );
+      }
+
       // Soul id -> value each Soul PUT will send, per owning agent.
       const learnedCandidates = new Map<string, Map<string, string[]>>();
       for (const row of writtenSouls) {
         const id = String(row.id);
-        if (scopeRefused.has(id)) continue;
+        if (scopeRefused.has(id) || writeRuleRefused.has(id)) continue;
         if (typeof row.value !== "string" || row.value === "") continue;
         if (typeof row.agentId !== "string" || row.agentId === "") continue;
         let byValue = learnedCandidates.get(row.agentId);
