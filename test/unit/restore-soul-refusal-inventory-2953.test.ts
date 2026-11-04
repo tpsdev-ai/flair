@@ -695,7 +695,7 @@ const OUT_OF_SCOPE = new Map<string, string>([
   ["soul_patch_row_changed", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
   ["soul_subject_occupied", "identity-change path: a successful Soul DELETE leaves the replace PUT no stored row, so its identity did not change; after a failed DELETE (recorded, and the PUT still runs) a stored row with a different identity can reach this 409"],
   ["instruction_version_head_mismatch", "compare-and-set: the replace PUT supplies no expectedVersion"],
-  ["instruction_version_append_failed", "commit-time version append failure not caused by the archived row's schema, which admission refuses before any delete"],
+  ["instruction_version_append_failed", "the server reports version append failures and catch-all-wrapped schema validation errors under this code (#2979); admission refuses checked schema cases (a present non-null held column of the wrong type or a missing required field the write does not supply) before any delete; unchecked validator refusals and append failures are not predictable here (#2970: server dry run)"],
   ["instruction_version_busy", "commit-time version lock contention, which the preflight cannot predict"],
   ["instruction_version_lock_unavailable", "commit-time version lock availability, which the preflight cannot predict"],
   ["skill_write_requires_verified_identity", "skill-version write authorization; the Soul write path does not call it"],
