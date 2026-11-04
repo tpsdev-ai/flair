@@ -276,6 +276,36 @@ describe("checkpoint-gate (invariant 1)", () => {
     });
   }
 
+  it("holds a registry that appears empty before the locked publication", () => {
+    const paths = integrityPaths(custodyDir);
+    const result = initializeIntegrityCustody(options({
+      beforeRegistryPublication: () => { writeFileSync(paths.registryPath, "", { mode: 0o600 }); },
+    }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("custody_invalid");
+    expect(result.detail).toContain("already exists");
+    expect(readFileSync(paths.registryPath).byteLength).toBe(0);
+  });
+
+  it("refuses a symlinked generation at open and at the custody check", () => {
+    const state = init();
+    commitFirst(state);
+    const paths = integrityPaths(custodyDir);
+    const genPath = generationPath(paths.generationsDir, 1);
+    const outside = join(root, "held-generation.json");
+    renameSync(genPath, outside);
+    symlinkSync(outside, genPath);
+    const custody = checkCustody({
+      paths, serverUid: SERVER_UID, operatorUid: OPERATOR_UID, machineId: MACHINE,
+    });
+    expect(custody).toMatchObject({ ok: false, reason: "custody_invalid" });
+    if (!custody.ok) expect(custody.detail).toBe(`${genPath} is a symlink`);
+    const opened = openIntegrityState(options({ newCustody: false }));
+    expect(opened).toMatchObject({ ok: false, reason: "custody_invalid" });
+    if (!opened.ok) expect(opened.detail).toBe(`${genPath} is a symlink`);
+  });
+
   it("refuses a symlinked custody directory", () => {
     init();
     const real = join(root, "custody-real");
@@ -423,19 +453,16 @@ describe("checkpoint-gate (invariant 1)", () => {
     const paths = integrityPaths(custodyDir);
     renameSync(generationPath(paths.generationsDir, 1), join(paths.generationsDir, "retained-checkpoint"));
     const opened = openIntegrityState(options({ newCustody: false }));
-    const unchecked = openIntegrityState(options({ newCustody: false, checkGenerations: false }));
     for (const path of [paths.keyPath, paths.registryPath, paths.currentPath]) unlinkSync(path);
     const result = initializeIntegrityCustody(options({ newCustody: true }));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("custody_invalid");
     expect(lstatSync(paths.keyPath, { throwIfNoEntry: false })).toBeUndefined();
     expect(lstatSync(paths.registryPath, { throwIfNoEntry: false })).toBeUndefined();
-    for (const result of [opened, unchecked]) {
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.reason).toBe("custody_invalid");
-        expect(result.detail).toContain("unexpected generation entry");
-      }
+    expect(opened.ok).toBe(false);
+    if (!opened.ok) {
+      expect(opened.reason).toBe("custody_invalid");
+      expect(opened.detail).toContain("unexpected generation entry");
     }
   });
 

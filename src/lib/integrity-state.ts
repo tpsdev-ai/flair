@@ -283,8 +283,6 @@ export interface CustodyCheckOptions {
   expectedMachineId?: string;
   /** Skip key/registry existence checks while initializing. */
   requireFiles?: boolean;
-  /** Check every retained generation file for ACLs too. */
-  checkGenerations?: boolean;
 }
 
 export type CustodyCheck =
@@ -399,7 +397,7 @@ export function checkCustody(opts: CustodyCheckOptions): CustodyCheck {
     if (!gens.ok) return gens;
     const listed = listGenerationFiles(paths.generationsDir);
     if (listed.kind === "error") return { ok: false, reason: listed.reason, detail: listed.detail };
-    if (opts.checkGenerations && listed.kind === "ok") {
+    if (listed.kind === "ok") {
       for (const name of listed.files) {
         const gen = checkManagedEntry(join(paths.generationsDir, name), "file", operatorUid);
         if (!gen.ok) return gen;
@@ -797,8 +795,9 @@ export interface IntegrityStateOptions {
   machineId?: string;
   enrollmentId?: string;
   newCustody?: boolean;
-  /** Check every retained generation file for ACLs. */
-  checkGenerations?: boolean;
+  /** TEST-ONLY seam: runs after the registry-absence check and before the
+   *  locked new-custody publication. */
+  beforeRegistryPublication?: () => void;
 }
 
 export interface CommitGenerationOptions {
@@ -979,8 +978,8 @@ function writeInitialRegistry(
   registry: IntegrityRegistry,
 ): { ok: true; registry: IntegrityRegistry } | { ok: false; reason: IntegrityReason; detail: string } {
   const result = withConfigCriticalSection(paths.registryPath, (bytes) => {
-    if (bytes !== null && bytes.byteLength > 0) {
-      return { hold: "custody_invalid: the registry appeared during initialization" };
+    if (bytes !== null) {
+      return { hold: "custody_invalid: the registry already exists; refusing to re-initialize it" };
     }
     return { write: jsonBytes(registry) };
   }, { lockPath: custodyLockPath(paths) });
@@ -1019,7 +1018,6 @@ function openWithRegistry(
     machineId,
     expectedOperatorUid: enrollment.operatorUid,
     expectedMachineId: enrollment.machineId,
-    checkGenerations: opts.checkGenerations ?? true,
   });
   if (!custody.ok) return fail(custody.reason, custody.detail);
 
@@ -1165,6 +1163,7 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
 
   const key = readKey(paths);
   if (!key.ok) return fail(key.reason, key.detail);
+  opts.beforeRegistryPublication?.();
   const written = writeInitialRegistry(paths, initialRegistry);
   if (!written.ok) return fail(written.reason, written.detail);
   const registry = written.registry;
@@ -1176,7 +1175,6 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
     machineId,
     expectedOperatorUid: uid,
     expectedMachineId: machineId,
-    checkGenerations: opts.checkGenerations ?? true,
   });
   if (!custody.ok) return fail(custody.reason, custody.detail);
 
@@ -1298,7 +1296,6 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     machineId: measuredMachineId,
     expectedOperatorUid: state.enrollment.operatorUid,
     expectedMachineId: state.enrollment.machineId,
-    checkGenerations: true,
   });
   if (!custody.ok) {
     return {
@@ -1398,8 +1395,12 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
         replaceDurable(path, generationBytes, 0o600);
       }
     }
-    // Durable intent marker BEFORE publication: a post-rename fsync warning
-    // then cannot lose the uncertainty. Failure here refuses the publication.
+    // Durable intent marker BEFORE publication. A failure of the target
+    // replacement's directory fsync reports commit_uncertain with marker
+    // clearing skipped, so the marker preserves the uncertainty. A marker
+    // clear that unlinks the marker but fails to fsync the custody directory
+    // also reports commit_uncertain, with the marker already gone. Failure
+    // here refuses the publication.
     writeUncertainMarker(state.paths, `${UNCERTAIN_COMMIT_PREFIX}${nextGeneration}`, opts.testHooks?.beforeUncertainMarkerWrite);
     return () => { try { clearUncertainMarker(state.paths); } catch { } };
   };
