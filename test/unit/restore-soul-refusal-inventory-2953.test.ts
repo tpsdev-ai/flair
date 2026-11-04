@@ -11,26 +11,25 @@
  * (trivia and comments skipped; string and template literal contents are not
  * identifiers), independently of the AST classifier. For each token the
  * classifier records one disposition: a classified Response construction or
- * call, an unresolved site, an alias definition it follows (and whose uses it
- * classifies), a type reference, or an `instanceof` check. Any lexical token
+ * call, an unresolved site, an alias definition it follows, a type reference,
+ * or an `instanceof` check. Any lexical token
  * without a disposition fails, naming file:line. Aliases resolve to a fixpoint
  * over plain constants, casts, parentheses, non-null assertions, destructuring
  * renames and defaults, assignments, imports, local exports, re-exports and
  * star exports; a pass that adds nothing ends resolution, and 100 passes
  * without convergence fail naming the module. A name that resolves to Response
  * through any chain is checked at each value read: a call or new callee is
- * classified, a chain definition is followed, and every other read is
+ * checked, a chain definition is followed, and every other read is
  * unaccounted, so an alias passed to another function fails the test. Object
  * properties are not followed, so
  * `const o = { r: Response }; o.r.json()` leaves that Response token
- * unaccounted and fails. For new Response and
- * Response.json, only no init (default 200) or a plain, unwrapped object
- * literal with no spread or computed keys is classified; every property is
- * read to prove status absent or statically numeric. Every other init, every
- * other static method (`Response.redirect`) and `Response.error()` (status 0)
- * is unresolved and fails with file:line unless listed with a reason.
- * Recognised status-taking helpers require statically numeric status
- * arguments; their unresolved definitions must also be listed. A function that
+ * unaccounted and fails. Payloads, error values and statuses accept only
+ * literals and conditional/&&/||/?? branches that all resolve; every possible
+ * code and status is recorded. Objects with spreads, computed keys or duplicate
+ * error/status keys are unresolved, as are identifiers, calls, members and
+ * templates with substitutions. A new Response body may use JSON.stringify
+ * around its payload. Other Response methods and unsupported forms are
+ * unresolved with file:line and require a listed reason. A function that
  * forwards one of its parameters into a callee the inventory cannot resolve (a
  * method call, a computed callee, a callee outside the closure), including
  * through a parenthesis, an `as` cast or a non-null assertion, is opaque:
@@ -115,17 +114,18 @@ interface FnInfo {
   statusParam: string | null;
   /** The Response error comes from this parameter (a code-taking builder). */
   messageParam: string | null;
+  bodyParam: string | null;
 }
 
 interface RefusalInventory {
   /** Refusal code → the file:line of the first site that produces it. */
   codes: Map<string, string>;
   unresolved: Map<string, string>;
+  statuses: Map<string, number[]>;
   /** Construction or call sites that reference Response directly or through an alias. */
   occurrences: number;
   /** Lexical `Response` identifier tokens in the source set. */
   lexicalTokens: number;
-  /** Tokens whose construction or call `responseShape` classified (a status list it proved). */
   classified: number;
   /** Tokens recorded as unresolved references. */
   unresolvedReferences: number;
@@ -137,7 +137,6 @@ interface RefusalInventory {
   checkReferences: number;
   /** Alias uses classified or unresolved (there is no Response token at the use). */
   aliasSites: number;
-  /** Alias uses outside a classified call or a chain definition, as file:line. */
   unaccountedAliasUses: string[];
   /** Lexical tokens with no disposition, as file:line. */
   unaccounted: string[];
@@ -270,7 +269,6 @@ function responseCallee(file: string, callee: ts.Expression, aliases: Map<string
 
 function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   const importAliases = new Map<string, Map<string, { file: string; name: string }>>();
-  const topLevelConsts = new Map<string, Map<string, ts.Expression>>();
   const responseAliases = new Map<string, Map<string, ResponseAlias>>();
   const exportedAliases = new Map<string, Map<string, ResponseAlias>>();
   const aliasConsts = new Map<string, Array<{ name: string; initializer: ts.Expression }>>();
@@ -286,7 +284,6 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
 
   for (const [file, source] of sources) {
     const aliases = new Map<string, { file: string; name: string }>();
-    const constants = new Map<string, ts.Expression>();
     const consts: Array<{ name: string; initializer: ts.Expression }> = [];
     const assignments: Array<{ name: string; initializer: ts.Expression }> = [];
     const destructured: Array<{ name: string; property: string; initializer: ts.Expression; fallback?: ts.Expression }> = [];
@@ -321,11 +318,6 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
           }
         } else if (!clause && target) {
           starExports.push(target);
-        }
-      }
-      if (ts.isVariableStatement(statement)) {
-        for (const declaration of statement.declarationList.declarations) {
-          if (ts.isIdentifier(declaration.name) && declaration.initializer) constants.set(declaration.name.text, declaration.initializer);
         }
       }
       const addFunction = (name: string, fn: FnNode): void => {
@@ -378,7 +370,6 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     };
     collectAssignments(source);
     importAliases.set(file, aliases);
-    topLevelConsts.set(file, constants);
     responseAliases.set(file, new Map());
     exportedAliases.set(file, new Map());
     aliasConsts.set(file, consts);
@@ -500,135 +491,58 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     return alias ? (functionsByName.get(`${alias.file}:${alias.name}`) ?? null) : null;
   };
 
-  const lookupVariable = (at: ts.Node, name: string, constantOnly = false): ts.Expression | null => {
-    let parent: ts.Node | undefined = at.parent;
-    while (parent) {
-      if (constantOnly) {
-        if (ts.isFunctionLike(parent) && parent.parameters.some((parameter) =>
-          !ts.isIdentifier(parameter.name) || parameter.name.text === name)) return null;
-        if (ts.isCatchClause(parent) || ts.isForStatement(parent) || ts.isForOfStatement(parent) || ts.isForInStatement(parent)) return null;
-      }
-      const statements = ts.isSourceFile(parent) || ts.isBlock(parent) || ts.isModuleBlock(parent) ? parent.statements : null;
-      if (statements) {
-        for (const statement of statements) {
-          if (!ts.isVariableStatement(statement)) continue;
-          for (const declaration of statement.declarationList.declarations) {
-            if (!ts.isIdentifier(declaration.name)) {
-              if (constantOnly) return null;
-              continue;
-            }
-            if (declaration.name.text !== name) continue;
-            if (constantOnly && (!(statement.declarationList.flags & ts.NodeFlags.Const) || declaration.getStart() >= at.getStart())) return null;
-            return declaration.initializer ?? null;
-          }
-        }
-      }
-      parent = parent.parent;
+  const branches = (expression: ts.Expression): ts.Expression[] => {
+    if (ts.isConditionalExpression(expression)) return [expression.whenTrue, expression.whenFalse];
+    if (ts.isBinaryExpression(expression) && [ts.SyntaxKind.AmpersandAmpersandToken,
+      ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken].includes(expression.operatorToken.kind)) {
+      return [expression.left, expression.right];
     }
-    return constantOnly ? null : (topLevelConsts.get(at.getSourceFile().fileName)?.get(name) ?? null);
+    return [expression];
   };
 
-  const resolveString = (file: string, expression: ts.Expression | null | undefined, depth = 0): string[] | null => {
-    if (!expression || depth > 8) return null;
-    if (ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression) ||
-        ts.isSatisfiesExpression(expression) || ts.isNonNullExpression(expression)) {
-      return resolveString(file, expression.expression, depth + 1);
-    }
-    if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) return [expression.text];
-    if (ts.isTemplateExpression(expression)) return null;
-    if (ts.isConditionalExpression(expression)) {
-      const whenTrue = resolveString(file, expression.whenTrue, depth + 1);
-      const whenFalse = resolveString(file, expression.whenFalse, depth + 1);
-      return whenTrue && whenFalse ? [...new Set([...whenTrue, ...whenFalse])] : null;
-    }
-    if (ts.isPropertyAccessExpression(expression)) return resolveReturnedProperty(file, expression, depth + 1);
-    if (ts.isIdentifier(expression)) {
-      const local = lookupVariable(expression, expression.text);
-      if (local) return resolveString(file, local, depth + 1);
-      const alias = importAliases.get(file)?.get(expression.text);
-      const imported = alias ? topLevelConsts.get(alias.file)?.get(alias.name) : null;
-      return imported ? resolveString(alias!.file, imported, depth + 1) : null;
-    }
-    return null;
+  const evaluate = <T,>(expression: ts.Expression | null | undefined,
+    literal: (node: ts.Expression) => T[] | null): T[] | null => {
+    if (!expression) return null;
+    const alternatives = branches(expression);
+    if (alternatives.length === 1) return literal(expression);
+    const values = alternatives.map((branch) => evaluate(branch, literal));
+    return values.every((value) => value !== null) ? [...new Set(values.flatMap((value) => value!))] : null;
   };
 
-  /** `result.error` where `const result = f(…)` and `f` returns an `error` string in its object returns. */
-  const resolveReturnedProperty = (file: string, expression: ts.PropertyAccessExpression, depth: number): string[] | null => {
-    if (!ts.isIdentifier(expression.expression)) return null;
-    const initializer = lookupVariable(expression.expression, expression.expression.text);
-    if (!initializer) return null;
-    if (ts.isObjectLiteralExpression(initializer)) {
-      return resolveString(file, propertyOf(initializer, file, expression.name.text), depth + 1);
-    }
-    if (!ts.isCallExpression(initializer) || !ts.isIdentifier(initializer.expression)) return null;
-    const target = resolveFunction(file, initializer.expression.text);
-    if (!target) return null;
-    const values: string[] = [];
-    const visit = (node: ts.Node): void => {
-      if (ts.isReturnStatement(node) && node.expression && ts.isObjectLiteralExpression(node.expression)) {
-        const value = resolveString(target.file, propertyOf(node.expression, target.file, expression.name.text), depth + 1);
-        if (value) values.push(...value);
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(bodyOf(target.fn));
-    return values.length > 0 ? [...new Set(values)] : null;
+  const resolveString = (_file: string, expression: ts.Expression | null | undefined): string[] | null =>
+    evaluate(expression, (node) => ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? [node.text] : null);
+
+  const resolveNumbers = (_file: string, expression: ts.Expression | null | undefined): number[] | null =>
+    evaluate(expression, (node) => ts.isNumericLiteral(node) ? [Number(node.text)] : null);
+
+  const payloadOf = (_file: string, expression: ts.Expression | null | undefined): ts.Expression | null => {
+    if (expression && ts.isCallExpression(expression) && ts.isPropertyAccessExpression(expression.expression) &&
+        ts.isIdentifier(expression.expression.expression) && expression.expression.expression.text === "JSON" &&
+        expression.expression.name.text === "stringify" && expression.arguments.length === 1 &&
+        !ts.isSpreadElement(expression.arguments[0])) return expression.arguments[0];
+    return expression ?? null;
   };
 
-  const resolveNumbers = (file: string, expression: ts.Expression | null | undefined, depth = 0): number[] | null => {
-    if (!expression || depth > 8) return null;
-    if (ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression) || ts.isNonNullExpression(expression)) {
-      return resolveNumbers(file, expression.expression, depth + 1);
-    }
-    if (ts.isNumericLiteral(expression)) return [Number(expression.text)];
-    if (ts.isConditionalExpression(expression)) {
-      const whenTrue = resolveNumbers(file, expression.whenTrue, depth + 1);
-      const whenFalse = resolveNumbers(file, expression.whenFalse, depth + 1);
-      return whenTrue && whenFalse ? [...new Set([...whenTrue, ...whenFalse])] : null;
-    }
-    if (ts.isIdentifier(expression)) {
-      const local = lookupVariable(expression, expression.text, true);
-      return local ? resolveNumbers(file, local, depth + 1) : null;
-    }
-    return null;
-  };
-
-  /** The `JSON.stringify(...)` payload of a Response body, following local consts and conditionals. */
-  const payloadOf = (file: string, expression: ts.Expression | null | undefined, depth = 0): ts.Expression | null => {
-    if (!expression || depth > 6) return null;
-    if (ts.isCallExpression(expression) && ts.isPropertyAccessExpression(expression.expression) &&
-        expression.expression.name.text === "stringify") {
-      return expression.arguments[0] ?? null;
-    }
-    if (ts.isIdentifier(expression)) {
-      const local = lookupVariable(expression, expression.text);
-      return local ? payloadOf(file, local, depth + 1) : null;
-    }
-    if (ts.isConditionalExpression(expression)) {
-      return payloadOf(file, expression.whenTrue, depth + 1) ?? payloadOf(file, expression.whenFalse, depth + 1);
-    }
-    return ts.isObjectLiteralExpression(expression) ? expression : null;
-  };
-
-  const propertyOf = (object: ts.Expression | null | undefined, file: string, key: string, depth = 0): ts.Expression | null => {
-    if (!object || depth > 6) return null;
-    if (ts.isIdentifier(object)) {
-      const local = lookupVariable(object, object.text);
-      return local ? propertyOf(local, file, key, depth + 1) : null;
-    }
-    if (ts.isConditionalExpression(object)) {
-      return propertyOf(object.whenTrue, file, key, depth + 1) ?? propertyOf(object.whenFalse, file, key, depth + 1);
-    }
+  const propertiesOf = (object: ts.Expression): Map<string, ts.Expression> | null => {
     if (!ts.isObjectLiteralExpression(object)) return null;
+    const properties = new Map<string, ts.Expression>();
     for (const property of object.properties) {
-      const name = ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property) ? property.name : null;
-      if (!name) continue;
-      const matches = (ts.isIdentifier(name) || ts.isStringLiteral(name)) && name.text === key;
-      if (!matches) continue;
-      return ts.isPropertyAssignment(property) ? property.initializer : (property as ts.ShorthandPropertyAssignment).name;
+      if (ts.isSpreadAssignment(property) || ts.isComputedPropertyName(property.name)) return null;
+      const name = property.name;
+      if (!ts.isIdentifier(name) && !ts.isStringLiteral(name) && !ts.isNumericLiteral(name)) return null;
+      if (name.text === "__proto__" || name.text === "toJSON" || ((name.text === "error" || name.text === "status") && properties.has(name.text))) return null;
+      if (ts.isPropertyAssignment(property)) properties.set(name.text, property.initializer);
+      else if (ts.isShorthandPropertyAssignment(property)) properties.set(name.text, property.name);
+      else return null;
     }
-    return null;
+    return properties;
   };
+
+  const propertyOf = (object: ts.Expression | null | undefined, _file: string, key: string): ts.Expression | null =>
+    object ? propertiesOf(object)?.get(key) ?? null : null;
+
+  const errorValues = (file: string, body: ts.Expression | null | undefined): string[] | null =>
+    evaluate(body, (object) => resolveString(file, propertyOf(object, file, "error")));
 
   type ResponseShape = {
     status: ts.Expression | undefined;
@@ -638,23 +552,13 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
 
   const responseInit = (file: string, init: ts.Expression | undefined): Pick<ResponseShape, "status" | "statuses"> => {
     if (init === undefined) return { status: undefined, statuses: [200] };
-    if (!ts.isObjectLiteralExpression(init)) return { status: undefined, statuses: null };
-    let status: ts.Expression | undefined;
-    for (const property of init.properties) {
-      if (ts.isSpreadAssignment(property) || ts.isComputedPropertyName(property.name)) {
-        return { status: undefined, statuses: null };
-      }
-      const name = property.name;
-      if (!ts.isIdentifier(name) && !ts.isStringLiteral(name) && !ts.isNumericLiteral(name)) {
-        return { status: undefined, statuses: null };
-      }
-      if (name.text === "__proto__") return { status: undefined, statuses: null };
-      if (name.text !== "status") continue;
-      if (ts.isPropertyAssignment(property)) status = property.initializer;
-      else if (ts.isShorthandPropertyAssignment(property)) status = property.name;
-      else return { status: undefined, statuses: null };
-    }
-    return { status, statuses: status === undefined ? [200] : resolveNumbers(file, status) };
+    const statuses = evaluate(init, (object) => {
+      const properties = propertiesOf(object);
+      if (!properties) return null;
+      const value = properties.get("status");
+      return value === undefined ? [200] : resolveNumbers(file, value);
+    });
+    return { status: propertyOf(init, file, "status") ?? undefined, statuses };
   };
 
   const responseShape = (file: string, node: ts.Expression, callee: ResponseAlias): ResponseShape | null => {
@@ -664,7 +568,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
       if (node.arguments?.some(ts.isSpreadElement)) return { status: undefined, statuses: null, body: null };
       return {
         ...responseInit(file, init),
-        body: node.arguments?.[0] ?? null,
+        body: payloadOf(file, node.arguments?.[0]),
       };
     }
     if (!ts.isCallExpression(node)) return null;
@@ -684,20 +588,22 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   const describe = (record: FnRecord): FnInfo => {
     let statusParam: string | null = null;
     let messageParam: string | null = null;
+    let bodyParam: string | null = null;
     const parameters = parametersOf(record.fn);
     const visit = (node: ts.Node): void => {
       if (ts.isNewExpression(node) || ts.isCallExpression(node)) {
         const callee = responseCallee(record.file, node.expression, responseAliases);
         const shape = callee ? responseShape(record.file, node, callee) : null;
         const status = shape?.status;
+        if (shape?.body && ts.isIdentifier(shape.body) && parameters.has(shape.body.text)) bodyParam = shape.body.text;
         if (status && ts.isIdentifier(status) && parameters.has(status.text)) statusParam = status.text;
-        const error = propertyOf(payloadOf(record.file, shape?.body), record.file, "error");
+        const error = propertyOf(shape?.body, record.file, "error");
         if (error && ts.isIdentifier(error) && parameters.has(error.text)) messageParam = error.text;
       }
       ts.forEachChild(node, visit);
     };
     visit(bodyOf(record.fn));
-    return { statusParam, messageParam };
+    return { statusParam, messageParam, bodyParam };
   };
 
   const info = new Map<string, FnInfo>();
@@ -710,10 +616,6 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     const described = info.get(record.key)!;
     if (described.messageParam) sinkParameter.set(record.key, described.messageParam);
   }
-  const sinkParamOf = (fn: FnNode | null): string | null => {
-    const record = functions.find((candidate) => candidate.fn === fn);
-    return record ? (sinkParameter.get(record.key) ?? null) : null;
-  };
   let changed = true;
   while (changed) {
     changed = false;
@@ -750,6 +652,11 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
 
   const codes = new Map<string, string>();
   const unresolved = new Map<string, string>();
+  const statuses = new Map<string, number[]>();
+  const recordStatuses = (file: string, line: number, values: number[]): void => {
+    const at = `${file}:${line}`;
+    statuses.set(at, [...new Set([...(statuses.get(at) ?? []), ...values])]);
+  };
   const recordCode = (message: string, file: string, line: number): void => {
     const code = codeOf(message);
     if (!codes.has(code)) codes.set(code, `${file}:${line}`);
@@ -777,11 +684,6 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
         if (ts.isIdentifier(parameter.name) && parameter.name.text === sink) index = position;
       });
       const argument = index >= 0 ? node.arguments[index] : undefined;
-      const forwardedArgument = forwardedIdentifier(argument);
-      if (forwardedArgument && sinkParamOf(enclosingFunction(node)) === forwardedArgument.text) {
-        ts.forEachChild(node, visit);
-        return;
-      }
       const values = resolveString(file, argument);
       if (values) for (const value of values) recordCode(value, file, lineOf(source, node));
       else recordUnresolved(file, lineOf(source, node), `unresolvable refusal argument: ${target.name}.${sink}`);
@@ -840,24 +742,22 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
           occurrences++;
           if (alias) {
             const shape = responseShape(file, node, alias);
-            if (shape && shape.statuses !== null) {
+            const refusal = shape?.statuses?.some((value) => value >= 400);
+            const values = refusal && shape ? errorValues(file, shape.body) : null;
+            if (shape?.statuses !== null && shape?.statuses !== undefined) {
+              recordStatuses(file, lineOf(source, node), shape.statuses);
+            }
+            if (shape && shape.statuses !== null && (!refusal || values !== null)) {
               if (direct.length > 0) classified += direct.length;
               else aliasSites++;
               for (const identifier of direct) account(file, identifier, "classified");
-              if (shape.statuses.some((value) => value >= 400)) {
-                const error = propertyOf(payloadOf(file, shape.body), file, "error");
-                const holder = enclosingFunction(node);
-                if (!(holder && error && ts.isIdentifier(error) && sinkParamOf(holder) === error.text)) {
-                  const values = resolveString(file, error);
-                  if (values) for (const value of values) recordCode(value, file, lineOf(source, node));
-                  else recordUnresolved(file, lineOf(source, node), "unresolvable refusal body");
-                }
-              }
+              if (refusal && values) for (const value of values) recordCode(value, file, lineOf(source, node));
             } else {
               if (direct.length > 0) unresolvedReferences += direct.length;
               else aliasSites++;
               for (const identifier of direct) account(file, identifier, "unresolved");
-              recordUnresolved(file, lineOf(source, node), shape ? "unresolvable Response status" : "unrecognised Response reference");
+              recordUnresolved(file, lineOf(source, node), !shape ? "unrecognised Response reference" :
+                shape.statuses === null ? "unresolvable Response status" : "unresolvable refusal body");
             }
           } else {
             unresolvedReferences += direct.length;
@@ -887,7 +787,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
 
   // A name that resolves to Response, through any chain, is a use wherever it
   // is read. The definition sites and the chain edges that build a longer
-  // alias are not uses; a use as a call or new callee is classified above. Any
+  // alias are not uses; a use as a call or new callee is checked above. Any
   // other use is unaccounted, so an alias handed to another function or stored
   // in an object is a red test result rather than a silent pass.
   const unaccountedAliasUses: string[] = [];
@@ -952,18 +852,16 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
           record.fn.parameters.forEach((parameter, position) => {
             if (ts.isIdentifier(parameter.name) && parameter.name.text === statusParam) index = position;
           });
-          const statuses = index >= 0 ? resolveNumbers(file, node.arguments[index]) : null;
-          if (statuses && statuses.some((value) => value >= 400)) {
-            const body = node.arguments.find((argument) => {
-              if (ts.isObjectLiteralExpression(argument)) return true;
-              if (!ts.isIdentifier(argument)) return false;
-              const local = lookupVariable(argument, argument.text);
-              return !!local && ts.isObjectLiteralExpression(local);
-            });
-            const values = resolveString(file, propertyOf(body, file, "error"));
+          const statusesAtCall = index >= 0 ? resolveNumbers(file, node.arguments[index]) : null;
+          if (statusesAtCall) recordStatuses(file, lineOf(source, node), statusesAtCall);
+          if (statusesAtCall && statusesAtCall.some((value) => value >= 400)) {
+            const bodyParam = info.get(record.key)!.bodyParam;
+            const bodyIndex = record.fn.parameters.findIndex((parameter) => ts.isIdentifier(parameter.name) && parameter.name.text === bodyParam);
+            const body = bodyIndex >= 0 ? node.arguments[bodyIndex] : undefined;
+            const values = errorValues(file, body);
             if (values) for (const value of values) recordCode(value, file, lineOf(source, node));
             else recordUnresolved(file, lineOf(source, node), "unresolvable refusal body");
-          } else if (index >= 0 && statuses === null) {
+          } else if (index >= 0 && statusesAtCall === null) {
             recordUnresolved(file, lineOf(source, node), `unresolvable status argument: ${record.name}.${statusParam}`);
           }
         }
@@ -1002,27 +900,18 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   }
 
   return {
-    codes, unresolved, occurrences, lexicalTokens: lexical.size, classified, unresolvedReferences,
+    codes, unresolved, statuses, occurrences, lexicalTokens: lexical.size, classified, unresolvedReferences,
     aliasDefinitions: count("alias"), typeReferences: count("type"), checkReferences: count("check"),
     aliasSites, unaccountedAliasUses, unaccounted, notLexical, opaque,
   };
 }
 
-function enclosingFunction(node: ts.Node): FnNode | null {
-  let parent: ts.Node | undefined = node.parent;
-  while (parent) {
-    if (ts.isFunctionDeclaration(parent) || ts.isFunctionExpression(parent) ||
-        ts.isArrowFunction(parent) || ts.isMethodDeclaration(parent)) return parent;
-    parent = parent.parent;
-  }
-  return null;
-}
+
 
 // ─── The three lists ────────────────────────────────────────────────────────
 
 /** Refusal codes `restore --replace` decides before its first delete. */
 const PREFLIGHTED = [
-  "soul_scope_fields_not_writable", // suppliesSoulScopeFields in src/commands/restore.ts
   "soul_value_is_learned_content", // LEARNED_REFUSAL plus the Memory and candidate comparisons
   "skill_source_not_durable", // refuseSkillAssignmentWrite in src/lib/skill-assignment-preflight.ts
   "skill_opt_out_not_boolean", // the same predicate
@@ -1040,15 +929,12 @@ const OUT_OF_SCOPE = new Map<string, string>([
   ["authentication required", "source-class gate: the anonymous verdict comes from authorizeSoulWrite (resources/soul-write-policy.ts), and the Soul DELETE evaluates the same gate before it runs"],
   ["forbidden: agentId must match authenticated agent", "attribution guard: an admin credential takes the passthrough branch"],
   ["forbidden: the owner of a record cannot be changed", "owner-field guard: an admin credential takes the passthrough branch"],
-  ["owner_check_unavailable", "owner-field guard: its read runs only for a non-admin caller"],
   ["id_target_mismatch", "body-id/address disagreement: restore addresses each row by its own id"],
   ["stored_row_lookup_failed", "stored-row read failure at the write, which the preflight does not perform"],
   ["stored_row_read_failed", "Memory/Relationship PATCH stored-row read failure; the Soul write path does not call it"],
   ["soul_delete_requires_one_record", "DELETE-only: restore --replace addresses each Soul row by its single-record id"],
   ["soul_stored_state_unavailable", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
   ["soul_patch_table_unavailable", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
-  ["soul_patch_conflict", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
-  ["soul_patch_row_changed", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
   ["soul_subject_occupied", "identity-change path: a successful Soul DELETE leaves the replace PUT no stored row, so its identity did not change; after a failed DELETE (recorded, and the PUT still runs) a stored row with a different identity can reach this 409"],
   ["instruction_version_head_mismatch", "compare-and-set: the replace PUT supplies no expectedVersion"],
   ["instruction_version_append_failed", "the server reports version append failures and catch-all-wrapped schema validation errors under this code (#2979); admission refuses checked schema cases (a present non-null held column of the wrong type or a missing required field the write does not supply) before any delete; unchecked validator refusals and append failures are not predictable here (#2970: server dry run)"],
@@ -1056,11 +942,20 @@ const OUT_OF_SCOPE = new Map<string, string>([
   ["instruction_version_lock_unavailable", "commit-time version lock availability, which the preflight cannot predict"],
   ["skill_write_requires_verified_identity", "skill-version write authorization; the Soul write path does not call it"],
   ["not found", "kit by-id read gate: Soul has no get() override and the write path returns no 404"],
-  ["non_canonical_request_target", "request-target canonicalisation in the auth middleware; not a Soul write rule"],
 ]);
 
 /** Unresolved sites accepted by file:line with a reason. */
 const UNRESOLVED_SITES = new Map<string, string>([
+  ["resources/record-type-kit.ts:514", "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately"],
+  ["resources/record-type-kit.ts:519", "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately"],
+  ["resources/record-type-kit.ts:527", "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately"],
+  ["resources/Soul.ts:70", "patchConflict forwards its error parameter; literal call arguments are checked separately"],
+  ["resources/Soul.ts:186", "the conditional error argument includes the SOUL_PATCH_CONFLICT identifier; this PATCH conflict remains unresolved"],
+  ["resources/record-owner-guard.ts:255", "ownerCheckUnavailable uses status and error identifiers; the owner-field read guard remains unresolved"],
+  ["resources/record-type-kit.ts:76", "FORBIDDEN forwards msg; literal call arguments are checked separately"],
+  ["resources/request-target.ts:75", "the HEAD/body conditional uses null and a body identifier; the request-target refusal remains unresolved"],
+  ["resources/skill-provenance.ts:212", "the error is result.error from registerSkillAssignment; this response remains unresolved"],
+  ["resources/soul-write-policy.ts:72", "FORBIDDEN receives the SOUL_SCOPE_FIELDS_REFUSAL identifier; this scope-field refusal remains unresolved"],
   ["resources/instruction-version-record.ts:272", "jsonResponse forwards its status parameter; its call sites are checked for static statuses"],
   ["resources/record-owner-guard.ts:220", "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write"],
   ["resources/record-owner-guard.ts:231", "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write"],
@@ -1220,7 +1115,6 @@ test.each([
   'Response.json({})',
   'new Response(null, {})',
   'Response.json({}, { headers: {} })',
-  'Response.json({}, { headers() {} })',
 ])("classifies the default status: %s", (expression) => {
   const source = ts.createSourceFile("fixture.ts", expression, ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
@@ -1235,7 +1129,6 @@ test.each([
   '{ status: 403 }!',
   '{ ...base, status: 403 }',
   '{ status: 403, ...base }',
-  'flag ? { status: 200 } : { status: 403 }',
   'flag && { status: 403 }',
   'init',
   'makeInit()',
@@ -1259,7 +1152,6 @@ test.each([
 test.each([
   'new Response(JSON.stringify({ error: "x" }), { status: 403 })',
   'Response.json({ error: "x" }, { status: 403 })',
-  'const status = 403; Response.json({ error: "x" }, { status })',
 ])("records a static refusal: %s", (expression) => {
   const source = ts.createSourceFile("fixture.ts", expression, ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
@@ -1360,6 +1252,8 @@ jsonResponse(${status}, { error: "x" });`, ts.ScriptTarget.Latest, true);
 
 
 test.each([
+  'const status = 403; Response.json({}, { status })',
+  'Response.json({}, { headers() {} })',
   'let status = 200; status = 403; Response.json({}, { status })',
   'const status = 200; function f(status: number) { return Response.json({}, { status }); }',
   'Response.json(...args)',
@@ -1464,4 +1358,108 @@ test("an alias stored in an object property is an unaccounted use, not a silent 
   expect([...inventory.codes]).toEqual([]);
   expect(inventory.occurrences).toBe(0);
   expect(inventory.unaccounted).toEqual(["fixture.ts:1"]);
+});
+
+
+test.each([
+  'flag ? { error: "x" } : { error: "y" }',
+  '{ error: "x" } && { error: "y" }',
+  '{ error: "x" } || { error: "y" }',
+  '{ error: "x" } ?? { error: "y" }',
+  '{ error: flag ? "x" : "y" }',
+  '{ error: "x" && "y" }',
+  '{ error: "x" || "y" }',
+  '{ error: "x" ?? "y" }',
+])("records every literal error branch: %s", (body) => {
+  for (const expression of [
+    `Response.json(${body}, { status: 403 })`,
+    `new Response(JSON.stringify(${body}), { status: 403 })`,
+  ]) {
+    const source = ts.createSourceFile("fixture.ts", expression, ts.ScriptTarget.Latest, true);
+    const inventory = buildInventory(new Map([["fixture.ts", source]]));
+    expect([...inventory.codes]).toEqual([["x", "fixture.ts:1"], ["y", "fixture.ts:1"]]);
+    expect([...inventory.unresolved]).toEqual([]);
+  }
+});
+
+test.each([
+  '{ error: "x", toJSON: serialize }',
+  '{ error: "x", ...extra }',
+  '{ ...extra, error: "x" }',
+  '{ error: "x", [key]: "y" }',
+  '{ error: "x", error: "y" }',
+  '{ error: "x", "error": "y" }',
+  'flag ? { error: "x" } : unknown',
+  'unknown && { error: "x" }',
+  '{ error: "x" } || unknown',
+  '{ error: "x" } ?? unknown',
+  '{ error: flag ? "x" : unknown }',
+  '{ error: "x" || unknown }',
+  '{ error: unknown }',
+  '{ error: getError() }',
+  '{ error: result.error }',
+  '{ error: `x${value}` }',
+  'payload',
+  'makePayload()',
+  'JSON.stringify({ error: "x" })',
+])("leaves an incompletely evaluated payload unresolved: %s", (body) => {
+  const source = ts.createSourceFile("fixture.ts", `const payload = { error: "x" }; const unknown = "x"; const extra = {}; Response.json(${body}, { status: 403 })`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.codes]).toEqual([]);
+  expect(inventory.classified).toBe(0);
+  expect(inventory.unresolvedReferences).toBe(1);
+  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable refusal body"]]);
+});
+
+test.each([
+  '{ status: flag ? 403 : 400 }',
+  '{ status: 403 && 400 }',
+  '{ status: 403 || 400 }',
+  '{ status: 403 ?? 400 }',
+  'flag ? { status: 403 } : { status: 400 }',
+  '{ status: 403 } && { status: 400 }',
+  '{ status: 403 } || { status: 400 }',
+  '{ status: 403 } ?? { status: 400 }',
+])("records every literal status branch: %s", (init) => {
+  const source = ts.createSourceFile("fixture.ts", `Response.json({ error: "skill_opt_out_not_boolean" }, ${init})`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.statuses]).toEqual([["fixture.ts:1", [403, 400]]]);
+  expect([...inventory.codes]).toEqual([["skill_opt_out_not_boolean", "fixture.ts:1"]]);
+  expect([...inventory.unresolved]).toEqual([]);
+});
+
+test.each([
+  '{ status: flag ? 403 : unknown }',
+  '{ status: 403 || unknown }',
+  '{ status: result.status }',
+  '{ status: `403${value}` }',
+  '{ status: 200, status: 403 }',
+])("leaves an incompletely evaluated status unresolved: %s", (init) => {
+  const source = ts.createSourceFile("fixture.ts", `Response.json({ error: "x" }, ${init})`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.statuses]).toEqual([]);
+  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable Response status"]]);
+});
+
+test("checks every payload and status branch passed to a status-taking helper", () => {
+  const source = ts.createSourceFile("fixture.ts", `
+function jsonResponse(status: number, body: any) { return new Response(JSON.stringify(body), { status }); }
+jsonResponse(flag ? 403 : 400, flag ? { error: "x" } : { error: "y" });
+jsonResponse(403, flag ? { error: "x" } : unknown);`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect(inventory.statuses.get("fixture.ts:3")).toEqual([403, 400]);
+  expect([...inventory.codes]).toEqual([["x", "fixture.ts:3"], ["y", "fixture.ts:3"]]);
+  expect(inventory.unresolved.get("fixture.ts:4")).toBe("unresolvable refusal body");
+});
+
+
+test("a payload toJSON override is unresolved", async () => {
+  const payload = { error: "skill_opt_out_not_boolean", toJSON: () => ({ error: "x_new_rule" }) };
+  expect(await Response.json(payload, { status: 403 }).json()).toEqual({ error: "x_new_rule" });
+  const source = ts.createSourceFile("fixture.ts",
+    'Response.json({ error: "skill_opt_out_not_boolean", toJSON: () => ({ error: "x_new_rule" }) }, { status: 403 })',
+    ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect(inventory.classified).toBe(0);
+  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable refusal body"]]);
 });

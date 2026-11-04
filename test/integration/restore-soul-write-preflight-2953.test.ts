@@ -8,8 +8,8 @@
  * is a filesystem path (including one under the server's TMPDIR only), a
  * skill-assignment row with a non-boolean optOut, and a Soul row without a
  * non-empty agentId. Archive admission also refuses before any delete a row id
- * containing a dot and a Soul row whose schema columns do not hold their
- * declared types. Each refusal stops the run with the live rows untouched. A
+ * containing a dot and a Soul row with a non-string `value`. Each refusal
+ * stops the run with the live rows untouched. A
  * direct server PUT with a numeric `value` shows the server also refuses that
  * row.
  *

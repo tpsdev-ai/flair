@@ -7,9 +7,8 @@
  * any request: a Soul row without a non-empty string `agentId`; a row id
  * containing `.` in any collection, which admission conservatively refuses
  * because a suffix such as `.json` or `.content` can be read as a content type
- * or an attribute selector; and a row that does not match the GraphQL schema
- * of its table (a required column absent, or a present non-null column holding
- * the wrong JS type).
+ * or an attribute selector; and a row whose columns fail the checked schema
+ * rules.
  * The command cases run the real restore command with `fetch` as its only
  * write path; a refusal sends no request at all.
  */
@@ -200,8 +199,12 @@ describe("archive admission refuses a row that does not match its table's schema
  * Anything left unconsumed fails, naming the line.
  */
 function schemaColumnsFromText(schemaText: string, table: string, label: string): Array<[string, { type: RestoreColumnType; required: boolean }]> {
-  const header = new RegExp(`^type\\s+${table}\\b[^{]*\\{`, "m").exec(schemaText);
-  if (!header) throw new Error(`${label}: no type ${table} @table declaration`);
+  const header = new RegExp(`^type\\s+${table}\\s+@table\\b[^{]*\\{`, "m").exec(schemaText);
+  if (!header) {
+    const declaration = new RegExp(`^type\\s+${table}\\b`, "m").exec(schemaText);
+    const line = schemaText.slice(0, declaration?.index ?? 0).split("\n").length;
+    throw new Error(`${label}:${line}: no type ${table} @table declaration`);
+  }
   let cursor = header.index + header[0].length;
   const bodyStart = cursor;
   let depth = 1;
@@ -340,6 +343,12 @@ describe("the restore field table matches the GraphQL schema (flair#2953)", () =
     ["Soul", "schemas/memory.graphql"],
     ["Memory", "schemas/memory.graphql"],
   ] as const;
+
+  test.each(["Agent", "Soul", "Memory"])("%s without @table is refused", (table) => {
+    const fixture = `type ${table} {\n  id: ID\n}\n`;
+    expect(() => schemaColumnsFromText(fixture, table, "fixture.graphql"))
+      .toThrow(`fixture.graphql:1: no type ${table} @table declaration`);
+  });
 
   for (const [table, schemaPath] of sources) {
     test(`${table} columns and types match its \`type ... @table\` body`, () => {
