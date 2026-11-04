@@ -2,47 +2,23 @@
  * restore-soul-refusal-inventory-2953.test.ts — the Soul write-refusal
  * inventory behind `flair restore --replace` (flair#2953).
  *
- * The source set is the relative-import closure of resources/Soul.ts. Every
- * Response identifier token in the import closure's source is accounted for;
- * a name built at runtime (e.g. from strings) is not seen — #2970 replaces
- * this inventory with a server dry run.
+ * Threat model: detect refusal drift in forms the TypeScript checker can bind
+ * statically, within the relative-import closure of resources/Soul.ts. Prove
+ * JSON, Response and globalThis against TypeScript's global library bindings;
+ * follow literal consts and aliases to a bounded fixpoint; fail closed on
+ * unsupported forms. Runtime-built names or properties, eval/Function and
+ * dynamic property strings are out of scope. #2970 replaces this inventory
+ * with a server dry run.
  *
- * The tokens come from TypeScript's scanner over each module's raw text
- * (trivia and comments skipped; string and template literal contents are not
- * identifiers), independently of the AST classifier. For each token the
- * classifier records one disposition: a classified Response construction or
- * call, an unresolved site, an alias definition it follows, a type reference,
- * or an `instanceof` check. Any lexical token
- * without a disposition fails, naming file:line. Aliases resolve to a fixpoint
- * over plain constants, casts, parentheses, non-null assertions, destructuring
- * renames and defaults, assignments, imports, local exports, re-exports and
- * star exports; a pass that adds nothing ends resolution, and 100 passes
- * without convergence fail naming the module. A name that resolves to Response
- * through any chain is checked at each value read: a call or new callee is
- * checked, a chain definition is followed, and every other read is
- * unaccounted, so an alias passed to another function fails the test. Object
- * properties are not followed, so
- * `const o = { r: Response }; o.r.json()` leaves that Response token
- * unaccounted and fails. Payloads, error values and statuses accept only
- * literals, identifiers bound lexically or through imports and re-exports to
- * string/numeric literal consts (initializer parentheses and `as const`
- * allowed), and conditional/&&/||/?? branches that all resolve; every possible
- * code and status is recorded.
- * Objects with spreads, computed keys or duplicate error/status keys are
- * unresolved, as are other identifiers, calls, members and templates with
- * substitutions. Members remain unresolved because object mutation is not
- * checked. A new Response body may use JSON.stringify around its payload.
- * Other Response methods and unsupported forms are unresolved with file:line
- * and require a listed reason. A function that
- * forwards one of its parameters into a callee the inventory cannot resolve (a
- * method call, a computed callee, a callee outside the closure), including
- * through a parenthesis, an `as` cast or a non-null assertion, is opaque:
- * listed by name with a reason, or the test fails naming it. Refusal codes
- * must be preflighted, admission-refused or listed out of scope.
+ * TypeScript's scanner accounts for lexical Response tokens independently of
+ * the classifier. Unresolved sites require file:line:column and a reason.
+ * Row object properties are unsupported; only proven globalThis.Response is
+ * accepted as a qualified constructor. Payload objects with spreads, computed
+ * keys, duplicate error/status keys or toJSON are unresolved.
  */
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import ts from "typescript";
 
 const root = join(import.meta.dir, "../..");
@@ -236,6 +212,11 @@ function lineOf(source: ts.SourceFile, node: ts.Node): number {
   return source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
 }
 
+function siteOf(source: ts.SourceFile, node: ts.Node): string {
+  const { line, character } = source.getLineAndCharacterOfPosition(node.getStart(source));
+  return `${relative(root, resolve(source.fileName))}:${line + 1}:${character + 1}`;
+}
+
 /**
  * A refusal code is the snake_case rule name before the first ":" when the
  * literal carries one; a prose message (the `forbidden: …` attribution and
@@ -248,38 +229,80 @@ function codeOf(message: string): string {
   return /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(prefix) ? prefix : message;
 }
 
-/** `Response`, `globalThis.Response`, `self.Response`, … — the constructor, not a member of a row. */
-function isResponseReferenceName(expression: ts.Expression): boolean {
-  if (ts.isParenthesizedExpression(expression)) return isResponseReferenceName(expression.expression);
-  if (ts.isIdentifier(expression)) return expression.text === "Response";
-  return ts.isPropertyAccessExpression(expression) && expression.name.text === "Response";
-}
-
-/** The Response constructor or static method a `new`/call's callee names, directly or through an alias. */
-function responseCallee(file: string, callee: ts.Expression, aliases: Map<string, Map<string, ResponseAlias>>): ResponseAlias | null {
-  const local = aliases.get(file);
+function responseCallee(file: string, callee: ts.Expression,
+  isResponseReferenceName: (expression: ts.Expression) => boolean,
+  aliasAt: (file: string, expression: ts.Identifier) => ResponseAlias | null): ResponseAlias | null {
   if (isResponseReferenceName(callee)) return { kind: "constructor" };
   if (ts.isPropertyAccessExpression(callee)) {
     if (isResponseReferenceName(callee.expression)) return { kind: "method", method: callee.name.text };
     if (ts.isIdentifier(callee.expression)) {
-      const alias = local?.get(callee.expression.text);
+      const alias = aliasAt(file, callee.expression);
       if (alias?.kind === "constructor") return { kind: "method", method: callee.name.text };
     }
     return null;
   }
-  if (ts.isIdentifier(callee)) return local?.get(callee.text) ?? null;
-  return null;
+  return ts.isIdentifier(callee) ? aliasAt(file, callee) : null;
 }
 
 function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
+  const options: ts.CompilerOptions = {
+    target: ts.ScriptTarget.Latest, module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler, moduleDetection: ts.ModuleDetectionKind.Force, types: [],
+    lib: ["lib.esnext.d.ts", "lib.dom.d.ts"],
+  };
+  const host = ts.createCompilerHost(options, true);
+  const readFile = host.readFile.bind(host);
+  host.readFile = (file) => sources.get(relative(root, resolve(file)))?.text ?? readFile(file);
+  host.resolveModuleNames = (names, fromFile) => names.map((name) => {
+    const target = resolveRelative(relative(root, fromFile), name);
+    return target && sources.has(target) ? { resolvedFileName: join(root, target), extension: ts.Extension.Ts } : undefined;
+  });
+  const program = ts.createProgram([...sources.keys()].map((file) => join(root, file)), options, host);
+  sources = new Map([...sources.keys()].map((file) => [file, program.getSourceFile(join(root, file))!]));
+  const checker = program.getTypeChecker();
+  const symbolAt = (node: ts.Node): ts.Symbol | undefined => {
+    let symbol = checker.getSymbolAtLocation(node);
+    const seen = new Set<ts.Symbol>();
+    while (symbol && (symbol.flags & ts.SymbolFlags.Alias)) {
+      if (seen.has(symbol)) return undefined;
+      seen.add(symbol);
+      symbol = checker.getAliasedSymbol(symbol);
+    }
+    return symbol;
+  };
+  const libDirectory = dirname(ts.getDefaultLibFilePath(options));
+  const isLibSymbol = (symbol: ts.Symbol | undefined, name: "JSON" | "Response"): boolean =>
+    symbol?.getName() === name && !!symbol.declarations?.length && symbol.declarations.every((declaration) => {
+      const source = declaration.getSourceFile();
+      return dirname(source.fileName) === libDirectory && /^lib\..+\.d\.ts$/.test(basename(source.fileName)) &&
+        program.isSourceFileDefaultLibrary(source);
+    });
+  const isGlobalThis = (node: ts.Expression): boolean => {
+    if (!ts.isIdentifier(node) || node.text !== "globalThis") return false;
+    const symbol = symbolAt(node);
+    // TypeScript's intrinsic globalThis has no declarations.
+    return !!symbol && symbol === checker.resolveName("globalThis", undefined, ts.SymbolFlags.Value, false) &&
+      symbol.declarations?.length === 0;
+  };
+  const isResponseReferenceName = (expression: ts.Expression): boolean => {
+    if (ts.isParenthesizedExpression(expression)) return isResponseReferenceName(expression.expression);
+    if (ts.isIdentifier(expression)) return expression.text === "Response" && isLibSymbol(symbolAt(expression), "Response");
+    return ts.isPropertyAccessExpression(expression) && expression.name.text === "Response" &&
+      isGlobalThis(expression.expression) && isLibSymbol(symbolAt(expression.name), "Response");
+  };
+  const provenAliases = new Map<ts.Symbol, ResponseAlias>();
+  const aliasAt = (_file: string, node: ts.Identifier): ResponseAlias | null => {
+    const symbol = symbolAt(node);
+    return symbol ? provenAliases.get(symbol) ?? null : null;
+  };
   const importAliases = new Map<string, Map<string, { file: string; name: string }>>();
   const responseAliases = new Map<string, Map<string, ResponseAlias>>();
   const exportedAliases = new Map<string, Map<string, ResponseAlias>>();
-  const aliasConsts = new Map<string, Array<{ name: string; initializer: ts.Expression }>>();
-  const aliasAssignments = new Map<string, Array<{ name: string; initializer: ts.Expression }>>();
-  const aliasDestructured = new Map<string, Array<{ name: string; property: string; initializer: ts.Expression; fallback?: ts.Expression }>>();
+  const aliasConsts = new Map<string, Array<{ name: string; initializer: ts.Expression; binding: ts.Identifier }>>();
+  const aliasAssignments = new Map<string, Array<{ name: string; initializer: ts.Expression; binding: ts.Identifier }>>();
+  const aliasDestructured = new Map<string, Array<{ name: string; property: string; initializer: ts.Expression; fallback?: ts.Expression; binding: ts.Identifier }>>();
   const aliasImports = new Map<string, Array<{ localName: string; importedName: string; targetFile: string }>>();
-  const aliasLocalExports = new Map<string, Array<{ exportedName: string; localName: string }>>();
+  const aliasLocalExports = new Map<string, Array<{ exportedName: string; localName: string; localNode: ts.ModuleExportName }>>();
   const aliasReExports = new Map<string, Array<{ exportedName: string; importedName: string; targetFile: string }>>();
   const aliasStarExports = new Map<string, string[]>();
   const aliasExportDeclarations = new Map<string, Set<string>>();
@@ -288,11 +311,11 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
 
   for (const [file, source] of sources) {
     const aliases = new Map<string, { file: string; name: string }>();
-    const consts: Array<{ name: string; initializer: ts.Expression }> = [];
-    const assignments: Array<{ name: string; initializer: ts.Expression }> = [];
-    const destructured: Array<{ name: string; property: string; initializer: ts.Expression; fallback?: ts.Expression }> = [];
+    const consts: Array<{ name: string; initializer: ts.Expression; binding: ts.Identifier }> = [];
+    const assignments: Array<{ name: string; initializer: ts.Expression; binding: ts.Identifier }> = [];
+    const destructured: Array<{ name: string; property: string; initializer: ts.Expression; fallback?: ts.Expression; binding: ts.Identifier }> = [];
     const imports: Array<{ localName: string; importedName: string; targetFile: string }> = [];
-    const localExports: Array<{ exportedName: string; localName: string }> = [];
+    const localExports: Array<{ exportedName: string; localName: string; localNode: ts.ModuleExportName }> = [];
     const reExports: Array<{ exportedName: string; importedName: string; targetFile: string }> = [];
     const starExports: string[] = [];
     const exportDeclarations = new Set<string>();
@@ -318,7 +341,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
             const exportedName = element.name.text;
             const localName = (element.propertyName ?? element.name).text;
             if (target) reExports.push({ exportedName, importedName: localName, targetFile: target });
-            else localExports.push({ exportedName, localName });
+            else localExports.push({ exportedName, localName, localNode: element.propertyName ?? element.name });
           }
         } else if (!clause && target) {
           starExports.push(target);
@@ -349,7 +372,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
         const exported = !!(statement && ts.isVariableStatement(statement) && statement.parent === source &&
           (statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false));
         if (ts.isIdentifier(node.name)) {
-          consts.push({ name: node.name.text, initializer: node.initializer });
+          consts.push({ name: node.name.text, initializer: node.initializer, binding: node.name });
           if (exported) exportDeclarations.add(node.name.text);
         } else if (ts.isObjectBindingPattern(node.name)) {
           for (const element of node.name.elements) {
@@ -357,7 +380,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
             const property = element.propertyName && (ts.isIdentifier(element.propertyName) || ts.isStringLiteral(element.propertyName))
               ? element.propertyName.text
               : element.name.text;
-            destructured.push({ name: element.name.text, property, initializer: node.initializer, fallback: element.initializer });
+            destructured.push({ name: element.name.text, property, initializer: node.initializer, fallback: element.initializer, binding: element.name });
             if (exported) exportDeclarations.add(element.name.text);
           }
         }
@@ -368,7 +391,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     const collectAssignments = (node: ts.Node): void => {
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
           ts.isIdentifier(node.left)) {
-        assignments.push({ name: node.left.text, initializer: node.right });
+        assignments.push({ name: node.left.text, initializer: node.right, binding: node.left });
       }
       ts.forEachChild(node, collectAssignments);
     };
@@ -405,13 +428,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     }
     return true;
   };
-  // Resolve every alias kind to a fixpoint: plain constants, `as` casts,
-  // parentheses, non-null assertions, destructuring with renames and default
-  // values, assignments, imports, local exports, re-exports and star exports.
-  // Each pass runs every rule against the maps built by earlier passes, so a
-  // chain of any length resolves; a pass that adds nothing ends the loop. The
-  // resolver fails rather than returning a partial map when 100 passes do not
-  // converge, naming the module that still changed.
+  // Continue to the bounded fixpoint; fail if resolution does not converge.
   const ALIAS_PASS_BOUND = 100;
   let converged = false;
   let lastChangedModule = "";
@@ -428,25 +445,37 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
         }
         if (ts.isPropertyAccessExpression(unwrapped)) {
           if (isResponseReferenceName(unwrapped.expression)) return { kind: "method", method: unwrapped.name.text };
-          const base = ts.isIdentifier(unwrapped.expression) ? local.get(unwrapped.expression.text) : undefined;
+          const base = ts.isIdentifier(unwrapped.expression) ? aliasAt(file, unwrapped.expression) : undefined;
           return base?.kind === "constructor" ? { kind: "method", method: unwrapped.name.text } : null;
         }
-        return ts.isIdentifier(unwrapped) ? (local.get(unwrapped.text) ?? null) : null;
+        return ts.isIdentifier(unwrapped) ? aliasAt(file, unwrapped) : null;
       };
       for (const declaration of aliasConsts.get(file) ?? []) {
         const alias = aliasOf(declaration.initializer);
-        if (alias && !local.has(declaration.name)) local.set(declaration.name, alias);
+        if (alias) {
+          const symbol = symbolAt(declaration.binding);
+          if (symbol && !provenAliases.has(symbol)) { provenAliases.set(symbol, alias); mutated = true; lastChangedModule = file; }
+          if (!local.has(declaration.name)) local.set(declaration.name, alias);
+        }
       }
       for (const declaration of aliasAssignments.get(file) ?? []) {
         const alias = aliasOf(declaration.initializer);
-        if (alias && !local.has(declaration.name)) local.set(declaration.name, alias);
+        if (alias) {
+          const symbol = symbolAt(declaration.binding);
+          if (symbol && !provenAliases.has(symbol)) { provenAliases.set(symbol, alias); mutated = true; lastChangedModule = file; }
+          if (!local.has(declaration.name)) local.set(declaration.name, alias);
+        }
       }
       for (const declaration of aliasDestructured.get(file) ?? []) {
         const base = aliasOf(declaration.initializer);
         const alias = base?.kind === "constructor"
           ? { kind: "method" as const, method: declaration.property }
           : declaration.fallback ? aliasOf(declaration.fallback) : null;
-        if (alias && !local.has(declaration.name)) local.set(declaration.name, alias);
+        if (alias) {
+          const symbol = symbolAt(declaration.binding);
+          if (symbol && !provenAliases.has(symbol)) { provenAliases.set(symbol, alias); mutated = true; lastChangedModule = file; }
+          if (!local.has(declaration.name)) local.set(declaration.name, alias);
+        }
       }
       for (const element of aliasImports.get(file) ?? []) {
         const alias = exportedAliases.get(element.targetFile)?.get(element.importedName);
@@ -458,7 +487,8 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
         if (alias) exported.set(name, alias);
       }
       for (const element of aliasLocalExports.get(file) ?? []) {
-        const alias = element.localName === "Response" ? { kind: "constructor" as const } : local.get(element.localName);
+        const alias = ts.isIdentifier(element.localNode)
+          ? (isResponseReferenceName(element.localNode) ? { kind: "constructor" as const } : aliasAt(file, element.localNode)) : null;
         if (alias) exported.set(element.exportedName, alias);
       }
       for (const element of aliasReExports.get(file) ?? []) {
@@ -513,13 +543,6 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     return values.every((value) => value !== null) ? [...new Set(values.flatMap((value) => value!))] : null;
   };
 
-  const host = ts.createCompilerHost({ noLib: true });
-  host.getSourceFile = (file) => sources.get(relative(root, resolve(file)));
-  host.resolveModuleNames = (names, fromFile) => names.map((name) => {
-    const target = resolveRelative(relative(root, fromFile), name);
-    return target && sources.has(target) ? { resolvedFileName: join(root, target), extension: ts.Extension.Ts } : undefined;
-  });
-  const checker = ts.createProgram([...sources.keys()].map((file) => join(root, file)), { noLib: true }, host).getTypeChecker();
   const literalConst = (expression: ts.Expression): ts.Expression => {
     if (!ts.isIdentifier(expression)) return expression;
     let symbol = ts.isShorthandPropertyAssignment(expression.parent)
@@ -553,7 +576,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
 
   const payloadOf = (_file: string, expression: ts.Expression | null | undefined): ts.Expression | null => {
     if (expression && ts.isCallExpression(expression) && ts.isPropertyAccessExpression(expression.expression) &&
-        ts.isIdentifier(expression.expression.expression) && expression.expression.expression.text === "JSON" &&
+        ts.isIdentifier(expression.expression.expression) && expression.expression.expression.text === "JSON" && isLibSymbol(symbolAt(expression.expression.expression), "JSON") &&
         expression.expression.name.text === "stringify" && expression.arguments.length === 1 &&
         !ts.isSpreadElement(expression.arguments[0])) return expression.arguments[0];
     return expression ?? null;
@@ -628,7 +651,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     const parameters = parametersOf(record.fn);
     const visit = (node: ts.Node): void => {
       if (ts.isNewExpression(node) || ts.isCallExpression(node)) {
-        const callee = responseCallee(record.file, node.expression, responseAliases);
+        const callee = responseCallee(record.file, node.expression, isResponseReferenceName, aliasAt);
         const shape = callee ? responseShape(record.file, node, callee) : null;
         const status = shape?.status;
         if (shape?.body && ts.isIdentifier(shape.body) && parameters.has(shape.body.text)) bodyParam = shape.body.text;
@@ -697,8 +720,8 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     const code = codeOf(message);
     if (!codes.has(code)) codes.set(code, `${file}:${line}`);
   };
-  const recordUnresolved = (file: string, line: number, detail: string): void => {
-    const at = `${file}:${line}`;
+  const recordUnresolved = (file: string, node: ts.Node, detail: string): void => {
+    const at = siteOf(sources.get(file)!, node);
     if (!unresolved.has(at)) unresolved.set(at, detail);
   };
 
@@ -722,7 +745,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
       const argument = index >= 0 ? node.arguments[index] : undefined;
       const values = resolveString(file, argument);
       if (values) for (const value of values) recordCode(value, file, lineOf(source, node));
-      else recordUnresolved(file, lineOf(source, node), `unresolvable refusal argument: ${target.name}.${sink}`);
+      else recordUnresolved(file, node, `unresolvable refusal argument: ${target.name}.${sink}`);
       ts.forEachChild(node, visit);
     };
     visit(source);
@@ -741,24 +764,25 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   };
   for (const [file, source] of sources) {
     for (const declaration of aliasConsts.get(file) ?? []) {
-      if (!responseAliases.get(file)?.has(declaration.name)) continue;
+      if (!aliasAt(file, declaration.binding)) continue;
       for (const identifier of responseIdentifiersIn(declaration.initializer)) account(file, identifier, "alias");
     }
     for (const declaration of aliasDestructured.get(file) ?? []) {
-      if (!responseAliases.get(file)?.has(declaration.name)) continue;
+      if (!aliasAt(file, declaration.binding)) continue;
       for (const identifier of responseIdentifiersIn(declaration.initializer)) account(file, identifier, "alias");
       if (declaration.fallback) {
         for (const identifier of responseIdentifiersIn(declaration.fallback)) account(file, identifier, "alias");
       }
     }
     for (const declaration of aliasAssignments.get(file) ?? []) {
-      if (!responseAliases.get(file)?.has(declaration.name)) continue;
+      if (!aliasAt(file, declaration.binding)) continue;
       for (const identifier of responseIdentifiersIn(declaration.initializer)) account(file, identifier, "alias");
     }
     const visitBindings = (node: ts.Node): void => {
       if (ts.isImportSpecifier(node) || ts.isExportSpecifier(node)) {
         const original = node.propertyName ?? node.name;
-        if (ts.isIdentifier(original) && original.text === "Response") account(file, original, "alias");
+        if (ts.isIdentifier(original) && original.text === "Response" &&
+            (isLibSymbol(symbolAt(original), "Response") || aliasAt(file, original))) account(file, original, "alias");
       }
       ts.forEachChild(node, visitBindings);
     };
@@ -773,7 +797,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     const visit = (node: ts.Node): void => {
       if (ts.isNewExpression(node) || ts.isCallExpression(node)) {
         const direct = responseIdentifiersIn(node.expression);
-        const alias = responseCallee(file, node.expression, responseAliases);
+        const alias = responseCallee(file, node.expression, isResponseReferenceName, aliasAt);
         if (direct.length > 0 || alias) {
           occurrences++;
           if (alias) {
@@ -792,14 +816,24 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
               if (direct.length > 0) unresolvedReferences += direct.length;
               else aliasSites++;
               for (const identifier of direct) account(file, identifier, "unresolved");
-              recordUnresolved(file, lineOf(source, node), !shape ? "unrecognised Response reference" :
+              recordUnresolved(file, node, !shape ? "unrecognised Response reference" :
                 shape.statuses === null ? "unresolvable Response status" : "unresolvable refusal body");
             }
           } else {
             unresolvedReferences += direct.length;
             for (const identifier of direct) account(file, identifier, "unresolved");
-            recordUnresolved(file, lineOf(source, node), "unrecognised Response reference");
+            recordUnresolved(file, node, "unrecognised Response reference");
           }
+        }
+      }
+      if (ts.isElementAccessExpression(node) || (ts.isBindingElement(node) && node.propertyName)) {
+        const property = ts.isElementAccessExpression(node) ? node.argumentExpression : node.propertyName!;
+        const value = ts.isComputedPropertyName(property) ? property.expression : property;
+        const literal = ts.isExpression(value) ? literalConst(unwrapAliasExpression(value)) : value;
+        const propertyType = ts.isExpression(value) ? checker.getTypeAtLocation(value) : undefined;
+        if (((ts.isStringLiteral(literal) || ts.isNoSubstitutionTemplateLiteral(literal)) && literal.text === "Response") ||
+            (propertyType?.isStringLiteral() && propertyType.value === "Response")) {
+          recordUnresolved(file, node, "unrecognised Response reference");
         }
       }
       ts.forEachChild(node, visit);
@@ -821,7 +855,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     return ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword;
   };
 
-  // A name that resolves to Response, through any chain, is a use wherever it
+  // A followed Response alias is a use wherever it
   // is read. The definition sites and the chain edges that build a longer
   // alias are not uses; a use as a call or new callee is checked above. Any
   // other use is unaccounted, so an alias handed to another function or stored
@@ -831,7 +865,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     const local = responseAliases.get(file)!;
     if (local.size === 0) continue;
     const visit = (node: ts.Node): void => {
-      if (ts.isIdentifier(node) && local.has(node.text) && !isTypePosition(node)) {
+      if (ts.isIdentifier(node) && aliasAt(file, node) && !isTypePosition(node)) {
         const parent = node.parent;
         const definition =
           ((ts.isVariableDeclaration(parent) || ts.isBindingElement(parent) || ts.isParameter(parent) ||
@@ -896,9 +930,9 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
             const body = bodyIndex >= 0 ? node.arguments[bodyIndex] : undefined;
             const values = errorValues(file, body);
             if (values) for (const value of values) recordCode(value, file, lineOf(source, node));
-            else recordUnresolved(file, lineOf(source, node), "unresolvable refusal body");
+            else recordUnresolved(file, node, "unresolvable refusal body");
           } else if (index >= 0 && statusesAtCall === null) {
-            recordUnresolved(file, lineOf(source, node), `unresolvable status argument: ${record.name}.${statusParam}`);
+            recordUnresolved(file, node, `unresolvable status argument: ${record.name}.${statusParam}`);
           }
         }
         ts.forEachChild(node, visit);
@@ -983,19 +1017,19 @@ const OUT_OF_SCOPE = new Map<string, string>([
   ["not found", "kit by-id read gate: Soul has no get() override and the write path returns no 404"],
 ]);
 
-/** Unresolved sites accepted by file:line with a reason. */
-const UNRESOLVED_SITES = new Map<string, string>([
-  ["resources/record-type-kit.ts:514", "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately"],
-  ["resources/record-type-kit.ts:519", "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately"],
-  ["resources/record-type-kit.ts:527", "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately"],
-  ["resources/Soul.ts:70", "patchConflict forwards its error parameter; literal call arguments are checked separately"],
-  ["resources/record-owner-guard.ts:255", "status has a conditional initializer rather than a literal"],
-  ["resources/record-type-kit.ts:76", "FORBIDDEN forwards msg; literal call arguments are checked separately"],
-  ["resources/request-target.ts:75", "the HEAD/body conditional uses null and a body identifier; the request-target refusal remains unresolved"],
-  ["resources/skill-provenance.ts:212", "the error is result.error from registerSkillAssignment; this response remains unresolved"],
-  ["resources/instruction-version-record.ts:272", "jsonResponse forwards its status parameter; its call sites are checked for static statuses"],
-  ["resources/record-owner-guard.ts:220", "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write"],
-  ["resources/record-owner-guard.ts:231", "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write"],
+/** Expected diagnostics and reasons for accepting unresolved sites. */
+const UNRESOLVED_SITES = new Map<string, { detail: string; reason: string }>([
+  ["resources/record-type-kit.ts:514:26", { detail: "unresolvable refusal argument: FORBIDDEN.msg", reason: "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately" }],
+  ["resources/record-type-kit.ts:519:26", { detail: "unresolvable refusal argument: FORBIDDEN.msg", reason: "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately" }],
+  ["resources/record-type-kit.ts:527:26", { detail: "unresolvable refusal argument: FORBIDDEN.msg", reason: "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately" }],
+  ["resources/Soul.ts:70:10", { detail: "unresolvable refusal body", reason: "patchConflict forwards its error parameter; literal call arguments are checked separately" }],
+  ["resources/record-owner-guard.ts:255:10", { detail: "unresolvable Response status", reason: "status has a conditional initializer rather than a literal" }],
+  ["resources/record-type-kit.ts:76:3", { detail: "unresolvable refusal body", reason: "FORBIDDEN forwards msg; literal call arguments are checked separately" }],
+  ["resources/request-target.ts:75:10", { detail: "unresolvable refusal body", reason: "the HEAD/body conditional uses null and a body identifier; the request-target refusal remains unresolved" }],
+  ["resources/skill-provenance.ts:212:10", { detail: "unresolvable refusal body", reason: "the error is result.error from registerSkillAssignment; this response remains unresolved" }],
+  ["resources/instruction-version-record.ts:272:10", { detail: "unresolvable Response status", reason: "jsonResponse forwards its status parameter; its call sites are checked for static statuses" }],
+  ["resources/record-owner-guard.ts:220:10", { detail: "unresolvable refusal body", reason: "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write" }],
+  ["resources/record-owner-guard.ts:231:10", { detail: "unresolvable refusal body", reason: "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write" }],
 ]);
 
 /**
@@ -1077,6 +1111,13 @@ const OPAQUE_FUNCTIONS = new Map<string, string>([
   ["resources/host-pointer/registry.ts:restorePointerRowIfAbsent", "forwards row into currentHostPointerAdapter().putPointerRow, which the inventory does not resolve"],
 ]);
 
+function siteIn(source: ts.SourceFile, text: string): string {
+  const pos = source.text.indexOf(text);
+  if (pos < 0) throw new Error(`missing fixture site: ${text}`);
+  const { line, character } = source.getLineAndCharacterOfPosition(pos);
+  return `${relative(root, resolve(source.fileName))}:${line + 1}:${character + 1}`;
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 test("the source set contains each module the inventory names", () => {
@@ -1102,11 +1143,11 @@ test("each refusal code found in the derived source set is preflighted, admissio
   expect(inventory.codes.size).toBe(listed.size);
 });
 
-test("each unresolved site is listed by file:line with a reason", () => {
+test("each unresolved site matches its file:line:column and diagnostic", () => {
   const inventory = buildInventory(collectSourceSet());
-  for (const reason of UNRESOLVED_SITES.values()) expect(reason.trim()).not.toBe("");
+  for (const { reason } of UNRESOLVED_SITES.values()) expect(reason.trim()).not.toBe("");
   const unexpected = [...inventory.unresolved]
-    .filter(([at]) => !UNRESOLVED_SITES.has(at))
+    .filter(([at, detail]) => UNRESOLVED_SITES.get(at)?.detail !== detail)
     .map(([at, detail]) => `${at}: ${detail}`)
     .sort();
   expect(unexpected).toEqual([]);
@@ -1114,7 +1155,7 @@ test("each unresolved site is listed by file:line with a reason", () => {
   expect(stale).toEqual([]);
 });
 
-test("every Response identifier token in the import closure's source is accounted for; a name built at runtime (e.g. from strings) is not seen — #2970 replaces this inventory with a server dry run", () => {
+test("lexical Response tokens have dispositions", () => {
   const inventory = buildInventory(collectSourceSet());
   expect(inventory.lexicalTokens).toBeGreaterThan(0);
   expect(inventory.unaccounted).toEqual([]);
@@ -1184,7 +1225,7 @@ test.each([
   ]) {
     const source = ts.createSourceFile("fixture.ts", `const init = { status: 403 };\n${expression}`, ts.ScriptTarget.Latest, true);
     const inventory = buildInventory(new Map([["fixture.ts", source]]));
-    expect([...inventory.unresolved]).toEqual([["fixture.ts:2", "unresolvable Response status"]]);
+    expect([...inventory.unresolved]).toEqual([["fixture.ts:2:1", "unresolvable Response status"]]);
   }
 });
 
@@ -1201,7 +1242,7 @@ test.each([
 test("Response.error is an unresolved refusal", () => {
   const source = ts.createSourceFile("fixture.ts", "Response.error()", ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
-  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable Response status"]]);
+  expect([...inventory.unresolved]).toEqual([["fixture.ts:1:1", "unresolvable Response status"]]);
 });
 
 test.each([
@@ -1212,7 +1253,7 @@ test.each([
   expect(inventory.occurrences).toBe(1);
   expect(inventory.classified).toBe(0);
   expect(inventory.unresolvedReferences).toBe(1);
-  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unrecognised Response reference"]]);
+  expect([...inventory.unresolved]).toEqual([["fixture.ts:1:1", "unrecognised Response reference"]]);
 });
 
 test.each([
@@ -1252,7 +1293,7 @@ test.each([
   expect(inventory.occurrences).toBe(1);
   expect(inventory.classified).toBe(0);
   expect(inventory.unresolvedReferences).toBe(1);
-  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unrecognised Response reference"]]);
+  expect([...inventory.unresolved]).toEqual([["fixture.ts:1:1", "unrecognised Response reference"]]);
 });
 
 test("a function forwarding a parameter through a cast is opaque", () => {
@@ -1280,12 +1321,12 @@ test.each(["403", "Date.now()"])("checks a status-taking helper call: %s", (stat
 function jsonResponse(status: number, body: any) { return new Response(JSON.stringify(body), { status }); }
 jsonResponse(${status}, { error: "x" });`, ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
-  expect(inventory.unresolved.get("fixture.ts:2")).toBe("unresolvable Response status");
+  expect(inventory.unresolved.get(siteIn(source, "new Response"))).toBe("unresolvable Response status");
   if (status === "403") {
     expect([...inventory.codes]).toEqual([["x", "fixture.ts:3"]]);
     expect(inventory.unresolved.size).toBe(1);
   } else {
-    expect(inventory.unresolved.get("fixture.ts:3")).toBe("unresolvable status argument: jsonResponse.status");
+    expect(inventory.unresolved.get(siteIn(source, "jsonResponse(Date.now()"))).toBe("unresolvable status argument: jsonResponse.status");
   }
 });
 
@@ -1299,7 +1340,7 @@ test.each([
 ])("leaves an unproven status unresolved: %s", (expression) => {
   const source = ts.createSourceFile("fixture.ts", expression, ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
-  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable Response status"]]);
+  expect([...inventory.unresolved]).toEqual([[siteIn(source, source.text.includes("Response.json") ? "Response.json" : "new Response"), "unresolvable Response status"]]);
 });
 
 test("checks imported status-taking helper calls", () => {
@@ -1313,7 +1354,7 @@ test("checks imported status-taking helper calls", () => {
     ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([[builderFile, builder], [callerFile, caller]]));
   expect([...inventory.codes]).toEqual([["x", "resources/Soul.ts:1"]]);
-  expect(inventory.unresolved.get("resources/Soul.ts:1")).toBe("unresolvable status argument: jsonResponse.status");
+  expect(inventory.unresolved.get(siteIn(caller, "jsonResponse(Date.now()"))).toBe("unresolvable status argument: jsonResponse.status");
 });
 
 test("classifies a refusal through a two-step destructured alias chain", () => {
@@ -1446,7 +1487,7 @@ test.each([
   expect([...inventory.codes]).toEqual([]);
   expect(inventory.classified).toBe(0);
   expect(inventory.unresolvedReferences).toBe(1);
-  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable refusal body"]]);
+  expect([...inventory.unresolved]).toEqual([[siteIn(source, "Response.json"), "unresolvable refusal body"]]);
 });
 
 test.each([
@@ -1476,7 +1517,7 @@ test.each([
   const source = ts.createSourceFile("fixture.ts", `Response.json({ error: "x" }, ${init})`, ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
   expect([...inventory.statuses]).toEqual([]);
-  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable Response status"]]);
+  expect([...inventory.unresolved]).toEqual([[siteIn(source, source.text.includes("Response.json") ? "Response.json" : "new Response"), "unresolvable Response status"]]);
 });
 
 test("checks every payload and status branch passed to a status-taking helper", () => {
@@ -1487,7 +1528,7 @@ jsonResponse(403, flag ? { error: "x" } : unknown);`, ts.ScriptTarget.Latest, tr
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
   expect(inventory.statuses.get("fixture.ts:3")).toEqual([403, 400]);
   expect([...inventory.codes]).toEqual([["x", "fixture.ts:3"], ["y", "fixture.ts:3"]]);
-  expect(inventory.unresolved.get("fixture.ts:4")).toBe("unresolvable refusal body");
+  expect(inventory.unresolved.get("fixture.ts:4:1")).toBe("unresolvable refusal body");
 });
 
 
@@ -1499,7 +1540,7 @@ test("a payload toJSON override is unresolved", async () => {
     ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
   expect(inventory.classified).toBe(0);
-  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable refusal body"]]);
+  expect([...inventory.unresolved]).toEqual([[siteIn(source, "Response.json"), "unresolvable refusal body"]]);
 });
 
 
@@ -1534,7 +1575,7 @@ test.each([
     `${bindings} Response.json({ error: code }, { status: 403 }); ${bindings.endsWith("{") || bindings.includes("; {") ? "}" : ""}`, ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
   expect([...inventory.codes]).toEqual([]);
-  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable refusal body"]]);
+  expect([...inventory.unresolved]).toEqual([[siteIn(source, "Response.json"), "unresolvable refusal body"]]);
 });
 
 test.each([
@@ -1574,12 +1615,92 @@ test.each([
     `${bindings} Response.json({ error: obj.code }, { status: 403 });`, ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
   expect([...inventory.codes]).toEqual([]);
-  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable refusal body"]]);
+  expect([...inventory.unresolved]).toEqual([[siteIn(source, "Response.json"), "unresolvable refusal body"]]);
 });
 
 test("record-type-kit FORBIDDEN parameter forwarding stays unresolved", () => {
   const inventory = buildInventory(collectSourceSet());
-  for (const at of ["resources/record-type-kit.ts:514", "resources/record-type-kit.ts:519", "resources/record-type-kit.ts:527"]) {
+  for (const at of ["resources/record-type-kit.ts:514:26", "resources/record-type-kit.ts:519:26", "resources/record-type-kit.ts:527:26"]) {
     expect(inventory.unresolved.get(at)).toBe("unresolvable refusal argument: FORBIDDEN.msg");
   }
+});
+
+
+test.each([
+  [`function f() { const JSON = { stringify: () => '{"error":"x_new_rule"}' }; return new Response(JSON.stringify({ error: "skill_opt_out_not_boolean" }), { status: 403 }); }`, 'new Response', 'unresolvable refusal body'],
+  ['function f() { const Response = { json: () => ({ error: "x_new_rule" }) }; return Response.json({ error: "skill_opt_out_not_boolean" }, { status: 403 }); }', 'Response.json', 'unrecognised Response reference'],
+  ['function f(row: any) { return row.Response.json({ error: "skill_opt_out_not_boolean" }, { status: 403 }); }', 'row.Response.json', 'unrecognised Response reference'],
+  ['function f(globalThis: any) { return globalThis.Response.json({ error: "skill_opt_out_not_boolean" }, { status: 403 }); }', 'globalThis.Response.json', 'unrecognised Response reference'],
+  ['function f(Response: any) { const R = Response; return R.json({ error: "skill_opt_out_not_boolean" }, { status: 403 }); }', 'R.json', 'unrecognised Response reference'],
+])("rejects an unproven built-in binding: %s", (text, callee, detail) => {
+  const source = ts.createSourceFile("fixture.ts", text, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.codes]).toEqual([]);
+  expect(inventory.classified).toBe(0);
+  if (callee === "R.json") expect(inventory.unaccounted).not.toEqual([]);
+  else expect([...inventory.unresolved]).toEqual([[siteIn(source, callee), detail]]);
+});
+
+test("keeps distinct unresolved calls on one line", () => {
+  const source = ts.createSourceFile("fixture.ts",
+    'Response.json(payload, { status: 403 }); Response.json({}, { status: unknown });', ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.unresolved]).toEqual([
+    ["fixture.ts:1:1", "unresolvable refusal body"],
+    ["fixture.ts:1:42", "unresolvable Response status"],
+  ]);
+});
+
+
+test.each([
+  'globalThis["Response"].json({ error: "x" }, { status: 403 });',
+  'globalThis[`Response`].json({ error: "x" }, { status: 403 });',
+  'const key = "Response"; globalThis[key].json({ error: "x" }, { status: 403 });',
+  'const key = "Response"; const next = key; globalThis[next].json({ error: "x" }, { status: 403 });',
+  'const { ["Response"]: R } = globalThis; R.json({ error: "x" }, { status: 403 });',
+])("a static string Response property remains unresolved: %s", (text) => {
+  const source = ts.createSourceFile("fixture.ts", text, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.codes]).toEqual([]);
+  expect([...inventory.unresolved.values()]).toEqual(["unrecognised Response reference"]);
+});
+
+
+test.each([
+  ['JSON', 'export const JSON = { stringify: () => "x_new_rule" };', 'new Response(JSON.stringify({ error: "skill_opt_out_not_boolean" }), { status: 403 });', 'unresolvable refusal body'],
+  ['Response', 'export const Response = { json: () => ({ error: "x_new_rule" }) };', 'Response.json({ error: "skill_opt_out_not_boolean" }, { status: 403 });', 'unrecognised Response reference'],
+  ['globalThis', 'export const globalThis = { Response: { json: () => ({ error: "x_new_rule" }) } };', 'globalThis.Response.json({ error: "skill_opt_out_not_boolean" }, { status: 403 });', 'unrecognised Response reference'],
+])("rejects an imported shadow of %s", (name, declaration, call, detail) => {
+  const file = "resources/Soul.ts";
+  const source = ts.createSourceFile(file,
+    `import { ${name} } from "./soul-write-policy.js"; ${call}`, ts.ScriptTarget.Latest, true);
+  const dependency = ts.createSourceFile("resources/soul-write-policy.ts", declaration, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([[file, source], ["resources/soul-write-policy.ts", dependency]]));
+  expect([...inventory.codes]).toEqual([]);
+  expect([...inventory.unresolved]).toEqual([[siteIn(source, call), detail]]);
+});
+
+
+test("an authored no-default-lib declaration cannot prove Response", () => {
+  const file = "resources/Soul.ts";
+  const source = ts.createSourceFile(file,
+    'Response.json({ error: "skill_opt_out_not_boolean" }, { status: 403 });', ts.ScriptTarget.Latest, true);
+  const declarationFile = "resources/fake-global.d.ts";
+  const declarations = ts.createSourceFile(declarationFile,
+    '/// <reference no-default-lib="true"/>\ndeclare const Response: { json(body: any, init: any): any };', ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([[file, source], [declarationFile, declarations]]));
+  expect([...inventory.codes]).toEqual([]);
+  expect([...inventory.unresolved]).toEqual([[`${file}:1:1`, "unrecognised Response reference"]]);
+});
+
+
+test.each([
+  'const JSON = { stringify: () => "x_new_rule" }; new Response(JSON.stringify({ error: "skill_opt_out_not_boolean" }), { status: 403 });',
+  'const Response = { json: () => "x_new_rule" }; Response.json({ error: "skill_opt_out_not_boolean" }, { status: 403 });',
+  'const globalThis = { Response: { json: () => "x_new_rule" } }; globalThis.Response.json({ error: "skill_opt_out_not_boolean" }, { status: 403 });',
+])("rejects a top-level shadow: %s", (text) => {
+  const source = ts.createSourceFile("fixture.ts", text, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.codes]).toEqual([]);
+  expect(inventory.unresolved.size).toBeGreaterThan(0);
 });
