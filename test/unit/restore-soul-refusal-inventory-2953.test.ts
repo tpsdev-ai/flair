@@ -4,9 +4,11 @@
  *
  * Threat model: detect refusal drift in forms the TypeScript checker can bind
  * statically, within the relative-import closure of resources/Soul.ts. Prove
- * JSON, Response and globalThis against TypeScript's global library bindings;
- * follow literal consts and aliases to a bounded fixpoint; fail closed on
- * unsupported forms. Runtime-built names or properties, eval/Function and
+ * JSON and Response against TypeScript's global library bindings, and
+ * globalThis against TypeScript's intrinsic globalThis symbol. Check that the
+ * closure does not mutate these trusted built-ins, directly or through proven
+ * aliases. Follow literal consts and aliases to a bounded fixpoint; fail closed
+ * on unsupported forms. Runtime-built names or properties, eval/Function and
  * dynamic property strings are out of scope. #2970 replaces this inventory
  * with a server dry run.
  *
@@ -271,7 +273,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     return symbol;
   };
   const libDirectory = dirname(ts.getDefaultLibFilePath(options));
-  const isLibSymbol = (symbol: ts.Symbol | undefined, name: "JSON" | "Response"): boolean =>
+  const isLibSymbol = (symbol: ts.Symbol | undefined, name: "JSON" | "Response" | "Object" | "Reflect"): boolean =>
     symbol?.getName() === name && !!symbol.declarations?.length && symbol.declarations.every((declaration) => {
       const source = declaration.getSourceFile();
       return dirname(source.fileName) === libDirectory && /^lib\..+\.d\.ts$/.test(basename(source.fileName)) &&
@@ -419,6 +421,91 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     }
     return current;
   };
+  type SelectedProperty = { kind: "absent" } | { kind: "value"; value: ts.Expression } | { kind: "unknown" };
+  const selectedProperty = (expression: ts.Expression, property: string): SelectedProperty => {
+    const value = unwrapAliasExpression(expression);
+    if (!ts.isObjectLiteralExpression(value)) return { kind: "unknown" };
+    let supplied: ts.Expression | undefined;
+    for (const member of value.properties) {
+      if (ts.isSpreadAssignment(member) || !member.name || ts.isComputedPropertyName(member.name)) return { kind: "unknown" };
+      const name = member.name;
+      if (!ts.isIdentifier(name) && !ts.isStringLiteral(name) && !ts.isNumericLiteral(name)) return { kind: "unknown" };
+      if (name.text !== property) continue;
+      if (supplied || (!ts.isPropertyAssignment(member) && !ts.isShorthandPropertyAssignment(member))) return { kind: "unknown" };
+      supplied = ts.isPropertyAssignment(member) ? member.initializer : member.name;
+    }
+    return supplied ? { kind: "value", value: supplied } : { kind: "absent" };
+  };
+  const builtinPaths = (expression: ts.Expression, seen = new Set<ts.Symbol>()): string[][] => {
+    const value = unwrapAliasExpression(expression);
+    if (isGlobalThis(value)) return [["globalThis"]];
+    if (ts.isBinaryExpression(value) && value.operatorToken.kind === ts.SyntaxKind.EqualsToken) return builtinPaths(value.right, seen);
+    if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
+      const key = ts.isPropertyAccessExpression(value) ? value.name.text :
+        ts.isStringLiteral(value.argumentExpression) ? value.argumentExpression.text : "*";
+      return builtinPaths(value.expression, seen).map((base) => [...base, key]);
+    }
+    if (!ts.isIdentifier(value)) return [];
+    const symbol = symbolAt(value);
+    for (const name of ["JSON", "Response", "Object", "Reflect"] as const) {
+      if (isLibSymbol(symbol, name)) return [[name]];
+    }
+    if (!symbol || seen.has(symbol)) return [];
+    const next = new Set([...seen, symbol]);
+    const paths: string[][] = [];
+    const declaration = symbol.valueDeclaration;
+    if (declaration && ts.isVariableDeclaration(declaration) && declaration.initializer) {
+      paths.push(...builtinPaths(declaration.initializer, next));
+    }
+    if (declaration && ts.isBindingElement(declaration) && !declaration.dotDotDotToken &&
+        ts.isObjectBindingPattern(declaration.parent) && ts.isVariableDeclaration(declaration.parent.parent)) {
+      const initializer = declaration.parent.parent.initializer;
+      const name = declaration.propertyName ?? declaration.name;
+      if (initializer && (ts.isIdentifier(name) || ts.isStringLiteral(name))) {
+        paths.push(...builtinPaths(initializer, next).map((base) => [...base, name.text]));
+        const selected = selectedProperty(initializer, name.text);
+        if (selected.kind === "value") paths.push(...builtinPaths(selected.value, next));
+        if (selected.kind === "absent" && declaration.initializer) paths.push(...builtinPaths(declaration.initializer, next));
+      }
+    }
+    for (const assignments of aliasAssignments.values()) {
+      for (const assignment of assignments) {
+        if (symbolAt(assignment.binding) === symbol) paths.push(...builtinPaths(assignment.initializer, next));
+      }
+    }
+    return paths;
+  };
+  const trustedTarget = (expression: ts.Expression): boolean => {
+    const value = unwrapAliasExpression(expression);
+    if (builtinPaths(value).some((path) => ["JSON", "Response", "globalThis"].includes(path[0]))) return true;
+    if (ts.isObjectLiteralExpression(value)) return value.properties.some((member) =>
+      ts.isShorthandPropertyAssignment(member) ? trustedTarget(member.name) :
+        ts.isPropertyAssignment(member) ? trustedTarget(member.initializer) :
+          ts.isSpreadAssignment(member) && trustedTarget(member.expression));
+    if (ts.isArrayLiteralExpression(value)) return value.elements.some((element) =>
+      ts.isSpreadElement(element) ? trustedTarget(element.expression) : trustedTarget(element));
+    if (ts.isBinaryExpression(value) && value.operatorToken.kind === ts.SyntaxKind.EqualsToken) return trustedTarget(value.left);
+    return false;
+  };
+  for (const source of sources.values()) {
+    const visit = (node: ts.Node): void => {
+      let target: ts.Expression | undefined;
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+          node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) target = node.left;
+      if (ts.isDeleteExpression(node)) target = node.expression;
+      if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+          (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)) target = node.operand;
+      if (ts.isCallExpression(node)) {
+        const methods = builtinPaths(node.expression).map((path) =>
+          path[0] === "globalThis" ? path.slice(1).join(".") : path.join("."));
+        if (methods.some((method) => ["Object.defineProperty", "Object.assign", "Reflect.set"].includes(method))) target = node.arguments[0];
+      }
+      if (target && trustedTarget(target)) throw new Error(`${siteOf(source, node)}: trusted built-in mutation`);
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  const uncertainAliases = new Set<ts.Symbol>();
   const sameAliasMap = (left: Map<string, ResponseAlias>, right: Map<string, ResponseAlias>): boolean => {
     if (left.size !== right.size) return false;
     for (const [name, alias] of left) {
@@ -452,6 +539,12 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
       };
       for (const declaration of aliasConsts.get(file) ?? []) {
         const alias = aliasOf(declaration.initializer);
+        const input = unwrapAliasExpression(declaration.initializer);
+        const inputSymbol = ts.isIdentifier(input) ? symbolAt(input) : undefined;
+        const outputSymbol = symbolAt(declaration.binding);
+        if (inputSymbol && outputSymbol && uncertainAliases.has(inputSymbol) && !uncertainAliases.has(outputSymbol)) {
+          uncertainAliases.add(outputSymbol); mutated = true; lastChangedModule = file;
+        }
         if (alias) {
           const symbol = symbolAt(declaration.binding);
           if (symbol && !provenAliases.has(symbol)) { provenAliases.set(symbol, alias); mutated = true; lastChangedModule = file; }
@@ -460,6 +553,12 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
       }
       for (const declaration of aliasAssignments.get(file) ?? []) {
         const alias = aliasOf(declaration.initializer);
+        const input = unwrapAliasExpression(declaration.initializer);
+        const inputSymbol = ts.isIdentifier(input) ? symbolAt(input) : undefined;
+        const outputSymbol = symbolAt(declaration.binding);
+        if (inputSymbol && outputSymbol && uncertainAliases.has(inputSymbol) && !uncertainAliases.has(outputSymbol)) {
+          uncertainAliases.add(outputSymbol); mutated = true; lastChangedModule = file;
+        }
         if (alias) {
           const symbol = symbolAt(declaration.binding);
           if (symbol && !provenAliases.has(symbol)) { provenAliases.set(symbol, alias); mutated = true; lastChangedModule = file; }
@@ -470,7 +569,16 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
         const base = aliasOf(declaration.initializer);
         const alias = base?.kind === "constructor"
           ? { kind: "method" as const, method: declaration.property }
-          : declaration.fallback ? aliasOf(declaration.fallback) : null;
+          : (() => {
+            const selected = selectedProperty(declaration.initializer, declaration.property);
+            if (selected.kind === "value") return aliasOf(selected.value);
+            return selected.kind === "absent" && declaration.fallback ? aliasOf(declaration.fallback) : null;
+          })();
+        const bindingSymbol = symbolAt(declaration.binding);
+        if (!alias && bindingSymbol && (responseIdentifiersIn(declaration.initializer).length ||
+            (declaration.fallback && (aliasOf(declaration.fallback) || responseIdentifiersIn(declaration.fallback).length)))) {
+          if (!uncertainAliases.has(bindingSymbol)) { uncertainAliases.add(bindingSymbol); mutated = true; lastChangedModule = file; }
+        }
         if (alias) {
           const symbol = symbolAt(declaration.binding);
           if (symbol && !provenAliases.has(symbol)) { provenAliases.set(symbol, alias); mutated = true; lastChangedModule = file; }
@@ -798,7 +906,9 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
       if (ts.isNewExpression(node) || ts.isCallExpression(node)) {
         const direct = responseIdentifiersIn(node.expression);
         const alias = responseCallee(file, node.expression, isResponseReferenceName, aliasAt);
-        if (direct.length > 0 || alias) {
+        const calleeSymbol = ts.isIdentifier(node.expression) ? symbolAt(node.expression) : undefined;
+        const uncertain = calleeSymbol && uncertainAliases.has(calleeSymbol);
+        if (direct.length > 0 || alias || uncertain) {
           occurrences++;
           if (alias) {
             const shape = responseShape(file, node, alias);
@@ -1405,6 +1515,77 @@ test("follows an alias through a destructuring default value", () => {
   expect([...inventory.unresolved]).toEqual([]);
   expect(inventory.unaccounted).toEqual([]);
   expect(inventory.unaccountedAliasUses).toEqual([]);
+});
+
+test.each([
+  ['const other = () => Response.json({ error: "different" }, { status: 403 });', '{ json: other }'],
+  ['declare const supplied: any;', 'supplied'],
+  ['declare const supplied: any;', '{ ...supplied }'],
+  ['declare const key: string;', '{ [key]: Response.json }'],
+  ['const native = Response.json; const other = () => ({});', '{ json: other }'],
+  ['const supplied: any = {}; supplied.json = () => ({});', 'supplied'],
+])("does not select a destructuring default over an unproven source: %s %s", (setup, initializer) => {
+  const source = ts.createSourceFile("fixture.ts",
+    `${setup}\nconst { json: j = ${setup.includes("const native") ? "native" : "Response.json"} } = ${initializer};\nj({ error: "wrong_code" }, { status: 403 });`,
+    ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect(inventory.codes.has("wrong_code")).toBe(false);
+  expect(inventory.unresolved.get(siteIn(source, 'j({ error:'))).toBe("unrecognised Response reference");
+});
+
+test.each([
+  ['', '{}', 'fallback'],
+  ['', '{ json: Response.json }', 'supplied'],
+])("selects a proven destructured value: %s %s", (setup, initializer, code) => {
+  const source = ts.createSourceFile("fixture.ts",
+    `${setup}\nconst { json: j = ${code === "supplied" ? "other" : "Response.json"} } = ${initializer};\nj({ error: "${code}" }, { status: 403 });`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect(inventory.codes.get(code)).toBe("fixture.ts:3");
+  expect([...inventory.unresolved]).toEqual([]);
+});
+
+test.each([
+  ['', `JSON.stringify = () => '{"error":"x_new_rule"}';`],
+  ['', 'Response.json = () => new Response();'],
+  ['', 'Object.defineProperty(JSON, "stringify", { value: () => "changed" });'],
+  ['', 'delete globalThis.Response;'],
+  ['', 'JSON.stringify ||= other;'],
+  ['', 'Response.json += other;'],
+  ['', 'globalThis.Response = other;'],
+  ['', 'Object.assign(Response, { json: other });'],
+  ['', 'Reflect.set(globalThis, "Response", other);'],
+  ['const J = JSON;', 'J.stringify = other;'],
+  ['let J: any = {};', 'J = JSON; J.stringify = other;'],
+  ['let J: any = Object;', 'J = JSON; J.stringify = other;'],
+  ['const R = Response;', 'delete R.json;'],
+  ['const G = globalThis;', 'Object.defineProperty(G, "Response", { value: other });'],
+  ['const { stringify: s } = JSON;', 'Object.assign(s, { toJSON: other });'],
+  ['const { json: j } = Response;', 'Reflect.set(j, "name", "changed");'],
+  ['const G = globalThis; const R = G.Response; const alias = R;', 'alias["json"] = other;'],
+  ['const define = Object.defineProperty; const J = JSON;', 'define(J, "stringify", { value: other });'],
+  ['', '({ value: JSON.stringify } = supplied);'],
+  ['', '[globalThis.Response] = supplied;'],
+  ['', 'JSON.count++;'],
+  ['', 'function unused() { JSON.stringify = other; }'],
+])("rejects a trusted built-in mutation: %s %s", (setup, mutation) => {
+  const source = ts.createSourceFile("fixture.ts", `${setup}\n${mutation}`, ts.ScriptTarget.Latest, true);
+  const operation = mutation.startsWith("function unused") ? "JSON.stringify =" : mutation.startsWith("(") ? mutation.slice(1, -2) : mutation;
+  expect(() => buildInventory(new Map([["fixture.ts", source]]))).toThrow(
+    `${siteIn(source, operation)}: trusted built-in mutation`);
+});
+
+test("rejects a mutation through an imported built-in alias anywhere in the closure", () => {
+  const texts = new Map([
+    ["resources/soul-write-policy.ts", 'export const J = JSON;'],
+    ["resources/Soul.ts", 'import { J } from "./soul-write-policy.js";\nfunction unused() { J.stringify = other; }'],
+  ]);
+  const sources = new Map([...texts].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
+  expect(() => buildInventory(sources)).toThrow("resources/Soul.ts:2:21: trusted built-in mutation");
+});
+
+test("does not treat a shadowed JSON object as a trusted built-in mutation", () => {
+  const source = ts.createSourceFile("fixture.ts", 'const JSON = { stringify: () => "" }; JSON.stringify = other;', ts.ScriptTarget.Latest, true);
+  expect(() => buildInventory(new Map([["fixture.ts", source]]))).not.toThrow();
 });
 
 test("an alias passed as an argument is an unaccounted use, not a silent pass", () => {

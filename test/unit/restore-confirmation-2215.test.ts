@@ -41,8 +41,8 @@ async function run(faults: Fault[] = [], backup: unknown = archive, flags: strin
         const fault = faults.find(f => f.path === path && f.method === method);
         if (fault?.error) throw new Error(fault.error);
         if (fault) return new Response(fault.raw ?? JSON.stringify("body" in fault ? fault.body : { error: "fixture failure" }), { status: fault.status ?? 200 });
-        // The replace preflight lists an agent's live Memories and leftover
-        // MemoryCandidates before any delete.
+        // The replace preflight lists MemoryCandidates before deletion only
+        // when some value did not match a Memory.
         if (method === "GET" && path === "/Memory") {
           const agentId = new URL(String(url)).searchParams.get("agentId");
           return Response.json(archive.memories.filter(row => row.agentId === agentId));

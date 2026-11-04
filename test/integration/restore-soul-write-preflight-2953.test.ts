@@ -5,7 +5,7 @@
  * Replace deletes the archived ids before it writes them back, with no
  * rollback snapshot. The cases here seed through the admin ops route or a
  * resource PUT, and cover these refusals: a skill-assignment row whose source
- * is a filesystem path (including one under the server's TMPDIR only), a
+ * is a filesystem path (including one under the server's TMPDIR), a
  * skill-assignment row with a non-boolean optOut, and a Soul row without a
  * non-empty agentId. Archive admission also refuses before any delete a row id
  * containing a dot and a Soul row with a non-string `value`. Each refusal
@@ -30,7 +30,6 @@ const CLI = join(process.cwd(), "dist", "cli.js");
 const CREATED_AT = "2026-10-01T00:00:00.000Z";
 
 let harper: HarperInstance;
-/** A server-only temp root: not one of the CLI's temp roots. */
 let serverTempRoot = "";
 
 interface RunResult { code: number | null; stdout: string; stderr: string }
@@ -192,7 +191,7 @@ describe("flair restore --replace refuses the Soul write rules it covers before 
     expect(await row("Soul", soulId)).toEqual(before);
   }, 300_000);
 
-  test("a filesystem source under the server's TMPDIR only is refused before any delete", async () => {
+  test("a filesystem source under the server's TMPDIR is refused before any delete", async () => {
     const home = tempDir("flair-2953-real-home-");
     const agent = "server-temp-agent";
     const soulId = `${agent}:skill`;
