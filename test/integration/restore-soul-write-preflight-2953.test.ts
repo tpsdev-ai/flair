@@ -218,8 +218,7 @@ describe("flair restore --replace decides every archived Soul write before delet
     expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
     assertNothingDeleted(restored);
     // Archive admission refuses the edited row as invalid before the replace
-    // preflight; the preflight's unusable-owner branch is the backstop for a
-    // path that admits it.
+    // preflight or any delete.
     expect(restored.stderr).toContain("invalid-row");
     expect(restored.stderr).toContain("agentId");
     expect(await row("Soul", soulId)).toEqual(before);

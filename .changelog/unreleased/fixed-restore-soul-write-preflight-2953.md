@@ -1,2 +1,2 @@
-- **`flair restore --replace` refuses before any delete when an archived Soul row has no usable `agentId` or would be refused by the skill-assignment write rule.**
-  Archive admission refuses a Soul row without a non-empty `agentId` as `invalid-row`; the replace preflight refuses a skill-assignment row whose metadata source is non-durable or whose `optOut` is not a boolean, naming the row and the remedy. A concurrent same-agent write between the preflight and the PUT is not covered.
+- **`flair restore --replace` refuses before any delete when a Soul row would be refused by the skill-assignment write rule.**
+  The preflight refuses a `skill-assignment` row whose metadata source is non-durable or whose `optOut` is not a boolean, naming the row and the remedy. Archive admission refuses a Soul row without a non-empty `agentId` as `invalid-row` before the preflight runs. A concurrent same-agent write between the preflight and the PUT is not covered.

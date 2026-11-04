@@ -159,7 +159,7 @@ export function refuseSkillAssignmentWrite(content: any, existing?: any): Respon
     priority: content?.priority ?? existing?.priority,
     metadata,
   });
-  if (result.ok) return null;
+  if (!("error" in result)) return null;
   return new Response(
     JSON.stringify({
       error: result.error,

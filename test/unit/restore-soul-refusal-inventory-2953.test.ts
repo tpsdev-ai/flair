@@ -6,8 +6,8 @@
  * Soul write policy. A refusal added to the write path after the preflight
  * would reopen the delete-then-refused window, so this inventory reads the
  * source of every module that path calls and fails when a code it finds is
- * neither preflighted nor named out of scope here. The codes come from the
- * source, not from a hand-written list alone.
+ * neither preflighted, refused by archive admission, nor named out of scope
+ * here. The codes come from the source, not from a hand-written list alone.
  */
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -46,10 +46,14 @@ function sourceCodes(): Set<string> {
 const PREFLIGHTED = [
   "soul_scope_fields_not_writable", // suppliesSoulScopeFields in src/commands/restore.ts
   "soul_value_is_learned_content", // LEARNED_REFUSAL plus the Memory and candidate comparisons
-  "soul_owner_required", // the unusable-agentId branch
   "skill_source_not_durable", // refuseSkillAssignmentWrite in src/lib/skill-assignment-preflight.ts
   "skill_opt_out_not_boolean", // the same predicate
 ] as const;
+
+/** Codes archive admission already refuses, each with the check that covers it. */
+const ADMISSION = new Map<string, string>([
+  ["soul_owner_required", "rowShapeProblem refuses a Soul row whose agentId is not a non-empty string"],
+]);
 
 /** Codes the preflight deliberately leaves to the write, with the reason. */
 const OUT_OF_SCOPE = new Map<string, string>([
@@ -73,10 +77,11 @@ const OUT_OF_SCOPE = new Map<string, string>([
   ["instruction_version_lock_unavailable", "commit-time version lock availability, which the preflight cannot predict"],
 ]);
 
-test("every named refusal code in the Soul write path is preflighted or explicitly out of scope", () => {
+test("every named refusal code in the Soul write path is preflighted, admission-refused or explicitly out of scope", () => {
   const found = sourceCodes();
-  const listed = new Set<string>([...PREFLIGHTED, ...OUT_OF_SCOPE.keys()]);
+  const listed = new Set<string>([...PREFLIGHTED, ...ADMISSION.keys(), ...OUT_OF_SCOPE.keys()]);
 
+  for (const check of ADMISSION.values()) expect(check.trim()).not.toBe("");
   const unclassified = [...found].filter((code) => !listed.has(code)).sort();
   expect(unclassified).toEqual([]);
   const unlisted = [...listed].filter((code) => !found.has(code)).sort();
@@ -89,7 +94,6 @@ test("restore --replace names each preflighted Soul write rule", () => {
   for (const marker of [
     "suppliesSoulScopeFields(row)",
     "LEARNED_REFUSAL",
-    "soul_owner_required",
     "refuseSkillAssignmentWrite(row)",
   ]) {
     expect(source).toContain(marker);

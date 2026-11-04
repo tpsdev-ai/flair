@@ -218,26 +218,14 @@ addAdminPassOptions(
         );
       }
 
-      // The Soul PUT also refuses a row with no usable owner and a
-      // skill-assignment row refuseSkillAssignmentWrite refuses. The PUT
-      // normally runs after the live row's DELETE, so the skill rule sees no
-      // stored row (`existing` is undefined).
+      // The Soul PUT also refuses a skill-assignment row that
+      // refuseSkillAssignmentWrite refuses. The PUT normally runs after the
+      // live row's DELETE, so the skill rule sees no stored row (`existing`
+      // is undefined).
       const writeRuleRefused = new Set<string>();
       for (const row of writtenSouls) {
         const id = String(row.id);
         if (scopeRefused.has(id)) continue;
-        if (typeof row.agentId !== "string" || row.agentId === "") {
-          writeRuleRefused.add(id);
-          const valueBearing = typeof row.value === "string" && row.value !== "";
-          refusals.push(
-            `Error: Soul ${row.id}: the archived row `
-              + (valueBearing
-                ? "has no usable agentId, which the Soul owner rule refuses (soul_owner_required)"
-                : "has no usable agentId, which a Soul write requires")
-              + "; edit that row in the archive, then re-run; no rows were deleted",
-          );
-          continue;
-        }
         const skillDenied = refuseSkillAssignmentWrite(row);
         if (!skillDenied) continue;
         writeRuleRefused.add(id);
