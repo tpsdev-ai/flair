@@ -266,7 +266,7 @@ const LOCAL_FILESYSTEM_TYPES: Record<number, string> = {
   0xf2f52010: "f2fs",
 };
 
-/** macOS filesystem names accepted for custody. `stat -f %T` prints these. */
+/** macOS filesystem names accepted for custody, as named in the mount table. */
 const LOCAL_FILESYSTEM_NAMES = new Set(["apfs", "hfs"]);
 
 export type FilesystemSupport =
@@ -285,6 +285,70 @@ export function isSupportedLocalFilesystemName(name: string): boolean {
   return LOCAL_FILESYSTEM_NAMES.has(name.toLowerCase());
 }
 
+/** One entry from the macOS mount table. `mount` prints
+ *  `<device> on <mount point> (<type>, <option>, ...)`. */
+export interface MountEntry {
+  device: string;
+  mountPoint: string;
+  type: string;
+  options: string[];
+}
+
+/** `<device> on <mount point> (<type>, <option>, ...)`. Mount points can
+ *  contain spaces, so nothing here splits on whitespace. */
+const MOUNT_LINE = /^(.+) on (.+) \(([^,()]+)((?:, [^()]*)?)\)$/;
+
+/** Parse one `mount` output line. Returns null for anything that does not
+ *  match the documented shape. */
+export function parseMountLine(line: string): MountEntry | null {
+  const match = MOUNT_LINE.exec(line);
+  if (!match) return null;
+  const device = match[1];
+  const mountPoint = match[2];
+  const type = match[3].trim();
+  const rawOptions = match[4];
+  const options = rawOptions
+    ? rawOptions.split(",").map((option) => option.trim()).filter((option) => option !== "")
+    : [];
+  return { device, mountPoint, type, options };
+}
+
+/** The entry whose mount point is the longest path-prefix of `realPath`
+ *  (or equal to it), matched on a `/` boundary. */
+export function selectMountEntry(entries: MountEntry[], realPath: string): MountEntry | null {
+  let best: MountEntry | null = null;
+  for (const entry of entries) {
+    const covers =
+      entry.mountPoint === realPath ||
+      realPath.startsWith(entry.mountPoint === "/" ? "/" : `${entry.mountPoint}/`);
+    if (covers && (best === null || entry.mountPoint.length > best.mountPoint.length)) best = entry;
+  }
+  return best;
+}
+
+/** Classify a resolved macOS path from the output of `mount`. Accepts only
+ *  an `apfs` or `hfs` mount that also carries the `local` option; a network
+ *  mount (smbfs, nfs, afpfs, webdav) carries no `local`. */
+export function classifyDarwinFilesystem(realPath: string, mountOutput: string): FilesystemSupport {
+  const entries: MountEntry[] = [];
+  for (const line of mountOutput.split("\n")) {
+    if (line.trim() === "") continue;
+    const entry = parseMountLine(line);
+    if (entry !== null) entries.push(entry);
+  }
+  const entry = selectMountEntry(entries, realPath);
+  if (entry === null) {
+    return { ok: false, reason: `no mount entry covers ${realPath}` };
+  }
+  if (!isSupportedLocalFilesystemName(entry.type)) {
+    return { ok: false, reason: `filesystem ${entry.type} at ${entry.mountPoint} is not a recognized local filesystem` };
+  }
+  if (!entry.options.includes("local")) {
+    return { ok: false, reason: `filesystem ${entry.type} at ${entry.mountPoint} is not local` };
+  }
+  return { ok: true, type: entry.type.toLowerCase() };
+}
+
 /** Refuse a network or unrecognized filesystem. Resolves the nearest existing
  *  ancestor so an about-to-be-created custody directory is checked too. A
  *  failed probe is a refusal, never "local". */
@@ -299,18 +363,22 @@ export function assertSupportedLocalFilesystem(targetPath: string): FilesystemSu
   }
   if (process.platform === "darwin") {
     // macOS reports the same numeric f_type for every local disk filesystem,
-    // so the name is the stable identifier; BSD stat documents `%T` as the
-    // file-system type name.
-    let name: string;
+    // so the mount table is the identifier: it names the type and marks a
+    // local disk with the `local` option. (`stat -f %T` is not usable: `-f`
+    // selects the output format, and `%T` is the file-type marker.)
+    let realProbe: string;
     try {
-      name = execFileSync("stat", ["-f", "%T", probe], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      realProbe = realpathSync(probe);
     } catch (err) {
-      return { ok: false, reason: `cannot determine the filesystem name for ${probe}: ${msg(err)}` };
+      return { ok: false, reason: `cannot resolve ${probe}: ${msg(err)}` };
     }
-    if (!isSupportedLocalFilesystemName(name)) {
-      return { ok: false, reason: `filesystem ${name || "(empty)"} at ${probe} is not a recognized local filesystem` };
+    let table: string;
+    try {
+      table = execFileSync("/sbin/mount", [], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    } catch (err) {
+      return { ok: false, reason: `cannot read the mount table for ${realProbe}: ${msg(err)}` };
     }
-    return { ok: true, type: name.toLowerCase() };
+    return classifyDarwinFilesystem(realProbe, table);
   }
   let st: { type: number };
   try {
