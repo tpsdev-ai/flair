@@ -1058,6 +1058,28 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     return { ok: false, status: "commit_failed", reason: "commit_conflict", detail: "the expected generation is not a non-negative integer", remedy: INTEGRITY_REASON_REMEDIES.commit_conflict };
   }
 
+  // Custody is rechecked at the start of the commit operation too, not only
+  // when the state was opened: a mode or identity drift between the open and
+  // the commit must not stage a generation.
+  const custody = checkCustody({
+    paths: state.paths,
+    serverUid: state.serverUid,
+    operatorUid: state.operatorUid,
+    machineId: state.machineId,
+    expectedOperatorUid: state.enrollment.operatorUid,
+    expectedMachineId: state.enrollment.machineId,
+    checkGenerations: true,
+  });
+  if (!custody.ok) {
+    return {
+      ok: false,
+      status: "commit_failed",
+      reason: custody.reason,
+      detail: custody.detail,
+      remedy: INTEGRITY_REASON_REMEDIES[custody.reason],
+    };
+  }
+
   const nextGeneration = opts.expectedGeneration + 1;
   const checkpointPayload = checkpointPayloadFor(opts, nextGeneration);
   const checkpoint = signIntegrityRecord(checkpointPayload, state.key);

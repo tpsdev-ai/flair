@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -150,6 +151,15 @@ function resultOf(stdout: string): Record<string, unknown> {
 }
 
 describe("commit-fence (invariant 7)", () => {
+  it("rechecks custody when committing a generation", () => {
+    const state = init();
+    chmodSync(integrityPaths(custodyDir).keyPath, 0o644);
+    const denied = commitGeneration({ state, expectedGeneration: 0, checkpoint: payload() });
+    expect(denied.ok).toBe(false);
+    if (denied.ok) return;
+    expect(denied.reason).toBe("custody_invalid");
+  });
+
   it("commits a generation and holds a stale expected generation", () => {
     const state = init();
     const first = commitGeneration({ state, expectedGeneration: 0, checkpoint: payload() });
