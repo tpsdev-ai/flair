@@ -276,9 +276,17 @@ export function _resetInProcessLockForTests(): void {
   inProcessHeld = false;
 }
 
-export type AcquireResult =
-  | MigrationLockHandle
-  | { acquired: false; reason: string; holder?: LockHolder };
+/**
+ * A refused acquisition. `held` is contention: another caller or process holds
+ * the lock, or won the race for it, so skipping is benign. `error` means the
+ * acquisition could not be attempted or completed, and the caller must report
+ * it.
+ */
+export type MigrationLockRefusal =
+  | { acquired: false; kind: "held"; reason: string; holder?: LockHolder }
+  | { acquired: false; kind: "error"; reason: string };
+
+export type AcquireResult = MigrationLockHandle | MigrationLockRefusal;
 
 /**
  * True only when this module issued the handle and the file it opens at the
@@ -611,7 +619,9 @@ function settleContention(): void {
   Atomics.wait(sleeper, 0, 0, CONTENTION_SETTLE_MS);
 }
 
-type GuardResult = { acquired: true; generation: string } | { acquired: false; reason: string };
+type GuardResult =
+  | { acquired: true; generation: string }
+  | { acquired: false; kind: "held" | "error"; reason: string };
 
 function makeGuardHolder(now: () => number): GuardHolder {
   return {
@@ -641,13 +651,14 @@ function acquireGuard(guardPath: string, deps: LockDeps): GuardResult {
     if (!published.contention) {
       return {
         acquired: false,
+        kind: "error",
         reason: `${MigrationLockMutexError.name}: the mutex at ${guardPath} cannot be published (${published.code ?? "unknown error"})`,
       };
     }
 
     const inspected = inspectGuard(guardPath);
     if (inspected.state === "unreadable") {
-      return { acquired: false, reason: `${MigrationLockMutexError.name}: ${inspected.detail}` };
+      return { acquired: false, kind: "error", reason: `${MigrationLockMutexError.name}: ${inspected.detail}` };
     }
     if (inspected.state !== "occupied") {
       settleContention();
@@ -659,13 +670,14 @@ function acquireGuard(guardPath: string, deps: LockDeps): GuardResult {
       breakable = guardHolderIsBreakable(guardPath, inspected.holder, inspected.mtimeMs, deps);
     } catch (err) {
       if (err instanceof MigrationLockProbeError) {
-        return { acquired: false, reason: `${err.name}: ${err.message}` };
+        return { acquired: false, kind: "error", reason: `${err.name}: ${err.message}` };
       }
       throw err;
     }
     if (!breakable) {
       return {
         acquired: false,
+        kind: "held",
         reason:
           `the migration-lock mutex is held by pid ${inspected.holder.pid} on ${inspected.holder.hostname} ` +
           `since ${inspected.holder.startedAt} (${guardPath})`,
@@ -686,6 +698,7 @@ function acquireGuard(guardPath: string, deps: LockDeps): GuardResult {
       if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
         return {
           acquired: false,
+          kind: "error",
           reason: `${MigrationLockMutexError.name}: ${inspected.name} cannot be removed (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`,
         };
       }
@@ -698,7 +711,7 @@ function acquireGuard(guardPath: string, deps: LockDeps): GuardResult {
     });
     settleContention();
   }
-  return { acquired: false, reason: `lost the race to acquire the migration-lock mutex (${guardPath})` };
+  return { acquired: false, kind: "held", reason: `lost the race to acquire the migration-lock mutex (${guardPath})` };
 }
 
 function guardHolderIsBreakable(guardPath: string, holder: GuardHolder, mtimeMs: number, deps: LockDeps): boolean {
@@ -848,13 +861,24 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
   const guardPath = guardPathFor(lockPath);
 
   if (inProcessHeld) {
-    return { acquired: false, reason: "already held in-process (another async caller in this process holds it)" };
+    return {
+      acquired: false,
+      kind: "held",
+      reason: "already held in-process (another async caller in this process holds it)",
+    };
   }
   inProcessHeld = true;
 
-  const abort = (reason: string, holder?: LockHolder): AcquireResult => {
+  const abortHeld = (reason: string, holder?: LockHolder): AcquireResult => {
     inProcessHeld = false;
-    return holder === undefined ? { acquired: false, reason } : { acquired: false, reason, holder };
+    return holder === undefined
+      ? { acquired: false, kind: "held", reason }
+      : { acquired: false, kind: "held", reason, holder };
+  };
+
+  const abortError = (reason: string): AcquireResult => {
+    inProcessHeld = false;
+    return { acquired: false, kind: "error", reason };
   };
 
   try {
@@ -866,7 +890,7 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
 
   for (let round = 0; round < LOCK_ACQUISITION_ROUNDS; round++) {
     const guard = acquireGuard(guardPath, resolved);
-    if (!guard.acquired) return abort(guard.reason);
+    if (!guard.acquired) return guard.kind === "held" ? abortHeld(guard.reason) : abortError(guard.reason);
 
     let outcome: UnderGuardOutcome;
     try {
@@ -883,7 +907,7 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
     const released = releaseGuard(guardPath, guard.generation);
     if (!released.ok) {
       if (outcome.kind === "handle") {
-        return abort(
+        return abortError(
           `refusing to return the migration lock at ${lockPath}: the mutex could not be released ` +
             `(${released.reason}); the lock file remains`,
         );
@@ -895,9 +919,9 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
       settleContention();
       continue;
     }
-    if (outcome.kind === "refused") return abort(outcome.reason);
+    if (outcome.kind === "refused") return abortError(outcome.reason);
     if (outcome.kind === "held") {
-      return abort(
+      return abortHeld(
         `held by pid ${outcome.holder.pid} on ${outcome.holder.hostname} since ${outcome.holder.startedAt} (lock ${lockPath})`,
         outcome.holder,
       );
@@ -905,7 +929,7 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
     return issueHandle(lockPath, outcome.holder, outcome.dev, outcome.ino, now);
   }
 
-  return abort(`lost the race to acquire the lock file (${lockPath})`);
+  return abortHeld(`lost the race to acquire the lock file (${lockPath})`);
 }
 
 function makeHolder(now: () => number): LockHolder {
