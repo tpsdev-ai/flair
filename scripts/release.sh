@@ -26,16 +26,17 @@ set -euo pipefail
 #   ./scripts/release.sh 0.5.0 --dry
 #       → phase-1 bump + build + test on a local branch, skip push/PR.
 
-VERSION="${1:?Usage: release.sh <version> [--publish [--break-glass]|--dry]}"
+VERSION="${1:?Usage: release.sh <version> [--publish [--break-glass]|--dry] [--allow-no-release-tag]}"
 shift
 MODE=""
 ACK=""
+RELEASE_TAG_ARGS=()
 for arg in "$@"; do
   case "$arg" in
     --publish|--dry)
       if [[ -n "$MODE" && "$MODE" != "$arg" ]]; then
         echo "❌ Conflicting flags: $MODE and $arg"
-        echo "   Usage: release.sh <version> [--publish [--break-glass]|--dry]"
+        echo "   Usage: release.sh <version> [--publish [--break-glass]|--dry] [--allow-no-release-tag]"
         exit 1
       fi
       MODE="$arg"
@@ -43,9 +44,12 @@ for arg in "$@"; do
     --break-glass)
       ACK="--break-glass"
       ;;
+    --allow-no-release-tag)
+      RELEASE_TAG_ARGS=(--allow-no-release-tag)
+      ;;
     *)
       echo "❌ Unknown argument: $arg"
-      echo "   Usage: release.sh <version> [--publish [--break-glass]|--dry]"
+      echo "   Usage: release.sh <version> [--publish [--break-glass]|--dry] [--allow-no-release-tag]"
       exit 1
       ;;
   esac
@@ -213,7 +217,7 @@ if [[ "$MODE" == "--publish" ]]; then
 
   # Verify every package.json is at the declared version — catches running
   # --publish before the release PR was actually merged.
-  for pj in "${PACKAGE_JSONS[@]}"; do
+  for pj in ${PACKAGE_JSONS[@]+"${PACKAGE_JSONS[@]}"}; do
     name="$(node -e "console.log(require('$pj').name)")"
     pv="$(node -e "console.log(require('$pj').version)")"
     if [[ "$pv" != "$VERSION" ]]; then
@@ -276,7 +280,7 @@ if [[ "$MODE" == "--publish" ]]; then
   if (( ${#SOFT_FAILED[@]} > 0 )); then
     echo ""
     echo "❌ ${#SOFT_FAILED[@]} package(s) did NOT publish:"
-    for p in "${SOFT_FAILED[@]}"; do echo "     - $p"; done
+    for p in ${SOFT_FAILED[@]+"${SOFT_FAILED[@]}"}; do echo "     - $p"; done
     echo ""
     echo "   NOT tagging v${VERSION}. A tag asserts that this version shipped; it did not."
     echo "   The core packages above ARE published — this is a partial release."
@@ -343,11 +347,9 @@ echo "🌿 Creating $RELEASE_BRANCH..."
 git -C "$ROOT" checkout -b "$RELEASE_BRANCH"
 
 # 1a. Assemble the changelog fragments into this version's section.
-# Entries live one-per-file under .changelog/unreleased/ (flair#835) so
-# concurrent PRs never conflict on CHANGELOG.md. This turns them into a
-# `## [$VERSION] - <date>` section and deletes the fragment files; released
-# history above it is untouched. It refuses to run when there are no fragments
-# (an empty release section) or when someone hand-wrote an entry into
+# Fragment files under .changelog/unreleased/ (flair#835) become a
+# `## [$VERSION] - <date>` section and are deleted; released
+# history below it is untouched. It refuses an empty release section or a hand-written entry in
 # `## [Unreleased]` that this step would otherwise overwrite.
 echo "📰 Assembling changelog fragments..."
 # 1a-pre. Refuse to cut if a changelog fragment claims "fixed" for an
@@ -356,8 +358,8 @@ echo "📰 Assembling changelog fragments..."
 (cd "$ROOT" && node scripts/changelog-fragments.mjs check-fixed) || {
   echo "❌ A 'fixed' fragment overstates a harper-pinned advisory — fix it before releasing."; exit 1;
 }
-(cd "$ROOT" && node scripts/changelog-fragments.mjs promote "$VERSION") || {
-  echo "❌ Changelog assembly failed — fix the fragments before releasing."; exit 1;
+(cd "$ROOT" && bash scripts/release-promote-changelog.sh "$VERSION" ${RELEASE_TAG_ARGS[@]+"${RELEASE_TAG_ARGS[@]}"}) || {
+  echo "❌ Changelog assembly failed — resolve the error printed above before releasing."; exit 1;
 }
 
 # Preview published release notes.
@@ -368,7 +370,7 @@ echo "📰 Rendered GitHub release notes:"
 
 # 2. Bump versions in all package.json files
 echo "📦 Bumping all packages to v${VERSION}..."
-for pkg in "${PACKAGES[@]}"; do
+for pkg in ${PACKAGES[@]+"${PACKAGES[@]}"}; do
   name="$(node -e "console.log(require('$pkg/package.json').name)")"
   node -e "
     const fs = require('fs');
