@@ -7,7 +7,7 @@
  *
  *   - a v3 checkpoint whose ENTIRE record is HMAC-SHA256 over a canonical JSON
  *     encoding with a custody key;
- *   - the fixed twelve-reason taxonomy (strings, not prose) every caller will
+ *   - the fixed twelve-reason taxonomy (strings, not prose) for callers to
  *     report;
  *   - the custody predicate: key directory 0700, key and state files 0600, no
  *     symlinks, no ACL grants, a server uid that can neither read the key nor
@@ -18,10 +18,11 @@
  *   - generation staging and uncertain-commit recovery on top of
  *     `withConfigCriticalSection` (NO second lock).
  *
- * The custody key and all state live outside the store. Modes alone cannot
- * prove a server cannot reach them, so `checkCustody` records and rechecks the
- * operator/machine pair on every call and refuses a same-machine same-uid
- * arrangement; a test must additionally demonstrate the real denial.
+ * The custody key and state live in the caller-supplied custody directory.
+ * Modes alone cannot prove a server cannot reach them, so `checkCustody`
+ * records and rechecks the operator/machine pair on every call and refuses a
+ * same-machine same-uid arrangement; a test must additionally demonstrate the
+ * real denial.
  */
 import {
   closeSync,

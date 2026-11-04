@@ -181,11 +181,12 @@ export interface ConfigSectionOptions {
   lockRetry?: { attempts?: number; delayMs?: number };
   /** In-lock staging for a protocol that must publish IMMUTABLE side records
    *  before the target replacement. Runs after `decide` returns a write and
-   *  before the temp file is created for the target. It must create new names
-   *  only (never replace the target or a reader-visible name); a throw aborts
-   *  the write, leaving the target unchanged and any staged names unreferenced.
-   *  Added for the integrity generation/registry protocol (flair#971); existing
-   *  sinks leave it unset. */
+   *  before the temp file is created for the target. It must not replace the
+   *  target or any name a reader can resolve to current state; an unreferenced
+   *  staging orphan may be replaced. A throw aborts the write, leaving the
+   *  target unchanged and any staged names unreferenced. Added for the
+   *  integrity generation/registry protocol (flair#971); existing sinks leave
+   *  it unset. */
   stage?: (bytes: Uint8Array, identity: ConfigObservation) => void;
   /** TEST-ONLY deterministic barriers at the production read/write boundary.
    *  Inert unless a fixture sets them. `afterPreObserve` fires between the
@@ -232,12 +233,14 @@ export interface ConfigSectionResult {
 
 // ── filesystem support ──────────────────────────────────────────────────────
 
-/** Filesystems this primitive may use. The lock's O_EXCL create and rename
- *  guarantees are documented above for APFS and ext4/xfs; the rest are local
- *  filesystems with the same directory semantics. Anything not listed —
- *  including NFS, SMB/CIFS, FUSE and 9p — is refused BEFORE a lock is created,
- *  because on those the lock may not serialize and rename/fsync guarantees are
- *  weaker than this module claims. */
+/** Filesystems the integrity custody protocol accepts. The lock's O_EXCL
+ *  create and rename guarantees are documented above for APFS and ext4/xfs;
+ *  the rest are local filesystems with the same directory semantics. Anything
+ *  not listed — including NFS, SMB/CIFS, FUSE and 9p — is refused, because on
+ *  those the lock may not serialize and rename/fsync guarantees are weaker
+ *  than this module claims. A caller that needs this refusal (the integrity
+ *  protocol) runs the wrapper before creating a lock; the primitive itself
+ *  keeps its documented NFS/SMB degradation. */
 const LOCAL_FILESYSTEM_TYPES: Record<number, string> = {
   0xef53: "ext2/ext3/ext4",
   0x58465342: "xfs",
