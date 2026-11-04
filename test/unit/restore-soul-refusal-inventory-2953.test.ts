@@ -5,11 +5,14 @@
  * Threat model: detect refusal drift in forms the TypeScript checker can bind
  * statically, within the relative-import closure of resources/Soul.ts. Prove
  * JSON and Response against TypeScript's global library bindings, and
- * globalThis against TypeScript's intrinsic globalThis symbol. Check that the
- * closure does not mutate these trusted built-ins, directly or through proven
- * aliases. Follow literal consts and aliases to a bounded fixpoint; fail closed
- * on unsupported forms. Runtime-built names or properties, eval/Function and
- * dynamic property strings are out of scope. #2970 replaces this inventory
+ * globalThis against TypeScript's intrinsic globalThis symbol. A trusted value
+ * or proven alias may occur only as the receiver or callee of a recognised
+ * member call or new, the right operand of instanceof, the operand of typeof,
+ * or the initializer of an alias binding the resolver tracks. Named imports
+ * and exports must be followed by the resolver; alias uses obey this whitelist.
+ * Every other use is unresolved, with file:line:column.
+ * Follow literal consts and aliases to a bounded fixpoint; fail closed
+ * on unsupported forms. eval/Function are out of scope. #2970 replaces this inventory
  * with a server dry run.
  *
  * TypeScript's scanner accounts for lexical Response tokens independently of
@@ -115,7 +118,7 @@ interface RefusalInventory {
   aliasDefinitions: number;
   /** Tokens in a type position, which cannot produce a refusal. */
   typeReferences: number;
-  /** Tokens in an `instanceof` check, which cannot produce a refusal. */
+  /** Tokens in an `instanceof` or `typeof` check. */
   checkReferences: number;
   /** Alias uses classified or unresolved (there is no Response token at the use). */
   aliasSites: number;
@@ -263,7 +266,8 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   sources = new Map([...sources.keys()].map((file) => [file, program.getSourceFile(join(root, file))!]));
   const checker = program.getTypeChecker();
   const symbolAt = (node: ts.Node): ts.Symbol | undefined => {
-    let symbol = checker.getSymbolAtLocation(node);
+    let symbol = ts.isIdentifier(node) && ts.isShorthandPropertyAssignment(node.parent)
+      ? checker.getShorthandAssignmentValueSymbol(node.parent) : checker.getSymbolAtLocation(node);
     const seen = new Set<ts.Symbol>();
     while (symbol && (symbol.flags & ts.SymbolFlags.Alias)) {
       if (seen.has(symbol)) return undefined;
@@ -273,7 +277,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     return symbol;
   };
   const libDirectory = dirname(ts.getDefaultLibFilePath(options));
-  const isLibSymbol = (symbol: ts.Symbol | undefined, name: "JSON" | "Response" | "Object" | "Reflect"): boolean =>
+  const isLibSymbol = (symbol: ts.Symbol | undefined, name: "JSON" | "Response"): boolean =>
     symbol?.getName() === name && !!symbol.declarations?.length && symbol.declarations.every((declaration) => {
       const source = declaration.getSourceFile();
       return dirname(source.fileName) === libDirectory && /^lib\..+\.d\.ts$/.test(basename(source.fileName)) &&
@@ -290,7 +294,8 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     if (ts.isParenthesizedExpression(expression)) return isResponseReferenceName(expression.expression);
     if (ts.isIdentifier(expression)) return expression.text === "Response" && isLibSymbol(symbolAt(expression), "Response");
     return ts.isPropertyAccessExpression(expression) && expression.name.text === "Response" &&
-      isGlobalThis(expression.expression) && isLibSymbol(symbolAt(expression.name), "Response");
+      builtinPaths(expression.expression).some((path) => path.length === 1 && path[0] === "globalThis") &&
+      isLibSymbol(symbolAt(expression.name), "Response");
   };
   const provenAliases = new Map<ts.Symbol, ResponseAlias>();
   const aliasAt = (_file: string, node: ts.Identifier): ResponseAlias | null => {
@@ -447,7 +452,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     }
     if (!ts.isIdentifier(value)) return [];
     const symbol = symbolAt(value);
-    for (const name of ["JSON", "Response", "Object", "Reflect"] as const) {
+    for (const name of ["JSON", "Response"] as const) {
       if (isLibSymbol(symbol, name)) return [[name]];
     }
     if (!symbol || seen.has(symbol)) return [];
@@ -475,36 +480,6 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     }
     return paths;
   };
-  const trustedTarget = (expression: ts.Expression): boolean => {
-    const value = unwrapAliasExpression(expression);
-    if (builtinPaths(value).some((path) => ["JSON", "Response", "globalThis"].includes(path[0]))) return true;
-    if (ts.isObjectLiteralExpression(value)) return value.properties.some((member) =>
-      ts.isShorthandPropertyAssignment(member) ? trustedTarget(member.name) :
-        ts.isPropertyAssignment(member) ? trustedTarget(member.initializer) :
-          ts.isSpreadAssignment(member) && trustedTarget(member.expression));
-    if (ts.isArrayLiteralExpression(value)) return value.elements.some((element) =>
-      ts.isSpreadElement(element) ? trustedTarget(element.expression) : trustedTarget(element));
-    if (ts.isBinaryExpression(value) && value.operatorToken.kind === ts.SyntaxKind.EqualsToken) return trustedTarget(value.left);
-    return false;
-  };
-  for (const source of sources.values()) {
-    const visit = (node: ts.Node): void => {
-      let target: ts.Expression | undefined;
-      if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-          node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) target = node.left;
-      if (ts.isDeleteExpression(node)) target = node.expression;
-      if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
-          (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)) target = node.operand;
-      if (ts.isCallExpression(node)) {
-        const methods = builtinPaths(node.expression).map((path) =>
-          path[0] === "globalThis" ? path.slice(1).join(".") : path.join("."));
-        if (methods.some((method) => ["Object.defineProperty", "Object.assign", "Reflect.set"].includes(method))) target = node.arguments[0];
-      }
-      if (target && trustedTarget(target)) throw new Error(`${siteOf(source, node)}: trusted built-in mutation`);
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
-  }
   const uncertainAliases = new Set<ts.Symbol>();
   const sameAliasMap = (left: Map<string, ResponseAlias>, right: Map<string, ResponseAlias>): boolean => {
     if (left.size !== right.size) return false;
@@ -960,16 +935,91 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     }
     return false;
   };
-  const isInstanceOfOperand = (node: ts.Node): boolean => {
+  const isCheckOperand = (node: ts.Node): boolean => {
+    while (ts.isPropertyAccessExpression(node.parent) || ts.isParenthesizedExpression(node.parent)) node = node.parent;
     const parent = node.parent;
-    return ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword;
+    return (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword && parent.right === node) ||
+      ts.isTypeOfExpression(parent);
   };
 
-  // A followed Response alias is a use wherever it
-  // is read. The definition sites and the chain edges that build a longer
-  // alias are not uses; a use as a call or new callee is checked above. Any
-  // other use is unaccounted, so an alias handed to another function or stored
-  // in an object is a red test result rather than a silent pass.
+  const transparentParent = (node: ts.Node): ts.Node => {
+    let current = node;
+    while (current.parent && ts.isExpression(current.parent) && current.parent !== unwrapAliasExpression(current.parent)) {
+      if (unwrapAliasExpression(current.parent) !== unwrapAliasExpression(current as ts.Expression)) break;
+      current = current.parent;
+    }
+    return current;
+  };
+  const trackablePath = (path: string[]): boolean => {
+    const name = path.join(".");
+    return ["JSON", "JSON.stringify", "JSON.parse", "Response", "Response.json", "Response.error", "Response.redirect",
+      "globalThis", "globalThis.Response", "globalThis.Response.json", "globalThis.Response.error", "globalThis.Response.redirect"].includes(name);
+  };
+  const trustedPaths = (expression: ts.Expression): string[][] => builtinPaths(expression).filter(trackablePath);
+  const trackedBinding = (name: ts.BindingName): boolean => {
+    if (ts.isIdentifier(name)) {
+      const paths = trustedPaths(name);
+      return paths.length > 0 && paths.every((path) =>
+        !path.includes("Response") || aliasAt(name.getSourceFile().fileName, name) !== null);
+    }
+    return ts.isObjectBindingPattern(name) && name.elements.length > 0 && name.elements.every((element) =>
+      !element.dotDotDotToken && !(element.propertyName && ts.isComputedPropertyName(element.propertyName)) && trackedBinding(element.name));
+  };
+  const exportsTrustedValue = (module: ts.Symbol, seen = new Set<ts.Symbol>()): boolean => {
+    if (seen.has(module)) return false;
+    seen.add(module);
+    return checker.getExportsOfModule(module).some((exported) => {
+      const target = exported.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(exported) : exported;
+      if (target === checker.resolveName("globalThis", undefined, ts.SymbolFlags.Value, false)) return true;
+      const declaration = target.valueDeclaration;
+      if (declaration && (ts.isVariableDeclaration(declaration) || ts.isBindingElement(declaration)) &&
+          ts.isIdentifier(declaration.name) && trustedPaths(declaration.name).length) return true;
+      return !!(target.flags & ts.SymbolFlags.Module) && exportsTrustedValue(target, seen);
+    });
+  };
+  for (const [file, source] of sources) {
+    const visit = (node: ts.Node): void => {
+      if (ts.isNamespaceImport(node) && !node.parent.isTypeOnly) {
+        const module = symbolAt(node.name);
+        if (module && exportsTrustedValue(module)) recordUnresolved(file, node.name, "unsupported trusted built-in use");
+      }
+      if (ts.isIdentifier(node) && trustedPaths(node).length && !isTypePosition(node)) {
+        const parent = node.parent;
+        const definition =
+          ((ts.isVariableDeclaration(parent) || ts.isBindingElement(parent) || ts.isParameter(parent)) && parent.name === node) ||
+          ts.isImportSpecifier(parent) ||
+          (ts.isExportSpecifier(parent) && parent.name === node && !!parent.propertyName) ||
+          (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+          (ts.isPropertyAssignment(parent) && parent.name === node);
+        let current = transparentParent(node);
+        while (ts.isPropertyAccessExpression(current.parent) && current.parent.expression === current) {
+          current = transparentParent(current.parent);
+        }
+        const use = current.parent;
+        const paths = ts.isExpression(current) ? builtinPaths(current) : [];
+        const invocation = (ts.isCallExpression(use) || ts.isNewExpression(use)) && use.expression === current;
+        const recognised = invocation && paths.length > 0 && paths.every((path) => {
+          const name = (path[0] === "globalThis" ? path.slice(1) : path).join(".");
+          if (name.startsWith("Response") && !responseCallee(file, use.expression, isResponseReferenceName, aliasAt)) return false;
+          return ts.isNewExpression(use) ? name === "Response" :
+            ["JSON.stringify", "JSON.parse", "Response.json", "Response.error", "Response.redirect"].includes(name);
+        });
+        const check = paths.length > 0 && paths.every(trackablePath) &&
+          ((ts.isTypeOfExpression(use) && use.expression === current) ||
+           (ts.isBinaryExpression(use) && use.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword && use.right === current));
+        const binding = (ts.isVariableDeclaration(use) && use.initializer === current && trackedBinding(use.name)) ||
+          (ts.isBindingElement(use) && use.initializer === current && trackedBinding(use.name));
+        const namedExport = ts.isExportSpecifier(parent) && (parent.propertyName ?? parent.name) === node &&
+          !!symbolAt(node) && trustedPaths(node).length > 0;
+        if (!definition && !recognised && !check && !binding && !namedExport) {
+          recordUnresolved(file, node, `unsupported trusted built-in use: ${current.getText(source)} in ${ts.SyntaxKind[use.kind]}`);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+
   const unaccountedAliasUses: string[] = [];
   for (const [file, source] of sources) {
     const local = responseAliases.get(file)!;
@@ -991,7 +1041,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
           ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression === node) ||
           (ts.isPropertyAccessExpression(parent) && parent.expression === node &&
             (ts.isCallExpression(parent.parent) || ts.isNewExpression(parent.parent)) && parent.parent.expression === parent);
-        if (!definition && !chainEdge && !callee) {
+        if (!definition && !chainEdge && !callee && !isCheckOperand(node)) {
           unaccountedAliasUses.push(`${file}:${lineOf(source, node)}: ${node.text}`);
         }
       }
@@ -1003,7 +1053,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     const visit = (node: ts.Node): void => {
       if (ts.isIdentifier(node) && node.text === "Response" && !accounted.has(`${file}:${node.getStart(source)}`)) {
         if (isTypePosition(node)) account(file, node, "type");
-        else if (isInstanceOfOperand(node)) account(file, node, "check");
+        else if (isCheckOperand(node)) account(file, node, "check");
       }
       ts.forEachChild(node, visit);
     };
@@ -1129,6 +1179,11 @@ const OUT_OF_SCOPE = new Map<string, string>([
 
 /** Expected diagnostics and reasons for accepting unresolved sites. */
 const UNRESOLVED_SITES = new Map<string, { detail: string; reason: string }>([
+  ["resources/request-transaction.ts:34:14", { detail: "unsupported trusted built-in use: (globalThis as any)?.transaction in VariableDeclaration", reason: "reads Harper's transaction helper from globalThis; the helper is outside the use whitelist" }],
+  ["resources/replay-store.ts:107:19", { detail: "unsupported trusted built-in use: (globalThis as any).transaction in PropertyAssignment", reason: "copies Harper's transaction helper into replay dependencies; the property read is outside the use whitelist" }],
+  ["resources/replay-store.ts:346:19", { detail: "unsupported trusted built-in use: (globalThis as any).transaction in PropertyAssignment", reason: "copies Harper's transaction helper into ID-JAG replay dependencies; the property read is outside the use whitelist" }],
+  ["resources/replay-store.ts:400:19", { detail: "unsupported trusted built-in use: (globalThis as any).transaction in PropertyAssignment", reason: "copies Harper's transaction helper into OAuth replay dependencies; the property read is outside the use whitelist" }],
+  ["resources/replay-store.ts:451:15", { detail: "unsupported trusted built-in use: (globalThis as any).server?.workerCount in TypeOfExpression", reason: "reads Harper's worker count through globalThis.server; that property chain is outside the use whitelist" }],
   ["resources/record-type-kit.ts:514:26", { detail: "unresolvable refusal argument: FORBIDDEN.msg", reason: "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately" }],
   ["resources/record-type-kit.ts:519:26", { detail: "unresolvable refusal argument: FORBIDDEN.msg", reason: "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately" }],
   ["resources/record-type-kit.ts:527:26", { detail: "unresolvable refusal argument: FORBIDDEN.msg", reason: "FORBIDDEN receives the forwarded forbiddenMessage parameter; literal wrapper-call arguments are checked separately" }],
@@ -1263,6 +1318,18 @@ test("each unresolved site matches its file:line:column and diagnostic", () => {
   expect(unexpected).toEqual([]);
   const stale = [...UNRESOLVED_SITES.keys()].filter((at) => !inventory.unresolved.has(at)).sort();
   expect(stale).toEqual([]);
+});
+
+test("an array at a listed global property read does not match its diagnostic", () => {
+  const sources = collectSourceSet();
+  const file = "resources/replay-store.ts";
+  const source = sources.get(file)!;
+  const text = source.text.replace("(globalThis as any).transaction", "[globalThis]");
+  sources.set(file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true));
+  const at = "resources/replay-store.ts:107:19";
+  const detail = buildInventory(sources).unresolved.get(at);
+  expect(detail).toBe("unsupported trusted built-in use: globalThis in ArrayLiteralExpression");
+  expect(detail).not.toBe(UNRESOLVED_SITES.get(at)!.detail);
 });
 
 test("lexical Response tokens have dispositions", () => {
@@ -1403,7 +1470,11 @@ test.each([
   expect(inventory.occurrences).toBe(1);
   expect(inventory.classified).toBe(0);
   expect(inventory.unresolvedReferences).toBe(1);
-  expect([...inventory.unresolved]).toEqual([["fixture.ts:1:1", "unrecognised Response reference"]]);
+  expect([...inventory.unresolved]).toContainEqual(["fixture.ts:1:1", "unrecognised Response reference"]);
+  expect(inventory.unresolved.size).toBe(expression.includes("as any") ? 2 : 1);
+  if (expression.includes("as any")) {
+    expect(inventory.unresolved.get(siteIn(source, "Response"))).toStartWith("unsupported trusted built-in use:");
+  }
 });
 
 test("a function forwarding a parameter through a cast is opaque", () => {
@@ -1541,7 +1612,8 @@ test.each([
     `${setup}\nconst { json: j = ${code === "supplied" ? "other" : "Response.json"} } = ${initializer};\nj({ error: "${code}" }, { status: 403 });`, ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
   expect(inventory.codes.get(code)).toBe("fixture.ts:3");
-  expect([...inventory.unresolved]).toEqual([]);
+  expect([...inventory.unresolved]).toEqual(code === "supplied"
+    ? [["fixture.ts:2:37", "unsupported trusted built-in use: Response.json in PropertyAssignment"]] : []);
 });
 
 test.each([
@@ -1569,9 +1641,97 @@ test.each([
   ['', 'function unused() { JSON.stringify = other; }'],
 ])("rejects a trusted built-in mutation: %s %s", (setup, mutation) => {
   const source = ts.createSourceFile("fixture.ts", `${setup}\n${mutation}`, ts.ScriptTarget.Latest, true);
-  const operation = mutation.startsWith("function unused") ? "JSON.stringify =" : mutation.startsWith("(") ? mutation.slice(1, -2) : mutation;
-  expect(() => buildInventory(new Map([["fixture.ts", source]]))).toThrow(
-    `${siteIn(source, operation)}: trusted built-in mutation`);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  const refusals = [...inventory.unresolved].filter(([, detail]) => detail.startsWith("unsupported trusted built-in use"));
+  expect(refusals.length).toBeGreaterThan(0);
+  for (const [site] of refusals) expect(site).toMatch(/^fixture\.ts:2:\d+$/);
+});
+
+test.each([
+  ['Object.defineProperties(JSON, { stringify: { value: other } });', 25],
+  ['Reflect.defineProperty(JSON, "stringify", { value: other });', 24],
+  ['Reflect.deleteProperty(JSON, "stringify");', 24],
+  ['Object.setPrototypeOf(Response, other);', 23],
+  ['const x = [JSON];', 12],
+  ['fn(Response);', 4],
+  ['function f() { return globalThis; }', 23],
+  ['const x = { JSON };', 13],
+  ['const x = { value: Response };', 20],
+  ['const x = { ...JSON };', 16],
+  ['const x = [...Response];', 15],
+  ['JSON[key]({});', 1],
+  ['export default JSON;', 16],
+  ['JSON instanceof x;', 1],
+  ['JSON = other;', 1],
+  ['const { Response: R } = globalThis; R.json({});', 25],
+  ['const J = JSON; J = other;', 17],
+  ['const J = JSON; fn(J);', 20],
+  ['const G = globalThis; function f() { return G; }', 45],
+  ['const R = Response; R.json = other;', 21],
+  ['const R = Response; delete R.json;', 28],
+  ['const J = JSON; J["stringify"]({});', 17],
+  ['const J = JSON; J.unknown({});', 17],
+])("refuses a use outside the whitelist: %s", (text, column) => {
+  const source = ts.createSourceFile("fixture.ts", text, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect(inventory.unresolved.get(`fixture.ts:1:${column}`)).toStartWith("unsupported trusted built-in use:");
+});
+
+test.each([
+  'JSON.stringify({})',
+  'JSON.parse("{}")',
+  'Response.json({})',
+  'new Response()',
+  'x instanceof Response',
+  'typeof JSON',
+  'typeof globalThis',
+  'new globalThis.Response()',
+  'globalThis.Response.json({})',
+  'x instanceof globalThis.Response',
+  'const J = JSON; J.stringify({});',
+  'const R = Response; x instanceof R;',
+  'const R = Response; typeof R;',
+  'const G = globalThis; new G.Response();',
+  'const G = globalThis; const R = G.Response; R.json({});',
+  'const { stringify: s } = JSON; s({});',
+])("accepts a use in the whitelist: %s", (text) => {
+  const source = ts.createSourceFile("fixture.ts", text, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.unresolved]).toEqual([]);
+  expect(inventory.unaccounted).toEqual([]);
+  expect(inventory.unaccountedAliasUses).toEqual([]);
+});
+
+test.each(['Response.error()', 'Response.redirect("http://example.invalid/")'])("permits the built-in use while retaining the refusal diagnostic: %s", (text) => {
+  const source = ts.createSourceFile("fixture.ts", text, ts.ScriptTarget.Latest, true);
+  expect([...buildInventory(new Map([["fixture.ts", source]])).unresolved.values()]
+    .some((detail) => detail.startsWith("unsupported trusted built-in use"))).toBe(false);
+});
+
+test.each(["JSON", "Response", "globalThis"])("follows a named export and import of %s", (name) => {
+  const policyFile = "resources/soul-write-policy.ts";
+  const soulFile = "resources/Soul.ts";
+  const call = name === "JSON" ? "J.stringify({})" : name === "Response" ? "new J()" : "new J.Response()";
+  const sources = new Map([
+    [policyFile, ts.createSourceFile(policyFile, `const A = ${name}; export { A as J };`, ts.ScriptTarget.Latest, true)],
+    [soulFile, ts.createSourceFile(soulFile, `import { J } from "./soul-write-policy.js"; ${call}; fn(J);`, ts.ScriptTarget.Latest, true)],
+  ]);
+  const inventory = buildInventory(sources);
+  expect([...inventory.unresolved]).toEqual([
+    [`${soulFile}:1:${`import { J } from "./soul-write-policy.js"; ${call}; fn(`.length + 1}`, "unsupported trusted built-in use: J in CallExpression"],
+  ]);
+});
+
+test.each(["JSON", "Response", "globalThis"])("refuses an argument reached through a namespace import of %s", (name) => {
+  const policyFile = "resources/soul-write-policy.ts";
+  const soulFile = "resources/Soul.ts";
+  const sources = new Map([
+    [policyFile, ts.createSourceFile(policyFile, `export const J = ${name};`, ts.ScriptTarget.Latest, true)],
+    [soulFile, ts.createSourceFile(soulFile, 'import * as N from "./soul-write-policy.js"; fn(N.J);', ts.ScriptTarget.Latest, true)],
+  ]);
+  expect(buildInventory(sources).unresolved.get(`${soulFile}:1:13`)).toBe("unsupported trusted built-in use");
+  sources.set(soulFile, ts.createSourceFile(soulFile, 'import type * as N from "./soul-write-policy.js";', ts.ScriptTarget.Latest, true));
+  expect([...buildInventory(sources).unresolved]).toEqual([]);
 });
 
 test("rejects a mutation through an imported built-in alias anywhere in the closure", () => {
@@ -1580,12 +1740,12 @@ test("rejects a mutation through an imported built-in alias anywhere in the clos
     ["resources/Soul.ts", 'import { J } from "./soul-write-policy.js";\nfunction unused() { J.stringify = other; }'],
   ]);
   const sources = new Map([...texts].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
-  expect(() => buildInventory(sources)).toThrow("resources/Soul.ts:2:21: trusted built-in mutation");
+  expect(buildInventory(sources).unresolved.get("resources/Soul.ts:2:21")).toBe("unsupported trusted built-in use: J.stringify in BinaryExpression");
 });
 
 test("does not treat a shadowed JSON object as a trusted built-in mutation", () => {
   const source = ts.createSourceFile("fixture.ts", 'const JSON = { stringify: () => "" }; JSON.stringify = other;', ts.ScriptTarget.Latest, true);
-  expect(() => buildInventory(new Map([["fixture.ts", source]]))).not.toThrow();
+  expect([...buildInventory(new Map([["fixture.ts", source]])).unresolved]).toEqual([]);
 });
 
 test("an alias passed as an argument is an unaccounted use, not a silent pass", () => {
@@ -1843,7 +2003,7 @@ test.each([
   const source = ts.createSourceFile("fixture.ts", text, ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
   expect([...inventory.codes]).toEqual([]);
-  expect([...inventory.unresolved.values()]).toEqual(["unrecognised Response reference"]);
+  expect([...inventory.unresolved.values()]).toContain("unrecognised Response reference");
 });
 
 
