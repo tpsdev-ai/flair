@@ -357,6 +357,48 @@ describe("acquireMigrationLock — directory mutex (flair#2866)", () => {
     expect(result.reason).toContain("cannot be removed");
   });
 
+  it.each([false, true])("reclaims its published record and mutex after release failure (existing record: %s)", (existing) => {
+    mkdirSync(join(testRoot, ".migrations"), { recursive: true, mode: 0o700 });
+    if (existing) {
+      writeFileSync(lockPath, JSON.stringify({ pid: process.pid + 1, hostname: hostname(), startedAt: "old" }));
+    }
+    let owner = "";
+    let ownerRecord = "";
+    let clockReads = 0;
+    const timestamp = Date.now();
+    const result = acquireMigrationLock({
+      lockPath,
+      isProcessAlive: () => false,
+      now: () => {
+        if (++clockReads === 2) {
+          owner = join(guardPath(), readdirSync(guardPath())[0]);
+          ownerRecord = readFileSync(owner, "utf-8");
+          unlinkSync(owner);
+          mkdirSync(owner);
+        }
+        return timestamp;
+      },
+    });
+    expect(result.acquired).toBe(false);
+    if (result.acquired) throw new Error("expected refusal");
+    expect(result.kind).toBe("error");
+    expect(result.reason).toContain("cannot be removed");
+    expect(JSON.parse(readFileSync(lockPath, "utf-8"))).toEqual({
+      pid: process.pid, hostname: hostname(), startedAt: new Date(timestamp).toISOString(),
+    });
+
+    rmSync(owner, { recursive: true });
+    writeFileSync(owner, ownerRecord);
+    const next = acquireMigrationLock({ lockPath, now: () => timestamp + 1 });
+    expect(next.acquired ? "handle" : next.kind).toBe("handle");
+    if (next.acquired) {
+      expect(next.holder.startedAt).toBe(new Date(timestamp + 1).toISOString());
+      expect(readdirSync(guardPath())).toEqual([]);
+      next.release();
+    }
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
   it("refuses a mutex directory with an unexpected entry", () => {
     mkdirSync(join(testRoot, ".migrations"), { recursive: true, mode: 0o700 });
     mkdirSync(guardPath(), { mode: 0o700 });

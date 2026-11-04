@@ -3,7 +3,7 @@
  * Tests use the boot entry point and real filesystem mutex entries.
  */
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -132,7 +132,7 @@ test("a mutex error is reported as a boot failure naming the lock reason", async
 });
 
 test("an owner-entry unlink failure after finding a holder is reported by boot", async () => {
-  const holder = Bun.spawn(["sleep", "30"]);
+  const holder = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { env: {} });
   const kill = process.kill.bind(process);
   const probe = spyOn(process, "kill").mockImplementation((pid, signal) => {
     const result = kill(pid, signal);
@@ -167,8 +167,50 @@ test("an owner-entry unlink failure after finding a holder is reported by boot",
   }
 });
 
+test("boot reports a release failure after publication and the next acquisition recovers", async () => {
+  const holder = Bun.spawn([process.execPath, "-e", "process.exit(0)"], { env: {} });
+  expect(await holder.exited).toBe(0);
+  const kill = process.kill.bind(process);
+  let owner = "";
+  let ownerRecord = "";
+  const probe = spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid === holder.pid && signal === 0) {
+      const guard = `${lockPath()}.guard`;
+      owner = join(guard, readdirSync(guard)[0]);
+      ownerRecord = readFileSync(owner, "utf-8");
+      unlinkSync(owner);
+      mkdirSync(owner);
+    }
+    return kill(pid, signal);
+  });
+  try {
+    mkdirSync(join(dataDir, ".migrations"), { recursive: true, mode: 0o700 });
+    writeFileSync(lockPath(), JSON.stringify({ pid: holder.pid, hostname: os.hostname(), startedAt: "old" }));
+
+    boot.scheduleMigrationBoot();
+    await waitForBootAttempt();
+
+    expect(JSON.parse(readFileSync(lockPath(), "utf-8")).pid).toBe(process.pid);
+    expect(bootLog()).toContain("[flair-migrations] migration cycle did not run:");
+    expect(bootLog()).toContain("lock error:");
+    expect(bootLog()).toContain("cannot be removed");
+    expect(getCycleStatus().lastCycleError).toContain("cannot be removed");
+    const failed = listMigrationProgress().filter((entry) => entry.state === "failed");
+    expect(failed.length).toBeGreaterThan(0);
+    for (const entry of failed) expect(entry.reason).toContain("cannot be removed");
+
+    rmSync(owner, { recursive: true });
+    writeFileSync(owner, ownerRecord);
+    const next = acquireMigrationLock({ lockPath: lockPath() });
+    expect(next.acquired).toBe(true);
+    if (next.acquired) next.release();
+  } finally {
+    probe.mockRestore();
+  }
+});
+
 test("a live holder in another process stays quiet", async () => {
-  const holder = Bun.spawn(["sleep", "30"]);
+  const holder = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { env: {} });
   try {
     mkdirSync(join(dataDir, ".migrations"), { recursive: true, mode: 0o700 });
     writeFileSync(

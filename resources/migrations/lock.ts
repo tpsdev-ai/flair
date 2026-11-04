@@ -114,12 +114,12 @@ const liveHolderKeys = new Set<string>();
 const ownedGuardGenerations = new Map<string, string>();
 
 /**
- * A record this process wrote whose release could not take the mutex. A later
- * acquisition may finish that cleanup, but only after taking the mutex, finding
+ * A later acquisition may finish abandoned-record cleanup after taking the mutex, finding
  * this exact identity still at the lock path, and finding no live handle for it
  * (flair#2866).
  */
 const abandonedOwnRecords = new Map<string, LockHolder>();
+const abandonedGuardGenerations = new Map<string, string>();
 
 function holderKey(lockPath: string, holder: LockHolder): string {
   return `${lockPath}\u0000${holder.pid}\u0000${holder.hostname}\u0000${holder.startedAt}`;
@@ -702,6 +702,9 @@ function acquireGuard(guardPath: string, deps: LockDeps): GuardResult {
       settleContention();
       continue;
     }
+    if (abandonedGuardGenerations.get(guardPath) === inspected.holder.generation) {
+      abandonedGuardGenerations.delete(guardPath);
+    }
     txnPausePointSync("migration-lock-guard-reclaimed", process.env, undefined, {
       guardPath,
       generation: inspected.holder.generation,
@@ -714,6 +717,7 @@ function acquireGuard(guardPath: string, deps: LockDeps): GuardResult {
 function guardHolderIsBreakable(guardPath: string, holder: GuardHolder, mtimeMs: number, deps: LockDeps): boolean {
   if (holder.hostname === osHostname()) {
     if (holder.pid === process.pid) {
+      if (abandonedGuardGenerations.get(guardPath) === holder.generation) return true;
       return ownedGuardGenerations.get(guardPath) !== holder.generation && deps.now() - mtimeMs > deps.staleMs;
     }
     return !deps.isProcessAlive(holder.pid);
@@ -722,7 +726,7 @@ function guardHolderIsBreakable(guardPath: string, holder: GuardHolder, mtimeMs:
 }
 
 /**
- * True only for the exact record this process wrote and could not remove, with
+ * True only for the exact record this process wrote, with
  * no live handle for it. The path and the full identity must match: a pid
  * alone never authorizes deleting a record (flair#2866).
  */
@@ -735,8 +739,9 @@ function isAbandonedOwnRecord(lockPath: string, holder: LockHolder): boolean {
   );
 }
 
-function rememberAbandonedRecord(lockPath: string, holder: LockHolder): void {
+function rememberAbandonedRecord(lockPath: string, holder: LockHolder, guardGeneration?: string): void {
   abandonedOwnRecords.set(lockPath, holder);
+  if (guardGeneration !== undefined) abandonedGuardGenerations.set(guardPathFor(lockPath), guardGeneration);
 }
 
 // ─── migration lock protocol ────────────────────────────────────────────────
@@ -770,9 +775,6 @@ function transitionUnderGuard(lockPath: string, deps: LockDeps, staleMs: number,
 
   const holder = inspected.holder;
   if (isAbandonedOwnRecord(lockPath, holder)) {
-    // This process wrote the record and its release could not take the mutex.
-    // No live handle owns it, so under the mutex this process may finish the
-    // cleanup its release could not perform.
     try {
       unlinkSync(lockPath);
     } catch (err) {
@@ -909,6 +911,7 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
 
     const released = releaseGuard(guardPath, guard.generation);
     if (!released.ok) {
+      if (outcome.kind === "handle") rememberAbandonedRecord(lockPath, outcome.holder, guard.generation);
       return abortError(
         `refusing to return the migration lock at ${lockPath}: the mutex could not be released ` +
           `(${released.reason})`,
