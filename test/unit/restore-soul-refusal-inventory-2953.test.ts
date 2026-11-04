@@ -3,14 +3,21 @@
  * inventory behind `flair restore --replace` (flair#2953).
  *
  * The source set is the relative-import closure of resources/Soul.ts.
+ * Every syntactic reference to `Response` in a construction or call position
+ * (bare, `globalThis.Response`, `<x>.Response`, or a top-level alias of one)
+ * is counted, and each is either classified or recorded as an unresolved site;
+ * the test asserts classified + unresolved equals the number of references.
  * For new Response and Response.json, only no init (default 200) or a
  * plain, unwrapped object literal with no spread or computed keys is classified;
  * every property is read to prove status absent or statically numeric.
- * Every other init and Response.error() (status 0) is unresolved and fails
- * with file:line unless listed with a reason. Recognised status-taking
- * helpers require statically numeric status arguments; their unresolved
- * definitions must also be listed. Refusal codes must be preflighted,
- * admission-refused or listed out of scope.
+ * Every other init, every other static method (`Response.redirect`) and
+ * `Response.error()` (status 0) is unresolved and fails with file:line unless
+ * listed with a reason. Recognised status-taking helpers require statically
+ * numeric status arguments; their unresolved definitions must also be listed.
+ * A function that forwards one of its parameters into a callee the inventory
+ * cannot resolve (a method call, a computed callee, a callee outside the
+ * closure) is opaque: listed by name with a reason, or the test fails naming
+ * it. Refusal codes must be preflighted, admission-refused or listed out of scope.
  */
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
@@ -96,6 +103,14 @@ interface RefusalInventory {
   /** Refusal code → the file:line of the first site that produces it. */
   codes: Map<string, string>;
   unresolved: Map<string, string>;
+  /** Response references (construction or call position). */
+  occurrences: number;
+  /** References `responseShape` classified (a status list it proved). */
+  classified: number;
+  /** References recorded as unresolved. */
+  unresolvedReferences: number;
+  /** Functions forwarding a parameter into a callee the inventory cannot resolve. */
+  opaque: Map<string, string>;
 }
 
 function parametersOf(fn: FnNode): Set<string> {
@@ -125,15 +140,36 @@ function codeOf(message: string): string {
   return /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(prefix) ? prefix : message;
 }
 
+/** `Response`, `globalThis.Response`, `self.Response`, … — the constructor, not a member of a row. */
+function isResponseReferenceName(expression: ts.Expression): boolean {
+  if (ts.isParenthesizedExpression(expression)) return isResponseReferenceName(expression.expression);
+  if (ts.isIdentifier(expression)) return expression.text === "Response";
+  return ts.isPropertyAccessExpression(expression) && expression.name.text === "Response";
+}
+
+/** Whether a `new`/call's callee is the Response constructor, directly or through a top-level alias. */
+function responseCallee(file: string, callee: ts.Expression, aliases: Map<string, Set<string>>): boolean {
+  if (isResponseReferenceName(callee)) return true;
+  if (ts.isIdentifier(callee)) return aliases.get(file)?.has(callee.text) === true;
+  // `Response.json(...)` and `Response.redirect(...)`, and the same on an alias.
+  if (ts.isPropertyAccessExpression(callee)) {
+    if (isResponseReferenceName(callee.expression)) return true;
+    return ts.isIdentifier(callee.expression) && aliases.get(file)?.has(callee.expression.text) === true;
+  }
+  return false;
+}
+
 function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   const importAliases = new Map<string, Map<string, { file: string; name: string }>>();
   const topLevelConsts = new Map<string, Map<string, ts.Expression>>();
+  const responseAliases = new Map<string, Set<string>>();
   const functions: FnRecord[] = [];
   const functionsByName = new Map<string, FnRecord>();
 
   for (const [file, source] of sources) {
     const aliases = new Map<string, { file: string; name: string }>();
     const constants = new Map<string, ts.Expression>();
+    const responseNames = new Set<string>();
     for (const statement of source.statements) {
       if (ts.isImportDeclaration(statement) && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
         const target = resolveRelative(file, statement.moduleSpecifier.text);
@@ -146,7 +182,10 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
       }
       if (ts.isVariableStatement(statement)) {
         for (const declaration of statement.declarationList.declarations) {
-          if (ts.isIdentifier(declaration.name) && declaration.initializer) constants.set(declaration.name.text, declaration.initializer);
+          if (ts.isIdentifier(declaration.name) && declaration.initializer) {
+            constants.set(declaration.name.text, declaration.initializer);
+            if (isResponseReferenceName(declaration.initializer)) responseNames.add(declaration.name.text);
+          }
         }
       }
       const addFunction = (name: string, fn: FnNode): void => {
@@ -169,6 +208,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     }
     importAliases.set(file, aliases);
     topLevelConsts.set(file, constants);
+    responseAliases.set(file, responseNames);
   }
   for (const record of functions) if (!functionsByName.has(record.key)) functionsByName.set(record.key, record);
 
@@ -467,28 +507,35 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     visit(source);
   }
 
-  // (b) new Response/Response.json: no init (200), or a plain, unwrapped
-  // object literal without spread/computed keys, with every property read and status
-  // absent or statically numeric. Every other init and Response.error()
-  // (status 0) fails with file:line unless listed with a reason. Status-taking
-  // helpers require static status arguments in (c) and listed definitions.
+  // (b) Every Response reference in a construction or call position is counted:
+  // no init (200), or a plain, unwrapped object literal without spread/computed
+  // keys, with every property read and status absent or statically numeric, is
+  // classified. Every other init, every other static method (Response.redirect),
+  // Response.error() (status 0), a globalThis/alias form and an unresolvable body
+  // are unresolved and fail with file:line unless listed with a reason.
+  // Status-taking helpers require static status arguments in (c).
+  let occurrences = 0;
+  let classified = 0;
+  let unresolvedReferences = 0;
   for (const [file, source] of sources) {
     const visit = (node: ts.Node): void => {
-      if (ts.isNewExpression(node) || ts.isCallExpression(node)) {
+      if ((ts.isNewExpression(node) || ts.isCallExpression(node)) && responseCallee(file, node.expression, responseAliases)) {
+        occurrences++;
         const shape = responseShape(file, node);
-        if (shape) {
-          const holder = enclosingFunction(node);
-          const statuses = shape.statuses;
-          if (statuses === null) {
-            recordUnresolved(file, lineOf(source, node), "unresolvable Response status");
-          } else if (statuses.some((value) => value >= 400)) {
+        if (shape && shape.statuses !== null) {
+          classified++;
+          if (shape.statuses.some((value) => value >= 400)) {
             const error = propertyOf(payloadOf(file, shape.body), file, "error");
+            const holder = enclosingFunction(node);
             if (!(holder && error && ts.isIdentifier(error) && sinkParamOf(holder) === error.text)) {
               const values = resolveString(file, error);
               if (values) for (const value of values) recordCode(value, file, lineOf(source, node));
               else recordUnresolved(file, lineOf(source, node), "unresolvable refusal body");
             }
           }
+        } else {
+          unresolvedReferences++;
+          recordUnresolved(file, lineOf(source, node), shape ? "unresolvable Response status" : "unrecognised Response reference");
         }
       }
       ts.forEachChild(node, visit);
@@ -528,7 +575,34 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     }
   }
 
-  return { codes, unresolved };
+  // (d) A function that forwards one of its parameters into a callee the
+  // inventory cannot resolve is opaque.
+  const opaque = new Map<string, string>();
+  for (const record of functions) {
+    const parameters = parametersOf(record.fn);
+    if (parameters.size === 0) continue;
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+        const callee = node.expression;
+        // An identifier that names a function in the closure is resolved; a
+        // method call, a computed callee and any other expression are not.
+        const resolved = ts.isIdentifier(callee) && resolveFunction(record.file, callee.text) !== null;
+        if (!resolved) {
+          for (const argument of node.arguments ?? []) {
+            if (ts.isIdentifier(argument) && parameters.has(argument.text) && !opaque.has(record.key)) {
+              const source = record.fn.getSourceFile();
+              opaque.set(record.key,
+                `${record.file}:${lineOf(source, node)} forwards ${argument.text} into ${callee.getText(source)}`);
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(bodyOf(record.fn));
+  }
+
+  return { codes, unresolved, occurrences, classified, unresolvedReferences, opaque };
 }
 
 function enclosingFunction(node: ts.Node): FnNode | null {
@@ -559,8 +633,8 @@ const ADMISSION = new Map<string, string>([
 /** Codes the preflight deliberately leaves to the write, with the reason. */
 const OUT_OF_SCOPE = new Map<string, string>([
   ["soul_write_requires_one_record", "body-shape guard: both the preflight and the write send the archive row as an object"],
-  ["soul_write_requires_operator", "write authorization: the preflight and the write use the same admin credentials"],
-  ["authentication required", "anonymous 401: the preflight and the write use the same admin credentials"],
+  ["soul_write_requires_operator", "source-class gate: soulWriteSource (resources/soul-write-policy.ts) classifies the request, and the Soul DELETE evaluates the same gate before it runs"],
+  ["authentication required", "source-class gate: the anonymous verdict comes from authorizeSoulWrite (resources/soul-write-policy.ts), and the Soul DELETE evaluates the same gate before it runs"],
   ["forbidden: agentId must match authenticated agent", "attribution guard: an admin credential takes the passthrough branch"],
   ["forbidden: the owner of a record cannot be changed", "owner-field guard: an admin credential takes the passthrough branch"],
   ["owner_check_unavailable", "owner-field guard: its read runs only for a non-admin caller"],
@@ -574,7 +648,7 @@ const OUT_OF_SCOPE = new Map<string, string>([
   ["soul_patch_row_changed", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
   ["soul_subject_occupied", "identity-change path: a successful Soul DELETE leaves the replace PUT no stored row, so its identity did not change; after a failed DELETE (recorded, and the PUT still runs) a stored row with a different identity can reach this 409"],
   ["instruction_version_head_mismatch", "compare-and-set: the replace PUT supplies no expectedVersion"],
-  ["instruction_version_append_failed", "commit-time version append failure, which the preflight cannot predict"],
+  ["instruction_version_append_failed", "commit-time version append failure not caused by the archived row's schema, which admission refuses before any delete"],
   ["instruction_version_busy", "commit-time version lock contention, which the preflight cannot predict"],
   ["instruction_version_lock_unavailable", "commit-time version lock availability, which the preflight cannot predict"],
   ["skill_write_requires_verified_identity", "skill-version write authorization; the Soul write path does not call it"],
@@ -587,6 +661,82 @@ const UNRESOLVED_SITES = new Map<string, string>([
   ["resources/instruction-version-record.ts:272", "jsonResponse forwards its status parameter; its call sites are checked for static statuses"],
   ["resources/record-owner-guard.ts:220", "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write"],
   ["resources/record-owner-guard.ts:231", "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write"],
+]);
+
+/**
+ * Functions that forward one of their parameters into a callee the inventory
+ * cannot resolve, with the reason the forwarding cannot hide a refusal.
+ * `file:name` matches the closure's own naming.
+ */
+const OPAQUE_FUNCTIONS = new Map<string, string>([
+  ["resources/Soul.ts:enforceWriteAuth", "forwards data into Array.isArray, which the inventory does not resolve"],
+  ["resources/Soul.ts:Soul.post", "forwards content into this.validate, which the inventory does not resolve"],
+  ["resources/Soul.ts:Soul.patch", "forwards content into this.validate, which the inventory does not resolve"],
+  ["resources/Soul.ts:Soul.put", "forwards content into this.validate, which the inventory does not resolve"],
+  ["resources/Soul.ts:Soul.delete", "forwards id into super.delete, which the inventory does not resolve"],
+  ["resources/originator-instance.ts:isPlainObject", "forwards value into Array.isArray, which the inventory does not resolve"],
+  ["resources/originator-instance.ts:urlTargetId", "forwards resource into getId.call, which the inventory does not resolve"],
+  ["resources/originator-instance.ts:idTargetMismatchDenial", "forwards bodyId into JSON.stringify, which the inventory does not resolve"],
+  ["resources/record-types.ts:deepFreeze", "forwards value into Object.isFrozen, which the inventory does not resolve"],
+  ["resources/skill-provenance.ts:parseSkillMetadata", "forwards metadata into Array.isArray, which the inventory does not resolve"],
+  ["resources/skill-provenance.ts:isWindowsDrivePath", "forwards source into /^[a-zA-Z]:[\\/]/.test, which the inventory does not resolve"],
+  ["resources/skill-provenance.ts:isNonDurableFilesystemPath", "forwards fsPath into resolve, which the inventory does not resolve"],
+  ["resources/skill-provenance.ts:normalizePriority", "forwards p into Object.hasOwn, which the inventory does not resolve"],
+  ["resources/instruction-version-record.ts:appendInstructionEvent", "forwards shared into events.create, which the inventory does not resolve"],
+  ["resources/instruction-version-record.ts:removeAppendedVersion", "forwards versionRecordId into raw.delete.call, which the inventory does not resolve"],
+  ["resources/instruction-version-record.ts:valueDigest", "forwards value into createHash().update, which the inventory does not resolve"],
+  ["resources/instruction-version-record.ts:subjectTypeReadable", "forwards subjectType into AUTHORIZED_SUBJECT_TYPES.has, which the inventory does not resolve"],
+  ["resources/instruction-version-record.ts:jsonResponse", "forwards body into JSON.stringify, which the inventory does not resolve"],
+  ["resources/instruction-version-record.ts:readHead", "forwards shared into table.search, which the inventory does not resolve"],
+  ["resources/instruction-version-record.ts:readVersionRecord", "forwards shared into table.search, which the inventory does not resolve"],
+  ["resources/instruction-version-record.ts:readVersionRecordAfter", "forwards version into BigInt, which the inventory does not resolve"],
+  ["resources/instruction-version-record.ts:resolveVersionAuthorization", "forwards subjectType into String, which the inventory does not resolve"],
+  ["resources/instruction-version-record.ts:recordVersion", "forwards ctx into (joinsCaller ? withSharedWriteTransaction : withOwnedTransaction), which the inventory does not resolve"],
+  ["resources/txn-pause-point.ts:isInside", "forwards parent into relative, which the inventory does not resolve"],
+  ["resources/txn-pause-point.ts:txnFault", "forwards point into PAUSE_POINT_PATTERN.test, which the inventory does not resolve"],
+  ["resources/txn-pause-point.ts:txnPausePointSync", "forwards point into PAUSE_POINT_PATTERN.test, which the inventory does not resolve"],
+  ["resources/txn-pause-point.ts:txnPausePoint", "forwards point into PAUSE_POINT_PATTERN.test, which the inventory does not resolve"],
+  ["resources/agent-auth.ts:readCredentialedPrincipal", "forwards agentId into (databases as any).flair.Agent.get, which the inventory does not resolve"],
+  ["resources/agent-auth.ts:agentIsAdmin", "forwards agentId into configuredAdminAgentIds().has, which the inventory does not resolve"],
+  ["resources/agent-auth.ts:isAdmin", "forwards agentId into (databases as any).flair.Agent.get, which the inventory does not resolve"],
+  ["resources/agent-auth.ts:readRequestHeader", "forwards name into reqLike?.headers?.get, which the inventory does not resolve"],
+  ["resources/record-owner-guard.ts:resolveGuardedRecordById", "forwards resource into Object.prototype.hasOwnProperty.call, which the inventory does not resolve"],
+  ["resources/record-owner-guard.ts:isForbiddenOwnerFieldChange", "forwards requested into Object.prototype.hasOwnProperty.call, which the inventory does not resolve"],
+  ["resources/provenance.ts:isSemanticPatch", "forwards content into Array.isArray, which the inventory does not resolve"],
+  ["resources/key-lock.ts:withKeyLock", "forwards key into lock.tryLock, which the inventory does not resolve"],
+  ["resources/skill-write-fault.ts:maybeThrowSkillWriteFault", "forwards step into hook, which the inventory does not resolve"],
+  ["resources/memory-visibility.ts:assertValidVisibility", "forwards visibility into the writable-visibilities set includes, which the inventory does not resolve"],
+  ["resources/memory-visibility.ts:assertVisibilityAllowedForDurability", "forwards visibility into JSON.stringify, which the inventory does not resolve"],
+  ["resources/ed25519-auth.ts:parseTpsEd25519Header", "forwards header into TPS_ED25519_HEADER_RE.exec, which the inventory does not resolve"],
+  ["resources/ed25519-auth.ts:importEd25519Key", "forwards publicKeyStr into keyCache.get, which the inventory does not resolve"],
+  ["resources/replay-store.ts:replayWindowGap", "forwards windowMs into Number.isFinite, which the inventory does not resolve"],
+  ["resources/replay-store.ts:recordOnce", "forwards key into store.getEntry, which the inventory does not resolve"],
+  ["resources/replay-store.ts:isKnownAgentReplay", "forwards now into agentReplayGuard.knownReplay, which the inventory does not resolve"],
+  ["resources/replay-store.ts:claimAgentNonce", "forwards now into agentReplayGuard.claim, which the inventory does not resolve"],
+  ["resources/protocol-context.ts:ownDataValue", "forwards target into Object.getOwnPropertyDescriptor, which the inventory does not resolve"],
+  ["resources/protocol-context.ts:dataValueInChain", "forwards key into Object.getOwnPropertyDescriptor, which the inventory does not resolve"],
+  ["resources/protocol-context.ts:isDirectMqttSessionContext", "forwards value into Object.getOwnPropertyDescriptor, which the inventory does not resolve"],
+  ["resources/request-target.ts:whatwgUrlMatchesRawTarget", "forwards rawTarget into URL, which the inventory does not resolve"],
+  ["resources/request-target.ts:whatwgQueryMatchesRawTarget", "forwards rawTarget into URL, which the inventory does not resolve"],
+  ["resources/request-target.ts:decodePathSegment", "forwards segment into decodeURIComponent, which the inventory does not resolve"],
+  ["src/lib/instance-identity-row.ts:usableInstanceRows", "forwards rows into Array.isArray, which the inventory does not resolve"],
+  ["src/lib/instance-identity-row.ts:opsPost", "forwards body into JSON.stringify, which the inventory does not resolve"],
+  ["src/lib/instance-identity-row.ts:writeConfirmed", "forwards id into changed.map(String).includes, which the inventory does not resolve"],
+  ["resources/federation-crypto.ts:sortKeys", "forwards val into Array.isArray, which the inventory does not resolve"],
+  ["resources/federation-crypto.ts:signBody", "forwards secretKey into nacl.sign.detached, which the inventory does not resolve"],
+  ["resources/federation-crypto.ts:verifyBodySignature", "forwards publicKeyB64url into Buffer.from, which the inventory does not resolve"],
+  ["resources/write-journal.ts:materialize", "forwards value into seen.has, which the inventory does not resolve"],
+  ["resources/write-journal.ts:WriteJournal.run", "forwards fn into active.run, which the inventory does not resolve"],
+  ["resources/write-journal.ts:WriteJournal.undo", "forwards ctx into transact, which the inventory does not resolve"],
+  ["resources/memory-host-source.ts:extractPointerInputs", "forwards content into Array.isArray, which the inventory does not resolve"],
+  ["resources/memory-host-source.ts:loadPointerRows", "forwards context into table.search, which the inventory does not resolve"],
+  ["resources/memory-host-source.ts:loadStoredPointer", "forwards memoryId into (await loadPointerRows([memoryId], context)).get, which the inventory does not resolve"],
+  ["resources/host-pointer-adapter.ts:putPointerRow", "forwards row into currentHostPointerAdapter().putPointerRow, which the inventory does not resolve"],
+  ["resources/host-pointer-adapter.ts:deletePointerRowViaTable", "forwards memoryId into currentHostPointerAdapter().deletePointerRow, which the inventory does not resolve"],
+  ["resources/host-source.ts:validateHostSource", "forwards input into JSON.parse, which the inventory does not resolve"],
+  ["resources/host-source.ts:parseHostSource", "forwards stored into JSON.parse, which the inventory does not resolve"],
+  ["resources/host-source-visibility.ts:renderHostSourceUrl", "forwards url into URL, which the inventory does not resolve"],
+  ["resources/host-pointer/registry.ts:restorePointerRowIfAbsent", "forwards row into currentHostPointerAdapter().putPointerRow, which the inventory does not resolve"],
 ]);
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -622,6 +772,24 @@ test("each unresolved site is listed by file:line with a reason", () => {
     .map(([at, detail]) => `${at}: ${detail}`)
     .sort();
   expect(unexpected).toEqual([]);
+});
+
+test("every Response reference is classified or listed unresolved", () => {
+  const inventory = buildInventory(collectSourceSet());
+  expect(inventory.occurrences).toBeGreaterThan(0);
+  expect(inventory.classified + inventory.unresolvedReferences).toBe(inventory.occurrences);
+});
+
+test("each function that forwards a parameter into an unresolvable callee is opaque and listed", () => {
+  const inventory = buildInventory(collectSourceSet());
+  for (const reason of OPAQUE_FUNCTIONS.values()) expect(reason.trim()).not.toBe("");
+  const unexpected = [...inventory.opaque]
+    .filter(([key]) => !OPAQUE_FUNCTIONS.has(key))
+    .map(([key, detail]) => `${key} (${detail})`)
+    .sort();
+  expect(unexpected).toEqual([]);
+  const stale = [...OPAQUE_FUNCTIONS.keys()].filter((key) => !inventory.opaque.has(key)).sort();
+  expect(stale).toEqual([]);
 });
 
 test("restore --replace names each preflighted Soul write rule", () => {
@@ -691,6 +859,30 @@ test("Response.error is an unresolved refusal", () => {
   const source = ts.createSourceFile("fixture.ts", "Response.error()", ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
   expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unresolvable Response status"]]);
+});
+
+test.each([
+  'new globalThis.Response(JSON.stringify({ error: "x" }), { status: 403 })',
+  'Response.redirect("http://example.invalid/")',
+  'const R = Response; new R(JSON.stringify({ error: "x" }), { status: 403 })',
+  'const R = Response; R.json({ error: "x" }, { status: 403 })',
+])('counts a Response form it does not classify as unresolved: %s', (expression) => {
+  const source = ts.createSourceFile("fixture.ts", expression, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect(inventory.occurrences).toBe(1);
+  expect(inventory.classified).toBe(0);
+  expect(inventory.unresolvedReferences).toBe(1);
+  expect([...inventory.unresolved]).toEqual([["fixture.ts:1", "unrecognised Response reference"]]);
+});
+
+test("a function forwarding a parameter into a class method is opaque", () => {
+  const source = ts.createSourceFile("fixture.ts", `
+function forbid(code: string) { return new Response(JSON.stringify({ error: code }), { status: 403 }); }
+const gate = { forbid(code: string) { return forbid(code); } };
+function refuseContent(content: any) { return gate.forbid(content); }
+function write(content: any) { return refuseContent(content); }`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.opaque.keys()]).toEqual(["fixture.ts:refuseContent"]);
 });
 
 test.each(["403", "Date.now()"])("checks a status-taking helper call: %s", (status) => {

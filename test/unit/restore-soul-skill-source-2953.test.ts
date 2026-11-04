@@ -28,7 +28,7 @@ function archiveText(source: string): string {
     value: "a-skill",
     metadata: JSON.stringify({ source }),
   };
-  return `${JSON.stringify({ version: 1, agents: [{ id: "agent-a" }], souls: [soul], memories: [] })}\n`;
+  return `${JSON.stringify({ version: 1, agents: [{ id: "agent-a", name: "agent-a" }], souls: [soul], memories: [] })}\n`;
 }
 
 /** Run the restore command in a child process with `fetch` recording every call. */

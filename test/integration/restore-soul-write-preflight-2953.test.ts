@@ -7,7 +7,9 @@
  * resource PUT, and cover these refusals: a skill-assignment row whose source
  * is a filesystem path (including one under the server's TMPDIR only), a
  * skill-assignment row with a non-boolean optOut, and a Soul row without a
- * non-empty agentId. Each refusal stops the run with the live rows untouched.
+ * non-empty agentId. Archive admission also refuses before any delete a row id
+ * containing a dot and a Soul row whose schema columns do not hold their
+ * declared types. Each refusal stops the run with the live rows untouched.
  *
  * Build prerequisite: `bun run build && bun run build:cli`.
  */
@@ -74,14 +76,23 @@ async function op(body: Record<string, unknown>): Promise<any> {
 }
 
 async function operatorPut(path: string, body: unknown): Promise<number> {
-  const res = await fetch(harper.httpURL + path, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json", Authorization: adminAuth() },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000),
-  });
-  await res.text();
-  return res.status;
+  // A freshly started Harper can answer 503 while a table is still coming up.
+  // Retry a bounded number of times and return the last status if never accepted.
+  const attempts = 5;
+  let status = 0;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const res = await fetch(harper.httpURL + path, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+    });
+    await res.text();
+    status = res.status;
+    if (status !== 503) return status;
+    if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  return status;
 }
 
 const row = async (table: string, id: string): Promise<any> =>
@@ -254,6 +265,60 @@ describe("flair restore --replace refuses the Soul write rules it covers before 
     // preflight or any delete.
     expect(restored.stderr).toContain("invalid-row");
     expect(restored.stderr).toContain("agentId");
+    expect(await row("Soul", soulId)).toEqual(before);
+  }, 300_000);
+
+  test("an archived Soul id containing a dot is refused before any delete", async () => {
+    const home = tempDir("flair-2953-real-home-");
+    const agent = "dotted-id-agent";
+    const soulId = `${agent}:identity`;
+
+    await seedAgent(agent);
+    expect(await operatorPut(`/Soul/${encodeURIComponent(soulId)}`, {
+      id: soulId, agentId: agent, key: "identity", value: "a durable value", durability: "permanent", createdAt: CREATED_AT,
+    })).toBeLessThan(300);
+    const archive = await backup(home, "dotted-id.json", agent);
+    // The archived id keeps its record but gains a suffix Harper's path parser
+    // strips, so the DELETE would target a row the archive does not hold.
+    rewriteArchive(archive, (parsed) => {
+      const soul = (parsed.souls as any[]).find((candidate) => String(candidate.id) === soulId);
+      if (!soul) throw new Error(`archive has no Soul ${soulId}`);
+      soul.id = `${soulId}.json`;
+    });
+    const before = await row("Soul", soulId);
+
+    const restored = await runCli(["restore", archive, "--replace", "--url", harper.httpURL], home, { FLAIR_ADMIN_PASS: harper.admin.password });
+
+    expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
+    assertNothingDeleted(restored);
+    expect(restored.stderr).toContain("invalid-row");
+    expect(restored.stderr).toContain("contains \".\"");
+    expect(await row("Soul", soulId)).toEqual(before);
+  }, 300_000);
+
+  test("an archived Soul row with a non-string value is refused before any delete", async () => {
+    const home = tempDir("flair-2953-real-home-");
+    const agent = "schema-value-agent";
+    const soulId = `${agent}:identity`;
+
+    await seedAgent(agent);
+    expect(await operatorPut(`/Soul/${encodeURIComponent(soulId)}`, {
+      id: soulId, agentId: agent, key: "identity", value: "a durable value", durability: "permanent", createdAt: CREATED_AT,
+    })).toBeLessThan(300);
+    const archive = await backup(home, "schema-value.json", agent);
+    rewriteArchive(archive, (parsed) => {
+      const soul = (parsed.souls as any[]).find((candidate) => String(candidate.id) === soulId);
+      if (!soul) throw new Error(`archive has no Soul ${soulId}`);
+      soul.value = 42;
+    });
+    const before = await row("Soul", soulId);
+
+    const restored = await runCli(["restore", archive, "--replace", "--url", harper.httpURL], home, { FLAIR_ADMIN_PASS: harper.admin.password });
+
+    expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
+    assertNothingDeleted(restored);
+    expect(restored.stderr).toContain("invalid-row");
+    expect(restored.stderr).toContain("value is not a string");
     expect(await row("Soul", soulId)).toEqual(before);
   }, 300_000);
 

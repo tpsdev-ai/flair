@@ -76,7 +76,7 @@ function refused(result: Awaited<ReturnType<typeof run>>, ...names: string[]) {
   for (const name of names) expect(result.stderr).toContain(name);
 }
 
-const agent = { id: "flint" };
+const agent = { id: "flint", name: "flint" };
 
 describe("restore verifies preserved content (#2226)", () => {
   test("content still differing after PUT fails without logging the content values", async () => {
@@ -94,7 +94,7 @@ describe("restore verifies preserved content (#2226)", () => {
   });
 
   test("a changed own __proto__ key in meta fails restore", async () => {
-    const archived = { id: "m1", agentId: "flint", meta: JSON.parse('{"__proto__":{"x":1}}') };
+    const archived = { id: "m1", agentId: "flint", content: "a note", meta: JSON.parse('{"__proto__":{"x":1}}') };
     const restored = { ...archived, meta: JSON.parse('{"__proto__":{"x":2}}') };
     expect(comparePreservedFields("Memory", archived, restored)).toEqual(["meta"]);
     const archive = { version: 1, agents: [agent], souls: [], memories: [archived] };
@@ -111,7 +111,7 @@ describe("restore verifies preserved content (#2226)", () => {
   });
 
   test("when the archived row has a promotion content binding, a restore read that lacks it fails verification, naming the field", async () => {
-    const archiveAgent = { id: "agent-a" };
+    const archiveAgent = { id: "agent-a", name: "agent-a" };
     const archived = {
       id: "m1", agentId: "agent-a", content: "same",
       promotionStatus: "approved", promotedAt: "2020-01-01T00:00:00.000Z", promotedBy: "agent-b",

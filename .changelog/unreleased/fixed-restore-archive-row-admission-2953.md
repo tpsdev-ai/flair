@@ -1,0 +1,2 @@
+- **Restore refuses an archive row it could not write back before deleting the live copy.**
+  Archive admission refuses a row id containing `.`, which Harper's REST path reads as a content-type suffix or an attribute selector, and a row whose columns do not match its table's GraphQL schema: a required column the write does not stamp, or a column holding the wrong JS type. Each refusal names the row, the field and the expected type, and restore stops before any request.

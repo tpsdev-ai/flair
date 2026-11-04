@@ -1,39 +1,46 @@
 /**
- * restore-soul-admission-2953.test.ts — archive admission refuses a Soul row
- * whose agentId is not a non-empty string, before restore can delete anything
+ * restore-soul-admission-2953.test.ts — archive admission refuses a row
+ * restore could not write back, before `--replace` can delete its live copy
  * (flair#2953).
  *
- * The replace preflight in src/commands/restore.ts does not repeat this
- * owner check: rowShapeProblem (src/lib/restore-archive.ts) refuses the row as
- * invalid at /souls/N/agentId, so no restore reaches a write. Each variant below
- * has one parser test and one command test; the command test runs the real
- * restore command with `fetch` as its only write path, and a refusal sends no
- * request at all.
+ * Three classes, each refused as `invalid-row` at the row's own field before
+ * any request: a Soul row without a non-empty string `agentId`; a row id
+ * containing `.` in any collection, because Harper's REST path reads a dot as
+ * a content-type suffix or an attribute selector and would address a
+ * different record; and a row that does not match the GraphQL schema of its
+ * table (a required column absent, or a column holding the wrong JS type).
+ * The command cases run the real restore command with `fetch` as its only
+ * write path; a refusal sends no request at all.
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
-import { parseRestoreArchive } from "../../src/lib/restore-archive.ts";
+import {
+  parseRestoreArchive,
+  RESTORE_TABLE_FIELDS,
+  RESTORE_WRITE_SUPPLIED_FIELDS,
+  type RestoreColumnType,
+} from "../../src/lib/restore-archive.ts";
 
-const commandPath = join(import.meta.dirname, "../../src/commands/restore.ts");
-const commanderPath = join(import.meta.dirname, "../../node_modules/commander/index.js");
+const root = join(import.meta.dir, "../..");
+const commandPath = join(root, "src/commands/restore.ts");
+const commanderPath = join(root, "node_modules/commander/index.js");
 
-type Variant = { label: string; agentId: string | number | undefined };
+const AGENT = { id: "agent-a", name: "agent-a" };
+const SOUL = { id: "soul-1", agentId: "agent-a", key: "role", value: "builder" };
+const MEMORY = { id: "memory-1", agentId: "agent-a", content: "a note" };
 
-/** A Soul row with the variant's agentId; undefined omits the field. */
-function archiveText({ agentId }: Variant): string {
-  const soul: Record<string, unknown> = { id: "soul-1", key: "role", value: "builder" };
-  if (agentId !== undefined) soul.agentId = agentId;
-  return `${JSON.stringify({ version: 1, agents: [{ id: "agent-a" }], souls: [soul], memories: [] })}\n`;
+interface Archive {
+  agents: Array<Record<string, unknown>>;
+  souls: Array<Record<string, unknown>>;
+  memories: Array<Record<string, unknown>>;
 }
 
-const VARIANTS: Variant[] = [
-  { label: "missing", agentId: undefined },
-  { label: "empty string", agentId: "" },
-  { label: "non-string", agentId: 42 },
-];
+function archiveText(archive: Partial<Archive> = {}): string {
+  return `${JSON.stringify({ version: 1, agents: [AGENT], souls: [SOUL], memories: [MEMORY], ...archive })}\n`;
+}
 
 type Call = { method: string; path: string };
 
@@ -70,21 +77,160 @@ async function restore(text: string): Promise<{ exitCode: number; stdout: string
   return { exitCode, stdout, stderr, calls: JSON.parse(readFileSync(callsPath, "utf8")) };
 }
 
+/** Assert one archive is refused at `location` before any request reaches the server. */
+async function refusedBeforeAnyRequest(text: string, location: string, reason: RegExp): Promise<void> {
+  const parsed = parseRestoreArchive(Buffer.from(text));
+  expect(parsed).toMatchObject({ ok: false, code: "invalid-row", location });
+  if (parsed.ok) throw new Error(`archive admission accepted a row it must refuse at ${location}`);
+  expect(parsed.reason).toMatch(reason);
+
+  const result = await restore(text);
+  expect(result.exitCode).not.toBe(0);
+  expect(result.calls).toEqual([]);
+  expect(result.stdout).not.toContain("Restoring from");
+  expect(result.stderr).toContain(`(invalid-row at ${location})`);
+}
+
 describe("archive admission refuses a Soul row without a non-empty string agentId (flair#2953)", () => {
-  for (const variant of VARIANTS) {
-    test(`the real admission function refuses an agentId that is ${variant.label}`, () => {
-      const parsed = parseRestoreArchive(Buffer.from(archiveText(variant)));
+  for (const [label, agentId] of [["missing", undefined], ["empty string", ""], ["non-string", 42]] as const) {
+    const soul: Record<string, unknown> = { id: "soul-1", key: "role", value: "builder" };
+    if (agentId !== undefined) soul.agentId = agentId;
+    const text = archiveText({ souls: [soul] });
+
+    test(`the real admission function refuses an agentId that is ${label}`, () => {
+      const parsed = parseRestoreArchive(Buffer.from(text));
       expect(parsed).toMatchObject({ ok: false, code: "invalid-row", location: "/souls/0/agentId" });
       if (parsed.ok) throw new Error("archive admission accepted a Soul row without a non-empty string agentId");
       expect(parsed.reason).toContain("agentId");
     });
 
-    test(`the restore command refuses an agentId that is ${variant.label} before any request`, async () => {
-      const result = await restore(archiveText(variant));
+    test(`the restore command refuses an agentId that is ${label} before any request`, async () => {
+      const result = await restore(text);
       expect(result.exitCode).not.toBe(0);
       expect(result.calls).toEqual([]);
       expect(result.stdout).not.toContain("Restoring from");
       expect(result.stderr).toContain("(invalid-row at /souls/0/agentId)");
+    });
+  }
+});
+
+describe("archive admission refuses a row id containing a dot in every collection (flair#2953)", () => {
+  const cases = [
+    { collection: "agents", location: "/agents/0/id", row: { ...AGENT, id: "agent-a.json" } },
+    { collection: "souls", location: "/souls/0/id", row: { ...SOUL, id: "soul-1.json" } },
+    { collection: "memories", location: "/memories/0/id", row: { ...MEMORY, id: "memory-1.cbor" } },
+  ] as const;
+
+  for (const { collection, location, row } of cases) {
+    test(`a row id with a dot in ${collection} is refused at ${location}`, async () => {
+      await refusedBeforeAnyRequest(archiveText({ [collection]: [row] }), location, /contains "\."/);
+    });
+  }
+
+  test("a dot in an id is refused, while a slash, query or fragment is not", () => {
+    expect(parseRestoreArchive(Buffer.from(archiveText({ memories: [{ ...MEMORY, id: "a/b?c#d%" }] }))).ok).toBe(true);
+  });
+});
+
+describe("archive admission refuses a row that does not match its table's schema (flair#2953)", () => {
+  test("a Soul row with a non-string value is refused at /souls/0/value before any request", async () => {
+    await refusedBeforeAnyRequest(
+      archiveText({ souls: [{ ...SOUL, value: 42 }] }),
+      "/souls/0/value",
+      /value is not a string \(the schema declares String\)/,
+    );
+  });
+
+  test("a Soul row with a non-string priority or metadata is refused", async () => {
+    await refusedBeforeAnyRequest(
+      archiveText({ souls: [{ ...SOUL, priority: 1 }] }),
+      "/souls/0/priority",
+      /priority is not a string \(the schema declares String\)/,
+    );
+    await refusedBeforeAnyRequest(
+      archiveText({ souls: [{ ...SOUL, metadata: { source: "npm:@example/skills@1.0.0" } }] }),
+      "/souls/0/metadata",
+      /metadata is not a string \(the schema declares String\)/,
+    );
+  });
+
+  test("a Soul row with no key or no value is refused", async () => {
+    const { key: _key, ...noKey } = SOUL;
+    await refusedBeforeAnyRequest(archiveText({ souls: [noKey] }), "/souls/0/key", /has no key \(the schema requires String\)/);
+    const { value: _value, ...noValue } = SOUL;
+    await refusedBeforeAnyRequest(archiveText({ souls: [noValue] }), "/souls/0/value", /has no value \(the schema requires String\)/);
+  });
+
+  test("a Memory row with a wrong-typed required field is refused", async () => {
+    await refusedBeforeAnyRequest(
+      archiveText({ memories: [{ ...MEMORY, content: 42 }] }),
+      "/memories/0/content",
+      /content is not a string \(the schema declares String\)/,
+    );
+    const { content: _content, ...noContent } = MEMORY;
+    await refusedBeforeAnyRequest(archiveText({ memories: [noContent] }), "/memories/0/content", /has no content/);
+  });
+
+  test("a present optional column of the wrong type is refused; a null one reads as absent", async () => {
+    await refusedBeforeAnyRequest(
+      archiveText({ memories: [{ ...MEMORY, tags: "note" }] }),
+      "/memories/0/tags",
+      /tags is not an array of strings \(the schema declares String\[\]\)/,
+    );
+    await refusedBeforeAnyRequest(
+      archiveText({ memories: [{ ...MEMORY, retrievalCount: 1.5 }] }),
+      "/memories/0/retrievalCount",
+      /retrievalCount is not an integer \(the schema declares Int\)/,
+    );
+    expect(parseRestoreArchive(Buffer.from(archiveText({ souls: [{ ...SOUL, priority: null }] }))).ok).toBe(true);
+  });
+
+  test("an Agent row with no name is refused", async () => {
+    const { name: _name, ...noName } = AGENT;
+    await refusedBeforeAnyRequest(archiveText({ agents: [noName] }), "/agents/0/name", /has no name \(the schema requires String\)/);
+  });
+});
+
+/** Every column of `type <name>` in `schema`, with the JS value its type holds. */
+function schemaColumns(schemaPath: string, table: string): Array<[string, { type: RestoreColumnType; required: boolean }]> {
+  const lines = readFileSync(join(root, schemaPath), "utf8").split("\n");
+  const start = lines.findIndex((line) => new RegExp(`^type ${table} @table`).test(line));
+  expect(start).toBeGreaterThan(-1);
+  const columns: Array<[string, { type: RestoreColumnType; required: boolean }]> = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^\}/.test(lines[i])) break;
+    const match = /^ {2}([A-Za-z_][A-Za-z0-9_]*):\s*(\[[A-Za-z]+\]|[A-Za-z]+)(!?)/.exec(lines[i]);
+    if (!match) continue;
+    const type = match[2].startsWith("[") ? `${match[2].slice(1, -1)}[]` : match[2];
+    columns.push([match[1], { type: type as RestoreColumnType, required: match[3] === "!" }]);
+  }
+  return columns;
+}
+
+describe("the restore field table matches the GraphQL schema (flair#2953)", () => {
+  const sources = [
+    ["Agent", "schemas/agent.graphql"],
+    ["Soul", "schemas/memory.graphql"],
+    ["Memory", "schemas/memory.graphql"],
+  ] as const;
+
+  for (const [table, schemaPath] of sources) {
+    test(`every ${table} column and its type matches the schema`, () => {
+      const columns = schemaColumns(schemaPath, table);
+      expect(columns.length).toBeGreaterThan(5);
+      expect(Object.keys(RESTORE_TABLE_FIELDS[table])).toEqual(columns.map(([name]) => name));
+      for (const [name, column] of columns) {
+        expect({ column: name, ...RESTORE_TABLE_FIELDS[table][name] }).toEqual({ column: name, ...column });
+      }
+    });
+
+    test(`each required ${table} column the write supplies is assigned by the resource`, () => {
+      const resource = { Agent: "resources/Agent.ts", Soul: "resources/Soul.ts", Memory: "resources/Memory.ts" }[table];
+      const source = readFileSync(join(root, resource), "utf8");
+      for (const field of RESTORE_WRITE_SUPPLIED_FIELDS[table]) {
+        expect(RESTORE_TABLE_FIELDS[table][field]?.required).toBe(true);
+        expect(new RegExp(`content\\.${field}\\s*=`).test(source)).toBe(true);
+      }
     });
   }
 });
