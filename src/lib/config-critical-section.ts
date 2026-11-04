@@ -99,6 +99,7 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  statfsSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -178,6 +179,14 @@ export interface ConfigSectionOptions {
   maxAttempts?: number;
   /** Lock acquisition: bounded retry (default 40 × 50 ms). */
   lockRetry?: { attempts?: number; delayMs?: number };
+  /** In-lock staging for a protocol that must publish IMMUTABLE side records
+   *  before the target replacement. Runs after `decide` returns a write and
+   *  before the temp file is created for the target. It must create new names
+   *  only (never replace the target or a reader-visible name); a throw aborts
+   *  the write, leaving the target unchanged and any staged names unreferenced.
+   *  Added for the integrity generation/registry protocol (flair#971); existing
+   *  sinks leave it unset. */
+  stage?: (bytes: Uint8Array, identity: ConfigObservation) => void;
   /** TEST-ONLY deterministic barriers at the production read/write boundary.
    *  Inert unless a fixture sets them. `afterPreObserve` fires between the
    *  pre-lock observation and the lock; `afterRead` fires between the in-lock
@@ -194,6 +203,10 @@ export interface ConfigSectionOptions {
     afterRead?: (attempt: number) => void;
     afterTempCreate?: (tempPath: string) => void;
     afterFsync?: (tempPath: string) => void;
+    /** TEST-ONLY: fires AFTER the rename landed and BEFORE the parent
+     *  directory fsync. A throw is reported as a post-rename cleanup warning,
+     *  exactly as a real directory-fsync failure is. */
+    afterRename?: (targetPath: string) => void;
   };
 }
 
@@ -215,6 +228,61 @@ export interface ConfigSectionResult {
   committed?: boolean;
   /** Set when the write COMMITTED but a post-rename cleanup step failed. */
   cleanupWarning?: string | null;
+}
+
+// ── filesystem support ──────────────────────────────────────────────────────
+
+/** Filesystems this primitive may use. The lock's O_EXCL create and rename
+ *  guarantees are documented above for APFS and ext4/xfs; the rest are local
+ *  filesystems with the same directory semantics. Anything not listed —
+ *  including NFS, SMB/CIFS, FUSE and 9p — is refused BEFORE a lock is created,
+ *  because on those the lock may not serialize and rename/fsync guarantees are
+ *  weaker than this module claims. */
+const LOCAL_FILESYSTEM_TYPES: Record<number, string> = {
+  0xef53: "ext2/ext3/ext4",
+  0x58465342: "xfs",
+  0x9123683e: "btrfs",
+  0x1a2b3c4d: "apfs",
+  0x2fc12fc1: "zfs",
+  0x01021994: "tmpfs",
+  0x794c7630: "overlayfs",
+  0x3153464a: "jfs",
+  0xf2f52010: "f2fs",
+};
+
+export type FilesystemSupport =
+  | { ok: true; type: string }
+  | { ok: false; reason: string };
+
+/** Whether a statfs type is one of the recognized local filesystems. Exported
+ *  so the refusal policy can be pinned without mounting a network filesystem. */
+export function isSupportedLocalFilesystemType(type: number): boolean {
+  return Object.hasOwn(LOCAL_FILESYSTEM_TYPES, type);
+}
+
+/** Refuse a network or unrecognized filesystem. Resolves the nearest existing
+ *  ancestor so an about-to-be-created custody directory is checked too. A
+ *  failed statfs is a refusal, never "local". */
+export function assertSupportedLocalFilesystem(targetPath: string): FilesystemSupport {
+  let probe = targetPath;
+  // Bounded: `/` exists on every supported host; stop at the root.
+  for (let i = 0; i < 256; i++) {
+    if (existsSync(probe)) break;
+    const parent = dirname(probe);
+    if (parent === probe) return { ok: false, reason: `cannot find an existing ancestor of ${targetPath}` };
+    probe = parent;
+  }
+  let st: { type: number };
+  try {
+    st = statfsSync(probe);
+  } catch (err) {
+    return { ok: false, reason: `cannot inspect the filesystem for ${probe}: ${msg(err)}` };
+  }
+  const name = isSupportedLocalFilesystemType(st.type) ? LOCAL_FILESYSTEM_TYPES[st.type] : undefined;
+  if (!name) {
+    return { ok: false, reason: `filesystem type 0x${st.type.toString(16)} at ${probe} is not a recognized local filesystem` };
+  }
+  return { ok: true, type: name };
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -488,6 +556,7 @@ export function atomicReplace(
   // (flair#1778 2c-i-d2 crash window, T1c). A SIGKILL here leaves the target
   // byte-identical and orphans the temp + lock (cleanup bypassed).
   onAfterFsync?: (tempPath: string) => void,
+  onAfterRename?: (targetPath: string) => void,
 ): ReplaceResult {
   if (original && !isRegularMode(original.mode)) {
     return { ok: false, reason: `the destination ${targetPath} is not a regular file (mode ${original.mode.toString(8)}); refusing to replace it` };
@@ -549,10 +618,17 @@ export function atomicReplace(
 
   let cleanupWarning: string | null = null;
   try {
-    const dfd = openSync(dir, "r");
-    try { fsyncSync(dfd); } finally { try { closeSync(dfd); } catch { /* */ } }
+    onAfterRename?.(targetPath);
   } catch (err) {
-    cleanupWarning = `the replacement is committed but the directory fsync failed: ${msg(err)}`;
+    cleanupWarning = `the replacement is committed but the post-rename step failed: ${msg(err)}`;
+  }
+  if (cleanupWarning === null) {
+    try {
+      const dfd = openSync(dir, "r");
+      try { fsyncSync(dfd); } finally { try { closeSync(dfd); } catch { /* */ } }
+    } catch (err) {
+      cleanupWarning = `the replacement is committed but the directory fsync failed: ${msg(err)}`;
+    }
   }
   return { ok: true, cleanupWarning };
 }
@@ -647,11 +723,20 @@ export function withConfigCriticalSection(
         return { status: "noop", path: targetPath, attempts, message: decision.noop, backupPath };
       }
 
-      // 5. WRITE.
+      // 5. WRITE. Immutable side records are staged under the SAME lock before
+      // the target replacement, so a failure before the rename leaves the
+      // target untouched while the staged records stay unreferenced.
+      if (opts.stage) {
+        try {
+          opts.stage(decision.write, obs);
+        } catch (err) {
+          return { status: "refused", path: targetPath, attempts, message: `nothing written: staging failed: ${msg(err)}`, backupPath };
+        }
+      }
       const original = obs.target.type === "regular"
         ? { mode: obs.target.mode!, uid: obs.target.uid!, gid: obs.target.gid! }
         : null;
-      const wr = atomicReplace(targetPath, decision.write, original, opts.testHooks?.afterTempCreate, opts.testHooks?.afterFsync);
+      const wr = atomicReplace(targetPath, decision.write, original, opts.testHooks?.afterTempCreate, opts.testHooks?.afterFsync, opts.testHooks?.afterRename);
       if (!wr.ok) {
         return { status: "refused", path: targetPath, attempts, message: `nothing written: ${wr.reason}`, backupPath };
       }

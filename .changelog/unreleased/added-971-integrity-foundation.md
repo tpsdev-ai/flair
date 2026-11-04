@@ -1,0 +1,1 @@
+- **Internal integrity custody and commit-fence primitives for the scheduled integrity watcher; no command, route or baseline is reachable yet.**
