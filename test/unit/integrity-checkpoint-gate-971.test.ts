@@ -213,10 +213,12 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(result.reason).toBe("custody_invalid");
   });
 
+  // Both cases run for real in the CI step "Custody denial (root)": it installs
+  // setfacl when absent and runs this file as root.
   const hasSetfacl = spawnSync("setfacl", ["--version"], { encoding: "utf8" }).status === 0;
   const aclName = hasSetfacl
     ? "refuses an ACL grant on the key"
-    : "refuses an ACL grant on the key (skipped: setfacl is not installed on this host)";
+    : "refuses an ACL grant on the key (skipped: setfacl is unavailable; the CI step \"Custody denial (root)\" installs and runs this case)";
   (hasSetfacl ? it : it.skip)(aclName, () => {
     init();
     const paths = integrityPaths(custodyDir);
@@ -331,20 +333,27 @@ describe("checkpoint-gate (invariant 1)", () => {
   });
 
   // The real denial. Mode arithmetic is not evidence: a child process with the
-  // server uid must fail to READ the key and fail to WRITE state. Docker CI runs
-  // as root, so this executes there; a non-root local host skips it with the
-  // reason below rather than pretending mode bits are a syscall.
+  // server uid must fail to READ the key and fail to WRITE state. It runs as
+  // root in the CI step "Custody denial (root)"; a non-root host skips it with
+  // the reason below rather than pretending mode bits are a syscall. In the
+  // root run the operator is uid 0 and the recorded server uid is 65534, so the
+  // predicate's "the server must not be root" rule holds and the child drops to
+  // exactly that recorded uid. Bun 1.3.10 ignores spawnSync's uid/gid, so the
+  // drop goes through setpriv (util-linux) instead of the spawn options.
   const isRoot = (process.getuid?.() ?? -1) === 0;
   const denialName = isRoot
     ? "server uid cannot read the key or write state (real denial)"
-    : "server uid cannot read the key or write state (skipped: needs root to drop to a second uid; CI runs this as root)";
+    : "server uid cannot read the key or write state (skipped: runs as root in the CI step \"Custody denial (root)\"; skipped on a non-root host)";
   (isRoot ? it : it.skip)(
     denialName,
     () => {
       init();
-      // The temp ROOT is traversable; the custody directory itself stays 0700,
-      // so a failure below is the key/state modes, not an unreachable parent.
+      // Let the child reach the key: the temp root and the custody directory
+      // are searchable, while the key stays 0600 and the directory unwritable,
+      // so the read fails on the key's mode and the write on the directory's,
+      // not on an unreachable parent.
       chmodSync(root, 0o755);
+      chmodSync(custodyDir, 0o711);
       const paths = integrityPaths(custodyDir);
       const probe = join(custodyDir, "server-write-probe");
       const script = [
@@ -358,12 +367,20 @@ describe("checkpoint-gate (invariant 1)", () => {
         "}",
         "process.exit(10);",
       ].join("\n");
-      const child = spawnSync("node", ["-e", script, paths.keyPath, probe], {
-        uid: 65534,
-        gid: 65534,
-        encoding: "utf8",
-        timeout: 15_000,
-      });
+      const child = spawnSync(
+        "setpriv",
+        [
+          `--reuid=${SERVER_UID}`,
+          `--regid=${SERVER_UID}`,
+          "--clear-groups",
+          "node",
+          "-e",
+          script,
+          paths.keyPath,
+          probe,
+        ],
+        { encoding: "utf8", timeout: 15_000 },
+      );
       expect(child.error).toBeUndefined();
       expect(child.status).toBe(0);
       expect(child.stderr).toBe("");
