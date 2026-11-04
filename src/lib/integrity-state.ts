@@ -395,14 +395,16 @@ export function checkCustody(opts: CustodyCheckOptions): CustodyCheck {
     if (!registry.ok) return registry;
     const gens = checkManagedEntry(paths.generationsDir, "dir", operatorUid, true);
     if (!gens.ok) return gens;
-    const listed = listGenerationFiles(paths.generationsDir);
-    if (listed.kind === "error") return { ok: false, reason: listed.reason, detail: listed.detail };
-    if (listed.kind === "ok") {
-      for (const name of listed.files) {
-        const gen = checkManagedEntry(join(paths.generationsDir, name), "file", operatorUid);
-        if (!gen.ok) return gen;
-      }
+  }
+  const listed = listGenerationFiles(paths.generationsDir);
+  if (listed.kind === "error") return { ok: false, reason: listed.reason, detail: listed.detail };
+  if (listed.kind === "ok") {
+    for (const name of listed.files) {
+      const gen = checkManagedEntry(join(paths.generationsDir, name), "file", operatorUid);
+      if (!gen.ok) return gen;
     }
+  }
+  if (requireFiles) {
     const current = checkManagedEntry(paths.currentPath, "file", operatorUid, true);
     if (!current.ok) return current;
   }
