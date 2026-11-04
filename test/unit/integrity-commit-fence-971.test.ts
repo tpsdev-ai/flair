@@ -17,6 +17,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -260,6 +261,27 @@ describe("commit-fence (invariant 7)", () => {
     expect(lstatSync(integrityPaths(custodyDir).uncertainPath, { throwIfNoEntry: false })).toBeUndefined();
   });
 
+  it("retains uncertain intent on a same-handle retry until recovered open", () => {
+    const state = init();
+    commit(state, 0);
+    const uncertain = commitGeneration({
+      state, expectedGeneration: 1, checkpoint: payload(),
+      testHooks: { afterRename: () => { throw new Error("injected post-rename failure"); } },
+    });
+    expect(uncertain).toMatchObject({ ok: false, reason: "commit_uncertain", generation: 2 });
+    const retry = commitGeneration({ state, expectedGeneration: 2, checkpoint: payload() });
+    expect(readFileSync(integrityPaths(custodyDir).uncertainPath, "utf-8")).toBe("commit:2");
+    expect(retry).toMatchObject({ ok: false, reason: "commit_uncertain" });
+    expect(generationNumbers(integrityPaths(custodyDir))).toEqual([1, 2]);
+    const recovered = openIntegrityState(options({ newCustody: false }));
+    expect(recovered.ok).toBe(true);
+    if (!recovered.ok) return;
+    expect(recovered.state.recovered).toBe(true);
+    expect(recovered.state.generation).toBe(2);
+    expect(existsSync(integrityPaths(custodyDir).uncertainPath)).toBe(false);
+    expect(commitGeneration({ state: recovered.state, expectedGeneration: 2, checkpoint: payload() }).ok).toBe(true);
+  });
+
   it("refuses to publish a retained generation when CURRENT is missing", () => {
     const state = init();
     commit(state, 0);
@@ -335,9 +357,19 @@ describe("commit-fence (invariant 7)", () => {
     const result = commitGeneration({ state, expectedGeneration: 0, checkpoint: payload() });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.status).toBe("commit_failed");
+    expect(result.reason).toBe("unavailable");
     expect(existsSync(integrityPaths(custodyDir).currentPath)).toBe(false);
-    expect(generationNumbers(integrityPaths(custodyDir))).toEqual([1]);
+    expect(generationNumbers(integrityPaths(custodyDir))).toEqual([]);
+  });
+
+  it("retains a pre-existing marker entry when exclusive creation fails", () => {
+    const state = init();
+    const paths = integrityPaths(custodyDir);
+    symlinkSync(join(root, "absent-marker-target"), paths.uncertainPath);
+    const result = commitGeneration({ state, expectedGeneration: 0, checkpoint: payload() });
+    expect(lstatSync(paths.uncertainPath).isSymbolicLink()).toBe(true);
+    expect(result).toMatchObject({ ok: false, status: "commit_failed" });
+    expect(existsSync(paths.currentPath)).toBe(false);
   });
 
   it("keeps the registry intent marker when the tombstone's directory fsync fails", () => {
@@ -413,6 +445,37 @@ describe("commit-fence (invariant 7)", () => {
     if (!result.ok) expect(result.reason).toBe("checkpoint_incompatible");
     expect(generationNumbers(integrityPaths(custodyDir))).toEqual([]);
     expect(existsSync(integrityPaths(custodyDir).currentPath)).toBe(false);
+  });
+
+  it("refuses a changing getter before committing a checkpoint", () => {
+    const state = init();
+    let reads = 0;
+    const checkpoint = payload();
+    Object.defineProperty(checkpoint.baseline.ids, "mem-a", {
+      enumerable: true,
+      get: () => ++reads === 1 ? "permanent" : "standard",
+    });
+    const result = commitGeneration({ state, expectedGeneration: 0, checkpoint });
+    expect(result).toMatchObject({ ok: false, reason: "checkpoint_incompatible" });
+    expect(reads).toBe(0);
+    expect(generationNumbers(integrityPaths(custodyDir))).toEqual([]);
+    expect(existsSync(integrityPaths(custodyDir).currentPath)).toBe(false);
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    expect(reopened).toMatchObject({ ok: false, reason: "checkpoint_missing" });
+  });
+
+  it("commits a snapshot of changing property descriptors", () => {
+    const state = init();
+    let reads = 0;
+    const event = new Proxy({ value: 0 }, {
+      getOwnPropertyDescriptor: () => ({ configurable: true, enumerable: true, writable: true, value: ++reads }),
+    });
+    const result = commitGeneration({ state, expectedGeneration: 0, checkpoint: { ...payload(), pendingEvents: [event] } });
+    expect(result.ok).toBe(true);
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    expect(reopened.ok).toBe(true);
+    if (reopened.ok) expect(reopened.state.checkpoint?.pendingEvents).toEqual([{ value: 1 }]);
+    expect(reads).toBe(1);
   });
 
   it("round-trips a committed checkpoint through JSON and reopens", () => {

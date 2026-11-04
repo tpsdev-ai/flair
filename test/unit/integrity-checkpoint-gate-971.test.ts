@@ -212,6 +212,19 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(result.reason).toBe("custody_invalid");
   });
 
+  it("refuses a symlinked custody path before writing its target", () => {
+    const target = join(root, "custody-target");
+    mkdirSync(target, { mode: 0o700 });
+    symlinkSync(target, custodyDir, "dir");
+    const result = initializeIntegrityCustody(options());
+    const paths = integrityPaths(target);
+    expect(lstatSync(paths.keyPath, { throwIfNoEntry: false })).toBeUndefined();
+    expect(lstatSync(paths.registryPath, { throwIfNoEntry: false })).toBeUndefined();
+    expect(lstatSync(paths.generationsDir, { throwIfNoEntry: false })).toBeUndefined();
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("custody_invalid");
+  });
+
   // Both cases run for real in the CI step "Custody denial (root)": it installs
   // setfacl when absent and runs this file as root.
   const hasSetfacl = spawnSync("setfacl", ["--version"], { encoding: "utf8" }).status === 0;
@@ -307,6 +320,28 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(result.detail).toContain("generation history");
   });
 
+  it("refuses new custody when a retained generation was renamed", () => {
+    const state = init();
+    commitFirst(state);
+    const paths = integrityPaths(custodyDir);
+    renameSync(generationPath(paths.generationsDir, 1), join(paths.generationsDir, "retained-checkpoint"));
+    const opened = openIntegrityState(options({ newCustody: false }));
+    const unchecked = openIntegrityState(options({ newCustody: false, checkGenerations: false }));
+    for (const path of [paths.keyPath, paths.registryPath, paths.currentPath]) unlinkSync(path);
+    const result = initializeIntegrityCustody(options({ newCustody: true }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("custody_invalid");
+    expect(lstatSync(paths.keyPath, { throwIfNoEntry: false })).toBeUndefined();
+    expect(lstatSync(paths.registryPath, { throwIfNoEntry: false })).toBeUndefined();
+    for (const result of [opened, unchecked]) {
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("custody_invalid");
+        expect(result.detail).toContain("unexpected generation entry");
+      }
+    }
+  });
+
   it("exposes a statfs refusal wrapper that accepts the temp filesystem and refuses network types", () => {
     const support = assertSupportedLocalFilesystem(custodyDir);
     expect(support.ok).toBe(true);
@@ -359,7 +394,7 @@ describe("checkpoint-gate (invariant 1)", () => {
     }
   });
 
-  it("refuses values JSON cannot represent", () => {
+  it("canonical JSON value checks", () => {
     const sparse: unknown[] = [1];
     sparse.length = 3;
     for (const value of [undefined, () => 1, Symbol("s"), 1n, NaN, Infinity, -Infinity, new Date(0), /x/, new Map(), sparse]) {
@@ -368,6 +403,17 @@ describe("checkpoint-gate (invariant 1)", () => {
     expect(() => canonicalJson({ a: undefined })).toThrow();
     expect(canonicalJson({ b: 1, a: [true, null, "x"] })).toBe('{"a":[true,null,"x"],"b":1}');
     expect(JSON.parse(canonicalJson({ b: 1, a: [true, null, "x"] }))).toEqual({ a: [true, null, "x"], b: 1 });
+  });
+
+  it("refuses accessors, symbol keys, hidden properties and extra array properties", () => {
+    const accessor = Object.defineProperty({}, "value", { enumerable: true, get: () => 1 });
+    const hidden = Object.defineProperty({}, "value", { value: 1 });
+    const symbolKey = { [Symbol("value")]: 1 };
+    const extraArray = Object.assign([1], { extra: 2 });
+    const arrayAccessor = Object.defineProperty([1], "0", { enumerable: true, get: () => 1 });
+    for (const value of [accessor, hidden, symbolKey, extraArray, arrayAccessor]) {
+      expect(() => canonicalJson(value)).toThrow();
+    }
   });
 
   // The real denial. Mode arithmetic is not evidence: a child process with the

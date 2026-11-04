@@ -313,39 +313,46 @@ export function parseMountLine(line: string): MountEntry | null {
   return { device, mountPoint, type, options };
 }
 
-/** The entry whose mount point is the longest path-prefix of `realPath`
- *  (or equal to it), matched on a `/` boundary. */
-export function selectMountEntry(entries: MountEntry[], realPath: string): MountEntry | null {
-  let best: MountEntry | null = null;
+/** Match the file's device to a recognized local mount's device. */
+export function selectMountEntry(
+  entries: MountEntry[],
+  realPath: string,
+  statDevice: (path: string) => number = (path) => statSync(path).dev,
+): MountEntry | null {
+  const device = statDevice(realPath);
+  if (!Number.isSafeInteger(device) || device < 0) throw new Error(`invalid device for ${realPath}`);
+  let selected: MountEntry | null = null;
   for (const entry of entries) {
-    const covers =
-      entry.mountPoint === realPath ||
-      realPath.startsWith(entry.mountPoint === "/" ? "/" : `${entry.mountPoint}/`);
-    if (covers && (best === null || entry.mountPoint.length > best.mountPoint.length)) best = entry;
+    if (!isSupportedLocalFilesystemName(entry.type) || !entry.options.includes("local")) continue;
+    const mountDevice = statDevice(entry.mountPoint);
+    if (!Number.isSafeInteger(mountDevice) || mountDevice < 0) throw new Error(`invalid device for ${entry.mountPoint}`);
+    if (mountDevice !== device) continue;
+    if (selected !== null && selected.type !== entry.type) return null;
+    if (selected === null || entry.mountPoint.length > selected.mountPoint.length) selected = entry;
   }
-  return best;
+  return selected;
 }
 
-/** Classify a resolved macOS path from the output of `mount`. Accepts only
- *  an `apfs` or `hfs` mount that also carries the `local` option; a network
- *  mount (smbfs, nfs, afpfs, webdav) carries no `local`. */
-export function classifyDarwinFilesystem(realPath: string, mountOutput: string): FilesystemSupport {
+/** Classify a macOS path by device, accepting only local apfs or hfs mounts. */
+export function classifyDarwinFilesystem(
+  realPath: string,
+  mountOutput: string,
+  statDevice: (path: string) => number = (path) => statSync(path).dev,
+): FilesystemSupport {
   const entries: MountEntry[] = [];
   for (const line of mountOutput.split("\n")) {
     if (line.trim() === "") continue;
     const entry = parseMountLine(line);
-    if (entry !== null) entries.push(entry);
+    if (entry === null) return { ok: false, reason: "unparseable mount entry" };
+    entries.push(entry);
   }
-  const entry = selectMountEntry(entries, realPath);
-  if (entry === null) {
-    return { ok: false, reason: `no mount entry covers ${realPath}` };
+  let entry: MountEntry | null;
+  try {
+    entry = selectMountEntry(entries, realPath, statDevice);
+  } catch (err) {
+    return { ok: false, reason: `cannot inspect mount devices for ${realPath}: ${msg(err)}` };
   }
-  if (!isSupportedLocalFilesystemName(entry.type)) {
-    return { ok: false, reason: `filesystem ${entry.type} at ${entry.mountPoint} is not a recognized local filesystem` };
-  }
-  if (!entry.options.includes("local")) {
-    return { ok: false, reason: `filesystem ${entry.type} at ${entry.mountPoint} is not local` };
-  }
+  if (entry === null) return { ok: false, reason: `no recognized local mount matches the device of ${realPath}` };
   return { ok: true, type: entry.type.toLowerCase() };
 }
 

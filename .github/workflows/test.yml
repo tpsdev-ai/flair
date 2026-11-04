@@ -305,11 +305,8 @@ jobs:
             exit 1
           fi
 
-  # flair#971 — the two custody cases that prove a real denial can only run
-  # as root: the denial child drops to uid/gid 65534, and the ACL-grant case
-  # needs setfacl. The unit lane runs as the normal runner user, so both skip
-  # there. This job runs them for real; a skipped case exits 0, so the step
-  # asserts the counts rather than the exit code.
+  # flair#971 — the denial child requires root to drop uid/gid; the ACL case
+  # requires setfacl. This job runs both and checks their pass/skip counts.
   custody-denial-root:
     name: "Custody denial (root)"
     runs-on: ubuntu-24.04

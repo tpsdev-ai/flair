@@ -9,9 +9,9 @@
  *     encoding with a custody key;
  *   - the fixed twelve-reason taxonomy (strings, not prose) for callers to
  *     report;
- *   - the custody predicate: key directory 0700, key and state files 0600, no
- *     symlinks, no ACL grants, a server uid that can neither read the key nor
- *     write state, and the recorded operator uid and machine identity compared
+ *   - the custody predicate: key directory 0700, key and state files 0600,
+ *     managed entries checked for symlinks and ACL grants,
+ *     a server uid that can neither read the key nor write state, and the recorded operator uid and machine identity compared
  *     when custody is opened and when a generation is committed;
  *   - an authenticated enrollment registry with a monotonic sequence and
  *     tombstones, plus retained generations;
@@ -34,7 +34,6 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
-  statSync,
   unlinkSync,
   type Stats,
 } from "node:fs";
@@ -173,10 +172,7 @@ export interface IntegrityRegistry {
 
 // ── canonical JSON + HMAC ───────────────────────────────────────────────────
 
-/** Deterministic JSON over plain JSON values only: object keys sorted, arrays
- *  in order, no holes. Anything JSON cannot represent (undefined, functions,
- *  symbols, bigint, NaN/Infinity, class instances, sparse arrays) is refused.
- *  HMACs are computed over THIS encoding, never over parse order. */
+/** Sort object keys and preserve array order over plain JSON data properties. */
 export function canonicalJson(value: unknown, location = "$"): string {
   if (value === null) return "null";
   switch (typeof value) {
@@ -193,10 +189,20 @@ export function canonicalJson(value: unknown, location = "$"): string {
       throw new TypeError(`${location} is ${typeof value}, which is not plain JSON`);
   }
   if (Array.isArray(value)) {
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (key === "length") continue;
+      const descriptor = descriptors[key as string];
+      if (typeof key !== "string" || !/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length ||
+          !descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+        throw new TypeError(`${location} has a non-JSON array property`);
+      }
+    }
     const parts: string[] = [];
     for (let index = 0; index < value.length; index++) {
-      if (!(index in value)) throw new TypeError(`${location}[${index}] is a sparse array hole`);
-      parts.push(canonicalJson(value[index], `${location}[${index}]`));
+      const descriptor = descriptors[String(index)];
+      if (!descriptor) throw new TypeError(`${location}[${index}] is a sparse array hole`);
+      parts.push(canonicalJson(descriptor.value, `${location}[${index}]`));
     }
     return `[${parts.join(",")}]`;
   }
@@ -204,9 +210,15 @@ export function canonicalJson(value: unknown, location = "$"): string {
   if (proto !== Object.prototype && proto !== null) {
     throw new TypeError(`${location} is not a plain object`);
   }
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key], `${location}.${key}`)}`).join(",")}}`;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(value);
+  for (const key of keys) {
+    const descriptor = descriptors[key as string];
+    if (typeof key !== "string" || !descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+      throw new TypeError(`${location} has a non-JSON object property`);
+    }
+  }
+  return `{${(keys as string[]).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(descriptors[key]!.value, `${location}.${key}`)}`).join(",")}}`;
 }
 
 function hmacHex(payload: unknown, key: Buffer): string {
@@ -215,7 +227,7 @@ function hmacHex(payload: unknown, key: Buffer): string {
 
 /** Sign a record: returns the same fields plus `hmac`. */
 export function signIntegrityRecord<T extends Record<string, unknown>>(record: T, key: Buffer): T & { hmac: string } {
-  const { hmac: _ignored, ...payload } = record as Record<string, unknown>;
+  const { hmac: _ignored, ...payload } = JSON.parse(canonicalJson(record)) as Record<string, unknown>;
   return { ...(payload as T), hmac: hmacHex(payload, key) } as T & { hmac: string };
 }
 
@@ -386,14 +398,12 @@ export function checkCustody(opts: CustodyCheckOptions): CustodyCheck {
     if (existsSync(paths.generationsDir)) {
       const gens = checkManagedEntry(paths.generationsDir, "dir", operatorUid);
       if (!gens.ok) return gens;
-      if (opts.checkGenerations) {
-        const listed = listGenerationFiles(paths.generationsDir);
-        if (listed.kind === "error") return { ok: false, reason: listed.reason, detail: listed.detail };
-        if (listed.kind === "ok") {
-          for (const name of listed.files) {
-            const gen = checkManagedEntry(join(paths.generationsDir, name), "file", operatorUid);
-            if (!gen.ok) return gen;
-          }
+      const listed = listGenerationFiles(paths.generationsDir);
+      if (listed.kind === "error") return { ok: false, reason: listed.reason, detail: listed.detail };
+      if (opts.checkGenerations && listed.kind === "ok") {
+        for (const name of listed.files) {
+          const gen = checkManagedEntry(join(paths.generationsDir, name), "file", operatorUid);
+          if (!gen.ok) return gen;
         }
       }
     }
@@ -452,9 +462,10 @@ function fsyncDir(path: string): void {
 
 /** Create a new file durably (`wx`, explicit mode, full write, fsync). Never
  *  replaces an existing path. */
-function writeNewDurable(path: string, bytes: Uint8Array, mode: number): void {
+function writeNewDurable(path: string, bytes: Uint8Array, mode: number, onCreated?: () => void): void {
   const fd = openSync(path, "wx", mode);
   try {
+    onCreated?.();
     writeAllSync(fd, Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
     fsyncSync(fd);
   } finally {
@@ -500,7 +511,7 @@ type GenerationListing =
 
 /** ENOENT is the only "absent". Any other readdir failure is an error the
  *  callers must refuse, never an empty history. */
-function listGenerationFiles(generationsDir: string): GenerationListing {
+function listGenerationEntries(generationsDir: string): GenerationListing {
   let names: string[];
   try {
     names = readdirSync(generationsDir);
@@ -508,7 +519,17 @@ function listGenerationFiles(generationsDir: string): GenerationListing {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
     return { kind: "error", reason: "unavailable", detail: `cannot list ${generationsDir}: ${msg(err)}` };
   }
-  return { kind: "ok", files: names.filter((name) => /^\d{12}\.json$/.test(name)).sort() };
+  return { kind: "ok", files: names.sort() };
+}
+
+function listGenerationFiles(generationsDir: string): GenerationListing {
+  const listed = listGenerationEntries(generationsDir);
+  if (listed.kind !== "ok") return listed;
+  const unexpected = listed.files.find((name) => !/^\d{12}\.json$/.test(name));
+  if (unexpected !== undefined) {
+    return { kind: "error", reason: "custody_invalid", detail: `unexpected generation entry ${JSON.stringify(unexpected)}` };
+  }
+  return listed;
 }
 
 type HistoryCheck =
@@ -525,7 +546,7 @@ function hasGenerationHistory(paths: IntegrityPaths): HistoryCheck {
       return { kind: "error", reason: "unavailable", detail: `cannot stat CURRENT: ${msg(err)}` };
     }
   }
-  const listed = listGenerationFiles(paths.generationsDir);
+  const listed = listGenerationEntries(paths.generationsDir);
   if (listed.kind === "error") return listed;
   return listed.kind === "ok" && listed.files.length > 0 ? { kind: "yes" } : { kind: "no" };
 }
@@ -533,7 +554,15 @@ function hasGenerationHistory(paths: IntegrityPaths): HistoryCheck {
 /** Write the durable intent marker BEFORE publication. A failure here must
  *  refuse the publication. */
 function writeUncertainMarker(paths: IntegrityPaths, value: string): void {
-  writeNewDurable(paths.uncertainPath, Buffer.from(value, "utf-8"), 0o600);
+  let created = false;
+  try {
+    writeNewDurable(paths.uncertainPath, Buffer.from(value, "utf-8"), 0o600, () => { created = true; });
+  } catch (err) {
+    if (created) {
+      try { clearUncertainMarker(paths); } catch { /* retain incomplete intent */ }
+    }
+    throw err;
+  }
 }
 
 /** Remove the marker after durable completion (or after a publication that
@@ -828,10 +857,8 @@ function parseUncertainMarker(raw: string): { kind: "commit" | "registry"; value
   return null;
 }
 
-/** Reconcile the durable intent marker left before a publication. The marker
- *  is not evidence that the publication landed: the published record decides.
- *  A landed publication is fsynced and the marker cleared; an unlanded one is
- *  discarded. */
+/** Reconcile publication intent against the published record. A commit marker
+ *  ahead of an existing CURRENT is retained as commit_uncertain. */
 function reconcileUncertainMarker(paths: IntegrityPaths, key: Buffer, checkpoint: IntegrityCheckpointV3 | null): MarkerReconcile {
   let outcome: MarkerReconcile = { ok: true, recovered: false };
   const locked = withCustodyLock(paths, () => {
@@ -979,7 +1006,7 @@ function openWithRegistry(
   let checkpoint: IntegrityCheckpointV3 | null = null;
   if (current.kind === "absent") {
     // A staged generation is never commit evidence on its own: only CURRENT
-    // proves a commit. Fail closed when any generation history exists.
+    // names the published generation. Refuse any retained directory entry.
     const history = hasGenerationHistory(paths);
     if (history.kind === "error") return fail(history.reason, history.detail);
     if (history.kind === "yes") {
@@ -1011,9 +1038,6 @@ function openWithRegistry(
     }
   }
 
-  // A durable intent marker is written BEFORE publication. Reconcile it
-  // against the published record: a landed publication is fsynced and the
-  // marker cleared; an unlanded one is discarded.
   const reconciled = reconcileUncertainMarker(paths, key, checkpoint);
   if (!reconciled.ok) return fail(reconciled.reason, reconciled.detail);
   if (reconciled.recovered) recovered = true;
@@ -1050,6 +1074,14 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
   }
 
   const paths = integrityPaths(opts.custodyDir);
+  try {
+    if (lstatSync(paths.custodyDir, { throwIfNoEntry: false }) !== undefined) {
+      const dir = checkManagedEntry(paths.custodyDir, "dir", uid);
+      if (!dir.ok) return fail(dir.reason, dir.detail);
+    }
+  } catch (err) {
+    return fail("unavailable", `cannot inspect the custody directory: ${msg(err)}`);
+  }
   const fsCheck = assertSupportedLocalFilesystem(paths.custodyDir);
   if (!fsCheck.ok) return fail("custody_invalid", fsCheck.reason);
 
@@ -1078,15 +1110,13 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
 
   try {
     mkdirSync(paths.custodyDir, { recursive: true, mode: 0o700 });
-    const dirStat = statSync(paths.custodyDir);
-    if (!dirStat.isDirectory() || (dirStat.mode & 0o777) !== 0o700) {
-      return fail("custody_invalid", `the custody directory is not mode 0700`);
-    }
+    const dir = checkCustody({ paths, serverUid: derived.uid, operatorUid: uid, machineId, requireFiles: false });
+    if (!dir.ok) return fail(dir.reason, dir.detail);
     mkdirSync(paths.generationsDir, { recursive: true, mode: 0o700 });
-    const genStat = statSync(paths.generationsDir);
-    if (!genStat.isDirectory() || (genStat.mode & 0o777) !== 0o700) {
-      return fail("custody_invalid", `the generations directory is not mode 0700`);
-    }
+    const generations = checkManagedEntry(paths.generationsDir, "dir", uid);
+    if (!generations.ok) return fail(generations.reason, generations.detail);
+    const filesystem = ensureLocalFilesystem(paths);
+    if (!filesystem.ok) return fail(filesystem.reason, filesystem.detail);
     writeNewDurable(paths.keyPath, randomBytes(32), 0o600);
     fsyncDir(paths.custodyDir);
   } catch (err) {
@@ -1158,8 +1188,6 @@ export function openIntegrityState(opts: IntegrityStateOptions): IntegrityStateR
   }
   if (read.kind === "error") return fail(read.reason, read.detail);
 
-  // A registry-write intent marker is reconciled before the enrollment check:
-  // the tombstone that wrote it has already made the enrollment inactive.
   const marker = reconcileUncertainMarker(paths, key.key, null);
   if (!marker.ok) return fail(marker.reason, marker.detail);
 
@@ -1261,8 +1289,6 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     } satisfies Omit<IntegrityCurrentPointer, "hmac">, state.key);
     generationBytes = jsonBytes(checkpoint);
   } catch (err) {
-    // canonicalJson refuses values JSON cannot represent (including
-    // undefined, NaN/Infinity and non-plain objects); nothing is staged.
     return {
       ok: false,
       status: "commit_failed",
@@ -1273,6 +1299,9 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   }
 
   const decide = (bytes: Uint8Array | null): { write: Uint8Array } | { hold: string } => {
+    const marker = readUncertainMarker(state.paths);
+    if (marker.kind === "error") return holdMessage("unavailable", marker.detail);
+    if (marker.kind === "value") return holdMessage("commit_uncertain", "publication requires uncertainty reconciliation");
     // Recheck the registry under the lock: an enrollment tombstoned while this
     // scan ran must not publish a new generation.
     const registryRead = readRegistry(state.paths, state.key);
@@ -1324,12 +1353,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     }
     // Durable intent marker BEFORE publication: a post-rename fsync warning
     // then cannot lose the uncertainty. Failure here refuses the publication.
-    try {
-      writeUncertainMarker(state.paths, `${UNCERTAIN_COMMIT_PREFIX}${nextGeneration}`);
-    } catch (err) {
-      try { clearUncertainMarker(state.paths); } catch { /* the write failure stands */ }
-      throw err;
-    }
+    writeUncertainMarker(state.paths, `${UNCERTAIN_COMMIT_PREFIX}${nextGeneration}`);
     return () => { try { clearUncertainMarker(state.paths); } catch { /* leave it for the next open */ } };
   };
 
@@ -1411,6 +1435,9 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
   const enrollmentId = opts.enrollmentId ?? state.enrollment.enrollmentId;
   let nextSequence = 0;
   const decide = (bytes: Uint8Array | null): { write: Uint8Array } | { hold: string } => {
+    const marker = readUncertainMarker(state.paths);
+    if (marker.kind === "error") return holdMessage("unavailable", marker.detail);
+    if (marker.kind === "value") return holdMessage("commit_uncertain", "publication requires uncertainty reconciliation");
     if (bytes === null || bytes.byteLength === 0) return holdMessage("checkpoint_missing", "the registry is absent");
     let parsed: unknown;
     try {
@@ -1439,12 +1466,7 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
     return { write: jsonBytes(updated) };
   };
   const stage = (): (() => void) => {
-    try {
-      writeUncertainMarker(state.paths, `${UNCERTAIN_REGISTRY_PREFIX}${nextSequence}`);
-    } catch (err) {
-      try { clearUncertainMarker(state.paths); } catch { /* the write failure stands */ }
-      throw err;
-    }
+    writeUncertainMarker(state.paths, `${UNCERTAIN_REGISTRY_PREFIX}${nextSequence}`);
     return () => { try { clearUncertainMarker(state.paths); } catch { /* leave it for the next open */ } };
   };
   let result: ConfigSectionResult;

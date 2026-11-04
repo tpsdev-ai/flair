@@ -1,4 +1,4 @@
-- **Integrity custody serializes commits, tombstones and recovery on one lock and writes its intent marker before publishing.**
+- **Integrity custody serializes commits, tombstones and recovery on one lock.**
 
-  An open refuses to publish a staged generation when CURRENT is absent, and
-  canonical JSON refuses values it cannot represent (#971).
+  Generation commits and tombstones stage an intent marker before publication.
+  Open refuses retained generation entries without CURRENT (#971).
