@@ -17,10 +17,11 @@
  * over plain constants, casts, parentheses, non-null assertions, destructuring
  * renames and defaults, assignments, imports, local exports, re-exports and
  * star exports; a pass that adds nothing ends resolution, and 100 passes
- * without convergence fail naming the module. A name that is an alias of
- * Response through any chain is a use at every read: a read that is neither a
- * call or new callee nor a chain definition is unaccounted, so an alias passed
- * to another function fails the test. Object properties are not followed, so
+ * without convergence fail naming the module. A name that resolves to Response
+ * through any chain is checked at each value read: a call or new callee is
+ * classified, a chain definition is followed, and every other read is
+ * unaccounted, so an alias passed to another function fails the test. Object
+ * properties are not followed, so
  * `const o = { r: Response }; o.r.json()` leaves that Response token
  * unaccounted and fails. For new Response and
  * Response.json, only no init (default 200) or a plain, unwrapped object
