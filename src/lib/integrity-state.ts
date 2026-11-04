@@ -1451,9 +1451,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     };
   }
 
-  // refused: the target was not replaced. A staged generation may remain,
-  // unreferenced; a later retry that passes decide reuses it when the bytes
-  // match and replaces it otherwise.
+  // refused: the target was not replaced; staged files may remain.
   return {
     ok: false,
     status: "commit_failed",

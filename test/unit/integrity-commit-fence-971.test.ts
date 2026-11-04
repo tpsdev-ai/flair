@@ -385,6 +385,7 @@ describe("commit-fence (invariant 7)", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.status).toBe("commit_failed");
+    expect(result.detail).toContain("target was not replaced; staged files may remain");
     expect(readFileSync(paths.currentPath, "utf-8")).toBe(published);
     // The generation was staged, so the marker write is the step that failed.
     expect(generationNumbers(paths)).toEqual([1, 2]);

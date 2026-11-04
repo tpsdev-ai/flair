@@ -188,8 +188,8 @@ export interface ConfigSectionOptions {
    *  before the target replacement. Runs after `decide` returns a write and
    *  before the temp file is created for the target. It must not replace the
    *  target or any name a reader can resolve to current state; an unreferenced
-   *  staging orphan may be replaced. A throw aborts the write, leaving the
-   *  target unchanged and any staged names unreferenced. When it returns a
+   *  staging orphan may be replaced. A throw leaves the target unchanged;
+   *  staged files may remain. When it returns a
    *  function, that cleanup runs under the SAME lock if the target replacement
    *  does not land (a throw or a pre-rename failure). Added for the integrity
    *  generation/registry protocol (flair#971); existing sinks leave it unset. */
@@ -834,16 +834,14 @@ export function withConfigCriticalSection(
         return { status: "noop", path: targetPath, attempts, message: decision.noop, backupPath };
       }
 
-      // 5. WRITE. Immutable side records are staged under the SAME lock before
-      // the target replacement, so a failure before the rename leaves the
-      // target untouched while the staged records stay unreferenced.
+      // 5. WRITE. Stage under the SAME lock before replacing the target.
       let stageCleanup: (() => void) | undefined;
       if (opts.stage) {
         try {
           const staged = opts.stage(decision.write, obs);
           stageCleanup = typeof staged === "function" ? staged : undefined;
         } catch (err) {
-          return { status: "refused", path: targetPath, attempts, message: `nothing written: staging failed: ${msg(err)}`, backupPath };
+          return { status: "refused", path: targetPath, attempts, message: `target was not replaced; staged files may remain: staging failed: ${msg(err)}`, backupPath };
         }
       }
       const original = obs.target.type === "regular"
@@ -858,7 +856,7 @@ export function withConfigCriticalSection(
       }
       if (!wr.ok) {
         try { stageCleanup?.(); } catch { /* the refusal stands */ }
-        return { status: "refused", path: targetPath, attempts, message: `nothing written: ${wr.reason}`, backupPath };
+        return { status: "refused", path: targetPath, attempts, message: `target was not replaced; staged files may remain: ${wr.reason}`, backupPath };
       }
       let cleanupWarning = wr.cleanupWarning;
       if (cleanupWarning === null && opts.onCommitted) {
