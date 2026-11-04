@@ -298,17 +298,71 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     return null;
   };
 
-  /** Whether a function's body constructs a non-2xx Response, and from which parameter. */
+  /** A response construction the inventory can see: `new Response`, `Response.json` or `Response.error`. */
+  type ResponseShape = {
+    status: ts.Expression | undefined;
+    /** False when the init argument is present but not statically inspectable. */
+    statusKnown: boolean;
+    body: ts.Expression | null;
+    baseStatus: number;
+  };
+
+  /** Whether an expression resolves to an object literal this inventory can read. */
+  const objectLiteralAt = (file: string, expression: ts.Expression | null | undefined, depth = 0): boolean => {
+    if (!expression || depth > 6) return false;
+    if (ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression) ||
+        ts.isSatisfiesExpression(expression) || ts.isNonNullExpression(expression)) {
+      return objectLiteralAt(file, expression.expression, depth + 1);
+    }
+    if (ts.isObjectLiteralExpression(expression)) return true;
+    if (ts.isConditionalExpression(expression)) {
+      return objectLiteralAt(file, expression.whenTrue, depth + 1) && objectLiteralAt(file, expression.whenFalse, depth + 1);
+    }
+    if (ts.isIdentifier(expression)) {
+      const local = lookupVariable(expression, expression.text);
+      return local ? objectLiteralAt(file, local, depth + 1) : false;
+    }
+    return false;
+  };
+
+  const responseShape = (file: string, node: ts.Expression): ResponseShape | null => {
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Response") {
+      const init = node.arguments?.[1];
+      return {
+        status: init === undefined ? undefined : (propertyOf(init, file, "status") ?? undefined),
+        statusKnown: init === undefined || objectLiteralAt(file, init),
+        body: node.arguments?.[0] ?? null,
+        baseStatus: 200,
+      };
+    }
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        ts.isIdentifier(node.expression.expression) && node.expression.expression.text === "Response") {
+      const method = node.expression.name.text;
+      if (method === "json") {
+        const init = node.arguments?.[1];
+        return {
+          status: init === undefined ? undefined : (propertyOf(init, file, "status") ?? undefined),
+          statusKnown: init === undefined || objectLiteralAt(file, init),
+          body: node.arguments?.[0] ?? null,
+          baseStatus: 200,
+        };
+      }
+      if (method === "error") return { status: undefined, statusKnown: true, body: null, baseStatus: 0 };
+    }
+    return null;
+  };
+
+  /** Whether a function's body constructs a Response with a status >= 400, and from which parameter. */
   const describe = (record: FnRecord): FnInfo => {
     let statusParam: string | null = null;
     let messageParam: string | null = null;
     const parameters = parametersOf(record.fn);
     const visit = (node: ts.Node): void => {
-      if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Response") {
-        const status = propertyOf(node.arguments?.[1], record.file, "status");
-        const statuses = resolveNumbers(record.file, status);
-        if (!statuses && status && ts.isIdentifier(status) && parameters.has(status.text)) statusParam = status.text;
-        const error = propertyOf(payloadOf(record.file, node.arguments?.[0]), record.file, "error");
+      if (ts.isNewExpression(node) || ts.isCallExpression(node)) {
+        const shape = responseShape(record.file, node);
+        const status = shape?.status;
+        if (status && ts.isIdentifier(status) && parameters.has(status.text)) statusParam = status.text;
+        const error = propertyOf(payloadOf(record.file, shape?.body), record.file, "error");
         if (error && ts.isIdentifier(error) && parameters.has(error.text)) messageParam = error.text;
       }
       ts.forEachChild(node, visit);
@@ -405,18 +459,30 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     visit(source);
   }
 
-  // (b) Direct `new Response(...)` bodies with a non-2xx status.
+  // (b) Every Response construction (`new Response`, `Response.json`,
+  // `Response.error`) with a status >= 400. A construction whose status cannot
+  // be resolved statically fails, unless it is the definition of a
+  // status-taking builder, whose call sites pass (c) decides.
   for (const [file, source] of sources) {
     const visit = (node: ts.Node): void => {
-      if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Response") {
-        const statuses = resolveNumbers(file, propertyOf(node.arguments?.[1], file, "status"));
-        if (statuses && statuses.every((value) => value >= 400)) {
-          const error = propertyOf(payloadOf(file, node.arguments?.[0]), file, "error");
+      if (ts.isNewExpression(node) || ts.isCallExpression(node)) {
+        const shape = responseShape(file, node);
+        if (shape) {
           const holder = enclosingFunction(node);
-          if (!(holder && error && ts.isIdentifier(error) && sinkParamOf(holder) === error.text)) {
-            const values = resolveString(file, error);
-            if (values) for (const value of values) recordCode(value, file, lineOf(source, node));
-            else recordUnresolved(file, lineOf(source, node), "unresolvable refusal body");
+          const parameters = holder ? parametersOf(holder) : new Set<string>();
+          const statuses = shape.status === undefined ? [shape.baseStatus] : resolveNumbers(file, shape.status);
+          if (!shape.statusKnown) {
+            recordUnresolved(file, lineOf(source, node), "unresolvable Response status");
+          } else if (statuses === null) {
+            const fromParameter = shape.status !== undefined && ts.isIdentifier(shape.status) && parameters.has(shape.status.text);
+            if (!fromParameter) recordUnresolved(file, lineOf(source, node), "unresolvable Response status");
+          } else if (statuses.some((value) => value >= 400)) {
+            const error = propertyOf(payloadOf(file, shape.body), file, "error");
+            if (!(holder && error && ts.isIdentifier(error) && sinkParamOf(holder) === error.text)) {
+              const values = resolveString(file, error);
+              if (values) for (const value of values) recordCode(value, file, lineOf(source, node));
+              else recordUnresolved(file, lineOf(source, node), "unresolvable refusal body");
+            }
           }
         }
       }
@@ -437,7 +503,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
           if (ts.isIdentifier(parameter.name) && parameter.name.text === statusParam) index = position;
         });
         const statuses = index >= 0 ? resolveNumbers(record.file, node.arguments[index]) : null;
-        if (statuses && statuses.every((value) => value >= 400)) {
+        if (statuses && statuses.some((value) => value >= 400)) {
           const body = node.arguments.find((argument) => {
             if (ts.isObjectLiteralExpression(argument)) return true;
             if (!ts.isIdentifier(argument)) return false;
@@ -447,6 +513,8 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
           const values = resolveString(record.file, propertyOf(body, record.file, "error"));
           if (values) for (const value of values) recordCode(value, record.file, lineOf(source, node));
           else recordUnresolved(record.file, lineOf(source, node), "unresolvable refusal body");
+        } else if (index >= 0 && statuses === null) {
+          recordUnresolved(record.file, lineOf(source, node), `unresolvable status argument: ${record.name}.${statusParam}`);
         }
       }
       ts.forEachChild(node, visit);
@@ -498,7 +566,7 @@ const OUT_OF_SCOPE = new Map<string, string>([
   ["soul_patch_table_unavailable", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
   ["soul_patch_conflict", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
   ["soul_patch_row_changed", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
-  ["soul_subject_occupied", "identity-change path: the replace PUT has no stored row, so its identity did not change"],
+  ["soul_subject_occupied", "identity-change path: a successful Soul DELETE leaves the replace PUT no stored row, so its identity did not change; after a failed DELETE (recorded, and the PUT still runs) a stored row with a different identity can reach this 409"],
   ["instruction_version_head_mismatch", "compare-and-set: the replace PUT supplies no expectedVersion"],
   ["instruction_version_append_failed", "commit-time version append failure, which the preflight cannot predict"],
   ["instruction_version_busy", "commit-time version lock contention, which the preflight cannot predict"],

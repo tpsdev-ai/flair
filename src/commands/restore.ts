@@ -12,7 +12,7 @@ import { loadApprovedArchive } from "../lib/backup-approval-store.js";
 import type { RestoreArchive } from "../lib/restore-archive.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { comparePreservedFields } from "../lib/restore-verify.js";
-import { refuseSkillAssignmentWrite } from "../lib/skill-assignment-preflight.js";
+import { refuseSkillAssignmentWrite, skillSourceIsFilesystemPath } from "../lib/skill-assignment-preflight.js";
 import { suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
 import { listAgentCandidates, requireLiveListing, type ApiCall } from "../rem/restore.js";
 import * as render from "../render.js";
@@ -218,14 +218,34 @@ addAdminPassOptions(
         );
       }
 
-      // The Soul PUT also refuses a skill-assignment row that
-      // refuseSkillAssignmentWrite refuses. The PUT normally runs after the
-      // live row's DELETE, so the skill rule sees no stored row (`existing`
-      // is undefined).
-      const writeRuleRefused = new Set<string>();
+      // The copied predicate's filesystem classification reads this CLI
+      // process's tmpdir/TMPDIR/TMP/TEMP and working directory, while the
+      // server uses its own environment (resources/skill-provenance.ts), so a
+      // filesystem-path source can be durable to one and not the other.
+      // Replace refuses every such row before any delete; a non-path source
+      // keeps the copied predicate, whose verdict does not depend on the
+      // environment.
+      const filesystemSourceRefused = new Set<string>();
       for (const row of writtenSouls) {
         const id = String(row.id);
         if (scopeRefused.has(id)) continue;
+        if (!skillSourceIsFilesystemPath(row)) continue;
+        filesystemSourceRefused.add(id);
+        refusals.push(
+          `Error: Soul ${row.id}: its skill-assignment source is a filesystem path, whose durability `
+            + "the server decides from its own environment; restore without --replace, or edit that "
+            + "row's source in the archive, then re-run; no rows were deleted",
+        );
+      }
+
+      // The Soul PUT also refuses a skill-assignment row that the copied
+      // predicate refuses. The PUT sees no stored row (`existing` is
+      // undefined) only after a successful Soul DELETE; a failed DELETE is
+      // recorded and the PUT still runs, so the stored row may still exist.
+      const writeRuleRefused = new Set<string>();
+      for (const row of writtenSouls) {
+        const id = String(row.id);
+        if (scopeRefused.has(id) || filesystemSourceRefused.has(id)) continue;
         const skillDenied = refuseSkillAssignmentWrite(row);
         if (!skillDenied) continue;
         writeRuleRefused.add(id);
@@ -246,7 +266,7 @@ addAdminPassOptions(
       const learnedCandidates = new Map<string, Map<string, string[]>>();
       for (const row of writtenSouls) {
         const id = String(row.id);
-        if (scopeRefused.has(id) || writeRuleRefused.has(id)) continue;
+        if (scopeRefused.has(id) || filesystemSourceRefused.has(id) || writeRuleRefused.has(id)) continue;
         if (typeof row.value !== "string" || row.value === "") continue;
         if (typeof row.agentId !== "string" || row.agentId === "") continue;
         let byValue = learnedCandidates.get(row.agentId);

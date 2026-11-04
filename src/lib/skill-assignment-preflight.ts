@@ -122,6 +122,17 @@ export function isDurableSkillSource(source: string): boolean {
   return !isNonDurableFilesystemPath(fsPath);
 }
 
+/**
+ * Whether `record` is a skill-assignment row whose source is a filesystem path.
+ * Parsing the source is environment-independent; the durability verdict for a
+ * filesystem path is not (it reads this process's temp roots).
+ */
+export function skillSourceIsFilesystemPath(record: any): boolean {
+  if (record.key !== SKILL_ASSIGNMENT_KEY) return false;
+  const source = skillSourceOf(record);
+  return source !== undefined && filesystemPathFromSkillSource(source) !== null;
+}
+
 export function registerSkillAssignment(input: SkillAssignmentInput): SkillRegistrationResult {
   const key = typeof input.key === "string" ? input.key : SKILL_ASSIGNMENT_KEY;
   if (key !== SKILL_ASSIGNMENT_KEY) return { ok: true };

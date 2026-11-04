@@ -5,9 +5,10 @@
  *
  * The replace preflight in src/commands/restore.ts does not repeat this
  * owner check: rowShapeProblem (src/lib/restore-archive.ts) refuses the row as
- * invalid at /souls/N/agentId, so no restore reaches a write. Each case runs
- * the real parseRestoreArchive and the real restore command with `fetch` as
- * its only write path; a refusal sends no request at all.
+ * invalid at /souls/N/agentId, so no restore reaches a write. Each variant below
+ * has one parser test and one command test; the command test runs the real
+ * restore command with `fetch` as its only write path, and a refusal sends no
+ * request at all.
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";

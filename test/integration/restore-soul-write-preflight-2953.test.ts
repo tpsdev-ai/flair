@@ -3,22 +3,19 @@
  * against a REAL Harper and the REAL built CLI (flair#2953).
  *
  * Replace deletes the archived ids before it writes them back, with no
- * rollback snapshot. Archive admission refuses a Soul row without a non-empty
- * `agentId`; the replace preflight refuses a skill-assignment row the server's
- * `refuseSkillAssignmentWrite` refuses. Either way the run stops with the live
- * rows untouched.
- *
- * Every case runs a real `flair backup`, seeds the target through the admin
- * ops route where the resource guards would refuse the seed, and runs the
- * built CLI under a throwaway HOME.
+ * rollback snapshot. The cases here seed through the admin ops route or a
+ * resource PUT, and cover these refusals: a skill-assignment row whose source
+ * is a filesystem path (including one under the server's TMPDIR only), a
+ * skill-assignment row with a non-boolean optOut, and a Soul row without a
+ * non-empty agentId. Each refusal stops the run with the live rows untouched.
  *
  * Build prerequisite: `bun run build && bun run build:cli`.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import nacl from "tweetnacl";
 import { nodeBin } from "../helpers/node-runtime";
@@ -29,6 +26,8 @@ const CLI = join(process.cwd(), "dist", "cli.js");
 const CREATED_AT = "2026-10-01T00:00:00.000Z";
 
 let harper: HarperInstance;
+/** A server-only temp root: not one of the CLI's temp roots. */
+let serverTempRoot = "";
 
 interface RunResult { code: number | null; stdout: string; stderr: string }
 
@@ -129,16 +128,18 @@ beforeAll(async () => {
     throw new Error("dist/cli.js is missing: run `bun run build:cli` before this file; `bun run build` alone does not build the CLI");
   }
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
-  harper = await startHarper();
+  serverTempRoot = mkdtempSync(join(homedir(), ".flair-server-tmp-2953-"));
+  harper = await startHarper({ serverEnv: { TMPDIR: serverTempRoot } });
   assertOwnInstance(harper);
 }, HARPER_START_BUDGET_MS);
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
+  if (serverTempRoot) rmSync(serverTempRoot, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
-describe("flair restore --replace decides every archived Soul write before deleting (flair#2953)", () => {
-  test("a skill-assignment row with a non-durable source is refused before any delete", async () => {
+describe("flair restore --replace refuses the Soul write rules it covers before deleting (flair#2953)", () => {
+  test("a skill-assignment row with a filesystem source is refused before any delete", async () => {
     const home = tempDir("flair-2953-real-home-");
     const agent = "skill-source-agent";
     const soulId = `${agent}:skill`;
@@ -161,8 +162,40 @@ describe("flair restore --replace decides every archived Soul write before delet
     expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
     assertNothingDeleted(restored);
     expect(restored.stderr).toContain(`Soul ${soulId}`);
-    expect(restored.stderr).toContain("skill_source_not_durable");
-    expect(restored.stderr).toContain("then re-run");
+    expect(restored.stderr).toContain("filesystem path");
+    expect(restored.stderr).toContain("restore without --replace");
+    expect(restored.stderr).toContain("no rows were deleted");
+    expect(await row("Soul", soulId)).toEqual(before);
+  }, 300_000);
+
+  test("a filesystem source under the server's TMPDIR only is refused before any delete", async () => {
+    const home = tempDir("flair-2953-real-home-");
+    const agent = "server-temp-agent";
+    const soulId = `${agent}:skill`;
+    const source = join(serverTempRoot, "skills", "a-skill", "SKILL.md");
+
+    await seedAgent(agent);
+    await op({
+      operation: "upsert",
+      table: "Soul",
+      records: [{
+        id: soulId, agentId: agent, key: "skill-assignment", value: "a-skill",
+        metadata: JSON.stringify({ source }), durability: "permanent", createdAt: CREATED_AT,
+      }],
+    });
+    const archive = await backup(home, "server-temp-source.json", agent);
+    const before = await row("Soul", soulId);
+
+    const restored = await runCli(["restore", archive, "--replace", "--url", harper.httpURL], home, {
+      FLAIR_ADMIN_PASS: harper.admin.password,
+      TMPDIR: "/tmp",
+    });
+
+    expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
+    assertNothingDeleted(restored);
+    expect(restored.stderr).toContain(`Soul ${soulId}`);
+    expect(restored.stderr).toContain("filesystem path");
+    expect(restored.stderr).toContain("restore without --replace");
     expect(restored.stderr).toContain("no rows were deleted");
     expect(await row("Soul", soulId)).toEqual(before);
   }, 300_000);
