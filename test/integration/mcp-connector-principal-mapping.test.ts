@@ -66,7 +66,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { provisionIdpIdentityMapping } from "../../src/lib/mcp-enable.ts";
 
 const REPO_ROOT = process.cwd();
@@ -214,7 +214,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (dataDir) await rm(dataDir, { recursive: true, force: true, maxRetries: 4 });
   if (appDir) await rm(appDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#1280 — connector principal mapping (distinct-by-default, formalized)", () => {
   test("GROUND TRUTH: the seeded Credential + Memory rows are what the contract needs them to be", async () => {
@@ -463,8 +463,10 @@ describe("flair#1280 — connector principal mapping (distinct-by-default, forma
   // Not a #1317 regression — #1317's supersede is only worth anything if
   // "revoked" is a real denial. This pins the resolver's fail-closed property
   // directly: the revoked credential is the ONLY credential for its subject, so
-  // "not returned first" cannot mask a pass. (Green on main too, by design —
-  // it is the security floor the supersede stands on.)
+  // "not returned first" cannot mask a pass. flair#2503 tightened it: a subject
+  // whose only row is non-active is now REFUSED by name (the credential, its
+  // stored status and the remedy), not skipped and not reported as an unmapped
+  // subject, and JIT provisioning does not run for it.
   test("(f) flair#1317 fail-closed — a REVOKED credential does not resolve AT ALL, even as its subject's only credential", async () => {
     const revokedSub = `pm-idp-revoked-${sfx}`;
     const mapping = await provisionIdpIdentityMapping({
@@ -488,9 +490,12 @@ describe("flair#1280 — connector principal mapping (distinct-by-default, forma
     expect(stored?.status, "fixture control: the credential really is revoked in storage").toBe("revoked");
     expect(stored?.principalId, "the row still names a real principal — so a resolver that ignored status WOULD resolve it").toBe(AGENT_B);
 
-    // THE ASSERTION: denied outright. Not de-prioritised — unresolvable.
+    // THE ASSERTION: denied outright, by name. Not de-prioritised, not resolved,
+    // and not treated as an unprovisioned subject.
     const rpc = await mcpCall(revokedSub, "bootstrap", {});
-    expect(rpc.error?.message, `a revoked credential must not resolve: ${JSON.stringify(rpc).slice(0, 300)}`)
-      .toContain("not a provisioned flair agent");
+    expect(rpc.result, `a revoked credential must not resolve: ${JSON.stringify(rpc).slice(0, 300)}`).toBeUndefined();
+    expect(rpc.error?.message, JSON.stringify(rpc)).toContain(`usable only when its status is "active"`);
+    expect(rpc.error?.message).toContain(`status "revoked"`);
+    expect(rpc.error?.message).toMatch(/re-link/);
   }, 120_000);
 });

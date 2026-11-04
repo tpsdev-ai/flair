@@ -35,7 +35,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 // The SHIPPED contract — the budgetCap tolerance is read straight off it, so this
 // fixture asserts the SAME invariant the conformance suite declares (and can
 // never drift from it).
@@ -126,7 +126,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (dataDir) await rm(dataDir, { recursive: true, force: true, maxRetries: 4 });
   if (appDir) await rm(appDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#1199 (0.44.11) — teammate-heavy bootstrap respects maxTokens on the /mcp path", () => {
   // Run the SAME budgetCap check at both a tight budget (2000 — where the

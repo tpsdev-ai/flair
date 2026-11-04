@@ -14,7 +14,7 @@ Different surfaces authenticate differently. The model in one place:
 | **OpenClaw / pi / Hermes plugins** | Ed25519 agent keys; Pi can use configured administrator Basic fallback | Ordinary signed agents: own writes; own and org-wide non-private reads | OpenClaw identity comes from host context; Pi requires `FLAIR_AGENT_ID`; Hermes defaults to `hermes`. |
 | **`n8n-nodes-flair`** | **Ed25519 with Agent Private Key selected**; deprecated administrator Basic | Ordinary signed agents: own writes; own and org-wide non-private reads | The deprecated **Admin Password** authenticates as the Harper administrator (whole instance, including `private`) when Agent Private Key is empty. |
 
-**The default, secure path is Ed25519 per-agent** (see below): each agent holds its own key and signs every request. For ordinary signed agents, this enforces write ownership: they can write only their own records and read their own plus other agents' non-private records. Administrator credentials and administrator agent roles have broader authority, including access to private records. The hard access boundary is the **federation edge** (a separate Flair instance / org), not reads within an instance. See [SECURITY.md](../SECURITY.md) for the full model. Use Ed25519 per-agent everywhere you can regardless — it's still what makes writes and identity trustworthy.
+**The default, secure path is Ed25519 per-agent** (see below): each agent holds its own key and signs every request. For ordinary signed agents, this enforces write ownership: they can write only their own records. Reads follow each resource's policy: Memory uses owner/visibility scope with an additional current-authority check for retained closed skills, while Credential records are owner-only for non-admin callers. Administrator credentials and administrator agent roles have broader authority, including access to private records. The hard access boundary is the **federation edge** (a separate Flair instance / org), not reads within an instance. See [SECURITY.md](../SECURITY.md) for the full model. Use Ed25519 per-agent everywhere you can regardless — it's still what makes writes and identity trustworthy.
 
 ### n8n: agent-key signing, with the admin password deprecated
 
@@ -133,13 +133,31 @@ rather than registration.
 
 ### Authorization Code Flow with PKCE
 
-Standard OAuth 2.1 authorization code flow:
+Standard OAuth 2.1 authorization code flow. The authorization endpoints and the
+authorization-code exchange require PKCE with the `S256` method only; the
+metadata's `code_challenge_methods_supported` lists `["S256"]` as the supported method:
 
-1. Client generates PKCE `code_verifier` and `code_challenge`
-2. Client redirects user to `GET /OAuthAuthorize?client_id=...&code_challenge=...&redirect_uri=...`
-3. User approves (or auto-approves for trusted clients)
-4. Flair redirects back with authorization code
-5. Client exchanges code for access token at `POST /OAuthToken`
+1. Client generates a PKCE `code_verifier` and its `S256` `code_challenge`
+   (`BASE64URL(SHA256(code_verifier))`, RFC 7636)
+2. Client redirects user to `GET /OAuthAuthorize?response_type=code&client_id=...&redirect_uri=...&code_challenge=...&code_challenge_method=S256`
+3. User approves or denies on the consent page
+4. Flair redirects back with an authorization code on approve, or with `error=access_denied` on deny
+5. Client exchanges code and `code_verifier` for access token at `POST /OAuthToken`
+
+After the earlier request, scope and client checks pass, `GET /OAuthAuthorize`
+(the consent page) and its Approve (`POST /OAuthAuthorize`) answer
+`400 invalid_request` when `code_challenge` is missing, empty or not exactly 43
+base64url characters (43 is the length of an unpadded
+`BASE64URL(SHA256(verifier))`), or when `code_challenge_method` is anything other than
+`S256`. The consent page is not rendered and no authorization code is stored. A
+Deny needs no PKCE fields: after redirect-URI validation passes, it redirects with `access_denied` and issues nothing (an invalid `redirect_uri` is refused with `400 invalid_redirect_uri` first).
+
+The authorization-code exchange at `POST /OAuthToken` redeems a code only with a
+`code_verifier` whose S256 hash equals the challenge stored with the code. A code
+stored without an S256 challenge is `400 invalid_grant`. For an otherwise valid,
+unused code carrying an S256 challenge, a missing verifier is
+`400 invalid_request` and a verifier that does not match is `400 invalid_grant`.
+A PKCE refusal does not redeem the code.
 
 ### Endpoints
 
@@ -289,6 +307,8 @@ flair principal add <principal-id> --admin
 
 `add` upserts the Agent row. If `~/.flair/keys/<principal-id>.key` already exists, that key is reused and is not regenerated. The upsert writes the record this command builds, including `role: admin` and `admin: true` when `--admin` is set. With `--admin` and no `--trust`, the trust tier written is `endorsed`.
 
+For a request signed with an agent key, the admin decision uses the Agent row the signature is verified against: the caller is an admin when that row has `role: admin`, or when its id is listed in the instance's `FLAIR_ADMIN_AGENTS` (comma-separated). The decision is made on every request and nothing is kept between requests, so a role change, a removed row, or a new row under the same id applies to the next request on every worker thread.
+
 ### CLI Reference
 
 | Command | Description |
@@ -308,7 +328,7 @@ The web admin at `/AdminDashboard` provides a UI for managing:
 - **Memory:** browse and search stored memories
 - **Instance:** federation status, peer connections
 
-Access requires admin-level authentication (Basic auth with the Harper admin password).
+Access goes through the `allowAdmin` gate. It admits an admin agent, and admits the `internal` verdict only for a call whose context carries the marker that `internalContext()` sets and no request headers; a call that reaches the gate with no context is refused.
 
 ## Soul authorship
 
@@ -345,18 +365,20 @@ Federation remains an authenticated instance-to-instance replication path and
 preserves the originating record; it does not reclassify a runtime request as
 an operator edit. Raw Harper OPS access remains administrator infrastructure.
 
-An operator write is refused if its value exactly matches stored Memory or
-MemoryCandidate text for the target agent, including legacy or untagged records.
+A learned-text refusal reports `soul_value_is_learned_content` for a non-empty
+exact value match with stored Memory or MemoryCandidate text for the target
+agent, including legacy or untagged records.
 The owner-scoped lookup prevents another agent from blocking edits by copying
 known Soul text into its own memories. Learned artifacts are not an operator-authored Soul source;
 claimed or missing provenance does not exempt them. Lookup failure aborts the
 write. This is an exact-match backstop, not semantic detection of paraphrases.
 Existing Soul records remain readable without a migration.
 
-The legacy `adk:` body-tag and stored-tag refusal remains a compatibility
-bridge until **2026-10-31** (`ADK_SOUL_REFUSE_KILL_DATE` in
-`resources/soul-adk-guard.ts`). Runtime denial itself never depends on
-connector names — Soul writes are deny-by-default, and Flair stamps
-`sourceClass` from the authenticated credential, not from a body field.
-Removal of the vendor-string bridge is #1540; do not grow a per-connector
-blacklist in Soul.
+Authorized Soul resource POST/PUT with a non-empty `scopeTag` or non-empty
+`tags` array in the request body, and authorized PATCH with those fields in
+the merged row after its stored-row checks, receive
+`soul_scope_fields_not_writable`. Runtime denial
+does not depend on connector names — Soul writes are deny-by-default, and Flair
+stamps `sourceClass` from verified Basic credentials or a deliberate internal
+context, never a body field.
+Do not grow a per-connector blacklist in Soul.

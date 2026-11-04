@@ -22,6 +22,7 @@ import {
 // semantic-retrieval-core.ts's module doc for the full boundary).
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
 import { retrievalMode } from "./bm25.js";
+import { embeddingSpaceVerdict, spaceGuardWarning, type EmbeddingSpaceVerdict } from "./embedding-space-guard.js";
 import { buildTrustBlock } from "./trust-block.js";
 import { projectRowsThroughPointers } from "./memory-host-source.js";
 import { formatHostSourceCitation } from "./host-source-citation.js";
@@ -43,6 +44,7 @@ import {
   type SkillManifestEntry,
 } from "./skill-manifest.js";
 import { localInstanceId } from "./instance-identity.js";
+import { RESERVED_EVENT_KINDS } from "./org-event-reserved.js";
 
 /**
  * POST /MemoryBootstrap
@@ -335,11 +337,8 @@ export class BootstrapMemories extends Resource {
       includeTrust = false,  // flair#744 slice 1 — opt-in per-memory trust block
       abstain = false,       // flair#744 slice 2 — opt-in task-relevance abstention
       // flair#1199 — org-event knobs. `maxEvents` caps how many events ship
-      // (default MAX_ORG_EVENTS); `includeEventDetail` gates the verbose per-event
-      // `detail` JSON (default OFF — mirrors the includeContext opt-in). By
-      // default bootstrap ships LEAN events (id/kind/summary/createdAt/targetIds/
-      // scope); `detail` restates the summary + migration internals and is pure
-      // bloat for a connector, so it is opt-in. Both are also counted against the
+      // (default MAX_ORG_EVENTS); `includeEventDetail` gates ordinary event
+      // `detail` JSON (default OFF). Events are counted against the
       // shared tokenBudget below (before #1199 the events array was assembled but
       // NEVER charged, so a maxTokens=4000 request serialized well past budget).
       maxEvents,
@@ -503,6 +502,17 @@ export class BootstrapMemories extends Resource {
     let eventWatermark: string | null = null;
     let eventsHasMore = false;
     let eventsRemaining = 0;
+    // flair#2448 item 3 (decision) — the STRUCTURED container deliberately
+    // carries NO host-source pointer: no `hostSource`, `hostSourceScope` or
+    // `hostSourceVisibility`. The pointer is a citation aid for the agent-facing
+    // RENDERED bootstrap (formatMemory's prose line); a non-admin structured
+    // consumer that needs the pointer reads the memory back through the gated
+    // Memory read (memory_get by id), which renders the pointer that caller may
+    // see. An admin Memory read takes no pointer join (Memory.ts), so it does not
+    // render the pointer either. The admin
+    // bootstrap's containers fall under the same rule (see hostSourceReader
+    // below). A test pins those three pointer fields absent here, so adding one
+    // is a deliberate change.
     const leanMemory = (m: any, section: string) => ({
       id: m.id,
       content: m.content,
@@ -557,6 +567,12 @@ export class BootstrapMemories extends Resource {
     // sections (OWN_SELECT) carry `agentId` and `instanceToken` only: their query
     // already excludes archived rows, and the reader is the author, so the author
     // outcome never reads `visibility`.
+    // flair#2448 item 3 (decision) — an admin bootstrap takes no join, and the
+    // structured containers are built without the pointer (see leanMemory), so
+    // neither the admin prose nor any structured container carries the host
+    // source. A non-admin structured consumer that needs the pointer reads the
+    // memory back through the gated Memory read (memory_get by id); an admin
+    // Memory read takes no pointer join, so it does not render the pointer.
     const hostSourceReader: string | undefined =
       authenticatedAgent && !callerIsAdmin ? authenticatedAgent : undefined;
     const pointerRenders = async (rows: readonly any[]): Promise<Map<string, any>> => {
@@ -857,6 +873,11 @@ export class BootstrapMemories extends Resource {
       : 0;
     tokenBudget -= taskReserve;
     let taskRetrievalHint: string | undefined;
+    // flair#2559 — the guard verdict when the task-relevant selection's
+    // embedding leg was refused (a non-uniform verdict). Declared here so the
+    // response tail can surface the state-named warning; set inside the
+    // task-relevant block below.
+    let spaceGuardVerdict: EmbeddingSpaceVerdict | null = null;
 
     // --- 2. Permanent memories ---
     // Own-scoped pushdown: `agentId==self` + `durability==permanent`, both
@@ -1098,7 +1119,6 @@ export class BootstrapMemories extends Resource {
     tokenBudget += taskReserve;
     if (currentTask && tokenBudget <= 0) taskRetrievalHint = "Task retrieval skipped: no content budget remains.";
     if (currentTask && tokenBudget > 0) {
-      // Resolve the mode ONCE here so the embedding guard and the core agree.
       // The bm25-only arm ranks on the lexical leg alone and needs NO query
       // embedding — gating it on one being available would skip the lexical
       // search entirely and lose task-relevant memories for no reason.
@@ -1112,8 +1132,26 @@ export class BootstrapMemories extends Resource {
         } catch {}
       }
 
-      if (mode !== "bm25-only" && !queryEmbedding) taskRetrievalHint = "Task retrieval skipped: query embedding unavailable.";
-      if (mode === "bm25-only" || queryEmbedding) {
+      // ─── Vector-space uniformity guard (flair#2559) ────────────────────
+      // Consult the SAME chokepoint SemanticSearch uses (embeddingSpaceVerdict()):
+      // when the store's model stamps are not KNOWN uniform in the current
+      // embedding space — a non-current stamp observed, or an unknown verdict
+      // (before the first scan, or after a scan error) — cosining the task
+      // embedding against stored vectors could cross spaces. Fails CLOSED: the
+      // embedding leg is refused and the selection degrades to its non-vector
+      // (lexical) path, with the SAME state-named warning SemanticSearch emits.
+      // Consulted only when a query embedding is available (outside bm25-only,
+      // which ignores any query embedding).
+      if (queryEmbedding) {
+        const verdict = await embeddingSpaceVerdict();
+        if (!verdict.uniform) {
+          queryEmbedding = null;
+          spaceGuardVerdict = verdict;
+        }
+      }
+
+      if (mode !== "bm25-only" && !queryEmbedding && !spaceGuardVerdict) taskRetrievalHint = "Task retrieval skipped: query embedding unavailable.";
+      if (mode === "bm25-only" || queryEmbedding || spaceGuardVerdict) {
         // flair#1207 — exclude own memories ALREADY placed via the authoritative
         // set (permanent + recent + predicted actually admitted). The old set was
         // built positionally (recent.filter by index) AND omitted `predicted`, so
@@ -1141,23 +1179,7 @@ export class BootstrapMemories extends Resource {
           queryEmbedding,
           conditions: [scope.condition, { attribute: "archived", comparator: "not_equal", value: true }],
           limit: candidatePoolK,
-          // flair#1246 — ONE RANKER, ONE SCALE: this pass now invokes the
-          // core in the SAME mode memory_search does (hybrid + q via the
-          // shared retrievalMode() selector, so the FLAIR_RETRIEVAL_MODE /
-          // FLAIR_HYBRID_RETRIEVAL kill-switch moves BOTH surfaces together —
-          // a split mode IS the #1246 bug). HNSW-only here was an accident of early code, and it
-          // made bootstrap's teammate picks diverge from search on the same
-          // store+query: a record whose task-relevance is LEXICAL (exact task
-          // terms in semantically-atypical prose) ranks BELOW bland-generic
-          // noise on pure cosine (measured at N=21: on-task 0.5656 vs noise
-          // 0.6086 — HNSW rank 6 while search fused it to rank 1), and at
-          // field scale (corpus >> candidatePoolK) that inversion becomes
-          // exclusion from the K-bounded pool entirely. The BM25 leg is the
-          // rescue: it admits the record at lexical rank 1 and union-RRF
-          // fusion carries it to the top, same as search. Perf (Kern-ratified
-          // trade): the BM25 corpus scan this adds to the bootstrap path is
-          // the same per-call scan every memory_search request already runs.
-          mode,
+          mode: spaceGuardVerdict && mode === "vector-only" ? "bm25-only" : mode,
           // The lexical leg — same query text the embedding was computed
           // from, so both legs rank the same question (parity with search,
           // where `q` drives BM25 and the keyword bump).
@@ -1483,7 +1505,7 @@ export class BootstrapMemories extends Resource {
         ...(seekTs
           ? { conditions: [{ attribute: "createdAt", comparator: "greater_than_equal", value: seekTs }] }
           : {}),
-        select: ["id", "kind", "summary", "detail", "targetIds", "createdAt", "expiresAt", "scope"],
+        select: ["id", "kind", "summary", "detail", "targetIds", "createdAt", "expiresAt", "scope", "refId"],
       }));
       for await (const event of recentEvents as AsyncIterable<any>) {
         if (!isCatchupEligible(event, { participantId: agentId, after: eventWatermark, since: sinceFloor })) continue;
@@ -1498,18 +1520,11 @@ export class BootstrapMemories extends Resource {
         eventResults.push(event);
       }
 
-      // flair#1200 — collapse byte-identical duplicate events before rendering.
-      // The same logical event can land in the table more than once (a producer
-      // that double-fires, or the same broadcast emitted from two paths); each
-      // physical row has a distinct id/createdAt (OrgEvent.post keys the id off
-      // a millisecond timestamp), so they aren't caught by primary-key upsert
-      // and render as exact dupes. Org-event slots are scarce, so dedup BEFORE
-      // admission — otherwise ~half the slots are wasted on duplicates. Keyed on
-      // the CONTENT (kind + summary + detail + targets), keeping the most-recent
-      // occurrence per signature.
+      // flair#1200 — dedup before admission, keeping the most recent occurrence.
+      // Instruction events use version refs; other events use content.
       const eventBySignature = new Map<string, any>();
       for (const evt of eventResults) {
-        const sig = JSON.stringify([
+        const sig = JSON.stringify(RESERVED_EVENT_KINDS.includes(evt.kind) ? ["instruction", evt.refId] : [
           evt.kind ?? "",
           evt.summary ?? "",
           evt.detail ?? "",
@@ -1524,7 +1539,7 @@ export class BootstrapMemories extends Resource {
       // NEVER charged: a maxTokens=4000 request serialized at 6286 (+57%), the
       // bulk being 10 events each shipping a `detail` JSON. Now each event's
       // REAL serialized cost (the structured object that actually ships — lean by
-      // default, `detail` only under includeEventDetail) is charged against the
+      // default, ordinary `detail` under includeEventDetail) is charged against the
       // remaining budget, so events respect maxTokens the same way every other
       // content section does. An event that doesn't fit is skipped, not silently
       // over-budget; smaller later events may still fit (hence continue, not
@@ -1539,18 +1554,17 @@ export class BootstrapMemories extends Resource {
           eventsRemaining++;
           continue;
         }
-        // The structured object a connector actually reads (flair#1206). Lean by
-        // default; `detail` (the verbose migration-internals/summary-restating
-        // JSON) only when explicitly requested. Optional fields are omitted when
-        // absent so the object stays compact.
+        // The structured object a connector actually reads (flair#1206).
+        const instructionEvent = RESERVED_EVENT_KINDS.includes(evt.kind);
         const structured: Record<string, unknown> = {
           id: evt.id,
           kind: evt.kind,
           summary: evt.summary,
-          ...(includeEventDetail && evt.detail != null ? { detail: evt.detail } : {}),
+          ...((includeEventDetail || instructionEvent) && evt.detail != null ? { detail: evt.detail } : {}),
           ...(Array.isArray(evt.targetIds) && evt.targetIds.length > 0 ? { targetIds: evt.targetIds } : {}),
           createdAt: evt.createdAt ?? null,
           ...(evt.scope != null ? { scope: evt.scope } : {}),
+          ...(instructionEvent && evt.refId != null ? { refId: evt.refId } : {}),
         };
         // Charge the REAL serialized cost of what ships (structured object on the
         // /mcp path; the prose line is a subset of it). This is the #1199 fix:
@@ -1834,6 +1848,10 @@ export class BootstrapMemories extends Resource {
       // never absent, so "empty" is distinguishable from "unsupported").
       agentId,
       ...(taskRetrievalHint ? { taskRetrievalHint } : {}),
+      // flair#2559 — the task-relevant selection refused its embedding leg for a
+      // non-uniform verdict; the warning names the guard state (same wording as
+      // SemanticSearch's `_warning`).
+      ...(spaceGuardVerdict ? { _warning: spaceGuardWarning(spaceGuardVerdict, "keyword") } : {}),
       directoryHint: directoryHint(),
       scope: scopeInfo,
       soul: soulMap,

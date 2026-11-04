@@ -23,7 +23,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 import { sealMessage, type MessageEnvelope } from "../../resources/relay-lib";
 
@@ -144,7 +144,7 @@ describe("Flair Relay S1 — de-elevated flair_agent can send/ack, and reads are
     }
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   // P0-2 (a+b): the whole S1 surface is admin-only without the grant + the
   // allowCreate overrides. A de-elevated agent's send must not 403.

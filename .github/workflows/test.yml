@@ -39,6 +39,81 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Jobs previously using ubuntu-latest now pin ubuntu-24.04.
+  # On this PR's first run, ubuntu-latest resolved to ubuntu-26.04:
+  # Playwright could not install Chromium, and three unit cases failed.
+  # flair#2540 — share one build with pack-smoke and dist-esm-guard.
+  build:
+    name: "Build (shared dist)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - name: Cache bun install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-cache-${{ runner.os }}-
+      - name: Cache node_modules
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            node-modules-${{ runner.os }}-
+      - run: sfw bun install --frozen-lockfile
+      - name: Build dist (resources + CLI)
+        run: bun run build && bun run build:cli
+      - name: Build workspace packages
+        run: |
+          for pkg in flair-client flair-tool-descriptors flair-mcp langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench; do
+            echo "::group::build $pkg"
+            (cd "packages/$pkg" && bun run build)
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flair-dist
+          path: |
+            dist/
+            packages/*/dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # flair#2589 — the macOS launchd lane only runs the diagnostics redaction
+  # check when the lane itself fails, so a scanner that cannot load (or a
+  # regression the existing unit tests do not catch) stays invisible across a
+  # long green stretch. This runs `--check` on committed fixtures on every PR
+  # targeting main: a redacted plist must pass, and a credential key with a
+  # non-REDACTED value must be reported as a finding.
+  redaction-fixtures:
+    name: "Launchd diagnostics redaction: fixture check"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - name: Run the redaction check on fixtures (flair#2589)
+        run: bash scripts/ci/check-redaction-fixtures.sh
+
   test-unit:
     # Matrixed name (#672): GitHub Actions always suffixes a
     # matrixed job's display name/check context with the matrix values (e.g.
@@ -46,17 +121,8 @@ jobs:
     # branch-protection required check expects — see the `test-unit-gate` job
     # below, which reports that fixed context instead.
     name: "Unit Tests (node ${{ matrix.node-version }}, shard ${{ matrix.shard }})"
-    runs-on: ubuntu-latest
-    # No job timeout here either (ops-fumh): this job's `sfw bun install` below
-    # hung 16+ min on 2026-07-04, blocking merge on a required check. 15 min
-    # bounds a hung install/runner. The unit lane takes 401-510 s of it
-    # (measured 2026-10-02). scripts/test-unit.ts derives its keep-going lane
-    # budget from this value (CI_JOB_LIMIT_MS minus a 120 s reserve for the
-    # job's other steps, flair#2030/#2224); its per-step limits are fixed values
-    # chosen from measured step times. The summary and guards are expected to
-    # print before the job is cancelled while the other steps stay in the reserve.
-    # Change the two together; unit-runner.test.ts fails if they disagree.
-    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
     strategy:
       # fail-fast: false — a failure on one Node major must not cancel the
       # others still running; we want to see all three results, not just the
@@ -69,7 +135,13 @@ jobs:
         # 24 = Active LTS (EOL 2028-04), 26 = Current (released 2026-05, becomes
         # Active LTS 2026-10). Node 25 was Current-only and reached EOL 2026-06-01
         # when 26 superseded it — deliberately excluded, it's already dead upstream.
-        node-version: ["22", "24", "26"]
+        #
+        # flair#2540 — a PR push exercises the primary Node (22) only; the full
+        # 22/24/26 matrix runs on a push to main and on workflow_dispatch.
+        # The automatic release path checks main CI before tagging. The required
+        # "Unit Tests" context is the aggregate gate below, so the per-leg
+        # names can change without touching branch protection.
+        node-version: ${{ github.event_name == 'pull_request' && fromJSON('["22"]') || fromJSON('["22", "24", "26"]') }}
         # flair#2311: the shared unit lane is split into shards by scripts/ci/
         # lane-shards.mjs (LANE_SHARDS); each leg below runs one shard, so a
         # leg runs part of the lane instead of all of it. lane-shards.test.ts
@@ -78,6 +150,8 @@ jobs:
         # "Unit Tests" gate (test-unit-gate) below.
         shard: [1, 2]
     steps:
+      - name: "Record lane timing reference"
+        run: echo "FLAIR_UNIT_JOB_START=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - name: "Check for local file: deps"
         run: |
@@ -125,12 +199,13 @@ jobs:
         # dist-tag pin here rots the listing (flair#1307: 0.44.13 while
         # npm latest was 0.46.0). Unpinning is the policy.
         run: node scripts/check-plugin-mcp-unpinned.mjs
-      - name: "Check production dep bake time (≥7 days)"
+      - name: "Check dependency bake time (≥7 days)"
         # Supply-chain bake-time guard. See docs/supply-chain-policy.md.
-        # Tunable via FLAIR_DEP_MIN_AGE_DAYS env. Workspace-internal deps exempt.
-        # --ci marks THIS invocation as the gate: it refuses to run if
-        # FLAIR_CHECK_DEP_AGES_ROOT is set (that variable is for the tests,
-        # which point the gate at a fixture repo without --ci).
+        # Workspace-internal deps exempt. --ci marks THIS invocation as the gate:
+        # it refuses to run if FLAIR_CHECK_DEP_AGES_ROOT (for the tests, which
+        # point the gate at a fixture repo without --ci), FLAIR_DEP_MIN_AGE_DAYS
+        # or FLAIR_DEP_KEEP_CURRENT is set, or if FLAIR_NPM_REGISTRY names a host
+        # other than loopback (127.0.0.1, localhost or [::1]).
         run: node scripts/check-dep-ages.mjs --ci
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
@@ -145,7 +220,9 @@ jobs:
           key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: |
             bun-cache-${{ runner.os }}-
-      - run: sfw bun install --frozen-lockfile
+      - name: "Install dependencies"
+        timeout-minutes: 5
+        run: sfw bun install --frozen-lockfile
       - name: "Check workspace peer deps resolve within their declared ranges"
         # `bun install --frozen-lockfile` refuses only a manifest/lockfile
         # mismatch; it does NOT check that a RESOLVED peer satisfies the range a
@@ -207,7 +284,7 @@ jobs:
   test-unit-gate:
     name: Unit Tests
     needs: [test-unit, test-darwin-gated]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: always()
     steps:
       - name: Require all Node-version legs and the darwin-gated lane to pass
@@ -233,7 +310,7 @@ jobs:
     # release/v* PRs only; needs just node + npm, so no install step.
     name: First-publish preflight
     if: startsWith(github.head_ref, 'release/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -321,6 +398,25 @@ jobs:
         # Bounded so a stalled download cannot spend the case budgets above.
         timeout-minutes: 3
         run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+      # flair#2824: on a fresh macOS runner, ggml's Metal library load
+      # (ggml_metal_library_init) took 40 s once, inside the first test Harper's
+      # 60 s readiness wait, which spans its embedding engine's boot. This step
+      # loads the engine once, before the steps below start their test Harpers,
+      # so the job's first Metal library load happens here.
+      # Measured 2026-11-02 on fresh macOS runners (#2867, three runs each): the first
+      # test Harper's Metal load had a median of 0.018 s with this step and 13.662 s
+      # without. The load moves here, outside the readiness wait; it does not disappear.
+      - name: Load the embedding engine once before the test Harpers (flair#2824)
+        timeout-minutes: 5
+        run: |
+          node --input-type=module <<'JS'
+          import { init, dispose } from "harper-fabric-embeddings";
+          const started = Date.now();
+          await init({ modelPath: `${process.env.GITHUB_WORKSPACE}/models/nomic-embed-text-v1.5.Q4_K_M.gguf`, gpuLayers: 99 });
+          const loadedMs = Date.now() - started;
+          await dispose();
+          console.log(`Metal warm-up: the embedding engine loaded in ${loadedMs}ms`);
+          JS
       - name: using-flair seed acceptance (flair#2141)
         run: bun test test/integration/using-flair-seed-2141.test.ts test/integration/using-flair-seed-reserved-2141.test.ts
       - name: Real-launchd doctor --fix integration (flair#1581)
@@ -355,7 +451,7 @@ jobs:
   launchd-lane-changes:
     name: "launchd adopt-then-upgrade: changed-files gate"
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       run: ${{ steps.filter.outputs.run }}
@@ -503,7 +599,7 @@ jobs:
 
   test-integration:
     name: Integration Tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Sharded (#2149, #2131). Before: ONE job ran the whole suite ~16-26 min
     # against a 30-minute cap — main dfe01f0d 16m16s (`Run integration tests`
     # alone 13m45s), three other recent runs 23m2s / 24m38s / 26m1s, and PR
@@ -512,17 +608,29 @@ jobs:
     # 11m44s — every shard under half the old 30-minute cap. A first run at cap
     # 15 cut shard 2 during its Docker step (its `Run integration tests` step
     # alone 10m17s) and the gate failed, as designed, because a cancelled shard
-    # is not a success; the cap below is 25. Each shard runs the same
-    # steps on its share of test/integration/*.test.ts
+    # is not a success; the cap was then 25. By 2026-10-13 main's shards ran
+    # 15-25 min (ca9af70e: 3/3 24m50s, 2/3 21m20s) and PR runs of shard 3 hit
+    # that cap, so the cap was raised to 40 until the shards were rebalanced
+    # (#2556). After the rebalance the shards ran 14-23 min on the three main
+    # runs with completed integration jobs (3b040f1e, 6ab0d351, d6463b1e); the
+    # slowest, shard 1/3, was 22m33s, so the prior cap was 34 — 1.5x the slowest
+    # measured shard. On 2026-11-02 the last 20 runs with completed shards took
+    # 18-33 min (most 27-33), and PR runs 41427491902 and 41463469623 had shard
+    # 4/4 cancelled at the 34-minute cap with no test failure reported before
+    # cancellation, so that shard's full runtime is at least 34 min and was not
+    # measured. The cap below is 1.5x the old 34-minute cap = 51; re-check it
+    # against the first completed runtime under it.
+    # Each shard runs the same steps on its share of
+    # test/integration/*.test.ts
     # (scripts/ci/integration-shards.mjs), and the final job named
     # `Integration Tests` (below) requires every shard to succeed.
-    timeout-minutes: 25
+    timeout-minutes: 51
     strategy:
       # fail-fast: false — one failed shard does not cancel the others; the
       # aggregate job below fails unless each one succeeded.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -777,7 +885,7 @@ jobs:
   test-integration-gate:
     name: Integration Tests
     needs: [test-integration]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: always()
     timeout-minutes: 5
     steps:
@@ -791,7 +899,7 @@ jobs:
 
   test-integration-heavy:
     name: Integration Tests (heavy)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # flair#1290 — bulk-embedding integration files live in their OWN job.
     # The large-store conformance suite's dominant cost is CPU embedding
     # generation for a 251-record corpus: measured 253.4s on this runner
@@ -901,7 +1009,7 @@ jobs:
     #   Gemini/Google or any other model key belongs in CI — so that one test
     #   skips visibly regardless of runner class. All other quickstart cases run.
     name: adk-flair Python tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Generous headroom: the unit gate is ~1 min, but the live step below builds
     # the repo + fetches the embedding model + attempts an ephemeral Harper boot
     # whose warm-up carries a 120s floor-detection deadline before it skips.
@@ -985,12 +1093,18 @@ jobs:
     # 3x cost buys real, high-signal coverage rather than padding the matrix
     # for its own sake.
     name: "Install-from-tarball smoke (node ${{ matrix.node-version }})"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
+    needs: build
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["22", "24", "26"]
+        # flair#2554 — a non-release PR push exercises the primary Node (22)
+        # only; the full 22/24/26 matrix runs on a push to main and on a
+        # release (`release/v*`) PR. The "Install-from-tarball smoke" context is
+        # re-emitted by pack-smoke-gate, so per-leg names can change without
+        # touching it.
+        node-version: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/v') && fromJSON('["22"]') || fromJSON('["22", "24", "26"]') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -1005,23 +1119,27 @@ jobs:
       - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
         with:
           mode: firewall-free
-      - name: Cache bun install
+      - name: Cache node_modules
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: ~/.bun/install/cache
-          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: |
-            bun-cache-${{ runner.os }}-
+            node-modules-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
-      - run: bun run build && bun run build:cli
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: flair-dist
       - name: Verify dist/ modules import cleanly (dev surface)
         run: node scripts/check-imports.mjs dist
       - name: Pack
         id: pack
         run: |
           # --ignore-scripts: flair#1683's root `prepack` re-vendors + rebuilds so a
-          # bare `npm pack` cannot ship stale dist. This lane packs the dist it just
-          # built and import-checked above (its point is the install surface, not the
+          # bare `npm pack` cannot ship stale dist. This lane packs the downloaded,
+          # import-checked dist (its point is the install surface, not the
           # rebuild), so an extra build per matrix leg buys nothing. The install-weight
           # lane packs WITHOUT the flag — that is where prepack is exercised in CI.
           npm pack --ignore-scripts
@@ -1056,7 +1174,7 @@ jobs:
 
           # Post-init status sanity
           STATUS=$($FLAIR status --port $PORT); echo "$STATUS"
-          echo "$STATUS" | grep -q "running" || { echo "FAIL: not running after init"; exit 1; }
+          grep -q "running" <<< "$STATUS" || { echo "FAIL: not running after init"; exit 1; }
 
           # ── flair#654 HARD GATE: authorizeLocal now defaults to false ──────────
           # Proves the bootstrap-ordering invariant K&S required: the admin
@@ -1097,11 +1215,11 @@ jobs:
           INIT_REMOTE_OUT=$($FLAIR init --target "http://127.0.0.1:$PORT" --remote --force \
             --admin-pass "$FLAIR_ADMIN_PASS" --agent-id smoke-hub-agent 2>&1)
           echo "$INIT_REMOTE_OUT"
-          echo "$INIT_REMOTE_OUT" | grep -q "registered on remote instance" || {
+          grep -q "registered on remote instance" <<< "$INIT_REMOTE_OUT" || {
             echo "FAIL: federation-seed init did not report the agent seed succeeding"
             exit 1
           }
-          echo "$INIT_REMOTE_OUT" | grep -q "Federation Instance created" || {
+          grep -q "Federation Instance created" <<< "$INIT_REMOTE_OUT" || {
             echo "FAIL: federation-seed init did not report the FederationInstance seed succeeding"
             exit 1
           }
@@ -1216,7 +1334,7 @@ jobs:
           $FLAIR memory add --agent smoke --content "pack-smoke-roundtrip-marker-unique"
           SEARCH=$($FLAIR memory search --agent smoke --q "pack-smoke-roundtrip-marker-unique")
           echo "$SEARCH"
-          echo "$SEARCH" | grep -q "pack-smoke-roundtrip-marker-unique" || {
+          grep -q "pack-smoke-roundtrip-marker-unique" <<< "$SEARCH" || {
             echo "FAIL: memory write/search round-trip did not return the marker"
             exit 1
           }
@@ -1282,7 +1400,7 @@ jobs:
     # cannot block a merge.
     name: Install-from-tarball smoke
     needs: pack-smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: always()
     steps:
       - name: Require all Node-version legs to pass
@@ -1308,7 +1426,7 @@ jobs:
     # script cannot run (no tarball, no CLI, unresolved --version) it exits 2
     # (DID NOT RUN), not 0. Required-check name: "MCP client wiring".
     name: MCP client wiring
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -1386,7 +1504,7 @@ jobs:
     # empty tree) the script exits 2 (DID NOT RUN), not 0. Required-check
     # name: "Install-weight budget".
     name: Install-weight budget
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -1465,7 +1583,7 @@ jobs:
 
   upgrade-smoke:
     name: Upgrade from npm-stable
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -1559,7 +1677,7 @@ jobs:
           $BASE_FLAIR memory add --agent upgrade --content "upgrade-smoke-pre-marker"
 
           PRE=$($BASE_FLAIR memory search --agent upgrade --q "upgrade-smoke-pre-marker")
-          echo "$PRE" | grep -q "upgrade-smoke-pre-marker" || {
+          grep -q "upgrade-smoke-pre-marker" <<< "$PRE" || {
             echo "FAIL: baseline write/search didn't work — setup broken, not an upgrade regression"
             exit 1
           }
@@ -1669,7 +1787,7 @@ jobs:
           }
 
           MIGRATION_RECALL=$($FLAIR memory search --agent "$RESERVED_TEST_AGENT_ID" --admin-pass "$FLAIR_ADMIN_PASS" --q "upgrade-lane-migration-seed-row-0")
-          echo "$MIGRATION_RECALL" | grep -q "upgrade-lane-migration-seed-row-0" || {
+          grep -q "upgrade-lane-migration-seed-row-0" <<< "$MIGRATION_RECALL" || {
             echo "FAIL: migration-seeded ground truth not retrievable by search post-migration (recall parity broken)"
             exit 1
           }
@@ -1684,7 +1802,7 @@ jobs:
           # 5. Pre-upgrade memory must still be readable (the core regression guard)
           POST=$($FLAIR memory search --agent upgrade --q "upgrade-smoke-pre-marker")
           echo "$POST"
-          echo "$POST" | grep -q "upgrade-smoke-pre-marker" || {
+          grep -q "upgrade-smoke-pre-marker" <<< "$POST" || {
             echo "FAIL: pre-upgrade memory lost upgrading $BASELINE → $NEW"
             exit 1
           }
@@ -1692,7 +1810,7 @@ jobs:
           # 6. New writes must work post-upgrade (schema didn't silently break writes)
           $FLAIR memory add --agent upgrade --content "upgrade-smoke-post-marker"
           POST_NEW=$($FLAIR memory search --agent upgrade --q "upgrade-smoke-post-marker")
-          echo "$POST_NEW" | grep -q "upgrade-smoke-post-marker" || {
+          grep -q "upgrade-smoke-post-marker" <<< "$POST_NEW" || {
             echo "FAIL: post-upgrade write didn't round-trip"
             exit 1
           }
@@ -1718,11 +1836,16 @@ jobs:
     # unpinned/removed entirely, since nothing needs it) is a reasonable
     # follow-up — flagging for reviewer call rather than silently deciding.
     name: "Type Check (node ${{ matrix.node-version }})"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["22", "24", "26"]
+        # flair#2554 — a non-release PR push exercises the primary Node (22)
+        # only; the full 22/24/26 matrix runs on a push to main and on a
+        # release (`release/v*`) PR. The required "Type Check" context is
+        # re-emitted by typecheck-gate, so per-leg names can change without
+        # touching it.
+        node-version: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/v') && fromJSON('["22"]') || fromJSON('["22", "24", "26"]') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -1754,7 +1877,7 @@ jobs:
   typecheck-gate:
     name: Type Check
     needs: typecheck
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: always()
     steps:
       - name: Require all Node-version legs to pass
@@ -1767,7 +1890,7 @@ jobs:
 
   typecheck-strict:
     name: "Type Check (strict)"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -1889,7 +2012,7 @@ jobs:
 
   audit:
     name: Dependency Audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # This job was the ONLY one in this file without a job timeout, so when the
     # Socket firewall (`sfw`) install below hung (ops-fumh, seen 2026-07-04) it
     # ran 33+ min with nothing to cancel it, indefinitely blocking merge on a
@@ -1900,6 +2023,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          # The allowlist gate searches this file's history across renames.
+          # It refuses a shallow checkout.
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
           bun-version: "1.3.10"
@@ -1985,13 +2112,47 @@ jobs:
             npm init -y > /dev/null
             npm install --ignore-scripts --omit=dev "$GITHUB_WORKSPACE/packages/adk-flair-js/$ADK_TGZ"
           )
+          # flair#2757 — the same observation for flair-mcp, openclaw-flair,
+          # pi-flair and n8n-nodes-flair. Each depends on @tpsdev-ai/flair-client
+          # at the release version, which a release PR sets before that version
+          # is on the registry, so the packed client is installed alongside.
+          # Packing needs no build here: a build does not change a package's
+          # dependencies. openclaw-flair and n8n-nodes-flair declare their host
+          # application as peer dependencies; --legacy-peer-deps leaves peer
+          # dependencies, and so the host's tree, out of their install.
+          PACKED=$(mktemp -d)
+          pack() { (cd "$GITHUB_WORKSPACE/packages/$1" && npm pack --silent --ignore-scripts --pack-destination "$PACKED"); }
+          consumer_install() {
+            (
+              cd "$1"
+              npm init -y > /dev/null
+              npm install --ignore-scripts --omit=dev "${@:2}"
+            )
+          }
+          CLIENT_TGZ="$PACKED/$(pack flair-client)"
+          MCP_TGZ="$PACKED/$(pack flair-mcp)"
+          OPENCLAW_TGZ="$PACKED/$(pack openclaw-flair)"
+          PI_TGZ="$PACKED/$(pack pi-flair)"
+          N8N_TGZ="$PACKED/$(pack n8n-nodes-flair)"
+          MCP_PREFIX=$(mktemp -d)
+          OPENCLAW_PREFIX=$(mktemp -d)
+          PI_PREFIX=$(mktemp -d)
+          N8N_PREFIX=$(mktemp -d)
+          consumer_install "$MCP_PREFIX" "$CLIENT_TGZ" "$MCP_TGZ"
+          consumer_install "$OPENCLAW_PREFIX" --legacy-peer-deps "$CLIENT_TGZ" "$OPENCLAW_TGZ"
+          consumer_install "$PI_PREFIX" "$CLIENT_TGZ" "$PI_TGZ"
+          consumer_install "$N8N_PREFIX" --legacy-peer-deps "$CLIENT_TGZ" "$N8N_TGZ"
           bun "$GITHUB_WORKSPACE/scripts/audit-gate.mjs" --explain \
             --npm-install-prefix "$PREFIX" \
-            --adk-npm-install-prefix "$ADK_PREFIX"
+            --adk-npm-install-prefix "$ADK_PREFIX" \
+            --mcp-npm-install-prefix "$MCP_PREFIX" \
+            --openclaw-npm-install-prefix "$OPENCLAW_PREFIX" \
+            --pi-npm-install-prefix "$PI_PREFIX" \
+            --n8n-npm-install-prefix "$N8N_PREFIX"
 
   sast-semgrep:
     name: Semgrep SAST
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - run: python3 -m pip install semgrep
@@ -2005,7 +2166,7 @@ jobs:
 
   sast-codeql:
     name: CodeQL SAST
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       security-events: write
     steps:
@@ -2020,7 +2181,7 @@ jobs:
 
   doclint:
     name: "Doc/Code Lint: implementation-term leaks"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -2061,7 +2222,7 @@ jobs:
 
   docs-freshness:
     name: "Doc/Code Lint: docs-freshness gate"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # fetch-depth: 0 pulls full history + tags so the CHANGELOG check can count
       # feat/fix commits since the last v* tag. The other checks are file-only.
@@ -2097,15 +2258,31 @@ jobs:
   # the deadline, by name, with its output — never by bun's per-test timer. It
   # sees node `child_process` and `Bun.spawn`/`Bun.spawnSync` (flair#1825). The
   # exceptions live in a reviewed baseline file, not an in-script allow-list; the
-  # baseline can only shrink, and there is no skip flag.
+  # gate rejects newly added exception keys, and there is no skip flag.
   cli-spawn-budgets:
     name: "Doc/Code Lint: CLI spawn budgets"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - name: Cache bun install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-cache-${{ runner.os }}-
+      # The gate parses each test file with the lockfile's `typescript`
+      # (flair#2774), so the dependencies are installed before it runs.
+      - run: sfw bun install --frozen-lockfile
       - name: Fetch the base ref for the spawn-budget gate
         # Fetch BOTH the base sha and the seed anchor, with history, so
         # `git merge-base --is-ancestor <anchor> <base>` can decide. A
@@ -2129,15 +2306,16 @@ jobs:
     # calls require() while the build has top-level await makes Node throw
     # ERR_AMBIGUOUS_MODULE_SYNTAX at runtime. The source suite runs under bun,
     # which tolerates require in ESM, so #1653 shipped a broken `flair session
-    # snapshot list` while CI stayed green. This job builds the real output that
-    # ships and scans every emitted module, naming the file + line.
+    # snapshot list` while CI stayed green. This job scans emitted output,
+    # naming the file + line.
     #
     # BLOCKING. Do not add `continue-on-error`, `|| true` or `|| echo` here — a
     # check that cannot go red is not a control. If dist/ is missing or empty
     # the script exits non-zero rather than passing vacuously.
     name: "Dist ESM: require() + top-level await guard"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    needs: build
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -2149,17 +2327,18 @@ jobs:
       - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
         with:
           mode: firewall-free
-      - name: Cache bun install
+      - name: Cache node_modules
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: ~/.bun/install/cache
-          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: |
-            bun-cache-${{ runner.os }}-
+            node-modules-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
-      # Build the exact output that ships: dist/resources/** via `build`, and
-      # dist/cli.js + dist/commands/** via `build:cli`.
-      - name: Build dist
-        run: bun run build && bun run build:cli
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: flair-dist
       - name: Fail if any emitted ESM module uses require() with top-level await
         run: node scripts/check-dist-esm-require.mjs dist

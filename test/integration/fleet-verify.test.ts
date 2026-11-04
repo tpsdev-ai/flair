@@ -21,7 +21,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { sweepFleet, FLEET_EXIT_OK, FLEET_EXIT_PEER_SKEW } from "../../src/fleet-verify";
 
 let harper: HarperInstance;
@@ -40,7 +40,7 @@ describe("sweepFleet against a real spawned Harper — single origin, zero peers
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("reports the origin row correctly with the real running version, zero peers, exit OK", async () => {
     const result = await sweepFleet({

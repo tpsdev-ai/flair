@@ -128,6 +128,80 @@ are the guarantees it keeps, each with the test that proves it in
   only): two concurrent runs of one agent share neither the session cap nor the
   dedup set`; `R10: interleaved agents, driven through the host's turn order,
   sign as themselves`.
+- **While the plugin holds a session's state, a session-keyed `agent_end` scan
+  treats a message as already seen only if the session records its identity, and
+  the identity cap does not drop a recorded identity the current snapshot
+  holds.** Timestamp ordering never suppresses a message — `flair#2560
+  (mutation: a timestamp
+  mark): a new message is captured whether its timestamp ties with, precedes or
+  follows the session's earlier messages, and a later non-capturable message
+  hides none`. The identity hashes the role, the JSON content and the timestamp
+  with its type, so messages whose encoded fields differ have different
+  identities, barring digest collisions — `flair#2560 (mutation: untyped
+  timestamp): a numeric and a string timestamp give different identities`. While
+  the state is held, a session's recorded identities number at most
+  max(`sessionMessageCap` (4,096), D), where D is the number of distinct
+  identities in the last snapshot it accounted for; disabled callbacks do not
+  update it. Deferred identities (below) hold only that snapshot's identities,
+  so at most D. The cap evicts only identities that have left the snapshot, so a
+  recorded message that stays in the snapshot with unchanged encoded identity
+  fields is not offered again; one that
+  left the snapshot can be evicted and, if it reappears, captured again —
+  `flair#2560 (mutation: a live identity is evicted): a snapshot over
+  sessionMessageCap distinct messages, across several runs: the message each run
+  appends is captured and nothing earlier is captured again`; `flair#2560
+  (mutation: deferred is never pruned): entries stay within
+  max(sessionMessageCap, D) and deferred holds only last-accounted-snapshot identities`.
+  A message re-emitted with a different timestamp, as the CLI runner's fresh
+  current-turn timestamp can be, has a new identity and can be offered again,
+  barring digest collisions.
+  The scan walks the supplied snapshot from its last position, so a run's
+  capture cap (`autoCaptureMaxPerSession`) is spent on the last eligible
+  positions; that is position, not proof of which run added a message. In a warm
+  session a message the cap leaves out stays unseen (deferred) and remains
+  eligible for a later capture scan unless settled, subject to its gates and cap, and
+  if a later scan captures it, the row carries that later run's id only when it
+  passes the `hostSource` grammar; otherwise it lands without that field, with
+  a rate-limited warning. Another cap can leave it unseen. A refused scan settles
+  its occurrences, including identical copies: their origin is ambiguous. Preserving deferred messages
+  while excluding refused-run copies fully needs a stable host-owned message
+  identity; that is a follow-up.
+  Same-run excerpt dedup settles it without a new write. A failure before the
+  write, a write that starts and then fails, or a write whose run is aborted
+  while it is in flight records it as skipped if the scan continues past its
+  stop and disable check, because an aborted write may still have reached Flair —
+  `flair#2560 (mutation: oldest first; mutation: a capped message recorded as
+  seen): a run's cap is spent from the last snapshot position, and the message
+  it left out is captured by the next capture scan`; `flair#2560: a refused
+  scan settles a message an earlier cap deferred`; `flair#2560: abort before a
+  deferred message's write starts settles it`; `flair#2560
+  (mutation: a discarded write leaves the message deferred): when a run is
+  aborted while a deferred message's own write is in flight, the message is
+  recorded as skipped and not captured again`. Another limit is a session's first
+  scan in this process: for a new session, after its state is evicted past
+  `sessionStateCap`, or after a gateway restart (the state is held in process
+  memory and cleared at `gateway_stop`). That scan cannot tell which messages a
+  run added, so it offers the last eligible positions up to the run's cap and
+  records the rest of the identifiable messages as seen, including any the run
+  added beyond the cap. A message captured before can be captured again, if it
+  passes the trigger rule, the run's dedup and cap, and its write succeeds; it
+  then lands as a second row. The row carries the current run's id only when
+  it passes the `hostSource` grammar; otherwise it lands without that field,
+  with a rate-limited warning — `flair#2560 cold start (mutation: a cold scan
+  leaves capped messages unseen): a session's first scan captures at most the run's cap, from the last eligible position, and
+  records the rest as seen`. Flair's near-duplicate check can flag such a write
+  `deduplicated`, naming a near-matching row (`matchedId`); it does not suppress
+  the write. The plugin counts flagged auto-captures since it registered and
+  logs a line at the 1st, 2nd, 4th, … one: no line for n = 0 flagged captures,
+  and floor(log2 n) + 1 lines for n ≥ 1 — `flair#2560 (mutation: the
+  deduplicated flag is ignored): a capture Flair flags deduplicated is counted,
+  with a log line at the 1st, 2nd, 4th, ... one`; `flair#2560 (mutation: a
+  32-bit power-of-two check): the repeat log points are exactly the powers of
+  two, for any count`; against a real Flair component, `flair#2560 cold start
+  (mutation: the deduplicated flag is ignored): after gateway_stop and a new
+  registration, a re-delivered message is captured again; Flair stores the
+  repeat as a second row, flags it deduplicated, and the plugin counts it` in
+  `test/integration/agent-end-session-capture-2560.test.ts`.
 - **Memory is bounded.** The run map holds at most `capacityCap` records, plus at
   most `abortOverflowCap` records for aborted runs that were never admitted, and a
   new run is refused rather than evicting a live record — `(a) repeated aborts of
@@ -172,7 +246,9 @@ NFC-normalised form), plus the host's session
 id when the hook carries one. A run id outside that grammar is omitted with a
 rate-limited warning — the capture still lands. `hostSource` is the writer's claim, not
 verified host authorship. Covered by
-`test/integration/host-source-openclaw-capture-1940.test.ts`.
+`test/integration/host-source-openclaw-capture-1940.test.ts`; the session-keyed
+`agent_end` capture reads back from a real Flair component in
+`test/integration/agent-end-session-capture-2560.test.ts`.
 
 ## Auth
 

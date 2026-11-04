@@ -132,9 +132,6 @@ let harper: HarperInstance;
 let clientId: string;
 let tokenEndpoint: string;
 let agentPrivateKey: KeyObject;
-const ENV_KEYS = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER"] as const;
-let originalEnv: Record<(typeof ENV_KEYS)[number], string | undefined> | undefined;
-
 function sha256(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
@@ -180,12 +177,10 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth compone
     );
     writeFileSync(join(tempDir, "config.yaml"), replaced);
 
-    originalEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]])) as Record<(typeof ENV_KEYS)[number], string | undefined>;
-    process.env.FLAIR_MCP_OAUTH = "1";
-    process.env.FLAIR_MCP_ISSUER = ISSUER;
-
-    // Point Harper at the temp tree — it reads config.yaml from its cwd.
-    harper = await startHarper({ cwd: tempDir });
+    harper = await startHarper({
+      cwd: tempDir,
+      serverEnv: { FLAIR_MCP_OAUTH: "1", FLAIR_MCP_ISSUER: ISSUER },
+    });
 
     // Seed the agent MCPClientMetadata.ts will serve a CIMD document for.
     const agentKeyPair = generateKeyPairSync("ed25519");
@@ -204,13 +199,6 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth compone
   }, 180_000);
 
   afterAll(async () => {
-    if (originalEnv) {
-      for (const k of ENV_KEYS) {
-        const value = originalEnv[k];
-        if (value === undefined) delete process.env[k];
-        else process.env[k] = value;
-      }
-    }
     if (harper) await stopHarper(harper);
     if (tempDir) {
       // rm -rf of the hard-linked temp tree (repo + node_modules, tens of

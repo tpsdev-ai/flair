@@ -42,11 +42,17 @@ import { resolveAgentAuth, isPrincipalDeactivated } from "./agent-auth.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
+import { currentInstanceId } from "./instance-identity.js";
+import { applyOriginatorInstanceIdWith, resolveStoredRow } from "./originator-instance.js";
+// The receipt validator shares the POST heartbeat's activity vocabulary and
+// currentTask cap; aliased to this file's existing names.
+import {
+  PRESENCE_ACTIVITIES as VALID_ACTIVITIES,
+  sanitizePresenceCurrentTask as sanitizeCurrentTask,
+  presenceWriteHomeRefusal,
+} from "./presence-receipt.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-
-const CURRENT_TASK_MAX_LENGTH = 200;
-const VALID_ACTIVITIES = new Set(["coding", "reviewing", "planning", "debugging", "idle"]);
 
 function idleThresholdMs(): number {
   const env = process.env.PRESENCE_IDLE_THRESHOLD_MS;
@@ -315,19 +321,85 @@ const ROSTER_ALLOWLIST = new Set([
   "harperVersion",
 ]);
 
-function sanitizeCurrentTask(task: unknown): string | null {
-  if (typeof task !== "string") return null;
-  const trimmed = task.trim();
-  if (trimmed.length === 0) return null;
-  return trimmed.slice(0, CURRENT_TASK_MAX_LENGTH);
-}
-
 function pickAllowlisted(record: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(record)) {
     if (ROSTER_ALLOWLIST.has(key)) out[key] = record[key];
   }
   return out;
+}
+
+// ─── Federation receipt rules (flair#2578 slice 1) ──────────────────────────
+//
+// Office-wide Presence, receive side only: in a later slice a spoke will push
+// its agents' Presence rows to the hub over the existing hub-and-spoke sync, and
+// the hub will derive status locally from the replicated timestamps. The flag,
+// the home binding, the receipt validation and the merge live in
+// resources/presence-receipt.ts (PURE, so they are unit-testable without a live
+// Harper, and so the activity vocabulary and currentTask cap have one definition
+// shared with the receipt validator). Only the DB-touching local-write home
+// guard lives here.
+
+/**
+ * Read the local Agent row for `agentId` and resolve the P2 refusal against
+ * `currentId` — this instance's id as the caller read it FRESH from the
+ * `Instance` table (`currentInstanceId`), never the process-cached id: after
+ * that table changes, a write for an agent homed on the new id is local and one
+ * for the old id is refused. A read FAILURE is a 500, never read as "no home" —
+ * treating it as local would let a foreign-homed agent's write land while the
+ * authority is unreadable.
+ */
+async function presenceWriteHomeDenial(agentId: string, currentId: string | null): Promise<Response | null> {
+  let agentRow: any;
+  try {
+    agentRow = await (databases as any).flair.Agent.get(agentId);
+  } catch (err: any) {
+    console.error("presence: the agent home could not be read, so the write was refused", { agentId, err });
+    return new Response(
+      JSON.stringify({ error: "presence_home_lookup_failed", message: "the agent's home could not be read, so the write was refused" }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  const refusal = presenceWriteHomeRefusal(agentRow, currentId);
+  if (!refusal) return null;
+  return new Response(JSON.stringify(refusal), { status: 403, headers: { "Content-Type": "application/json" } });
+}
+
+/**
+ * Use the URL-bound id; if absent, empty-string, or getId() throws, use a non-empty string
+ * body `agentId`, else a non-empty scalar (string or number) body `id`.
+ */
+function presenceWriteTargetId(resource: any, content: any): string | number | null {
+  try {
+    const getId = resource?.getId;
+    const id = typeof getId === "function" ? getId.call(resource) : undefined;
+    if ((typeof id === "string" && id.length > 0) || typeof id === "number") return id;
+  } catch {
+    /* Fall back to the body below. */
+  }
+  if (content != null && typeof content === "object") {
+    if (typeof content.agentId === "string" && content.agentId.length > 0) return content.agentId;
+    if ((typeof content.id === "string" && content.id.length > 0) || typeof content.id === "number") return content.id;
+  }
+  return null;
+}
+
+/**
+ * flair#2624: a Presence write must name the agent it is for. With no URL-bound
+ * id and no usable body `agentId`/`id`, `presenceWriteTargetId` returns null;
+ * for an authenticated administrator the owner (403) and home checks were
+ * skipped and the keyless write still reached `super.put`/`super.patch`.
+ * Refuse that by name before those checks and before any read-modify-write: an
+ * authenticated administrator's keyless PUT/PATCH gets 400
+ * presence_target_required; a non-admin agent's collection PUT/PATCH gets the
+ * owner guard's named 403; an anonymous request gets 401.
+ */
+function presenceTargetRequiredRefusal(targetId: string | number | null): Response | null {
+  if (targetId != null) return null;
+  return new Response(
+    JSON.stringify({ error: "presence_target_required", message: "a presence write must name the target agent (URL id, or a body agentId or id)" }),
+    { status: 400, headers: { "Content-Type": "application/json" } },
+  );
 }
 
 // ─── Resource ─────────────────────────────────────────────────────────────────
@@ -630,14 +702,34 @@ export class Presence extends (databases as any).flair.Presence {
       );
     }
 
+    // ── P2: refuse a write for an agent homed on another instance ─────────────
+    // A heartbeat writes the row keyed by agentId; a replicated row for the
+    // same agent arrives on that same key. Refusing the local write for a
+    // foreign-homed agent keeps one writer per row. The home is compared with
+    // THIS instance's id read FRESH here (`currentInstanceId`), not the
+    // process-cached id, so a change to the Instance table is followed. Null
+    // home = local (rev 2.1).
+    const currentId = await currentInstanceId();
+    const homeDenial = await presenceWriteHomeDenial(agentId, currentId);
+    if (homeDenial) return homeDenial;
+
     // ── Write presence ───────────────────────────────────────────────────────
     const now = Date.now();
 
     try {
-      let existing: any = null;
+      // A read FAILURE is refused by name — it is never read as "first
+      // heartbeat". Treating a failed read as a miss would let an existing row
+      // be re-stamped (and re-authored) when the read fails but the write lands.
+      let existing: any;
       try {
         existing = await (databases as any).flair.Presence.get(agentId);
-      } catch { /* first heartbeat */ }
+      } catch (err: any) {
+        console.error("presence: the stored row could not be read, so the heartbeat was refused", { agentId, err });
+        return new Response(
+          JSON.stringify({ error: "presence_read_failed", message: "the stored presence row could not be read, so the write was refused" }),
+          { status: 500, headers: { "Content-Type": "application/json" } },
+        );
+      }
 
       // flair#639: stamp THIS server's own running versions on every
       // heartbeat — an upgrade takes effect on the instance's very next
@@ -656,12 +748,14 @@ export class Presence extends (databases as any).flair.Presence {
         resolveHarperVersion(),
       );
 
-      if (existing) {
-        const merged = { ...existing, ...record };
-        await (databases as any).flair.Presence.put(merged);
-      } else {
-        await (databases as any).flair.Presence.put(record);
-      }
+      // P3: CREATE stamps THIS instance's id — the same fresh `currentId` used
+      // for the home guard, never the process-cached id; with no current
+      // instance identity it stamps null. UPDATE keeps the stored value.
+      applyOriginatorInstanceIdWith(record, existing, currentId);
+
+      const written = existing ? { ...existing, ...record } : record;
+      delete written.receivedAt;
+      await (databases as any).flair.Presence.put(written);
 
       return {
         ok: true,
@@ -679,22 +773,71 @@ export class Presence extends (databases as any).flair.Presence {
 
   /**
    * PUT/DELETE are not part of the agent heartbeat contract (writes go through
-   * POST, which carries its own Ed25519 auth). GET is intentionally public and
+   * POST, which carries its own Ed25519 auth). GET is gated in get() (verified reader by default) and
    * allowCreate=true lets POST self-auth — but those bypasses must NOT extend to
    * PUT/DELETE. The non-rejecting gate would otherwise let anonymous PUT/DELETE
    * straight to Harper's default handler (the leak this closes). Require a verified
    * non-anonymous principal, scoped to the agent's own record (Presence is keyed
    * by agentId).
+   *
+   * PATCH is the third local writer and shares every one of these controls.
    */
   async put(content: any, context?: any) {
     const auth = await resolveAgentAuth((this as any).getContext?.());
     if (auth.kind === "anonymous") {
       return new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
     }
-    if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
+    const targetId = presenceWriteTargetId(this, content);
+    const keylessDenial = presenceTargetRequiredRefusal(targetId);
+    if (keylessDenial) return keylessDenial;
+    if (auth.kind === "agent" && !auth.isAdmin && targetId != null && String(targetId) !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
+    // P2: refuse a foreign-homed agent using that target and THIS instance's
+    // id read FRESH here.
+    const currentId = await currentInstanceId();
+    if (targetId != null) {
+      const homeDenial = await presenceWriteHomeDenial(String(targetId), currentId);
+      if (homeDenial) return homeDenial;
+    }
+    // P3: stamp the row's author the same way post() does (CREATE → the fresh
+    // current id, or null with no current instance identity; UPDATE → stored
+    // value); a body value never replaces or clears it, and a body `receivedAt`
+    // is never written.
+    const resolved = await resolveStoredRow(this, "Presence", content, () => super.get());
+    if (resolved.denial) return resolved.denial;
+    applyOriginatorInstanceIdWith(content, resolved.row, currentId);
+    if (content && typeof content === "object") delete content.receivedAt;
     return super.put(content, context);
+  }
+
+  /**
+   * PATCH merges into the stored row (Harper partial update) and repeats put()'s
+   * auth, home guard (P2), and author rule (P3).
+   * A client `receivedAt` is never stored.
+   */
+  async patch(content: any, query?: any) {
+    const auth = await resolveAgentAuth((this as any).getContext?.());
+    if (auth.kind === "anonymous") {
+      return new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
+    }
+    const targetId = presenceWriteTargetId(this, content);
+    const keylessDenial = presenceTargetRequiredRefusal(targetId);
+    if (keylessDenial) return keylessDenial;
+    if (auth.kind === "agent" && !auth.isAdmin && targetId != null && String(targetId) !== auth.agentId) {
+      return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
+    }
+    const currentId = await currentInstanceId();
+    if (targetId != null) {
+      const homeDenial = await presenceWriteHomeDenial(String(targetId), currentId);
+      if (homeDenial) return homeDenial;
+    }
+    // P3: the same author stamp rule as put(), with the same fresh current id.
+    const resolved = await resolveStoredRow(this, "Presence", content, () => super.get());
+    if (resolved.denial) return resolved.denial;
+    applyOriginatorInstanceIdWith(content, resolved.row, currentId);
+    if (content && typeof content === "object") delete content.receivedAt;
+    return super.patch(content, query);
   }
 
   async delete(id: any) {
@@ -702,9 +845,12 @@ export class Presence extends (databases as any).flair.Presence {
     if (auth.kind === "anonymous") {
       return new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
     }
-    if (auth.kind === "agent" && !auth.isAdmin && id != null && String(id) !== auth.agentId) {
+    const targetId = presenceWriteTargetId(this, id) ?? ((typeof id === "string" && id.length > 0) || typeof id === "number" ? id : null);
+    const keylessDenial = presenceTargetRequiredRefusal(targetId);
+    if (keylessDenial) return keylessDenial;
+    if (auth.kind === "agent" && !auth.isAdmin && String(targetId) !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden: cannot delete presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
-    return super.delete(id);
+    return super.delete(targetId);
   }
 }

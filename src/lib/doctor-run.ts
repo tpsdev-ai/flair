@@ -445,6 +445,14 @@ export interface FlairHealthProbe {
   status: number;
   body: unknown;
   observation: WorkerThreadsObservation | null;
+  /** The body doctor may read Flair's fields from (see readFlairHealthBody), or null. */
+  healthBody: Record<string, unknown> | null;
+  /** A readiness 503 (searchReady false) whose body has Flair's /Health
+   *  fields: the server answers but does not serve search. Never healthy;
+   *  `reaching` stays false unless the 503 is also a multi-worker refusal. */
+  notReady: boolean;
+  /** The 503's bounded searchReadyReason, when it has a printable one. */
+  notReadyReason: string | null;
 }
 
 export function interpretFlairHealth(status: number, body: unknown): { reaching: boolean; observation: WorkerThreadsObservation | null } {
@@ -452,6 +460,41 @@ export function interpretFlairHealth(status: number, body: unknown): { reaching:
   if (status >= 200 && status < 300) return { reaching: true, observation };
   if (status === 503 && observation.kind === "refused") return { reaching: true, observation };
   return { reaching: false, observation: null };
+}
+
+/**
+ * flair#2530 — the /Health body doctor may read fields from (version, embedding,
+ * embeddingSpace). A 2xx object body is read as before. A 503 is read only when
+ * its body has the fields Health.get builds (ok:false, a version string, a
+ * boolean searchReady, a capabilities array), so a 503 without them (a typical
+ * proxy or other-service error) is not read. The check is on shape only; it
+ * cannot prove the response came from Flair. Reading a 503 never makes the
+ * instance healthy: `notReady` marks a readiness refusal.
+ */
+export function readFlairHealthBody(
+  status: number,
+  body: unknown,
+): { body: Record<string, unknown>; notReady: boolean; notReadyReason: string | null } | null {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+  const rec = body as Record<string, unknown>;
+  if (status >= 200 && status < 300) return { body: rec, notReady: false, notReadyReason: null };
+  if (status !== 503) return null;
+  if (
+    rec.ok !== false ||
+    typeof rec.version !== "string" ||
+    typeof rec.searchReady !== "boolean" ||
+    !Array.isArray(rec.capabilities)
+  ) {
+    return null;
+  }
+  const reason = rec.searchReadyReason;
+  // /Health is unauthenticated: print the reason only when it is short and has
+  // no control characters.
+  const printable =
+    typeof reason === "string" && reason.trim().length > 0 && reason.length <= 200 && !/[\u0000-\u001f\u007f]/.test(reason)
+      ? reason.trim()
+      : null;
+  return { body: rec, notReady: rec.searchReady === false, notReadyReason: rec.searchReady === false ? printable : null };
 }
 
 export async function probeFlairHealth(
@@ -468,9 +511,17 @@ export async function probeFlairHealth(
       body = null;
     }
     const verdict = interpretFlairHealth(res.status, body);
-    return { ...verdict, status: res.status, body };
+    const read = readFlairHealthBody(res.status, body);
+    return {
+      ...verdict,
+      status: res.status,
+      body,
+      healthBody: read?.body ?? null,
+      notReady: read?.notReady ?? false,
+      notReadyReason: read?.notReadyReason ?? null,
+    };
   } catch {
-    return { reaching: false, status: 0, body: null, observation: null };
+    return { reaching: false, status: 0, body: null, observation: null, healthBody: null, notReady: false, notReadyReason: null };
   }
 }
 

@@ -4,6 +4,7 @@
  * harper mock for Memory.ts.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
+import { memoryLockDouble } from "../helpers/memory-lock-double";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -20,6 +21,9 @@ let memoryStore: Map<string, any>;
 let staged: Map<string, any> | null = null;
 
 class BaseMemory {
+  /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
+   *  double injects one (test/helpers/memory-lock-double.ts). */
+  static primaryStore = memoryLockDouble();
   async get(target?: any) {
     const id = typeof target === "string" ? target : target?.id ?? (this as any).id;
     return memoryStore.get(id) ?? null;
@@ -74,6 +78,7 @@ const { Memory } = await import("../../resources/Memory.ts");
 function makeMemory(id: string) {
   const r: any = new (Memory as any)();
   r.id = id;
+  r.getId = () => id;
   r.getContext = () => ({ request: { tpsAgent: "alice", tpsAgentIsAdmin: false } });
   return r;
 }
@@ -130,6 +135,17 @@ describe("Memory updates preserve stored visibility", () => {
     expect(result).toBeInstanceOf(Response);
     expect((result as Response).status).toBe(400);
     expect(memoryStore.get("pub").durability).toBe("persistent"); // nothing written
+  });
+
+  test("a new PUT leaves its stamped identity on the supplied row", async () => {
+    const body: any = { id: "fresh-stamp", agentId: "alice", content: "promotion stamp claim for the commit gap", createdAt: "2026-01-01T00:00:00.000Z", durability: "persistent", visibility: "private", tags: ["adk:app:alice"] };
+    const result = await makeMemory(body.id).put(body);
+    expect(result).not.toBeInstanceOf(Response);
+    const stored = memoryStore.get(body.id);
+    expect(body.instanceToken).toBeTruthy();
+    expect(stored.instanceToken).toBe(body.instanceToken);
+    expect(stored.content).toBe(body.content);
+    expect(stored.agentId).toBe(body.agentId);
   });
 
   test("a NEW record still gets the durability-keyed default", async () => {

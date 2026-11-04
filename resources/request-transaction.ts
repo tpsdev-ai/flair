@@ -1,3 +1,4 @@
+import { currentWriteJournal } from "./write-journal-context.js";
 /**
  * request-transaction.ts — one shared write scope for the host-pointer path
  * (flair#1940 slice 1). A Memory row and its `MemoryHostSource` pointer row
@@ -58,7 +59,15 @@ export async function withSharedWriteTransaction<T>(ctx: any, fn: (shared: any) 
       "flair: Harper's transaction() is unavailable — refusing to run a Memory/pointer write unwrapped (A7: no silent loss)",
     );
   }
-  return (await txn(shared, () => fn(shared))) as T;
+  const journal = currentWriteJournal();
+  if (!journal) return (await txn(shared, () => fn(shared))) as T;
+  return journal.transaction(shared, (capture, complete) => txn(shared, async () => {
+    capture();
+    const result = await fn(shared);
+    journal.assertCoverage();
+    complete();
+    return result;
+  }));
 }
 
 /**
@@ -78,4 +87,39 @@ export async function withOwnedTransaction<T>(ctx: any, fn: (shared: any) => Pro
   } finally {
     ctx.transaction = saved;
   }
+}
+
+/** Marks a context whose OPEN write transaction belongs to an in-process
+ *  caller that composes a Memory write into it. A Symbol, so no request body
+ *  or header can set it. */
+const COMPOSED_WRITE = Symbol("flair.composedMemoryWrite");
+
+/**
+ * Run `fn` in a shared write transaction ({@link withSharedWriteTransaction})
+ * and mark `shared` for the duration, so `Memory.put()` JOINS this transaction
+ * instead of owning one (flair#2478 slice 1, part 1). The caller owns the
+ * commit: its own writes in `fn` commit or abort with the Memory row. Manual
+ * promotion uses it, so its Memory write and verdict stamp stay one
+ * transaction (flair#2354). The per-id write lock orders the put's read and
+ * decision against other owner PUT/PATCH writers of that id, but this
+ * transaction commits after the lock is released, so its commit is not
+ * serialized with theirs; writers that take no lock are not serialized at all.
+ */
+export async function withComposedWriteTransaction<T>(ctx: any, fn: (shared: any) => Promise<T>): Promise<T> {
+  return withSharedWriteTransaction(ctx, async (shared) => {
+    const had = Object.prototype.hasOwnProperty.call(shared, COMPOSED_WRITE);
+    const prior = shared[COMPOSED_WRITE];
+    shared[COMPOSED_WRITE] = true;
+    try {
+      return await fn(shared);
+    } finally {
+      if (had) shared[COMPOSED_WRITE] = prior;
+      else delete shared[COMPOSED_WRITE];
+    }
+  });
+}
+
+/** Is `ctx` inside {@link withComposedWriteTransaction} with its transaction still open? */
+export function composesCallerWrite(ctx: any): boolean {
+  return !!ctx && ctx[COMPOSED_WRITE] === true && isJoinableTransaction(ctx);
 }

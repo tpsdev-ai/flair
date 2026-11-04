@@ -26,8 +26,9 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 let harper: HarperInstance;
 const CLI = join(process.cwd(), "dist", "cli.js");
@@ -59,15 +60,16 @@ async function tokenIds(): Promise<string[]> {
 /** Run the shipped CLI with an isolated HOME; returns stdout+stderr+code. */
 async function runCli(args: string[], home: string): Promise<{ code: number | null; out: string }> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [CLI, ...args], {
-      env: {
-        ...process.env,
-        HOME: home,
-        FLAIR_URL: harper.httpURL,
-        FLAIR_TOKEN: "",
-        FLAIR_ADMIN_PASS: "",
-      },
-      timeout: CHILD_DEADLINE_MS,
+    const env = {
+      ...process.env,
+      HOME: home,
+      FLAIR_URL: harper.httpURL,
+      FLAIR_TOKEN: "",
+      FLAIR_ADMIN_PASS: "",
+    };
+    const child = spawn(nodeBin({ env }), [CLI, ...args], {
+      env,
+      timeout: 20_000, // literal so the spawn-budget gate reads a child deadline
     });
     let out = "";
     child.stdout.on("data", (d) => (out += d.toString()));
@@ -100,7 +102,7 @@ describe("federation token rollback (live Harper)", () => {
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("a forced add_user failure actually deletes the PairingToken it persisted", async () => {
     // The premise of the forced failure: the role `federation token` needs is

@@ -32,7 +32,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HarperInstance, startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { FlairClient } from "../../packages/flair-client/src/client";
 import {
   launchReceiptId,
@@ -137,7 +137,7 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     if (keyDir) await rm(keyDir, { recursive: true, force: true, maxRetries: 4 });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("a created launch writes a receipt that reads back with its stable id, content and hostSource", async () => {
     const agent = mkAgent(`agent-a-${randomUUID()}`);

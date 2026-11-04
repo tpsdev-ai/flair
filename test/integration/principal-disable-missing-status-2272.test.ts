@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { ensureCliBuild } from "../helpers/build-cli-once";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline";
+import { nodeBin } from "../helpers/node-runtime";
 
 const CHILD_DEADLINE_MS = 20_000;
 const CLI_PATH = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
@@ -83,9 +84,10 @@ function protectedGet(): Promise<Response> {
 function runCli(args: string[], env: Record<string, string> = {}): Promise<{ stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const child = spawn("bun", [CLI_PATH, ...args], {
+    const childEnv = { ...process.env, FLAIR_AGENT_ID: "", FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TARGET: "", FLAIR_OPS_TARGET: "", FLAIR_ADMIN_PASS: "", ...env };
+    const child = spawn(nodeBin({ env: childEnv, cwd: env.HOME ?? scratch }), [CLI_PATH, ...args], {
       cwd: env.HOME ?? scratch,
-      env: { ...process.env, FLAIR_AGENT_ID: "", FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TARGET: "", FLAIR_OPS_TARGET: "", FLAIR_ADMIN_PASS: "", ...env },
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 20_000,
     });

@@ -4,14 +4,12 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { computeContentHash } from "../../resources/memory-feed-lib.js";
 import { SEED_SKILL_ROW_ID } from "../../resources/seed-ids.js";
 
 // A small, non-default TTL so the repaired row can be reaped inside the test.
 const TTL_HOURS = "0.001"; // 3.6s
-const PRIOR_TTL = process.env.FLAIR_EPHEMERAL_TTL_HOURS;
-process.env.FLAIR_EPHEMERAL_TTL_HOURS = TTL_HOURS;
 
 // The test-only pause inside the repair's owned transaction
 // (resources/txn-pause-point.ts), between its read and its write.
@@ -136,21 +134,13 @@ const other = mkAgent("dedup-eph-other");
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-dedup-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper();
-  } finally {
-    // The spawned Harper has its copy; no later Harper in this process inherits it.
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({
+    serverEnv: {
+      FLAIR_ENABLE_TEST_FAULT_INJECTION: "1",
+      FLAIR_TEST_PAUSE_DIR: pauseDir,
+      FLAIR_EPHEMERAL_TTL_HOURS: TTL_HOURS,
+    },
+  });
   assertOwnInstance(harper);
   await seedAgent(harper, agent);
   await seedAgent(harper, other);
@@ -159,9 +149,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-  if (PRIOR_TTL === undefined) delete process.env.FLAIR_EPHEMERAL_TTL_HOURS;
-  else process.env.FLAIR_EPHEMERAL_TTL_HOURS = PRIOR_TTL;
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("deduplicated ephemeral feed expiry (flair#2358)", () => {
   test("a deduplicated ephemeral row with no expiry is repaired, returned as stored, and then reaped", async () => {
@@ -182,8 +170,11 @@ describe("deduplicated ephemeral feed expiry (flair#2358)", () => {
     expect(typeof stored?.expiresAt).toBe("string");
     expect(Date.parse(stored!.expiresAt!)).toBeGreaterThanOrEqual(before + Number(TTL_HOURS) * 3600000);
     expect(Date.parse(stored!.expiresAt!)).toBeLessThanOrEqual(Date.now() + Number(TTL_HOURS) * 3600000);
-    // The response body is the stored row.
-    expect(body).toEqual(stored!);
+    // The response body is the stored row, less contentHash, which the request
+    // did not supply (flair#2561).
+    const { contentHash, ...reported } = stored!;
+    expect(typeof contentHash).toBe("string");
+    expect(body).toEqual(reported);
 
     // The repaired expiry is the reap signal: once it passes, maintenance reaps.
     await new Promise((r) => setTimeout(r, 6000));
@@ -244,7 +235,7 @@ describe("deduplicated ephemeral feed expiry (flair#2358)", () => {
     expect(await readStored(harper, id)).toEqual(competed!);
   }, 60_000);
 
-  test("a competing request that stamps the expiry first: the response carries the current stamped row", async () => {
+  test("a competing request that finds the repair's id held skips the repair and answers the allowlisted feed response from the matched, unrepaired row", async () => {
     const content = `deduplicated contended state ${randomUUID()}`;
     const id = `dedup-contended-${randomUUID()}`;
     await seedMemory(harper, agent, { id, agentId: agent.id, content, durability: "ephemeral" });
@@ -259,11 +250,19 @@ describe("deduplicated ephemeral feed expiry (flair#2358)", () => {
     expect(released, "the repair was not paused and released by this test").toBe("go");
     expect(competed?.status).toBe(200);
 
+    // flair#2478: the repair takes the matched id's per-id Memory write lock
+    // once, without waiting. The competing request cannot repair while the
+    // first request holds the id, so it reports the matched row it read
+    // (still without an expiry) and leaves the repair to the holder; the
+    // holder's expiry is the one stored.
+    expect(competed?.body.expiresAt ?? null).toBeNull();
     const stored = await readStored(harper, id);
     expect(typeof stored?.expiresAt).toBe("string");
-    expect(competed?.body.expiresAt).toBe(stored!.expiresAt);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual(stored!);
+    // The stored row, less contentHash, which the request did not supply (flair#2561).
+    const { contentHash, ...reported } = stored!;
+    expect(typeof contentHash).toBe("string");
+    expect(await response.json()).toEqual(reported);
   }, 60_000);
 
   test("a matched row whose id the feed does not write is refused and left unchanged", async () => {

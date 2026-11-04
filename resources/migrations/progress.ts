@@ -11,7 +11,8 @@
  * migration already complete" is the on-disk state file (state.ts), which
  * the runner re-derives progress from before its next cycle either way.
  */
-import type { MigrationProgress } from "./types.js";
+import type { MigrationProgress, MigrationState } from "./types.js";
+import { readMigrationState, type MigrationStateEntry } from "./state.js";
 
 /**
  * `scheduled` (flair#812) is set SYNCHRONOUSLY by
@@ -33,6 +34,9 @@ export interface CycleStatus {
 
 let cycleStatus: CycleStatus = { phase: "idle" };
 const progressById = new Map<string, MigrationProgress>();
+/** Ids whose entry `seedProgressFromState` built from the state file and
+ *  `setMigrationProgress` has not written since (flair#2840). */
+const seededFromState = new Set<string>();
 
 /**
  * flair#1800 — the last state-file WRITE outcome, for `/HealthDetail`.
@@ -93,6 +97,7 @@ export function getCycleStatus(): CycleStatus {
 
 export function setMigrationProgress(p: MigrationProgress): void {
   progressById.set(p.id, p);
+  seededFromState.delete(p.id);
 }
 
 export function getMigrationProgress(id: string): MigrationProgress | undefined {
@@ -114,9 +119,56 @@ export function seedIdleProgress(ids: readonly string[]): void {
   }
 }
 
+/** The progress row for one durable state entry. Shared with status.ts's
+ *  fallback so a boot-seeded row and a fallback row read the same. */
+export function progressFromStateEntry(id: string, entry: MigrationStateEntry): MigrationProgress {
+  const derivedState: MigrationState =
+    entry.lastOutcome === "success" ? "completed" : entry.lastOutcome === "halted" ? "halted" : "failed";
+  const row: MigrationProgress = {
+    id,
+    rowsDone: entry.rowsProcessed ?? 0,
+    rowsRemaining: entry.rowsRemaining ?? 0,
+    state: derivedState,
+  };
+  if (entry.reason) row.reason = entry.reason;
+  if (entry.rowsUnconfirmed) {
+    row.rowsUnconfirmed = entry.rowsUnconfirmed;
+    if (entry.unconfirmedIds?.length) row.unconfirmedIds = entry.unconfirmedIds;
+  }
+  return row;
+}
+
 /**
- * Marks every migration that never got off the starting line as `failed`
- * with `reason` — and ONLY those (flair#812).
+ * Seeds the in-process progress store from the state file at boot
+ * (flair#2840). When the file parses as a JSON object, a migration with an
+ * entry is seeded from it, including unconfirmed ids, their count and the
+ * status its last outcome maps to. A migration without one, or every migration
+ * when the file is missing, unreadable, invalid or not an object, is seeded
+ * `idle`. An existing entry is never overwritten. A seeded entry counts as not started
+ * this boot until `setMigrationProgress` writes its id (see
+ * {@link markUnstartedMigrationsFailed}).
+ */
+export function seedProgressFromState(statePath: string, ids: readonly string[]): void {
+  const state = readMigrationState(statePath);
+  for (const id of ids) {
+    if (progressById.has(id)) continue;
+    const entry = state[id];
+    if (entry) {
+      progressById.set(id, progressFromStateEntry(id, entry));
+      seededFromState.add(id);
+    } else {
+      progressById.set(id, { id, rowsDone: 0, rowsRemaining: 0, state: "idle" });
+    }
+  }
+}
+
+/**
+ * Marks every migration that did not start this boot as `failed` with
+ * `reason` (flair#812): an id with no entry, an `idle` entry, or an entry
+ * `seedProgressFromState` built from the state file that `setMigrationProgress`
+ * has not written since (flair#2840). A seeded entry keeps its recorded
+ * `rowsUnconfirmed` and `unconfirmedIds`; the rest of its row is replaced as
+ * for an idle entry.
  *
  * The boot path calls this when a cycle couldn't run, so that a condition
  * which is really instance-wide (no writable data dir, tables never ready,
@@ -124,24 +176,30 @@ export function seedIdleProgress(ids: readonly string[]): void {
  * `flair doctor` and `flair quality`'s `instance.migrationsClean` actually
  * read.
  *
- * Restricting it to `idle` entries is load-bearing, not tidiness: a cycle
- * can fail AFTER some migrations already reached a terminal state — the
- * pre-hash path, for instance, halts each candidate with its own precise
+ * Skipping an entry the runner wrote this boot is load-bearing, not tidiness:
+ * a cycle can fail AFTER some migrations already reached a terminal state —
+ * the pre-hash path, for instance, halts each candidate with its own precise
  * reason and THEN reports cycle failure. Overwriting those would replace a
  * specific `halted` (which the runner retries on the next boot, per its
  * documented contract) with a blanket `failed`, and would flip migrations
- * that genuinely completed this cycle to failed. Only an entry still `idle`
- * is one nothing has said anything about yet.
+ * that genuinely completed this cycle to failed.
  *
  * Returns the ids actually marked, so a caller can tell "nothing had
  * started" from "the cycle died partway".
  */
-export function markIdleMigrationsFailed(ids: readonly string[], reason: string): string[] {
+export function markUnstartedMigrationsFailed(ids: readonly string[], reason: string): string[] {
   const marked: string[] = [];
   for (const id of ids) {
     const current = progressById.get(id);
-    if (current && current.state !== "idle") continue;
-    progressById.set(id, { id, rowsDone: 0, rowsRemaining: 0, state: "failed", reason });
+    const seeded = seededFromState.has(id);
+    if (current && current.state !== "idle" && !seeded) continue;
+    const row: MigrationProgress = { id, rowsDone: 0, rowsRemaining: 0, state: "failed", reason };
+    if (seeded && current?.rowsUnconfirmed) {
+      row.rowsUnconfirmed = current.rowsUnconfirmed;
+      if (current.unconfirmedIds?.length) row.unconfirmedIds = current.unconfirmedIds;
+    }
+    progressById.set(id, row);
+    seededFromState.delete(id);
     marked.push(id);
   }
   return marked;
@@ -149,6 +207,7 @@ export function markIdleMigrationsFailed(ids: readonly string[], reason: string)
 
 export function _resetProgressForTests(): void {
   progressById.clear();
+  seededFromState.clear();
   cycleStatus = { phase: "idle" };
   stateFileStatus = { path: null, lastWriteError: null };
 }

@@ -1,0 +1,1 @@
+- **Each timeout variable is validated only for the requests it governs.** A request that passes its own explicit deadline is validated and returned before `FLAIR_REQUEST_TIMEOUT_MS` is read, and `FLAIR_REM_REQUEST_TIMEOUT_MS` is read only for the four REM work routes; an invalid value of one variable no longer refuses a request governed by another (flair#2789).

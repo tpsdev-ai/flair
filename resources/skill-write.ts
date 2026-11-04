@@ -44,6 +44,44 @@ export function isSkillWrite(content: any): boolean {
   return Array.isArray(content?.tags) && content.tags.includes(SKILL_TAG);
 }
 
+/** Scan decoded top-level keys of a valid JSON object. */
+export function skillMetadataHasDuplicateKey(metadata: unknown): boolean {
+  if (typeof metadata !== "string") return false;
+  try {
+    const parsed = JSON.parse(metadata);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  } catch {
+    return false;
+  }
+  const keys = new Set<string>();
+  let depth = 0;
+  let keyExpected = false;
+  for (let i = 0; i < metadata.length; i++) {
+    const char = metadata[i];
+    if (char === '"') {
+      const start = i;
+      while (++i < metadata.length) {
+        if (metadata[i] === "\\") i++;
+        else if (metadata[i] === '"') break;
+      }
+      if (depth === 1 && keyExpected) {
+        const key = JSON.parse(metadata.slice(start, i + 1)) as string;
+        if (keys.has(key)) return true;
+        keys.add(key);
+        keyExpected = false;
+      }
+    } else if (char === "{" || char === "[") {
+      depth++;
+      if (depth === 1) keyExpected = true;
+    } else if (char === "}" || char === "]") {
+      depth--;
+    } else if (char === "," && depth === 1) {
+      keyExpected = true;
+    }
+  }
+  return false;
+}
+
 /**
  * Every field a Memory embedding can be computed from, across row kinds:
  * `trigger` for a skill-tagged row whose trigger is a non-empty string, and

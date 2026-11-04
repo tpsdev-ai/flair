@@ -1,6 +1,19 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { Command } from "commander";
 import { bindCli as bindAgent, register as registerAgent, type AgentCli } from "../../src/commands/agent";
+import { setInstancePairOsReadsForTests } from "../../src/lib/local-instance-pair";
+
+/**
+ * flair#2526: the pair check reads the OS listener table, and the ops endpoint
+ * here is a fetch mock with no listener behind it. These tests inject a
+ * SIMULATED table: one simulated Harper process id on every port, with a
+ * fixed birth identity and a Harper command line. No such process exists.
+ */
+const SIMULATED_LISTENER_TABLE = {
+  listeners: () => ({ kind: "listeners" as const, pids: [24_526] }),
+  birth: () => ({ kind: "birth" as const, id: "24526@simulated" }),
+  commandLine: () => "node\u0000/simulated/node_modules/harper/dist/bin/harper.js\u0000run\u0000.",
+};
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 
@@ -30,6 +43,7 @@ let log: ReturnType<typeof spyOn>;
 let write: ReturnType<typeof spyOn>;
 
 beforeEach(() => {
+  setInstancePairOsReadsForTests(SIMULATED_LISTENER_TABLE);
   operations = [];
   soulScan = null;
   soulConfirm = null;
@@ -107,6 +121,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setInstancePairOsReadsForTests(null);
   globalThis.fetch = originalFetch;
   if (originalPass === undefined) delete process.env.FLAIR_ADMIN_PASS;
   else process.env.FLAIR_ADMIN_PASS = originalPass;

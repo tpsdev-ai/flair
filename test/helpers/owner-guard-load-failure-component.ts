@@ -25,11 +25,18 @@ export const LOAD_FAILURE_MARKER = "load-fail-2468";
 
 /**
  * Sentinel file, created under the Harper instance ROOTPATH, that arms the
- * injected failure. The wrapper is installed either way; present → a marker-id
- * load throws; absent → every load is delegated to the original method. Lets
- * the test seed data first, then flip the switch.
+ * injected failure. The wrapper is installed either way; absent → every load is
+ * delegated to the original method. Lets the test seed data first, then flip the
+ * switch. A legacy text sentinel (trimmed content not starting with `{`) makes
+ * every marker-id load throw. The JSON sentinel `armFor(id, pass)` affects only
+ * that exact id: the next `pass` loads succeed, then throw. `{}` admits all marker ids.
  */
 export const ARM_FILE = "owner-guard-load-fail-armed";
+
+/** The sentinel content that arms the failure for one exact id, after `pass` successful loads of it. */
+export function armFor(id: string, pass = 0): string {
+  return JSON.stringify({ id, pass });
+}
 
 /** Where the composed copy writes the patched-load module (a top-level built
  *  resource file, so `config.yaml`'s `jsResource.files: dist/resources/*.js`
@@ -40,14 +47,31 @@ export const LOAD_FAILURE_MODULE_REL = join("dist", "resources", "zz-test-owner-
 export const LOAD_FAILURE_MODULE_SRC = `// Test-only module (composed copy): fail the read of a marker-id stored row at
 // Harper's LOAD point, before any resource method runs.
 import { databases } from "harper";
-import { existsSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const MARKER = ${JSON.stringify(LOAD_FAILURE_MARKER)};
 const ARM_FILE = ${JSON.stringify(ARM_FILE)};
 
-function armed() {
-  return existsSync(join(process.env.ROOTPATH ?? "", ARM_FILE));
+// A legacy text sentinel (trimmed content not starting with "{") arms every
+// marker id. A JSON sentinel arms only its exact id after "pass" successful
+// loads; {} admits all marker ids.
+function failsFor(id) {
+  const file = join(process.env.ROOTPATH ?? "", ARM_FILE);
+  let text;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (e) {
+    if (e && e.code === "ENOENT") return false;
+    throw e;
+  }
+  if (!text.trim().startsWith("{")) return true;
+  const armed = JSON.parse(text);
+  if (armed.id !== id) return false;
+  const left = Number(armed.pass ?? 0);
+  if (left <= 0) return true;
+  writeFileSync(file, JSON.stringify({ ...armed, pass: left - 1 }));
+  return false;
 }
 
 // Patch each table's load path. Read _loadRecord off the prototype chain as a
@@ -76,7 +100,7 @@ function patch(name) {
     writable: true,
     value: function (target, request, options) {
       const id = target && typeof target === "object" ? target.id : target;
-      if (armed() && typeof id === "string" && id.includes(MARKER)) {
+      if (typeof id === "string" && id.includes(MARKER) && failsFor(id)) {
         throw new Error(
           "test component: forced stored-row read failure at Harper's load point (" + name + " id=" + id + ")",
         );

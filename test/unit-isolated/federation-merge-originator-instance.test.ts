@@ -30,6 +30,7 @@ import nacl from "tweetnacl";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto.js";
 import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
 import { installFakeHarperTransaction } from "../helpers/fake-harper-txn.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double.ts";
 
 const PEER_ID = "inst-remote";
 const ORIGIN = "instance-origin";
@@ -40,6 +41,11 @@ const NEW = "2026-09-02T00:00:00.000Z";
 let peerStore: Map<string, any>;
 let syncLogStore: Map<string, any>;
 let stores: Record<string, Map<string, any>>;
+let loseCommitAck = false;
+let pauseRead: Promise<void> | undefined;
+let pauseCommit: Promise<void> | undefined;
+let signalPause: (() => void) | undefined;
+let changeAfterStage = false;
 
 function emptyGen() {
   async function* gen() {}
@@ -47,8 +53,16 @@ function emptyGen() {
 }
 
 function table(name: string) {
+  const store = memoryLockDouble();
   return {
-    get: async (id: string) => stores[name].get(id) ?? null,
+    primaryStore: store,
+    get: async (id: string) => {
+      if (name === "Memory" && pauseRead) {
+        signalPause?.();
+        await pauseRead;
+      }
+      return stores[name].get(id) ?? null;
+    },
     put: async (r: any) => {
       if (name === "Memory") {
         for (const field of ["agentId", "content", "createdAt"]) expect(typeof r[field]).toBe("string");
@@ -57,9 +71,16 @@ function table(name: string) {
       // transaction — stage it so the committed re-read still sees the committed
       // store row (as real Harper does), then commit it when the transaction
       // resolves.
-      if (harperTxn.stage(r.id, { table: name, row: r })) return r;
+      if (harperTxn.stage(r.id, { table: name, row: r })) {
+        if (changeAfterStage) stores[name].set(r.id, { ...r, content: "concurrent" });
+        return r;
+      }
       stores[name].set(r.id, JSON.parse(JSON.stringify(r)));
       return r;
+    },
+    update: async (id: string, patch: Record<string, unknown>) => {
+      const row = { ...(stores[name].get(id) ?? {}), ...patch };
+      if (!harperTxn.stage(id, { table: name, row })) stores[name].set(id, JSON.parse(JSON.stringify(row)));
     },
     search: () => emptyGen(),
   };
@@ -67,6 +88,11 @@ function table(name: string) {
 
 const harperTxn = installFakeHarperTransaction((id: string, payload: { table: string; row: any }) => {
   stores[payload.table].set(id, JSON.parse(JSON.stringify(payload.row)));
+  if (loseCommitAck) throw new Error("commit acknowledgement lost");
+  if (pauseCommit) {
+    signalPause?.();
+    return pauseCommit;
+  }
 });
 
 mock.module("harper", () => ({
@@ -170,6 +196,11 @@ const ROWS: Record<string, { data: (origin: string) => Record<string, any>; fiel
 };
 
 beforeEach(() => {
+  loseCommitAck = false;
+  pauseRead = undefined;
+  pauseCommit = undefined;
+  signalPause = undefined;
+  changeAfterStage = false;
   peerStore = new Map();
   syncLogStore = new Map();
   stores = { Memory: new Map(), Soul: new Map(), Agent: new Map(), Relationship: new Map(), Message: new Map() };
@@ -192,7 +223,11 @@ describe("flair#1965 — the federated merge preserves an authenticated peer's r
       // the receiver's OWN bookkeeping stamp is the separate underscore field
       expect(stored._originatorInstanceId).toBe(PEER_ID);
     });
+  }
 
+  // Agent is covered separately below: an existing Agent row's home changes
+  // only through a record from that home (flair#2665).
+  for (const tableName of ["Memory", "Soul", "Relationship"]) {
     it(`${tableName}: a NEWER inbound update keeps the REMOTE (pushed-row) value over the local row's`, async () => {
       const { secretKey, publicKey } = keypair();
       peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
@@ -210,6 +245,36 @@ describe("flair#1965 — the federated merge preserves an authenticated peer's r
       expect(stored[ROWS[tableName].field]).toBe(data[ROWS[tableName].field]); // control: the merge really applied the remote row
     });
   }
+
+  it("Agent: a NEWER inbound update from the row's stored home keeps the REMOTE (pushed-row) value", async () => {
+    const { secretKey, publicKey } = keypair();
+    peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+    const local = ROWS.Agent.data(PEER_ID);
+    stores.Agent.set(local.id, { ...local, name: "Local Principal", updatedAt: OLD });
+
+    const data = ROWS.Agent.data(ORIGIN);
+    const res: any = await postSync({ instanceId: PEER_ID, records: [pushedRecord("Agent", data.id, data, NEW, secretKey)], lamportClock: 2 }, secretKey);
+
+    expect(res.merged).toBe(1);
+    const stored = stores.Agent.get(data.id);
+    expect(stored.originatorInstanceId).toBe(ORIGIN);
+    expect(stored.originatorInstanceId).not.toBe(LOCAL_ORIGIN);
+    expect(stored.name).toBe(data.name);
+  });
+
+  it("Agent: a NEWER inbound update from a peer that is not the row's stored home is refused and the stored row is kept", async () => {
+    const { secretKey, publicKey } = keypair();
+    peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+    const local: Record<string, any> = { ...ROWS.Agent.data(LOCAL_ORIGIN), name: "Local Principal", updatedAt: OLD };
+    stores.Agent.set(local.id, local);
+
+    const data = ROWS.Agent.data(ORIGIN);
+    const res: any = await postSync({ instanceId: PEER_ID, records: [pushedRecord("Agent", data.id, data, NEW, secretKey)], lamportClock: 2 }, secretKey);
+
+    expect(res.merged).toBe(0);
+    expect(res.refused).toEqual([{ table: "Agent", id: data.id, reason: "agent_identity_not_from_home" }]);
+    expect(stores.Agent.get(data.id)).toEqual(local);
+  });
 });
 
 describe("FederationSync ephemeral expiry", () => {
@@ -233,4 +298,117 @@ describe("FederationSync ephemeral expiry", () => {
       else process.env.FLAIR_EPHEMERAL_TTL_HOURS = prior;
     }
   });
+});
+
+it("a lost commit acknowledgement returns unknown without refusing the committed row", async () => {
+  const { secretKey, publicKey } = keypair();
+  peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+  const data = ROWS.Memory.data(ORIGIN);
+  const record = pushedRecord("Memory", data.id, data, NEW, secretKey);
+  loseCommitAck = true;
+  const response = await postSync({ instanceId: PEER_ID, records: [record], lamportClock: 1 }, secretKey);
+  expect(response.merged).toBe(0);
+  expect(response.refused).toEqual([]);
+  expect(response.indeterminate).toEqual([{ table: "Memory", id: data.id }]);
+  expect(response.merged + response.refused.length + response.indeterminate.length).toBe(response.total);
+  expect(stores.Memory.get(data.id)?.content).toBe(data.content);
+});
+
+for (const stage of ["initial read", "commit outcome"]) {
+  it(`${stage} pending past the deadline is indeterminate`, async () => {
+    const { secretKey, publicKey } = keypair();
+    peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+    const data = ROWS.Memory.data(ORIGIN);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const paused = new Promise<void>((resolve) => { signalPause = resolve; });
+    if (stage === "initial read") pauseRead = held;
+    else pauseCommit = held;
+    const pending = postSync({ instanceId: PEER_ID, records: [pushedRecord("Memory", data.id, data, NEW, secretKey)] }, secretKey);
+    try {
+      await paused;
+      const response = await pending;
+      expect(response.refused).toEqual([]);
+      expect(response.indeterminate).toEqual([{ table: "Memory", id: data.id }]);
+      expect(response.merged).toBe(0);
+      expect(response.merged + response.refused.length + response.indeterminate.length).toBe(response.total);
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(stores.Memory.get(data.id)?.content).toBe(data.content);
+      expect(response.merged).toBe(0);
+      expect(response.refused).toEqual([]);
+    } finally {
+      release();
+    }
+  }, 15_000);
+}
+
+it("a committed row that changes after staging refuses the key as merge_target_changed and keeps the other write", async () => {
+  const { secretKey, publicKey } = keypair();
+  peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+  const data = ROWS.Memory.data(ORIGIN);
+  changeAfterStage = true;
+  const response = await postSync({ instanceId: PEER_ID, records: [pushedRecord("Memory", data.id, data, NEW, secretKey)] }, secretKey);
+  expect(response.merged).toBe(0);
+  expect(response.refused).toEqual([{ table: "Memory", id: data.id, reason: "merge_target_changed" }]);
+  expect(response.indeterminate).toEqual([]);
+  expect(response.skippedReasons).toEqual({ merge_target_changed: 1 });
+  expect(response.merged + response.refused.length + response.indeterminate.length).toBe(response.total);
+  // The staged merge was discarded with its aborted transaction: the row the
+  // other writer committed stays.
+  expect(stores.Memory.get(data.id)?.content).toBe("concurrent");
+});
+
+it("a committed Memory remains merged when its post-commit note throws", async () => {
+  const { _resetGuardForTests, _setGuardModelIdForTests, isEmbeddingSpaceUniform, recomputeLatch } = await import("../../resources/embedding-space-guard.ts");
+  const { secretKey, publicKey } = keypair();
+  peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+  const data: Record<string, any> = { ...ROWS.Memory.data(ORIGIN), embeddingModel: "foreign:model" };
+  _resetGuardForTests();
+  expect(await recomputeLatch()).toBe(true);
+  let noteCalled = false;
+  _setGuardModelIdForTests(() => { noteCalled = true; throw new Error("model lookup failed"); });
+  try {
+    const response = await postSync({ instanceId: PEER_ID, records: [pushedRecord("Memory", data.id, data, NEW, secretKey)] }, secretKey);
+    expect(noteCalled).toBe(true);
+    expect(stores.Memory.get(data.id)?.content).toBe(data.content);
+    expect(response.merged).toBe(1);
+    expect(response.refused).toEqual([]);
+    expect(response.indeterminate).toEqual([]);
+    expect(response.merged + response.refused.length + response.indeterminate.length).toBe(response.total);
+    // The verdict read also consults the configured model: answer it now, so the
+    // assertion reads the guard state the failed note left, not the lookup failure.
+    _setGuardModelIdForTests(() => "gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix");
+    expect(await isEmbeddingSpaceUniform()).toBe(false);
+  } finally {
+    _resetGuardForTests();
+  }
+});
+
+for (const field of ["table", "id"] as const) {
+  it(`an empty ${field} returns invalid_sync_batch_key before merging`, async () => {
+    const { secretKey, publicKey } = keypair();
+    peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+    const data = ROWS.Memory.data(ORIGIN);
+    const valid = pushedRecord("Memory", data.id, data, NEW, secretKey);
+    const invalid = { table: "Memory", id: "invalid", data: { ...data, id: "invalid" }, updatedAt: NEW };
+    invalid[field] = "";
+    if (field === "id") invalid.data.id = "";
+    const response = await postSync({ instanceId: PEER_ID, records: [valid, invalid] }, secretKey);
+    expect(response).toBeInstanceOf(Response);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "invalid_sync_batch_key" });
+    expect(stores.Memory.size).toBe(0);
+    expect(syncLogStore.size).toBe(0);
+  });
+}
+
+it("normalizes an empty embedding in the Memory federation merge", async () => {
+  const { secretKey, publicKey } = keypair();
+  peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+  const data: Record<string, any> = { ...ROWS.Memory.data(ORIGIN), embedding: [] };
+  const record = pushedRecord("Memory", data.id, data, NEW, secretKey);
+  const result: any = await postSync({ instanceId: PEER_ID, records: [record], lamportClock: 1 }, secretKey);
+  expect(result.merged).toBe(1);
+  expect(stores.Memory.get(data.id).embedding).toBeNull();
 });

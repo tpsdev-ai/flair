@@ -16,7 +16,7 @@
  */
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { writeFileSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -94,7 +94,7 @@ describe("Presence API integration", () => {
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   const adminAuth = () =>
     "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");

@@ -22,7 +22,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { SignJWT, importPKCS8 } from "jose";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const ISSUER = "https://mcp-aud-test.flair.internal";
 const RESOURCE = `${ISSUER}/mcp`;
@@ -84,22 +84,16 @@ describe("MCP audience binding (ops-igmt) — executed must-fail", () => {
     publicKeyPem = publicKey;
     privateKeyPem = privateKey;
 
-    const envKeys = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET", "OAUTH_GITHUB_REDIRECT_URI"] as const;
-    const prior = envKeys.map((key) => [key, process.env[key]] as const);
-    process.env.FLAIR_MCP_OAUTH = "true";
-    process.env.FLAIR_MCP_ISSUER = ISSUER;
-    process.env.OAUTH_GITHUB_CLIENT_ID = "audience-binding-client";
-    process.env.OAUTH_GITHUB_CLIENT_SECRET = "audience-binding-secret";
-    process.env.OAUTH_GITHUB_REDIRECT_URI = `${ISSUER}/oauth`;
-
-    try {
-      harper = await startHarper({ cwd: process.cwd() });
-    } finally {
-      for (const [key, value] of prior) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
+    harper = await startHarper({
+      cwd: process.cwd(),
+      serverEnv: {
+        FLAIR_MCP_OAUTH: "true",
+        FLAIR_MCP_ISSUER: ISSUER,
+        OAUTH_GITHUB_CLIENT_ID: "audience-binding-client",
+        OAUTH_GITHUB_CLIENT_SECRET: "audience-binding-secret",
+        OAUTH_GITHUB_REDIRECT_URI: `${ISSUER}/oauth`,
+      },
+    });
 
     // Seed the signing key into the table withMCPAuth verifies against.
     const seed = await adminOp({
@@ -121,7 +115,7 @@ describe("MCP audience binding (ops-igmt) — executed must-fail", () => {
 
   afterAll(async () => {
     await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("(1) wrong audience -> 401 invalid_token + resource_metadata", async () => {
     const token = await signToken({ audience: OTHER_RESOURCE, issuer: ISSUER });

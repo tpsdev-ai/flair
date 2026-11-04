@@ -2,9 +2,8 @@
 //
 // A default local Flair install listens on DEFAULT_HTTP_PORT (19926, the
 // CLI's `DEFAULT_PORT` in src/cli.ts), NOT on 9926 (the legacy early-install
-// port). The A2A agent-card `url` and the streaming catch-up self-fetch must
-// reflect the REAL listening port, or a remote A2A peer that follows discovery
-// hits a dead port.
+// port). The A2A agent-card `url` must reflect the REAL listening port, or a
+// remote A2A peer that follows discovery hits a dead port.
 //
 // Kept free of any harper import so the resolution logic is
 // unit-testable without spinning up Harper (mirrors agentcard-fields.ts —
@@ -18,8 +17,8 @@ export const DEFAULT_HTTP_PORT = 19926;
 
 export type RequestLike = { headers?: any } | undefined;
 
-// Loopback base URL for in-process self-calls (e.g. the streaming catch-up
-// fetch). Points at the port Flair is ACTUALLY listening on, which Harper
+// Loopback base URL on the port Flair is ACTUALLY listening on (the agent
+// card's local-only fallback below). Reads the port Harper
 // exposes via HTTP_PORT in the runtime env — never the public/proxy URL.
 // `HTTP_PORT` is parsed through `harperPortValue` so a host-qualified value
 // (`127.0.0.1:19926`, `[::1]:19926`) yields a valid URL rather than a doubled

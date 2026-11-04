@@ -9,7 +9,7 @@
  *
  * Copy the three helpers at the top — `flair()`, `registerAgent()`,
  * `remember()`/`recall()` — into your own component and you have the whole
- * integration. `test/integration/in-process-agents.test.ts` drives this file
+ * integration. `test/integration-heavy/in-process-agents.test.ts` drives this file
  * and asserts the properties that make it safe: registration lands a complete
  * Principal record, every call is attributed to ONE agent, an agent cannot
  * write as another, and an agent cannot read another's private memories.
@@ -17,7 +17,8 @@
  * Kept as plain JS (no build step) so it loads through the `jsResource` glob
  * exactly as a hand-written application component would.
  */
-import { Resource, server } from "harper";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { Resource, server, transaction } from "harper";
 // The in-process call seam. Deep-imported from the installed package the same
 // way an application would — Flair ships `dist/`, and this module has no
 // dependencies of its own.
@@ -100,14 +101,74 @@ const actingAs = (agentId, asAdmin) => (asAdmin === true ? adminContext(agentId)
  * `internal` verdict. An application never has to remember that rule — but it
  * should still resolve `agentId` before it gets here, not hope for the throw.
  */
-async function remember(agentId, { content, durability = "standard", visibility, ownerAgentId, asAdmin }) {
+async function remember(agentId, { content, durability = "standard", visibility, ownerAgentId, asAdmin, supersedes }) {
   const h = await collectionResource(flair("Memory"), actingAs(agentId, asAdmin));
   // `ownerAgentId` exists only so the test can attempt a forgery — acting as
   // one agent while claiming another owns the record. Flair 403s that; an
   // application would simply pass `agentId` and never expose the distinction.
   const body = { agentId: ownerAgentId ?? agentId, content, durability };
   if (visibility) body.visibility = visibility;
+  // Optional: the id of the record this one replaces (a supersede).
+  if (supersedes) body.supersedes = supersedes;
   return h.post(body);
+}
+
+/** Thrown by {@link supersedeInCallerTransaction} to abort its own transaction. */
+class CallerAbort extends Error {}
+
+/**
+ * A supersede written inside a transaction THIS caller owns (Harper's
+ * `transaction()`), the shape of an in-process caller that composes a Memory
+ * write with writes of its own: the Memory write joins the caller's
+ * transaction, and the caller's commit or abort decides it. With `abort`, the
+ * caller throws after the write returns, so its transaction aborts.
+ */
+async function supersedeInCallerTransaction(agentId, { id, content, durability = "standard", supersedes, abort, tags, metadata, trigger }) {
+  const ctx = agentContext(agentId);
+  let written = null;
+  try {
+    await transaction(ctx, async () => {
+      const h = await collectionResource(flair("Memory"), ctx);
+      written = await h.post({ id, agentId, content, durability, supersedes, tags, metadata, trigger });
+      if (abort && !(written instanceof Response)) throw new CallerAbort("the caller aborts its transaction after the write");
+    });
+  } catch (err) {
+    if (!(err instanceof CallerAbort)) throw err;
+    return { aborted: true, written: true };
+  }
+  if (written instanceof Response) return written;
+  return { aborted: false, written: written != null };
+}
+
+async function supersedeWithCloseStorageRefusal(agentId, { id, content, supersedes, method, joined }) {
+  const ctx = agentContext(agentId);
+  const table = databases.flair.Memory;
+  const originalPut = table.put;
+  let refusedCloses = 0;
+  table.put = function (row, shared) {
+    if (row.id === supersedes && row.validTo != null) {
+      refusedCloses++;
+      return Promise.resolve(new Response("fixture storage refusal", { status: 503 }));
+    }
+    return originalPut.call(this, row, shared);
+  };
+  let written;
+  const write = async () => {
+    const body = { id, agentId, content, durability: "persistent", supersedes };
+    if (method === "POST") {
+      const h = await collectionResource(flair("Memory"), ctx);
+      written = await h.post(body);
+    } else {
+      written = await flair("Memory").put(body, ctx);
+    }
+  };
+  try {
+    if (joined) await transaction(ctx, write);
+    else await write();
+    return { refusedCloses, reply: await run(() => written) };
+  } finally {
+    table.put = originalPut;
+  }
 }
 
 /**
@@ -133,7 +194,7 @@ async function semanticRecall(agentId, q, limit = 20) {
   return Array.isArray(list) ? list.map(summarise) : list;
 }
 
-/** The same semantic read with NO context — see `recallUnscoped`. */
+/** A SemanticSearch read with `internalContext()`. */
 async function semanticRecallUnscoped(q, limit = 20) {
   const h = await collectionResource(flair("SemanticSearch"), internalContext());
   const r = await h.post({ q, limit });
@@ -280,8 +341,7 @@ async function mcpRpc(sub, rpc, clientId) {
 /**
  * The DELIBERATELY unfiltered read — every agent's private records, by name.
  * `internalContext()` is what an infrastructure sweep asks for on purpose; an
- * application must never reach this verdict, and since it now has to type this
- * function to get there, it cannot reach it by accident.
+ * agent-facing application operation must not reach this verdict.
  */
 async function recallUnscoped() {
   return collect(await flair("Memory").search({ conditions: [] }, internalContext()));
@@ -313,6 +373,58 @@ async function createWithNoContext() {
 async function recallWithRawMissingId() {
   const forgotten = { request: { tpsAgent: undefined, tpsAgentIsAdmin: false } };
   return collect(await flair("Memory").search({ conditions: [] }, forgotten));
+}
+
+// ─── flair#2084 — memory maintenance called in-process with admin authority ──
+//
+// The direct resource call a Harper application makes with no HTTP hop. JSON
+// cannot carry an `undefined` value, so each key named in `undefinedKeys` is
+// added to the request body as an OWN property whose value is `undefined`. The
+// reply carries the body's own keys and which of them hold `undefined`, so the
+// test can check what was sent as well as what came back.
+async function maintainAsAdmin(agentId, body, undefinedKeys) {
+  const request = { ...(body ?? {}) };
+  for (const key of undefinedKeys ?? []) request[key] = undefined;
+  const sent = {
+    ownKeys: Object.keys(request),
+    undefinedKeys: Object.keys(request).filter((key) => request[key] === undefined),
+  };
+  const h = await collectionResource(flair("MemoryMaintenance"), adminContext(agentId));
+  return { sent, reply: await run(() => h.post(request)) };
+}
+
+// ─── flair#2837 — the admin-only gate through Harper's resource lifecycle ────
+//
+// A static get() whose target sets `checkPermission` makes Harper call the
+// resource's allowRead() with the context the call carries; Flair's Admin
+// resource answers allowRead with allowAdmin. Each call runs in the async
+// context captured when this module loaded, outside any request, so a call
+// with no context argument finds no request context in Harper's async storage
+// either. The marker-with-headers context carries a plain-object `headers`,
+// which the resolver still reads as `internal`, so its refusal is the
+// deliberate-internal check's.
+const outsideAnyRequest = AsyncLocalStorage.snapshot();
+
+const ADMIN_GATE_CONTEXTS = {
+  none: () => undefined,
+  internalContext: () => internalContext(),
+  markerWithHeaders: () => ({ ...internalContext(), request: { headers: { "x-probe": "2837" } } }),
+};
+
+async function adminGate(contextKind) {
+  const make = ADMIN_GATE_CONTEXTS[contextKind];
+  if (!make) throw new Error(`no such admin-gate context '${contextKind}'`);
+  return outsideAnyRequest(async () => {
+    const context = make();
+    try {
+      const reply = context === undefined
+        ? await flair("Admin").get({ checkPermission: true })
+        : await flair("Admin").get({ checkPermission: true }, context);
+      return { admitted: true, status: reply instanceof Response ? reply.status : null };
+    } catch (err) {
+      return { admitted: false, statusCode: err?.statusCode ?? null, error: String(err?.message ?? err) };
+    }
+  });
 }
 
 const summarise = (r) => ({ id: r?.id, agentId: r?.agentId, visibility: r?.visibility, content: r?.content });
@@ -355,6 +467,34 @@ export class AgentFleet extends Resource {
         return run(() => registerAgent(body));
       case "remember":
         return run(() => remember(body.agentId, body));
+      case "putAgent":
+        // flair#2696 — an Agent PUT the way an embedding app's provisioning code
+        // calls it: through the Agent resource bound to a trusted internal
+        // context, as a collection resource with NO URL target, so the body
+        // `id` names the row.
+        return run(async () => {
+          const h = await collectionResource(flair("Agent"), internalContext());
+          return h.put(body.record);
+        });
+      case "seedAgent":
+        // flair#2696 — AgentSeed called in-process through a collection
+        // resource. `marker: true` uses internalContext() (the deliberate
+        // trusted internal call); `marker: false` passes an explicit context
+        // that lacks the internal marker.
+        return run(async () => {
+          const ctx = body.marker === true ? internalContext() : { request: {} };
+          const h = await collectionResource(flair("AgentSeed"), ctx);
+          return h.post(body.seed);
+        });
+      case "postMemory":
+        return run(async () => {
+          const h = await collectionResource(flair("Memory"), agentContext(body.agentId));
+          return h.post(body.record);
+        });
+      case "supersedeInCallerTransaction":
+        return run(() => supersedeInCallerTransaction(body.agentId, body));
+      case "supersedeWithCloseStorageRefusal":
+        return run(() => supersedeWithCloseStorageRefusal(body.agentId, body));
       case "recall":
         return run(() => recall(body.agentId, body));
       case "recallById":
@@ -365,6 +505,8 @@ export class AgentFleet extends Resource {
         return run(() => recallByIdTrust(body.agentId, body.id));
       case "deleteById":
         return run(() => deleteById(body.agentId, body.id));
+      case "deletePresenceById":
+        return run(() => flair("Presence").delete(body.id, agentContext(body.agentId)));
       case "updateById":
         return run(() => updateById(body.agentId, body.id, body.content));
       case "semanticRecall":
@@ -385,6 +527,10 @@ export class AgentFleet extends Resource {
         return run(() => createWithNoContext());
       case "recallWithRawMissingId":
         return run(() => recallWithRawMissingId());
+      case "maintainAsAdmin":
+        return run(() => maintainAsAdmin(body.agentId, body.body, body.undefinedKeys));
+      case "adminGate":
+        return run(() => adminGate(body.context));
       default:
         return new Response(JSON.stringify({ error: `unknown op '${op}'` }), { status: 400 });
     }

@@ -132,25 +132,10 @@ redact_plist() {
   node "$WORKSPACE/scripts/ci/redact-launchd-plist.mjs" "$@"
 }
 
-assert_no_inline_credentials() {
-  # Fails-first companion to redact_plist. Two independent layers:
-  #   (1) the run's own admin password value must not appear anywhere; and
-  #   (2) no credential KEY may appear with a value other than REDACTED. A
-  #       *different* credential in a plist is exactly the shape layer (1)
-  #       cannot see, and this repository is PUBLIC.
-  # The key list lives in the redactor (derived from the product's own
-  # secret-key export), so this assertion widens with that list automatically.
-  local target="$1"
-  if [ -n "${ADMIN_PASS:-}" ] && grep -rIlF "$ADMIN_PASS" "$target" >/dev/null 2>&1; then
-    echo "::error::the lane's admin password reached the diagnostics output under ${target}"
-    return 1
-  fi
-  if ! node "$WORKSPACE/scripts/ci/redact-launchd-plist.mjs" --check "$target"; then
-    echo "::error::a credential key with a non-REDACTED value reached the diagnostics output under ${target}"
-    return 1
-  fi
-  return 0
-}
+# The shared assertion checks the run's password and supported credential
+# key/string shapes. Findings and could-not-run are reported during an
+# already-failing lane.
+source "$WORKSPACE/scripts/ci/launchd-redaction-check.sh"
 
 dump_diagnostics() {
   set +e

@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -84,7 +84,7 @@ describe("Integration collection DELETE (flair#2309)", () => {
     }
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("OPERATOR: collection DELETE removes every matched row and leaves an unmatched control row", async () => {
     await seedRow("intdel-op-a", "slack-op");
@@ -158,7 +158,12 @@ describe("Integration collection DELETE (flair#2309)", () => {
         headers: { Authorization: ed25519Header(principal, "DELETE", path) },
       });
       expect(del.status).toBe(403);
-      expect(await del.json()).toEqual({ error: "integration_directory_requires_operator: deleting by a collection or query target is operator-only" });
+      // A non-admin agent's collection DELETE is refused by the shared
+      // owner-scoped write rule (resources/owner-scoped-write-policy.ts) before
+      // the resource runs; an admin agent reaches Integration's own operator rule.
+      expect(await del.json()).toEqual(principal === adminAgent
+        ? { error: "integration_directory_requires_operator: deleting by a collection or query target is operator-only" }
+        : { error: "forbidden: a non-admin write to Integration must address one record by its id" });
 
       const still = await readByPlatform(`${principal.id}-slack-rt`);
       expect(still.map((r) => r.id).sort()).toEqual([`${principal.id}-intdel-rt-a`, `${principal.id}-intdel-rt-b`]);

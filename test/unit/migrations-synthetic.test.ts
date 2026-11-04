@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, mock } from "bun:test";
 import { makeFakeWriteBack } from "../helpers/fake-write-back";
+import { memoryLockDouble } from "../helpers/memory-lock-double";
 
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
@@ -39,6 +40,8 @@ function makeFakeMemoryTable(seed: Row[]) {
     puts,
     writes,
     table: {
+      // flair#2478: the stamp write runs under the row's per-id Memory lock.
+      primaryStore: memoryLockDouble(),
       async get(id: string) {
         return store.has(id) ? { ...store.get(id)! } : null;
       },

@@ -345,11 +345,13 @@ describe("Basic auth super_user path", () => {
 describe("auth middleware: the Basic scheme name is case-insensitive (RFC 9110)", () => {
   test("basic/BASIC select the Basic branch — the middleware's scheme check is case-insensitive, in both places", () => {
     const src = readFileSync(join(import.meta.dir, "../../resources/auth-middleware.ts"), "utf8");
-    // ONE case-insensitive predicate…
-    expect(src).toContain("const isBasic = /^Basic /i.test(header)");
+    const grammar = readFileSync(join(import.meta.dir, "../../resources/basic-auth-header.ts"), "utf8");
+    // ONE case-insensitive predicate, defined with the Basic header grammar…
+    expect(grammar).toContain("export const BASIC_AUTH_HEADER_RE = /^Basic /i;");
+    expect(src).toContain("const isBasic = BASIC_AUTH_HEADER_RE.test(header)");
     // …used by BOTH the /FederationPair bypass and the Basic branch, and the
     // case-sensitive exact match is gone.
-    expect(src).toContain('url.pathname === "/FederationPair" && !isBasic');
+    expect(src).toContain('routedDecisionPath === "/FederationPair" && !isBasic');
     expect(src).toContain("if (isBasic) {");
     expect(src).not.toContain('startsWith("Basic ")');
     const isBasic = (h: string) => /^Basic /i.test(h);

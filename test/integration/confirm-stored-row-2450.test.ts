@@ -22,7 +22,11 @@
  * `_reindex` answers 409 stored_row_changed; a merge is skipped by
  * name (merge_target_changed). Harper has no compare-and-set on a table write, so
  * a change committed AFTER the final confirm read — taken inside the same
- * transaction, before its commit — is not seen (resources/write-back.ts).
+ * transaction, before its commit — is not seen by that read
+ * (resources/write-back.ts). `_reindex` owns its transaction and reads the
+ * committed row back after the commit (flair#2656): a row that does not show
+ * the re-PUT answers 409 stored_row_changed, a failed read 503
+ * write_outcome_unknown (the flair#2656 cases below).
  *
  * Test-only pause points (resources/txn-pause-point.ts, armed
  * through FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR) hold each
@@ -39,7 +43,7 @@ import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { computeContentHash } from "../../resources/relay-lib.js";
 import { runFederationSyncOnce } from "../../src/cli.js";
 import { keystore } from "../../src/keystore.js";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -99,15 +103,18 @@ async function updateRow(table: string, row: Record<string, unknown>): Promise<v
 async function deleteRow(table: string, id: string): Promise<void> {
   await ops({ operation: "delete", database: "flair", table, ids: [id] });
 }
-async function purgeRow(id: string): Promise<void> {
+async function purgeBusy(id: string): Promise<{ status: number; body: any }> {
   const res = await fetch(`${harper.httpURL}/MemoryPurge`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: basicAuth() },
     body: JSON.stringify({ ids: [id] }),
     signal: AbortSignal.timeout(30_000),
   });
-  const text = await res.text();
-  expect(res.status, `MemoryPurge: ${text.slice(0, 300)}`).toBe(200);
+  return { status: res.status, body: await res.json() };
+}
+async function purgeRow(id: string): Promise<void> {
+  const { status, body } = await purgeBusy(id);
+  expect(status, `MemoryPurge: ${JSON.stringify(body).slice(0, 300)}`).toBe(200);
 }
 
 function authSend(agent: TestAgent, method: string, path: string, body?: unknown): Promise<Response> {
@@ -168,20 +175,7 @@ async function withPaused<T>(point: string, trigger: () => Promise<Response>, co
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2450-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper();
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
   assertOwnInstance(harper);
   await ops({
     operation: "insert", database: "flair", table: "Agent",
@@ -200,7 +194,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 // ── item 1: Memory.put's admin _reindex re-PUT ───────────────────────────────
 
@@ -220,16 +214,22 @@ describe("flair#2450 — the _reindex re-PUT confirms the stored row (real Harpe
     expect(await readRow("Memory", id), "the re-PUT re-created the deleted row").toBeNull();
   }, 60_000);
 
-  it("a PURGE between the read and the write is refused and the row stays purged", async () => {
+  // flair#2478 slice 3b: the purge takes its targets' per-id write locks, so a
+  // purge that arrives while the re-PUT holds the id is refused busy and
+  // deletes nothing; once the re-PUT has committed, a purge removes the row.
+  it("a PURGE between the read and the write is refused busy and lands once the re-PUT commits", async () => {
     const id = `csr2-reidx-purge-${Date.now()}`;
     await seed(id, randomUUID());
-    const { response, released, paused } = await withPaused("memory-reindex", () => reindexPut(id), () => purgeRow(id));
+    const { response, released, paused, competed } = await withPaused("memory-reindex", () => reindexPut(id), () => purgeBusy(id));
     expect(paused, "the reindex re-PUT was not paused").toBe(true);
     expect(released).toBe("go");
+    expect(competed?.status).toBe(503);
+    expect(competed?.body).toEqual({ error: "memory_busy", caller: "admin" });
     const text = await response.clone().text();
-    expect(response.status, text.slice(0, 200)).toBe(409);
-    expect(JSON.parse(text).error).toBe("stored_row_changed");
-    expect(await readRow("Memory", id), "the re-PUT re-created the purged row").toBeNull();
+    expect(response.status, text.slice(0, 200)).toBeLessThan(300);
+    expect(await readRow("Memory", id), "the refused purge deleted the row").not.toBeNull();
+    await purgeRow(id);
+    expect(await readRow("Memory", id), "the purge did not remove the row the re-PUT committed").toBeNull();
   }, 60_000);
 
   it("a same-id UPDATE with a new token is refused and not overwritten", async () => {
@@ -265,11 +265,77 @@ describe("flair#2450 — the _reindex re-PUT confirms the stored row (real Harpe
     const id = `csr2-reidx-ok-${Date.now()}`;
     const TOKEN = randomUUID();
     await seed(id, TOKEN);
-    const res = await reindexPut(id);
+    const res = await reindexPut(id, { retrievalCount: 7 });
     expect(res.status, (await res.clone().text()).slice(0, 200)).toBeLessThan(300);
     const row = await readRow("Memory", id);
     expect(row?.content, "the ordinary re-PUT did not land").toBe(`reindex ${id}`);
     expect(row?.instanceToken, "the re-PUT did not preserve the stored token").toBe(TOKEN);
+    expect(row?.retrievalCount, "the re-PUT did not commit the changed bookkeeping field").toBe(7);
+  }, 60_000);
+});
+
+// flair#2656: the `_reindex` re-PUT owns its transaction and reads the
+// committed row back after that commit. Each request below is an HTTP PUT,
+// which Harper runs inside a request transaction. The
+// `memory-reindex-confirmed` pause holds the re-PUT after its final pre-commit
+// confirmation, before its transaction commits; the competitor is a raw
+// operations write, which takes no Memory write lock.
+describe("flair#2656 — the _reindex re-PUT reads its committed row back (real Harper)", () => {
+  const POINT = "memory-reindex-confirmed";
+  const seed = (id: string, token: string) =>
+    insertRow("Memory", { id, agentId: owner.id, content: `reindex ${id}`, contentHash: id, instanceToken: token, durability: "persistent", visibility: "shared", archived: false, createdAt: new Date(Date.now() - 60_000).toISOString() });
+
+  it("a same-id UPDATE with a new token committed after the final confirmation stands, and the re-PUT answers 409", async () => {
+    const id = `csr2-reidx-gap-${Date.now()}`;
+    const T2 = randomUUID();
+    await seed(id, randomUUID());
+    const { response, released, paused } = await withPaused(POINT, () => reindexPut(id), async () => {
+      await updateRow("Memory", { id, instanceToken: T2, content: "replaced" });
+    });
+    // Behaviour first, so a run that never paused still reports the outcome.
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 200)).toBe(409);
+    expect(JSON.parse(text).error).toBe("stored_row_changed");
+    const row = await readRow("Memory", id);
+    expect(row?.instanceToken, "the competing incarnation token was not kept").toBe(T2);
+    expect(row?.content, "the competing content was not kept").toBe("replaced");
+    expect(paused, "the reindex re-PUT was not paused after its final confirmation").toBe(true);
+    expect(released).toBe("go");
+  }, 60_000);
+
+  it("CONTROL: held at the same point with no competitor, the re-PUT lands and keeps the stored token", async () => {
+    const id = `csr2-reidx-gap-ok-${Date.now()}`;
+    const TOKEN = randomUUID();
+    await seed(id, TOKEN);
+    const { response, released, paused } = await withPaused(POINT, () => reindexPut(id, { retrievalCount: 7 }), async () => {});
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 200)).toBeLessThan(300);
+    const row = await readRow("Memory", id);
+    expect(row?.content).toBe(`reindex ${id}`);
+    expect(row?.instanceToken).toBe(TOKEN);
+    expect(row?.retrievalCount, "the re-PUT did not commit the changed bookkeeping field").toBe(7);
+    expect(paused, "the reindex re-PUT was not paused after its final confirmation").toBe(true);
+    expect(released).toBe("go");
+  }, 60_000);
+
+  it("a failed read-back answers 503 write_outcome_unknown, and the id's next PUT is refused the same way", async () => {
+    const id = `csr2-reidx-unread-${Date.now()}`;
+    await seed(id, randomUUID());
+    const fault = join(pauseDir, "fail.memory-reindex-verify");
+    writeFileSync(fault, "");
+    let response: Response;
+    try {
+      response = await reindexPut(id);
+    } finally {
+      rmSync(fault, { force: true });
+    }
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 200)).toBe(503);
+    expect(JSON.parse(text).error).toBe("write_outcome_unknown");
+    const next = await reindexPut(id);
+    const nextText = await next.clone().text();
+    expect(next.status, nextText.slice(0, 200)).toBe(503);
+    expect(JSON.parse(nextText).error).toBe("write_outcome_unknown");
   }, 60_000);
 });
 

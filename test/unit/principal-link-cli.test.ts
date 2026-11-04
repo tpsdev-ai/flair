@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 import { tempDir } from "../helpers/temp-dir.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 /** A public-shaped origin that never resolves: if the command reached the
  *  network at all, the failure would be a DNS/connection error, not its own. */
@@ -32,8 +33,9 @@ function runCli(args: string[]): Promise<{ stdout: string; stderr: string; code:
   const home = tempDir("flair-2115-cli-");
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const child = spawn("bun", [cliPath, ...args], {
-      env: { ...process.env, HOME: home, FLAIR_URL: "", FLAIR_ADMIN_PASS: "" },
+    const childEnv = { ...process.env, HOME: home, FLAIR_URL: "", FLAIR_ADMIN_PASS: "" };
+    const child = spawn(nodeBin({ env: childEnv }), [cliPath, ...args], {
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       // A literal: the CLI-spawn budget gate (flair#1807/#1825) reads a literal
       // token, and a new test may not arrive with its own baseline exception.

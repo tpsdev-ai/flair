@@ -44,6 +44,7 @@ import { join } from "node:path";
 import nacl from "tweetnacl";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline";
+import { nodeBin } from "../helpers/node-runtime.js";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { seedAgentWithLocalHome } from "../../src/cli.js";
 import {
@@ -138,16 +139,17 @@ function runDoctor(): Promise<{ code: number | null; stdout: string; stderr: str
   return new Promise((resolve, reject) => {
     const args = ["doctor", "--port", new URL(harper.httpURL).port];
     const startedAt = Date.now();
-    const child = spawn(process.execPath, [CLI, ...args], {
-      env: {
-        ...process.env,
-        HOME: cliHome,
-        FLAIR_URL: harper.httpURL,
-        FLAIR_OPS_PORT: new URL(harper.opsURL).port,
-        FLAIR_TOKEN: "",
-        FLAIR_ADMIN_PASS: ADMIN_PASS,
-        NO_COLOR: "1",
-      },
+    const env = {
+      ...process.env,
+      HOME: cliHome,
+      FLAIR_URL: harper.httpURL,
+      FLAIR_OPS_PORT: new URL(harper.opsURL).port,
+      FLAIR_TOKEN: "",
+      FLAIR_ADMIN_PASS: ADMIN_PASS,
+      NO_COLOR: "1",
+    };
+    const child = spawn(nodeBin({ env }), [CLI, ...args], {
+      env,
       timeout: 30_000,
     });
     let stdout = "";
@@ -170,8 +172,9 @@ function runPrincipalAdd(id: string, opsPortArg: string): Promise<{ code: number
   return new Promise((resolve, reject) => {
     const args = ["principal", "add", id, "--ops-port", opsPortArg, "--port", new URL(harper.httpURL).port, "--keys-dir", join(cliHome, "keys"), "--admin-pass", ADMIN_PASS];
     const startedAt = Date.now();
-    const child = spawn(process.execPath, [CLI, ...args], {
-      env: { ...process.env, HOME: cliHome, FLAIR_TOKEN: "", NO_COLOR: "1" },
+    const env = { ...process.env, HOME: cliHome, FLAIR_TOKEN: "", NO_COLOR: "1" };
+    const child = spawn(nodeBin({ env }), [CLI, ...args], {
+      env,
       timeout: 30_000,
     });
     let stdout = "";
@@ -258,21 +261,7 @@ async function withPausedStamp<T, R>(
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2433-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper();
-  } finally {
-    // The spawned Harper has its copy; no later Harper in this process inherits it.
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
   assertOwnInstance(harper);
   cliHome = await mkdtemp(join(tmpdir(), "flair-2433-home-"));
   // Make this instance's identity unambiguous: exactly one Instance row.
@@ -385,10 +374,17 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     expect(patchClear.status, patchClear.raw).toBeLessThan(300);
     await stays("a PATCH that cleared them");
 
+    // Admin Basic PUTs (an Agent PUT is an administrator operation). Each must
+    // succeed and store its displayName, so "stays" is checked after a PUT that
+    // landed rather than one that was refused.
     const full = { id, name: id, role: "agent", status: "active", publicKey: "pk-bk-2433", createdAt: new Date().toISOString() };
-    await send("PUT", `/Agent/${id}`, { ...full, _syncedFrom: "forged", _originatorInstanceId: "forged" });
+    const putSet = await send("PUT", `/Agent/${id}`, { ...full, displayName: "put-supplied", _syncedFrom: "forged", _originatorInstanceId: "forged" });
+    expect(putSet.status, putSet.raw).toBeLessThan(300);
+    expect((await rowIn("Agent", id))?.displayName, "the PUT that supplied them did not land").toBe("put-supplied");
     await stays("a PUT that supplied them");
-    await send("PUT", `/Agent/${id}`, full);
+    const putOmit = await send("PUT", `/Agent/${id}`, { ...full, displayName: "put-omitted" });
+    expect(putOmit.status, putOmit.raw).toBeLessThan(300);
+    expect((await rowIn("Agent", id))?.displayName, "the PUT that omitted them did not land").toBe("put-omitted");
     await stays("a PUT that omitted them");
   }, 30_000);
 

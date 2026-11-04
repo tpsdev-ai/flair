@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { FlairClient } from "../../packages/flair-client/src/client";
 import { buildCaptureMemoryRow, captureHash, planStop } from "../../packages/flair-mcp/src/capture";
 import { appendRecord, readSpool } from "../../packages/flair-mcp/src/capture-spool";
@@ -48,7 +48,7 @@ describe("flair#2068 — capture flush through the production client path agains
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     if (keyDir) await rm(keyDir, { recursive: true, force: true, maxRetries: 4 });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("a staged candidate is written and read back with its id, content, meta and provenance", async () => {
     const agent = mkAgent(`capture-flush-${randomUUID()}`);

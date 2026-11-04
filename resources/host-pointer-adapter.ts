@@ -7,6 +7,7 @@
  * Production behaviour is the real table.
  */
 import { currentHostPointerAdapter } from "./host-pointer/registry.js";
+export { PointerAlreadyStoredError, restorePointerRowIfAbsent } from "./host-pointer/registry.js";
 
 export function putPointerRow(row: any, ctx: any): Promise<void> {
   return currentHostPointerAdapter().putPointerRow(row, ctx);

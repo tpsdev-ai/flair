@@ -186,7 +186,7 @@ auto-cuts a [GitHub release](https://github.com/tpsdev-ai/flair/releases) for th
 Release notes are a **lede + links** rendering of the matching `## [X.Y.Z]` section
 (`scripts/changelog-release-notes.mjs`): each entry keeps its bold lede, up to three
 issue links, and any `> **Heads-up:**` operator lines. The deep record stays in
-`CHANGELOG.md` and is linked from the footer at that tag. It is idempotent: re-running
+`CHANGELOG.md` and is linked from the footer at that tag. <!-- docs-freshness-allow: the repository's changelog, not a package file --> It is idempotent: re-running
 the workflow or re-pushing the tag updates the existing release rather than failing.
 The GitHub release documents the tagged commit immediately; it does not wait on the
 npm 2FA gate. If the CHANGELOG has no section for the version, this job fails loudly

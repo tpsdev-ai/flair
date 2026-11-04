@@ -21,7 +21,7 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, copyFileSync, cpSync, writ
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
+import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { childOverranDeadline } from "../helpers/child-deadline.ts";
 import { discriminateMcpOAuthDiscovery, reportMcpOAuthDiscovery } from "../../src/lib/mcp-enable.ts";
 
@@ -57,15 +57,15 @@ function clearMcpEnv(): void {
   for (const k of MCP_ENV_KEYS) delete process.env[k];
 }
 afterAll(async () => {
-  for (const h of instances) {
-    try { await stopHarper(h); } catch { /* best effort */ }
-  }
+  // flair#2568: every instance this file started, stopped concurrently (one
+  // stop deadline for the set, not one per instance); best effort, as before.
+  await stopHarpers(instances).catch(() => { /* best effort */ });
   for (const d of tempDirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
   }
   instances = [];
   tempDirs = [];
-});
+}, HARPER_STOP_BUDGET_MS);
 
 function makeWorkDir(prefix: string, withCli = false): string {
   const workDir = mkdtempSync(join(tmpdir(), prefix));
@@ -124,9 +124,8 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
     "flair's own AS (FLAIR_PUBLIC_URL ≠ the probed address) is the named failure, not 'unrecognized'",
     async () => {
       clearMcpEnv();
-      process.env.FLAIR_PUBLIC_URL = FLAIR_PUBLIC; // the flag stays OFF → flair's own AS
       const workDir = makeWorkDir("flair-2283-public-own-");
-      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, serverEnv: { FLAIR_PUBLIC_URL: FLAIR_PUBLIC } });
       instances.push(harper);
 
       // The instance really is reachable on loopback, but the document it serves
@@ -162,13 +161,18 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
     "the live plugin document (FLAIR_MCP_ISSUER ≠ the probed address) is a pass",
     async () => {
       clearMcpEnv();
-      process.env.FLAIR_MCP_OAUTH = "true";
-      process.env.FLAIR_MCP_ISSUER = PLUGIN_ISSUER;
-      process.env.OAUTH_GITHUB_CLIENT_ID = "public-issuer-2283-client";
-      process.env.OAUTH_GITHUB_CLIENT_SECRET = "public-issuer-2283-secret";
-      process.env.OAUTH_GITHUB_REDIRECT_URI = `${PLUGIN_ISSUER}/oauth`;
       const workDir = makeWorkDir("flair-2283-public-live-");
-      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      const harper = await startHarper({
+        cwd: workDir,
+        harperBinDir: REPO_ROOT,
+        serverEnv: {
+          FLAIR_MCP_OAUTH: "true",
+          FLAIR_MCP_ISSUER: PLUGIN_ISSUER,
+          OAUTH_GITHUB_CLIENT_ID: "public-issuer-2283-client",
+          OAUTH_GITHUB_CLIENT_SECRET: "public-issuer-2283-secret",
+          OAUTH_GITHUB_REDIRECT_URI: `${PLUGIN_ISSUER}/oauth`,
+        },
+      });
       instances.push(harper);
 
       const doc = await wellKnown(harper.httpURL);
@@ -246,10 +250,10 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
     "doctor infers the legacy flag from the component .env and reports flair's own advertised endpoint",
     async () => {
       clearMcpEnv();
-      // The running instance's flag is OFF: the process environment (which wins over
-      // the component .env — Harper's loadEnv only fills in keys not already set)
-      // decides the effective value, while the .env written below is what doctor reads.
-      process.env.FLAIR_MCP_OAUTH = "false";
+      // The running instance's flag is OFF: serverEnv (which reaches Harper's
+      // process environment and wins over the component .env — Harper's loadEnv
+      // only fills in keys not already set) decides the effective value, while
+      // the .env written below is what doctor reads.
       const workDir = makeWorkDir("flair-2283-env-legacy-", true);
       writeFileSync(
         join(workDir, ".env"),
@@ -260,10 +264,10 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
           "",
         ].join("\n"),
       );
-      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, serverEnv: { FLAIR_MCP_OAUTH: "false" } });
       instances.push(harper);
 
-      // Flag off in the process environment -> flair serves its OWN AS document.
+      // Flag off in the instance's environment -> flair serves its OWN AS document.
       const doc = await wellKnown(harper.httpURL);
       expect(doc.issuer).toBe(FLAIR_PUBLIC);
       expect(doc.token_endpoint).toBe(`${FLAIR_PUBLIC}/OAuthToken`);
@@ -291,10 +295,9 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
     async () => {
       clearMcpEnv();
       const DECOY = "https://flair-2283-decoy.test";
-      // The running instance's flag is OFF (the process environment wins over the
+      // The running instance's flag is OFF (the server env wins over the
       // component .env for the EFFECTIVE value), so it serves flair's OWN AS document,
       // whose issuer/endpoints come from the last FLAIR_PUBLIC_URL the .env assigns.
-      process.env.FLAIR_MCP_OAUTH = "false";
       const workDir = makeWorkDir("flair-2283-env-last-wins-", true);
       writeFileSync(
         join(workDir, ".env"),
@@ -305,7 +308,7 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
           "",
         ].join("\n"),
       );
-      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, serverEnv: { FLAIR_MCP_OAUTH: "false" } });
       instances.push(harper);
 
       const doc = await wellKnown(harper.httpURL);

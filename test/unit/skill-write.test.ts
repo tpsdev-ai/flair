@@ -1,3 +1,4 @@
+import { skillMetadataHasDuplicateKey } from "../../resources/skill-write.js";
 import { describe, expect, test } from "bun:test";
 import {
   SKILL_TAG,
@@ -178,5 +179,32 @@ describe("skillScanGate", () => {
     skillScanGate(content);
     expect(content._safetyFlags).toContain("existing");
     expect(content._safetyFlags.some((f: string) => f.startsWith("skill:"))).toBe(true);
+  });
+});
+
+
+describe("skill metadata top-level keys", () => {
+  test.each([
+    '{"name":"one","name":"two"}',
+    '{"description":"one","description":"two"}',
+    '{"source":1,"source":2}',
+    '{"__proto__":1,"__proto__":2}',
+    '{"name":1,"na\\u006de":2}',
+    '{"quote\\\"key":1,"quote\\u0022key":2}',
+    '{"name":{"nested":[{"key":1}]},"name":2}',
+  ])("recognizes duplicate decoded keys in %s", (metadata) => {
+    expect(skillMetadataHasDuplicateKey(metadata)).toBe(true);
+  });
+
+  test.each([
+    '{"name":"one","description":"two"}',
+    '{"name":"commas, braces{} colon: and quote\\\"","other":"name"}',
+    '{"name":{"name":1,"name":2},"other":[{"name":3}]}',
+    '{"name":[1,2],"description":{"x":[3,4]}}',
+    ' { "" : 1, "other": 2 } ',
+    '{}', '[]', 'null', '{"name":1,}', '',
+    { name: "one" }, null,
+  ])("accepts metadata without duplicate top-level object keys: %j", (metadata) => {
+    expect(skillMetadataHasDuplicateKey(metadata)).toBe(false);
   });
 });

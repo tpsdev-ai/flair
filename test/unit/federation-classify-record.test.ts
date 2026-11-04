@@ -12,7 +12,7 @@ import {
 // no operator-visible reason ("green dashboard while burning").
 
 describe("classifyRecord — skip categorization", () => {
-  const knownTables = new Set(["Memory", "Soul", "Agent", "Relationship", "Message"]);
+  const knownTables = new Set(["Memory", "Soul", "Agent", "Relationship", "Message", "Presence"]);
   const receiverId = "flair_hub_1";
   const now = new Date("2026-05-27T00:00:00Z");
 

@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { cp, mkdtemp, rm, symlink } from "node:fs/promises";
+import { access, cp, mkdtemp, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 import {
   bm25LegServesTracked,
   hnswLegServesTracked,
@@ -10,6 +10,7 @@ import {
   trackedHitStatsCommitted,
   trackedResultSet,
 } from "../helpers/search-index-ready";
+import { OMITTED_TRIGGER_REL } from "../helpers/component-without-migration-boot";
 
 let harper: HarperInstance;
 let appDir: string;
@@ -25,6 +26,11 @@ beforeAll(async () => {
   }
   await cp(join(root, "test/fixtures/bm25-metadata-app/resources/Bm25MetadataProbe.js"),
     join(appDir, "dist/resources/Bm25MetadataProbe.js"));
+  // No migration cycle: its boot cycle can start after the insert below, and its
+  // re-embeds of the inserted rows are Memory writes the probe would count in a
+  // measured window.
+  await rm(join(appDir, OMITTED_TRIGGER_REL), { force: true });
+  await expect(access(join(appDir, OMITTED_TRIGGER_REL))).rejects.toThrow();
   await symlink(join(root, "node_modules"), join(appDir, "node_modules"), "dir");
   harper = await startHarper({ cwd: appDir, harperBinDir: root });
   const records = Array.from({ length: 1000 }, (_, i) => ({
@@ -43,11 +49,11 @@ beforeAll(async () => {
   const res = await fetch(harper.opsURL, { method: "POST", headers: { "Content-Type": "application/json", Authorization: auth() },
     body: JSON.stringify({ operation: "insert", database: "flair", table: "Memory", records }) });
   expect(res.status, await res.text()).toBe(200);
-}, 120_000);
+}, HARPER_START_BUDGET_MS);
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (appDir) await rm(appDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 async function post(endpoint: string, body: unknown): Promise<any> {
   const response = await fetch(`${harper.httpURL}/${endpoint}`, { method: "POST",

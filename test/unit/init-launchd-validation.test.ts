@@ -89,7 +89,7 @@ exit 1
     `;
     try {
       const child = spawnSync(process.execPath, ["-e", driver, JSON.stringify({ write, dataDir, plistDir, legacyPath, prior, legacyLabel: LEGACY_LAUNCHD_LABEL, failure, injected })], {
-        encoding: "utf-8", timeout: 30_000, env: { ...process.env, PATH: path },
+        encoding: "utf-8", timeout: 30_000, env: { ...({ ...process.env, PATH: path }), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise init-launchd-validation process fixture arguments" },
       });
       expect(child.status, child.stderr).toBe(0);
       const { runs, lintCalls } = JSON.parse(child.stdout) as {

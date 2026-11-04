@@ -6,7 +6,7 @@ adopter does not have to read `resources/` or `schemas/` to see what is
 callable.
 
 - **Auth model:** [docs/auth.md](auth.md), [SECURITY.md](../SECURITY.md)
-- **Access invariant:** [DESIGN.md](../DESIGN.md) — open within the org, closed
+- **Access invariant:** [DESIGN.md](https://github.com/tpsdev-ai/flair/blob/main/DESIGN.md) — open within the org, closed
   at the federation edge
 - **Federation pairing and sync:** [docs/federation.md](federation.md)
 - **Source of truth for tables:** [`schemas/*.graphql`](../schemas/)
@@ -56,8 +56,9 @@ the schema section so the catalog is complete.
 | **Federation body-sig** | Ed25519 over the request body + timestamp/nonce; pairing uses a one-time token | `/FederationPair`, `/FederationSync`. Harper role gate is open; the handler is the auth boundary. |
 | **OAuth bearer** | Access token from Flair's AS or `@harperfast/oauth` | `/mcp` only, and only when `FLAIR_MCP_OAUTH=true` plus a public issuer. Off by default (path 404s). |
 
-Anonymous HTTP is denied on every agent-facing table (and on `GET /Presence`, which needs a verified reader unless the instance enables the public-roster opt-in). A by-id miss and a
-by-id deny both return **404**, never 403, so ids are not an existence oracle.
+Anonymous HTTP is denied on every agent-facing table (and on `GET /Presence`, which needs a verified reader unless the instance enables the public-roster opt-in). By-id refusal
+status is resource-specific: Memory returns **404** for missing or unreadable rows, while Credential
+refuses a non-admin's by-id read of another principal's credential.
 
 **PATCH updates existing rows.** On every table, a PATCH from a caller that is
 not an administrator or a trusted internal call does not create or modify its
@@ -74,7 +75,55 @@ or an admin agent) and trusted internal callers only. A verified non-admin
 agent is refused with **403** (WebSocket close code 3003), and a caller without
 a valid credential with **401** (close code 3000). Verified agents receive
 changes to the memories they can read through `/FeedMemories`, and soul changes
-through `/FeedSouls`; neither is a table.
+through `/FeedSouls`; neither is a table. Harper's native MCP
+`resources/subscribe`, available only when an operator configures Harper's MCP
+component, refuses every table subscription, administrators included: flair
+does not yet verify the Harper user of an MCP session as a flair caller. For
+the same reason, that component's application tools (`get_`, `search_`,
+`create_`, `update_`, `delete_`) are resolved, wherever flair resolves a
+caller, as a caller without a valid credential, administrators included.
+
+Flair's local installs run Harper with MQTT off. For a component deployment,
+`flair deploy` and `flair upgrade --target` by default set MQTT off in the
+target's configuration, request the shared worker threads' restart that
+applies it for an isolated application, and read the saved configuration back
+after the deploy's restart (`--keep-mqtt-config` skips all of it;
+`--no-restart` and `--no-verify` skip the restart request and the read-back);
+they do not probe the listeners
+([deploying-on-fabric.md](deploying-on-fabric.md#mqtt-configuration)). When an
+operator turns MQTT on, an exported table's path is also an MQTT topic (`<Table>/#`,
+`<Table>/<id>`) — except a path that a resource other than the table serves
+(`AgentReadPosition`, `OAuthToken`), which follows that resource's own rules.
+On a table topic, these MQTT actions are served to administrators and trusted
+internal callers only: SUBSCRIBE; PUBLISH; a retained PUBLISH (which writes
+the row, or with an empty payload deletes it); and a session's last-will when
+Harper publishes it. UNSUBSCRIBE is not guarded: it only ends a subscription
+the session already holds. CONNECT is Harper's own authentication.
+
+Over MQTT 5, a refused SUBSCRIBE gets SUBACK reason code `0x87` (not
+authorized) for a verified non-admin agent and `0x80` for a caller without a
+valid credential whose session Harper admits (Harper may instead refuse that
+caller at CONNECT). A refused PUBLISH is answered only when it asks for an
+acknowledgment: at QoS 1 (PUBACK) or QoS 2 (PUBREC) it gets the same codes, and
+a verified non-admin agent's also carries the refusal as a reason string unless
+the client turned problem information off or the string would exceed its
+maximum packet size. A refused QoS 0 PUBLISH gets no answer. Over MQTT 3.1.1, a
+refused SUBSCRIBE gets SUBACK `0x80`, and a PUBACK carries no reason code, so a
+PUBACK alone cannot tell a refused PUBLISH from an accepted one. A refused
+publish reaches no subscriber, and a refused retained publish leaves the row as
+it was.
+
+A session's last-will message is decided when Harper publishes it: when the
+session drops without DISCONNECT, as that session's own publish; and when
+Harper replays the eligible wills it still holds as its first worker starts,
+as a caller without a valid credential, so a replayed will on a table topic is
+refused, an administrator's included. Harper drops an expired scoped-token
+will before this check, on replay and when a session drops. Over MQTT on
+WebSocket the credential is
+the one on the WebSocket upgrade request, as for SSE and WebSocket. An MQTT
+connection on Harper's TCP or TLS listener carries no HTTP request, so flair
+resolves the caller of each of its actions as one without a valid credential,
+whatever it sent in CONNECT.
 
 Every Ed25519-signed request and federation body carries a nonce, recorded
 once per instance in the `ReplayNonce` table before the request takes effect.
@@ -89,18 +138,18 @@ From `RECORD_TYPES` in `resources/record-types.ts`:
 
 | Scope | Meaning | Tables |
 |-------|---------|--------|
-| **open-within-org** | Own rows (any visibility) plus every other agent's non-private rows | Memory |
+| **open-within-org** | Base scope: own rows at any visibility plus other agents' non-private rows; non-admin Memory by-id and collection reads of retained closed skills additionally require readable current authority. | Memory |
 | **owner-only** | Only the owning agent (plus admin / internal) | Relationship, WorkspaceState, Asset, MemoryCandidate |
 | **none** | Any verified agent reads every row; no visibility field | Soul, OrgEvent, OrgSkillAssignment |
 
-These three scopes are **not** in `RECORD_TYPES`. Each is hand-implemented on its
-own resource:
+The following resources implement their read scopes outside `RECORD_TYPES`.
 
 | Scope | Meaning | Table | Enforced in |
 |-------|---------|-------|-------------|
 | **party** | Sender or recipient only | Message | `resources/Message.ts` |
 | **own-ledger** | Non-admin reads: only the contributing agent's rows, about memories it can read. Admin / internal reads: unfiltered | MemoryUsage | `resources/MemoryUsage.ts` |
 | **owner-or-grantee** | Either party on the grant | MemoryGrant | `resources/MemoryGrant.ts` |
+| **owner-only** | Non-admin reads match `principalId` to the caller; administrator/internal reads are unfiltered | Credential | `resources/Credential.ts` |
 
 Writes stamp `agentId` (or `authorId` / `from`) from the authenticated
 principal. A body that names a different owner is rejected or overwritten
@@ -126,7 +175,27 @@ is `GET /Name/<id>` unless noted.
 | GET | `/HealthDetail` | Ed25519 | Rich stats (counts, agents, migration). `bm25.summary` is this worker's lexical index: `building N/M docs`, `ready · N docs`, or `disabled — reason`. |
 | GET | `/AgentCard/<agentId>` | Public | A2A agent-card; field-allowlisted. |
 | GET | `/a2a`, `/A2AAdapter` | Public | A2A discovery. |
-| POST | `/a2a`, `/A2AAdapter` | Ed25519 | JSON-RPC actions (writes OrgEvents, reads tasks). GET-only is public; POST is not. |
+| POST | `/a2a`, `/A2AAdapter` | Ed25519 | JSON-RPC actions (writes OrgEvents, streams an agent's OrgEvents, reads tasks). GET-only is public; POST is not. Methods: [A2A JSON-RPC](#a2a-json-rpc-post-a2a). |
+
+#### A2A JSON-RPC (`POST /a2a`)
+
+`POST /a2a` takes a JSON-RPC 2.0 request and requires a `TPS-Ed25519`
+signature or admin Basic auth. A request with neither is answered with error
+`-32001` `Unauthorized`.
+
+**Caller match (`message/send` and `message/stream` only).** For these two
+methods `params.agentId` must be the caller's own agent id when the caller is
+not an admin; any other id is answered with error `-32001` `Forbidden`, whose
+`data.detail` names the method (`caller <a> cannot send as <b>`, `caller <a>
+cannot stream as <b>`). An admin caller may name another agent. `tasks/list`
+does not apply this rule: its `params.agentId` is only an assignee filter.
+
+| Method | What it does |
+|--------|--------------|
+| `message/send` | Writes an `a2a.message` OrgEvent authored by `params.agentId`, targeted at `params.toAgentId`, or at `params.agentId` when that is omitted. |
+| `message/stream` | Answers with a `text/event-stream` of OrgEvents for `params.agentId`: the events targeted at that agent or carrying no targets, not expired, created after the stream's opening position, in catch-up position order. The opening position follows every event created in or before the millisecond the stream opened (whatever its id); the stream's opening comment and first read wait until that millisecond has passed. The events are read in process through `OrgEventCatchup` with the requesting caller's own identity. The stream keeps its own cursor, passed to each catch-up read: it never moves the agent's durable catch-up watermark (which a default `GET /OrgEventCatchup/<agentId>` starts from), and the watermark does not decide what the stream delivers. A missing `params.agentId` is error `-32602`. Each event arrives as an `org.event` frame whose `data` is a JSON-RPC result `{ type: "event", event }`. A `task.status` frame follows when the status helper finds a status for the event: from its `detail`, its `status` or `kind`, or words in its `summary` (the helper may infer `failed` from `error` in the summary). The stream ends when the client disconnects, after 5 minutes, at an event for the task named in `params.taskId` whose status is terminal (`completed`, `failed`, `canceled`; later events in that read are not sent), or with one `error` frame (a JSON-RPC error) when a read is refused or fails while the stream is open. A read that settles after the stream has ended sends nothing. A POST whose body is a JSON-RPC request reaches this handler with or without `Accept: text/event-stream`. |
+| `tasks/get` | One task by `params.taskId`, with its OrgEvent history. |
+| `tasks/list` | The instance's Beads task board on the Flair host, from one source: the `.yaml`/`.yml` files in `~/ops/.beads/issues/` when at least one exists, otherwise `~/ops/.beads/issues.jsonl`. The two sources are not combined. An authenticated caller can request the unfiltered board; the board is shared within one instance and not scoped per caller. Optional filters: `params.agentId` matches the issue's assignee (case-insensitive) and `params.status` the mapped A2A status (`working`, `completed`, `input-required`, `canceled`). Tasks are ordered newest `updatedAt` first. An anonymous request is refused (`-32001`). |
 
 ### Identity — Agent, Presence, Soul
 
@@ -134,8 +203,10 @@ is `GET /Name/<id>` unless noted.
 |--------|------|------|--------------|
 | GET | `/Agent`, `/Agent/<id>` | Ed25519 | Any verified agent may read principals (discovery). |
 | POST | `/Agent` | Admin Basic | Create principal. Also `POST /AgentSeed` (operator/internal only — not an admin-agent key). |
-| PUT / PATCH | `/Agent/<id>` | Ed25519 | An agent updates **only its own** record. |
+| PUT | `/Agent/<id>` | Ed25519 admin / Admin Basic | An administrator operation. An administrator (an Ed25519 agent whose record has `role: "admin"` or whose id `FLAIR_ADMIN_AGENTS` names, or Admin Basic) may PUT any existing record. For a request that reaches `Agent.put()`, the target id is checked first: an id outside the agent-id rule is refused 400 before the handler's authorization and existence checks. Authentication, routing and Harper's resource admission (for a missing target, `allowCreate()`, administrators only) can refuse earlier. For a valid id, a PUT from any other verified agent is refused 403: `agent_put_admin_only` when the record exists, Harper's create check (`allowCreate()`, administrators only) when it does not; such an agent updates its own record with PATCH. An unauthenticated request is refused. The PUT is a full replacement of an existing record. The server sets these fields whatever the body says: the id is the URL's; `createdAt`, `publicKey`, `originatorInstanceId` and the receiver federation fields (`_originatorInstanceId`, `_syncedFrom`, `_syncedAt`) are kept from the stored record; `updatedAt` is set by the handler; `role` and `admin` are reconciled (an admin role or `admin: true` sets both, otherwise `admin` is false). Every other field comes from the body, so an ordinary field the body omits (`status` and `role` included) is not kept, and an absent `status` reads as active. An administrator's PUT to a valid id with no record is refused 404 `agent_put_requires_existing` (a body `id` that disagrees with the URL's is refused instead). |
+| PATCH | `/Agent/<id>` | Ed25519 / Admin Basic | Merges the body into the stored record. A verified agent that is not an administrator may PATCH only its own record, may not write `status`, and may not change the record's admin status (403); the admin-status decision compares the `role` of the row it reads with the role that row would have once the body is merged and reconciled. An administrator may PATCH any record. An unauthenticated request is refused. |
 | DELETE | `/Agent/<id>` | Admin Basic | Deprovision. |
+| POST | `/AgentKeyRegister` | Basic admin / Ed25519 agent with the admin annotation | Register an agent key. Under Flair's per-agent registration lock, reads a fresh local, non-deactivated row with `publicKey: "pending"` and, at the confirmation read, requires the committed row to equal the fresh-read snapshot and still be `pending` before commit. The lock serializes registrations for that agent within one Harper process; raw operations-API writes and other processes do not take it. The post-commit read-back detects surviving differences in compared fields or identity and reports the registered key only when the committed row still has the registered key's identity and the staged `publicKey` and `updatedAt`, and the `AgentKeyRegistration` row this attempt wrote under its `registrationId` is present; otherwise it refuses 503 `registration_unavailable` with outcome `unconfirmed`. A change restored before the confirmation read is not observed; a commit-time pending check is a follow-up. Unsupported schemes that reach the handler receive 401 before Flair's `resolveAgentAuth`, body validation and table reads. Harper handles some Authorization values upstream: a Bearer refresh token receives Harper's 404 before any resource runs. Refuses 409 `agent_key_not_pending` (a non-`pending` row points to key rotation), 403 `agent_not_local` / `agent_inactive`, 404 `agent_not_found`, 400 `registration_request_invalid`, 409 `registration_conflict`, 503 `registration_unavailable`. Writes an `AgentKeyRegistration` audit row and an `agent_key_registered` OrgEvent. The audit `keyFingerprint` and the event `detail` carry the key fingerprint, not the key; the audit `agentId` and the event `refId` carry the target agent's id, which the event `summary` names in text. |
 | GET | `/Presence` | Verified reader | Roster. Requires a valid `TPS-Ed25519` agent signature or the admin credential; an anonymous request gets 401. An instance may opt in to a public roster with `PRESENCE_PUBLIC_ROSTER=true`, in which case an unverified reader gets the allowlisted roster with `currentTask`, `flairVersion`, and `harperVersion` as null. Thresholds: [Presence for API consumers](#presence-for-api-consumers). |
 | POST | `/Presence` | Ed25519 | Heartbeat. Agent writes only its own row (403 cross-agent). Stamps `flairVersion` / `harperVersion` on the row. |
 | PUT / DELETE | `/Presence/<id>` | Ed25519 | Own row only. Collection PUT is not a public bypass. |
@@ -143,30 +214,38 @@ is `GET /Name/<id>` unless noted.
 | POST / PUT / PATCH / DELETE | `/Soul` | **Operator / internal** | Not Ed25519. Learned Memory text cannot be copied in as Soul. See [docs/auth.md](auth.md#soul-authorship). |
 | POST | `/FeedSouls` | Ed25519 | Soul change feed (verified). |
 
-`Credential` (GET/POST verified; extra credentials for a principal) and
-`Integration` (legacy 0.x platform rows; verified, prefer Credential) sit on
-the same identity plane.
+`Credential` (extra credentials for a principal) requires authenticated HTTP
+access: non-admin by-id reads and writes are limited to the caller's
+`principalId`, while administrators and trusted internal callers may access
+other principals' credentials. Through this resource only an administrator or the server creates a
+`kind: "idp"` credential, changes its kind or identity fields, or reactivates
+it, and its owner may relabel, revoke or delete it (see
+[Who writes a mapping](access-control.md#who-writes-a-mapping)). `Credential`
+and `Integration` (legacy 0.x platform rows; verified, prefer Credential) sit on
+the same identity plane. `AgentKeyRegistration`
+(agent-key-registration.graphql) is the admin-read-only audit log of committed
+registrations; its key field is the fingerprint, not the key.
 
 ### Memory, search, bootstrap
 
 | Method | Path | Auth | Read / write |
 |--------|------|------|--------------|
-| GET | `/Memory`, `/Memory/<id>` | Ed25519 | open-within-org. By-id deny = 404. |
+| GET | `/Memory`, `/Memory/<id>` | Ed25519 | Open-within-org base scope, with the additional current-authority check for non-admin reads of retained closed skills; denied by-id reads return 404 and denied collection rows are omitted. |
 | POST / PUT / PATCH | `/Memory` | Ed25519 | Own `agentId` only. Auto-embed on write. Visibility defaults from durability (`permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private`). Identified client older than 0.18.0 → **426** `stale_flair_client` (missing version is served). |
-| PATCH | `/Memory/<id>`, body `{"embedding": null, "embeddingModel": null}` | Ed25519 | Owner or admin. Re-embeds the stored row, writing `embedding`, `embeddingModel` and `updatedAt` (what `flair reembed` sends). |
+| PATCH | `/Memory/<id>`, body `{"embedding": null, "embeddingModel": null}` | Ed25519 | Owner or admin. Re-embeds the stored row, writing `embedding`, `embeddingModel` and `updatedAt`, and answers `{ id, updatedAt }` (what `flair reembed` sends; it reads `embeddingModel` from the stored row afterwards). |
 | DELETE | `/Memory/<id>` | Ed25519 | Owner or admin. `permanent` owner-delete is allowed. |
 | POST | `/SemanticSearch` | Ed25519 | Hybrid semantic + lexical. Same read-scope as Memory. Default scoring is `raw`. Results carry `provenance` (like the by-id and list reads); `includeTrust` and `abstain` stay opt-in. |
 | POST | `/BootstrapMemories` | Ed25519 | Cold-start context (soul + predicted memories + optional org events). |
 | POST | `/RecordUsage` | Ed25519 | Cross-agent usage signal (`Memory.usageCount`). No ownership requirement; counts only memories in the caller's read scope (`resolveReadScope`: own at any visibility, others' non-private), admin callers included even though admin Memory reads are unfiltered; an out-of-scope id is handled like a missing one. No existence oracle in the response. Prefer this over writing `/MemoryUsage` directly. |
 | GET | `/MemoryUsage` | Ed25519 | Non-admin reads: own ledger rows only, about memories the caller can currently read; any other row reads as not found. Admin and internal reads are unchanged. PUT/DELETE are admin/internal — agents must not delete their row to re-count. |
-| GET / write | `/MemoryGrant` | Ed25519 | Read: owner or grantee. Write/delete: owner only (you share your own memories). |
+| GET / write | `/MemoryGrant` | Ed25519 | Non-admin reads: owner or grantee. Write/delete: owner only (you share your own memories). A `write` grant lets the grantee write a successor of the owner's memory or skill (`supersedes`). A write grant does not include changing a record's visibility; visibility is set by the owner or an admin. For that grant-authorized write, the successor carries the predecessor's visibility, and a write naming a different one is refused with 403 `grant_cannot_change_visibility` unless an earlier validation refuses it first (an ordinary, non-skill ephemeral write naming `shared` gets 400 `invalid_visibility_for_durability`; an ephemeral skill write gets 400 `skill_durability`, and a `session` skill write gets 400 `invalid_durability` on Memory POST/PUT (durability validation runs first) and 400 `skill_durability` on FeedMemories). After staging the close, the writer re-reads the predecessor's committed row; a visibility that no longer reads the same refuses the write with 409 `predecessor_visibility_changed`, and a change committed after that final re-read is not seen. An ordinary successor and its close share the write's transaction. An ordinary close refusal aborts the whole write: a storage Response returns the fixed 500 `write_response_withheld`; grant revocation returns 409 `granted_close_revoked`; a predecessor change that keeps visibility the same returns 409 `stored_row_changed`. No refusal writes anything. An ordinary successor is the grantee's own row, so the grantee may later change its visibility as its owner; a skill successor keeps its lineage owner. |
 | GET / write | `/Asset` | Ed25519 | Owner-only blobs linked by `memoryId`. No MCP and no federation in this slice. |
 | GET / write | `/MemoryCandidate` | Ed25519 | Owner-only REM drafts. Never auto-promoted except the narrow ADK path. |
 | POST | `/PromoteMemoryCandidate` | Ed25519 | Promote/reject with required rationale. |
-| POST | `/AutoPromoteCandidates` | Ed25519 | ADK per-user auto-promote only. |
+| POST | `/AutoPromoteCandidates` | Ed25519 | Auto-promote of eligible per-user ADK and continuity candidates. Answers `promoted` (memory ids), `skipped` (`{ id, reason }`), `incomplete` (`{ memoryId, candidateId, error }`: memory written and stamped, candidate update threw, candidate read back `pending`), `unconfirmed` (the same throw where the read-back did not confirm the promotion on this memory, plus `readBack` with what it found), `count` (`promoted` only) and `considered`. A later sweep can adopt the recorded memory of a candidate still pending, without a second memory, only when the memory's identity is present on the candidate and the memory still passes the sweep's checks. See [docs/rem.md](rem.md#auto-promote-adk-only). |
 | POST | `/FeedMemories` | Ed25519 | Ingest path; `agentId` stamped from the caller (`stamp-strict`). |
-| POST | `/MemoryArchive` | Ed25519 | Basement / restore (`memory_basement` / `memory_restore` on `/mcp`). |
-| POST | `/MemoryMaintenance` | Ed25519 or admin | Hygiene: expire ephemeral, archive old standard. Agent-scoped unless admin. |
+| POST | `/MemoryArchive` | Ed25519 | Basement / restore. Accepts `{ id, action: "basement" \| "restore" }`; a successful ordinary-memory operation returns HTTP 200 with Memory.put()'s write receipt, including `id`, `written`, `deduplicated` and any returned visibility or redaction fields. Read the memory to inspect its archive state. Read/write refusals retain their HTTP status and body; a persisted-row change detected by the archive's re-read returns `409 memory_changed`. |
+| POST | `/MemoryMaintenance` | Ed25519 or admin | Hygiene: expire ephemeral, archive old standard. An agent's own run is scoped to the caller; an admin run with no `agentId` is fleet-wide, and one that names an `agentId` is scoped to that agent. Fleet-wide maintenance expires and archives eligible rows of every agent. A supplied admin `agentId` that is not a conforming string (the agent-id rule `^[a-zA-Z0-9_-]{1,64}$` included) is refused 400 with the rule and a `remedy`: run that agent's own authenticated non-admin maintenance, which reaches its rows, when the stored id can authenticate (the signed TPS-Ed25519 header cannot carry a colon or whitespace); for an id the header cannot represent, run fleet-wide, which reaches that agent's rows and expires or archives every other agent's eligible rows. |
 | POST | `/MemoryReindex` | Admin / verified per handler | Embedding / HNSW rebuild. |
 | POST | `/MemoryConsolidate` | Ed25519 | Dedup / consolidate. |
 | POST | `/MemoryReflect` | Ed25519 | REM distill → MemoryCandidate. |
@@ -178,6 +257,21 @@ the same identity plane.
 
 Skill-tagged Memory rows embed from `trigger` (the recall signal), not
 `content`. MCP tools: `skill_store`, `skill_search`, `skill_get`.
+
+For non-admin Memory by-id and collection reads, a retained closed skill payload must pass both its
+stored owner/visibility check and its subject's current-authority check: a
+readable live skill referenced by a matching create/update head, or a readable
+delete head with `memoryId: null`. Missing, invalid or unreadable authority
+denies the payload even to its owner: by-id reads return 404 and collection
+reads omit it. Administrator and trusted internal reads are not subject to this additional
+check.
+
+Superseding a skill closes its predecessor with `validTo`; deleting a
+non-reserved skill closes its live head and appends a delete version while
+retaining the Memory row. Skill writes through Memory POST/PUT and
+`FeedMemories` that supply a non-null `archived` value other than `false` or a
+nonempty `validTo` are refused with `400 skill_state_requires_delete`, so basementing a
+skill is refused.
 
 #### Client version gate (HTTP 426 `stale_flair_client`)
 
@@ -219,11 +313,21 @@ The remedy is `flair upgrade` (the adapter), not a server upgrade alone.
 | GET / POST / PUT | `/Relationship` | Ed25519 / Admin Basic | Owner-only for non-admin agents; administrators can read across owners. POST creates; a create that is otherwise admitted, valid and within the rate limit is 409 when its id already exists. PUT upserts. For a verified non-admin agent both stamp the owner from the caller (a body naming another agent is 403); an administrator keeps the owner it supplies. A write that passes validation gets provenance built server-side. |
 | GET / POST / PUT | `/WorkspaceState` | Ed25519 | Owner-only. POST stamps `agentId`; PUT rejects a mismatch. |
 | GET | `/WorkspaceLatest` | Ed25519 | Latest workspace row for the caller. |
-| GET / POST / PUT | `/OrgEvent` | Ed25519 | Any verified agent reads every event. Writes stamp `authorId`. |
+| GET / POST / PUT / PATCH | `/OrgEvent` | Ed25519 / Admin Basic | Any verified agent reads every event. `authorId` for a non-admin agent: POST sets it from the caller, whatever the body says; PUT requires the body to name the caller (403 otherwise, including when it is absent); PATCH leaves the stored value unless the body names one, and refuses a change (403). An administrator (an admin agent key or credentialed Basic admin) may supply `authorId` on any verb; POST defaults it to the administrator's own id. The server assigns an OrgEvent's `createdAt` on create. After the earlier checks, a `createdAt` check reads the stored row under each event's id. A stored row's `createdAt` is authoritative whatever its value (an empty string included): an update that omits it keeps it, and one that names a different value is refused with 409 `created_at_immutable`. An event that reaches the check and is not an object, or whose id is not a non-empty string or a non-empty array of strings, is refused with 400 `invalid_event_id` before any write, as is an administrator's PATCH to the collection (for a non-admin's collection PUT, PATCH or DELETE, if reached, the table guard returns the 403 collection refusal; existing DELETE middleware may refuse earlier). Before validation, an addressed POST binds a missing or `null` body id to the addressed id, and a string or number body id when its text matches the address; any other id type is left unchanged by this step. At the root collection, POST generates an id when the body's id is missing, `null` or empty. At POST id validation, at the root collection or an addressed path whose body id was not bound, a remaining id that is not a non-empty string or a non-empty array of strings receives 400 `invalid_event_id`. |
 | GET / POST | `/OrgEventCatchup` | Ed25519 | Catch-up feed for the caller. `since` is optional (defaults to the per-agent watermark). GET pages; POST acks `{ position }` (advance-on-ack). |
 | GET / POST | `/AgentReadPosition` | Ed25519 | Owner-only watermark (`stream`, default `org-event`). Foundation for light-comms catch-up. |
 | POST | `/OrgEventMaintenance` | Ed25519 / admin | Expire / sweep org events. |
 | POST | `/AttentionQuery` | Ed25519 | Cross-table “what touches entity E”. Entity strings: [docs/entity-vocabulary.md](entity-vocabulary.md). |
+
+#### Instruction-change events (Soul and skill)
+
+Each version appended by Flair's Soul and skill application writers also creates an OrgEvent: kind `soul.changed` or `skill.changed`, id `instruction-change:<version id>`, `refId` the version id, `authorId` `flair:internal`, `createdAt` copied from the version, and `detail` built from these fields only: `subjectType`, `subjectId`, `key` (the Soul key; null for skills), `changeKind`, `actorKind`, `actorId`, `sourceClass`, `valueHash`, `previousVersionHash`, `recordHash`. A private skill's event omits the three hashes, including on the tombstone, whose stored visibility is the closed head's last state. `authorId` is `flair:internal`; `detail.actorKind` disambiguates the actor.
+
+Instruction events are readable by any verified agent. Three things a reader should not infer:
+
+- The stream begins with the release that ships this event; versions appended earlier have no event, and `InstructionVersion` remains the complete history. A missing event before the cutover does not mean nothing changed.
+- An event does not grant read access to its version record, which keeps stored-and-current authority.
+- Hashes emitted while a skill was shared stay readable in the append-only stream after the skill is tightened to private.
 
 ### Federation
 
@@ -258,7 +362,7 @@ operator audit trail.
 | GET | `/.well-known/oauth-authorization-server`, `/OAuthMetadata` | Public | RFC 8414. CORS `*`. |
 | GET | `/.well-known/oauth-protected-resource`, `…/mcp` | Public | RFC 9728. |
 | POST | `/OAuthRegister` | `X-Flair-Initial-Access-Token` | DCR. **Off** unless `FLAIR_OAUTH_DCR_TOKEN` is set (32–508 chars). Rate-limited. |
-| GET / POST | `/OAuthAuthorize` | Public (user consent) | Authorization code + PKCE. |
+| GET / POST | `/OAuthAuthorize` | Public (user consent) | Authorization code + PKCE (`S256` required). |
 | POST | `/OAuthToken` | Public (client + code/assertion) | Token + `jwt-bearer` (XAA). |
 | POST | `/OAuthRevoke` | Public (token) | Revocation. |
 | GET / POST | `/mcp` | OAuth bearer | Curated tools. **Unmounted** until `FLAIR_MCP_OAUTH=true` and an issuer. |
@@ -278,7 +382,7 @@ OAuth rate limits and env vars: [docs/auth.md](auth.md#rate-limiting).
 
 ### Admin UI
 
-All `/Admin*` routes require **Admin Basic**.
+Reads of the `/Admin*` routes below are admin-only: **Admin Basic**, or a `TPS-Ed25519` signature from an admin agent.
 
 | Path | Purpose |
 |------|---------|
@@ -287,6 +391,7 @@ All `/Admin*` routes require **Admin Basic**.
 | `/AdminConnectors` | OAuth clients and sessions |
 | `/AdminIdp` | IdP configuration |
 | `/AdminMemory` | Browse / search memory as operator |
+| `/AdminMemoryCandidates/{agentId}` | JSON: one agent's MemoryCandidate ids in id order (`limit`, default 200, max 500; `after=<id>` for the ids after that one), used by `flair rem restore` |
 | `/AdminInstance` | Federation status, peers, instance |
 
 ---
@@ -303,8 +408,8 @@ comes from the token `sub`, never from tool arguments.
 | `memory_update` | Memory read-modify-write (in-place or `supersedes` version) |
 | `memory_get` | `GET /Memory/<id>` |
 | `memory_delete` | `DELETE /Memory/<id>` |
-| `memory_basement` | `POST /MemoryArchive` (archive) |
-| `memory_restore` | `POST /MemoryArchive` (restore) |
+| `memory_basement` | Memory read-modify-write setting `archived: true` |
+| `memory_restore` | Memory read-modify-write setting `archived: false` and removing `archivedAt` and `archivedBy` |
 | `skill_store` / `skill_search` / `skill_get` | Skill-tagged Memory |
 | `bootstrap` | `POST /BootstrapMemories` |
 | `soul_get` | `GET /Soul` |
@@ -381,7 +486,7 @@ A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `last
 | `expiresAt` | String | Ephemeral TTL |
 | `retrievalCount` / `lastRetrieved` | | Search-hit counters (weak signal). Incremented on `MemoryHitStat` and overlaid on Memory reads — search no longer rewrites the Memory row. |
 | `usageCount` | Int | Verified-use signal; only `RecordUsage` / citations increment |
-| `promotionStatus` / `promotedAt` / `promotedBy` | | REM promotion |
+| `promotionStatus` / `promotedAt` / `promotedBy` / `promotionContentHash` | | REM promotion; the hash binds the verdict to the stored text |
 | `archived` / `archivedAt` / `archivedBy` | | Basement |
 | `parentId` / `derivedFrom` / `sessionId` / `lastReflected` | | Learning pipeline |
 | `supersedes` | String | Version chain |
@@ -431,7 +536,7 @@ The **binding** (A1-iv item 1): The named application create paths stamp a local
 
 **Direct access** — Direct resource reads permit admin agents and trusted in-process callers; non-admin agents cannot read this table directly. The author reads their own pointer only through the gated join. The table has **NO REST write verbs**: `POST`/`PUT`/`PATCH`/`DELETE` to the resource are refused for EVERY caller, non-admin and admin alike, with nothing written (`r4-http`), so no REST caller can plant a pointer. A superuser Harper operation against the table (an admin `export`, `backup`, `reseed`, or a hygiene/forensics read of orphaned or author-only pointers) is the named operator path and is not gated by the resource (`r4-http` proves only the resource refusal). This admin exception names `MemoryHostSource` explicitly.
 
-**Federation** — `MemoryHostSource` is excluded from the sync's table set by mechanism (it is absent from the federation table policy), and an inbound row carrying a pointer field is refused. The outbound reader projects declared Memory attributes. The inbound merge removes undeclared attributes except the named bookkeeping fields (`f1-out`, `f1-in`). `Memory.delete` and maintenance expiry or age-based archival delete the pointer with their Memory operation. `MemoryArchive` basement/restore retains the pointer row; the join suppresses it while the Memory is archived. `Memory.delete` joins a request transaction when present; maintenance uses an owned transaction per item. An orphan sweep re-checks inside the transaction before deleting; a cleanup failure makes the maintenance run report a failure, not "complete". Orphaned pointers are absent from ordinary Memory joins but remain directly readable by administrators.
+**Federation** — `MemoryHostSource` is excluded from the sync's table set by mechanism (it is absent from the federation table policy), and an inbound row carrying a pointer field is refused. The outbound reader projects declared Memory attributes. The inbound merge removes undeclared attributes except the named bookkeeping fields (`f1-out`, `f1-in`). `Memory.delete` and maintenance expiry or age-based archival delete the pointer with their Memory operation. `MemoryArchive` basement/restore retains the pointer row; the join suppresses it while the Memory is archived. Ordinary `Memory.delete` uses an owned transaction; maintenance uses an owned transaction per item. An orphan sweep re-checks inside the transaction before deleting; a cleanup failure makes the maintenance run report a failure, not "complete". The orphan sweep runs only when the run is not a dry run, and follows the run's scope: a non-admin run, and an admin run that names an agent, considers only pointer rows whose stamped `authorId` is that agent, and a pointer with an empty author is outside such a run; fleet-wide admin maintenance considers every pointer row, so it also removes an empty-author orphan pointer. A pointer whose Memory row is live at the sweep's reads is kept. Harper has no compare-and-delete, so the sweep re-reads the Memory row and the pointer and stages the delete in one owned transaction, whose time Harper takes at its first read; inside that transaction's callback it also reads both rows' committed state through fresh contexts (the confirmation reads) before staging the delete: a pointer replaced before the confirmation read is skipped, and a replacement whose transaction takes its time after that first read is applied after the delete and stays stored. A write whose transaction took its time before that first read and commits after the confirmation read is not covered (per-id serialization is tracked in #2478). A pointer counts as removed only when a read after the commit finds no row for its memoryId. Orphaned pointers are absent from ordinary Memory joins but remain directly readable by administrators.
 
 hostSource is the writer's unverified claim about an external source, stored with the writer's authenticated agent id; Flair does not verify it. The Ed25519 request signature covers method and URL, not the body.
 
@@ -480,6 +585,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **Instance** | yes | One row per Flair instance (`id`, `publicKey`, `role` hub/spoke, `fabricEndpoint`, `status`) |
 | **PairingToken** | yes | One-time token (`expiresAt`, `consumedBy`) |
 | **Peer** | yes | Pinned peer (`publicKey`, `endpoint`, `status`, `lastSyncAt` / `lastMergeAt`, `lastSyncCursor`, `relayOnly`) |
+| **FederationRetry** | yes | Sender-owned federation retry bookkeeping, shaped for one row per (peer, table, record) refused for a reason a later re-offer could clear (`state`, `attempts`, `firstRefusedAt`, `lastReason`, `resolution`, `bound`). No production sender path creates rows yet; admin-written rows are readable. `@sealed`: a write naming an undeclared field is refused. Admin-only on every operation; excluded from federation policy and the receive mapping. |
 | **ReplayNonce** | no | `schemas/replay.graphql`. Anti-replay record shared by agent auth (`a:<agentId>:<nonce>`) and federation body signatures (`f:<nonce>`). Local to the instance (`replicate: false`); rows expire after 120 s |
 | **SyncLog** | no | Per-sync audit (`peerId`, `direction`, counts, `skippedReasons`, `status`) |
 
@@ -496,10 +602,11 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **OrgSkillAssignment** | memory.graphql | yes | Org-scope skill assignment (`skillName`, `skillRef`, `priority`, server-stamped `writer` / `sourceClass`) |
 | **OrgSkillAssignmentHistory** | memory.graphql | no | One row per accepted OrgSkillAssignment resource write (`assignmentId`, `op`, `actor`, `sourceClass`, `previousHash`) |
 | **MemoryDeletionHistory** | memory.graphql | no | History of confirmed physical deletions of permanent/persistent Memory rows through `Memory.delete` (including CLI hygiene and agent remove), appended in the delete transaction. Non-durable deletes, including maintenance expiry, append no history (`memoryId`, `memoryInstanceToken`, `durability`, `actor`, `sourceClass`, `at`); read by `flair integrity check` for history-backed attributions. `replicate: true` is declared explicitly to state the database default (a table replicates unless it opts out) |
-| **InstructionVersion** | memory.graphql | yes (read only) | Append-only history for single-row Soul resource writes and skill writes through Memory post/put/delete and FeedMemories (excluding `_reindex` and reserved-seed deletes). Soul collection deletes and InstructionVersion REST writes are refused. The operator's reserved seed row keeps its fixed id and is versioned in place. Skill writers share a subject-type lock, select rows where `archived !== true` and `validTo` is not a nonempty string, and refuse stale create/update targets or predecessors and ambiguous heads. Reads authorize `soul` subjects under Soul's verified-agent rule. Ordinary skill readers require readable stored visibility and current authority: matching subjects, a live skill Memory row owned by the head's owner, or a delete head with null `memoryId`; authority references require nonempty owners and explicit private/shared visibility. Admin/internal keep unfiltered skill reads; unknown subject types deny. `Memory.skillSubjectId` is nullable and server-owned. |
+| **InstructionVersion** | memory.graphql | yes (read only) | History for single-row Soul resource writes and skill writes through Memory post/put/delete and FeedMemories (excluding `_reindex` and reserved-seed deletes). InstructionVersion resource REST clients cannot write or delete version records; the server appends them, and when a request's close fails it attempts to remove the version that request appended only while that version is still the head, reporting a compensation failure when the removal cannot be confirmed. Soul collection deletes and InstructionVersion REST writes are refused. The administrator operations API (`upsert` / `delete` under admin auth) is the separate raw-table exception described below. The operator's reserved seed row keeps its fixed id and is versioned in place. Skill writers share a subject-type lock, select rows where `archived !== true`, `validTo` is not a nonempty string, and `expiresAt` is absent or a valid future timestamp, and refuse stale create/update targets or predecessors and ambiguous heads. Reads authorize `soul` subjects under Soul's verified-agent rule. Ordinary skill readers require readable stored visibility and current authority: matching subjects, a live skill Memory row owned by the head's owner, or a delete head with null `memoryId`; authority references require nonempty owners and explicit private/shared visibility. Admin/internal keep unfiltered skill reads; unknown subject types deny. `Memory.skillSubjectId` is nullable and server-owned. |
 | **WorkspaceState** | workspace.graphql | yes | Current work (`ref`, `provider`, `phase`, `entities`) |
 | **OrgEvent** | event.graphql | yes | Org-visible event (`authorId`, `kind`, `summary`, `entities`) |
 | **AgentReadPosition** | agent.graphql | no | Per-agent watermark (`agentId`, `stream`, `position`). HTTP via `/AgentReadPosition`, not raw-table REST. |
+| **AgentKeyRegistration** | agent-key-registration.graphql | yes (admin read only) | Audit log of committed `POST /AgentKeyRegister` calls (`actorId`, `operator`, `agentId`, `instanceId`, `keyFingerprint`, `createdAt`). The Flair resource route refuses every write; the registration operation is its only application writer. The operations API is a separate raw-table trust root. `replicate: true` is declared explicitly to state the database default (a table replicates unless it opts out). |
 | **Message** | message.graphql | yes | Signed envelope (`from`, `to`, `threadId`, `seq`, `state`, `signature`) |
 | **OAuthClient** | oauth.graphql | yes | Registered OAuth clients |
 | **OAuthAuthCode** | oauth.graphql | no | Single-use codes + PKCE |
@@ -525,4 +632,4 @@ Raw operations-API Memory deletes create no deletion history. A scan alerts when
 - [docs/rem.md](rem.md) — MemoryCandidate promote/reject
 - [docs/entity-vocabulary.md](entity-vocabulary.md) — `entities` grammar
 - [docs/embedding-in-a-harper-app.md](embedding-in-a-harper-app.md) — in-process API
-- [`packages/flair-client/README.md`](../packages/flair-client/README.md) — typed HTTP client
+- [`packages/flair-client/README.md`](https://github.com/tpsdev-ai/flair/blob/main/packages/flair-client/README.md) — typed HTTP client

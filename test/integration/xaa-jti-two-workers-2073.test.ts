@@ -18,7 +18,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { componentWithReplayProbe, XAA_JTI_PROBE, type ProbeComponent } from "../helpers/component-with-replay-probe";
 
 const WORKERS = 2;
@@ -81,7 +81,7 @@ describe(`XAA ID-JAG jti records are instance-shared across ${WORKERS} Harper wo
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     composed?.cleanup();
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("the instance runs two workers, the test IdP is ours, and IdJagReplay has the retention expiration", () => {
     expect(result.workerCount).toBe(WORKERS); // assertion: not a vacuous one-worker run

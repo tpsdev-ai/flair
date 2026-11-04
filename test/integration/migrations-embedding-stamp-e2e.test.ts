@@ -24,8 +24,9 @@
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { rm } from "node:fs/promises";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
+import { computeContentHash } from "../../resources/memory-feed-lib.ts";
 
 const EMBEDDING_STAMP_ID = "embedding-stamp";
 const AGENT_ID = "__flair_embedding_stamp_e2e_test_agent__";
@@ -105,6 +106,19 @@ describe("zero-touch migrations — embedding-stamp end-to-end (real Harper, alw
           embeddingModel: CURRENT_MODEL_ID,
           createdAt: new Date().toISOString(),
         },
+        {
+          // Row D (flair#2465): a CURRENT stamp but an `embeddedContentHash` that
+          // no longer matches the row's text — the shape a text edit leaves behind.
+          // The migration's live per-row scan (a query cannot compute the current
+          // text's hash) must re-queue it even though the model stamp looks current.
+          id: "stamp-hash-mismatch",
+          agentId: AGENT_ID,
+          content: "embedding-stamp-e2e-marker-delta",
+          embedding: [0.13, 0.13, 0.13],
+          embeddingModel: CURRENT_MODEL_ID,
+          embeddedContentHash: "a-hash-for-different-text",
+          createdAt: new Date().toISOString(),
+        },
       ],
     });
 
@@ -116,7 +130,7 @@ describe("zero-touch migrations — embedding-stamp end-to-end (real Harper, alw
   afterAll(async () => {
     if (harper) await stopHarper(harper).catch(() => {});
     await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("both the stale-model row and the explicit-null row get re-embedded via Memory.put()'s own regen path", async () => {
     const deadline = Date.now() + 90_000;
@@ -185,5 +199,23 @@ describe("zero-touch migrations — embedding-stamp end-to-end (real Harper, alw
     expect(record.embeddingModel).toBe(CURRENT_MODEL_ID);
     expect(record.embedding).toEqual([0.42, 0.42, 0.42]); // byte-identical — never regenerated
     expect(record.content).toBe("embedding-stamp-e2e-marker-gamma");
+  }, 120_000);
+
+  test("flair#2465: a row whose embeddedContentHash no longer matches its text is re-queued and re-embedded, and the binding is refreshed", async () => {
+    // Reuses the SAME completed cycle the tests above wait for.
+    const record = await opsCall({
+      operation: "search_by_value",
+      database: "flair",
+      table: "Memory",
+      search_attribute: "id",
+      search_value: "stamp-hash-mismatch",
+      get_attributes: ["*"],
+    });
+    const row = Array.isArray(record) ? record[0] : record;
+    expect(Array.isArray(row.embedding)).toBe(true);
+    expect(row.embedding).not.toEqual([0.13, 0.13, 0.13]); // a real re-embed landed
+    expect(row.content).toBe("embedding-stamp-e2e-marker-delta");
+    // The refreshed write records the hash of the row's current text.
+    expect(row.embeddedContentHash).toBe(computeContentHash(AGENT_ID, "embedding-stamp-e2e-marker-delta"));
   }, 120_000);
 });

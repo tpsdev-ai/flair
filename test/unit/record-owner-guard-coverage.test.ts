@@ -235,8 +235,28 @@ describe("resolveGuardedRecord", () => {
       .toEqual({ table: "Soul", ownerField: "agentId", id: "alice:mission" });
   });
 
+  it("returns the fully decoded remainder after the table as one id", () => {
+    // An id that itself contains `/`, raw or percent-encoded, is the whole remainder.
+    expect(resolveGuardedRecord("/Relationship/a/b")).toEqual({ table: "Relationship", ownerField: "agentId", id: "a/b" });
+    expect(resolveGuardedRecord("/Relationship/%2Fr")).toEqual({ table: "Relationship", ownerField: "agentId", id: "/r" });
+    expect(resolveGuardedRecord("/Relationship//r")).toEqual({ table: "Relationship", ownerField: "agentId", id: "/r" });
+    expect(resolveGuardedRecord("/Relationship/a.b")).toEqual({ table: "Relationship", ownerField: "agentId", id: "a.b" });
+  });
+
+  it("returns null for a collection path or a malformed remainder", () => {
+    expect(resolveGuardedRecord("/Relationship/")).toBeNull();         // collection
+    expect(resolveGuardedRecord("/Relationship/r/")).toBeNull();       // trailing slash
+    expect(resolveGuardedRecord("/Relationship/r//")).toBeNull();      // doubled trailing slash
+    expect(resolveGuardedRecord("//Relationship/r")).toBeNull();       // extra leading slash: an empty resource
+    // The path is the target before its `?` — the caller strips the query.
+    expect(resolveGuardedRecord("/Relationship/r")).toEqual({ table: "Relationship", ownerField: "agentId", id: "r" });
+  });
+
   it("returns null for unguarded tables and malformed paths", () => {
     expect(resolveGuardedRecord("/NotATable/x")).toBeNull();
+    expect(resolveGuardedRecord("/constructor/x")).toBeNull();     // an inherited property is not a table
+    expect(resolveGuardedRecord("/__proto__/x")).toBeNull();
+    expect(resolveGuardedRecord("/hasOwnProperty/x")).toBeNull();
     expect(resolveGuardedRecord("/")).toBeNull();
     expect(resolveGuardedRecord("")).toBeNull();
     expect(resolveGuardedRecord("/Soul/%E0%A4%A")).toBeNull(); // bad encoding

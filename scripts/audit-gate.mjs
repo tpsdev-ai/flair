@@ -32,13 +32,23 @@
  *   3. Every allowlist entry must be well-formed: advisory id, package, the
  *      reason it cannot be fixed here, an expiry date, and the condition that
  *      removes it. Missing any field BLOCKS.
- *   4. Expiry is capped by severity (see the allowlist's `policy` block). You
- *      cannot park a critical for a year. Writing an over-long expiry BLOCKS.
+ *   4. Lifetime is capped by severity (see the allowlist's `policy` block).
+ *      An over-cap entry requires a valid overCapApproval.
  *   5. An expired entry BLOCKS. That is the point of the mechanism, not a flaw:
  *      the build stops and a human re-decides.
  *   6. STALENESS — an allowlist entry whose advisory no longer appears BLOCKS
  *      with "remove this entry". An allowlist that only ever grows is the same
  *      failure with more ceremony.
+ *   6a. COVERAGE PER LOCATION — an advisory may carry several entries, keyed by
+ *      GHSA, package, sources and introducedBy. On `bun` and the root
+ *      npm-install observation, one entry per (GHSA, package) may name the
+ *      source. On another consumer install, each entry's chain resolves to one
+ *      node and every reported node must be the node of exactly one entry. Such
+ *      an entry that covers no reported location in a source it names is stale,
+ *      whatever its siblings cover. A GHSA with one entry keeps the
+ *      single-entry matching path; the class rule in 6b applies to it too.
+ *   6b. CLASS PER SOURCE — `vendor-pinned` is refused on `bun`: bun.lock
+ *      resolves through this repository's root overrides.
  *   7. FIXABILITY DRIFT — entries claiming `no-patch-published` are re-checked
  *      against the registry. If a patched version has since shipped, the stated
  *      justification is false and the entry BLOCKS.
@@ -55,9 +65,9 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ALLOWLIST_PATH = join(REPO_ROOT, ".github", "audit-allowlist.json");
@@ -77,11 +87,62 @@ const REQUIRED_ENTRY_FIELDS = [
   "approvedBy",
 ];
 
-// The two observations the gate can run. `bun` is the lockfile observation
-// (`bun audit`); `npm-install` is the installed-tree observation (`npm audit
-// --omit=dev --json` on the packed-and-installed prefix). An allowlist entry
-// declares which of these it expects to see its advisory in.
-const VALID_SOURCES = new Set(["bun", "npm-install", "npm-install-adk"]);
+/**
+ * The consumer-install observations. Each is one published package, packed
+ * from its workspace directory `dir` and installed with npm --omit=dev outside
+ * this repo (so without its overrides), then audited with `npm audit
+ * --omit=dev --json`. npm overrides in a package do not apply to its consumers,
+ * so the workspace's bun lockfile does not show what a consumer of each package
+ * resolves (flair#1498, flair#2398, flair#2757).
+ *
+ * Each input is a mandatory flag naming an install prefix. Before any audit
+ * runs, the gate refuses a missing flag, two flags naming one prefix, and a
+ * prefix whose install records fail `prefixIdentityProblems` against the
+ * workspace manifest the job packs: the package as a production dependency
+ * from a local tarball, with that manifest's version and `dependencies`.
+ * `source` is the name an allowlist entry's `sources` uses for that tree.
+ * `vendor`, when set, is the only direct dependency a vendor-pinned entry's
+ * chain may name second.
+ */
+export const CONSUMER_INSTALLS = [
+  { flag: "--npm-install-prefix", source: "npm-install", package: "@tpsdev-ai/flair", dir: "." },
+  { flag: "--adk-npm-install-prefix", source: "npm-install-adk", package: "@tpsdev-ai/adk-flair", dir: "packages/adk-flair-js", vendor: "@google/adk" },
+  { flag: "--mcp-npm-install-prefix", source: "npm-install-mcp", package: "@tpsdev-ai/flair-mcp", dir: "packages/flair-mcp" },
+  { flag: "--openclaw-npm-install-prefix", source: "npm-install-openclaw", package: "@tpsdev-ai/openclaw-flair", dir: "packages/openclaw-flair" },
+  { flag: "--pi-npm-install-prefix", source: "npm-install-pi", package: "@tpsdev-ai/pi-flair", dir: "packages/pi-flair" },
+  { flag: "--n8n-npm-install-prefix", source: "npm-install-n8n", package: "@tpsdev-ai/n8n-nodes-flair", dir: "packages/n8n-nodes-flair" },
+];
+
+// The observations the gate runs. `bun` is the lockfile observation (`bun
+// audit`); the others are the consumer-install observations above. An
+// allowlist entry declares which of these it expects to see its advisory in.
+const VALID_SOURCES = new Set(["bun", ...CONSUMER_INSTALLS.map((input) => input.source)]);
+
+/**
+ * Sources where at most one entry per (ghsa, package) may cover an advisory.
+ * `bun audit` reports no location, and the root npm-install observation is
+ * checked against harper's shipped evidence per entry, not per chain. On every
+ * other consumer-install source an advisory may be split across entries, one
+ * per dependency chain, each covering the node its chain resolves to.
+ */
+const SINGLE_ENTRY_SOURCES = new Set(["bun", "npm-install"]);
+
+/**
+ * The identity of an allowlist entry: GHSA (case-insensitive), package, the set
+ * of sources and introducedBy. Several entries may share a GHSA; two with the
+ * same key are a duplicate.
+ */
+export function entryKey(entry) {
+  const sources = Array.isArray(entry?.sources) ? [...new Set(entry.sources)].sort() : entry?.sources;
+  return JSON.stringify([String(entry?.ghsa ?? "").toUpperCase(), entry?.package, sources, entry?.introducedBy]);
+}
+
+/** How a diagnostic names an entry when its GHSA has more than one. */
+function entryLabel(entry, index) {
+  // Formats a non-array `sources` value as text instead of joining it.
+  const sources = Array.isArray(entry.sources) ? entry.sources.join(", ") : String(entry.sources ?? "");
+  return `entry[${index}] (${entry.ghsa} / ${entry.package}, sources [${sources}], via ${entry.introducedBy})`;
+}
 
 const VALID_CLASSES = new Set([
   // No patched version exists anywhere yet. Nothing to do but wait upstream.
@@ -96,6 +157,20 @@ const VALID_CLASSES = new Set([
 
 const failures = [];
 const warnings = [];
+
+function reportFailuresAndExit() {
+  console.log(`  ${failures.length} problem(s) block this build:\n`);
+  for (const f of failures) {
+    console.log(`::error::audit-gate: ${f.split("\n")[0]}`);
+    console.log(`    - ${f}\n`);
+  }
+  console.log(
+    "  This gate is blocking by design. Do not add `continue-on-error` or `|| true` to it —\n" +
+      "  that is the exact defect it was written to remove. Either fix the advisory, or add a\n" +
+      "  justified, dated entry to .github/audit-allowlist.json that a reviewer has agreed to.\n",
+  );
+  process.exit(1);
+}
 const notes = [];
 
 const fail = (m) => failures.push(m);
@@ -345,7 +420,8 @@ export function flattenAdvisories(auditJson) {
  * Install-from-tarball lane produces. This is the installed-tree observation:
  * it reports the advisories a real `npm install -g @tpsdev-ai/flair` would see,
  * which the lockfile observation (`bun audit`) cannot — harper's
- * npm-shrinkwrap pins versions the root overrides never reach under npm.
+ * npm-shrinkwrap or bundled dependency tree pins versions the root overrides
+ * never reach under npm.
  *
  * Refused: no stdout, stdout that is not valid JSON, the checks in
  * `npmAuditReportRefusal`, and the exit-status and stderr checks in
@@ -462,12 +538,190 @@ function loadAllowlist() {
  * ------------------------------------------------------------------ */
 
 const DAY_MS = 86_400_000;
-const isIsoDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s ?? "")) && !Number.isNaN(Date.parse(s));
+/** A real calendar date: the UTC year, month and day round-trip. */
+function isCalendarDate(s) {
+  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [year, month, day] = s.split("-").map(Number);
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+/** The UTC calendar day of a Date or a parseable date string. */
+function utcDay(value) {
+  return (value instanceof Date ? value : new Date(value)).toISOString().slice(0, 10);
+}
+
+/**
+ * The first commit day each advisory id appears in parsed allowlist snapshots,
+ * oldest first, following file renames and comparing ids case-insensitively.
+ * Dates are read as UTC calendar days, because a commit made late in a negative
+ * offset is already the next day in UTC.
+ *
+ * A shallow repository, a failed git call or an unreadable allowlist throws.
+ * The repository root comes from the script location, so the gate behaves the
+ * same whatever directory it is run from.
+ */
+export function readAllowlistHistory(repoRoot = REPO_ROOT) {
+  const allowlistPath = join(repoRoot, ".github", "audit-allowlist.json");
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(allowlistPath, "utf8"));
+  } catch (e) {
+    throw new Error(`cannot read ${allowlistPath}: ${e.message}`);
+  }
+  if (!Array.isArray(parsed?.entries)) {
+    throw new Error(`${allowlistPath} must have an "entries" array`);
+  }
+
+  const runGit = (args) => {
+    const res = spawnSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 120_000 });
+    if (res.error) throw new Error(`git ${args[0]} failed: ${res.error.message}`);
+    if (res.status !== 0) {
+      throw new Error(`git ${args[0]} failed (exit ${res.status}): ${(res.stderr ?? "").trim()}`);
+    }
+    return res.stdout;
+  };
+
+  if (runGit(["rev-parse", "--is-shallow-repository"]).trim() === "true") {
+    throw new Error(
+      `repository ${repoRoot} is shallow, so the allowlist history is incomplete. ` +
+        "Fetch full history (fetch-depth: 0) before running the gate.",
+    );
+  }
+
+  const ids = new Set();
+  for (const entry of parsed.entries) {
+    const id = String(entry?.ghsa ?? "");
+    if (id) ids.add(id.toUpperCase());
+  }
+  if (ids.size > 1_000) throw new Error(`allowlist has ${ids.size} advisory ids; refusing to read history for more than 1000`);
+
+  let path = ".github/audit-allowlist.json";
+  const history = runGit(["log", "--follow", "--name-status", "--format=%x1e%H%x09%cI", "--", path]);
+  const snapshots = [];
+  for (const record of history.split("\x1e").filter((record) => record.trim())) {
+    const [header, ...changes] = record.trim().split("\n");
+    const [sha, timestamp] = header.split("\t");
+    const day = utcDayFromTimestamp(timestamp);
+    if (!day) throw new Error(`git returned an unparseable date for ${sha}: ${timestamp}`);
+    if (!changes.includes(`D\t${path}`)) snapshots.push({ sha, day, path });
+    for (const line of changes) {
+      const rename = /^R\d+\t(.+)\t(.+)$/.exec(line);
+      if (rename && rename[2] === path) path = rename[1];
+    }
+  }
+
+  const firstDays = new Map();
+  for (const { sha, day, path } of snapshots.reverse()) {
+    const contents = runGit(["show", `${sha}:${path}`]);
+    let snapshot;
+    try {
+      snapshot = JSON.parse(contents);
+    } catch (e) {
+      throw new Error(`cannot parse allowlist snapshot ${sha}:${path}: ${e.message}`);
+    }
+    if (!Array.isArray(snapshot?.entries)) {
+      throw new Error(`allowlist snapshot ${sha}:${path} must have an "entries" array`);
+    }
+    for (const entry of snapshot.entries) {
+      if (typeof entry?.ghsa !== "string") continue;
+      const id = entry.ghsa.toUpperCase();
+      if (!firstDays.has(id)) firstDays.set(id, day);
+    }
+  }
+  return firstDays;
+}
+
+function utcDayFromTimestamp(value) {
+  if (!isCalendarDate(value.slice(0, 10))) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const day = date.toISOString().slice(0, 10);
+  return isCalendarDate(day) ? day : null;
+}
+
+/**
+ * Each entry's `added` must be a real calendar date no later than the first day its advisory id
+ * appears in the parsed snapshots. An id absent from those snapshots uses today.
+ */
+export function validateAllowlistHistory(allowlist, firstDays, today) {
+  const problems = [];
+  const todayDay = utcDay(today);
+  (allowlist?.entries ?? []).forEach((entry, i) => {
+    if (typeof entry?.ghsa !== "string") return;
+    const where = `entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"})`;
+    if (!isCalendarDate(entry?.added)) {
+      problems.push(`${where}: "added" must be a real calendar date (YYYY-MM-DD)`);
+      return;
+    }
+    const id = entry.ghsa.toUpperCase();
+    const boundary = firstDays.get(id) ?? todayDay;
+    if (!isCalendarDate(boundary)) {
+      problems.push(`${where}: first history day must be a real calendar date (YYYY-MM-DD)`);
+      return;
+    }
+    if (firstDays.has(id) && boundary > todayDay) {
+      problems.push(`entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"}): first history day (${boundary}) is after today (${todayDay})`);
+    }
+    if (entry.added > todayDay) {
+      problems.push(`entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"}): "added" (${entry.added}) is after today (${todayDay})`);
+    }
+    if (entry.added <= boundary) return;
+    const bound =
+      firstDays.has(id)
+        ? `the first day this advisory appears in parsed allowlist history (${boundary})`
+        : `today (${boundary}), and no parsed snapshot contained this advisory id`;
+    problems.push(
+      `entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"}): lifetime cap: "added" (${entry.added}) is later than ${bound}.`,
+    );
+  });
+  return problems;
+}
+
+/**
+ * Problems with an over-cap entry's approval, exactly as the plan defines it:
+ * all four members, non-blank names and reasons, real dates, `approvedOn` <= today
+ * < its `expires`, the entry not outliving it, and the approval itself no longer
+ * than the severity cap.
+ */
+export function overCapApprovalProblems(entry, today, cap) {
+  const approval = entry?.overCapApproval;
+  if (!approval || typeof approval !== "object" || Array.isArray(approval)) {
+    return ["no overCapApproval is present"];
+  }
+  const problems = [];
+  for (const field of ["approvedBy", "reason", "approvedOn", "expires"]) {
+    if (typeof approval[field] !== "string" || approval[field].trim() === "") {
+      problems.push(`"overCapApproval.${field}" is required and must be non-blank`);
+    }
+  }
+  if (problems.length) return problems;
+  for (const field of ["approvedOn", "expires"]) {
+    if (!isCalendarDate(approval[field])) problems.push(`"overCapApproval.${field}" must be a real calendar date (YYYY-MM-DD)`);
+  }
+  if (problems.length) return problems;
+
+  const todayDay = utcDay(today);
+  if (approval.approvedOn > todayDay) problems.push(`"overCapApproval.approvedOn" (${approval.approvedOn}) is after today (${todayDay})`);
+  if (todayDay >= approval.expires) problems.push(`the over-cap approval EXPIRED on ${approval.expires}`);
+  if (entry.expires > approval.expires) {
+    problems.push(`the entry expires ${entry.expires}, after the approval's expiry ${approval.expires}`);
+  }
+  const approvalDays = Math.round((Date.parse(approval.expires) - Date.parse(approval.approvedOn)) / DAY_MS);
+  if (approvalDays <= 0) {
+    problems.push(`"overCapApproval.expires" (${approval.expires}) must be after "approvedOn" (${approval.approvedOn})`);
+  } else if (approvalDays > cap) {
+    problems.push(`the approval lasts ${approvalDays}d, beyond the ${cap}d cap for this severity`);
+  }
+  return problems;
+}
 
 export function validateAllowlist(allowlist, today) {
   const problems = [];
   const caps = allowlist?.policy?.maxLifetimeDaysBySeverity ?? {};
-  const seen = new Set();
+  const seenKeys = new Map();
+  const singleSourceOwner = new Map();
 
   allowlist.entries.forEach((entry, i) => {
     const where = `entry[${i}] (${entry?.ghsa ?? "no ghsa"} / ${entry?.package ?? "no package"})`;
@@ -476,17 +730,29 @@ export function validateAllowlist(allowlist, today) {
       const v = entry?.[f];
       if (v === undefined || v === null || String(v).trim() === "") {
         problems.push(`${where}: missing required field "${f}"`);
+      } else if (f !== "sources" && typeof v !== "string") {
+        // String({}) is "[object Object]", so presence alone admitted an object,
+        // and the bun admission path, which does not check introducedBy, then let
+        // such an entry cover an advisory.
+        problems.push(`${where}: "${f}" must be a string (found ${Array.isArray(v) ? "an array" : typeof v})`);
       }
     }
     if (problems.some((p) => p.startsWith(where))) return;
 
     if (!/^GHSA-[a-z0-9-]+$/i.test(entry.ghsa)) {
       problems.push(`${where}: "ghsa" must be a GHSA id`);
+    } else if (!/^GHSA-[a-z0-9-]+$/.test(entry.ghsa)) {
+      problems.push(`${where}: "ghsa" must use canonical casing (uppercase GHSA- prefix, lowercase remainder)`);
     }
-    if (seen.has(entry.ghsa)) {
-      problems.push(`${where}: duplicate entry for ${entry.ghsa}`);
+    const key = entryKey(entry);
+    const duplicateKey = seenKeys.has(key);
+    if (duplicateKey) {
+      problems.push(
+        `${where}: duplicate entry for ${entry.ghsa} (entry[${seenKeys.get(key)}] has the same package, sources and introducedBy)`,
+      );
+    } else {
+      seenKeys.set(key, i);
     }
-    seen.add(entry.ghsa);
 
     if (!VALID_CLASSES.has(entry.class)) {
       problems.push(
@@ -494,17 +760,42 @@ export function validateAllowlist(allowlist, today) {
       );
     }
     if (!Array.isArray(entry.sources) || entry.sources.length === 0) {
-      problems.push(`${where}: "sources" must be a non-empty array of "bun" and/or "npm-install"`);
+      problems.push(`${where}: "sources" must be a non-empty array of ${[...VALID_SOURCES].map((v) => `"${v}"`).join(", ")}`);
     } else {
       for (const s of entry.sources) {
         if (!VALID_SOURCES.has(s)) {
           problems.push(`${where}: unknown source "${s}" (expected one of ${[...VALID_SOURCES].join(", ")})`);
         }
       }
+      // One entry per (ghsa, package) on a source whose advisories carry no
+      // per-chain location: two would both cover the same report.
+      for (const s of new Set(entry.sources)) {
+        if (!SINGLE_ENTRY_SOURCES.has(s) || duplicateKey) continue;
+        const owner = JSON.stringify([String(entry.ghsa).toUpperCase(), entry.package, s]);
+        if (singleSourceOwner.has(owner)) {
+          const j = singleSourceOwner.get(owner);
+          problems.push(
+            `${where}: duplicate coverage — ${entryLabel(allowlist.entries[j], j)} and ${entryLabel(entry, i)} ` +
+              `both cover ${entry.ghsa} (${entry.package}) in source "${s}"; at most one entry per advisory and package may name that source.`,
+          );
+        } else {
+          singleSourceOwner.set(owner, i);
+        }
+      }
+      // bun.lock resolves through this repository's root overrides, so its copy
+      // is never in a tree we do not control: vendor-pinned is false there.
+      if (entry.class === "vendor-pinned" && entry.sources.includes("bun")) {
+        problems.push(
+          `${where}: class "vendor-pinned" cannot cover source "bun": bun.lock resolves through this ` +
+            `repository's root overrides, so the bun copy is not in a tree we do not control. Give the bun ` +
+            `copy its own entry classed remediation-available or no-patch-published.`,
+        );
+      }
     }
-    if (!isIsoDate(entry.added)) problems.push(`${where}: "added" must be YYYY-MM-DD`);
-    if (!isIsoDate(entry.expires)) problems.push(`${where}: "expires" must be YYYY-MM-DD`);
-    if (!isIsoDate(entry.added) || !isIsoDate(entry.expires)) return;
+    if (!isCalendarDate(entry.added)) problems.push(`${where}: "added" must be a real calendar date (YYYY-MM-DD)`);
+    if (!isCalendarDate(entry.expires)) problems.push(`${where}: "expires" must be a real calendar date (YYYY-MM-DD)`);
+    if (!isCalendarDate(entry.added) || !isCalendarDate(entry.expires)) return;
+    if (entry.added > utcDay(today)) problems.push(`${where}: "added" (${entry.added}) is after today (${utcDay(today)})`);
 
     // An exception with no meaningful deadline is the defect this gate exists
     // to prevent, so the deadline is capped by severity and the cap is enforced
@@ -514,11 +805,19 @@ export function validateAllowlist(allowlist, today) {
       problems.push(`${where}: "expires" (${entry.expires}) must be after "added" (${entry.added})`);
     }
     const cap = caps[entry.severity];
-    if (typeof cap === "number" && lifetimeDays > cap) {
+    if (typeof cap !== "number") {
       problems.push(
-        `${where}: lifetime ${lifetimeDays}d exceeds the ${cap}d cap for severity "${entry.severity}". ` +
-          `Shorten "expires", or fix the advisory.`,
+        `${where}: no lifetime cap is configured for severity "${entry.severity}". Add it to ` +
+          `policy.maxLifetimeDaysBySeverity; an entry without a cap cannot be admitted.`,
       );
+    } else if (lifetimeDays > cap || entry.overCapApproval !== undefined) {
+      const approvalProblems = overCapApprovalProblems(entry, today, cap);
+      if (approvalProblems.length) {
+        problems.push(
+          `${where}: ${lifetimeDays > cap ? `lifetime ${lifetimeDays}d exceeds the ${cap}d cap for severity "${entry.severity}" and ` : ""}` +
+            `its overCapApproval is not valid — ${approvalProblems.join("; ")}.`,
+        );
+      }
     }
     if (String(entry.removeWhen).trim().length < 20) {
       problems.push(
@@ -562,11 +861,248 @@ function harperNodeRoot(node, pkg) {
 }
 
 /**
+ * The package name at the top of harper's node_modules tree for a reported node.
+ * `node_modules/harper/node_modules/@scope/name/node_modules/x` starts at
+ * `@scope/name`; a hoisted leaf such as `.../fast-uri` starts at `fast-uri`.
+ */
+function topLevelPackageUnderHarper(node, harperRoot) {
+  const prefix = `${harperRoot}/node_modules/`;
+  if (!node.startsWith(prefix)) return null;
+  const parts = node.slice(prefix.length).split("/");
+  if (!parts[0]) return null;
+  if (!parts[0].startsWith("@")) return parts[0];
+  return parts[1] ? `${parts[0]}/${parts[1]}` : null;
+}
+
+/**
+ * The real path of `path`, which must lie inside harper's installed tree
+ * (`realHarper`, the real path of harper's package directory). `label` names
+ * the path in the error.
+ */
+function realPathInsideHarper(path, realHarper, label) {
+  const real = realpathSync(path);
+  if (real !== realHarper && !real.startsWith(`${realHarper}${sep}`)) {
+    throw new Error(`${label} resolves outside harper's installed tree`);
+  }
+  return real;
+}
+
+/**
+ * Applies `realPathInsideHarper` to each directory on `relPath` below
+ * `harperDir`, from its first segment to its last. `relPath` is relative to
+ * `harperDir`, and the error names the directory relative to it. Returns the
+ * real path of the last directory.
+ */
+function directoriesInsideHarper(harperDir, relPath, realHarper) {
+  const segments = relPath.split(/[\\/]/);
+  let real = realHarper;
+  for (let i = 1; i <= segments.length; i++) {
+    const label = segments.slice(0, i).join("/");
+    real = realPathInsideHarper(join(harperDir, label), realHarper, label);
+  }
+  return real;
+}
+
+/**
+ * The node_modules directories Node's resolver searches for a package required
+ * from `fromDir`, a real path at or below `realHarper`, cut off at harper's
+ * directory: walking from `fromDir` up to and including `realHarper`, each
+ * directory not itself named node_modules contributes its node_modules child.
+ */
+export function harperSearchPaths(fromDir, realHarper) {
+  if (fromDir !== realHarper && !fromDir.startsWith(`${realHarper}${sep}`)) {
+    throw new Error("a dependency search started outside harper's installed tree");
+  }
+  const paths = [];
+  let dir = fromDir;
+  while (true) {
+    if (basename(dir) !== "node_modules") paths.push(join(dir, "node_modules"));
+    if (dir === realHarper) return paths;
+    const parent = dirname(dir);
+    if (parent === dir) throw new Error("a dependency search did not reach harper's directory");
+    dir = parent;
+  }
+}
+
+/** True for a dependency name shaped like an npm package name: `name` or `@scope/name`. */
+function isPackageName(name) {
+  return /^(?:@[^@/\\]+\/)?[^@/\\][^@/\\]*$/.test(name) &&
+    !name.split("/").some((part) => part === "." || part === "..");
+}
+
+/**
+ * Look up the package `name` required from `fromDir` (a real path at or below
+ * `realHarper`) in `harperSearchPaths(fromDir, realHarper)`, in order: the
+ * first search directory that holds `<name>/package.json` wins. A name that is
+ * not shaped like a package name resolves to nothing. Once a package.json is
+ * found, it and each directory from harper's directory down to its package
+ * directory must resolve inside harper's installed tree, or this throws.
+ * Returns the real paths of the package directory and its package.json, or null.
+ */
+export function resolveHarperDependency(fromDir, realHarper, name) {
+  if (typeof name !== "string" || !isPackageName(name)) return null;
+  for (const searchDir of harperSearchPaths(fromDir, realHarper)) {
+    const relPath = relative(realHarper, join(searchDir, name));
+    // Walk installed manifests, not runtime imports: a package may export
+    // subpaths without exporting its bare name.
+    let manifest;
+    try {
+      manifest = realPathInsideHarper(join(realHarper, relPath, "package.json"), realHarper, `${relPath}/package.json`);
+    } catch (e) {
+      if (e.code === "ENOENT" || e.code === "ENOTDIR") continue;
+      throw e;
+    }
+    return { dir: directoriesInsideHarper(realHarper, relPath, realHarper), manifest };
+  }
+  return null;
+}
+
+/** Read and parse a package.json under harper; an unreadable or invalid one throws a named error. */
+function readHarperManifest(manifestPath, name) {
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch (e) {
+    throw new Error(`harper's package.json for ${JSON.stringify(name)} cannot be read or parsed: ${e.message}`);
+  }
+  if (typeof pkg !== "object" || pkg === null || Array.isArray(pkg)) {
+    throw new Error(`harper's package.json for ${JSON.stringify(name)} is not a JSON object`);
+  }
+  return pkg;
+}
+
+/**
+ * Whether harper's top-level package `target` is one of the bundled packages
+ * `roots` or in their dependency closure. npm ships each bundled package's
+ * dependency closure inside the tarball too; closure members may be hoisted to
+ * the top level of harper's tree (for example fast-uri through fastify) or
+ * nested below it. Each dependency is resolved with `resolveHarperDependency`
+ * from the real path of the package that requires it, before it is compared
+ * with the target, and it matches only when it resolves to the real path of
+ * `node_modules/<target>` at harper's top level. Missing dependencies are
+ * skipped; their absence does not enlarge the bundled set. The walk makes at
+ * most `limit` lookups, the bundled packages included, and throws past that.
+ */
+function harperBundleIncludes(harperDir, roots, target, limit = 5000) {
+  const realHarper = realpathSync(harperDir);
+  const targetDir = resolveHarperDependency(realHarper, realHarper, target)?.dir;
+  if (!targetDir) return false;
+  const seen = new Set();
+  const queue = [];
+  let lookups = 0;
+  const reaches = (from, name) => {
+    if (++lookups > limit) {
+      throw new Error(`dependency closure for harper's bundled packages exceeded ${limit} lookups`);
+    }
+    const found = resolveHarperDependency(from, realHarper, name);
+    if (!found) return false;
+    if (name === target && found.dir === targetDir) {
+      readHarperManifest(found.manifest, target);
+      return true;
+    }
+    if (seen.has(found.dir)) return false;
+    seen.add(found.dir);
+    queue.push(found);
+    return false;
+  };
+  for (const name of roots) {
+    if (reaches(realHarper, name)) return true;
+  }
+  while (queue.length) {
+    const { dir, manifest } = queue.shift();
+    const pkg = JSON.parse(readFileSync(manifest, "utf8"));
+    for (const dep of Object.keys({ ...pkg.optionalDependencies, ...pkg.dependencies })) {
+      if (reaches(dir, dep)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Evidence that harper shipped a node.
+ * Releases that ship npm-shrinkwrap.json are checked against its pin, unchanged.
+ * A release without one requires both the consumer install's package-lock
+ * (`inBundle: true` plus the recorded version) and harper's installed
+ * package.json `bundleDependencies` (or `bundledDependencies`; `true` means the
+ * packages in harper's `dependencies`). Anything else throws, and the caller blocks.
+ */
+function harperShippedVersion(npmPrefix, harperRoot, node) {
+  const pinKey = node.slice(harperRoot.length + 1);
+  let shrinkwrapText = null;
+  try {
+    shrinkwrapText = readFileSync(join(npmPrefix, harperRoot, "npm-shrinkwrap.json"), "utf8");
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
+  if (shrinkwrapText !== null) {
+    const shrinkwrap = JSON.parse(shrinkwrapText);
+    const pinned = shrinkwrap?.packages?.[pinKey]?.version;
+    if (typeof pinned !== "string" || !pinned) throw new Error(`missing or invalid version for ${pinKey}`);
+    return { version: pinned, label: "harper's shrinkwrap pins" };
+  }
+
+  const lock = JSON.parse(readFileSync(join(npmPrefix, "package-lock.json"), "utf8"));
+  const entry = lock?.packages?.[node];
+  if (!entry || typeof entry !== "object") {
+    throw new Error(`the consumer package-lock has no entry for ${pinKey}`);
+  }
+  if (entry.inBundle !== true) {
+    throw new Error(`the consumer package-lock does not mark ${pinKey} as inBundle`);
+  }
+  const recorded = entry.version;
+  if (typeof recorded !== "string" || !recorded) throw new Error(`missing or invalid version for ${pinKey}`);
+
+  const harperManifest = JSON.parse(readFileSync(join(npmPrefix, harperRoot, "package.json"), "utf8"));
+  const declared = harperManifest?.bundleDependencies ?? harperManifest?.bundledDependencies;
+  const topLevel = topLevelPackageUnderHarper(node, harperRoot);
+  if (!topLevel) throw new Error(`cannot identify the top-level package under harper for ${pinKey}`);
+  let roots;
+  if (declared === true) {
+    const dependencies = harperManifest.dependencies ?? {};
+    if (typeof dependencies !== "object" || dependencies === null || Array.isArray(dependencies)) {
+      throw new Error("harper's package.json sets bundleDependencies to true but its dependencies field is not an object");
+    }
+    roots = Object.keys(dependencies);
+  } else if (Array.isArray(declared)) {
+    roots = declared.filter((name) => typeof name === "string" && name);
+  } else {
+    throw new Error("harper's package.json declares no bundleDependencies");
+  }
+  const harperDir = join(npmPrefix, harperRoot);
+  const realHarper = realpathSync(harperDir);
+  if (!resolveHarperDependency(realHarper, realHarper, topLevel)) {
+    throw new Error(`harper's tree has no package.json for ${JSON.stringify(topLevel)}`);
+  }
+  if (!harperBundleIncludes(harperDir, roots, topLevel)) {
+    throw new Error(
+      declared === true
+        ? `${JSON.stringify(topLevel)} is not in harper's dependencies (bundleDependencies is true) and is not in their dependency closure`
+        : `${JSON.stringify(topLevel)} is not listed in harper's bundleDependencies and is not in a bundled package's dependency closure`,
+    );
+  }
+  return { version: recorded, label: "the consumer package-lock records" };
+}
+
+/** True unless harper's npm-shrinkwrap.json is missing; harperShippedVersion branches on the same read. */
+function harperShrinkwrapDecides(npmPrefix, harperRoot) {
+  try {
+    readFileSync(join(npmPrefix, harperRoot, "npm-shrinkwrap.json"));
+    return true;
+  } catch (e) {
+    return e.code !== "ENOENT";
+  }
+}
+
+/**
  * For a vendor-pinned exception, reject any npm-audit-reported node path outside
  * harper. When all reported paths are under harper, compare each installed version
- * and any audit-reported version with harper's shrinkwrap pin. Empty node lists,
- * unreadable required metadata, and version mismatches block the gate; errors
- * name a node when one was reported.
+ * and any audit-reported version with the version harper shipped it at: the
+ * shrinkwrap pin for releases that carry one, otherwise the bundle evidence in the
+ * consumer install's package-lock and harper's package.json. Empty node lists,
+ * a node package.json, package directory or directory between harper's and it
+ * whose real path is outside harper's installed tree, unreadable required
+ * metadata, and version mismatches block the gate; errors name a node when one
+ * was reported.
  */
 export function vendorPinnedNodeProblems(adv, npmPrefix) {
   const nodes = adv.nodes;
@@ -585,84 +1121,119 @@ export function vendorPinnedNodeProblems(adv, npmPrefix) {
     const harperRoot = harperNodeRoot(node, adv.package);
     const pinKey = node.slice(harperRoot.length + 1);
     try {
-      const shrinkwrap = JSON.parse(readFileSync(join(npmPrefix, harperRoot, "npm-shrinkwrap.json"), "utf8"));
-      const pinned = shrinkwrap?.packages?.[pinKey]?.version;
-      const installed = JSON.parse(readFileSync(join(npmPrefix, node, "package.json"), "utf8"))?.version;
+      const harperDir = join(npmPrefix, harperRoot);
+      const realHarper = realpathSync(harperDir);
+      const manifest = realPathInsideHarper(join(npmPrefix, node, "package.json"), realHarper, `${pinKey}/package.json`);
+      directoriesInsideHarper(harperDir, pinKey, realHarper);
+      const installed = JSON.parse(readFileSync(manifest, "utf8"))?.version;
       const reported = adv.nodeVersions?.[node];
-      if (typeof pinned !== "string" || !pinned || typeof installed !== "string" || !installed ||
+      if (typeof installed !== "string" || !installed ||
           (reported !== undefined && (typeof reported !== "string" || !reported))) {
         throw new Error(`missing or invalid version for ${pinKey}`);
       }
-      if (installed !== pinned || (reported !== undefined && reported !== pinned)) {
+      const shipped = harperShippedVersion(npmPrefix, harperRoot, node);
+      if (installed !== shipped.version || (reported !== undefined && reported !== shipped.version)) {
         problems.push(
           `${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} has installed version ${installed}` +
-            `${reported === undefined ? "" : `, audit version ${reported}`}, but harper's shrinkwrap pins ${pinned}. Fix the dependency, or extend the allowlist schema and add a separate, justified entry scoped to that node.`,
+            `${reported === undefined ? "" : `, audit version ${reported}`}, but ${shipped.label} ${shipped.version}. Fix the dependency, or extend the allowlist schema and add a separate, justified entry scoped to that node.`,
         );
       }
     } catch (e) {
+      const remedy = harperShrinkwrapDecides(npmPrefix, harperRoot)
+        ? "Restore readable package and shrinkwrap evidence, then rerun the gate."
+        : "Without npm-shrinkwrap.json in harper, restore a readable installed package.json, a consumer package-lock that marks the node inBundle, and a harper package.json whose bundleDependencies (true for all of its dependencies) names the node's top-level package or a package whose dependency closure contains it, then rerun the gate.";
       problems.push(
-        `${adv.ghsa} (${adv.package}): cannot verify node ${JSON.stringify(node)} against harper's shrinkwrap: ${e.message}. Restore readable package and shrinkwrap evidence, then rerun the gate.`,
+        `${adv.ghsa} (${adv.package}): cannot verify node ${JSON.stringify(node)} against harper's npm-shrinkwrap.json or its bundleDependencies listing: ${e.message}. ${remedy}`,
       );
     }
   }
   return problems;
 }
 
-function adkVendorPinnedNodeProblems(adv, npmPrefix, entry) {
+/**
+ * The install-relative node that `entry.introducedBy` resolves to in the
+ * consumer install at `npmPrefix` for `input`. The chain must start at the
+ * input's package (then its `vendor`, when set) and end at `advPackage`; each
+ * later link must be a declared dependency of the one before it and resolve on
+ * disk, found by walking up from the requiring package's directory. Throws on
+ * any break in the chain.
+ */
+function consumerChainNode(npmPrefix, entry, input, advPackage) {
+  const chain = entry.introducedBy.split(" -> ");
+  if (chain.length < 2 || chain[0] !== input.package ||
+      (input.vendor !== undefined && chain[1] !== input.vendor) ||
+      chain.at(-1) !== advPackage ||
+      !chain.every((pkg) => /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/.test(pkg))) {
+    throw new Error(`invalid ${input.package} dependency chain`);
+  }
+  const prefix = resolve(npmPrefix);
+  let parent = prefix;
+  let manifest;
+  for (const pkg of chain) {
+    if (manifest && !Object.hasOwn(manifest.dependencies ?? {}, pkg)) {
+      throw new Error(`${manifest.name} does not depend on ${pkg}`);
+    }
+    let search = parent;
+    while (!existsSync(join(search, "node_modules", pkg, "package.json"))) {
+      if (search === prefix) throw new Error(`cannot resolve ${pkg}`);
+      search = dirname(search);
+    }
+    parent = join(search, "node_modules", pkg);
+    manifest = JSON.parse(readFileSync(join(parent, "package.json"), "utf8"));
+    if (manifest.name !== pkg) throw new Error(`package name mismatch for ${pkg}`);
+  }
+  return relative(prefix, parent).split("\\").join("/");
+}
+
+/**
+ * The version problems of `node`, a node an entry's chain resolves to: the
+ * installed version must equal the entry's `version`, and an audit-reported
+ * version must equal the installed one.
+ */
+function consumerNodeVersionProblems(adv, npmPrefix, entry, input, node) {
+  const prefix = resolve(npmPrefix);
+  try {
+    const installed = JSON.parse(readFileSync(join(prefix, node, "package.json"), "utf8"))?.version;
+    const reported = adv.nodeVersions?.[node];
+    if (typeof entry.version !== "string" || !entry.version.trim()) {
+      throw new Error("missing or invalid allowlist version");
+    }
+    if (typeof installed !== "string" || !installed.trim()) {
+      throw new Error("missing or invalid installed version");
+    }
+    if (installed !== entry.version) {
+      throw new Error(`installed version ${installed} differs from allowlist version ${entry.version}`);
+    }
+    if (reported !== undefined && reported !== installed) {
+      throw new Error(`audit version ${JSON.stringify(reported)} conflicts with installed version ${installed}`);
+    }
+    return [];
+  } catch (e) {
+    return [`${adv.ghsa} (${adv.package}): cannot verify ${input.package} node ${JSON.stringify(node)} version: ${e.message}.`];
+  }
+}
+
+/**
+ * For a vendor-pinned entry on a consumer-install observation other than the
+ * root tarball's, when it is the only entry for its advisory: the entry's
+ * `introducedBy` chain must resolve (`consumerChainNode`), every reported node
+ * must be the chain's resolved node, and the installed version must equal the
+ * entry's `version` (`consumerNodeVersionProblems`).
+ */
+function consumerVendorPinnedNodeProblems(adv, npmPrefix, entry, input) {
   if (!Array.isArray(adv.nodes) || adv.nodes.length === 0) {
     return [`${adv.ghsa} (${adv.package}): npm audit reported no nodes.`];
   }
+  let expected;
   try {
-    const chain = entry.introducedBy.split(" -> ");
-    if (chain[0] !== "@tpsdev-ai/adk-flair" || chain[1] !== "@google/adk" ||
-        chain.at(-1) !== adv.package ||
-        !chain.every((pkg) => /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/.test(pkg))) {
-      throw new Error("invalid ADK dependency chain");
-    }
-    const prefix = resolve(npmPrefix);
-    let parent = prefix;
-    let manifest;
-    for (const pkg of chain) {
-      if (manifest && !Object.hasOwn(manifest.dependencies ?? {}, pkg)) {
-        throw new Error(`${manifest.name} does not depend on ${pkg}`);
-      }
-      let search = parent;
-      while (!existsSync(join(search, "node_modules", pkg, "package.json"))) {
-        if (search === prefix) throw new Error(`cannot resolve ${pkg}`);
-        search = dirname(search);
-      }
-      parent = join(search, "node_modules", pkg);
-      manifest = JSON.parse(readFileSync(join(parent, "package.json"), "utf8"));
-      if (manifest.name !== pkg) throw new Error(`package name mismatch for ${pkg}`);
-    }
-    const expected = relative(prefix, parent).split("\\").join("/");
-    return adv.nodes.flatMap((node) => {
-      if (node !== expected) {
-        return [`${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} is outside the dependency chain ${entry.introducedBy} (resolved node ${expected}).`];
-      }
-      try {
-        const installed = JSON.parse(readFileSync(join(prefix, node, "package.json"), "utf8"))?.version;
-        const reported = adv.nodeVersions?.[node];
-        if (typeof entry.version !== "string" || !entry.version.trim()) {
-          throw new Error("missing or invalid allowlist version");
-        }
-        if (typeof installed !== "string" || !installed.trim()) {
-          throw new Error("missing or invalid installed version");
-        }
-        if (installed !== entry.version) {
-          throw new Error(`installed version ${installed} differs from allowlist version ${entry.version}`);
-        }
-        if (reported !== undefined && reported !== installed) {
-          throw new Error(`audit version ${JSON.stringify(reported)} conflicts with installed version ${installed}`);
-        }
-        return [];
-      } catch (e) {
-        return [`${adv.ghsa} (${adv.package}): cannot verify ADK node ${JSON.stringify(node)} version: ${e.message}.`];
-      }
-    });
+    expected = consumerChainNode(npmPrefix, entry, input, adv.package);
   } catch (e) {
-    return [`${adv.ghsa} (${adv.package}): cannot verify ADK dependency chain: ${e.message}.`];
+    return [`${adv.ghsa} (${adv.package}): cannot verify ${input.package} dependency chain: ${e.message}.`];
   }
+  return adv.nodes.flatMap((node) =>
+    node !== expected
+      ? [`${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} is outside the dependency chain ${entry.introducedBy} (resolved node ${expected}).`]
+      : consumerNodeVersionProblems(adv, npmPrefix, entry, input, node));
 }
 
 async function latestPublishedVersion(pkg) {
@@ -675,12 +1246,205 @@ async function latestPublishedVersion(pkg) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Consumer-install prefix identity                                    *
+ * ------------------------------------------------------------------ */
+
+/**
+ * The workspace manifest the job packs for `input` (`<repo>/<dir>/package.json`,
+ * the file `npm pack` reads): its path, its version and its `dependencies` (an
+ * empty object when it has none). Throws when that manifest cannot be read,
+ * names a different package, has no version, or has a `dependencies` field
+ * that is not an object of string specs.
+ */
+export function packedManifest(repoRoot, input) {
+  const rel = join(input.dir, "package.json");
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(repoRoot, rel), "utf8"));
+  } catch (e) {
+    throw new Error(`cannot read the workspace manifest ${rel} the job packs for ${input.flag}: ${e.message}`);
+  }
+  if (manifest?.name !== input.package) {
+    throw new Error(`the workspace manifest ${rel} names ${JSON.stringify(manifest?.name)}, expected ${input.package}`);
+  }
+  if (typeof manifest.version !== "string" || !manifest.version) {
+    throw new Error(`the workspace manifest ${rel} has no version`);
+  }
+  const dependencies = manifest.dependencies === undefined ? {} : manifest.dependencies;
+  if (!isObject(dependencies) || !Object.values(dependencies).every((spec) => typeof spec === "string")) {
+    throw new Error(`the workspace manifest ${rel} has a "dependencies" field that is not an object of string specs`);
+  }
+  return { path: rel, version: manifest.version, dependencies };
+}
+
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** The prefix's direct dependencies as its package-lock.json records them, for refusal messages. */
+function directDependencies(lock) {
+  const deps = Object.keys(lock?.packages?.[""]?.dependencies ?? {});
+  return deps.length ? `direct dependencies ${deps.join(", ")}` : "no direct dependencies";
+}
+
+/** A spec that installs a local tarball, as npm records one in a consumer's package.json and lockfile. */
+function isLocalTarballSpec(spec) {
+  return typeof spec === "string" && spec.startsWith("file:") && spec.endsWith(".tgz");
+}
+
+/** The root dependency fields other than `dependencies`; the package must be in none of them. */
+const NON_PRODUCTION_FIELDS = ["devDependencies", "optionalDependencies", "peerDependencies"];
+
+/** Lock-row flags of a node that is not a production dependency of the root. */
+const NON_PRODUCTION_FLAGS = ["dev", "optional", "devOptional", "peer", "extraneous"];
+
+/**
+ * What is wrong with `root` (the consumer's package.json, or the "" row of its
+ * package-lock.json, named `where`) as a root that depends on `name` in
+ * production from a local tarball.
+ */
+function productionLinkProblems(where, root, name) {
+  if (!isObject(root)) return [`${where} has no root package record`];
+  const problems = [];
+  const spec = isObject(root.dependencies) && Object.hasOwn(root.dependencies, name)
+    ? root.dependencies[name]
+    : undefined;
+  if (!isLocalTarballSpec(spec)) {
+    problems.push(`${where} does not name it in "dependencies" from a local .tgz (found ${JSON.stringify(spec ?? null)})`);
+  }
+  for (const field of NON_PRODUCTION_FIELDS) {
+    if (isObject(root[field]) && Object.hasOwn(root[field], name)) {
+      problems.push(`${where} also names it in "${field}"`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * How a `dependencies` field `found` differs from the workspace manifest's
+ * `expected`, as a list (empty when both declare the same names with the same
+ * specs). An absent field is an empty one.
+ */
+function dependencyDifferences(found, expected) {
+  const actual = found === undefined ? {} : found;
+  if (!isObject(actual)) return [`"dependencies" is ${JSON.stringify(actual)}, not an object`];
+  const differences = [];
+  for (const [dep, spec] of Object.entries(expected)) {
+    if (!Object.hasOwn(actual, dep)) differences.push(`${dep} is missing (expected ${JSON.stringify(spec)})`);
+    else if (actual[dep] !== spec) differences.push(`${dep} is ${JSON.stringify(actual[dep])} (expected ${JSON.stringify(spec)})`);
+  }
+  for (const dep of Object.keys(actual)) {
+    if (!Object.hasOwn(expected, dep)) differences.push(`${dep} ${JSON.stringify(actual[dep])} is not in the workspace manifest`);
+  }
+  return differences;
+}
+
+/**
+ * What is wrong with `prefix` as an npm install of the packed tarball of
+ * `name`, against `packed` (the workspace manifest the job packs, from
+ * `packedManifest`), as a list (empty when nothing is). The prefix must hold:
+ *
+ *   - `node_modules/<name>/package.json` with that name and version;
+ *   - a package-lock.json (the tree `npm audit` reads) that records
+ *     `node_modules/<name>` at that version, resolved from a local `.tgz`;
+ *   - a package.json, and a package-lock.json "" row, that name the package in
+ *     `dependencies` with a local `.tgz` spec and in none of
+ *     `NON_PRODUCTION_FIELDS`, and a `node_modules/<name>` lock row with none
+ *     of `NON_PRODUCTION_FLAGS`;
+ *   - in both the installed package.json and that lock row, the same
+ *     `dependencies` names and specs as the workspace manifest.
+ *
+ * An unreadable or unparseable file is a problem, never a pass.
+ */
+export function prefixIdentityProblems(prefix, name, packed) {
+  const { version } = packed;
+  const problems = [];
+  let lock;
+  try {
+    lock = JSON.parse(readFileSync(join(prefix, "package-lock.json"), "utf8"));
+  } catch (e) {
+    problems.push(`no readable package-lock.json (${e.code ?? e.message})`);
+  }
+  let installed;
+  try {
+    installed = JSON.parse(readFileSync(join(prefix, "node_modules", name, "package.json"), "utf8"));
+  } catch (e) {
+    problems.push(`no readable node_modules/${name}/package.json (${e.code ?? e.message})`);
+  }
+  let consumer;
+  try {
+    consumer = JSON.parse(readFileSync(join(prefix, "package.json"), "utf8"));
+  } catch (e) {
+    problems.push(`no readable package.json (${e.code ?? e.message})`);
+  }
+  const row = lock?.packages?.[`node_modules/${name}`];
+  if (installed !== undefined) {
+    if (installed?.name !== name) {
+      problems.push(`node_modules/${name}/package.json names ${JSON.stringify(installed?.name)}`);
+    }
+    if (installed?.version !== version) {
+      problems.push(`node_modules/${name}/package.json has version ${JSON.stringify(installed?.version)}`);
+    }
+  }
+  if (lock !== undefined) {
+    if (!isObject(row)) {
+      problems.push(`package-lock.json has no "node_modules/${name}" entry; found ${directDependencies(lock)}`);
+    } else {
+      if (row.version !== version) {
+        problems.push(`package-lock.json records version ${JSON.stringify(row.version)}`);
+      }
+      if (!isLocalTarballSpec(row.resolved)) {
+        problems.push(`package-lock.json resolves it from ${JSON.stringify(row.resolved ?? null)}, not a local .tgz`);
+      }
+    }
+  }
+
+  // Production linkage: the consumer depends on the package in production.
+  if (consumer !== undefined) problems.push(...productionLinkProblems("package.json", consumer, name));
+  if (lock !== undefined) {
+    problems.push(...productionLinkProblems('package-lock.json\'s "" row', lock?.packages?.[""], name));
+    if (isObject(row)) {
+      for (const flag of NON_PRODUCTION_FLAGS) {
+        if (row[flag] !== undefined && row[flag] !== false) {
+          problems.push(`package-lock.json marks "node_modules/${name}" ${JSON.stringify(flag)}: ${JSON.stringify(row[flag])}`);
+        }
+      }
+    }
+  }
+
+  // Dependency declarations: the installed package declares what the workspace manifest does.
+  const declarations = [];
+  if (isObject(installed)) declarations.push([`node_modules/${name}/package.json`, installed.dependencies]);
+  if (isObject(row)) declarations.push([`package-lock.json's "node_modules/${name}" row`, row.dependencies]);
+  for (const [where, found] of declarations) {
+    const differences = dependencyDifferences(found, packed.dependencies);
+    if (differences.length) {
+      problems.push(`${where} declares dependencies that differ from ${packed.path}: ${differences.join(", ")}`);
+    }
+  }
+  return problems;
+}
+
+/** A prefix's real path, or its resolved path when it does not exist (it then fails the identity check). */
+function canonicalPrefix(prefix) {
+  try {
+    return realpathSync(prefix);
+  } catch {
+    return resolve(prefix);
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * Main                                                                *
  * ------------------------------------------------------------------ */
 
 const SEVERITY_ORDER = { critical: 0, high: 1, moderate: 2, low: 3, info: 4, unknown: 5 };
 
 async function main() {
+  if (process.env.AUDIT_GATE_TODAY && !isCalendarDate(process.env.AUDIT_GATE_TODAY)) {
+    console.error("AUDIT_GATE_TODAY must be a real calendar date (YYYY-MM-DD)");
+    process.exit(2);
+  }
   const today = new Date(process.env.AUDIT_GATE_TODAY || Date.now());
   if (Number.isNaN(today.getTime())) {
     console.error("AUDIT_GATE_TODAY is not a parseable date");
@@ -688,44 +1452,88 @@ async function main() {
   }
   const todayStr = today.toISOString().slice(0, 10);
 
-  // --npm-install-prefix <dir>: the npm-install observation is MANDATORY. The
-  // gate refuses to run without it — a bun-only pass is the exact escape
-  // Sherlock's verdict forbade (a PR whose tarball lane is skipped or optional
-  // would merge with the npm observation never made). Both observations run in
-  // every invocation.
-  const npmPrefixIdx = process.argv.indexOf("--npm-install-prefix");
-  const npmPrefix = npmPrefixIdx !== -1 ? process.argv[npmPrefixIdx + 1] : null;
-  if (!npmPrefix) {
-    console.error(
-      "DEPENDENCY AUDIT GATE: missing --npm-install-prefix <dir> — the npm-install observation is mandatory; the gate refuses to run bun-only.",
-    );
-    process.exit(2);
+  // Every consumer-install input is a MANDATORY flag. The gate refuses to run
+  // without each one: a PR whose tarball lane is skipped or optional would merge
+  // with that observation never made, and a check that can be skipped is not a
+  // check.
+  const prefixes = new Map();
+  const missing = [];
+  for (const input of CONSUMER_INSTALLS) {
+    const idx = process.argv.indexOf(input.flag);
+    const value = idx !== -1 ? process.argv[idx + 1] : undefined;
+    if (!value || value.startsWith("--")) missing.push(input);
+    else prefixes.set(input.source, value);
   }
+  for (const input of missing) {
+    console.error(
+      input.source === "npm-install"
+        ? `DEPENDENCY AUDIT GATE: missing --npm-install-prefix <dir> — the published ${input.package} package's npm-install observation is mandatory; the gate refuses to run bun-only.`
+        : `DEPENDENCY AUDIT GATE: missing ${input.flag} <dir> — the published ${input.package} package's consumer-install observation is mandatory; the gate refuses to run without it.`,
+    );
+  }
+  if (missing.length) process.exit(2);
 
-  // --adk-npm-install-prefix <dir>: the consumer install of the published ADK
-  // package, observed the same way as the root tarball. MANDATORY for the same
-  // reason --npm-install-prefix is: a check that can be skipped is not a check.
-  // npm overrides in a package do not apply to its consumers, so the root
-  // tarball's clean tree says nothing about what a consumer of @tpsdev-ai/adk-flair
-  // resolves; an install of that tarball is what shows it (flair#2398).
-  const adkPrefixIdx = process.argv.indexOf("--adk-npm-install-prefix");
-  const adkPrefix = adkPrefixIdx !== -1 ? process.argv[adkPrefixIdx + 1] : null;
-  if (!adkPrefix) {
-    console.error(
-      "DEPENDENCY AUDIT GATE: missing --adk-npm-install-prefix <dir> — the published ADK package's consumer-install observation is mandatory; the gate refuses to run without it.",
-    );
-    process.exit(2);
+  // Each prefix must be its own install and pass prefixIdentityProblems
+  // against the workspace manifest the job packs for its flag. A prefix of
+  // another package, a dev-only install, an archive whose dependencies differ
+  // from that manifest, or one prefix passed twice is refused before any audit
+  // runs.
+  const identityProblems = [];
+  const prefixOwner = new Map();
+  for (const input of CONSUMER_INSTALLS) {
+    const prefix = prefixes.get(input.source);
+    const key = canonicalPrefix(prefix);
+    if (prefixOwner.has(key)) {
+      identityProblems.push(
+        `${prefixOwner.get(key)} and ${input.flag} name the same prefix ${prefix}; each consumer-install input needs its own install.`,
+      );
+      continue;
+    }
+    prefixOwner.set(key, input.flag);
+    let packed;
+    try {
+      packed = packedManifest(REPO_ROOT, input);
+    } catch (e) {
+      identityProblems.push(`${e.message}.`);
+      continue;
+    }
+    const found = prefixIdentityProblems(prefix, input.package, packed);
+    if (found.length) {
+      identityProblems.push(
+        `${input.flag} ${prefix} is not an npm install of the packed ${input.package}@${packed.version}: ${found.join("; ")}.`,
+      );
+    }
   }
+  for (const problem of identityProblems) console.error(`DEPENDENCY AUDIT GATE: ${problem}`);
+  if (identityProblems.length) process.exit(2);
 
   let allowlist;
+  let firstDays;
   let advisories;
   try {
     allowlist = loadAllowlist();
-    advisories = flattenAdvisories(runBunAudit());
-    advisories = advisories.concat(flattenNpmAdvisories(runNpmAudit(npmPrefix)));
-    advisories = advisories.concat(
-      flattenNpmAdvisories(runNpmAudit(adkPrefix), "npm-install-adk"),
+  } catch (e) {
+    console.error(`\n  DEPENDENCY AUDIT GATE: FAILED TO RUN\n\n  ${e.message}\n`);
+    console.error("  The gate fails closed: an audit that cannot run is not an audit that passed.\n");
+    process.exit(1);
+  }
+  try {
+    firstDays = readAllowlistHistory(REPO_ROOT);
+  } catch (e) {
+    console.error(`\n  DEPENDENCY AUDIT GATE: FAILED TO READ ALLOWLIST HISTORY\n\n  ${e.message}\n`);
+    console.error(
+      "  The gate fails closed: an unknown history is not evidence that an advisory is new.\n" +
+        "  Full history is required; the audit job checks out with fetch-depth: 0.\n",
     );
+    process.exit(1);
+  }
+  try {
+    advisories = flattenAdvisories(runBunAudit());
+    for (const input of CONSUMER_INSTALLS) {
+      advisories = advisories.concat(
+        flattenNpmAdvisories(runNpmAudit(prefixes.get(input.source)), input.source),
+      );
+    }
   } catch (e) {
     console.error(`\n  DEPENDENCY AUDIT GATE: FAILED TO RUN\n\n  ${e.message}\n`);
     console.error("  The gate fails closed: an audit that cannot run is not an audit that passed.\n");
@@ -740,13 +1548,122 @@ async function main() {
 
   const schemaProblems = validateAllowlist(allowlist, today);
   for (const p of schemaProblems) fail(`allowlist is malformed — ${p}`);
+  const historyProblems = validateAllowlistHistory(allowlist, firstDays, today);
+  for (const p of historyProblems) fail(`allowlist history/date invalid — ${p}`);
+  // Matching against a malformed allowlist can admit an entry the schema check
+  // refused, and the summary would count it as allowlisted. Report and stop.
+  if (schemaProblems.length || historyProblems.length) {
+    console.log("\n  The allowlist is malformed; no advisory was matched against it.\n");
+    reportFailuresAndExit();
+  }
 
-  const byGhsa = new Map();
-  for (const e of allowlist.entries) if (e?.ghsa) byGhsa.set(e.ghsa.toUpperCase(), e);
+  // Every entry for a GHSA, in file order. A GHSA with one entry is matched as
+  // it always was; one with several is matched per source and per location.
+  const entriesByGhsa = new Map();
+  allowlist.entries.forEach((entry, index) => {
+    if (!entry?.ghsa) return;
+    const g = String(entry.ghsa).toUpperCase();
+    if (!entriesByGhsa.has(g)) entriesByGhsa.set(g, []);
+    entriesByGhsa.get(g).push({ entry, index });
+  });
 
-  const matchedBySource = new Map();
+  // The sources in which each entry (by index) covers a reported advisory.
+  const coveredBy = new Map();
+  const cover = (index, source) => {
+    if (!coveredBy.has(index)) coveredBy.set(index, new Set());
+    coveredBy.get(index).add(source);
+  };
   const allowed = [];
   const blocked = [];
+
+  /**
+   * The checks every covering entry passes: package, severity, expiry, and the
+   * vendor-pinned and harper evidence for its source. `chainChecked` skips the
+   * consumer-install chain check when the caller already matched the node.
+   * `index` is set when the entry's GHSA has sibling entries; diagnostics then
+   * name the entry. Records each failure; returns whether the entry admits the
+   * advisory.
+   */
+  const admit = (adv, entry, chainChecked = false, index = undefined) => {
+    const named = index === undefined ? `allowlist entry ${entry.ghsa}` : `allowlist ${entryLabel(entry, index)}`;
+    const namedPkg = index === undefined ? `allowlist entry ${entry.ghsa} (${entry.package})` : named;
+    if (entry.package !== adv.package) {
+      fail(
+        `${named} says package "${entry.package}" but the advisory is against ` +
+          `"${adv.package}". Correct the entry.`,
+      );
+      return false;
+    }
+    if (entry.severity !== adv.severity) {
+      fail(
+        `${named} records severity "${entry.severity}" but the advisory is now ` +
+          `"${adv.severity}". Re-assess it against the severity expiry cap, then update the entry.`,
+      );
+      return false;
+    }
+
+    // Expiry. This is the mechanism working, not a malfunction.
+    if (todayStr >= entry.expires) {
+      fail(
+        `${index === undefined ? `allowlist entry ${entry.ghsa} (${entry.package}, ${entry.severity})` : `${named} (${entry.severity})`} EXPIRED on ${entry.expires}.\n` +
+          `      Original reason: ${entry.reason}\n` +
+          `      Retires when:    ${entry.removeWhen}\n` +
+          `      A human must now re-decide: fix it, or re-justify with a new date.`,
+      );
+      return false;
+    }
+
+    if (entry.class === "vendor-pinned" && adv.source !== "bun" && !chainChecked) {
+      const nodeProblems = adv.source === "npm-install"
+        ? vendorPinnedNodeProblems(adv, prefixes.get(adv.source))
+        : consumerVendorPinnedNodeProblems(
+            adv,
+            prefixes.get(adv.source),
+            entry,
+            CONSUMER_INSTALLS.find((input) => input.source === adv.source),
+          );
+      if (nodeProblems.length) {
+        for (const problem of nodeProblems) fail(problem);
+        return false;
+      }
+    }
+
+    // Classification — vendor-pinned under harper. An entry whose advisory the
+    // npm observation reports under node_modules/harper/ must say so. Only an
+    // entry classed vendor-pinned has its nodes checked against harper's
+    // shipped evidence (above). The label is DERIVED from the nodes, not a
+    // typed class: the entry's `class` stays whatever it is (vendor-pinned for
+    // a patched-but-pinned leaf, no-patch-published for an unmaintained one
+    // like validate.js).
+    if (
+      adv.source === "npm-install" &&
+      (adv.nodes ?? []).some((n) => n.includes("node_modules/harper/"))
+    ) {
+      if (!String(entry.introducedBy ?? "").startsWith("harper -> ")) {
+        fail(
+          `${namedPkg} is vendor-pinned under harper but its ` +
+            `introducedBy ("${entry.introducedBy}") does not start with "harper -> ". Fix it.`,
+        );
+        return false;
+      }
+      if (!/harper/i.test(String(entry.removeWhen ?? ""))) {
+        fail(
+          `${namedPkg} is vendor-pinned under harper but its ` +
+            `removeWhen ("${entry.removeWhen}") does not name a harper version. Fix it.`,
+        );
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const allow = (adv, entry) => {
+    allowed.push({ adv, entry });
+    const daysLeft = Math.ceil((Date.parse(entry.expires) - today.getTime()) / DAY_MS);
+    if (daysLeft <= 14) {
+      warn(`${entry.ghsa} (${entry.package}) expires in ${daysLeft}d on ${entry.expires}.`);
+    }
+  };
 
   for (const adv of advisories) {
     if (!adv.ghsa) {
@@ -757,8 +1674,8 @@ async function main() {
       blocked.push(adv);
       continue;
     }
-    const entry = byGhsa.get(adv.ghsa.toUpperCase());
-    if (!entry) {
+    const candidates = entriesByGhsa.get(adv.ghsa.toUpperCase()) ?? [];
+    if (candidates.length === 0) {
       blocked.push(adv);
       fail(
         `${adv.severity.toUpperCase()} ${adv.ghsa} in ${adv.package} (${adv.vulnerableVersions}) ` +
@@ -767,98 +1684,136 @@ async function main() {
       );
       continue;
     }
-    if (!matchedBySource.has(adv.ghsa.toUpperCase())) {
-      matchedBySource.set(adv.ghsa.toUpperCase(), new Set());
-    }
-    matchedBySource.get(adv.ghsa.toUpperCase()).add(adv.source);
 
-    if (entry.package !== adv.package) {
-      fail(
-        `allowlist entry ${entry.ghsa} says package "${entry.package}" but the advisory is against ` +
-          `"${adv.package}". Correct the entry.`,
-      );
-      blocked.push(adv);
-      continue;
-    }
-    if (entry.severity !== adv.severity) {
-      fail(
-        `allowlist entry ${entry.ghsa} records severity "${entry.severity}" but the advisory is now ` +
-          `"${adv.severity}". Re-assess it against the severity expiry cap, then update the entry.`,
-      );
-      blocked.push(adv);
+    // One entry for this GHSA: it covers the advisory wherever it is observed,
+    // and the source and package checks below report any mismatch.
+    if (candidates.length === 1) {
+      const { entry, index } = candidates[0];
+      cover(index, adv.source);
+      if (admit(adv, entry)) allow(adv, entry);
+      else blocked.push(adv);
       continue;
     }
 
-    // Expiry. This is the mechanism working, not a malfunction.
-    if (todayStr >= entry.expires) {
-      fail(
-        `allowlist entry ${entry.ghsa} (${entry.package}, ${entry.severity}) EXPIRED on ${entry.expires}.\n` +
-          `      Original reason: ${entry.reason}\n` +
-          `      Retires when:    ${entry.removeWhen}\n` +
-          `      A human must now re-decide: fix it, or re-justify with a new date.`,
-      );
+    // Several entries: only an entry for this package that names this source
+    // can cover it.
+    const named = candidates.filter(({ entry }) =>
+      entry.package === adv.package && Array.isArray(entry.sources) && entry.sources.includes(adv.source));
+    if (named.length === 0) {
       blocked.push(adv);
+      fail(
+        `${adv.severity.toUpperCase()} ${adv.ghsa} in ${adv.package} (${adv.vulnerableVersions}) ` +
+          `is NOT allowlisted in source [${adv.source}]: none of the ${candidates.length} entries for ` +
+          `${adv.ghsa} names that source for package "${adv.package}".\n      ${adv.title}\n      ${adv.url}\n` +
+          `      Fix it, or add a justified, dated entry to .github/audit-allowlist.json.`,
+      );
       continue;
     }
 
-    if (entry.class === "vendor-pinned" && (adv.source === "npm-install" || adv.source === "npm-install-adk")) {
-      const nodeProblems = adv.source === "npm-install-adk"
-        ? adkVendorPinnedNodeProblems(adv, adkPrefix, entry)
-        : vendorPinnedNodeProblems(adv, npmPrefix);
-      if (nodeProblems.length) {
-        for (const problem of nodeProblems) fail(problem);
+    // bun and the root npm-install observation: exactly one entry per
+    // (ghsa, package) for the source.
+    if (SINGLE_ENTRY_SOURCES.has(adv.source)) {
+      if (named.length > 1) {
         blocked.push(adv);
-        continue;
-      }
-    }
-
-    // Classification — vendor-pinned (harper npm-shrinkwrap). An advisory the
-    // npm observation reports under node_modules/harper/ is pinned by harper's
-    // shrinkwrap, not by flair's own overrides. Such an entry must say so. The
-    // label is DERIVED from the nodes, not a typed class: the entry's `class`
-    // stays whatever it is (vendor-pinned for a patched-but-pinned leaf,
-    // no-patch-published for an unmaintained one like validate.js).
-    if (
-      adv.source === "npm-install" &&
-      (adv.nodes ?? []).some((n) => n.includes("node_modules/harper/"))
-    ) {
-      if (!String(entry.introducedBy ?? "").startsWith("harper -> ")) {
         fail(
-          `allowlist entry ${entry.ghsa} (${entry.package}) is vendor-pinned under harper but its ` +
-            `introducedBy ("${entry.introducedBy}") does not start with "harper -> ". Fix it.`,
+          `${adv.ghsa} (${adv.package}): duplicate coverage — ${named.map(({ entry, index }) => entryLabel(entry, index)).join(" and ")} ` +
+            `all cover source "${adv.source}"; at most one entry per advisory and package may name it.`,
         );
-        blocked.push(adv);
         continue;
       }
-      if (!/harper/i.test(String(entry.removeWhen ?? ""))) {
-        fail(
-          `allowlist entry ${entry.ghsa} (${entry.package}) is vendor-pinned under harper but its ` +
-            `removeWhen ("${entry.removeWhen}") does not name a harper version. Fix it.`,
-        );
-        blocked.push(adv);
-        continue;
-      }
+      const { entry, index } = named[0];
+      cover(index, adv.source);
+      if (admit(adv, entry, false, index)) allow(adv, entry);
+      else blocked.push(adv);
+      continue;
     }
 
-    allowed.push({ adv, entry });
-    const daysLeft = Math.ceil((Date.parse(entry.expires) - today.getTime()) / DAY_MS);
-    if (daysLeft <= 14) {
-      warn(`${entry.ghsa} (${entry.package}) expires in ${daysLeft}d on ${entry.expires}.`);
+    // A consumer-install observation: each entry's chain resolves to one node,
+    // and every reported node must be the node of exactly one entry.
+    const input = CONSUMER_INSTALLS.find((i) => i.source === adv.source);
+    const prefix = prefixes.get(adv.source);
+    const problems = [];
+    const resolved = [];
+    for (const { entry, index } of named) {
+      try {
+        resolved.push({ entry, index, node: consumerChainNode(prefix, entry, input, adv.package) });
+      } catch (e) {
+        problems.push(
+          `${adv.ghsa} (${adv.package}): ${entryLabel(entry, index)} cannot verify its ${input.package} dependency chain: ${e.message}.`,
+        );
+      }
     }
+    const nodes = Array.isArray(adv.nodes) ? adv.nodes : [];
+    if (nodes.length === 0) problems.push(`${adv.ghsa} (${adv.package}): npm audit reported no nodes.`);
+    const covering = new Map();
+    for (const node of nodes) {
+      const matches = resolved.filter((r) => r.node === node);
+      if (matches.length === 0) {
+        problems.push(
+          `${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} in ${adv.source} is covered by no allowlist entry ` +
+            `(the entries' chains resolve to ${resolved.map((r) => r.node).join(", ") || "no node"}).`,
+        );
+        continue;
+      }
+      if (matches.length > 1) {
+        problems.push(
+          `${adv.ghsa} (${adv.package}): duplicate coverage — ${matches.map((m) => entryLabel(m.entry, m.index)).join(" and ")} ` +
+            `all resolve to node ${JSON.stringify(node)} in ${adv.source}.`,
+        );
+        continue;
+      }
+      const [{ entry, index }] = matches;
+      cover(index, adv.source);
+      problems.push(...consumerNodeVersionProblems(adv, prefix, entry, input, node));
+      covering.set(index, entry);
+    }
+    let admitted = problems.length === 0;
+    for (const problem of problems) fail(problem);
+    for (const [index, entry] of covering) {
+      if (!admit(adv, entry, true, index)) admitted = false;
+    }
+    if (!admitted) {
+      blocked.push(adv);
+      continue;
+    }
+    for (const entry of covering.values()) allow(adv, entry);
   }
 
-  // Check 6 — staleness + sources mismatch.
+  // Check 6 — staleness + sources mismatch, per entry.
   //
-  // The gate always runs BOTH observations (bun lockfile + npm-install tree), so
-  // every declared source is observed in every invocation. An entry is STALE when
-  // its advisory appears in no source at all; a SOURCES MISMATCH when the observed
-  // sources and the declared sources do not agree in either direction.
-  const matchedGhsa = new Set(matchedBySource.keys());
-  for (const entry of allowlist.entries) {
-    if (!entry?.ghsa) continue;
-    const g = entry.ghsa.toUpperCase();
-    const observed = matchedBySource.get(g) ?? new Set();
+  // A run that reaches this point has run `bun audit` and, on every
+  // consumer-install prefix (each passed the identity check above), `npm audit
+  // --omit=dev`, so each source an entry can declare has a report. An entry is
+  // STALE when it covers a reported advisory in no source at all; a SOURCES
+  // MISMATCH when the sources it covers and the sources it declares do not
+  // agree in either direction. An entry whose GHSA has sibling entries covers
+  // only the sources (and, on a consumer install, the nodes) it was matched
+  // to, so a live sibling never keeps it.
+  allowlist.entries.forEach((entry, index) => {
+    if (!entry?.ghsa) return;
+    const observed = coveredBy.get(index) ?? new Set();
     const declared = new Set(entry.sources ?? []);
+    const siblings = (entriesByGhsa.get(String(entry.ghsa).toUpperCase()) ?? []).length > 1;
+    if (siblings) {
+      const label = `allowlist ${entryLabel(entry, index)}`;
+      if (observed.size === 0) {
+        fail(
+          `${label} is STALE — it covers no reported advisory location in any source it declares ` +
+            `(${[...declared].join(", ") || "none"}). Delete the entry, or correct its sources or introducedBy. ` +
+            `An allowlist that only ever grows is the same failure with more ceremony.`,
+        );
+        return;
+      }
+      for (const s of declared) {
+        if (!observed.has(s)) {
+          fail(
+            `${label} declares source [${s}] but covers no reported advisory location in it. ` +
+              `STALE for that source — fix the entry's sources or introducedBy.`,
+          );
+        }
+      }
+      return;
+    }
     if (observed.size === 0) {
       fail(
         `allowlist entry ${entry.ghsa} (${entry.package}) is STALE — that advisory no longer appears ` +
@@ -883,31 +1838,32 @@ async function main() {
         }
       }
     }
-  }
+  });
 
-  // FIXED-FOR-BUN-ONLY — advisories the bun lockfile observation no longer
-  // reports (the override fixed them) but the npm-install tree still carries
-  // under harper's shrinkwrap pin.
-  const fixedForBunOnly = [];
-  for (const entry of allowlist.entries) {
-    if (!entry?.ghsa) continue;
+  // NOT-REPORTED-BY-BUN — allowlisted advisories that this run's npm-install
+  // observation reported, with every node under harper, and its bun lockfile
+  // observation did not report.
+  const notReportedByBun = [];
+  allowlist.entries.forEach((entry, index) => {
+    if (!entry?.ghsa) return;
     const g = entry.ghsa.toUpperCase();
-    const observed = matchedBySource.get(g) ?? new Set();
-    if (observed.has("bun") || !observed.has("npm-install")) continue;
+    const observed = coveredBy.get(index) ?? new Set();
+    if (!observed.has("npm-install")) return;
+    if (advisories.some((a) => a.source === "bun" && a.ghsa?.toUpperCase() === g)) return;
     const npmAdv = advisories.find(
       (a) =>
         a.source === "npm-install" &&
         a.ghsa?.toUpperCase() === g &&
-        allowed.some(({ adv }) => adv === a) &&
+        allowed.some(({ adv, entry: e }) => adv === a && e === entry) &&
         (a.nodes ?? []).length > 0 &&
         a.nodes.every((n) => harperNodeRoot(n, a.package) !== null),
     );
-    if (!npmAdv) continue;
-    fixedForBunOnly.push({ entry, npmAdv });
-  }
+    if (!npmAdv) return;
+    notReportedByBun.push({ entry, npmAdv });
+  });
 
-  // Check 7 — fixability drift.
-  const drift = allowlist.entries.filter((e) => matchedGhsa.has(String(e.ghsa).toUpperCase()));
+  // Check 7 — fixability drift, per entry that covered a reported advisory.
+  const drift = allowlist.entries.filter((e, index) => e?.ghsa && (coveredBy.get(index)?.size ?? 0) > 0);
   const pkgs = [...new Set(drift.map((e) => e.package))];
   const latest = new Map();
   let registryReachable = true;
@@ -925,7 +1881,9 @@ async function main() {
   for (const entry of drift) {
     const v = latest.get(entry.package);
     if (!v) continue;
-    const adv = advisories.find((a) => a.ghsa?.toUpperCase() === String(entry.ghsa).toUpperCase());
+    const g = String(entry.ghsa).toUpperCase();
+    const adv = advisories.find((a) => a.ghsa?.toUpperCase() === g && a.package === entry.package) ??
+      advisories.find((a) => a.ghsa?.toUpperCase() === g);
     if (!adv) continue;
     const stillVulnerable = isVulnerable(v, adv.vulnerableVersions);
     if (entry.class === "no-patch-published" && !stillVulnerable) {
@@ -960,15 +1918,32 @@ async function main() {
 
   console.log(`\nDependency audit gate — ${todayStr}`);
   console.log(`  advisories reported: ${advisories.length} (${countStr})`);
-  console.log(`  allowlisted (justified + dated):  ${allowed.length}`);
+  console.log(`  allowlisted (justified + dated):  ${new Set(allowed.map(({ adv }) => adv)).size}`);
   console.log(`  blocking:                         ${blocked.length}\n`);
 
-  for (const { entry } of fixedForBunOnly) {
+  const caps = allowlist.policy?.maxLifetimeDaysBySeverity ?? {};
+  const overCap = allowlist.entries.filter((entry) => {
+    const cap = caps[entry?.severity];
+    if (typeof cap !== "number" || !isCalendarDate(entry?.added) || !isCalendarDate(entry?.expires)) return false;
+    return Math.round((Date.parse(entry.expires) - Date.parse(entry.added)) / DAY_MS) > cap;
+  });
+  for (const entry of overCap) {
+    const approval = entry.overCapApproval;
+    const lifetimeDays = Math.round((Date.parse(entry.expires) - Date.parse(entry.added)) / DAY_MS);
     console.log(
-      `  FIXED-FOR-BUN-ONLY: ${entry.ghsa} ${entry.package} — npm installs carry harper's pin until ${entry.removeWhen}`,
+      `  OVER-CAP: ${entry.ghsa} ${entry.package} — cumulative ${lifetimeDays}d lifetime, ` +
+        `${caps[entry.severity]}d ${entry.severity} cap, approval recorded for ${approval.approvedBy} until ` +
+        `${approval.expires}: ${approval.reason}`,
     );
   }
-  if (fixedForBunOnly.length) console.log("");
+  if (overCap.length) console.log("");
+
+  for (const { entry } of notReportedByBun) {
+    console.log(
+      `  NOT-REPORTED-BY-BUN: ${entry.ghsa} ${entry.package} — npm reports it under harper; retire when ${entry.removeWhen}`,
+    );
+  }
+  if (notReportedByBun.length) console.log("");
 
   if (allowed.length) {
     console.log("  Allowlisted:");
@@ -999,19 +1974,7 @@ async function main() {
   }
   if (warnings.length) console.log("");
 
-  if (failures.length) {
-    console.log(`  ${failures.length} problem(s) block this build:\n`);
-    for (const f of failures) {
-      console.log(`::error::audit-gate: ${f.split("\n")[0]}`);
-      console.log(`    - ${f}\n`);
-    }
-    console.log(
-      "  This gate is blocking by design. Do not add `continue-on-error` or `|| true` to it —\n" +
-        "  that is the exact defect it was written to remove. Either fix the advisory, or add a\n" +
-        "  justified, dated entry to .github/audit-allowlist.json that a reviewer has agreed to.\n",
-    );
-    process.exit(1);
-  }
+  if (failures.length) reportFailuresAndExit();
 
   console.log("  PASS — every reported advisory is enumerated, justified and dated.\n");
 }
@@ -1019,6 +1982,11 @@ async function main() {
 // Only run when executed directly, so the unit tests can import the helpers.
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   main().catch((e) => {
+    // A crash must not hide the problems the gate had already recorded.
+    if (failures.length) {
+      console.error(`audit-gate: ${failures.length} problem(s) were recorded before the crash:`);
+      for (const m of failures) console.error(`::error::audit-gate: ${m}`);
+    }
     console.error(`audit-gate crashed: ${e?.stack || e}`);
     process.exit(1);
   });

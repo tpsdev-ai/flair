@@ -1,6 +1,7 @@
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
+import { guardAuthorityFields } from "./authority-field-guard.js";
 import { deleteOwnedRow } from "./owner-delete-recheck.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import {
@@ -64,8 +65,11 @@ const memoryCandidateAuthGate = makeAuthGate();
  * (mirrors MemoryGrant.ts's delete() ownership check). Internal calls (the
  * FLAIR-NIGHTLY-REM staging writer — resources/MemoryReflect.ts's
  * `databases.flair.MemoryCandidate.put(row)` — and resources/health.ts's
- * pending-count read) and admin agents pass every method unfiltered, exactly
- * like every other table this pattern covers.
+ * pending-count read) and admin agents pass the ownership checks of every
+ * method unfiltered, exactly like every other table this pattern covers. The
+ * promoted-row identity (`promotedRowId`, `promotedRowInstanceToken`,
+ * flair#2645) is server-written: a REST POST, PUT or PATCH that changes it is
+ * refused for every caller, admin included.
  */
 export class MemoryCandidate extends (databases as any).flair.MemoryCandidate {
   /**
@@ -128,6 +132,10 @@ export class MemoryCandidate extends (databases as any).flair.MemoryCandidate {
     const auth = await resolveAgentAuth(ctx);
     if (auth.kind === "anonymous") return UNAUTH();
 
+    // flair#2645: the promoted-row identity is server-written.
+    const authorityDenial = await guardAuthorityFields(() => undefined, content, "MemoryCandidate");
+    if (authorityDenial) return authorityDenial;
+
     const attr = stampAttribution(auth, content, RECORD_TYPES.MemoryCandidate.ownerField, RECORD_TYPES.MemoryCandidate.attribution.post, "forbidden: cannot stage a memory candidate for another agent");
     if (attr.denied) return attr.denied;
 
@@ -148,12 +156,16 @@ export class MemoryCandidate extends (databases as any).flair.MemoryCandidate {
   async patch(content: any, query?: any) {
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
+    const authorityDenial = await guardAuthorityFields(() => super.get(), content, "MemoryCandidate");
+    if (authorityDenial) return authorityDenial;
     return super.patch(content, query);
   }
 
   async put(content: any) {
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (__ownerDenial) return __ownerDenial;
+    const __authorityDenial = await guardAuthorityFields(() => super.get(), content, "MemoryCandidate");
+    if (__authorityDenial) return __authorityDenial;
     const ctx = (this as any).getContext?.();
     const auth = await resolveAgentAuth(ctx);
     if (auth.kind === "anonymous") return UNAUTH();

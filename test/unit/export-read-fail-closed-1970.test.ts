@@ -1,6 +1,6 @@
 /**
  * flair#1970: the built export CLI refuses failed reads before writing a file.
- * A Bun preload replaces fetch inside the child, so the test exercises the
+ * A preload replaces fetch inside the child, so the test exercises the
  * command boundary without requiring a loopback socket.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -8,8 +8,10 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const CHILD_DEADLINE_MS = 20_000;
 const CLI_PATH = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
@@ -23,9 +25,10 @@ function runCli(args: string[], env: Record<string, string>, cwd: string): Promi
     const logPath = join(cwd, "requests.log");
     writeFileSync(logPath, "");
     const startedAt = Date.now();
-    const child = spawn("bun", ["--preload", PRELOAD, CLI_PATH, ...args], {
+    const childEnv = { ...process.env, HOME: cwd, FLAIR_AGENT_ID: "", MOCK_PATH_LOG: logPath, MOCK_AGENT_ID: AGENT, ...env };
+    const child = spawn(nodeBin({ env: childEnv, cwd }), ["--import", pathToFileURL(PRELOAD).href, CLI_PATH, ...args], {
       cwd,
-      env: { ...process.env, HOME: cwd, FLAIR_AGENT_ID: "", MOCK_PATH_LOG: logPath, MOCK_AGENT_ID: AGENT, ...env },
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 20_000, // literal for the spawn-budget gate
     });

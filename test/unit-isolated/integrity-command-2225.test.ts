@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { existsSync, lstatSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir";
+import { opsTable } from "../helpers/ops-table";
 import { bindIntegrityCli, register } from "../../src/commands/integrity";
 import { emptyCheckpoint } from "../../src/lib/memory-integrity";
 
@@ -23,8 +24,10 @@ test("a missing checkpointed token is replaced and never advances, even with --a
           let output = "";
           process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
           globalThis.fetch = (async (_url: any, init: any) => {
-            const { operation, table, hash_values } = JSON.parse(init.body);
+            const body = JSON.parse(init.body);
+            const { operation, hash_values } = body;
             if (operation === "delete") return new Response(JSON.stringify({ deleted_hashes: hash_values }));
+            const table = opsTable(body);
             const rows = table === "Memory" ? [{ id: "m", durability: "permanent", instanceToken }] : deletions;
             return new Response(JSON.stringify(operation === "describe_table" ? { record_count: rows.length } : rows));
           }) as typeof fetch;
@@ -95,7 +98,9 @@ test("a legacy row's first token is healthy and adopted into the next checkpoint
     let output = "";
     process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
     globalThis.fetch = (async (_url: any, init: any) => {
-      const { operation, table } = JSON.parse(init.body);
+      const body = JSON.parse(init.body);
+      const { operation } = body;
+      const table = opsTable(body);
       const rows = table === "Memory" ? [{ id: "m", durability: "permanent", instanceToken: "first-token" }] : [];
       return new Response(JSON.stringify(operation === "describe_table" ? { record_count: rows.length } : rows));
     }) as typeof fetch;
@@ -128,7 +133,9 @@ test("malformed successful Memory responses are UNKNOWN and never advance even w
       let output = "";
       process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
       globalThis.fetch = (async (_url: any, init: any) => {
-        const { operation, table } = JSON.parse(init.body);
+        const body = JSON.parse(init.body);
+        const { operation } = body;
+        const table = opsTable(body);
         const rows = table === "Memory" ? [row] : [];
         return new Response(JSON.stringify(operation === "describe_table" ? { record_count: rows.length } : rows));
       }) as typeof fetch;
@@ -188,11 +195,13 @@ test("the command reads incarnation fields and reports missing or replaced named
           process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
           console.log = (value) => { output += String(value); };
           globalThis.fetch = (async (_url: any, init: any) => {
-            const { operation, table, get_attributes, hash_values } = JSON.parse(init.body);
+            const body = JSON.parse(init.body);
+            const { operation, sql, hash_values } = body;
             if (operation === "delete") return new Response(JSON.stringify({ deleted_hashes: hash_values }));
+            const table = opsTable(body);
             const rows = table === "Memory" ? (replaced ? [{ id: "m", durability: "persistent", instanceToken: "new" }] : []) : [{ id: "d", memoryId: "m", memoryInstanceToken, at: "deleted" }];
             if (operation === "describe_table") return new Response(JSON.stringify({ record_count: rows.length }));
-            expect(get_attributes).toContain(table === "Memory" ? "instanceToken" : "memoryInstanceToken");
+            expect(String(sql)).toContain(table === "Memory" ? "instanceToken" : "memoryInstanceToken");
             return new Response(JSON.stringify(rows));
           }) as typeof fetch;
           const program = new Command();

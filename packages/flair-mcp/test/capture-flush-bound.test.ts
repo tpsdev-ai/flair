@@ -150,7 +150,7 @@ describe("capture flush bounds (flair#2321)", () => {
         process.stdout.write(JSON.stringify(runCapture(process.env.CAPTURE_INPUT, {
           dir: process.env.FLAIR_CAPTURE_DIR, env: process.env,
         })));
-      `], { env: { ...process.env, HOME: home, ...env, CAPTURE_INPUT: stop("Decision: prefer host-b."),
+      `], { env: { ...process.env, HOME: home, ...env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise a Bun capture child during flush", CAPTURE_INPUT: stop("Decision: prefer host-b."),
         CAPTURE_TEST_MODULE: new URL("../src/capture-spool.ts", import.meta.url).pathname }, timeout: 5000 });
       let output = "";
       child.stdout!.on("data", (data) => { output += data; });
@@ -288,7 +288,7 @@ describe("capture flush bounds (flair#2321)", () => {
 
     // Kill a lock-holder helper.
     const lock = flushLockPath(dir, agent);
-    const child = spawn(process.execPath, ["-e", HOLD_LOCK_SCRIPT], { env: { ...process.env, LOCK_FILE: lock }, timeout: 10_000 });
+    const child = spawn(process.execPath, ["-e", HOLD_LOCK_SCRIPT], { env: { ...process.env, LOCK_FILE: lock, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise the Bun flush-lock holder" }, timeout: 10_000 });
     await new Promise<void>((resolve, reject) => {
       child.stdout.once("data", () => resolve());
       child.once("error", reject);

@@ -5,8 +5,11 @@
 // treated as active (resources/agent-auth.ts's isPrincipalDeactivated). The
 // Agent resource's PUT and PATCH admit a trusted internal call and an
 // administrator. A non-admin agent's PUT or PATCH whose body includes `status`
-// is refused with 403 on any row, including its own; without `status`, it goes
-// on to the existing per-record rules. (A federation peer's record merges
+// is refused with 403 on any row with a valid id, including its own (an
+// out-of-rule id reaching the handler is refused 400 first). Without `status`, its
+// PATCH goes on to the existing per-record rules; its PUT is refused
+// regardless, since an Agent PUT is an administrator operation
+// (test/integration/agent-authority-guard-2696.test.ts). (A federation peer's record merges
 // through the raw table — test/integration/agent-status-federation-2108.test.ts.)
 //
 // These run against real Harper, booted from a private copy of the built
@@ -31,7 +34,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { componentWithReplayProbe, type ProbeComponent, type ProbeFiles } from "../helpers/component-with-replay-probe";
 
 /** The test-only resource that calls the Agent resource with internalContext(). */
@@ -121,7 +124,7 @@ describe("flair#2108 — a PUT or PATCH that includes Agent.status needs an admi
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     composed?.cleanup();
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("an administrator can set a principal's status", async () => {
     const path = `/Agent/${target.id}`;

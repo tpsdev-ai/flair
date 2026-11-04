@@ -24,6 +24,7 @@
  * never from a body field or connector label. No Harper imports.
  */
 import { resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
+import { isDeliberateInternalVerdict } from "./internal-authority.js";
 import { FORBIDDEN, UNAUTH } from "./record-type-kit.js";
 
 export type SkillWriteSource = "operator" | "agent" | "internal";
@@ -36,7 +37,7 @@ export type SkillWriteSource = "operator" | "agent" | "internal";
 export function skillWriteSource(context: any, auth: AgentAuthVerdict): SkillWriteSource | null {
   const request = context?.request ?? context;
   // A deliberate internal call: no HTTP request at all and the marker set.
-  if (auth.kind === "internal" && context?.__flairInternal === true && !request?.headers) return "internal";
+  if (isDeliberateInternalVerdict(context, auth)) return "internal";
   const header =
     request?.headers?.get?.("authorization") ?? request?.headers?.asObject?.authorization ?? "";
   // Role is not source: only verified Basic admin auth is the operator class.

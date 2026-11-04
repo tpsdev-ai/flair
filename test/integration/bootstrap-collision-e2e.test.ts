@@ -38,7 +38,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -237,7 +237,7 @@ describe("flair#681 — MemoryBootstrap 'Others in the room' collision surfacing
     await heartbeat(harper, teammateSemanticWeak, { currentTask: "baking bread" });
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("entity overlap surfaces the fresh teammate; non-overlap and stale teammates do NOT; no metadata leak", async () => {
     // No currentTask on this call — isolates the entity-overlap surface from

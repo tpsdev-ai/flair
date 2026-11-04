@@ -1,13 +1,14 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { stampEphemeralExpiry } from "../../resources/memory-durability.ts";
 
 // A small, non-default TTL so a tier-stamped row can be reaped inside the test.
 const TTL_HOURS = "0.001"; // 3.6s
 const PRIOR_TTL = process.env.FLAIR_EPHEMERAL_TTL_HOURS;
+// Kept in process.env: this process's stampEphemeralExpiry() call reads it (the Harper below gets it via serverEnv).
 process.env.FLAIR_EPHEMERAL_TTL_HOURS = TTL_HOURS;
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
@@ -73,7 +74,7 @@ let harper: HarperInstance;
 const agent = mkAgent("eph-feed-owner");
 
 beforeAll(async () => {
-  harper = await startHarper();
+  harper = await startHarper({ serverEnv: { FLAIR_EPHEMERAL_TTL_HOURS: TTL_HOURS } });
   await seedAgent(harper, agent);
 }, 180_000);
 
@@ -81,7 +82,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (PRIOR_TTL === undefined) delete process.env.FLAIR_EPHEMERAL_TTL_HOURS;
   else process.env.FLAIR_EPHEMERAL_TTL_HOURS = PRIOR_TTL;
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("feed-written ephemeral expiry (flair#2274)", () => {
   test("a fresh ephemeral feed write without expiry gets the tier TTL", async () => {

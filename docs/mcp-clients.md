@@ -261,7 +261,7 @@ reports that pending-approval state as configured but delivery not verified.
 Some clients have no session-start hook Flair can write. Wiring the MCP
 server is necessary but not sufficient — the model still has to choose to
 call `bootstrap`. Add a short instruction block to the file that client
-already loads (`AGENTS.md`, `GEMINI.md`, or the equivalent):
+already loads (`AGENTS.md`, `GEMINI.md`, or the equivalent): <!-- docs-freshness-allow: names files in the reader's project -->
 
 ```markdown
 ## Flair memory
@@ -299,7 +299,7 @@ Clients on this page talk to the stdio server `@tpsdev-ai/flair-mcp`. Its `tools
 | `memory_store` | Save a memory (type, durability, tags, visibility), under the configured agent ID, subject to server authorization. Optional `usedMemoryIds` cites memories that informed the write |
 | `skill_store` | Write a skill-tagged memory. `trigger` is the recall text; `content` is the procedure. Durability is forced to persistent, and SkillScan rejects a dangerous payload before embed |
 | `skill_search` | Rank skills by their trigger against a task. Returns a catalog (id, name, trigger, description, tags, agentId), not the procedure |
-| `skill_get` | Fetch one skill's full procedure by id. Non-admin callers can retrieve their own and other agents' non-private skills; administrators can also retrieve private skills |
+| `skill_get` | Fetch one skill's full procedure by id. Non-admin callers use Memory's owner/visibility scope and, for retained closed skills, its current-authority check; administrators are not subject to those restrictions |
 | `memory_update` | Update a memory by id. Overwrites in place, or pass `preserveHistory` to write a superseding version. Optional `usedMemoryIds` |
 | `memory_get` | Fetch a specific memory by ID |
 | `memory_delete` | Delete a memory by ID. Non-admin callers can delete only their own memories; administrators can also delete other agents' memories |
@@ -313,7 +313,9 @@ Clients on this page talk to the stdio server `@tpsdev-ai/flair-mcp`. Its `tools
 | `team_directory` | List active agents with published tps-mail contacts. Filter by `id` or `name`; page with `cursor`/`limit` |
 | `record_usage` | Report that recalled memories were actually used (`memoryId` or `memoryIds`, plus optional `attribution`). Drives `usageCount` / `usageBoost` |
 
-For ordinary signed agents, Flair enforces write ownership server-side: they can write only under their authenticated agent ID. Administrator credentials and administrator agent roles have broader authority. Reads are more open by design: any agent on the same Flair instance can read any other agent's **non-private** memories, with no grant to set up (open-within-org read; see [SECURITY.md](../SECURITY.md)).
+On the embedded `/mcp` handler, `soul_set` is listed only for a caller the soul write policy's source-authorization step admits (`Soul.post` applies its content guards after that step). That route authenticates callers with OAuth bearer tokens: a token subject mapped to an Agent acts as an agent principal, and the policy refuses an agent principal, so an agent's `tools/list` does not include `soul_set`. Listing resolves the caller the way a call does, except that it never JIT-provisions. An agent's soul is changed by the operator, on the agent's behalf (`flair soul set`).
+
+For ordinary signed agents, Flair enforces write ownership server-side: they can write only under their authenticated agent ID. Administrator credentials and administrator agent roles have broader authority. Reads are more open by design: reads use the open-within-org base scope without a grant, with an additional current-authority check for non-admin by-id and collection reads of retained closed skills (see [SECURITY.md](../SECURITY.md)).
 
 Which memories are non-private is decided at write time, and the default is not "shared". `memory_store` defaults `durability` to `standard`, and the server derives visibility from durability — `permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private` — so **a bare `memory_store` call creates a private memory: ordinary agents other than its owner cannot read it; administrators retain access.** Pass `visibility: "shared"` (or `"private"`, to be explicit) to say what you mean; the tool reports the visibility the write actually landed on so an agent can confirm it rather than assume.
 
@@ -322,6 +324,8 @@ Which memories are non-private is decided at write time, and the default is not 
 The following structured-payload details describe the HTTP bootstrap response and native `/mcp`; stdio `flair-mcp` returns the formatted context as an MCP text block.
 
 `bootstrap` returns the canonical structured containers — `soul`, `memories`, `predicted`, `teammateFindings`, `events` — plus counts and a `tokenEstimate`. The containers are **always present** (empty `[]`/`{}` when there's nothing), so an empty container is distinguishable from an unsupported one.
+
+**The structured containers carry no host-source pointer (flair#2448).** A `memories` or `predicted` entry omits `hostSource`. A visible, bound pointer appears in the bootstrap PROSE only when `includeContext` is true, for an authenticated non-admin caller; the admin bootstrap prose is uncited. A non-admin structured consumer that needs the pointer reads the memory back through the gated Memory read — `memory_get` by id — which renders the pointer that caller may see. An admin `memory_get` takes no pointer join, so it does not render the pointer either.
 
 **Skill assignments are reported in `skills` and `skillDiagnostics` (flair#2141).** A `skills` entry is `{ name, skillId, scope, priority, source }` for an assigned skill that won priority resolution; a `skillDiagnostics` entry is a refused, superseded, unresolved or ambiguous assignment with its `decision` and `reason`. Both arrays are present whatever `includeSoul` and `includeContext` say, and hold the entries admitted within the remaining token budget; `skillsTruncated` and `skillDiagnosticsTruncated` count the entries that did not fit. An entry names the skill and does not carry its procedure: fetch that with `skill_get` and the `skillId`, or over REST with a signed `GET /Memory/<skillId>`, which applies the same by-id read gate as `skill_get`. A name-only assignment that wins priority resolution resolves when the agent has exactly one live skill row of its own with that name (not archived, past `validTo` or past `expiresAt`); with none it is `unresolved`, with more than one `ambiguous`. An `OrgSkillAssignment` row is also a candidate when the target's Agent record has `kind` agent and `status` active (absent counts as agent and active); humans, deactivated principals and targets with no Agent record get no org candidates. A Soul `skill-assignment` row with `metadata.optOut: true` removes the org candidates with that name for that agent before priority resolution, when this instance's id can be read and the row's `originatorInstanceId` equals it. An org `skills` entry has `scope: "org"` and its `skillId` is the row's `skillRef`; an org assignment that wins priority resolution with a `skillRef` that is not a live skill row the agent can read is `unresolved`. The `name` and `source` strings come from Soul `skill-assignment` rows, and an org entry's `name` from its `OrgSkillAssignment` row; they reach the agent without SkillScan; that is safe only because no agent key can write those rows (admin agent keys included); only operator credentials and Flair's own internal paths can, so widening who may write them changes what reaches the agent's context.
 
@@ -347,7 +351,7 @@ The MCP server has no client-side flags beyond these env vars; everything else (
 
 ## What about pi?
 
-pi has no MCP client support, so Flair ships a **native pi extension** instead: [`@tpsdev-ai/pi-flair`](../packages/pi-flair/README.md). Same backend. With an ordinary signed identity, writes are owned by that agent; reads admit its own records and other agents' non-private records. Zero MCP in the path.
+Flair ships a **native pi extension**: [`@tpsdev-ai/pi-flair`](https://github.com/tpsdev-ai/flair/blob/main/packages/pi-flair/README.md). Same backend. With an ordinary signed identity, writes are owned by that agent. Reads follow each resource's policy: Memory uses owner/visibility scope with an additional current-authority check for retained closed skills, while Credential records are owner-only for non-admin callers. Zero MCP in the path.
 
 Wiring is a `packages` entry in pi's own settings (`~/.pi/agent/settings.json`), not an `mcpServers` block:
 
@@ -365,7 +369,7 @@ One difference from the MCP clients above: pi settings carry no per-package `env
 
 ## What about Hermes (Nous Research)?
 
-Hermes uses its own Python-native `MemoryProvider` ABC instead of MCP. It has its own Flair integration in [`packages/hermes-flair/`](../packages/hermes-flair). Same backend. With an ordinary signed identity, writes are owned by that agent; reads admit its own records and other agents' non-private records. Different plug shape.
+Hermes uses its own Python-native `MemoryProvider` ABC instead of MCP. It has its own Flair integration in [`packages/hermes-flair/`](../packages/hermes-flair). Same backend. With an ordinary signed identity, writes are owned by that agent. Reads follow each resource's policy: Memory uses owner/visibility scope with an additional current-authority check for retained closed skills, while Credential records are owner-only for non-admin callers. Different plug shape.
 
 Future MCP-capable agent CLIs (and there are more landing every month) will work out of the box with the MCP server above — no per-framework adapter required from us.
 

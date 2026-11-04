@@ -22,9 +22,15 @@ import {
   DEFAULT_MAX_MEMORIES_PER_RUN,
   ABSOLUTE_MAX_MEMORIES_PER_RUN,
   DEFAULT_HEALTH_PREFLIGHT_MS,
+  PENDING_NO_ADMIN_REASON,
+  formatCount,
+  formatPendingCandidates,
+  formatAutoPromoted,
   type ApiCall,
   type RunnerOpts,
+  type RunnerLogRow,
 } from "../src/rem/runner.ts";
+import { extractSnapshot } from "../src/rem/snapshot.ts";
 import {
   DEFAULT_MAX_MEMORIES_PER_RUN as LIB_DEFAULT_MAX_MEMORIES_PER_RUN,
   ABSOLUTE_MAX_MEMORIES_PER_RUN as LIB_ABSOLUTE_MAX_MEMORIES_PER_RUN,
@@ -125,7 +131,8 @@ describe("happy path", () => {
     expect(r.status).toBe("completed");
     expect(r.logRow.memoryCount).toBe(2);
     expect(r.logRow.soulCount).toBe(1);
-    expect(r.logRow.pendingCandidates).toBe(0);
+    // flair#2680: no opsSearch injected (no admin credential), so no count was taken.
+    expect(r.logRow.pendingCandidates).toEqual({ state: "unknown", reason: PENDING_NO_ADMIN_REASON });
     expect(r.logRow.errors).toEqual([]);
     // With distillation wired in this PR, baseline (non-dry-run) cycles are
     // now full slice-2 — distillation was attempted (see rem-runner.test.ts
@@ -144,6 +151,13 @@ describe("happy path", () => {
       opsSearch: async () => [{ id: "c1" }, { id: "c2" }, { id: "c3" }],
     }));
     expect(r.logRow.pendingCandidates).toBe(3);
+  });
+
+  it("reports an exact 0 from a successful empty candidate search", async () => {
+    const r = await runNightlyCycle(baseOpts({ opsSearch: async () => [] }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.pendingCandidates).toBe(0);
+    expect(formatPendingCandidates(r.logRow.pendingCandidates)).toBe("0");
   });
 
   it("handles Harper response shapes (results[] and items[])", async () => {
@@ -196,6 +210,32 @@ describe("happy path", () => {
     expect(receivedDryRun).toBe(true);
     expect(r.logRow.archived).toBe(7);
     expect(r.logRow.expired).toBe(2);
+  });
+
+  it("sends agentId to /MemoryMaintenance only when the runner has one", async () => {
+    const cases: Array<{ agentId: string | undefined; expected: Record<string, unknown> }> = [
+      { agentId: "", expected: { dryRun: true } },
+      { agentId: undefined, expected: { dryRun: true } },
+      { agentId: "test-agent", expected: { agentId: "test-agent", dryRun: true } },
+    ];
+    for (const c of cases) {
+      let received: unknown;
+      const r = await runNightlyCycle(baseOpts({
+        agentId: c.agentId as any,
+        dryRun: true,
+        apiCall: async (method, path, body) => {
+          if (method === "POST" && path === "/MemoryMaintenance") {
+            received = body;
+            return { expired: 0, archived: 0, total: 0, errors: 0 };
+          }
+          if (method === "GET" && path.startsWith("/Memory?")) return sampleMemories;
+          if (method === "GET" && path.startsWith("/Soul?")) return [sampleSoul];
+          throw new Error(`unexpected api: ${method}:${path}`);
+        },
+      }));
+      expect(r.status, `agentId=${JSON.stringify(c.agentId)}`).toBe("dry-run");
+      expect(received, `agentId=${JSON.stringify(c.agentId)}`).toEqual(c.expected); // assertion: an empty or absent id is omitted, not sent as ""
+    }
   });
 });
 
@@ -346,6 +386,69 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
     expect(r.logRow.errors).toEqual(["dedup: unexpected /MemoryDedupStats response shape"]);
   });
 
+  // "excluded" and "a-future-state" pin the generic rule: any non-uniform state is
+  // a refusal, not just the states that existed when the runner was written.
+  for (const state of ["mixed", "unverified", "scan-failed", "excluded", "a-future-state"]) {
+    it(`records the guard refusal state ${state}`, async () => {
+      const refusal = {
+        clusterCount: null, largestClusterSize: null, totalMemoriesInClusters: null,
+        computedAt: "2026-07-22T03:00:00.000Z",
+        embeddingSpace: { state, reason: state === "scan-failed" ? "scan failed" : null },
+      };
+      const r = await runNightlyCycle(baseOpts({
+        apiCall: makeApi({
+          "GET:/Memory": () => sampleMemories,
+          "GET:/Soul": () => [sampleSoul],
+          "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+          "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
+          "POST:/MemoryDedupStats": () => refusal,
+        }),
+      }));
+      expect(r.status).toBe("completed");
+      expect(r.logRow.errors).toEqual([]);
+      expect(r.logRow.dedup).toEqual(refusal);
+    });
+  }
+
+  const refusal = {
+    clusterCount: null, largestClusterSize: null, totalMemoriesInClusters: null,
+    computedAt: "fixture", embeddingSpace: { state: "mixed", reason: null },
+  };
+  for (const [label, body] of Object.entries({
+    "uniform state": { ...refusal, embeddingSpace: { state: "uniform", reason: null } },
+    // An unknown non-empty state is a refusal (the generic rule above); an empty one is not.
+    "empty state": { ...refusal, embeddingSpace: { state: "", reason: null } },
+    "missing state": { ...refusal, embeddingSpace: { reason: null } },
+    "non-string state": { ...refusal, embeddingSpace: { state: 1, reason: null } },
+    "null space": { ...refusal, embeddingSpace: null },
+    "array space": { ...refusal, embeddingSpace: [] },
+    "missing space": { ...refusal, embeddingSpace: undefined },
+    "missing reason": { ...refusal, embeddingSpace: { state: "mixed" } },
+    "non-string reason": { ...refusal, embeddingSpace: { state: "mixed", reason: {} } },
+    "numeric cluster count": { ...refusal, clusterCount: 0 },
+    "numeric largest cluster": { ...refusal, largestClusterSize: 0 },
+    "numeric total": { ...refusal, totalMemoriesInClusters: 0 },
+    "numeric counts with refusal state": { ...refusal, clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0 },
+    "missing count": { ...refusal, clusterCount: undefined },
+    "missing timestamp": { ...refusal, computedAt: undefined },
+    "non-string timestamp": { ...refusal, computedAt: 1 },
+  })) {
+    it(`rejects a malformed dedup refusal: ${label}`, async () => {
+      const r = await runNightlyCycle(baseOpts({
+        apiCall: makeApi({
+          "GET:/Memory": () => sampleMemories,
+          "GET:/Soul": () => [sampleSoul],
+          "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+          "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
+          "POST:/MemoryDedupStats": () => body,
+        }),
+      }));
+      expect(r.status).toBe("failed");
+      expect(r.logRow.dedup).toBeUndefined();
+      expect(r.logRow.errors).toEqual(["dedup: unexpected /MemoryDedupStats response shape"]);
+    });
+  }
+
   it("dry-run skips the /MemoryDedupStats call entirely — persisting the stat is a side effect", async () => {
     const calls: string[] = [];
     const r = await runNightlyCycle(baseOpts({
@@ -412,12 +515,17 @@ describe("failure modes", () => {
     const r = await runNightlyCycle(baseOpts({
       apiCall: makeApi({
         "GET:/Memory": () => { throw new Error("upstream is down"); },
+        "GET:/Soul": () => [],
       }),
     }));
     expect(r.status).toBe("failed");
     expect(r.snapshotPath).toBeUndefined();
     expect(r.logRow.errors.length).toBe(1);
     expect(r.logRow.errors[0]).toContain("upstream is down");
+    // flair#2684: the failed read is unknown, not an empty store.
+    expect(r.logRow.memoryCount).toEqual({ state: "unknown", reason: "upstream is down" });
+    expect(formatCount(r.logRow.memoryCount)).toBe("unknown (upstream is down)");
+    expect(formatCount(r.logRow.soulCount)).toBe("0");
 
     // Log row recorded.
     const rows = readLogRows();
@@ -436,15 +544,49 @@ describe("failure modes", () => {
     }));
     expect(r.status).toBe("failed");
     expect(r.logRow.errors[0]).toContain("soul gone");
+    // flair#2684: the Memory read still reports its exact count.
+    expect(formatCount(r.logRow.memoryCount)).toBe("1");
+    expect(r.logRow.soulCount).toEqual({ state: "unknown", reason: "soul gone" });
+    expect(r.logRow.errors).toEqual(["soul-count: soul gone"]);
   });
 
-  it("does not fail on candidate-count errors — degrades gracefully to 0", async () => {
+  it("reports an unrecognised Memory read body as unknown, not 0 (flair#2684)", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => ({ error: "fixture" }),
+        "GET:/Soul": () => [],
+      }),
+    }));
+    expect(r.status).toBe("failed");
+    expect(r.logRow.memoryCount).toEqual({ state: "unknown", reason: "GET /Memory returned an unexpected response shape" });
+    expect(r.logRow.errors).toEqual(["memory-count: GET /Memory returned an unexpected response shape"]);
+    expect(formatCount(r.logRow.memoryCount)).toBe("unknown (GET /Memory returned an unexpected response shape)");
+  });
+
+  it("reports a failed candidate count as unknown with the error and fails the run (flair#2680)", async () => {
     const r = await runNightlyCycle(baseOpts({
       opsSearch: async () => { throw new Error("candidate table missing"); },
     }));
-    // Candidate count is a non-fatal signal — the cycle still completes.
-    expect(r.status).toBe("completed");
-    expect(r.logRow.pendingCandidates).toBe(0);
+    expect(r.logRow.pendingCandidates).toEqual({ state: "unknown", reason: "candidate table missing" });
+    expect(formatPendingCandidates(r.logRow.pendingCandidates)).toBe("unknown (candidate table missing)");
+    expect(r.status).toBe("failed");
+    expect(r.logRow.errors).toEqual(["pending-count: candidate table missing"]);
+    // The later steps still ran, and the snapshot records the count as not taken.
+    expect(r.logRow.slice).toBe("2");
+    expect(r.logRow.dedup?.clusterCount).toBe(0);
+    const ex = await extractSnapshot({ snapshotPath: r.snapshotPath!, targetDir: join(testRoot, "extracted") });
+    expect(ex.entries.map((e) => e.path)).toContain("metadata.json");
+    expect(JSON.parse(readFileSync(join(testRoot, "extracted", "metadata.json"), "utf-8")).pendingCandidateCount).toBeNull();
+    expect(readLogRows()[0].pendingCandidates).toEqual({ state: "unknown", reason: "candidate table missing" });
+  });
+
+  it("reports a non-array candidate search result as unknown, not 0 (flair#2680)", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      opsSearch: async () => ({ error: "fixture" }) as unknown as any[],
+    }));
+    expect(r.logRow.pendingCandidates).toEqual({ state: "unknown", reason: "ops API returned an unexpected response shape" });
+    expect(r.status).toBe("failed");
+    expect(r.logRow.errors).toEqual(["pending-count: ops API returned an unexpected response shape"]);
   });
 
   it("captures maintenance errors and exits failed (snapshot preserved)", async () => {
@@ -772,8 +914,56 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
     expect(typeof autoPromoteCalls[0].limit).toBe("number");
     expect(autoPromoteCalls[0].limit).toBeGreaterThan(0);
     // outcome recorded on the audit row.
-    expect(r.logRow.autoPromoted).toEqual({ promoted: 2, skipped: 1 });
+    expect(r.logRow.autoPromoted).toEqual({ promoted: 2, skipped: 1, incomplete: 0, unconfirmed: 0 });
     expect(r.logRow.errors).toEqual([]);
+  });
+
+  // flair#2714: a promotion whose candidate update threw is reported by the
+  // server under `incomplete` (candidate read back pending) or `unconfirmed`
+  // (promotion on this row not confirmed), apart from `promoted`. The runner carries both
+  // counts onto the audit row rather than dropping them, and adds neither to
+  // the promoted or skipped counts.
+  it("records the server's incomplete and unconfirmed promotions apart from the promoted count", async () => {
+    const { api } = makeTagAwareApi({
+      activeTags: ["adk:app:alice"],
+      reflect: () => ({ candidates: [{ id: "cand_alice" }], count: 1, model: "default", gathered: 1, unreflected: 1 }),
+      autoPromote: () => ({
+        agentId: "test-agent",
+        promoted: ["m-1"],
+        skipped: [],
+        incomplete: [
+          { memoryId: "m-2", candidateId: "c-2", error: "write threw" },
+          { memoryId: "m-3", candidateId: "c-3", error: "write threw" },
+        ],
+        unconfirmed: [{ memoryId: "m-4", candidateId: "c-4", error: "write threw", readBack: "status rejected, promotedRowId m-4, reviewerId someone" }],
+        count: 1,
+        considered: 4,
+      }),
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.autoPromoted).toEqual({ promoted: 1, skipped: 0, incomplete: 2, unconfirmed: 1 });
+    expect(formatAutoPromoted(r.logRow.autoPromoted!)).toBe(
+      "Auto-promoted: 1 to own memory (0 skipped); 2 incomplete (memory written, candidate update threw, candidate read back pending); 1 unconfirmed (memory written, candidate update threw, promotion on this row not confirmed)",
+    );
+  });
+
+  it("formats the run-once auto-promote line, naming incomplete and unconfirmed promotions only when there are any", () => {
+    expect(formatAutoPromoted({ promoted: 2, skipped: 1, incomplete: 0, unconfirmed: 0 })).toBe("Auto-promoted: 2 to own memory (1 skipped)");
+    // A log row written before `incomplete` and `unconfirmed` existed.
+    expect(formatAutoPromoted({ promoted: 2, skipped: 1 })).toBe("Auto-promoted: 2 to own memory (1 skipped)");
+    expect(formatAutoPromoted({ promoted: 0, skipped: 0, incomplete: 1 })).toBe(
+      "Auto-promoted: 0 to own memory (0 skipped); 1 incomplete (memory written, candidate update threw, candidate read back pending)",
+    );
+    expect(formatAutoPromoted({ promoted: 0, skipped: 3, unconfirmed: 2 })).toBe(
+      "Auto-promoted: 0 to own memory (3 skipped); 2 unconfirmed (memory written, candidate update threw, promotion on this row not confirmed)",
+    );
+  });
+
+  it("formats an autoPromoted row written before the incomplete and unconfirmed counts existed", () => {
+    // Those rows carry only the two counts the sweep always wrote.
+    const row: Pick<RunnerLogRow, "autoPromoted"> = { autoPromoted: { promoted: 2, skipped: 1 } };
+    expect(formatAutoPromoted(row.autoPromoted!)).toBe("Auto-promoted: 2 to own memory (1 skipped)");
   });
 
   it("does NOT call /AutoPromoteCandidates for a NON-ADK agent (no adk tags)", async () => {

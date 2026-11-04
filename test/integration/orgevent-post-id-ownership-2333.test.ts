@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import nacl from "tweetnacl";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HarperInstance, startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import {
   componentWithOwnerGuardLoadFailure,
   LOAD_FAILURE_MARKER,
@@ -114,8 +114,10 @@ beforeAll(async () => {
   const clockPreload = fileURLToPath(new URL("../helpers/harper-freeze-clock.cjs", import.meta.url));
   harper = await startHarper({
     cwd: component.dir,
-    env: {
+    serverEnv: {
       FLAIR_TEST_FROZEN_NOW: String(Date.now()),
+    },
+    env: {
       NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${clockPreload}`.trim(),
     },
   });
@@ -134,7 +136,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) { disarmLookupFailure(); await stopHarper(harper); }
   if (component) component.cleanup();
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2333 N2 — a non-admin POST is refused for an OrgEvent observed at the guard's lookup as owned by another agent", () => {
   it("refuses a POST for a row observed at the guard's lookup as owned by another agent", async () => {

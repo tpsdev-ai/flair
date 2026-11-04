@@ -84,7 +84,7 @@ function runInit(proof: "own" | "foreign" | "other-pid" | "missing" | "declared"
       await once(child, "exit");
     }
   `;
-  const result = spawnSync("bun", ["--eval", script], { cwd: ROOT, env, encoding: "utf8", timeout: 20_000 });
+  const result = spawnSync("bun", ["--eval", script], { cwd: ROOT, env: { ...(env), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise init-own-listener process fixture arguments" }, encoding: "utf8", timeout: 20_000 });
   const requests = existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
   return { ...result, home, requests, adminPassPath, originalAdminPass };
 }

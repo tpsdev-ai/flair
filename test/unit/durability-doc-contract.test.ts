@@ -95,7 +95,7 @@ function forbiddenHits(text: string): string[] {
 }
 
 function runText(cmd: string[]): string {
-  const result = Bun.spawnSync(cmd, { cwd: REPO, stdout: "pipe", stderr: "pipe" });
+  const result = Bun.spawnSync(cmd, { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise durability-doc-contract process fixture arguments" }, cwd: REPO, stdout: "pipe", stderr: "pipe" });
   expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
   return new TextDecoder().decode(result.stdout);
 }

@@ -6,7 +6,7 @@
  * verifies Harper stores and retrieves durability metadata correctly.
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 let harper: HarperInstance;
 let authHeader: string;
@@ -29,7 +29,7 @@ describe("memory durability guards (integration)", () => {
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   const ops = (body: object) => (harper: HarperInstance, authHeader: string) =>
     fetch(harper.opsURL, {

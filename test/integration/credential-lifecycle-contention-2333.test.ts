@@ -35,10 +35,11 @@
  *
  *   - XAA credential touch vs revoke/delete (resources/XAA.ts). A jwt-bearer
  *     grant reads the matched IdP credential and touches its `lastUsedAt`. A
- *     matched credential whose status is not "active" is refused by name: no
- *     credential touch and no OAuth token is written, and the refusal names the
- *     credential's stored status (a present `jti` is claimed — and consumed —
- *     before the status check, in its own transaction). Each contended case
+ *     matched credential whose status is not "active", or that names no
+ *     principal, is refused by name: no credential touch and no OAuth token is
+ *     written, and the refusal names the credential's stored status or the
+ *     missing principal (a present `jti` is claimed — and consumed — before
+ *     that check, in its own transaction). Each contended case
  *     holds the touch between its read and its write (the test-only pause point
  *     `xaa-credential-touch`) while the credential is revoked (status ->
  *     "revoked"), deleted, or re-pointed at a different principal, then releases
@@ -59,7 +60,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SignJWT, exportJWK, generateKeyPair } from "jose";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 // A production Flair's HTTP and ops API ports: this test must never target them.
 const FORBIDDEN_PORTS = new Set([9925, 9926]);
@@ -217,20 +218,7 @@ function grantJwtBearer(assertion: string): Promise<Response> {
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-cred-2333-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper();
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
   assertOwnInstance(harper);
 
   // A test IdP: an ephemeral loopback JWKS server, and an IdpConfig row that
@@ -271,7 +259,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (jwksServer) jwksServer.close();
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2333 slice 2 — credential lifecycle writes preserve committed revocations within one Harper process (real Harper)", () => {
   // ── OAuth refresh vs revoke ────────────────────────────────────────────────
@@ -428,6 +416,44 @@ describe("flair#2333 slice 2 — credential lifecycle writes preserve committed 
     expect(row?.lastUsedAt, "the refused grant touched lastUsedAt").toBe(lastUsedAt);
   }, 60_000);
 
+  // flair#2503 — XAA applies the rule the MCP resolver and the principal linker
+  // apply (src/lib/credential-status-rule.ts): a matched credential completes a
+  // grant only when it is active AND names a principal. Real storage refuses a
+  // Credential without principalId and stores an empty one, so the empty form is
+  // the row exercised here. The IdpConfig has JIT provisioning on.
+  it("an ACTIVE credential that names no principal is refused by name and issues no grant", async () => {
+    const subject = `user-noprincipal-${randomUUID()}`;
+    const credentialId = `cred_idp_noprincipal_${randomUUID().slice(0, 8)}`;
+    const lastUsedAt = "2020-01-02T03:04:05.000Z";
+    await ops({
+      operation: "insert", database: "flair", table: "Credential",
+      records: [{ id: credentialId, principalId: "", kind: "idp", label: "noprincipal", status: "active", idpProvider: IDP_ID, idpSubject: subject, createdAt: new Date().toISOString(), lastUsedAt }],
+    });
+    const before = await readRow("Credential", credentialId);
+    expect(before?.principalId, "fixture control: real storage holds the empty principalId").toBe("");
+    expect(before?.status, "fixture control: the stored row is active").toBe("active");
+    const allRows = async (table: string): Promise<any[]> => {
+      const rows = await ops({ operation: "search_by_value", database: "flair", table, search_attribute: "id", search_value: "*", get_attributes: ["*"] });
+      if (!Array.isArray(rows)) throw new Error(`${table} read did not answer with a list: ${JSON.stringify(rows).slice(0, 200)}`);
+      return rows;
+    };
+    const agentsBefore = (await allRows("Agent")).length;
+    const tokensBefore = (await allRows("OAuthToken")).length;
+
+    const res = await grantJwtBearer(await jwtBearerAssertion(subject));
+    const text = await res.text();
+    expect(res.status, `grant returned ${res.status}: ${text.slice(0, 300)}`).toBe(400);
+    const body = JSON.parse(text);
+    expect(body.error).toBe("invalid_grant");
+    expect(body.error_description, "the refusal names the missing principal").toContain("names no principal");
+    expect(body.access_token).toBeUndefined();
+    const tokensAfter = await allRows("OAuthToken");
+    expect(tokensAfter.filter((t) => t.idpSubject === subject), "the refused grant issued a token").toEqual([]);
+    expect(tokensAfter.length, "no token row was written").toBe(tokensBefore);
+    expect((await allRows("Agent")).length, "no principal was provisioned").toBe(agentsBefore);
+    expect(await readRow("Credential", credentialId), "the credential row is unchanged").toEqual(before);
+  }, 60_000);
+
   it("a credential re-pointed at another principal while the touch is held refuses the grant", async () => {
     const subject = `user-repl-${randomUUID()}`;
     const principalId = `agent-2333-repl-${randomUUID().slice(0, 8)}`;
@@ -511,5 +537,32 @@ describe("flair#2333 slice 2 — credential lifecycle writes preserve committed 
     expect(await readTokensForPrincipal(principalId), "the refused grant issued a token").toEqual([]);
     const row = await readRow("Credential", credentialId);
     expect(row, "the stored row is not the committed delete").toBeNull();
+  }, 60_000);
+
+  it("a revoke committed in the touch's confirmation-to-commit gap refuses the grant", async () => {
+    const subject = `user-gap-${randomUUID()}`;
+    const principalId = `agent-2333-gap-${randomUUID().slice(0, 8)}`;
+    const credentialId = `cred_idp_gap_${randomUUID().slice(0, 8)}`;
+    const lastUsedAt = "2020-01-02T03:04:05.000Z";
+    await ops({
+      operation: "insert", database: "flair", table: "Credential",
+      records: [{ id: credentialId, principalId, kind: "idp", label: "gap", status: "active", idpProvider: IDP_ID, idpSubject: subject, createdAt: new Date().toISOString(), lastUsedAt }],
+    });
+    const assertion = await jwtBearerAssertion(subject);
+    const { response, competed, released } = await withPaused(
+      "xaa-credential-touch-commit",
+      () => grantJwtBearer(assertion),
+      () => ops({ operation: "update", database: "flair", table: "Credential", records: [{ id: credentialId, status: "revoked" }] }).then(() => 200),
+    );
+    expect(released, "the credential touch was not paused and released by this test").toBe("go");
+    expect(competed, "the competing revoke did not return 200").toBe(200);
+    const text = await response.text();
+    expect(response.status, `grant returned ${response.status}: ${text.slice(0, 300)}`).toBe(400);
+    const body = JSON.parse(text);
+    expect(body.error).toBe("invalid_grant");
+    expect(body.access_token).toBeUndefined();
+    expect(await readTokensForPrincipal(principalId), "the refused grant issued a token").toEqual([]);
+    const row = await readRow("Credential", credentialId);
+    expect(row?.status, "the stored credential is not the committed revoke").toBe("revoked");
   }, 60_000);
 });

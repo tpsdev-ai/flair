@@ -59,6 +59,7 @@ import { dirname, resolve } from "node:path";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { createSnapshot } from "./snapshot.js";
 import { resolveHome } from "../lib/home.js";
+import { ApiRequestOutcomeUnknown, apiErrorRawBody, boundErrorText } from "../lib/auth-resolve.js";
 
 export const REM_PAUSE_FLAG = resolve(resolveHome(), ".flair", "rem.paused");
 export const REM_NIGHTLY_LOG = resolve(resolveHome(), ".flair", "logs", "rem-nightly.jsonl");
@@ -227,19 +228,66 @@ export type ApiCall = (method: string, path: string, body?: unknown) => Promise<
 /**
  * Ops-API `search_by_conditions` helper (admin-authed). The runner is
  * agent-authed and cannot reach the ops port itself, so the CLI injects this
- * when admin credentials are available. When absent, `fetchPendingCandidateCount`
- * returns 0 (best-effort count).
+ * when admin credentials are available. When absent and the cycle reaches the
+ * candidate-count step, the pending-candidate count is unknown.
  */
 export type OpsSearch = (table: string, conditions: any[], getAttributes: string[]) => Promise<any[]>;
+
+/**
+ * flair#2680: a count the cycle prints. A number is the exact count from a
+ * successful read; the object says why no count was taken.
+ */
+export type CountResult = number | { state: "unknown"; reason: string };
+
+/** The cycle's pending-candidate count (flair#2680). */
+export type PendingCandidateCount = CountResult;
+
+export const PENDING_NO_ADMIN_REASON = "no admin credential for the operations API";
+
+/** A count line's value: the count, `unknown (<reason>)`, or `—` when not reached. */
+export function formatCount(count: CountResult | undefined): string {
+  if (count === undefined) return "—";
+  return typeof count === "number" ? String(count) : `unknown (${count.reason})`;
+}
+
+/** The `Pending:` value run-once prints. */
+export function formatPendingCandidates(count: PendingCandidateCount | undefined): string {
+  return formatCount(count);
+}
+
+/**
+ * The `Auto-promoted:` line run-once prints for the auto-promote step's
+ * outcome. `skipped` is the server's `skipped` list. flair#2714: incomplete
+ * promotions (Memory written and stamped, candidate update threw, candidate
+ * read back pending) and unconfirmed ones (the same throw, but the read did
+ * not confirm the promotion on this row) are named on the line, never folded
+ * into the promoted or skipped counts. A log row written before those fields
+ * existed reads as 0.
+ */
+export function formatAutoPromoted(outcome: { promoted: number; skipped: number; incomplete?: number; unconfirmed?: number }): string {
+  let line = `Auto-promoted: ${outcome.promoted} to own memory (${outcome.skipped} skipped)`;
+  const incomplete = outcome.incomplete ?? 0;
+  const unconfirmed = outcome.unconfirmed ?? 0;
+  if (incomplete > 0) line += `; ${incomplete} incomplete (memory written, candidate update threw, candidate read back pending)`;
+  if (unconfirmed > 0) line += `; ${unconfirmed} unconfirmed (memory written, candidate update threw, promotion on this row not confirmed)`;
+  return line;
+}
 
 export interface RunnerOpts {
   agentId: string;
   flairVersion: string;
   apiCall: ApiCall;
   /**
+   * Admin-authed REST call for the instance-wide, admin-only dedup step.
+   * Defaults to `apiCall`. The CLI injects it when an admin credential is
+   * available; agents cannot reach POST /MemoryDedupStats with their own key.
+   */
+  adminApiCall?: ApiCall;
+  /**
    * Ops-API `search_by_conditions` helper (admin-authed). Injected by the CLI;
    * the runner is agent-authed and cannot reach the ops port itself. When
-   * absent, `fetchPendingCandidateCount` returns 0 (best-effort count).
+   * absent and the cycle reaches the candidate-count step, the
+   * pending-candidate count is unknown.
    */
   opsSearch?: OpsSearch;
   /** Override snapshot root (testing). */
@@ -293,7 +341,7 @@ export interface RunnerOpts {
   healthTimeoutMs?: number;
 }
 
-export type RunnerStatus = "paused" | "completed" | "dry-run" | "failed" | "refused";
+export type RunnerStatus = "paused" | "completed" | "dry-run" | "unresolved" | "failed" | "refused";
 
 /**
  * Audit-row `slice` field. Tracks which phase of FLAIR-NIGHTLY-REM
@@ -315,11 +363,20 @@ export interface RunnerLogRow {
   status: RunnerStatus;
   dryRun?: boolean;
   snapshotPath?: string;
-  memoryCount?: number;
-  soulCount?: number;
-  pendingCandidates?: number;
+  memoryCount?: CountResult;
+  soulCount?: CountResult;
+  /** Absent when the cycle stopped before counting; see `PendingCandidateCount`. */
+  pendingCandidates?: PendingCandidateCount;
   durationMs: number;
   errors: string[];
+  /**
+   * Writes on the nightly path (the maintenance and reflection calls and the
+   * auto-promote and dedup writes) whose whole-request deadline expired
+   * without a complete response: each may or may not have taken effect. They
+   * are not in `errors`. A non-empty list makes `status` `unresolved`, never
+   * `failed` or `completed`.
+   */
+  outcomeUnknown?: string[];
   /** Deliberate stage skips; errors alone fail the run. */
   skips: string[];
   /** `runAt` for a cycle with generation and no errors or skips. */
@@ -331,16 +388,32 @@ export interface RunnerLogRow {
   candidates?: string[];
   /**
    * #1205b-2: outcome of the server-side ADK auto-promote step (POST
-   * /AutoPromoteCandidates), populated only when this cycle ran it — i.e. a
-   * non-dry-run cycle for an ADK agentId (active adk: tags this cycle).
+   * /AutoPromoteCandidates), populated only when this cycle ran it and the
+   * server returned a response without an error — i.e. a non-aborted,
+   * non-dry-run cycle with active adk:
+   * tags or selected settled continuity sessions (flair#1257 slice 3);
+   * successful distillation is not required.
    * `promoted` is the count of candidates auto-promoted to own memory this
-   * cycle; `skipped` the count left pending by a fail-closed gate (absent
-   * scope tag, content-safety, already-decided). Absent for dry-run / non-ADK
-   * cycles, exactly like `candidates`.
+   * cycle; `skipped` the length of the server's `skipped` list (candidates
+   * left pending by a fail-closed gate — absent scope tag, content-safety —
+   * or for another reason the server names, such as a refused stamp or a
+   * recorded row that changed). flair#2714: `incomplete` counts promotions
+   * whose Memory row was written and stamped but whose candidate update
+   * threw, with the candidate read back pending; `unconfirmed` counts the
+   * same throw where the read did not confirm the promotion on this row.
+   * Neither is counted in `promoted`. A later cycle re-sweeps a candidate still
+   * pending and can adopt its recorded row without writing another one, when
+   * the row identity is recorded on the candidate and the row still passes
+   * the sweep's checks, approval included. Each is 0 when the server's
+   * response has no such list. Absent for dry-run cycles and cycles with
+   * neither. Rows written before flair#2714 have neither count, so both read
+   * as 0 there.
    */
   autoPromoted?: {
     promoted: number;
     skipped: number;
+    incomplete?: number;
+    unconfirmed?: number;
   };
   /**
    * flair#1257 slice 3: count of SETTLED continuity sessions distilled this
@@ -360,12 +433,23 @@ export interface RunnerLogRow {
    * federated flairUrl deployments would leave HealthDetail with nothing to
    * read otherwise). Absent when dry-run skipped the step, the call failed
    * (see `errors`), or the response didn't carry the expected shape.
+   *
+   * flair#2596: when the embedding-space guard refused the sweep (the store's
+   * model stamps were not verified uniform), the resource answers with null
+   * counts and the guard's named state; that response is recorded HERE, below,
+   * as the second variant rather than treated as an unexpected shape.
    */
   dedup?: {
     clusterCount: number;
     largestClusterSize: number;
     totalMemoriesInClusters: number;
     computedAt: string;
+  } | {
+    clusterCount: null;
+    largestClusterSize: null;
+    totalMemoriesInClusters: null;
+    computedAt: string;
+    embeddingSpace: { state: string; reason: string | null };
   };
   /**
    * #1515: per-run distillation bound actually applied this cycle. Absent
@@ -395,10 +479,28 @@ function readPauseSentinel(path: string): boolean {
   }
 }
 
+/**
+ * A failed append of the nightly audit row. The row is carried so the CLI can
+ * still report an unknown write outcome (exit 3) even though the log failed.
+ */
+export class RunnerLogWriteError extends Error {
+  readonly row: RunnerLogRow;
+
+  constructor(row: RunnerLogRow, cause: unknown) {
+    super(`could not append the nightly log row: ${(cause as { message?: unknown })?.message ?? String(cause)}`);
+    this.name = "RunnerLogWriteError";
+    this.row = row;
+  }
+}
+
 function appendLogRow(logPath: string, row: RunnerLogRow): void {
   const dir = dirname(logPath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  appendFileSync(logPath, JSON.stringify(row) + "\n", { mode: 0o600 });
+  try {
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    appendFileSync(logPath, JSON.stringify(row) + "\n", { mode: 0o600 });
+  } catch (err) {
+    throw new RunnerLogWriteError(row, err);
+  }
 }
 
 /**
@@ -417,21 +519,47 @@ function asArray(raw: unknown): any[] {
 }
 
 /**
+ * A Memory or Soul read's rows. An unrecognised body is a failed read, not an
+ * empty result: `asArray` would report it as 0, which reads as an empty store.
+ */
+function rowsFromRead(raw: unknown, label: string): any[] {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    if (Array.isArray(obj.results)) return obj.results as any[];
+    if (Array.isArray(obj.items)) return obj.items as any[];
+  }
+  throw new Error(`${label} returned an unexpected response shape`);
+}
+
+/**
  * Best-effort extraction of a readable message out of a thrown API error.
- * `apiCall` implementations (see `api()` in src/cli.ts) throw
- * `Error(responseBodyText)` for non-2xx HTTP responses — /ReflectMemories's
- * 503 (no backend configured) and 502 (distillation_failed) bodies are JSON
- * `{ error: string, detail?: string }`. Unwraps that shape into a single
- * string so distinct failure modes read distinctly in the audit log instead
- * of as a raw JSON blob; falls back to the raw input for network errors or
- * any other shape.
+ * `api()` (src/cli.ts) throws an ApiHttpError for a non-2xx HTTP response
+ * (flair#2764). When that error was built from a non-empty response body
+ * (ApiHttpError.fromResponse), its unredacted text is parsed here
+ * (apiErrorRawBody); otherwise (the credential-less 403 and a refused redirect
+ * carry only a message, as does any other error) the message is parsed
+ * instead. /ReflectMemories's 503 (no backend configured) and 502
+ * (distillation_failed) bodies are JSON `{ error: string, detail?: string }`.
+ * A JSON object with a string `error` becomes one bounded line through
+ * boundErrorText, which redacts the credential values read from the request's
+ * Authorization header (credentialsInHeader) from the server's text within the
+ * scope stated on ApiHttpError, or withholds that text when the header's
+ * credential could not be read and the response text was non-empty, even when
+ * the text derived from it is empty (a prefix added when the line is written
+ * is outside the scope):
+ * `error: detail` when `detail` is a non-empty string and `error` alone
+ * otherwise, so distinct failure modes read distinctly in the audit log
+ * instead of as a raw JSON blob. Text that is not JSON, or JSON without a
+ * string `error`, falls back to the error's message.
  */
 function describeApiError(err: unknown): string {
   const message = typeof err === "string" ? err : (err as any)?.message ?? String(err);
   try {
-    const parsed = JSON.parse(message);
+    const parsed = JSON.parse(apiErrorRawBody(err) || message);
     if (parsed && typeof parsed === "object" && typeof parsed.error === "string") {
-      return parsed.detail ? `${parsed.error}: ${parsed.detail}` : parsed.error;
+      const detail = typeof parsed.detail === "string" ? parsed.detail : "";
+      return boundErrorText(err, detail ? `${parsed.error}: ${detail}` : parsed.error);
     }
   } catch {
     // Not a JSON error body — network error, plain string, etc.
@@ -440,7 +568,7 @@ function describeApiError(err: unknown): string {
 }
 
 function structuredApiError(err: unknown): string | null {
-  const message = typeof err === "string" ? err : (err as { message?: unknown })?.message;
+  const message = apiErrorRawBody(err) || (typeof err === "string" ? err : (err as { message?: unknown })?.message);
   if (typeof message !== "string") return null;
   try {
     const body = JSON.parse(message);
@@ -485,20 +613,18 @@ export function hasAdkUserTags(memories: any[], agentId: string): boolean {
  *
  * Uses the ops-API `search_by_conditions` convention (admin-authed) via the
  * injected `opsSearch` helper — the same shape `flair rem candidates` uses.
- * Returns 0 when no `opsSearch` is available (the agent-authed runner carries
- * no admin creds) or on any error — the runner should not fail the cycle just
- * because the candidate count couldn't be sampled.
+ * A failed query returns `unknown` with the error (flair#2680).
  */
-async function fetchPendingCandidateCount(opsSearch: OpsSearch | undefined, agentId: string): Promise<number> {
-  if (!opsSearch) return 0;
+async function fetchPendingCandidateCount(opsSearch: OpsSearch, agentId: string): Promise<PendingCandidateCount> {
   try {
-    const rows = await opsSearch("MemoryCandidate", [
+    const rows: unknown = await opsSearch("MemoryCandidate", [
       { search_attribute: "agentId", search_type: "equals", search_value: agentId },
       { search_attribute: "status", search_type: "equals", search_value: "pending" },
     ], ["id"]);
+    if (!Array.isArray(rows)) return { state: "unknown", reason: "ops API returned an unexpected response shape" };
     return rows.length;
-  } catch {
-    return 0;
+  } catch (err: any) {
+    return { state: "unknown", reason: err?.message || String(err) };
   }
 }
 
@@ -654,6 +780,9 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   }
 
   const errors: string[] = [];
+  // A deadline expiry on a write can leave an effect behind: it is carried
+  // apart from `errors` and makes the cycle `unresolved`.
+  const outcomeUnknown: string[] = [];
   // flair#924 defect 1: deliberate skips (no backend / idle ADK / operator
   // pause) land here, not in `errors`. Dedup so a per-tag or per-stage repeat
   // of the same reason is recorded once.
@@ -680,43 +809,79 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
 
   // Step 2: snapshot
   let snapshotPath: string | undefined;
-  let memoryCount = 0;
-  let soulCount = 0;
-  let pendingCandidates = 0;
+  let memoryCount: CountResult = 0;
+  let soulCount: CountResult = 0;
+  let pendingCandidates: PendingCandidateCount | undefined;
   // #1205b-1: the memories fetched here (for the snapshot) are reused by the
   // step-5 tag enumeration — no second fetch. Hoisted so step 5 can read them.
   let fetchedMemories: any[] = [];
+  let memories: any[] | undefined;
+  let souls: any[] | undefined;
+  let readOrSnapshotFailed = false;
 
+  // The two reads are independent: when one fails the other still reports its
+  // exact count, and each failed read is named under `Errors:`.
   try {
-    // Fetch agent data
-    const memoriesRaw = await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`);
-    const memories = asArray(memoriesRaw);
-    fetchedMemories = memories;
+    memories = rowsFromRead(
+      await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`),
+      "GET /Memory",
+    );
     memoryCount = memories.length;
-
-    const soulRaw = await opts.apiCall("GET", `/Soul?agentId=${encodeURIComponent(opts.agentId)}`);
-    const souls = asArray(soulRaw);
-    soulCount = souls.length;
-    // For the snapshot's soul.json: keep the full multi-row shape if there
-    // are multiple souls (different keys), or unwrap a single-row response.
-    const soulForSnapshot = souls.length === 1 ? souls[0] : souls.length > 1 ? souls : null;
-
-    pendingCandidates = await fetchPendingCandidateCount(opts.opsSearch, opts.agentId);
-
-    if (!opts.dryRun) {
-      const created = await createSnapshot({
-        agentId: opts.agentId,
-        flairVersion: opts.flairVersion,
-        memories,
-        soul: soulForSnapshot as Record<string, unknown> | null,
-        pendingCandidateCount: pendingCandidates,
-        rootOverride: opts.snapshotRoot,
-        nowOverride: opts.nowOverride,
-      });
-      snapshotPath = created.path;
-    }
   } catch (err: any) {
-    errors.push(`snapshot: ${err?.message ?? String(err)}`);
+    const reason = err?.message ?? String(err);
+    memoryCount = { state: "unknown", reason };
+    errors.push(`memory-count: ${reason}`);
+    readOrSnapshotFailed = true;
+  }
+  try {
+    souls = rowsFromRead(
+      await opts.apiCall("GET", `/Soul?agentId=${encodeURIComponent(opts.agentId)}`),
+      "GET /Soul",
+    );
+    soulCount = souls.length;
+  } catch (err: any) {
+    const reason = err?.message ?? String(err);
+    soulCount = { state: "unknown", reason };
+    errors.push(`soul-count: ${reason}`);
+    readOrSnapshotFailed = true;
+  }
+  fetchedMemories = memories ?? [];
+
+  if (memories && souls) {
+    try {
+      // For the snapshot's soul.json: keep the full multi-row shape if there
+      // are multiple souls (different keys), or unwrap a single-row response.
+      const soulForSnapshot = souls.length === 1 ? souls[0] : souls.length > 1 ? souls : null;
+
+      // flair#2680: a failed count is a failed check (an `errors` entry), not 0.
+      // With no admin credential no query runs; when the cycle reaches this step
+      // the count is reported unknown.
+      if (opts.opsSearch) {
+        pendingCandidates = await fetchPendingCandidateCount(opts.opsSearch, opts.agentId);
+        if (typeof pendingCandidates !== "number") errors.push(`pending-count: ${pendingCandidates.reason}`);
+      } else {
+        pendingCandidates = { state: "unknown", reason: PENDING_NO_ADMIN_REASON };
+      }
+
+      if (!opts.dryRun) {
+        const created = await createSnapshot({
+          agentId: opts.agentId,
+          flairVersion: opts.flairVersion,
+          memories,
+          soul: soulForSnapshot as Record<string, unknown> | null,
+          pendingCandidateCount: typeof pendingCandidates === "number" ? pendingCandidates : null,
+          rootOverride: opts.snapshotRoot,
+          nowOverride: opts.nowOverride,
+        });
+        snapshotPath = created.path;
+      }
+    } catch (err: any) {
+      errors.push(`snapshot: ${err?.message ?? String(err)}`);
+      readOrSnapshotFailed = true;
+    }
+  }
+
+  if (readOrSnapshotFailed) {
     const row: RunnerLogRow = {
       ...baseRow,
       status: "failed",
@@ -740,10 +905,11 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   let sliceLabel: RunnerLogRow["slice"] = "2-maintenance";
 
   try {
-    const maintRaw = await opts.apiCall("POST", "/MemoryMaintenance", {
-      agentId: opts.agentId,
-      dryRun: opts.dryRun ?? false,
-    });
+    // Only an id is sent: an empty or absent agentId is omitted rather than
+    // sent as an empty string.
+    const maintBody: Record<string, unknown> = { dryRun: opts.dryRun ?? false };
+    if (opts.agentId) maintBody.agentId = opts.agentId;
+    const maintRaw = await opts.apiCall("POST", "/MemoryMaintenance", maintBody);
     if (maintRaw && typeof maintRaw === "object") {
       const obj = maintRaw as Record<string, unknown>;
       if (obj.error) {
@@ -754,6 +920,26 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
       archived = typeof obj.archived === "number" ? obj.archived : 0;
     }
   } catch (err: any) {
+    if (err instanceof ApiRequestOutcomeUnknown) {
+      // The maintenance write may have landed. Do not continue writing state
+      // whose order depended on it, and do not report a plain failure.
+      outcomeUnknown.push(`maintenance: ${err.message}`);
+      const row: RunnerLogRow = {
+        ...baseRow,
+        slice: sliceLabel,
+        status: "unresolved",
+        snapshotPath,
+        memoryCount,
+        soulCount,
+        pendingCandidates,
+        durationMs: Date.now() - startedMs,
+        errors,
+        outcomeUnknown,
+        skips,
+      };
+      appendLogRow(logPath, row);
+      return { status: "unresolved", logRow: row, snapshotPath };
+    }
     errors.push(`maintenance: ${err?.message ?? String(err)}`);
     const row: RunnerLogRow = {
       ...baseRow,
@@ -875,6 +1061,11 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
             staged.push(...collectStagedIds(obj));
           }
         } catch (err: any) {
+          if (err instanceof ApiRequestOutcomeUnknown) {
+            // May have staged candidates; reported apart from `errors`.
+            outcomeUnknown.push(`distillation[${tag}]: ${describeApiError(err)}`);
+            continue;
+          }
           if (isNoBackendConfigured(err)) {
             pushSkipOnce(NO_BACKEND_SKIP);
             break;
@@ -884,7 +1075,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
             distillAborted = true;
             break;
           }
-          errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
+          errors.push(`distillation[${tag}]: ${describeApiError(err)}`);
         }
       }
       // `candidates` is defined (even if empty) whenever distillation was
@@ -922,13 +1113,15 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         // 3). Zero partial candidates is guaranteed server-side (all-or-
         // nothing staging in /ReflectMemories). rem_aborted IS fatal to the
         // rest of this cycle (no auto-promote / dedup).
-        if (isNoBackendConfigured(err)) {
+        if (err instanceof ApiRequestOutcomeUnknown) {
+          outcomeUnknown.push(`distillation: ${describeApiError(err)}`);
+        } else if (isNoBackendConfigured(err)) {
           pushSkipOnce(NO_BACKEND_SKIP);
         } else {
           if (isRemAbortedFailure(err)) {
             pushSkipOnce("distillation: aborted by operator (rem_aborted)");
             distillAborted = true;
-          } else errors.push(`distillation: ${describeApiError(err?.message ?? err)}`);
+          } else errors.push(`distillation: ${describeApiError(err)}`);
         }
       }
     }
@@ -990,6 +1183,11 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
             distilled++;
           }
         } catch (err: any) {
+          if (err instanceof ApiRequestOutcomeUnknown) {
+            // May have staged candidates; reported apart from `errors`.
+            outcomeUnknown.push(`distillation[${tag}]: ${describeApiError(err)}`);
+            continue;
+          }
           if (isNoBackendConfigured(err)) {
             pushSkipOnce(NO_BACKEND_SKIP);
             break;
@@ -999,7 +1197,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
             distillAborted = true;
             break;
           }
-          errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
+          errors.push(`distillation[${tag}]: ${describeApiError(err)}`);
         }
       }
       continuitySessions = distilled;
@@ -1031,10 +1229,19 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         } else {
           const promotedCount = typeof obj.count === "number" ? obj.count : asArray(obj.promoted).length;
           const skippedCount = asArray(obj.skipped).length;
-          autoPromoted = { promoted: promotedCount, skipped: skippedCount };
+          // flair#2714: a promotion whose candidate update threw is reported
+          // apart from `promoted`; carry its counts instead of dropping them.
+          const incompleteCount = asArray(obj.incomplete).length;
+          const unconfirmedCount = asArray(obj.unconfirmed).length;
+          autoPromoted = { promoted: promotedCount, skipped: skippedCount, incomplete: incompleteCount, unconfirmed: unconfirmedCount };
         }
       } catch (err: any) {
-        errors.push(`auto-promote: ${describeApiError(err?.message ?? err)}`);
+        if (err instanceof ApiRequestOutcomeUnknown) {
+          // The sweep may have promoted candidates; its outcome is unknown.
+          outcomeUnknown.push(`auto-promote: ${describeApiError(err)}`);
+        } else {
+          errors.push(`auto-promote: ${describeApiError(err)}`);
+        }
       }
     }
   }
@@ -1059,7 +1266,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
 
   if (!opts.dryRun && !distillAborted) {
     try {
-      const dedupRaw = await opts.apiCall("POST", "/MemoryDedupStats", {});
+      const dedupRaw = await (opts.adminApiCall ?? opts.apiCall)("POST", "/MemoryDedupStats", {});
       const obj = (dedupRaw && typeof dedupRaw === "object") ? (dedupRaw as Record<string, unknown>) : {};
       if (obj.error) {
         errors.push(`dedup: ${describeApiError(obj.error)}`);
@@ -1067,7 +1274,8 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         typeof obj.clusterCount === "number" &&
         typeof obj.largestClusterSize === "number" &&
         typeof obj.totalMemoriesInClusters === "number" &&
-        typeof obj.computedAt === "string"
+        typeof obj.computedAt === "string" &&
+        obj.embeddingSpace === undefined
       ) {
         dedup = {
           clusterCount: obj.clusterCount,
@@ -1075,11 +1283,41 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           totalMemoriesInClusters: obj.totalMemoriesInClusters,
           computedAt: obj.computedAt,
         };
+      } else if (
+        // Accept the guard's refusal only with null counts and a refusal state: any
+        // non-empty state other than "uniform" (a refusal claiming "uniform" is
+        // contradictory and stays an unexpected shape). Not an enumeration of
+        // today's states, so a new guard state is recorded rather than an error.
+        obj.clusterCount === null &&
+        obj.largestClusterSize === null &&
+        obj.totalMemoriesInClusters === null &&
+        typeof obj.computedAt === "string" &&
+        obj.embeddingSpace !== null && typeof obj.embeddingSpace === "object" &&
+        !Array.isArray(obj.embeddingSpace) &&
+        typeof (obj.embeddingSpace as { state?: unknown }).state === "string" &&
+        (obj.embeddingSpace as { state: string }).state.length > 0 &&
+        (obj.embeddingSpace as { state: string }).state !== "uniform" &&
+        ((obj.embeddingSpace as { reason?: unknown }).reason === null ||
+          typeof (obj.embeddingSpace as { reason?: unknown }).reason === "string")
+      ) {
+        const space = obj.embeddingSpace as { state: string; reason: string | null };
+        dedup = {
+          clusterCount: null,
+          largestClusterSize: null,
+          totalMemoriesInClusters: null,
+          computedAt: obj.computedAt,
+          embeddingSpace: { state: space.state, reason: space.reason },
+        };
       } else {
         errors.push("dedup: unexpected /MemoryDedupStats response shape");
       }
     } catch (err: any) {
-      errors.push(`dedup: ${describeApiError(err?.message ?? err)}`);
+      if (err instanceof ApiRequestOutcomeUnknown) {
+        // The stat write may have persisted; its outcome is unknown.
+        outcomeUnknown.push(`dedup: ${describeApiError(err)}`);
+      } else {
+        errors.push(`dedup: ${describeApiError(err)}`);
+      }
     }
   }
 
@@ -1095,7 +1333,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   const row: RunnerLogRow = {
     ...baseRow,
     slice: sliceLabel,
-    status: errors.length > 0 ? "failed" : opts.dryRun ? "dry-run" : "completed",
+    status: outcomeUnknown.length > 0 ? "unresolved" : errors.length > 0 ? "failed" : opts.dryRun ? "dry-run" : "completed",
     dryRun: opts.dryRun || undefined,
     snapshotPath,
     memoryCount,
@@ -1110,8 +1348,9 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     dedup,
     durationMs: Date.now() - startedMs,
     errors,
+    outcomeUnknown: outcomeUnknown.length > 0 ? outcomeUnknown : undefined,
     skips,
-    distilledAt: distillRan && !distillAborted && errors.length === 0 && skips.length === 0 ? baseRow.runAt : undefined,
+    distilledAt: distillRan && !distillAborted && errors.length === 0 && outcomeUnknown.length === 0 && skips.length === 0 ? baseRow.runAt : undefined,
     // `consolidated` remains undefined — this runner has no consolidation
     // step; it's reserved for a future slice that adds one.
   };

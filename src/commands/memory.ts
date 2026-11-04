@@ -13,24 +13,51 @@
  */
 import { Command, Option } from "commander";
 import * as render from "../render.js";
-import { resolveAdminUser } from "../lib/auth-resolve.js";
+import { resolveAdminUser, addAdminPassOptions } from "../lib/auth-resolve.js";
 import type { ResolvedSigningIdentity } from "../lib/signing-identity.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { DURABILITY_TIERS_HELP } from "../lib/durability-copy.js";
 import { resolveLocalDeleteInstance } from "../lib/local-delete-instance.js";
 import { confirmedPurgeIds } from "../lib/memory-purge-response.js";
+import { resolveHome } from "../lib/home.js";
+import { ALL_TIERS } from "../lib/memory-integrity.js";
+import {
+  normalizeOrigin,
+  buildCheckpoint,
+  buildOpsPost,
+  readMemoryRowCount,
+  readMemoryRowsPaged,
+  readCheckpointFile,
+  writeCheckpointFile,
+  checkpointPath,
+  unknownVerify,
+  verifyCheckpoint,
+  renderVerifyHuman,
+  VERIFY_EXIT_CODES,
+} from "../memory-id-checkpoint.js";
+import {
+  classifyNodeSets,
+  readNode,
+  renderCompareNodesHuman,
+  COMPARE_EXIT_CODES,
+} from "../memory-node-compare.js";
 
 export type MemoryCli = {
   api: (...args: any[]) => Promise<any>;
   resolveBaseUrl: (opts: { target?: string; url?: string; port?: string | number }) => string;
   resolveSigningAgentId: (opts: { agent?: string }, command?: string) => ResolvedSigningIdentity;
-  applyAdminPassFile: (opts: { adminPass?: string; adminPassFile?: string }) => void;
   addSharedCredentialOptions: (cmd: Command) => Command;
   addSharedIdentityOption: (cmd: Command) => Command;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
   resolveHttpPort: (opts: { port?: string | number }) => number;
   parseEntitiesOptionOrExit: (csv: string) => string[];
   ENTITIES_OPTION_DESCRIPTION: string;
+  resolveEffectiveOpsUrl: (opts: { target?: string; opsTarget?: string }) => string | undefined;
+  resolveFabricCredentials: (opts: {
+    fabricUser?: string;
+    fabricPassword?: string;
+    fabricPasswordFile?: string;
+  }) => { fabricUser: string | undefined; fabricPassword: string | undefined; warnings: string[] };
 };
 
 let cli: MemoryCli;
@@ -49,9 +76,6 @@ function resolveBaseUrl(opts: { target?: string; url?: string; port?: string | n
 function resolveSigningAgentId(opts: { agent?: string }, command?: string): ResolvedSigningIdentity {
   return cli.resolveSigningAgentId(opts, command);
 }
-function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
-  cli.applyAdminPassFile(opts);
-}
 function addSharedCredentialOptions(cmd: Command): Command {
   return cli.addSharedCredentialOptions(cmd);
 }
@@ -63,6 +87,13 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
 }
 function parseEntitiesOptionOrExit(csv: string): string[] {
   return cli.parseEntitiesOptionOrExit(csv);
+}
+function resolveFabricCredentials(opts: {
+  fabricUser?: string;
+  fabricPassword?: string;
+  fabricPasswordFile?: string;
+}): { fabricUser: string | undefined; fabricPassword: string | undefined; warnings: string[] } {
+  return cli.resolveFabricCredentials(opts);
 }
 
 // Exported for unit testing — keeps the predicate logic separable from
@@ -115,7 +146,6 @@ export function register(program: Command): void {
     .action(async (contentArg: string | undefined, opts: any) => {
       const content = contentArg ?? opts.content;
       if (!content) { console.error("error: content required (positional arg or --content)"); process.exit(1); }
-      applyAdminPassFile(opts);
       const { agentId, source } = resolveSigningAgentId(opts, "memory add");
       if (!agentId) {
         console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
@@ -244,10 +274,14 @@ export function register(program: Command): void {
       console.log(memId);
     });
 
-  memory.command("search [query]")
-    .description("Semantic search over an agent's memories (query via positional arg or --q)")
-    .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
-    .option("--admin-pass <pass>", "Admin password — sign as admin while --agent names whose memories to search (flair#1500: a flag-pinned agent with no key no longer falls back to FLAIR_ADMIN_PASS)")
+  addAdminPassOptions(
+    memory
+      .command("search [query]")
+      .description("Semantic search over an agent's memories (query via positional arg or --q)")
+      .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)"),
+    "Admin password — sign as admin while --agent names whose memories to search (flair#1500: a flag-pinned agent with no key no longer falls back to FLAIR_ADMIN_PASS)",
+  )
+    .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--q <query>", "search query (alias for positional arg)")
     .option("--json", "Output raw JSON array")
     .option("--limit <n>", "Max results", "5")
@@ -268,7 +302,7 @@ export function register(program: Command): void {
       if (opts.tag) body.tag = opts.tag;
       if (opts.includeArchived) body.includeArchived = true;
       const baseUrl = resolveBaseUrl(opts);
-      const res = await api("POST", "/SemanticSearch", body, { baseUrl, agentId, agentIdSource: source, explicitAdminPass: opts.adminPass });
+      const res = await api("POST", "/SemanticSearch", body, { baseUrl, agentId, agentIdSource: source, explicitAdminPass: opts.adminPass, adminUser: opts.adminUser });
       if (opts.json) {
         const results = res.results || res || [];
         console.log(render.asJSON(Array.isArray(results) ? results : []));
@@ -556,4 +590,156 @@ export function register(program: Command): void {
       console.log("tombstone-based distributed delete lands. Until then, run `flair memory");
       console.log("hygiene --apply` on each peer to fan out.");
     });
+
+  // ── flair memory checkpoint / verify (flair#2218) ─────────────────────────
+  const credentialOptions = (cmd: Command, withOpsTarget = true): Command => {
+    if (withOpsTarget) cmd.option("--ops-target <url>", "Operations API URL override (env: FLAIR_OPS_TARGET)");
+    return cmd
+      .option("--fabric-user <user>", "Admin username (env: FABRIC_USER; inline leaks to ps/shell history)")
+      .option("--fabric-password <pass>", "Admin password (prefer FABRIC_PASSWORD env or --fabric-password-file)")
+      .option("--fabric-password-file <path>", "Read the admin password from a mode-0600 file");
+  };
+
+  const requireCredentials = (opts: any, command: string): { user: string; pass: string } => {
+    const { fabricUser, fabricPassword, warnings } = resolveFabricCredentials(opts);
+    for (const w of warnings) console.error(render.wrap(render.c.dim, w));
+    if (!fabricUser || !fabricPassword) {
+      console.error(render.wrap(render.c.red, `${command}: admin credentials required`));
+      console.error("  set FABRIC_USER + FABRIC_PASSWORD env, or --fabric-password-file, or (discouraged) inline --fabric-user/--fabric-password");
+      process.exit(1);
+    }
+    return { user: fabricUser, pass: fabricPassword };
+  };
+
+  const originOf = (target: string, command: string): string => {
+    try {
+      return normalizeOrigin(target);
+    } catch {
+      console.error(render.wrap(render.c.red, `${command}: --target must be a URL (the instance's own origin)`));
+      process.exit(1);
+    }
+  };
+
+  credentialOptions(
+    memory
+      .command("checkpoint")
+      .description("Write this instance's Memory ids and per-tier counts to an operator-held checkpoint (mode 0600) before a planned cluster operation")
+      .requiredOption("--target <url>", "Instance served URL; operations API address is derived unless --ops-target or FLAIR_OPS_TARGET is set")
+      .option("--checkpoint <path>", "Checkpoint file path (default: ~/.flair/memory-id-checkpoint.json)"),
+  ).action(async (opts: any) => {
+    const { user, pass } = requireCredentials(opts, "flair memory checkpoint");
+    const origin = originOf(opts.target, "flair memory checkpoint");
+    const path: string = opts.checkpoint ?? checkpointPath(resolveHome());
+    try {
+      const opsOrigin = normalizeOrigin(cli.resolveEffectiveOpsUrl({ ...opts, target: origin })!);
+      const opsPost = buildOpsPost(opsOrigin, user, pass);
+      const expected = await readMemoryRowCount(opsPost);
+      const rows = await readMemoryRowsPaged(opsPost, { expected });
+      const checkpoint = buildCheckpoint({ node: opsOrigin, at: new Date().toISOString(), rows });
+      writeCheckpointFile(path, checkpoint);
+      const counts = ALL_TIERS.map((t) => `${t} ${checkpoint.byDurability[t]}`).join(", ");
+      console.log(`${render.icons.ok} Checkpoint written: ${path}`);
+      console.log(`  node: ${checkpoint.host} at ${checkpoint.at}`);
+      console.log(`  memories: ${checkpoint.ids.length} id(s) — ${counts}`);
+      console.log(render.wrap(render.c.dim, "  no Memory content was read or written"));
+    } catch (err) {
+      console.error(render.wrap(render.c.red, `${render.icons.error} checkpoint unknown: ${err instanceof Error ? err.message : String(err)}`));
+      console.error(render.wrap(render.c.dim, "  no checkpoint was written"));
+      process.exit(3);
+    }
+  });
+
+  credentialOptions(
+    memory
+      .command("verify")
+      .description("Compare this instance's Memory ids with a checkpoint taken before the operation: integrity failure, verified, or unknown")
+      .requiredOption("--target <url>", "Instance served URL — must resolve to the same operations origin")
+      .option("--checkpoint <path>", "Checkpoint file path (default: ~/.flair/memory-id-checkpoint.json)")
+      .addHelpText("after", `
+Exit codes:
+  0  verified — checkpointed ids present and no tier-count drop; new ids are fine
+  1  absent checkpoint — no verification outcome
+  2  integrity failure — a checkpointed Memory id is missing, or a durability tier count dropped
+  3  unknown — comparison could not be completed: e.g. unreadable checkpoint, different operations origin, failed read, or count change
+`),
+  ).action(async (opts: any) => {
+    const { user, pass } = requireCredentials(opts, "flair memory verify");
+    const origin = originOf(opts.target, "flair memory verify");
+    const path: string = opts.checkpoint ?? checkpointPath(resolveHome());
+    const read = readCheckpointFile(path);
+    if (read.kind === "absent") {
+      console.error(render.wrap(render.c.red, `${render.icons.error} no checkpoint at ${path}`));
+      console.error(`  run \`flair memory checkpoint\` before the operation to create one`);
+      process.exit(1);
+    }
+    const result = read.kind === "unreadable"
+      ? unknownVerify(`checkpoint unreadable: ${read.reason}`)
+      : await verifyCheckpoint({ checkpoint: read.checkpoint, target: origin, opsTarget: cli.resolveEffectiveOpsUrl({ ...opts, target: origin }), user, password: pass });
+    console.log(renderVerifyHuman(result, path));
+    process.exit(VERIFY_EXIT_CODES[result.outcome]);
+  });
+
+  // ── flair memory compare-nodes (flair#2216, slice 2 of #971) ──────────────
+  credentialOptions(
+    memory
+      .command("compare-nodes")
+      .description("Compare observed Memory id sets of two or more explicitly named nodes")
+      .option("--node <ops-url>", "A node's operations API URL (repeat once per node; at least two)", (value: string, seen: string[]) => [...seen, value], [] as string[])
+      .option("--json", "Print the comparison as JSON")
+      .addHelpText("after", `
+Each --node explicitly names an HTTP(S) operations API URL; its path, query and
+fragment are removed. Peers are never inferred from Flair federation peers.
+
+The command compares observed id sets. Count checks cannot detect equal-count
+concurrent updates or replacements. An id absent on every named node is invisible
+without a reference set.
+
+Classes use stored timestamps: parseable updatedAt, else createdAt. createdAt can
+be caller-supplied and node clocks can differ; these do not prove write order.
+A missing id uses the maximum timestamp among usable peers holding it.
+
+Per-node classes:
+  in-sync    observed ids equal the union of the other usable readings
+  lagging    missing ids only, each timestamp greater than this node's maximum
+  divergent  an extra id, or a missing id timestamp at or below this node's maximum
+  unknown    failed read, unusable timestamp, no usable peer, or no local timestamp for missing ids
+
+The overall result is healthy only when every node is in-sync;
+any unknown makes the overall result unknown.
+
+Exit codes:
+  0  healthy — every node has the same observed Memory ids
+  1  usage — fewer than two --node values, a duplicate node, or an invalid HTTP(S) URL
+  2  divergent — at least one divergent node and no unknown node
+  3  unknown — at least one node could not be classified
+  4  lagging — at least one node is lagging, with no divergent or unknown nodes
+`),
+    false,
+  ).action(async (opts: any) => {
+    const provided: string[] = opts.node ?? [];
+    if (provided.length < 2) {
+      console.error(render.wrap(render.c.red, `${render.icons.error} flair memory compare-nodes: at least two --node values are required`));
+      process.exit(1);
+    }
+    const nodes: string[] = [];
+    for (const raw of provided) {
+      let origin: string;
+      try {
+        origin = normalizeOrigin(raw);
+      } catch {
+        console.error(render.wrap(render.c.red, `${render.icons.error} --node must be an HTTP(S) operations API origin without credentials`));
+        process.exit(1);
+      }
+      if (nodes.includes(origin)) {
+        console.error(render.wrap(render.c.red, `${render.icons.error} --node ${origin} was given more than once`));
+        process.exit(1);
+      }
+      nodes.push(origin);
+    }
+    const { user, pass } = requireCredentials(opts, "flair memory compare-nodes");
+    const readings = await Promise.all(nodes.map((node) => readNode(node, { user, password: pass })));
+    const result = classifyNodeSets(readings);
+    console.log(opts.json ? JSON.stringify(result, null, 2) : renderCompareNodesHuman(result));
+    process.exit(COMPARE_EXIT_CODES[result.verdict]);
+  });
 }

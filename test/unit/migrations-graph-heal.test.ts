@@ -8,7 +8,8 @@
  * observe-only (zero row work) semantics, and the structural-only ledger
  * event.
  */
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeEach } from "bun:test";
+import { tempDir } from "../helpers/temp-dir.ts";
 
 // graph-heal.ts imports `{ databases } from "harper"` for its
 // DEFAULT accessors only (never used here — every test injects fakes). Same
@@ -18,6 +19,40 @@ import { mock } from "bun:test";
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
 const { createGraphHealMigration, GRAPH_HEAL_ID } = await import("../../resources/migrations/graph-heal.ts");
+const { _resetGuardForTests, _setGuardModelIdForTests, _setGuardTableGetterForTests, recomputeLatch, noteWriteStamp, scheduleSpaceGuardPrewarm, _prewarmSettledForTests, spaceGuardState } =
+  await import("../../resources/embedding-space-guard.ts");
+const { runMigrationCycle } = await import("../../resources/migrations/runner.ts");
+const { MigrationRegistry } = await import("../../resources/migrations/registry.ts");
+const { readMigrationState, defaultStatePath } = await import("../../resources/migrations/state.ts");
+const { listMigrationProgress, _resetProgressForTests } = await import("../../resources/migrations/progress.ts");
+const { _resetInProcessLockForTests } = await import("../../resources/migrations/lock.ts");
+
+const GUARD_CURRENT = "gguf:test-model";
+const GUARD_FOREIGN = "other-engine:not-the-current-space";
+
+/** A fake guard table over a fixed list of `embeddingModel` stamps. */
+function guardTableOver(stamps: (string | null)[]) {
+  return async () => ({
+    search(_q: unknown) {
+      async function* gen(): AsyncIterable<Record<string, unknown>> { for (const s of stamps) yield { embeddingModel: s }; }
+      return gen();
+    },
+  });
+}
+
+/** Drive the guard to a verdict from the given stamps. */
+async function guardVerdict(stamps: (string | null)[]): Promise<boolean> {
+  _setGuardModelIdForTests(() => GUARD_CURRENT);
+  _setGuardTableGetterForTests(guardTableOver(stamps));
+  return recomputeLatch();
+}
+
+beforeEach(async () => {
+  _resetGuardForTests();
+  // Default: a uniform (empty) store, so the comparison tests below are
+  // unchanged; the guard-specific tests re-drive it with a foreign stamp.
+  expect(await guardVerdict([])).toBe(true);
+});
 
 type Row = Record<string, unknown> & { id: string };
 
@@ -35,6 +70,7 @@ function cosine(a: number[], b: number[]): number {
 
 function makeFakeMemoryTable(rows: Row[], opts: { throwOnSort?: boolean } = {}) {
   const store = new Map<string, Row>(rows.map((r) => [r.id, { ...r }]));
+  let cosineSearches = 0;
   const table = {
     async get(id: string) {
       return store.has(id) ? { ...store.get(id)! } : null;
@@ -42,6 +78,7 @@ function makeFakeMemoryTable(rows: Row[], opts: { throwOnSort?: boolean } = {}) 
     search(query: any): AsyncIterable<Row> {
       // Cosine-sort (HNSW nearest-neighbor) query.
       if (query?.sort?.distance === "cosine") {
+        cosineSearches++;
         if (opts.throwOnSort) throw new Error("HNSW index unavailable (mid-rebuild)");
         const target = query.sort.target as number[];
         const limit = typeof query.limit === "number" ? query.limit : Infinity;
@@ -63,7 +100,7 @@ function makeFakeMemoryTable(rows: Row[], opts: { throwOnSort?: boolean } = {}) 
       })();
     },
   };
-  return { store, table };
+  return { store, table, cosineSearches: () => cosineSearches };
 }
 
 function makeFakeOrgEventTable() {
@@ -175,7 +212,7 @@ describe("graph-heal migration — run() (verify + structural-only ledger)", () 
     expect(blob).not.toContain("m2");
   });
 
-  it("never throws even if the OrgEvent write fails — observability must not brick the runner", async () => {
+  it("returns zero processed when verified recall's OrgEvent write fails", async () => {
     const { table } = makeFakeMemoryTable([
       { id: "m1", embedding: emb(1), embeddingModel: "real" },
     ]);
@@ -187,5 +224,136 @@ describe("graph-heal migration — run() (verify + structural-only ledger)", () 
     const m = createGraphHealMigration(() => table, () => throwingOrgEvent, () => VERSION);
     const result = await m.run(50);
     expect(result.processed).toBe(0);
+  });
+});
+
+describe("graph-heal migration — consults the embedding-space guard (flair#2596)", () => {
+  function healthyStore() {
+    const createdAt = new Date().toISOString();
+    return makeFakeMemoryTable([
+      { id: "m1", agentId: "agent-a", content: "alpha", createdAt, embedding: emb(1), embeddingModel: "real" },
+      { id: "m2", agentId: "agent-a", content: "beta", createdAt, embedding: emb(2), embeddingModel: "real" },
+    ]);
+  }
+
+  it("halts without a success marker after a guard trip between detect and run, continues the cycle, and retries", async () => {
+    _resetProgressForTests();
+    _resetInProcessLockForTests();
+    const dataDir = tempDir("flair-graph-heal-guard-");
+    const { table } = healthyStore();
+    const { table: oe, puts } = makeFakeOrgEventTable();
+    const migration = createGraphHealMigration(() => table, () => oe, () => VERSION);
+    expect(await migration.detect()).toBe(true);
+    let continued = false;
+    let trip = true;
+    const registry = new MigrationRegistry().register(migration).register({
+      id: "after-graph-heal", riskClass: "derived-only", affectsTables: ["Memory"],
+      detect: async () => true,
+      countPending: async () => 0,
+      run: async () => { continued = true; return { processed: 0, touchedIds: [] }; },
+    });
+    const deps = {
+      registry, dataDir, runningVersion: VERSION,
+      getTable: (name: string) => name === "Memory" ? table : makeFakeMemoryTable([]).table,
+      spaceProbe: {
+        getFreeBytes: () => {
+          if (trip) { trip = false; noteWriteStamp(GUARD_FOREIGN); }
+          return 10 * 1024 ** 3;
+        },
+        getTotalBytes: () => 20 * 1024 ** 3,
+      },
+      ledgerDeps: { orgEventTable: oe },
+    };
+    expect(await runMigrationCycle(deps)).toEqual({ ran: true });
+    expect(continued).toBe(true);
+    const state = readMigrationState(defaultStatePath(dataDir));
+    expect(state[GRAPH_HEAL_ID]?.lastOutcome).toBe("halted");
+    expect(state[GRAPH_HEAL_ID]?.completedAtVersion).toBeUndefined();
+    expect(state[GRAPH_HEAL_ID]?.completedAt).toBeUndefined();
+    expect(state["after-graph-heal"]?.lastOutcome).toBe("success");
+    expect(listMigrationProgress().find((p) => p.id === GRAPH_HEAL_ID)).toMatchObject({
+      state: "halted", reason: "run() threw mid-batch: graph-heal: recall re-verification failed",
+    });
+    expect(puts.map((p) => JSON.parse(p.detail)).filter((p) => p.migrationId === GRAPH_HEAL_ID))
+      .toEqual([expect.objectContaining({ outcome: "halted" })]);
+
+    expect(await guardVerdict([])).toBe(true);
+    expect(await runMigrationCycle(deps)).toEqual({ ran: true });
+    expect(readMigrationState(defaultStatePath(dataDir))[GRAPH_HEAL_ID]).toMatchObject({
+      lastOutcome: "success", completedAtVersion: VERSION,
+    });
+  });
+
+  it("retries a failed startup guard scan through a later migration cycle and completes", async () => {
+    _resetGuardForTests();
+    _resetProgressForTests();
+    _resetInProcessLockForTests();
+    _setGuardModelIdForTests(() => GUARD_CURRENT);
+    let tableReads = 0;
+    let releaseRetry!: () => void;
+    const retryReady = new Promise<void>((resolve) => { releaseRetry = resolve; });
+    const { table, store } = healthyStore();
+    for (const row of store.values()) row.embeddingModel = GUARD_CURRENT;
+    _setGuardTableGetterForTests(async () => {
+      if (++tableReads === 1) throw new Error("Memory not ready");
+      await retryReady;
+      return table;
+    });
+    scheduleSpaceGuardPrewarm();
+    await _prewarmSettledForTests({ FLAIR_ENABLE_TEST_FAULT_INJECTION: "1" });
+    expect(tableReads).toBe(1);
+    expect(spaceGuardState().state).toBe("scan-failed");
+
+    const dataDir = tempDir("flair-graph-heal-startup-retry-");
+    const { table: oe } = makeFakeOrgEventTable();
+    const registry = new MigrationRegistry().register(createGraphHealMigration(() => table, () => oe, () => VERSION));
+    const deps = {
+      registry, dataDir, runningVersion: VERSION,
+      getTable: () => table,
+      spaceProbe: { getFreeBytes: () => 10 * 1024 ** 3, getTotalBytes: () => 20 * 1024 ** 3 },
+      ledgerDeps: { orgEventTable: oe },
+    };
+    try {
+      expect(await runMigrationCycle(deps)).toEqual({ ran: false, reason: "nothing pending" });
+      expect(tableReads).toBe(2);
+      expect(readMigrationState(defaultStatePath(dataDir))[GRAPH_HEAL_ID]?.completedAtVersion).toBeUndefined();
+    } finally {
+      releaseRetry();
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(spaceGuardState().state).toBe("uniform");
+    expect(await runMigrationCycle(deps)).toEqual({ ran: true });
+    expect(readMigrationState(defaultStatePath(dataDir))[GRAPH_HEAL_ID]).toMatchObject({
+      lastOutcome: "success", completedAtVersion: VERSION,
+    });
+    expect(tableReads).toBe(2);
+  });
+
+  it("(uniform) verifies the canary self-recall — behaviour unchanged", async () => {
+    const { table } = healthyStore();
+    const { table: oe } = makeFakeOrgEventTable();
+    const m = createGraphHealMigration(() => table, () => oe, () => VERSION);
+    expect(await m.detect()).toBe(true);
+  });
+
+  it("(non-uniform) skips the cosine comparison and logs the guard state", async () => {
+    const { table, cosineSearches } = healthyStore();
+    const { table: oe } = makeFakeOrgEventTable();
+    const m = createGraphHealMigration(() => table, () => oe, () => VERSION);
+
+    // Same store as the control above — it WOULD self-recall — but a foreign
+    // stamp makes the guard's verdict non-uniform, so the comparison is skipped.
+    expect(await guardVerdict([GUARD_CURRENT, GUARD_FOREIGN])).toBe(false);
+
+    const warns: string[] = [];
+    const saved = console.warn;
+    console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
+    try {
+      expect(await m.detect()).toBe(false);
+    } finally {
+      console.warn = saved;
+    }
+    expect(warns.some((w) => w.includes("graph-heal") && w.includes("mixed"))).toBe(true);
+    expect(cosineSearches()).toBe(0);
   });
 });

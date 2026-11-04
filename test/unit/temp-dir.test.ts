@@ -46,7 +46,7 @@ describe("tempDir", () => {
       `const { tempDir } = await import(${JSON.stringify(helper)});`,
       `process.stdout.write(tempDir("flair-tempdir-exit-"));`,
     ].join("\n");
-    const r = spawnSync("bun", ["-e", script], { encoding: "utf8" });
+    const r = spawnSync("bun", ["-e", script], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise temp-dir process fixture arguments" }, encoding: "utf8" });
     expect(r.error).toBeUndefined();
     expect(r.status).toBe(0);
     const dir = (r.stdout ?? "").trim();

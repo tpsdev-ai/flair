@@ -1,3 +1,4 @@
+import { nodeBin } from "../helpers/node-runtime.ts";
 // stale-sidecar-2055.test.ts — flair#2055.
 //
 // After `flair stop` ends a directly started Harper, `<dataDir>/flair-daemon.json`
@@ -100,7 +101,7 @@ describe("flair#2055 — a stale identity sidecar never refuses and never surviv
 
   /** A pid that is CONFIRMED gone: spawn, record it, and wait until `kill(pid, 0)` says ESRCH. */
   async function confirmedDeadPid(): Promise<number> {
-    const p = Bun.spawn(["bun", "-e", "process.exit(0)"], { stdout: "ignore", stderr: "ignore" });
+    const p = Bun.spawn([nodeBin(), "-e", "process.exit(0)"], { stdout: "ignore", stderr: "ignore" });
     const pid = (p as unknown as { pid: number }).pid;
     await p.exited;
     for (let i = 0; i < 100; i++) {

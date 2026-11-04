@@ -83,7 +83,7 @@ function runInit(home: string, dataDir: string, source: typeof sources[number], 
     await program.parseAsync(${JSON.stringify(args)}, { from: "user" });
   `;
   return spawnSync(process.execPath, ["-e", script], {
-    cwd: home, env, encoding: "utf8", timeout: 20_000,
+    cwd: home, env: { ...(env), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise init-explicit-admin-pass process fixture arguments" }, encoding: "utf8", timeout: 20_000,
   });
 }
 

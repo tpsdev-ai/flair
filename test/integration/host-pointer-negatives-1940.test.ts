@@ -36,7 +36,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent {
   id: string;
@@ -181,7 +181,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#1940 A1-iv — host pointer negative cases (real Harper)", () => {
   it("n1a: a write that supplies its own instanceToken does not change the stored token", async () => {

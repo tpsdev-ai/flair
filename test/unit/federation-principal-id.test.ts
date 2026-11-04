@@ -383,7 +383,8 @@ describe("flair#1416 — principal entitlement is table-scoped, never field-pres
     expect(FEDERATION_TABLE_POLICY.Soul.principalOwning).toBe(false);
     expect(FEDERATION_TABLE_POLICY.Agent.principalOwning).toBe(false);
     expect(FEDERATION_TABLE_POLICY.Relationship.principalOwning).toBe(false);
-    expect(FEDERATION_SYNC_TABLES.sort()).toEqual(["Agent", "Memory", "Message", "Relationship", "Soul"]);
+    expect(FEDERATION_TABLE_POLICY.Presence.principalOwning).toBe(false);
+    expect(FEDERATION_SYNC_TABLES.sort()).toEqual(["Agent", "Memory", "Message", "Presence", "Relationship", "Soul"]);
   });
 
   it("SkipReason union includes principal_mismatch (closed vocabulary)", () => {
@@ -547,17 +548,31 @@ describe("flair#1416 — no Agent.get on the apply path", () => {
     expect(checkPrincipalEntitlement.constructor.name).toBe("Function");
   });
 
-  it("FederationSync.post does not call Agent.get (the originatorInstanceId shortcut)", () => {
+  it("FederationSync.post does not call Agent.get on the principal path (the originatorInstanceId shortcut)", () => {
     const src = readFileSync(join(import.meta.dir, "../../resources/Federation.ts"), "utf8");
     const start = src.indexOf("export class FederationSync");
     const end = src.indexOf("export class FederationPeers");
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const postClass = src.slice(start, end);
-    expect(postClass).not.toMatch(/Agent\.get\s*\(/);
+    // flair#2578: the PRESENCE receipt branch reads the local Agent row by
+    // design — P1's home binding (resources/presence-receipt.ts's
+    // presenceHomeBindingReason) — and that read is confined to the one named
+    // helper below. Every OTHER Agent read on the apply path would be the
+    // principal-entitlement shortcut this test forbids, so nothing outside that
+    // helper may call Agent.get.
+    const helperAt = postClass.indexOf("const readAgentRow");
+    expect(helperAt, "the presence home-binding read helper is present").toBeGreaterThan(-1);
+    const helperEnd = postClass.indexOf("};", helperAt);
+    expect(helperEnd).toBeGreaterThan(helperAt);
+    const helper = postClass.slice(helperAt, helperEnd);
+    expect(helper).toMatch(/Agent\.get\s*\(/);
+    const outside = postClass.slice(0, helperAt) + postClass.slice(helperEnd);
+    expect(outside, "no Agent.get outside the presence home-binding read").not.toMatch(/Agent\.get\s*\(/);
     // The apply path must use the extracted helpers, not a field-presence check.
     expect(postClass).toContain("reconstructRecordVerifyBody(");
     expect(postClass).toContain("checkPrincipalEntitlement(");
+    expect(postClass).toContain("presenceHomeBindingReason(");
   });
 
   it("Federation.ts tableMap is typed against FEDERATION_TABLE_POLICY (exhaustiveness)", () => {
@@ -570,10 +585,12 @@ describe("flair#1416 — no Agent.get on the apply path", () => {
     // Message is REGISTERED in the policy (so the owner-field + entitlement land
     // now and S2 is not a migration — the design's ship-order, flair#1521) but is
     // deliberately NOT pushed by a spoke in S1: cross-host Message delivery is
-    // S2. The push list is therefore the sync policy MINUS the receive-only set.
+    // S2. Presence is likewise RECEIVE-only in its slice 1 (flair#2578): the
+    // receive path carries it behind a default-off flag, the sender ships later.
+    // The push list is therefore the sync policy MINUS the receive-only set.
     // This still guards the original invariant — an ACCIDENTAL drift on any of
-    // the four synced tables fails — while documenting the one deliberate gap.
-    const S1_RECEIVE_ONLY = ["Message"];
+    // the synced tables fails — while documenting the one deliberate gap.
+    const S1_RECEIVE_ONLY = ["Message", "Presence"];
     const src = readFileSync(join(import.meta.dir, "../../src/commands/federation.ts"), "utf8");
     const match = src.match(/const tables = \[([^\]]+)\]/);
     expect(match).toBeTruthy();

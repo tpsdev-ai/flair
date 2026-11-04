@@ -67,6 +67,8 @@ export function probeCaptureRuntime(runtime: ActionRecallRuntime, agentId = "fla
     const dir = join(home, ".flair", "capture");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const installedCommand = command ?? buildCaptureHookCommand(runtime.bunPath, runtime.artifactPath, agentId, flairUrl, captureFlushSpec());
+    const commandPath = join(home, "command.sh");
+    writeFileSync(commandPath, installedCommand, { mode: 0o600 });
     const payload = JSON.stringify({
       hook_event_name: "Stop",
       session_id: "probe",
@@ -81,7 +83,7 @@ export function probeCaptureRuntime(runtime: ActionRecallRuntime, agentId = "fla
       FLAIR_CAPTURE_DIR: dir,
       FLAIR_CAPTURE_NO_FLUSH: "1",
     };
-    execFileSync("/bin/sh", ["-c", installedCommand], { input: payload, encoding: "utf8", timeout: 2000, maxBuffer: 8192, cwd: home, env, stdio: ["pipe", "ignore", "ignore"] });
+    execFileSync("/bin/sh", [commandPath], { input: payload, encoding: "utf8", timeout: 2000, maxBuffer: 8192, cwd: home, env, stdio: ["pipe", "ignore", "ignore"] });
     const spoolText = readFileSync(join(dir, `${agentId}.spool.json`), "utf-8");
     const parsed = JSON.parse(spoolText) as { records?: Array<{ content?: unknown }> };
     const records = Array.isArray(parsed.records) ? parsed.records : [];
@@ -91,7 +93,7 @@ export function probeCaptureRuntime(runtime: ActionRecallRuntime, agentId = "fla
     if (content.includes(secret)) return failure;
     if (!content.includes("[redacted]")) return failure;
     writeFileSync(join(dir, `${agentId}.spool.json`), `${JSON.stringify({ v: 1, agentId, records: [] })}\n`, { mode: 0o600 });
-    execFileSync("/bin/sh", ["-c", installedCommand], {
+    execFileSync("/bin/sh", [commandPath], {
       input: JSON.stringify({ hook_event_name: "Stop", session_id: "probe", last_assistant_message: "Routine turn; nothing to record." }),
       encoding: "utf8", timeout: 2000, maxBuffer: 8192, cwd: home, env, stdio: ["pipe", "ignore", "ignore"],
     });
@@ -104,7 +106,7 @@ export function probeCaptureRuntime(runtime: ActionRecallRuntime, agentId = "fla
       { hook_event_name: "PostToolUseFailure", session_id: "probe", tool_name: "Bash", tool_input: toolInput, error: `Error: token ${secret} rejected` },
       { hook_event_name: "PostToolUse", session_id: "probe", tool_name: "Bash", tool_input: toolInput, tool_response: { stdout: "" } },
     ]) {
-      execFileSync("/bin/sh", ["-c", installedCommand], {
+      execFileSync("/bin/sh", [commandPath], {
         input: JSON.stringify(event), encoding: "utf8", timeout: 2000, maxBuffer: 8192, cwd: home, env, stdio: ["pipe", "ignore", "ignore"],
       });
     }

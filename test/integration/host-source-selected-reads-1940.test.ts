@@ -14,7 +14,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HarperInstance, startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent {
   id: string;
@@ -108,7 +108,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#1940 round 17 — a non-admin Memory read ignores the caller's selection (real Harper, REST)", () => {
   it("by-id: a request WITH `select(content)` returns the FULL gated row (Harper cannot reapply it)", async () => {

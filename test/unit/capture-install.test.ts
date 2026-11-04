@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { shellScript } from "../helpers/shell-script.ts";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -66,7 +67,7 @@ describe("flair hook install --capture", () => {
       } else {
         mkdirSync(pendingPath(dir, "me"));
       }
-      const result = spawnSync("sh", ["-c", command], {
+      const result = spawnSync("sh", [shellScript(command)], {
         env: { HOME: home, PATH: process.env.PATH, FLAIR_CAPTURE_DIR: dir },
         input: JSON.stringify({
           hook_event_name: "PostToolUseFailure",

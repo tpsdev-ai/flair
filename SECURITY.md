@@ -63,8 +63,8 @@ Reads are open **within an org**; writes are isolated per agent. Enforced at
 the database layer (Harper resource `search()` override via a single
 centralized read-scope rule), not application logic:
 
-- `GET /Memory/` — returns the authenticated agent's own memories (any
-  visibility) plus every **non-private** memory in the org
+- `GET /Memory/` — applies the owner/visibility base scope and omits retained
+  closed skill payloads that fail the non-admin reader's current-authority check
 - `POST /MemorySearch` — same read scope: own memories plus all non-private
 - `POST /Memory` — writes are attributed to the authenticated agent; an
   agent cannot write as another (write isolation)
@@ -79,11 +79,55 @@ so a write naming neither is stamped `private` and is owner-only. An explicit
 `visibility` on the write always overrides the rule, and the response to a
 create names the value the record actually landed on.
 
+### Record Ownership on Writes
+
+For a verified non-admin agent's HTTP write to an owner-scoped table served by
+a resource that extends that table (Memory, Relationship, Soul, Credential,
+Integration, Asset, MemoryCandidate, MemoryGrant, MemoryUsage, Message,
+OrgEvent, WorkspaceState, Presence):
+
+- The middleware can return
+  `403 forbidden: cannot modify <Table> owned by another principal` before the
+  table guard runs on a request target of exactly `/<Table>/<id>` (two
+  non-empty path segments, no `.` in the decoded id), for which Harper resolves
+  the same record id. Other addressed forms are left to the guard, which uses
+  Harper's resolved id.
+- If reached, the guard checks the body `id` on POST/PUT/PATCH first, then
+  stored ownership (the same owner refusal), using Harper's resolved record id.
+  An absent, null or matching body `id` passes the body-id check; a differing
+  string or number `id` gets `403 write_id_not_addressed`, and a present,
+  non-null `id` of any other type that is not the addressed key gets
+  `400 id_target_mismatch`. Each
+  object element of an array body is checked the same way. OrgEvent and Memory
+  bind an addressed POST's missing body `id` to the addressed id.
+- For a collection PUT, PATCH or DELETE, if reached, the table guard returns
+  `403 forbidden: a non-admin write to <Table> must address one record by its id`;
+  existing DELETE middleware may refuse earlier.
+
+A refusal by this guard leaves its target row unchanged and carries no record
+content. A POST to a collection is delegated to each resource's own
+POST handling — its create and attribution rules (for example, an OrgEvent
+collection POST that names an existing event owned by another agent reaches
+OrgEvent's ownership check and is refused, one that names the caller's own
+existing event can update it when OrgEvent's other checks pass (a changed
+`createdAt` is refused with 409), and a
+Presence heartbeat writes the caller's own row). Routes served
+by a custom resource rather than a table-backed one are outside this table
+guard and apply their own rules; `/AgentReadPosition`, for example, enforces
+its own ownership rule.
+The guard exempts administrator and in-process calls. OrgEvent POST id
+selection also applies to administrator and in-process calls.
+
+Credential records are owner-scoped by `principalId`: non-admin callers read and
+modify only their own records, and administrators and trusted internal callers
+are unscoped. Anonymous HTTP access is refused.
+
 ### Cross-Agent Access (within an org)
 
-Within an org, an agent reads every non-private memory directly — no grant
-required. This is deliberate: the goal is relevance (surface what's useful to
-the org) over secrecy. A writer keeps something private by marking it
+Within an org, non-private memories pass the base read-scope check without a
+grant; non-admin by-id and collection reads of retained closed skills
+additionally require readable current authority. This is deliberate: the goal
+is relevance (surface what's useful to the org) over secrecy. A writer keeps something private by marking it
 `visibility: private`, which keeps it strictly owner-only. The access boundary
 that stays hard is the **federation edge** (cross-instance / cross-org), not
 within-org reads.

@@ -28,7 +28,7 @@ import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { probeInstance } from "../../src/probe";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
@@ -79,7 +79,7 @@ describe("probeInstance against a real spawned Harper (flair#635)", () => {
     expect(typeof realVersion).toBe("string");
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   function authedGet(path: string): Promise<any> {
     return fetch(`${harper.httpURL}${path}`, {

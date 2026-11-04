@@ -1,5 +1,7 @@
 /** Classify the pre-install /Health attempt for the restart-failure decision. */
 
+import { REFUSED_CODES } from "./connect-phase.js";
+
 export type PriorLiveness =
   | { kind: "running" }
   | { kind: "stopped" }
@@ -13,7 +15,7 @@ export interface PriorLivenessOptions {
 
 const DEFAULT_TIMEOUT_MS = 3000;
 
-const REFUSED_TOKENS = ["ECONNREFUSED", "ConnectionRefused"];
+const REFUSED_TOKENS = REFUSED_CODES;
 
 function namesRefusal(text: string): boolean {
   return REFUSED_TOKENS.some((token) => text.includes(token));

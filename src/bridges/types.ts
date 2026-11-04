@@ -52,6 +52,7 @@ export const FLAIR_RESERVED_FIELDS = [
   "retrievalCount",
   "lastRetrieved",
   "promotionStatus",
+  "promotionContentHash",
   "_safetyFlags",
   "createdBy",
   "updatedBy",
