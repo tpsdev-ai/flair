@@ -192,20 +192,140 @@ describe("archive admission refuses a row that does not match its table's schema
   });
 });
 
-/** Every column of `type <name>` in `schemaText`, with the JS value its type holds. */
+/**
+ * Every column of the `type <table> @table { … }` body in `schemaText`, with
+ * the JS value its declared type holds. The body is consumed as a token stream:
+ * comments are skipped, then `name[(args)]: Type[!] [@directive(...)]*` repeats
+ * until the body is exhausted, so fields need not share a line or start one.
+ * Anything left unconsumed fails, naming the line.
+ */
 function schemaColumnsFromText(schemaText: string, table: string, label: string): Array<[string, { type: RestoreColumnType; required: boolean }]> {
-  const lines = schemaText.split("\n");
-  const start = lines.findIndex((line) => new RegExp(`^type ${table} @table`).test(line));
-  expect(start).toBeGreaterThan(-1);
+  const header = new RegExp(`^type\\s+${table}\\b[^{]*\\{`, "m").exec(schemaText);
+  if (!header) throw new Error(`${label}: no type ${table} @table declaration`);
+  let cursor = header.index + header[0].length;
+  const bodyStart = cursor;
+  let depth = 1;
+  while (cursor < schemaText.length && depth > 0) {
+    const char = schemaText[cursor];
+    if (char === "#") {
+      while (cursor < schemaText.length && schemaText[cursor] !== "\n") cursor++;
+      continue;
+    }
+    if (char === '"') {
+      if (schemaText.startsWith('"""', cursor)) {
+        const close = schemaText.indexOf('"""', cursor + 3);
+        if (close < 0) throw new Error(`${label}:${schemaText.slice(0, cursor).split("\n").length}: unterminated block string`);
+        cursor = close + 3;
+      } else {
+        cursor++;
+        while (cursor < schemaText.length && schemaText[cursor] !== '"') {
+          if (schemaText[cursor] === "\\") cursor++;
+          cursor++;
+        }
+        cursor++;
+      }
+      continue;
+    }
+    if (char === "{") depth++;
+    else if (char === "}") depth--;
+    cursor++;
+  }
+  if (depth !== 0) throw new Error(`${label}: unterminated type ${table} body`);
+  const body = schemaText.slice(bodyStart, cursor - 1);
+
+  let at = 0;
+  const lineAt = (position: number): number => schemaText.slice(0, bodyStart + position).split("\n").length;
+  const fail = (message: string): never => {
+    throw new Error(`${label}:${lineAt(at)}: ${message}`);
+  };
+  const skipTrivia = (): void => {
+    for (;;) {
+      while (at < body.length && /[\s,]/.test(body[at])) at++;
+      if (body[at] !== "#") return;
+      while (at < body.length && body[at] !== "\n") at++;
+    }
+  };
+  const readName = (): string | null => {
+    const match = /^[A-Za-z_][A-Za-z0-9_]*/.exec(body.slice(at));
+    if (!match) return null;
+    at += match[0].length;
+    return match[0];
+  };
+  const balanced = (open: string, close: string): void => {
+    let nesting = 0;
+    while (at < body.length) {
+      const char = body[at];
+      if (char === "#") {
+        while (at < body.length && body[at] !== "\n") at++;
+        continue;
+      }
+      if (char === '"') {
+        if (body.startsWith('"""', at)) {
+          const end = body.indexOf('"""', at + 3);
+          if (end < 0) fail("unterminated block string");
+          at = end + 3;
+        } else {
+          at++;
+          while (at < body.length && body[at] !== '"') {
+            if (body[at] === "\\") at++;
+            at++;
+          }
+          at++;
+        }
+        continue;
+      }
+      if (char === open) nesting++;
+      else if (char === close) {
+        nesting--;
+        if (nesting === 0) {
+          at++;
+          return;
+        }
+      }
+      at++;
+    }
+    fail(`unterminated ${open}`);
+  };
+  const readType = (): { type: RestoreColumnType; required: boolean } => {
+    if (body[at] === "[") {
+      at++;
+      const inner = readName();
+      if (!inner) fail("expected a list element type");
+      if (body[at] === "!") at++;
+      if (body[at] !== "]") fail("expected ] after a list element type");
+      at++;
+      const required = body[at] === "!";
+      if (required) at++;
+      return { type: `${inner}[]` as RestoreColumnType, required };
+    }
+    const name = readName();
+    if (!name) fail("expected a type");
+    const required = body[at] === "!";
+    if (required) at++;
+    return { type: name as RestoreColumnType, required };
+  };
+
   const columns: Array<[string, { type: RestoreColumnType; required: boolean }]> = [];
-  for (let i = start + 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\s*\}\s*$/.test(line)) break;
-    if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue;
-    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*):\s*(\[[A-Za-z]+\]|[A-Za-z]+)(!?)/.exec(line);
-    if (!match) throw new Error(`${label}:${i + 1}: expected a field, got ${JSON.stringify(line)}`);
-    const type = match[2].startsWith("[") ? `${match[2].slice(1, -1)}[]` : match[2];
-    columns.push([match[1], { type: type as RestoreColumnType, required: match[3] === "!" }]);
+  for (;;) {
+    skipTrivia();
+    if (at >= body.length) break;
+    const name = readName();
+    if (!name) fail("expected a field name");
+    if (body[at] === "(") balanced("(", ")");
+    skipTrivia();
+    if (body[at] !== ":") fail(`expected : after ${name}`);
+    at++;
+    skipTrivia();
+    const column = readType();
+    for (;;) {
+      skipTrivia();
+      if (body[at] !== "@") break;
+      at++;
+      if (!readName()) fail("expected a directive name");
+      skipTrivia();
+      if (body[at] === "(") balanced("(", ")");
+    }
+    columns.push([name!, column]);
   }
   return columns;
 }
@@ -222,7 +342,7 @@ describe("the restore field table matches the GraphQL schema (flair#2953)", () =
   ] as const;
 
   for (const [table, schemaPath] of sources) {
-    test(`every ${table} column and its type matches the schema`, () => {
+    test(`${table} columns and types match its \`type ... @table\` body`, () => {
       const columns = schemaColumns(schemaPath, table);
       expect(columns.length).toBeGreaterThan(5);
       expect(Object.keys(RESTORE_TABLE_FIELDS[table])).toEqual(columns.map(([name]) => name));
@@ -254,5 +374,43 @@ describe("the restore field table matches the GraphQL schema (flair#2953)", () =
   test("an unparsed line inside a table block fails naming the line", () => {
     const fixture = "type Soul @table {\n  id: ID\n  this is not a field\n}\n";
     expect(() => schemaColumnsFromText(fixture, "Soul", "fixture.graphql")).toThrow(/fixture\.graphql:3:/);
+  });
+
+  test("two fields on one line are both read", () => {
+    const fixture = "type Soul @table {\n  key: String! value: String! addedRequired: String!\n}\n";
+    expect(schemaColumnsFromText(fixture, "Soul", "fixture.graphql")).toEqual([
+      ["key", { type: "String", required: true }],
+      ["value", { type: "String", required: true }],
+      ["addedRequired", { type: "String", required: true }],
+    ]);
+  });
+
+  test("a field with arguments and a directive is parsed", () => {
+    const fixture = 'type Soul @table {\n  value(max: Int = 10, list: [String!]): String! @deprecated(reason: "old")\n}\n';
+    expect(schemaColumnsFromText(fixture, "Soul", "fixture.graphql")).toEqual([
+      ["value", { type: "String", required: true }],
+    ]);
+  });
+
+  test("a field split across two lines is read", () => {
+    const fixture = "type Soul @table {\n  value:\n    String!\n  key: String\n}\n";
+    expect(schemaColumnsFromText(fixture, "Soul", "fixture.graphql")).toEqual([
+      ["value", { type: "String", required: true }],
+      ["key", { type: "String", required: false }],
+    ]);
+  });
+
+  test("a list type keeps its element type and its outer requiredness", () => {
+    const fixture = "type Soul @table {\n  tags: [String!]!\n  names: [String!]\n  loose: [String]\n}\n";
+    expect(schemaColumnsFromText(fixture, "Soul", "fixture.graphql")).toEqual([
+      ["tags", { type: "String[]", required: true }],
+      ["names", { type: "String[]", required: false }],
+      ["loose", { type: "String[]", required: false }],
+    ]);
+  });
+
+  test("garbage between fields fails naming its line", () => {
+    const fixture = "type Soul @table {\n  id: ID\n  # comment\n  ???\n  key: String\n}\n";
+    expect(() => schemaColumnsFromText(fixture, "Soul", "fixture.graphql")).toThrow(/fixture\.graphql:4:/);
   });
 });

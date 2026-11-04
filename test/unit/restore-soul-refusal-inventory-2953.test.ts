@@ -13,7 +13,16 @@
  * classifier records one disposition: a classified Response construction or
  * call, an unresolved site, an alias definition it follows (and whose uses it
  * classifies), a type reference, or an `instanceof` check. Any lexical token
- * without a disposition fails, naming file:line. For new Response and
+ * without a disposition fails, naming file:line. Aliases resolve to a fixpoint
+ * over plain constants, casts, parentheses, non-null assertions, destructuring
+ * renames and defaults, assignments, imports, local exports, re-exports and
+ * star exports; a pass that adds nothing ends resolution, and 100 passes
+ * without convergence fail naming the module. A name that is an alias of
+ * Response through any chain is a use at every read: a read that is neither a
+ * call or new callee nor a chain definition is unaccounted, so an alias passed
+ * to another function fails the test. Object properties are not followed, so
+ * `const o = { r: Response }; o.r.json()` leaves that Response token
+ * unaccounted and fails. For new Response and
  * Response.json, only no init (default 200) or a plain, unwrapped object
  * literal with no spread or computed keys is classified; every property is
  * read to prove status absent or statically numeric. Every other init, every
@@ -127,6 +136,8 @@ interface RefusalInventory {
   checkReferences: number;
   /** Alias uses classified or unresolved (there is no Response token at the use). */
   aliasSites: number;
+  /** Alias uses outside a classified call or a chain definition, as file:line. */
+  unaccountedAliasUses: string[];
   /** Lexical tokens with no disposition, as file:line. */
   unaccounted: string[];
   /** Dispositions with no lexical token; must stay empty. */
@@ -262,7 +273,8 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   const responseAliases = new Map<string, Map<string, ResponseAlias>>();
   const exportedAliases = new Map<string, Map<string, ResponseAlias>>();
   const aliasConsts = new Map<string, Array<{ name: string; initializer: ts.Expression }>>();
-  const aliasDestructured = new Map<string, Array<{ name: string; property: string; initializer: ts.Expression }>>();
+  const aliasAssignments = new Map<string, Array<{ name: string; initializer: ts.Expression }>>();
+  const aliasDestructured = new Map<string, Array<{ name: string; property: string; initializer: ts.Expression; fallback?: ts.Expression }>>();
   const aliasImports = new Map<string, Array<{ localName: string; importedName: string; targetFile: string }>>();
   const aliasLocalExports = new Map<string, Array<{ exportedName: string; localName: string }>>();
   const aliasReExports = new Map<string, Array<{ exportedName: string; importedName: string; targetFile: string }>>();
@@ -275,7 +287,8 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     const aliases = new Map<string, { file: string; name: string }>();
     const constants = new Map<string, ts.Expression>();
     const consts: Array<{ name: string; initializer: ts.Expression }> = [];
-    const destructured: Array<{ name: string; property: string; initializer: ts.Expression }> = [];
+    const assignments: Array<{ name: string; initializer: ts.Expression }> = [];
+    const destructured: Array<{ name: string; property: string; initializer: ts.Expression; fallback?: ts.Expression }> = [];
     const imports: Array<{ localName: string; importedName: string; targetFile: string }> = [];
     const localExports: Array<{ exportedName: string; localName: string }> = [];
     const reExports: Array<{ exportedName: string; importedName: string; targetFile: string }> = [];
@@ -347,7 +360,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
             const property = element.propertyName && (ts.isIdentifier(element.propertyName) || ts.isStringLiteral(element.propertyName))
               ? element.propertyName.text
               : element.name.text;
-            destructured.push({ name: element.name.text, property, initializer: node.initializer });
+            destructured.push({ name: element.name.text, property, initializer: node.initializer, fallback: element.initializer });
             if (exported) exportDeclarations.add(element.name.text);
           }
         }
@@ -355,11 +368,20 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
       ts.forEachChild(node, collectVariables);
     };
     collectVariables(source);
+    const collectAssignments = (node: ts.Node): void => {
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          ts.isIdentifier(node.left)) {
+        assignments.push({ name: node.left.text, initializer: node.right });
+      }
+      ts.forEachChild(node, collectAssignments);
+    };
+    collectAssignments(source);
     importAliases.set(file, aliases);
     topLevelConsts.set(file, constants);
     responseAliases.set(file, new Map());
     exportedAliases.set(file, new Map());
     aliasConsts.set(file, consts);
+    aliasAssignments.set(file, assignments);
     aliasDestructured.set(file, destructured);
     aliasImports.set(file, imports);
     aliasLocalExports.set(file, localExports);
@@ -387,29 +409,52 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     }
     return true;
   };
-  // Resolve local aliases, imports and exports to a fixpoint: `const { json } =
-  // Response`, `const R = Response as any`, `export { Response as R }` and a
-  // re-export from another module all name the same constructor or method.
-  for (let pass = 0; pass < 12; pass++) {
+  // Resolve every alias kind to a fixpoint: plain constants, `as` casts,
+  // parentheses, non-null assertions, destructuring with renames and default
+  // values, assignments, imports, local exports, re-exports and star exports.
+  // Each pass runs every rule against the maps built by earlier passes, so a
+  // chain of any length resolves; a pass that adds nothing ends the loop. The
+  // resolver fails rather than returning a partial map when 100 passes do not
+  // converge, naming the module that still changed.
+  const ALIAS_PASS_BOUND = 100;
+  let converged = false;
+  let lastChangedModule = "";
+  for (let pass = 0; pass < ALIAS_PASS_BOUND; pass++) {
     let mutated = false;
     for (const file of sources.keys()) {
-      const local = new Map<string, ResponseAlias>();
+      const local = responseAliases.get(file)!;
+      const priorSize = local.size;
       const aliasOf = (expression: ts.Expression): ResponseAlias | null => {
         const unwrapped = unwrapAliasExpression(expression);
         if (isResponseReferenceName(unwrapped)) return { kind: "constructor" };
+        if (ts.isBinaryExpression(unwrapped) && unwrapped.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+          return aliasOf(unwrapped.right);
+        }
+        if (ts.isPropertyAccessExpression(unwrapped)) {
+          if (isResponseReferenceName(unwrapped.expression)) return { kind: "method", method: unwrapped.name.text };
+          const base = ts.isIdentifier(unwrapped.expression) ? local.get(unwrapped.expression.text) : undefined;
+          return base?.kind === "constructor" ? { kind: "method", method: unwrapped.name.text } : null;
+        }
         return ts.isIdentifier(unwrapped) ? (local.get(unwrapped.text) ?? null) : null;
       };
       for (const declaration of aliasConsts.get(file) ?? []) {
         const alias = aliasOf(declaration.initializer);
-        if (alias) local.set(declaration.name, alias);
+        if (alias && !local.has(declaration.name)) local.set(declaration.name, alias);
+      }
+      for (const declaration of aliasAssignments.get(file) ?? []) {
+        const alias = aliasOf(declaration.initializer);
+        if (alias && !local.has(declaration.name)) local.set(declaration.name, alias);
       }
       for (const declaration of aliasDestructured.get(file) ?? []) {
         const base = aliasOf(declaration.initializer);
-        if (base?.kind === "constructor") local.set(declaration.name, { kind: "method", method: declaration.property });
+        const alias = base?.kind === "constructor"
+          ? { kind: "method" as const, method: declaration.property }
+          : declaration.fallback ? aliasOf(declaration.fallback) : null;
+        if (alias && !local.has(declaration.name)) local.set(declaration.name, alias);
       }
       for (const element of aliasImports.get(file) ?? []) {
         const alias = exportedAliases.get(element.targetFile)?.get(element.importedName);
-        if (alias) local.set(element.localName, alias);
+        if (alias && !local.has(element.localName)) local.set(element.localName, alias);
       }
       const exported = new Map<string, ResponseAlias>();
       for (const name of aliasExportDeclarations.get(file) ?? []) {
@@ -427,16 +472,24 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
       for (const target of aliasStarExports.get(file) ?? []) {
         for (const [name, alias] of exportedAliases.get(target) ?? []) if (!exported.has(name)) exported.set(name, alias);
       }
-      if (!sameAliasMap(responseAliases.get(file)!, local)) {
-        responseAliases.set(file, local);
-        mutated = true;
-      }
-      if (!sameAliasMap(exportedAliases.get(file)!, exported)) {
+      const exportedBefore = exportedAliases.get(file)!;
+      if (!sameAliasMap(exportedBefore, exported)) {
         exportedAliases.set(file, exported);
         mutated = true;
+        lastChangedModule = file;
+      }
+      if (local.size !== priorSize) {
+        mutated = true;
+        lastChangedModule = file;
       }
     }
-    if (!mutated) break;
+    if (!mutated) {
+      converged = true;
+      break;
+    }
+  }
+  if (!converged) {
+    throw new Error(`alias resolution did not converge within ${ALIAS_PASS_BOUND} passes: ${lastChangedModule}`);
   }
 
   const resolveFunction = (file: string, name: string): FnRecord | null => {
@@ -755,6 +808,13 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     for (const declaration of aliasDestructured.get(file) ?? []) {
       if (!responseAliases.get(file)?.has(declaration.name)) continue;
       for (const identifier of responseIdentifiersIn(declaration.initializer)) account(file, identifier, "alias");
+      if (declaration.fallback) {
+        for (const identifier of responseIdentifiersIn(declaration.fallback)) account(file, identifier, "alias");
+      }
+    }
+    for (const declaration of aliasAssignments.get(file) ?? []) {
+      if (!responseAliases.get(file)?.has(declaration.name)) continue;
+      for (const identifier of responseIdentifiersIn(declaration.initializer)) account(file, identifier, "alias");
     }
     const visitBindings = (node: ts.Node): void => {
       if (ts.isImportSpecifier(node) || ts.isExportSpecifier(node)) {
@@ -823,6 +883,41 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     const parent = node.parent;
     return ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword;
   };
+
+  // A name that resolves to Response, through any chain, is a use wherever it
+  // is read. The definition sites and the chain edges that build a longer
+  // alias are not uses; a use as a call or new callee is classified above. Any
+  // other use is unaccounted, so an alias handed to another function or stored
+  // in an object is a red test result rather than a silent pass.
+  const unaccountedAliasUses: string[] = [];
+  for (const [file, source] of sources) {
+    const local = responseAliases.get(file)!;
+    if (local.size === 0) continue;
+    const visit = (node: ts.Node): void => {
+      if (ts.isIdentifier(node) && local.has(node.text) && !isTypePosition(node)) {
+        const parent = node.parent;
+        const definition =
+          ((ts.isVariableDeclaration(parent) || ts.isBindingElement(parent) || ts.isParameter(parent) ||
+            ts.isFunctionDeclaration(parent) || ts.isMethodDeclaration(parent)) && parent.name === node) ||
+          ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent) ||
+          (ts.isPropertyAssignment(parent) && parent.name === node) ||
+          (ts.isPropertyAccessExpression(parent) && parent.name === node);
+        const chainEdge =
+          (ts.isVariableDeclaration(parent) && parent.initializer === node) ||
+          (ts.isBindingElement(parent) && parent.initializer === node) ||
+          (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.right === node);
+        const callee =
+          ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression === node) ||
+          (ts.isPropertyAccessExpression(parent) && parent.expression === node &&
+            (ts.isCallExpression(parent.parent) || ts.isNewExpression(parent.parent)) && parent.parent.expression === parent);
+        if (!definition && !chainEdge && !callee) {
+          unaccountedAliasUses.push(`${file}:${lineOf(source, node)}: ${node.text}`);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
   for (const [file, source] of sources) {
     const visit = (node: ts.Node): void => {
       if (ts.isIdentifier(node) && node.text === "Response" && !accounted.has(`${file}:${node.getStart(source)}`)) {
@@ -908,7 +1003,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   return {
     codes, unresolved, occurrences, lexicalTokens: lexical.size, classified, unresolvedReferences,
     aliasDefinitions: count("alias"), typeReferences: count("type"), checkReferences: count("check"),
-    aliasSites, unaccounted, notLexical, opaque,
+    aliasSites, unaccountedAliasUses, unaccounted, notLexical, opaque,
   };
 }
 
@@ -1088,6 +1183,7 @@ test("every Response identifier token in the import closure's source is accounte
   const inventory = buildInventory(collectSourceSet());
   expect(inventory.lexicalTokens).toBeGreaterThan(0);
   expect(inventory.unaccounted).toEqual([]);
+  expect(inventory.unaccountedAliasUses).toEqual([]);
   expect(inventory.notLexical).toEqual([]);
   expect(
     inventory.classified + inventory.unresolvedReferences + inventory.aliasDefinitions +
@@ -1285,4 +1381,72 @@ test("checks imported status-taking helper calls", () => {
   const inventory = buildInventory(new Map([[builderFile, builder], [callerFile, caller]]));
   expect([...inventory.codes]).toEqual([["x", "resources/Soul.ts:1"]]);
   expect(inventory.unresolved.get("resources/Soul.ts:1")).toBe("unresolvable status argument: jsonResponse.status");
+});
+
+test("classifies a refusal through a two-step destructured alias chain", () => {
+  const source = ts.createSourceFile("fixture.ts",
+    'const { json: j } = Response;\nconst k = j;\nk({ error: "new_code" }, { status: 403 })', ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect(inventory.occurrences).toBe(1);
+  expect(inventory.aliasSites).toBe(1);
+  expect([...inventory.codes]).toEqual([["new_code", "fixture.ts:3"]]);
+  expect([...inventory.unresolved]).toEqual([]);
+  expect(inventory.unaccountedAliasUses).toEqual([]);
+});
+
+test("classifies a refusal through a four-step alias chain", () => {
+  const source = ts.createSourceFile("fixture.ts",
+    'const { json: a } = Response;\nconst b = a;\nconst c = b;\nconst d = c;\nd({ error: "new_code" }, { status: 403 })', ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect(inventory.occurrences).toBe(1);
+  expect(inventory.aliasSites).toBe(1);
+  expect([...inventory.codes]).toEqual([["new_code", "fixture.ts:5"]]);
+  expect([...inventory.unresolved]).toEqual([]);
+  expect(inventory.unaccountedAliasUses).toEqual([]);
+});
+
+test("classifies a three-step chain across two modules with a re-export", () => {
+  const policyFile = "resources/soul-write-policy.ts";
+  const soulFile = "resources/Soul.ts";
+  const policy = ts.createSourceFile(policyFile,
+    'export const { json: j } = Response;', ts.ScriptTarget.Latest, true);
+  const soul = ts.createSourceFile(soulFile,
+    'import { j } from "./soul-write-policy.js";\nexport { j as reexported };\nconst k = j;\nk({ error: "new_code" }, { status: 403 });',
+    ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([[policyFile, policy], [soulFile, soul]]));
+  expect(inventory.occurrences).toBe(1);
+  expect(inventory.aliasSites).toBe(1);
+  expect([...inventory.codes]).toEqual([["new_code", `${soulFile}:4`]]);
+  expect([...inventory.unresolved]).toEqual([]);
+  expect(inventory.unaccountedAliasUses).toEqual([]);
+});
+
+test("follows an alias through a destructuring default value", () => {
+  const source = ts.createSourceFile("fixture.ts",
+    'const { json: j = Response.json } = {};\nj({ error: "new_code" }, { status: 403 })', ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect(inventory.occurrences).toBe(1);
+  expect(inventory.aliasSites).toBe(1);
+  expect([...inventory.codes]).toEqual([["new_code", "fixture.ts:2"]]);
+  expect([...inventory.unresolved]).toEqual([]);
+  expect(inventory.unaccounted).toEqual([]);
+  expect(inventory.unaccountedAliasUses).toEqual([]);
+});
+
+test("an alias passed as an argument is an unaccounted use, not a silent pass", () => {
+  const source = ts.createSourceFile("fixture.ts",
+    'function callWith(callee: any) { return callee({ error: "x" }, { status: 403 }); }\nconst R = Response;\ncallWith(R);',
+    ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.codes]).toEqual([]);
+  expect(inventory.unaccountedAliasUses).toEqual(["fixture.ts:3: R"]);
+});
+
+test("an alias stored in an object property is an unaccounted use, not a silent pass", () => {
+  const source = ts.createSourceFile("fixture.ts",
+    'const o = { r: Response };\no.r.json({ error: "x" }, { status: 403 });', ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([["fixture.ts", source]]));
+  expect([...inventory.codes]).toEqual([]);
+  expect(inventory.occurrences).toBe(0);
+  expect(inventory.unaccounted).toEqual(["fixture.ts:1"]);
 });

@@ -88,7 +88,8 @@ export interface RestoreColumn {
  * and requiredness `schemas/agent.graphql` and `schemas/memory.graphql`
  * declare. A hand table, like DECLARED_MEMORY_ATTRIBUTES: the CLI does not read
  * the schema files at runtime. test/unit/restore-soul-admission-2953.test.ts
- * pins it to those files, so a schema change fails there instead of drifting.
+ * reads each `type <Table> @table { … }` body as a token stream and pins this
+ * table to it; a field the parser cannot read fails there, naming the line.
  */
 export const RESTORE_TABLE_FIELDS: Readonly<Record<"Agent" | "Soul" | "Memory", Readonly<Record<string, RestoreColumn>>>> = Object.freeze({
   Agent: Object.freeze({
