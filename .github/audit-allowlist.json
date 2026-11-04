@@ -897,7 +897,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> systeminformation",
-      "reason": "harper's npm-shrinkwrap pins systeminformation 5.33.13 in its installed tree: harper 5.3.1, the version flair pins (package.json:69), declares ^5.31.4 and places 5.33.13 at node_modules/harper/node_modules/systeminformation in an npm install of flair, and npm honours that pin over root overrides. flair's own lockfile resolves the fixed release (the root override systeminformation 5.33.16, inside harper's declared range, resolves 5.33.16 in bun.lock). harper 5.3.4, npm's latest harper on 2026-11-01, declares systeminformation 5.33.13 exactly and does not bundle it. flair does not import systeminformation. Fixed in 5.33.16.",
+      "reason": "harper's npm-shrinkwrap pins systeminformation 5.33.13 in its installed tree: harper 5.3.1, the version flair previously pinned, declares ^5.31.4 and places 5.33.13 at node_modules/harper/node_modules/systeminformation in an npm install of flair, and npm honours that pin over root overrides. flair's own lockfile resolves the fixed release (the root override systeminformation 5.33.16, inside harper's declared range, resolves 5.33.16 in bun.lock). harper 5.3.4, the version flair pins (package.json:69), declares systeminformation 5.33.13 exactly and does not bundle it; in an npm install of flair that copy is hoisted to node_modules/systeminformation, and the consumer package-lock attributes it to harper alone. flair does not import systeminformation. Fixed in 5.33.16.",
+      "hoistedNode": "node_modules/systeminformation",
       "added": "2026-11-01",
       "expires": "2026-11-15",
       "removeWhen": "flair moves to a harper release whose installed tree resolves systeminformation >=5.33.16, whether pinned by its npm-shrinkwrap, shipped in its bundle or declared exactly; or flair stops depending on harper."
@@ -912,7 +913,8 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> systeminformation",
-      "reason": "harper's npm-shrinkwrap pins systeminformation 5.33.13 in its installed tree: harper 5.3.1, the version flair pins (package.json:69), declares ^5.31.4 and places 5.33.13 at node_modules/harper/node_modules/systeminformation in an npm install of flair, and npm honours that pin over root overrides. flair's own lockfile resolves the fixed release (the root override systeminformation 5.33.16, inside harper's declared range, resolves 5.33.16 in bun.lock). harper 5.3.4, npm's latest harper on 2026-11-01, declares systeminformation 5.33.13 exactly and does not bundle it. flair does not import systeminformation. Fixed in 5.33.14.",
+      "reason": "harper's npm-shrinkwrap pins systeminformation 5.33.13 in its installed tree: harper 5.3.1, the version flair previously pinned, declares ^5.31.4 and places 5.33.13 at node_modules/harper/node_modules/systeminformation in an npm install of flair, and npm honours that pin over root overrides. flair's own lockfile resolves the fixed release (the root override systeminformation 5.33.16, inside harper's declared range, resolves 5.33.16 in bun.lock). harper 5.3.4, the version flair pins (package.json:69), declares systeminformation 5.33.13 exactly and does not bundle it; in an npm install of flair that copy is hoisted to node_modules/systeminformation, and the consumer package-lock attributes it to harper alone. flair does not import systeminformation. Fixed in 5.33.14.",
+      "hoistedNode": "node_modules/systeminformation",
       "added": "2026-11-01",
       "expires": "2026-11-15",
       "removeWhen": "flair moves to a harper release whose installed tree resolves systeminformation >=5.33.14 (>=5.33.16 also retires GHSA-3f7j-7jwc-fxfj), whether pinned by its npm-shrinkwrap, shipped in its bundle or declared exactly; or flair stops depending on harper."
