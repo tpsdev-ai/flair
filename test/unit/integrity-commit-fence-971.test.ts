@@ -36,6 +36,7 @@ import {
   openIntegrityState,
   signIntegrityRecord,
   tombstoneEnrollment,
+  verifyIntegrityRecord,
   type IntegrityStateOptions,
 } from "../../src/lib/integrity-state.ts";
 
@@ -230,6 +231,155 @@ describe("commit-fence (invariant 7)", () => {
       expect(snapshotCustody(join(elsewhere, "custody"))).toEqual(otherBefore);
     } finally {
       process.chdir(initialCwd);
+    }
+  });
+
+  it.each([
+    ["generation", "restored"], ["commit marker", "restored"], ["tombstone marker", "restored"],
+    ["generation", "retained"], ["commit marker", "retained"], ["tombstone marker", "retained"],
+  ] as const)("preserves publication on %s staging refusal (%s)", (artifact, disposition) => {
+    const state = init();
+    commit(state, 0);
+    const before = snapshotCustody(custodyDir);
+    const directory = artifact === "generation" ? state.paths.generationsDir : custodyDir;
+    const retained = join(root, "retained");
+    let stages = 0;
+    let publications = 0;
+    const divert = () => {
+      stages++;
+      renameSync(directory, retained);
+      cpSync(retained, directory, { recursive: true });
+    };
+    const restore = () => {
+      rmSync(directory, { recursive: true });
+      renameSync(retained, directory);
+    };
+    const testHooks = {
+      beforeStage: () => { if (artifact !== "commit marker") divert(); },
+      beforeUncertainMarkerWrite: () => { if (artifact === "commit marker") divert(); },
+      afterStage: () => { if (disposition === "restored") restore(); },
+      afterRename: () => { publications++; },
+    };
+    const result = artifact === "tombstone marker"
+      ? tombstoneEnrollment({ ...options({ newCustody: false }), expectedSequence: 1, testHooks })
+      : commitGeneration({ state, expectedGeneration: 1, checkpoint: payload(), testHooks });
+    expect(stages).toBe(1);
+    expect(result).toMatchObject({ ok: false, status: "commit_failed", reason: "custody_invalid" });
+    expect(publications).toBe(0);
+    if (disposition === "retained") {
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.detail).toContain("identity changed");
+      restore();
+      if (artifact !== "generation") unlinkSync(join(custodyDir, ".custody.lock"));
+    }
+    expect(readFileSync(state.paths.currentPath, "utf-8")).toBe(before.CURRENT!);
+    expect(readFileSync(state.paths.registryPath, "utf-8")).toBe(before["registry.json"]!);
+    expect(existsSync(state.paths.uncertainPath)).toBe(false);
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    expect(reopened.ok).toBe(true);
+    if (reopened.ok) expect(reopened.state.generation).toBe(1);
+  });
+
+  it.each([
+    ["generation", "missing", "before"], ["generation", "replaced", "before"],
+    ["commit marker", "missing", "before"], ["commit marker", "replaced", "before"],
+    ["tombstone marker", "missing", "before"], ["tombstone marker", "replaced", "before"],
+    ["generation", "missing", "after"], ["generation", "replaced", "after"],
+    ["commit marker", "missing", "after"], ["commit marker", "replaced", "after"],
+    ["tombstone marker", "missing", "after"], ["tombstone marker", "replaced", "after"],
+  ] as const)("checks %s identity when %s %s publication", (artifact, change, phase) => {
+    const state = init();
+    commit(state, 0);
+    const before = snapshotCustody(custodyDir);
+    const path = artifact === "generation" ? generationPath(state.paths.generationsDir, 2) : state.paths.uncertainPath;
+    let publications = 0;
+    const changeFile = () => {
+      const bytes = readFileSync(path);
+      renameSync(path, join(root, "retained-file"));
+      if (change === "replaced") writeFileSync(path, bytes, { mode: 0o600 });
+    };
+    const testHooks = {
+      afterFsync: () => { if (phase === "before") changeFile(); },
+      afterRename: () => {
+        publications++;
+        if (phase === "after") changeFile();
+      },
+    };
+    const result = artifact === "tombstone marker"
+      ? tombstoneEnrollment({ ...options({ newCustody: false }), expectedSequence: 1, testHooks })
+      : commitGeneration({ state, expectedGeneration: 1, checkpoint: payload(), testHooks });
+    expect(result).toMatchObject({
+      ok: false,
+      status: phase === "before" ? "commit_failed" : "commit_uncertain",
+      reason: phase === "before" ? "custody_invalid" : "commit_uncertain",
+    });
+    if (!result.ok) {
+      expect(result.detail).toContain(path);
+      expect(result.remedy).toContain("Re-open custody");
+      if (phase === "after") expect(result.remedy).toBe(artifact === "tombstone marker"
+        ? "Re-open custody, reconcile uncertainty, then verify the authenticated registry sequence and the enrollment's tombstone status."
+        : "Re-open custody and verify the generation.");
+    }
+    expect(publications).toBe(phase === "before" ? 0 : 1);
+    if (phase === "before") {
+      expect(readFileSync(state.paths.currentPath, "utf-8")).toBe(before.CURRENT!);
+      expect(readFileSync(state.paths.registryPath, "utf-8")).toBe(before["registry.json"]!);
+      expect(existsSync(state.paths.uncertainPath)).toBe(false);
+      const reopened = openIntegrityState(options({ newCustody: false }));
+      expect(reopened.ok).toBe(true);
+      if (reopened.ok) expect(reopened.state.generation).toBe(1);
+    }
+  });
+
+  it.each(["identical", "different"] as const)("verifies a retained generation with %s bytes", (contents) => {
+    const state = init();
+    commit(state, 0);
+    const prepared = commitGeneration({
+      state, expectedGeneration: 1, checkpoint: payload(),
+      testHooks: { beforeUncertainMarkerWrite: () => { throw new Error("marker unavailable"); } },
+    });
+    expect(prepared.ok).toBe(false);
+    const path = generationPath(state.paths.generationsDir, 2);
+    if (contents === "different") writeFileSync(path, "{}", { mode: 0o600 });
+    const result = commitGeneration({
+      state, expectedGeneration: 1, checkpoint: payload(),
+      testHooks: { afterFsync: () => {
+        const bytes = readFileSync(path);
+        renameSync(path, join(root, "retained-generation"));
+        writeFileSync(path, bytes, { mode: 0o600 });
+      } },
+    });
+    expect(result).toMatchObject({ ok: false, status: "commit_failed", reason: "custody_invalid" });
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    expect(reopened.ok).toBe(true);
+    if (reopened.ok) expect(reopened.state.generation).toBe(1);
+  });
+
+  it.each(["commit", "tombstone"] as const)("reports %s marker cleanup absence as uncertain", (writer) => {
+    const state = init();
+    commit(state, 0);
+    let cleanups = 0;
+    const testHooks = { beforeUncertainMarkerClear: () => {
+      cleanups++;
+      unlinkSync(state.paths.uncertainPath);
+    } };
+    const result = writer === "commit"
+      ? commitGeneration({ state, expectedGeneration: 1, checkpoint: payload(), testHooks })
+      : tombstoneEnrollment({ ...options({ newCustody: false }), expectedSequence: 1, testHooks });
+    expect(cleanups).toBe(1);
+    expect(result).toMatchObject({ ok: false, status: "commit_uncertain", reason: "commit_uncertain" });
+    if (!result.ok) expect(result.detail).toContain("ENOENT");
+    expect(existsSync(state.paths.uncertainPath)).toBe(false);
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    if (writer === "commit") {
+      expect(reopened.ok).toBe(true);
+      if (reopened.ok) expect(reopened.state.generation).toBe(2);
+    } else {
+      expect(reopened).toMatchObject({ ok: false, reason: "custody_invalid", detail: "the registry has no active enrollment" });
+      const registry = JSON.parse(readFileSync(state.paths.registryPath, "utf-8"));
+      expect(verifyIntegrityRecord(registry, state.key)).toBe(true);
+      expect(registry.sequence).toBe(2);
+      expect(registry.entries[0].status).toBe("tombstoned");
     }
   });
 

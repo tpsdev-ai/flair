@@ -26,10 +26,9 @@
  *     open and rechecked under the commit and tombstone lock, immediately before
  *     and after publication rename. Detected drift before rename refuses with
  *     custody_invalid; detected drift after rename reports commit_uncertain.
- *     A process that can write to an ancestor is outside the custody trust
- *     boundary and can still race the rename. Chain checks detect drift present
- *     when they run; they do not guarantee detection of an intervening race.
- *     Node cannot bind rename to an open directory descriptor.
+ *     Staged files are checked with the chain before and after publication.
+ *     Recorded identities are dev+ino and inherit filesystem inode reuse.
+ *     The remaining unchecked window is between the last check and the rename itself.
  *
  * Callers decide whether to retry on `status`, never on `reason`: generation
  * exhaustion is `status: "commit_failed"` with `reason: "commit_conflict"`, so
@@ -43,6 +42,7 @@
  */
 import {
   closeSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -567,36 +567,46 @@ function fsyncDir(path: string): void {
   }
 }
 
+type StagedFileIdentity = { path: string; dev: number; ino: number };
+
 /** Create a new file durably (`wx`, explicit mode, full write, fsync). Never
  *  replaces an existing path. */
-function writeNewDurable(path: string, bytes: Uint8Array, mode: number, onCreated?: () => void): void {
+function writeNewDurable(path: string, bytes: Uint8Array, mode: number, onCreated?: () => void): StagedFileIdentity {
   const fd = openSync(path, "wx", mode);
+  let identity: StagedFileIdentity;
   try {
     onCreated?.();
     writeAllSync(fd, Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
     fsyncSync(fd);
+    const { dev, ino } = fstatSync(fd);
+    identity = { path, dev, ino };
   } finally {
     try { closeSync(fd); } catch { /* already closed */ }
   }
   fsyncDir(dirname(path));
+  return identity;
 }
 
 /** Replace a generation file atomically. The caller only reaches this for a
  *  number CURRENT does not name (the commit decision verified CURRENT names
  *  expectedGeneration and this writes expectedGeneration + 1); the function
  *  itself does not check that, so it cannot detect another writer. */
-function replaceDurable(path: string, bytes: Uint8Array, mode: number): void {
+function replaceDurable(path: string, bytes: Uint8Array, mode: number): StagedFileIdentity {
   const temp = `${path}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
+  let identity: StagedFileIdentity;
   try {
     const fd = openSync(temp, "wx", mode);
     try {
       writeAllSync(fd, Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
       fsyncSync(fd);
+      const { dev, ino } = fstatSync(fd);
+      identity = { path, dev, ino };
     } finally {
       try { closeSync(fd); } catch { /* already closed */ }
     }
     renameSync(temp, path);
     fsyncDir(dirname(path));
+    return identity;
   } catch (err) {
     try { unlinkSync(temp); } catch { /* nothing to remove */ }
     throw err;
@@ -662,11 +672,11 @@ function hasGenerationHistory(paths: IntegrityPaths): HistoryCheck {
 /** Write the durable intent marker BEFORE publication. A failure here must
  *  refuse the publication. `beforeWrite` is the test seam that injects such a
  *  failure after the commit decision succeeded. */
-function writeUncertainMarker(paths: IntegrityPaths, value: string, beforeWrite?: () => void): void {
+function writeUncertainMarker(paths: IntegrityPaths, value: string, beforeWrite?: () => void): StagedFileIdentity {
   beforeWrite?.();
   let created = false;
   try {
-    writeNewDurable(paths.uncertainPath, Buffer.from(value, "utf-8"), 0o600, () => { created = true; });
+    return writeNewDurable(paths.uncertainPath, Buffer.from(value, "utf-8"), 0o600, () => { created = true; });
   } catch (err) {
     if (created) {
       try { clearUncertainMarker(paths); } catch { }
@@ -675,16 +685,9 @@ function writeUncertainMarker(paths: IntegrityPaths, value: string, beforeWrite?
   }
 }
 
-/** Remove the marker after durable completion (or after a publication that
- *  did not land). Throws unless the marker is already absent; callers decide
- *  whether a failure is fatal. */
+/** Remove this operation's marker; removal and directory fsync failures throw. */
 function clearUncertainMarker(paths: IntegrityPaths): void {
-  try {
-    unlinkSync(paths.uncertainPath);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw err;
-  }
+  unlinkSync(paths.uncertainPath);
   fsyncDir(paths.custodyDir);
 }
 
@@ -927,6 +930,13 @@ export interface IntegrityStateOptions {
   beforeRegistryPublication?: () => void;
 }
 
+type IntegrityTestHooks = NonNullable<ConfigSectionOptions["testHooks"]> & {
+  beforeStage?: () => void;
+  afterStage?: () => void;
+  beforeUncertainMarkerWrite?: () => void;
+  beforeUncertainMarkerClear?: () => void;
+};
+
 export interface CommitGenerationOptions {
   state: IntegrityStateHandle;
   /** Generation observed before the scan. A mismatch holds the write. */
@@ -935,9 +945,7 @@ export interface CommitGenerationOptions {
   /** TEST-ONLY barriers. The shared critical-section hooks are passed through;
    *  `beforeUncertainMarkerWrite` fires after the decision succeeded and before
    *  the intent marker is created. */
-  testHooks?: NonNullable<ConfigSectionOptions["testHooks"]> & {
-    beforeUncertainMarkerWrite?: () => void;
-  };
+  testHooks?: IntegrityTestHooks;
 }
 
 function fail(reason: IntegrityReason, detail: string, remedy = INTEGRITY_REASON_REMEDIES[reason]): IntegrityStateResult {
@@ -1420,20 +1428,37 @@ type CustodyPublicationFailure = {
   remedy: string;
 };
 
+function verifyStagedFiles(files: readonly StagedFileIdentity[]): { ok: true } | { ok: false; detail: string } {
+  for (const file of files) {
+    try {
+      const entry = lstatSync(file.path);
+      if (!entry.isFile() || entry.dev !== file.dev || entry.ino !== file.ino) {
+        return { ok: false, detail: `staged file identity changed: ${file.path}` };
+      }
+    } catch (err) {
+      return { ok: false, detail: `cannot verify staged file ${file.path}: ${msg(err)}` };
+    }
+  }
+  return { ok: true };
+}
+
 function custodyPublicationChecks(
   chain: readonly CustodyChainEntry[],
+  stagedFiles: readonly StagedFileIdentity[],
   refuse: (failure: CustodyPublicationFailure) => void,
   uncertainRemedy: string,
 ): Pick<ConfigSectionOptions, "beforeRename" | "afterRename"> {
   return {
     beforeRename: () => {
-      const checked = verifyCustodyChain(chain);
+      const chainCheck = verifyCustodyChain(chain);
+      const checked = chainCheck.ok ? verifyStagedFiles(stagedFiles) : chainCheck;
       if (checked.ok) return;
       refuse({ ok: false, status: "commit_failed", reason: "custody_invalid", detail: checked.detail, remedy: CUSTODY_CHAIN_REMEDY });
       throw new Error(checked.detail);
     },
     afterRename: () => {
-      const checked = verifyCustodyChain(chain);
+      const chainCheck = verifyCustodyChain(chain);
+      const checked = chainCheck.ok ? verifyStagedFiles(stagedFiles) : chainCheck;
       if (checked.ok) return;
       refuse({ ok: false, status: "commit_uncertain", reason: "commit_uncertain", detail: checked.detail, remedy: uncertainRemedy });
       throw new Error(checked.detail);
@@ -1499,8 +1524,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   let refusal: Extract<CommitGenerationResult, { ok: false }> | undefined;
 
   const decide = (bytes: Uint8Array | null): { write: Uint8Array } | { hold: string } => {
-    // First check under the lock: a custody chain that no longer matches the
-    // opened handle must not write an intent marker or a generation.
+    // Recheck custody under the lock.
     const chain = verifyCustodyChain(state.custodyChain);
     if (!chain.ok) {
       refusal = {
@@ -1584,20 +1608,32 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     }
   };
 
+  const stagedFiles: StagedFileIdentity[] = [];
   const stage = (): (() => void) => {
+    opts.testHooks?.beforeStage?.();
     const path = generationPath(state.paths.generationsDir, nextGeneration);
     try {
-      writeNewDurable(path, generationBytes, 0o600);
+      stagedFiles.push(writeNewDurable(path, generationBytes, 0o600));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      const existing = readFileSync(path);
+      const fd = openSync(path, "r");
+      let existing: Buffer;
+      let identity: StagedFileIdentity;
+      try {
+        existing = readFileSync(fd);
+        const { dev, ino } = fstatSync(fd);
+        identity = { path, dev, ino };
+      } finally {
+        closeSync(fd);
+      }
       if (!Buffer.from(generationBytes).equals(existing)) {
         // CURRENT still names expectedGeneration (checked in decide), so this
         // number is unreferenced: an orphan left by an earlier attempt that
         // staged but did not publish. Replace it. A file another writer put at
         // a number CURRENT names is outside what this check can see.
-        replaceDurable(path, generationBytes, 0o600);
+        identity = replaceDurable(path, generationBytes, 0o600);
       }
+      stagedFiles.push(identity);
     }
     // Durable intent marker BEFORE publication. A failure of the target
     // replacement's directory fsync reports commit_uncertain with marker
@@ -1605,7 +1641,8 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     // clear that unlinks the marker but fails to fsync the custody directory
     // also reports commit_uncertain, with the marker already gone. Failure
     // here refuses the publication.
-    writeUncertainMarker(state.paths, `${UNCERTAIN_COMMIT_PREFIX}${nextGeneration}`, opts.testHooks?.beforeUncertainMarkerWrite);
+    stagedFiles.push(writeUncertainMarker(state.paths, `${UNCERTAIN_COMMIT_PREFIX}${nextGeneration}`, opts.testHooks?.beforeUncertainMarkerWrite));
+    opts.testHooks?.afterStage?.();
     return () => { try { clearUncertainMarker(state.paths); } catch { } };
   };
 
@@ -1613,9 +1650,12 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   try {
     result = withConfigCriticalSection(state.paths.currentPath, decide, {
       stage,
-      ...custodyPublicationChecks(state.custodyChain, (failure) => { refusal = failure; }, "Re-open custody and verify the generation."),
+      ...custodyPublicationChecks(state.custodyChain, stagedFiles, (failure) => { refusal = failure; }, "Re-open custody and verify the generation."),
       lockPath: custodyLockPath(state.paths),
-      onCommitted: () => clearUncertainMarker(state.paths),
+      onCommitted: () => {
+        opts.testHooks?.beforeUncertainMarkerClear?.();
+        clearUncertainMarker(state.paths);
+      },
       testHooks: opts.testHooks,
     });
   } catch (err) {
@@ -1676,8 +1716,8 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
 
 export interface TombstoneOptions extends IntegrityStateOptions {
   expectedSequence: number;
-  /** TEST-ONLY barriers, from the shared critical section. */
-  testHooks?: ConfigSectionOptions["testHooks"];
+  /** TEST-ONLY barriers. */
+  testHooks?: IntegrityTestHooks;
 }
 
 export type TombstoneResult =
@@ -1730,17 +1770,23 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
     }), state.key);
     return { write: jsonBytes(updated) };
   };
+  const stagedFiles: StagedFileIdentity[] = [];
   const stage = (): (() => void) => {
-    writeUncertainMarker(state.paths, `${UNCERTAIN_REGISTRY_PREFIX}${nextSequence}`);
+    opts.testHooks?.beforeStage?.();
+    stagedFiles.push(writeUncertainMarker(state.paths, `${UNCERTAIN_REGISTRY_PREFIX}${nextSequence}`, opts.testHooks?.beforeUncertainMarkerWrite));
+    opts.testHooks?.afterStage?.();
     return () => { try { clearUncertainMarker(state.paths); } catch { } };
   };
   let result: ConfigSectionResult;
   try {
     result = withConfigCriticalSection(state.paths.registryPath, decide, {
       stage,
-      ...custodyPublicationChecks(state.custodyChain, (failure) => { chainRefusal = failure; }, TOMBSTONE_UNCERTAIN_REMEDY),
+      ...custodyPublicationChecks(state.custodyChain, stagedFiles, (failure) => { chainRefusal = failure; }, TOMBSTONE_UNCERTAIN_REMEDY),
       lockPath: custodyLockPath(state.paths),
-      onCommitted: () => clearUncertainMarker(state.paths),
+      onCommitted: () => {
+        opts.testHooks?.beforeUncertainMarkerClear?.();
+        clearUncertainMarker(state.paths);
+      },
       testHooks: opts.testHooks,
     });
   } catch (err) {
