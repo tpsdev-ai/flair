@@ -9,7 +9,10 @@
  * or callee of a recognised member call or new, the right operand of instanceof,
  * the operand of typeof, or an alias initializer the resolver tracks. Follow
  * side-effect/default/named imports, named exports (local or from), and bare-star
- * re-exports. Namespace imports carrying trusted values or helpers, namespace re-exports,
+ * re-exports. Relative literal dynamic imports enter the closure; their yielded
+ * namespaces are unresolved. Non-literal specifiers, bare modules carrying trusted
+ * values or helpers, and unknown bare modules are unresolved; Node built-ins and
+ * harper stay out as for static imports. Namespace imports carrying trusted values or helpers, namespace re-exports,
  * export assignments, import-equals aliases and other import/export declaration
  * forms are unresolved with file:line:column; alias uses obey this rule. A refusal
  * helper may occur only as the callee of a direct call the classifier resolves, its own
@@ -26,10 +29,12 @@
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { builtinModules } from "node:module";
 import ts from "typescript";
 
 const root = join(import.meta.dir, "../..");
 const ENTRY = "resources/Soul.ts";
+const EXTERNAL_DYNAMIC_IMPORTS = new Set(["harper", ...builtinModules.flatMap((name) => name.startsWith("node:") ? [name] : [name, `node:${name}`])]);
 
 /** The modules the inventory named before it derived its set from imports. */
 const REQUIRED_SOURCES = [
@@ -60,20 +65,20 @@ function parseSource(file: string): ts.SourceFile {
   return ts.createSourceFile(file, readFileSync(join(root, file), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 }
 
-/** The transitive closure of relative imports starting at resources/Soul.ts. */
-function collectSourceSet(): Map<string, ts.SourceFile> {
+function collectSourceSet(overrides = new Map<string, ts.SourceFile>()): Map<string, ts.SourceFile> {
   const sources = new Map<string, ts.SourceFile>();
   const pending = [ENTRY];
   while (pending.length > 0) {
     const file = pending.shift()!;
     if (sources.has(file)) continue;
-    const source = parseSource(file);
+    const source = overrides.get(file) ?? parseSource(file);
     sources.set(file, source);
     const visit = (node: ts.Node): void => {
       const specifier =
         (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)
           ? node.moduleSpecifier.text
-          : null;
+          : ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+              node.arguments[0] && ts.isStringLiteral(node.arguments[0]) ? node.arguments[0].text : null;
       if (specifier) {
         const resolved = resolveRelative(file, specifier);
         if (resolved && !sources.has(resolved)) pending.push(resolved);
@@ -1212,6 +1217,24 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   };
   for (const [file, source] of sources) {
     const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        const specifier = node.arguments[0];
+        if (!specifier || !ts.isStringLiteral(specifier)) {
+          recordUnresolved(file, node, "unresolved dynamic import: non-literal specifier");
+        } else if (specifier.text.startsWith(".")) {
+          const target = resolveRelative(file, specifier.text);
+          recordUnresolved(file, node, target && sources.has(target)
+            ? "unresolved dynamic import: yielded namespace is not tracked"
+            : "unresolved dynamic import: relative module is not in the source closure");
+        } else {
+          const module = symbolAt(specifier);
+          if (module && (exportsTrustedValue(module) || exportsRefusalHelper(module))) {
+            recordUnresolved(file, node, "unresolved dynamic import: bare module carries trusted values or refusal helpers");
+          } else if (!module && !EXTERNAL_DYNAMIC_IMPORTS.has(specifier.text)) {
+            recordUnresolved(file, node, "unresolved dynamic import: bare module provenance is unknown");
+          }
+        }
+      }
       if (ts.isNamespaceImport(node)) {
         const module = symbolAt(node.name);
         if (module && exportsRefusalHelper(module)) {
@@ -2358,4 +2381,92 @@ test("rejects a namespace import containing a refusal helper", () => {
   const sources = new Map([...files].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
   const inventory = buildInventory(sources);
   expect(inventory.unresolved.get("importer.ts:1:13")).toBe("unsupported refusal-helper use: helpers in NamespaceImport");
+});
+
+test.each([
+  ['export async function probeH(c: any) { if (!c) return null; const m = await import("./soul-write-policy.js"); return m.FORBIDDEN("x_dyn_typed"); }', 77],
+  ['import("./soul-write-policy.js").then((m) => m.FORBIDDEN("x_then"));', 1],
+  ['const { FORBIDDEN: F } = await import("./soul-write-policy.js"); F("x_destructured");', 32],
+  ['const m = await import("./soul-write-policy.js"); m.R.json({ error: "x_response" }, { status: 403 });', 17],
+  ['(await import("./soul-write-policy.js")).FORBIDDEN("x_member");', 8],
+])("records a relative dynamic import at its column: %s", (text, column) => {
+  const file = "resources/owner-field-guard.ts";
+  const sources = collectSourceSet();
+  const source = ts.createSourceFile(file, `${sources.get(file)!.text}\n${text}`, ts.ScriptTarget.Latest, true);
+  sources.set(file, source);
+  if (text.includes("x_response")) {
+    const policy = "resources/soul-write-policy.ts";
+    sources.set(policy, ts.createSourceFile(policy, `${sources.get(policy)!.text}\nexport const R = Response;`, ts.ScriptTarget.Latest, true));
+  }
+  const at = siteIn(source, "import(");
+  expect(at).toEndWith(`:${column}`);
+  expect([...buildInventory(sources).unresolved]).toContainEqual([
+    at, "unresolved dynamic import: yielded namespace is not tracked",
+  ]);
+});
+
+test("records a non-literal dynamic import at its column", () => {
+  const source = ts.createSourceFile("fixture.ts", 'const name = "./helper.js"; import(name);', ts.ScriptTarget.Latest, true);
+  expect([...buildInventory(new Map([["fixture.ts", source]])).unresolved]).toEqual([
+    ["fixture.ts:1:29", "unresolved dynamic import: non-literal specifier"],
+  ]);
+});
+
+test("records a bare dynamic import carrying a refusal helper at its column", () => {
+  const sources = new Map([
+    ["resources/owner-field-guard.ts", 'import("soul-write-policy.js").then((m) => m.FORBIDDEN("x_bare"));'],
+    ["resources/soul-write-policy.ts", 'export function FORBIDDEN(msg: string) { return Response.json({ error: msg }, { status: 403 }); }'],
+  ].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
+  expect(buildInventory(sources).unresolved.get("resources/owner-field-guard.ts:1:1")).toBe(
+    "unresolved dynamic import: bare module carries trusted values or refusal helpers",
+  );
+});
+
+test.each(["Response", "JSON", "globalThis"])("records a bare dynamic import carrying %s at its column", (name) => {
+  const sources = new Map([
+    ["resources/owner-field-guard.ts", 'import("soul-write-policy.js");'],
+    ["resources/soul-write-policy.ts", `export const R = ${name};`],
+  ].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
+  expect(buildInventory(sources).unresolved.get("resources/owner-field-guard.ts:1:1")).toBe(
+    "unresolved dynamic import: bare module carries trusted values or refusal helpers",
+  );
+});
+
+test.each(["node:fs", "harper"])("excludes the bare dynamic import of %s outside the closure", (specifier) => {
+  const source = ts.createSourceFile("fixture.ts", `import("${specifier}");`, ts.ScriptTarget.Latest, true);
+  expect([...buildInventory(new Map([["fixture.ts", source]])).unresolved]).toEqual([]);
+});
+
+test("records a missing relative dynamic import at its column", () => {
+  const source = ts.createSourceFile("fixture.ts", 'import("./missing.js");', ts.ScriptTarget.Latest, true);
+  expect([...buildInventory(new Map([["fixture.ts", source]])).unresolved]).toEqual([
+    ["fixture.ts:1:1", "unresolved dynamic import: relative module is not in the source closure"],
+  ]);
+});
+
+test("follows nested relative dynamic imports into the source set", () => {
+  const sources = collectSourceSet(new Map([
+    [ENTRY, ts.createSourceFile(ENTRY, 'import("./soul-write-policy.js");', ts.ScriptTarget.Latest, true)],
+    ["resources/soul-write-policy.ts", ts.createSourceFile("resources/soul-write-policy.ts", 'import("./owner-field-guard.js");', ts.ScriptTarget.Latest, true)],
+  ]));
+  expect(sources.has("resources/soul-write-policy.ts")).toBe(true);
+  expect(sources.has("resources/owner-field-guard.ts")).toBe(true);
+  const inventory = buildInventory(sources);
+  expect(inventory.unresolved.get("resources/Soul.ts:1:1")).toBe("unresolved dynamic import: yielded namespace is not tracked");
+  expect(inventory.unresolved.get("resources/soul-write-policy.ts:1:1")).toBe("unresolved dynamic import: yielded namespace is not tracked");
+});
+
+test("records an unknown bare dynamic import at its column", () => {
+  const source = ts.createSourceFile("fixture.ts", 'import("unknown-package");', ts.ScriptTarget.Latest, true);
+  expect([...buildInventory(new Map([["fixture.ts", source]])).unresolved]).toEqual([
+    ["fixture.ts:1:1", "unresolved dynamic import: bare module provenance is unknown"],
+  ]);
+});
+
+test("excludes a resolved bare dynamic import without trusted values or helpers", () => {
+  const sources = new Map([
+    ["resources/owner-field-guard.ts", 'import("soul-write-policy.js");'],
+    ["resources/soul-write-policy.ts", 'export const value = 1;'],
+  ].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
+  expect([...buildInventory(sources).unresolved]).toEqual([]);
 });
