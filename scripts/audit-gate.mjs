@@ -557,7 +557,7 @@ export const MAX_LIFETIME_DAYS_BY_SEVERITY = Object.freeze({
  * below its ceiling replaces it; a missing, invalid or over-ceiling declaration
  * is a named problem and leaves the pinned ceiling in force.
  */
-function lifetimeCapsFromPolicy(allowlist, problems) {
+export function lifetimeCapsFromPolicy(allowlist, problems) {
   const declared = allowlist?.policy?.maxLifetimeDaysBySeverity;
   const caps = { ...MAX_LIFETIME_DAYS_BY_SEVERITY };
   if (declared === null || typeof declared !== "object" || Array.isArray(declared)) {
@@ -849,9 +849,9 @@ export function overCapApprovalProblems(entry, today, cap) {
   return problems;
 }
 
-export function validateAllowlist(allowlist, today) {
+export function validateAllowlist(allowlist, today, enforcedCaps) {
   const problems = [];
-  const caps = lifetimeCapsFromPolicy(allowlist, problems);
+  const caps = enforcedCaps ?? lifetimeCapsFromPolicy(allowlist, problems);
   const seenKeys = new Map();
   const singleSourceOwner = new Map();
 
@@ -959,6 +959,28 @@ export function validateAllowlist(allowlist, today) {
   });
 
   return problems;
+}
+
+/**
+ * The over-cap report's lines, built from the caps the gate enforces. `caps` is
+ * the map `lifetimeCapsFromPolicy` returns, so the report and the validation
+ * cannot disagree about a severity's cap.
+ */
+export function overCapReportLines(allowlist, caps) {
+  const lines = [];
+  for (const entry of allowlist.entries) {
+    const cap = caps[entry?.severity];
+    if (typeof cap !== "number" || !isCalendarDate(entry?.added) || !isCalendarDate(entry?.expires)) continue;
+    const lifetimeDays = Math.round((Date.parse(entry.expires) - Date.parse(entry.added)) / DAY_MS);
+    if (!(lifetimeDays > cap)) continue;
+    const approval = entry.overCapApproval;
+    lines.push(
+      `  OVER-CAP: ${entry.ghsa} ${entry.package} — cumulative ${lifetimeDays}d lifetime, ` +
+        `${cap}d ${entry.severity} cap, approval recorded for ${approval.approvedBy} until ` +
+        `${approval.expires}: ${approval.reason}`,
+    );
+  }
+  return lines;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1686,7 +1708,9 @@ async function main() {
       a.package.localeCompare(b.package),
   );
 
-  const schemaProblems = validateAllowlist(allowlist, today);
+  const policyProblems = [];
+  const caps = lifetimeCapsFromPolicy(allowlist, policyProblems);
+  const schemaProblems = [...policyProblems, ...validateAllowlist(allowlist, today, caps)];
   for (const p of schemaProblems) fail(`allowlist is malformed — ${p}`);
   const historyProblems = validateAllowlistHistory(allowlist, firstDays, today);
   for (const p of historyProblems) fail(`allowlist history/date invalid — ${p}`);
@@ -2061,22 +2085,9 @@ async function main() {
   console.log(`  allowlisted (justified + dated):  ${new Set(allowed.map(({ adv }) => adv)).size}`);
   console.log(`  blocking:                         ${blocked.length}\n`);
 
-  const caps = allowlist.policy?.maxLifetimeDaysBySeverity ?? {};
-  const overCap = allowlist.entries.filter((entry) => {
-    const cap = caps[entry?.severity];
-    if (typeof cap !== "number" || !isCalendarDate(entry?.added) || !isCalendarDate(entry?.expires)) return false;
-    return Math.round((Date.parse(entry.expires) - Date.parse(entry.added)) / DAY_MS) > cap;
-  });
-  for (const entry of overCap) {
-    const approval = entry.overCapApproval;
-    const lifetimeDays = Math.round((Date.parse(entry.expires) - Date.parse(entry.added)) / DAY_MS);
-    console.log(
-      `  OVER-CAP: ${entry.ghsa} ${entry.package} — cumulative ${lifetimeDays}d lifetime, ` +
-        `${caps[entry.severity]}d ${entry.severity} cap, approval recorded for ${approval.approvedBy} until ` +
-        `${approval.expires}: ${approval.reason}`,
-    );
-  }
-  if (overCap.length) console.log("");
+  const overCapLines = overCapReportLines(allowlist, caps);
+  for (const line of overCapLines) console.log(line);
+  if (overCapLines.length) console.log("");
 
   for (const { entry } of notReportedByBun) {
     console.log(

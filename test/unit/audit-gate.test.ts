@@ -9,6 +9,8 @@ import {
   isVulnerable,
   validateAllowlist,
   MAX_LIFETIME_DAYS_BY_SEVERITY,
+  lifetimeCapsFromPolicy,
+  overCapReportLines,
   flattenAdvisories,
   flattenNpmAdvisories,
   parseNpmAuditOutput,
@@ -1863,8 +1865,18 @@ describe("pinned lifetime ceilings", () => {
   for (const severity of SEVERITIES) {
     const ceiling = MAX_LIFETIME_DAYS_BY_SEVERITY[severity];
 
-    it(`accepts ${severity} at its ${ceiling}d pinned ceiling`, () => {
+    it(`accepts a policy block declaring ${severity} at its ${ceiling}d pinned ceiling`, () => {
       expect(problems({ policy: policy(), entries: [] })).toBe("");
+    });
+
+    it(`accepts an entry at ${severity}'s ${ceiling}d ceiling`, () => {
+      expect(problems({ policy: policy(), entries: [entryAt(severity, ceiling)] })).toBe("");
+    });
+
+    it(`rejects an entry one day over ${severity}'s ${ceiling}d ceiling`, () => {
+      expect(problems({ policy: policy(), entries: [entryAt(severity, ceiling + 1)] })).toContain(
+        `lifetime ${ceiling + 1}d exceeds the ${ceiling}d cap for severity "${severity}"`,
+      );
     });
 
     it(`accepts ${severity} below its ${ceiling}d pinned ceiling`, () => {
@@ -1902,6 +1914,44 @@ describe("pinned lifetime ceilings", () => {
       );
     });
   }
+
+  it("names the derived cap in the over-cap report when the policy declares a lower one", () => {
+    const declared = policy({ high: 30 });
+    const caps = lifetimeCapsFromPolicy({ policy: declared }, []);
+    expect(caps.high).toBe(30);
+    const entry = {
+      ...entryAt("high", 40),
+      overCapApproval: {
+        approvedBy: "fixture-approver",
+        reason: "Fixture approval reason.",
+        approvedOn: "2026-11-01",
+        expires: "2026-11-30",
+      },
+    };
+    const lines = overCapReportLines({ policy: declared, entries: [entry] }, caps);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("30d high cap");
+  });
+
+  it("reports against the caps it is given, not the raw policy block", () => {
+    const declared = policy({ high: 180 });
+    const policyProblems: string[] = [];
+    const caps = lifetimeCapsFromPolicy({ policy: declared }, policyProblems);
+    expect(policyProblems.join("\n")).toContain("above the 60d ceiling");
+    expect(caps.high).toBe(60);
+    const entry = {
+      ...entryAt("high", 90),
+      overCapApproval: {
+        approvedBy: "fixture-approver",
+        reason: "Fixture approval reason.",
+        approvedOn: "2026-11-01",
+        expires: "2026-11-30",
+      },
+    };
+    const lines = overCapReportLines({ policy: declared, entries: [entry] }, caps);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("60d high cap");
+  });
 
   it("rejects a severity outside the four instead of accepting a new cap", () => {
     expect(problems({ policy: policy({ unknown: 365 }), entries: [] })).toContain(

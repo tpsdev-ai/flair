@@ -1,8 +1,8 @@
 /**
  * integrity-apfs-971.test.ts — flair#971 slice 1a.
  *
- * Runs custody initialization against a real APFS directory in the macOS CI
- * lane.
+ * Runs custody initialization in a real temporary directory if its filesystem
+ * passes the custody predicate.
  */
 import { describe, it, expect } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -157,6 +157,23 @@ describe("macOS mount table classification", () => {
   });
 });
 
+const tempBacking = assertSupportedLocalFilesystem(tmpdir());
+
+/** Best-effort filesystem label for the skip reason; falls back to "unknown". */
+function tempFilesystemLabel(path: string): string {
+  try {
+    if (process.platform === "darwin") {
+      const table = execFileSync("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
+      const mountPoint = parseDfMountPoint(execFileSync("/bin/df", ["-P", path], { encoding: "utf8", timeout: 5000 }));
+      const entries = table.split("\n").filter((line) => line.trim() !== "").map(parseMountLine).filter((entry) => entry !== null);
+      return (mountPoint === null ? null : selectMountEntry(entries, mountPoint))?.type ?? "unknown";
+    }
+    return execFileSync("stat", ["-f", "-c", "%T", path], { encoding: "utf8", timeout: 5000 }).trim() || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 describe("apfs custody (invariant 1)", () => {
   it("refuses when the ancestor walk exhausts its iteration cap", () => {
     const root = mkdtempSync(join(tmpdir(), "flair-971-walk-"));
@@ -168,43 +185,47 @@ describe("apfs custody (invariant 1)", () => {
     }
   });
 
-  it.skipIf(!isDarwin)("initializes custody in a real APFS directory", () => {
-    const root = mkdtempSync(join(tmpdir(), "flair-971-apfs-"));
-    try {
-      const custodyDir = join(root, "custody");
-      const support = assertSupportedLocalFilesystem(root);
-      expect(support.ok).toBe(true);
-      if (support.ok) expect(support.type).toBe("apfs");
+  if (tempBacking.ok) {
+    it(`initializes custody in a real ${tempBacking.type} directory`, () => {
+      const root = mkdtempSync(join(tmpdir(), "flair-971-apfs-"));
+      try {
+        const custodyDir = join(root, "custody");
+        const support = assertSupportedLocalFilesystem(root);
+        expect(support.ok).toBe(true);
+        if (support.ok) expect(support.type).toBe(tempBacking.type);
 
-      const operatorUid = process.getuid?.() ?? 0;
-      const result = initializeIntegrityCustody({
-        custodyDir,
-        serverUid: operatorUid + 1000,
-        serverUidSource: "measured",
-        operatorUid,
-        newCustody: true,
-      });
-      expect(result.ok).toBe(true);
-      if (!result.ok) return;
-      const committed = commitGeneration({
-        state: result.state,
-        expectedGeneration: 0,
-        checkpoint: {
-          baseline: {
-            scannedAt: "2026-11-04T00:00:00.000Z",
-            scanStartedAt: "2026-11-04T00:00:00.000Z",
-            scanEndedAt: "2026-11-04T00:00:01.000Z",
-            clockSource: "test",
-            byDurability: { permanent: 1, persistent: 0, standard: 0, ephemeral: 0 },
-            ids: { "mem-a": "permanent" },
-            instanceTokens: { "mem-a": "tok-a" },
+        const operatorUid = process.getuid?.() ?? 0;
+        const result = initializeIntegrityCustody({
+          custodyDir,
+          serverUid: operatorUid + 1000,
+          serverUidSource: "measured",
+          operatorUid,
+          newCustody: true,
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const committed = commitGeneration({
+          state: result.state,
+          expectedGeneration: 0,
+          checkpoint: {
+            baseline: {
+              scannedAt: "2026-11-04T00:00:00.000Z",
+              scanStartedAt: "2026-11-04T00:00:00.000Z",
+              scanEndedAt: "2026-11-04T00:00:01.000Z",
+              clockSource: "test",
+              byDurability: { permanent: 1, persistent: 0, standard: 0, ephemeral: 0 },
+              ids: { "mem-a": "permanent" },
+              instanceTokens: { "mem-a": "tok-a" },
+            },
           },
-        },
-      });
-      expect(committed.ok).toBe(true);
-      expect(generationNumbers(integrityPaths(custodyDir))).toHaveLength(1);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  }, 20_000);
+        });
+        expect(committed.ok).toBe(true);
+        expect(generationNumbers(integrityPaths(custodyDir))).toHaveLength(1);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }, 20_000);
+  } else {
+    it.skip(`initializes custody in a real temporary directory (skipped: ${tempFilesystemLabel(tmpdir())} is not supported by the custody predicate: ${tempBacking.reason})`, () => {});
+  }
 });

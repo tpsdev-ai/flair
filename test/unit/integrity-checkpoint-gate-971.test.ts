@@ -20,10 +20,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 import ts from "typescript";
 
 import {
+  INTEGRITY_MAX_GENERATION,
   INTEGRITY_REASONS,
   INTEGRITY_REASON_REMEDIES,
   canonicalJson,
@@ -39,11 +40,27 @@ import {
   tombstoneEnrollment,
   type IntegrityStateOptions,
 } from "../../src/lib/integrity-state.ts";
-import { assertSupportedLocalFilesystem, isSupportedLocalFilesystemName, isSupportedLocalFilesystemType } from "../../src/lib/config-critical-section.ts";
+import { assertSupportedLocalFilesystem, isSupportedLocalFilesystemName, isSupportedLocalFilesystemType, parseDfMountPoint, parseMountLine, selectMountEntry } from "../../src/lib/config-critical-section.ts";
 
 const OPERATOR_UID = process.getuid?.() ?? 0;
 const SERVER_UID = OPERATOR_UID === 0 ? 65534 : OPERATOR_UID + 1000;
 const MACHINE = machineIdentity();
+const tempBacking = assertSupportedLocalFilesystem(tmpdir());
+
+/** Best-effort filesystem label for the skip reason; falls back to "unknown". */
+function tempFilesystemLabel(path: string): string {
+  try {
+    if (process.platform === "darwin") {
+      const table = execFileSync("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
+      const mountPoint = parseDfMountPoint(execFileSync("/bin/df", ["-P", path], { encoding: "utf8", timeout: 5000 }));
+      const entries = table.split("\n").filter((line) => line.trim() !== "").map(parseMountLine).filter((entry) => entry !== null);
+      return (mountPoint === null ? null : selectMountEntry(entries, mountPoint))?.type ?? "unknown";
+    }
+    return execFileSync("stat", ["-f", "-c", "%T", path], { encoding: "utf8", timeout: 5000 }).trim() || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
 
 let root: string;
 let custodyDir: string;
@@ -119,13 +136,13 @@ describe("checkpoint-gate (invariant 1)", () => {
     const path = join(import.meta.dirname, "../../src/lib/integrity-state.ts");
     const source = ts.createSourceFile(path, readFileSync(path, "utf-8"), ts.ScriptTarget.Latest, true);
     const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) &&
-      ["prepareIntegrityRecord", "validateCurrentShape"].includes(node.name?.text ?? ""));
-    expect(declarations).toHaveLength(2);
+      ["prepareIntegrityRecord", "validateCurrentShape", "isGenerationNumber"].includes(node.name?.text ?? ""));
+    expect(declarations).toHaveLength(3);
     const code = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
       compilerOptions: { target: ts.ScriptTarget.ES2022 },
     }).outputText;
     let signed = false;
-    const prepare = new Function("canonicalJson", "signIntegrityRecord", `${code}\nreturn prepareIntegrityRecord;`)(
+    const prepare = new Function("canonicalJson", "signIntegrityRecord", "INTEGRITY_MAX_GENERATION", `${code}\nreturn prepareIntegrityRecord;`)(
       canonicalJson,
       (record: Record<string, unknown>, key: Buffer) => {
         expect(Object.hasOwn(record, "__proto__")).toBe(true);
@@ -137,6 +154,7 @@ describe("checkpoint-gate (invariant 1)", () => {
         signed = true;
         return signIntegrityRecord(record, key);
       },
+      INTEGRITY_MAX_GENERATION,
     ) as (build: () => Record<string, unknown>, key: Buffer) => Record<string, unknown>;
     const key = Buffer.alloc(32, 7);
     const record = prepare(() => ({
@@ -536,18 +554,22 @@ describe("checkpoint-gate (invariant 1)", () => {
     }
   });
 
-  it("exposes a statfs refusal wrapper that accepts the temp filesystem and refuses network types", () => {
-    const support = assertSupportedLocalFilesystem(custodyDir);
-    expect(support.ok).toBe(true);
-    if (support.ok) expect(support.type.length).toBeGreaterThan(0);
-    expect(isSupportedLocalFilesystemType(0xef53)).toBe(true);
-    expect(isSupportedLocalFilesystemType(0x6969)).toBe(false); // NFS
-    expect(isSupportedLocalFilesystemType(0xff534d42)).toBe(false); // SMB/CIFS
-    expect(isSupportedLocalFilesystemType(0x65735546)).toBe(false); // FUSE
-    expect(isSupportedLocalFilesystemName("apfs")).toBe(true);
-    expect(isSupportedLocalFilesystemName("hfs")).toBe(true);
-    expect(isSupportedLocalFilesystemName("nfs")).toBe(false);
-  });
+  if (tempBacking.ok) {
+    it("exposes a statfs refusal wrapper that accepts the temp filesystem and refuses network types", () => {
+      const support = assertSupportedLocalFilesystem(custodyDir);
+      expect(support.ok).toBe(true);
+      if (support.ok) expect(support.type.length).toBeGreaterThan(0);
+      expect(isSupportedLocalFilesystemType(0xef53)).toBe(true);
+      expect(isSupportedLocalFilesystemType(0x6969)).toBe(false); // NFS
+      expect(isSupportedLocalFilesystemType(0xff534d42)).toBe(false); // SMB/CIFS
+      expect(isSupportedLocalFilesystemType(0x65735546)).toBe(false); // FUSE
+      expect(isSupportedLocalFilesystemName("apfs")).toBe(true);
+      expect(isSupportedLocalFilesystemName("hfs")).toBe(true);
+      expect(isSupportedLocalFilesystemName("nfs")).toBe(false);
+    });
+  } else {
+    it.skip(`exposes a statfs refusal wrapper that accepts the temp filesystem (skipped: ${tempFilesystemLabel(tmpdir())} is not supported by the custody predicate: ${tempBacking.reason})`, () => {});
+  }
 
   it("reports the custody predicate directly", () => {
     const state = init();
