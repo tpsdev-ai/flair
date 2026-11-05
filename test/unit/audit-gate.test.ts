@@ -1464,6 +1464,85 @@ describe("cumulative allowlist lifetime (#2897)", () => {
     }
   });
 
+  // ─── Allowlist history lineage (#2974) ──────
+
+  const filler = (tag: string, lines: number) =>
+    Array.from({ length: lines }, (_, i) => `${tag} documentation line ${i} with enough words to differ`);
+
+  /** Writes `path` (and optionally removes another), then commits the worktree at `date`. */
+  function commitPath(
+    root: string,
+    date: string,
+    path: string,
+    value: object,
+    message: string,
+    remove?: string,
+  ) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), JSON.stringify(value, null, 2));
+    if (remove) rmSync(join(root, remove), { force: true });
+    gitAt(root, date, ["add", "-A", "."]);
+    gitAt(root, date, ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", message]);
+  }
+
+  it("reads first appearance across a heavily edited rename", () => {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-rename-"));
+    try {
+      gitAt(root, "2026-08-01T12:00:00Z", ["init", "-q", "-b", "main"]);
+      commitPath(root, "2026-08-01T12:00:00Z", ".github/audit-allowlist.json",
+        { documentation: filler("original", 80), policy, entries: [] }, "start");
+      commitPath(root, "2026-08-20T12:00:00Z", ".github/old-allowlist.json",
+        { documentation: filler("renamed", 80), policy, entries: [entry({ added: "2026-08-20" })] },
+        "rename away with a heavy edit", ".github/audit-allowlist.json");
+      commitPath(root, "2026-09-20T12:00:00Z", ".github/audit-allowlist.json",
+        { documentation: filler("returned", 80), policy, entries: [entry({ added: "2026-09-20" })] },
+        "rename back with a heavy edit", ".github/old-allowlist.json");
+      expect(readAllowlistHistory(root).get(GHSA.toUpperCase())).toBe("2026-08-20");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads first appearance from a side-branch commit merged later", () => {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-merge-"));
+    try {
+      gitAt(root, "2026-09-01T12:00:00Z", ["init", "-q", "-b", "main"]);
+      commitPath(root, "2026-09-01T12:00:00Z", ".github/audit-allowlist.json",
+        { policy, entries: [] }, "base");
+      gitAt(root, "2026-09-02T12:00:00Z", ["checkout", "-q", "-b", "side"]);
+      commitPath(root, "2026-09-05T12:00:00Z", ".github/audit-allowlist.json",
+        { policy, entries: [entry({ ghsa: NEW_GHSA, added: "2026-09-05" })] }, "side adds the advisory");
+      gitAt(root, "2026-09-10T12:00:00Z", ["checkout", "-q", "main"]);
+      writeFileSync(join(root, "README.md"), "fixture\n");
+      gitAt(root, "2026-09-10T12:00:00Z", ["add", "README.md"]);
+      gitAt(root, "2026-09-10T12:00:00Z", ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "main moves on"]);
+      gitAt(root, "2026-09-15T12:00:00Z", ["merge", "--no-ff", "-q", "-m", "merge side", "side"]);
+      expect(readAllowlistHistory(root).get(NEW_GHSA.toUpperCase())).toBe("2026-09-05");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails with a named lineage problem when a new path is added without an explicit link", () => {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-unlinked-"));
+    try {
+      gitAt(root, "2026-09-01T12:00:00Z", ["init", "-q", "-b", "main"]);
+      commitPath(root, "2026-09-01T12:00:00Z", ".github/audit-allowlist.json",
+        { policy, entries: [entry()] }, "base");
+      rmSync(join(root, ".github/audit-allowlist.json"));
+      gitAt(root, "2026-09-05T12:00:00Z", ["add", "-A", "."]);
+      gitAt(root, "2026-09-05T12:00:00Z", ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "delete"]);
+      commitPath(root, "2026-09-10T12:00:00Z", ".github/other-allowlist.json",
+        { policy, entries: [entry()] }, "add another path");
+      commitPath(root, "2026-09-15T12:00:00Z", ".github/audit-allowlist.json",
+        { policy, entries: [entry()] }, "restore the tracked path");
+      expect(() => readAllowlistHistory(root)).toThrow(/allowlist lineage cannot be established/);
+      expect(() => readAllowlistHistory(root)).toThrow(/other-allowlist\.json/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a future-dated first history commit", () => {
     const root = historyRepo([{ date: "2030-01-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
     try {
@@ -1620,7 +1699,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
         timeout: 20_000,
       });
       expect(clone.status).toBe(0);
-      expect(() => readAllowlistHistory(shallow)).toThrow(/shallow/);
+      expect(() => readAllowlistHistory(shallow)).toThrow(/allowlist lineage cannot be established: .*shallow clone/);
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(shallow, { recursive: true, force: true });

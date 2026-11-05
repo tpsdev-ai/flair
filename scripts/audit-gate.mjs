@@ -615,13 +615,27 @@ function utcDay(value) {
   return (value instanceof Date ? value : new Date(value)).toISOString().slice(0, 10);
 }
 
+/** The ancestor-commit ceiling for one allowlist history walk in CI. */
+const MAX_ALLOWLIST_HISTORY_COMMITS = 10_000;
+
+/** A repo-relative path whose name marks an allowlist snapshot. */
+const ALLOWLIST_PATH_PATTERN = /(?:^|\/)[^/]*allowlist[^/]*\.json$/i;
+
 /**
- * The first commit day each advisory id appears in parsed allowlist snapshots,
- * oldest first, following file renames and comparing ids case-insensitively.
- * Dates are read as UTC calendar days, because a commit made late in a negative
- * offset is already the next day in UTC.
+ * The first ancestor-commit day each advisory id appears in parsed allowlist
+ * snapshots, comparing ids case-insensitively. Dates are read as UTC calendar
+ * days, because a commit made late in a negative offset is already the next day.
  *
- * A shallow repository, a failed git call or an unreadable allowlist throws.
+ * Every ancestor commit is walked with `git rev-list`; the allowlist at each
+ * commit is located by its tracked path(s), and each distinct blob is parsed
+ * once. A rename is followed only from a commit that both removes a tracked
+ * allowlist path and adds another, never from git's rename heuristic, so a
+ * low-similarity rename cannot hide history and a merge cannot attach a side
+ * branch's entry to the wrong path.
+ *
+ * A shallow clone, a rename split across commits with no explicit link, or an
+ * ancestry above MAX_ALLOWLIST_HISTORY_COMMITS throws a named lineage problem.
+ * The returned map's `cost` property reports the commits walked and blobs read.
  * The repository root comes from the script location, so the gate behaves the
  * same whatever directory it is run from.
  */
@@ -637,8 +651,13 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
     throw new Error(`${allowlistPath} must have an "entries" array`);
   }
 
-  const runGit = (args) => {
-    const res = spawnSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 120_000 });
+  const runGit = (args, input) => {
+    const res = spawnSync("git", ["-C", repoRoot, ...args], {
+      encoding: "utf8",
+      timeout: 120_000,
+      maxBuffer: 64 * 1024 * 1024,
+      ...(input === undefined ? {} : { input }),
+    });
     if (res.error) throw new Error(`git ${args[0]} failed: ${res.error.message}`);
     if (res.status !== 0) {
       throw new Error(`git ${args[0]} failed (exit ${res.status}): ${(res.stderr ?? "").trim()}`);
@@ -648,7 +667,8 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
 
   if (runGit(["rev-parse", "--is-shallow-repository"]).trim() === "true") {
     throw new Error(
-      `repository ${repoRoot} is shallow, so the allowlist history is incomplete. ` +
+      `allowlist lineage cannot be established: repository ${repoRoot} is a shallow clone, ` +
+        "so its ancestry stops before the allowlist's first appearance. " +
         "Fetch full history (fetch-depth: 0) before running the gate.",
     );
   }
@@ -660,48 +680,172 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
   }
   if (ids.size > 1_000) throw new Error(`allowlist has ${ids.size} advisory ids; refusing to read history for more than 1000`);
 
-  let path = ".github/audit-allowlist.json";
-  const history = runGit(["log", "--follow", "--name-status", "--format=%x1e%H%x09%cI", "--", path]);
-  const snapshots = [];
-  for (const record of history.split("\x1e").filter((record) => record.trim())) {
-    const [header, ...changes] = record.trim().split("\n");
-    const [sha, timestamp] = header.split("\t");
-    const day = utcDayFromTimestamp(timestamp);
-    if (!day) throw new Error(`git returned an unparseable date for ${sha}: ${timestamp}`);
-    if (!changes.includes(`D\t${path}`)) snapshots.push({ sha, day, path });
-    for (const line of changes) {
-      const rename = /^R\d+\t(.+)\t(.+)$/.exec(line);
-      if (rename && rename[2] === path) path = rename[1];
+  const epochDay = (value, sha) => {
+    const seconds = Number(value);
+    if (!Number.isSafeInteger(seconds) || seconds < 0) {
+      throw new Error(`git returned an unparseable date for ${sha}: ${value}`);
     }
+    const day = new Date(seconds * 1000).toISOString().slice(0, 10);
+    if (!isCalendarDate(day)) throw new Error(`git returned an unparseable date for ${sha}: ${value}`);
+    return day;
+  };
+
+  const commits = [];
+  for (const line of runGit(["rev-list", "--topo-order", "--reverse", "--parents", "--timestamp", "HEAD"]).split("\n")) {
+    if (!line) continue;
+    const [timestamp, sha, ...parents] = line.split(" ");
+    if (!sha || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)) {
+      throw new Error(`git rev-list returned an unparseable commit: ${line}`);
+    }
+    commits.push({ sha, parents, day: epochDay(timestamp, sha) });
+  }
+  if (commits.length === 0) {
+    throw new Error("allowlist lineage cannot be established: HEAD has no commits");
+  }
+  if (commits.length > MAX_ALLOWLIST_HISTORY_COMMITS) {
+    throw new Error(
+      `allowlist lineage cannot be established: the ancestry has ${commits.length} commits, above the ` +
+        `${MAX_ALLOWLIST_HISTORY_COMMITS}-commit bound. The gate walks every ancestor commit; raise the bound ` +
+        "only with a CI cost review.",
+    );
   }
 
-  const firstDays = new Map();
-  for (const { sha, day, path } of snapshots.reverse()) {
-    const contents = runGit(["show", `${sha}:${path}`]);
+  const presenceCache = new Map();
+  const presencesFor = (path) => {
+    if (presenceCache.has(path)) return presenceCache.get(path);
+    const input = commits.map((commit) => `${commit.sha}:${path}\n`).join("");
+    const lines = runGit(["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], input).split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    if (lines.length !== commits.length) {
+      throw new Error(`git cat-file returned ${lines.length} rows for ${commits.length} commits`);
+    }
+    const presence = lines.map((line) => {
+      if (line.endsWith(" missing")) return null;
+      const [oid, type, size] = line.split(" ");
+      if (type !== "blob" || !oid || !Number.isSafeInteger(Number(size))) {
+        throw new Error(`git cat-file returned an unparseable row: ${line}`);
+      }
+      return { oid, size: Number(size) };
+    });
+    presenceCache.set(path, presence);
+    return presence;
+  };
+
+  const parsedBlobs = new Map();
+  const parseBlob = (oid, sha, path) => {
+    if (parsedBlobs.has(oid)) return parsedBlobs.get(oid);
     let snapshot;
     try {
-      snapshot = JSON.parse(contents);
+      snapshot = JSON.parse(runGit(["cat-file", "blob", oid]));
     } catch (e) {
       throw new Error(`cannot parse allowlist snapshot ${sha}:${path}: ${e.message}`);
     }
     if (!Array.isArray(snapshot?.entries)) {
       throw new Error(`allowlist snapshot ${sha}:${path} must have an "entries" array`);
     }
-    for (const entry of snapshot.entries) {
-      if (typeof entry?.ghsa !== "string") continue;
-      const id = entry.ghsa.toUpperCase();
-      if (!firstDays.has(id)) firstDays.set(id, day);
+    parsedBlobs.set(oid, snapshot);
+    return snapshot;
+  };
+
+  /** Whether an added candidate itself carries an allowlist's policy and entries. */
+  const looksLikeSnapshot = (oid) => {
+    try {
+      const snapshot = JSON.parse(runGit(["cat-file", "blob", oid]));
+      return (
+        snapshot !== null &&
+        typeof snapshot === "object" &&
+        !Array.isArray(snapshot) &&
+        Array.isArray(snapshot.entries) &&
+        snapshot.policy !== null &&
+        typeof snapshot.policy === "object" &&
+        !Array.isArray(snapshot.policy)
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const knownPaths = new Set([".github/audit-allowlist.json"]);
+  const snapshots = [];
+  let seenAny = false;
+  let previousHadPath = false;
+
+  // Newest first: a commit is visited before every parent, so the first commit
+  // that lacks a tracked path is the point where the path entered (or left).
+  for (let i = commits.length - 1; i >= 0; i--) {
+    const commit = commits[i];
+    let present = false;
+    for (const path of knownPaths) {
+      const row = presencesFor(path)[i];
+      if (!row) continue;
+      present = true;
+      snapshots.push({ sha: commit.sha, day: commit.day, path, oid: row.oid });
+    }
+
+    if (!present && seenAny && previousHadPath) {
+      const additions = new Set();
+      const linked = new Set();
+      for (const parent of commit.parents) {
+        const deleted = new Set();
+        const added = [];
+        for (const line of runGit(["diff-tree", "-r", "--no-renames", "--name-status", parent, commit.sha]).split("\n")) {
+          if (!line) continue;
+          const [status, file] = line.split("\t");
+          if (status === "D" && knownPaths.has(file)) deleted.add(file);
+          if (status === "A" && ALLOWLIST_PATH_PATTERN.test(file)) added.push(file);
+        }
+        for (const file of added) {
+          additions.add(file);
+          if (deleted.size) linked.add(file);
+        }
+      }
+      const unlinked = [...additions]
+        .filter((file) => !knownPaths.has(file) && !linked.has(file))
+        .filter((file) => {
+          const row = presencesFor(file)[i];
+          return row ? looksLikeSnapshot(row.oid) : false;
+        });
+      if (unlinked.length) {
+        throw new Error(
+          `allowlist lineage cannot be established: commit ${commit.sha} adds ${unlinked.join(", ")} ` +
+            "while no parent commit removes a tracked allowlist path in the same commit",
+        );
+      }
+      for (const file of additions) {
+        if (linked.has(file)) knownPaths.add(file);
+      }
+      for (const path of knownPaths) {
+        const row = presencesFor(path)[i];
+        if (!row) continue;
+        present = true;
+        snapshots.push({ sha: commit.sha, day: commit.day, path, oid: row.oid });
+      }
+    }
+
+    if (present) {
+      seenAny = true;
+      previousHadPath = true;
+    } else {
+      previousHadPath = false;
     }
   }
-  return firstDays;
-}
 
-function utcDayFromTimestamp(value) {
-  if (!isCalendarDate(value.slice(0, 10))) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  const day = date.toISOString().slice(0, 10);
-  return isCalendarDate(day) ? day : null;
+  const firstDays = new Map();
+  for (const { sha, day, path, oid } of snapshots) {
+    for (const entry of parseBlob(oid, sha, path).entries) {
+      if (typeof entry?.ghsa !== "string") continue;
+      const id = entry.ghsa.toUpperCase();
+      const previous = firstDays.get(id);
+      if (previous === undefined || day < previous) firstDays.set(id, day);
+    }
+  }
+  firstDays.cost = {
+    commitsWalked: commits.length,
+    commitsWithAllowlist: new Set(snapshots.map((snapshot) => snapshot.sha)).size,
+    blobsRead: parsedBlobs.size,
+    commitLimit: MAX_ALLOWLIST_HISTORY_COMMITS,
+  };
+  return firstDays;
 }
 
 /**
@@ -1582,6 +1726,14 @@ async function main() {
   }
   try {
     firstDays = readAllowlistHistory(REPO_ROOT);
+    if (EXPLAIN) {
+      const cost = firstDays.cost;
+      console.log(
+        `\n  Allowlist history: walked ${cost.commitsWalked} ancestor commits ` +
+          `(${cost.commitsWithAllowlist} contain a tracked allowlist path; ${cost.blobsRead} distinct blobs read; ` +
+          `limit ${cost.commitLimit}).\n`,
+      );
+    }
   } catch (e) {
     console.error(`\n  DEPENDENCY AUDIT GATE: FAILED TO READ ALLOWLIST HISTORY\n\n  ${e.message}\n`);
     console.error(
