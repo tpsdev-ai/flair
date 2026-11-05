@@ -2,18 +2,17 @@
  * restore-soul-refusal-inventory-2953.test.ts — the Soul write-refusal
  * inventory behind `flair restore --replace` (flair#2953).
  *
- * Threat model: detect refusal drift in forms the TypeScript checker can bind
- * statically, within the relative-import closure of resources/Soul.ts. Prove
- * JSON and Response against TypeScript's global library bindings, and
- * globalThis against TypeScript's intrinsic globalThis symbol. A trusted value
- * or proven alias may occur only as the receiver or callee of a recognised
- * member call or new, the right operand of instanceof, the operand of typeof,
- * or the initializer of an alias binding the resolver tracks. Named imports
- * and exports must be followed by the resolver; alias uses obey this whitelist.
- * Every other use is unresolved, with file:line:column.
- * Follow literal consts and aliases to a bounded fixpoint; fail closed
- * on unsupported forms. eval/Function are out of scope. #2970 replaces this inventory
- * with a server dry run.
+ * Within the relative-import closure of resources/Soul.ts, resolve literal
+ * refusal codes, parameter-forwarding helpers and status-taking builders.
+ * Prove JSON/Response against TypeScript library symbols and globalThis against
+ * its intrinsic symbol. A built-in or proven alias may occur only as receiver
+ * or callee of a recognised member call or new, the right operand of instanceof,
+ * the operand of typeof, or an alias initializer the resolver tracks. Imports
+ * and exports must be followed; alias uses obey this rule. A refusal helper may
+ * occur only as the callee of a direct call the classifier resolves, its own
+ * declaration, or an import/re-export binding the resolver follows. Every other
+ * built-in or refusal-helper use is unresolved with file:line:column and reason.
+ * eval/Function are out of scope. #2970 replaces this inventory with a server dry run.
  *
  * TypeScript's scanner accounts for lexical Response tokens independently of
  * the classifier. Unresolved sites require file:line:column and a reason.
@@ -259,7 +258,9 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   const readFile = host.readFile.bind(host);
   host.readFile = (file) => sources.get(relative(root, resolve(file)))?.text ?? readFile(file);
   host.resolveModuleNames = (names, fromFile) => names.map((name) => {
-    const target = resolveRelative(relative(root, fromFile), name);
+    const candidate = relative(root, resolve(dirname(fromFile), name)).replace(/\.js$/, ".ts");
+    const target = sources.has(candidate) ? candidate : sources.has(`${candidate}.ts`) ? `${candidate}.ts` :
+      resolveRelative(relative(root, fromFile), name);
     return target && sources.has(target) ? { resolvedFileName: join(root, target), extension: ts.Extension.Ts } : undefined;
   });
   const program = ts.createProgram([...sources.keys()].map((file) => join(root, file)), options, host);
@@ -302,7 +303,6 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     const symbol = symbolAt(node);
     return symbol ? provenAliases.get(symbol) ?? null : null;
   };
-  const importAliases = new Map<string, Map<string, { file: string; name: string }>>();
   const responseAliases = new Map<string, Map<string, ResponseAlias>>();
   const exportedAliases = new Map<string, Map<string, ResponseAlias>>();
   const aliasConsts = new Map<string, Array<{ name: string; initializer: ts.Expression; binding: ts.Identifier }>>();
@@ -314,10 +314,10 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   const aliasStarExports = new Map<string, string[]>();
   const aliasExportDeclarations = new Map<string, Set<string>>();
   const functions: FnRecord[] = [];
-  const functionsByName = new Map<string, FnRecord>();
+  const functionsBySymbol = new Map<ts.Symbol, FnRecord>();
+  const functionsByDeclaration = new Map<ts.Declaration, FnRecord>();
 
   for (const [file, source] of sources) {
-    const aliases = new Map<string, { file: string; name: string }>();
     const consts: Array<{ name: string; initializer: ts.Expression; binding: ts.Identifier }> = [];
     const assignments: Array<{ name: string; initializer: ts.Expression; binding: ts.Identifier }> = [];
     const destructured: Array<{ name: string; property: string; initializer: ts.Expression; fallback?: ts.Expression; binding: ts.Identifier }> = [];
@@ -333,7 +333,6 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
         if (target && bindings && ts.isNamedImports(bindings)) {
           for (const element of bindings.elements) {
             const importedName = (element.propertyName ?? element.name).text;
-            aliases.set(element.name.text, { file: target, name: importedName });
             imports.push({ localName: element.name.text, importedName, targetFile: target });
           }
         }
@@ -403,7 +402,6 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
       ts.forEachChild(node, collectAssignments);
     };
     collectAssignments(source);
-    importAliases.set(file, aliases);
     responseAliases.set(file, new Map());
     exportedAliases.set(file, new Map());
     aliasConsts.set(file, consts);
@@ -415,7 +413,18 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     aliasStarExports.set(file, starExports);
     aliasExportDeclarations.set(file, exportDeclarations);
   }
-  for (const record of functions) if (!functionsByName.has(record.key)) functionsByName.set(record.key, record);
+  const helperCandidates = [...functions];
+  for (const [file, source] of sources) {
+    const visit = (node: ts.Node): void => {
+      if ((ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node) ||
+           ts.isMethodDeclaration(node)) && !helperCandidates.some((record) => record.fn === node)) {
+        const name = node.name?.getText(source) ?? (ts.isVariableDeclaration(node.parent) ? node.parent.name.getText(source) : "anonymous");
+        helperCandidates.push({ file, name, key: `${file}:${name}@${node.getStart(source)}`, fn: node });
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
 
   const unwrapAliasExpression = (expression: ts.Expression): ts.Expression => {
     let current = expression;
@@ -426,6 +435,31 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     }
     return current;
   };
+  const helperDeclarations = new Set<ts.Node>();
+  for (const record of helperCandidates) {
+    let current: ts.Node = record.fn;
+    while (ts.isExpression(current.parent) && unwrapAliasExpression(current.parent) === record.fn) current = current.parent;
+    const parent = current.parent;
+    const bindings = [record.fn.name,
+      ts.isVariableDeclaration(parent) || ts.isPropertyAssignment(parent) || ts.isPropertyDeclaration(parent) ? parent.name : undefined];
+    for (const binding of bindings) {
+      const symbol = binding ? symbolAt(binding) : undefined;
+      if (symbol && binding) {
+        functionsBySymbol.set(symbol, record);
+        for (const declaration of symbol.declarations ?? []) functionsByDeclaration.set(declaration, record);
+        helperDeclarations.add(binding);
+      }
+    }
+    const moduleSymbol = symbolAt(record.fn.getSourceFile());
+    if (moduleSymbol) {
+      for (const exported of checker.getExportsOfModule(moduleSymbol)) {
+        const target = exported.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(exported) : exported;
+        const declaration = target.valueDeclaration;
+        if (declaration === record.fn || (declaration && ts.isExportAssignment(declaration) &&
+            unwrapAliasExpression(declaration.expression) === record.fn)) functionsBySymbol.set(target, record);
+      }
+    }
+  }
   type SelectedProperty = { kind: "absent" } | { kind: "value"; value: ts.Expression } | { kind: "unknown" };
   const selectedProperty = (expression: ts.Expression, property: string): SelectedProperty => {
     const value = unwrapAliasExpression(expression);
@@ -601,12 +635,14 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     throw new Error(`alias resolution did not converge within ${ALIAS_PASS_BOUND} passes: ${lastChangedModule}`);
   }
 
-  const resolveFunction = (file: string, name: string): FnRecord | null => {
-    const local = functionsByName.get(`${file}:${name}`);
-    if (local) return local;
-    const alias = importAliases.get(file)?.get(name);
-    return alias ? (functionsByName.get(`${alias.file}:${alias.name}`) ?? null) : null;
+  const helperForSymbol = (symbol: ts.Symbol | undefined): FnRecord | null => {
+    if (!symbol) return null;
+    return functionsBySymbol.get(symbol) ??
+      symbol.declarations?.map((declaration) => functionsByDeclaration.get(declaration)).find((record) => record !== undefined) ?? null;
   };
+  const helperAt = (node: ts.Node): FnRecord | null => helperForSymbol(symbolAt(node));
+  const resolveFunction = (expression: ts.Expression): FnRecord | null =>
+    ts.isIdentifier(expression) ? helperAt(expression) : null;
 
   const branches = (expression: ts.Expression): ts.Expression[] => {
     if (ts.isConditionalExpression(expression)) return [expression.whenTrue, expression.whenFalse];
@@ -749,26 +785,26 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   };
 
   const info = new Map<string, FnInfo>();
-  for (const record of functions) info.set(record.key, describe(record));
+  for (const record of helperCandidates) info.set(record.key, describe(record));
 
   // A message parameter is a sink when it reaches a refusal, directly or through
   // another sink function (stampAttribution forwards its forbiddenMessage to FORBIDDEN).
   const sinkParameter = new Map<string, string>();
-  for (const record of functions) {
+  for (const record of helperCandidates) {
     const described = info.get(record.key)!;
     if (described.messageParam) sinkParameter.set(record.key, described.messageParam);
   }
   let changed = true;
   while (changed) {
     changed = false;
-    for (const record of functions) {
+    for (const record of helperCandidates) {
       if (sinkParameter.has(record.key)) continue;
       const parameters = parametersOf(record.fn);
       let forwarded: string | null = null;
       const visit = (node: ts.Node): void => {
         if (forwarded) return;
         if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression)) return;
-        const target = resolveFunction(record.file, node.expression.text);
+        const target = resolveFunction(node.expression);
         const sink = target ? sinkParameter.get(target.key) : null;
         if (!target || !sink) return;
         let index = -1;
@@ -815,7 +851,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
         ts.forEachChild(node, visit);
         return;
       }
-      const target = resolveFunction(file, node.expression.text);
+      const target = resolveFunction(node.expression);
       const sink = target ? sinkParameter.get(target.key) : null;
       if (!target || !sink) {
         ts.forEachChild(node, visit);
@@ -1072,12 +1108,12 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   const notLexical = [...accounted.keys()].filter((key) => !lexical.has(key)).sort();
 
   // (c) Calls to a status-taking builder (`jsonResponse(400, { error: … })`).
-  for (const record of functions) {
+  for (const record of helperCandidates) {
     const statusParam = info.get(record.key)!.statusParam;
     if (!statusParam) continue;
     for (const [file, source] of sources) {
       const visit = (node: ts.Node): void => {
-        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && resolveFunction(file, node.expression.text)?.key === record.key) {
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && resolveFunction(node.expression)?.key === record.key) {
           let index = -1;
           record.fn.parameters.forEach((parameter, position) => {
             if (ts.isIdentifier(parameter.name) && parameter.name.text === statusParam) index = position;
@@ -1101,6 +1137,73 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     }
   }
 
+  const refusalHelpers = new Set<FnRecord>();
+  for (const record of helperCandidates) {
+    const described = info.get(record.key)!;
+    if (sinkParameter.has(record.key) || described.statusParam) refusalHelpers.add(record);
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+        const callee = responseCallee(record.file, node.expression, isResponseReferenceName, aliasAt);
+        const shape = callee ? responseShape(record.file, node, callee) : null;
+        if (shape && (shape.statuses === null || shape.statuses.some((status) => status >= 400))) refusalHelpers.add(record);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(bodyOf(record.fn));
+  }
+  let helpersChanged = true;
+  while (helpersChanged) {
+    helpersChanged = false;
+    for (const record of helperCandidates) {
+      if (refusalHelpers.has(record)) continue;
+      const visit = (node: ts.Node): void => {
+        if (ts.isCallExpression(node)) {
+          const target = resolveFunction(node.expression);
+          if (target && refusalHelpers.has(target)) {
+            refusalHelpers.add(record);
+            helpersChanged = true;
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(bodyOf(record.fn));
+    }
+  }
+  const exportsRefusalHelper = (module: ts.Symbol, seen = new Set<ts.Symbol>()): boolean => {
+    if (seen.has(module)) return false;
+    seen.add(module);
+    return checker.getExportsOfModule(module).some((exported) => {
+      const symbol = exported.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(exported) : exported;
+      const target = helperForSymbol(symbol);
+      return !!(target && refusalHelpers.has(target)) ||
+        !!(symbol.flags & ts.SymbolFlags.Module) && exportsRefusalHelper(symbol, seen);
+    });
+  };
+  for (const [file, source] of sources) {
+    const visit = (node: ts.Node): void => {
+      if (ts.isNamespaceImport(node)) {
+        const module = symbolAt(node.name);
+        if (module && exportsRefusalHelper(module)) {
+          recordUnresolved(file, node.name, `unsupported refusal-helper use: ${node.name.text} in NamespaceImport`);
+        }
+      }
+      if (ts.isIdentifier(node) || ts.isStringLiteral(node)) {
+        const target = helperAt(node);
+        if (target && refusalHelpers.has(target)) {
+          const parent = node.parent;
+          const declaration = helperDeclarations.has(node);
+          const binding = ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isExportSpecifier(parent);
+          const directCall = ts.isCallExpression(parent) && parent.expression === node && resolveFunction(node) === target;
+          if (!declaration && !binding && !directCall) {
+            recordUnresolved(file, node, `unsupported refusal-helper use: ${node.getText(source)} in ${ts.SyntaxKind[parent.kind]}`);
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+
   // (d) A function that forwards one of its parameters into a callee the
   // inventory cannot resolve is opaque.
   const opaque = new Map<string, string>();
@@ -1112,7 +1215,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
         const callee = node.expression;
         // An identifier that names a function in the closure is resolved; a
         // method call, a computed callee and any other expression are not.
-        const resolved = ts.isIdentifier(callee) && resolveFunction(record.file, callee.text) !== null;
+        const resolved = ts.isIdentifier(callee) && resolveFunction(callee) !== null;
         if (!resolved) {
           for (const argument of node.arguments ?? []) {
             const forwardedArgument = forwardedIdentifier(argument);
@@ -2044,4 +2147,144 @@ test.each([
   const inventory = buildInventory(new Map([["fixture.ts", source]]));
   expect([...inventory.codes]).toEqual([]);
   expect(inventory.unresolved.size).toBeGreaterThan(0);
+});
+
+
+test.each([
+  ['const deny = FORBIDDEN; return deny("x_new_rule");', 14, "VariableDeclaration"],
+  ['const h = { FORBIDDEN }; h.FORBIDDEN("x");', 13, "ShorthandPropertyAssignment"],
+  ['[FORBIDDEN][0]("x");', 2, "ArrayLiteralExpression"],
+  ['(cond ? FORBIDDEN : other)("x");', 9, "ConditionalExpression"],
+  ['wrap(FORBIDDEN);', 6, "CallExpression"],
+  ['const h = { helper: FORBIDDEN };', 21, "PropertyAssignment"],
+  ['const h = { ...FORBIDDEN };', 16, "SpreadAssignment"],
+  ['const h = [...FORBIDDEN];', 15, "SpreadElement"],
+  ['return FORBIDDEN;', 8, "ReturnStatement"],
+  ['deny = FORBIDDEN;', 8, "BinaryExpression"],
+  ['FORBIDDEN = other;', 1, "BinaryExpression"],
+  ['h[FORBIDDEN]("x");', 3, "ElementAccessExpression"],
+  ['FORBIDDEN["call"](null, "x");', 1, "ElementAccessExpression"],
+  ['FORBIDDEN || other;', 1, "BinaryExpression"],
+  ['function f(deny = FORBIDDEN) {}', 19, "Parameter"],
+  ['typeof FORBIDDEN;', 8, "TypeOfExpression"],
+  ['const h: typeof FORBIDDEN = other;', 17, "TypeQuery"],
+])("rejects a refusal-helper use: %s", (expression, column, parentKind) => {
+  const file = "fixture.ts";
+  const source = ts.createSourceFile(file,
+    'function FORBIDDEN(msg: string) { return Response.json({ error: msg }, { status: 403 }); }\n' + expression,
+    ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([[file, source]]));
+  expect(inventory.unresolved.get(`${file}:2:${column}`)).toBe(
+    `unsupported refusal-helper use: FORBIDDEN in ${parentKind}`);
+});
+
+test.each([
+  ['const deny = outer;', "outer"],
+  ['const deny = fixed;', "fixed"],
+  ['const deny = builder;', "builder"],
+  ['const deny = nested;', "nested"],
+  ['const deny = arrow;', "arrow"],
+])("checks a helper the classifier resolves: %s", (expression, helper) => {
+  const file = "fixture.ts";
+  const source = ts.createSourceFile(file, `
+function FORBIDDEN(msg: string) { return Response.json({ error: msg }, { status: 403 }); }
+function outer(msg: string) { return FORBIDDEN(msg); }
+function fixed() { return FORBIDDEN("existing_rule"); }
+function builder(status: number, body: any) { return Response.json(body, { status }); }
+function container() { function nested(msg: string) { return FORBIDDEN(msg); } ${expression.includes("nested") ? expression : ""} }
+const arrow = (msg: string) => FORBIDDEN(msg);
+${expression.includes("nested") ? "" : expression}`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([[file, source]]));
+  const at = siteIn(source, `${helper};`);
+  expect(inventory.unresolved.get(at)).toBe(`unsupported refusal-helper use: ${helper} in VariableDeclaration`);
+});
+
+test("distinguishes a shadowed helper and an object key from the refusal helper", () => {
+  const file = "fixture.ts";
+  const source = ts.createSourceFile(file, `
+function FORBIDDEN(msg: string) { return Response.json({ error: msg }, { status: 403 }); }
+FORBIDDEN("existing_rule");
+function local(FORBIDDEN: unknown) { return [FORBIDDEN]; }
+const h = { FORBIDDEN: other };
+`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([[file, source]]));
+  expect([...inventory.codes.keys()]).toEqual(["existing_rule"]);
+  expect([...inventory.unresolved.values()].filter((detail) => detail.startsWith("unsupported refusal-helper use:"))).toEqual([]);
+});
+
+test.each([
+  'export { FORBIDDEN as renamed } from "./helper.js";',
+  'import { FORBIDDEN as local } from "./helper.js"; export { local as renamed };',
+  'export * from "./helper.js";',
+])("resolves a refusal helper through a re-export: %s", (reExport) => {
+  const files = new Map([
+    ["helper.ts", 'export function FORBIDDEN(msg: string) { return Response.json({ error: msg }, { status: 403 }); }'],
+    ["bridge.ts", reExport],
+    ["importer.ts", `import { ${reExport.includes("export *") ? "FORBIDDEN" : "renamed"} as deny } from "./bridge.js";\ndeny("x_new_rule");`],
+  ]);
+  const sources = new Map([...files].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
+  const inventory = buildInventory(sources);
+  expect(inventory.codes.get("x_new_rule")).toBe("importer.ts:2");
+  expect(inventory.unresolved.has("importer.ts:2:1")).toBe(false);
+  expect([...inventory.unresolved.values()].filter((detail) => detail.startsWith("unsupported refusal-helper use:"))).toEqual([]);
+});
+
+test("rejects an imported re-exported helper in an alias initializer", () => {
+  const files = new Map([
+    ["helper.ts", 'export function FORBIDDEN(msg: string) { return Response.json({ error: msg }, { status: 403 }); }'],
+    ["bridge.ts", 'export { FORBIDDEN as renamed } from "./helper.js";'],
+    ["importer.ts", 'import { renamed } from "./bridge.js";\nconst deny = renamed; deny("x_new_rule");'],
+  ]);
+  const sources = new Map([...files].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
+  const inventory = buildInventory(sources);
+  expect(inventory.unresolved.get("importer.ts:2:14")).toBe("unsupported refusal-helper use: renamed in VariableDeclaration");
+});
+
+
+test.each([
+  'const FORBIDDEN = function named(msg: string) { return Response.json({ error: msg }, { status: 403 }); };',
+  'const FORBIDDEN = function (msg: string) { return Response.json({ error: msg }, { status: 403 }); };',
+  'const FORBIDDEN = ((msg: string) => Response.json({ error: msg }, { status: 403 }));',
+])("checks a function-expression helper: %s", (declaration) => {
+  const file = "fixture.ts";
+  const source = ts.createSourceFile(file, `${declaration}\nFORBIDDEN("existing_rule"); const deny = FORBIDDEN;`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([[file, source]]));
+  expect(inventory.codes.get("existing_rule")).toBe("fixture.ts:2");
+  expect(inventory.unresolved.get(siteIn(source, "FORBIDDEN;"))).toBe("unsupported refusal-helper use: FORBIDDEN in VariableDeclaration");
+});
+
+test.each([
+  'export default function (msg: string) { return Response.json({ error: msg }, { status: 403 }); }',
+  'export default (msg: string) => Response.json({ error: msg }, { status: 403 });',
+])("resolves a default-exported helper: %s", (declaration) => {
+  const files = new Map([
+    ["helper.ts", declaration],
+    ["importer.ts", 'import deny from "./helper.js";\ndeny("x_new_rule"); const alias = deny;'],
+  ]);
+  const sources = new Map([...files].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
+  const inventory = buildInventory(sources);
+  expect(inventory.codes.get("x_new_rule")).toBe("importer.ts:2");
+  expect(inventory.unresolved.get("importer.ts:2:35")).toBe("unsupported refusal-helper use: deny in VariableDeclaration");
+});
+
+
+test.each([
+  'const h = { refuse(msg: string) { return Response.json({ error: msg }, { status: 403 }); } };',
+  'const h = { refuse: (msg: string) => Response.json({ error: msg }, { status: 403 }) };',
+])("rejects a helper property access: %s", (declaration) => {
+  const file = "fixture.ts";
+  const source = ts.createSourceFile(file, `${declaration}\nconst deny = h.refuse;`, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([[file, source]]));
+  expect(inventory.unresolved.get("fixture.ts:2:16")).toBe("unsupported refusal-helper use: refuse in PropertyAccessExpression");
+});
+
+
+test("rejects a namespace import containing a refusal helper", () => {
+  const files = new Map([
+    ["helper.ts", 'export function FORBIDDEN(msg: string) { return Response.json({ error: msg }, { status: 403 }); }'],
+    ["importer.ts", 'import * as helpers from "./helper.js";\nconst { FORBIDDEN: deny } = helpers; deny("x_new_rule");'],
+  ]);
+  const sources = new Map([...files].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
+  const inventory = buildInventory(sources);
+  expect(inventory.unresolved.get("importer.ts:1:13")).toBe("unsupported refusal-helper use: helpers in NamespaceImport");
 });
