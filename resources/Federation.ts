@@ -1,7 +1,9 @@
+import { normalizeEmptyEmbedding } from "./memory-embedding-value.js";
 import { Resource, databases, server } from "harper";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { allowAdmin } from "./agent-auth.js";
+import { configuredAdminAgentIds } from "./agent-admin.js";
 import {
   canonicalize,
   signBody,
@@ -29,28 +31,52 @@ import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declar
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { verifyFederationRequestBody } from "./replay-store.js";
-import { CommittedRowChanged, confirmCommittedRow, writeBackCommittedRow, WriteBackConflictError } from "./write-back.js";
+import { CommittedRowChanged, confirmCommittedRow, verifyCommittedFields, withoutHarperManagedFields, writeBackCommittedRow, WriteBackConflictError } from "./write-back.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
-import { txnPausePoint } from "./txn-pause-point.js";
+import { txnFault, txnPausePoint } from "./txn-pause-point.js";
+import { withMemoryWriteLockOnce, writeOutcomeUnknownResponse } from "./memory-write-lock.js";
+import { isDeepStrictEqual } from "node:util";
+import { retryRowProblem } from "./federation-retry-lib.js";
 import {
   classifyRecord,
   reconstructRecordVerifyBody,
   checkPrincipalEntitlement,
   inboundChangesExistingPrincipalStatus,
+  inboundChangesExistingPendingKey,
+  agentAdminIdCreateRefusal,
+  agentIdentityRefusal,
+  keepReceiverAgentAuthority,
   type FederationSyncTable,
+  type SkipReason,
 } from "./federation-classify.js";
+import {
+  mergePresenceReceipt,
+  presenceHomeBindingReason,
+  presenceReceiveEnabled,
+  validatePresenceReceipt,
+} from "./presence-receipt.js";
 export {
   classifyRecord,
   reconstructRecordVerifyBody,
   checkPrincipalEntitlement,
   inboundChangesExistingPrincipalStatus,
+  inboundChangesExistingPendingKey,
   recordSignatureVersion,
   PRINCIPAL_OWNING_TABLES,
   FEDERATION_TABLE_POLICY,
   FEDERATION_SYNC_TABLES,
+  SKIP_REASON_CLASS,
+  SKIP_REASONS,
+  RETRYABLE_SKIP_REASONS,
+  isSkipReason,
 } from "./federation-classify.js";
-export type { SkipReason, ClassifyResult, FederationSyncTable } from "./federation-classify.js";
+export type {
+  SkipReason,
+  RetryableSkipReason,
+  ClassifyResult,
+  FederationSyncTable,
+} from "./federation-classify.js";
 
 // Federation anti-replay: FederationPair and FederationSync both verify through
 // verifyFederationRequestBody (resources/replay-store.ts), which claims each
@@ -202,9 +228,7 @@ export function mergeRecord(local: Record<string, any> | null, remote: SyncRecor
  * cosine that foreign vector = mixed-space garbage — exactly the failure the
  * guard exists to kill. Trip the latch here.
  *
- * `noteWriteStamp` no-ops for a current/bare stamp (a self-originated or
- * same-space sync) and for a non-Memory table (no `embeddingModel`), so only a
- * genuinely foreign Memory sync trips it. Kept as a note-ONLY helper — the
+ * Kept as a note-ONLY helper — the
  * merge's row write stays INLINE at the call site (every synced table's merge
  * through the shared write-back helper, write-back.ts, flair#2441/flair#2450),
  * so the raw-writer coverage gates
@@ -216,9 +240,10 @@ export function mergeRecord(local: Record<string, any> | null, remote: SyncRecor
 export function noteFederationMergedMemory(
   recordTable: string,
   mergedData: { embeddingModel?: unknown },
+  previous?: { embedding?: unknown; embeddingModel?: unknown } | null,
 ): void {
   if (recordTable === "Memory") {
-    noteWriteStamp(mergedData.embeddingModel as string | null | undefined);
+    noteWriteStamp(mergedData.embeddingModel as string | null | undefined, previous);
   }
 }
 
@@ -633,12 +658,15 @@ export class FederationPair extends Resource {
         const tokenRepairPause = txnPausePoint("federation-pair-repair-token-pre");
         if (tokenRepairPause) await tokenRepairPause;
         let refusal: Response | undefined;
-        let pairedAsFirst = false;
+        let stagedFirstPeer: StagedPairPeer | undefined;
+        let stagedPeer: StagedPairPeer | undefined;
+        let stagedToken: StagedPairingToken | undefined;
         try {
           refusal = await withPairingTokenClaim(pairingToken, () =>
             withOwnedTransaction(ctx, async (owned) => {
               const claim = await consumePairingToken(pairingToken, instanceId, owned);
               if (claim.kind !== "consumed") return claim;
+              stagedToken = claim;
               // The Peer re-read sees a change committed before the owned
               // transaction's first read (its token read); a change committed
               // after that read is not covered by this re-read. A pinned key that
@@ -652,19 +680,31 @@ export class FederationPair extends Resource {
               // the valid token just consumed makes it a first-time pair. Write the
               // row the first-pair path writes, built from the verified request —
               // no field of the deleted row survives.
-              pairedAsFirst = !current;
+              if (!current) stagedFirstPeer = { ...firstPairPeerRow(instanceId, publicKey, role, endpoint), pairAttemptWriteId: claim.pairAttemptWriteId };
               try {
-                await writePeerRow(owned, current ? rePairedRow(current) : firstPairPeerRow(instanceId, publicKey, role, endpoint));
+                // The marker is this attempt's last-writer id for the field (see
+                // StagedPairPeer): a field-level competitor merged in this window
+                // can leave it on the committed row alongside its own fields.
+                stagedPeer = current ? { ...rePairedRow(current), pairAttemptWriteId: claim.pairAttemptWriteId } : stagedFirstPeer;
+                await writePeerRow(owned, stagedPeer);
               } catch (err) {
                 // Rethrow so the owned transaction ABORTS: the consume rolls back
                 // with the peer write (both commit or neither does). Tagged so the
                 // caller answers a named refusal, not a bare 500.
                 throw new PeerWriteFailedError(err);
               }
+              if (stagedFirstPeer) await confirmFirstPairBeforeCommit(instanceId);
+              // Test-only: inert unless the fault-injection env opt-in is set and
+              // armed. Holds the existing-Peer re-pair after its Peer write and
+              // before the owned transaction commits, so a competing write to
+              // the same Peer can commit in between (flair#2691).
+              const beforeCommit = txnPausePoint("federation-pair-repair-token-before-commit");
+              if (beforeCommit) await beforeCommit;
               return claim;
             }),
           );
         } catch (err) {
+          if (err instanceof CommittedRowChanged) return firstPairRowAppearedRefusal();
           if (err instanceof PeerWriteFailedError) {
             const cause: any = err.cause;
             console.error(
@@ -688,8 +728,12 @@ export class FederationPair extends Resource {
           throw err;
         }
         if (refusal) return refusal;
-        // Paired as a first-time pair: attempt bootstrap-user cleanup.
-        if (pairedAsFirst) await dropPairBootstrapUser(pairingToken, ctx);
+        const commitPause = txnPausePoint("federation-pair-repair-token-commit");
+        if (commitPause) await commitPause;
+        if (!stagedPeer || !stagedToken) return firstPairCommitUnconfirmedRefusal();
+        const unconfirmed = await confirmTokenPairAfterCommit(pairingToken, stagedPeer, stagedToken, !!stagedFirstPeer);
+        if (unconfirmed) return unconfirmed;
+        if (stagedFirstPeer) await dropPairBootstrapUser(pairingToken, ctx);
       }
 
       // The NO-token re-pair's peer write: the token path wrote the row inside the
@@ -708,15 +752,29 @@ export class FederationPair extends Resource {
       if (repairPause) await repairPause;
       if (!pairingToken) {
         const ctx = (this as any).getContext?.() ?? {};
+        let stagedPeer: StagedPairPeer | undefined;
         const refusal = await withOwnedTransaction(ctx, async (owned) => {
           const current = await (databases as any).flair.Peer.get(instanceId, owned);
           if (!current) return pairingTokenRequiredRefusal();
           if (current.publicKey !== publicKey) return publicKeyMismatchRefusal();
           if (current.status === "revoked") return peerRevokedRefusal();
-          await writePeerRow(owned, rePairedRow(current));
+          // Same last-writer marker as the token route (see StagedPairPeer).
+          stagedPeer = { ...rePairedRow(current), pairAttemptWriteId: randomUUID() };
+          await writePeerRow(owned, stagedPeer);
+          // Test-only: inert unless the fault-injection env opt-in is set and
+          // armed. Holds the no-token re-pair after its Peer write and before
+          // the owned transaction commits, so a competing write to the same
+          // Peer can commit in between (flair#2691).
+          const beforeCommit = txnPausePoint("federation-pair-repair-before-commit");
+          if (beforeCommit) await beforeCommit;
           return undefined;
         });
         if (refusal) return refusal;
+        const commitPause = txnPausePoint("federation-pair-repair-commit");
+        if (commitPause) await commitPause;
+        // The staged row spreads the re-read row, so the compared fields are its
+        // application fields: Harper's own timestamps are left out.
+        if (!stagedPeer || await verifyCommittedFields((databases as any).flair.Peer, instanceId, stagedPeer, withoutHarperManagedFields(stagedPeer)) !== "shown") return writeOutcomeUnknownResponse();
       }
     } else {
       // New peer — require a valid pairing token in the request body.
@@ -750,27 +808,17 @@ export class FederationPair extends Resource {
       const firstPairPause = txnPausePoint("federation-pair-first-pre");
       if (firstPairPause) await firstPairPause;
       let refusal: Response | undefined;
+      let stagedFirstPeer: StagedPairPeer | undefined;
+      let stagedToken: StagedPairingToken | undefined;
       try {
         refusal = await withPairingTokenClaim(pairingToken, () =>
           withOwnedTransaction(ctx, async (owned) => {
             const claim = await consumePairingToken(pairingToken, instanceId, owned);
             if (claim.kind !== "consumed") return claim;
-            await (databases as any).flair.Peer.put(firstPairPeerRow(instanceId, publicKey, role, endpoint), owned);
-            // The pre-transaction read above returned no Peer row, and this first
-            // pair has now staged one. Confirm against COMMITTED state that the row
-            // is still absent (confirmCommittedRow, resources/write-back.ts): its
-            // read is an explicit fresh context, so it sees the Peer row present in
-            // committed state when it runs, including one committed after this
-            // transaction's token read (which pins this transaction's own read
-            // snapshot). It reports presence, not when the row was committed, and a
-            // row deleted again before it runs is not seen. A row there is not the
-            // one this request staged, so the request must not answer `paired` for
-            // it: the throw aborts the owned transaction, the staged consume and
-            // Peer write are discarded, and the caller answers a named refusal with
-            // the token left unconsumed. A change committed after this confirm read
-            // and before the commit is not seen by it: Harper has no compare-and-set
-            // on a table write.
-            await confirmCommittedRow((databases as any).flair.Peer, instanceId, (committed) => committed == null);
+            stagedToken = claim;
+            stagedFirstPeer = { ...firstPairPeerRow(instanceId, publicKey, role, endpoint), pairAttemptWriteId: claim.pairAttemptWriteId };
+            await (databases as any).flair.Peer.put(stagedFirstPeer, owned);
+            await confirmFirstPairBeforeCommit(instanceId);
             return claim;
           }),
         );
@@ -779,6 +827,9 @@ export class FederationPair extends Resource {
         throw err;
       }
       if (refusal) return refusal;
+      if (!stagedFirstPeer || !stagedToken) return firstPairReadBackUnconfirmedRefusal();
+      const unconfirmed = await confirmTokenPairAfterCommit(pairingToken, stagedFirstPeer, stagedToken);
+      if (unconfirmed) return unconfirmed;
 
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
       // Pause AFTER the token lock released (and the consume is committed) but
@@ -811,7 +862,7 @@ export class FederationPair extends Resource {
 
 /** One pairing's one-time token claim: the check-then-consume of a token (FederationPair.post runs it under the token's lock). */
 type PairingTokenClaim =
-  | { kind: "consumed" }
+  | ({ kind: "consumed" } & StagedPairingToken)
   | { kind: "refused" }
   | { kind: "bootstrap_mismatch" };
 
@@ -855,6 +906,48 @@ function firstPairPeerRow(instanceId: string, publicKey: string, role: unknown, 
   };
 }
 
+type StagedPairingToken = { consumedBy: string; consumedAt: string; pairAttemptWriteId: string };
+
+/**
+ * A staged Peer row. `pairAttemptWriteId` is the id of the pairing attempt that
+ * last wrote this field: a LAST-WRITER marker for the field, not a
+ * last-confirmed marker for the row. Harper merges a field-level competing
+ * update with a staged write that commits around it, so a refused attempt's id
+ * can remain on a row whose other fields are the competitor's. The post-commit
+ * check in confirmTokenPairAfterCommit reads it as the id of this attempt's
+ * staged write; its presence does not report the attempt as confirmed.
+ */
+type StagedPairPeer = { id: string; pairAttemptWriteId: string } & Record<string, unknown>;
+
+async function confirmFirstPairBeforeCommit(instanceId: string): Promise<void> {
+  await confirmCommittedRow((databases as any).flair.Peer, instanceId, (committed) => committed == null);
+  const commitPause = txnPausePoint("federation-pair-first-commit");
+  if (commitPause) await commitPause;
+}
+
+async function confirmTokenPairAfterCommit(pairingToken: string, stagedPeer: StagedPairPeer, stagedToken: StagedPairingToken, firstPair = true): Promise<Response | undefined> {
+  if (firstPair) {
+    const readBackPause = txnPausePoint("federation-pair-first-read-back");
+    if (readBackPause) await readBackPause;
+  }
+  const unreadableRefusal = firstPair ? firstPairReadBackUnconfirmedRefusal : firstPairCommitUnconfirmedRefusal;
+  // A re-pair's staged row spreads the re-read row, so its compared fields are
+  // its application fields (Harper's own timestamps left out); a first pair's
+  // staged row is built from the request and is compared whole.
+  const peerFields = firstPair ? stagedPeer : withoutHarperManagedFields(stagedPeer);
+  const peerVerdict = await verifyCommittedFields((databases as any).flair.Peer, stagedPeer.id, stagedPeer, peerFields);
+  let tokenRow: any;
+  try {
+    tokenRow = await (databases as any).flair.PairingToken.get(pairingToken, {});
+  } catch {
+    return unreadableRefusal();
+  }
+  if (peerVerdict === "unreadable") return unreadableRefusal();
+  if (peerVerdict !== "shown" || tokenRow?.pairAttemptWriteId !== stagedToken.pairAttemptWriteId ||
+    tokenRow?.consumedBy !== stagedToken.consumedBy || tokenRow?.consumedAt !== stagedToken.consumedAt) return firstPairCommitUnconfirmedRefusal();
+  return undefined;
+}
+
 /**
  * Drop the bootstrap user that was created alongside this pairing token, after a
  * first-time pair consumed it. Failure here is logged and non-fatal.
@@ -882,7 +975,7 @@ function peerRevokedRefusal(): Response {
 
 /**
  * 409 for a first-time pair whose committed-state confirm found a Peer row for
- * the instance although its pre-transaction read returned none. The owned
+ * the instance although its earlier read returned none. The owned
  * transaction aborted: this request wrote no Peer row and did not consume the
  * pairing token.
  * Signature verification recorded the request's replay nonce before pairing
@@ -891,8 +984,33 @@ function peerRevokedRefusal(): Response {
 function firstPairRowAppearedRefusal(): Response {
   return new Response(JSON.stringify({
     error: "peer_row_appeared",
-    message: "a Peer row for this instance is present in committed state although this pairing's earlier read found none; this request wrote no Peer row and did not consume the pairing token",
+    outcome: "conflict",
+    message: "a Peer row for this instance is in committed state although this pairing's earlier read found none; this request wrote no Peer row and did not consume the pairing token",
   }), { status: 409, headers: { "content-type": "application/json" } });
+}
+
+/** 409 for a token pair whose committed Peer row and pairing token consume
+ *  could not be confirmed as this attempt's after the commit: on a first-time
+ *  pair, the committed rows do not show the staged values; on a token re-pair of
+ *  an existing Peer, they do not show them or could not be read. The
+ *  non-idempotent pair is not retried and is not reported as `paired`. */
+function firstPairCommitUnconfirmedRefusal(): Response {
+  return new Response(JSON.stringify({
+    error: "peer_pair_unconfirmed",
+    outcome: "unconfirmed",
+    message: "this pairing attempt's committed Peer row and pairing token consume could not be confirmed; the paired state is unconfirmed",
+  }), { status: 409, headers: { "content-type": "application/json" } });
+}
+
+/** 503 for a first-time pair whose committed Peer row or PairingToken row
+ *  could not be read back; the stored state is unconfirmed and the request did
+ *  not answer `paired`. */
+function firstPairReadBackUnconfirmedRefusal(): Response {
+  return new Response(JSON.stringify({
+    error: "peer_read_back_unconfirmed",
+    outcome: "unconfirmed",
+    message: "the committed Peer row or pairing token could not be read back; this pairing's stored state is unconfirmed",
+  }), { status: 503, headers: { "content-type": "application/json" } });
 }
 
 /**
@@ -1039,14 +1157,22 @@ async function consumePairingToken(
     }
   }
 
-  // Consume the token
+  // Consume the token. A fresh random `pairAttemptWriteId` is written here in
+  // the same transaction as the first-pair Peer write; after the commit,
+  // both first-pair routes confirm BOTH committed rows by that marker, so an attempt
+  // that merely shares `consumedAt` or staged Peer values cannot pass.
+  const consumedAt = new Date().toISOString();
+  const pairAttemptWriteId = randomUUID();
   await (databases as any).flair.PairingToken.put({
     ...tokenRecord,
     consumedBy: consumerInstanceId,
-    consumedAt: new Date().toISOString(),
+    consumedAt,
+    pairAttemptWriteId,
   }, ctx);
-  return { kind: "consumed" };
+  return { kind: "consumed", consumedBy: consumerInstanceId, consumedAt, pairAttemptWriteId };
 }
+
+const RECORD_MERGE_DEADLINE_MS = 5_000;
 
 /**
  * POST /FederationSync — push sync records from a peer.
@@ -1089,15 +1215,36 @@ export class FederationSync extends Resource {
     const verifyResult = await verifyFederationRequestBody(data, peer.publicKey);
     if (!verifyResult.ok) return federationVerifyRefusal(verifyResult.reason);
 
+    const offeredKeys = new Set<string>();
+    for (const record of records) {
+      if (typeof record?.table !== "string" || record.table.length === 0 ||
+        typeof record?.id !== "string" || record.id.length === 0 ||
+        record?.data?.id !== record.id) {
+        return new Response(JSON.stringify({ error: "invalid_sync_batch_key" }), {
+          status: 400, headers: { "content-type": "application/json" },
+        });
+      }
+      const key = JSON.stringify([record.table, record.id]);
+      if (offeredKeys.has(key)) {
+        return new Response(JSON.stringify({ error: "duplicate_sync_batch_key" }), {
+          status: 400, headers: { "content-type": "application/json" },
+        });
+      }
+      offeredKeys.add(key);
+    }
+
     const startTime = Date.now();
     let merged = 0;
     let skipped = 0;
     const skippedReasons: Record<string, number> = {};
+    const refused: Array<{ table: string; id: string; reason: SkipReason }> = [];
+    const indeterminate: Array<{ table: string; id: string }> = [];
     const mergeErrors: string[] = [];
 
-    function recordSkip(reason: string) {
+    function recordSkip(reason: SkipReason, record: SyncRecord) {
       skipped++;
       skippedReasons[reason] = (skippedReasons[reason] ?? 0) + 1;
+      refused.push({ table: record.table, id: record.id, reason });
     }
 
     // Table name → Harper database table mapping.
@@ -1124,14 +1271,94 @@ export class FederationSync extends Resource {
       // trust delegation to the originator's send-time check) alongside adding
       // Message to the push list — do not inherit this as a silent gap.
       Message: (databases as any).flair.Message,
+      // flair#2578 slice 1: Presence is REGISTERED so the receive path can carry
+      // it (the receiver writes it through the write-back helper). The sender
+      // ships in a later slice — this is the RECEIVE side only.
+      Presence: (databases as any).flair.Presence,
     };
     const knownTables = new Set(Object.keys(tableMap));
 
-    for (const record of records as SyncRecord[]) {
+    type MergeOutcome = { reason: SkipReason } | { merged: true } | { indeterminate: true };
+
+    /** The per-id Memory write lock store (flair#2478 slice 3c). */
+    const memoryLockStore = (): unknown => (databases as any)?.flair?.Memory?.primaryStore;
+
+    /** Read the local Agent row for an id, or null when there is none.
+     *  Read failures throw: before write-back starts they become retryable
+     *  `merge_error`; after it starts they are indeterminate. */
+    const readAgentRow = async (agentId: string): Promise<Record<string, any> | null> => {
+      const row = await (databases as any).flair.Agent.get(agentId);
+      return row ?? null;
+    };
+
+    // ── flair#2578 slice 1: Presence receipt (P1, P4, P5) ──
+    // The batch-verified sender (`sender`) is the home authority. Write-back
+    // rechecks the home fresh and reads the Presence row in its owned transaction.
+    const mergePresence = async (
+      record: SyncRecord,
+      sender: string,
+      local: Record<string, any> | null,
+      table: any,
+      markWriteStarted: () => void,
+    ): Promise<MergeOutcome> => {
+      const receivedAt = Date.now();
+      // P5: strip to the declared Presence fields and validate. The wire record
+      // id IS the primary key (agentId).
+      const validated = validatePresenceReceipt(record.id, record.data, receivedAt, sender);
+      if (!validated.ok) return { reason: validated.reason };
+      const agentId = validated.row.agentId as string;
+
+      // P1: the Agent row must be homed on the batch-verified sender.
+      const homeReason = presenceHomeBindingReason(await readAgentRow(agentId), sender);
+      if (homeReason) return { reason: homeReason };
+
+      // P4: Presence-specific merge (heartbeat, then activity stamp).
+      const planned = mergePresenceReceipt(local, validated.row, receivedAt);
+      if (planned.action === "skip") return { reason: planned.reason };
+
+      // As in the generic merge: write-back conflicts aborted before commit are
+      // merge_target_changed; other errors after write-back starts are indeterminate.
+      let outcome: any;
+      markWriteStarted();
+      try {
+        outcome = await writeBackCommittedRow(
+          table,
+          record.id,
+          async (row) => {
+            // Fresh home recheck during write-back; `row` is the transaction-scoped
+            // Presence read.
+            const currentHome = presenceHomeBindingReason(await readAgentRow(agentId), sender);
+            if (currentHome) return { skip: true, reason: currentHome };
+            const current = mergePresenceReceipt(row, validated.row, receivedAt);
+            if (current.action === "skip") return { skip: true, reason: current.reason };
+            return { idempotent: true, write: current.row };
+          },
+          {
+            label: "FederationSync",
+            expectedRow: local,
+            attempts: 1,
+            wholeRow: true,
+            pausePre: () => txnPausePoint("presence-merge-pre"),
+            pausePoint: () => txnPausePoint("presence-merge"),
+          },
+        );
+      } catch (err) {
+        if (err instanceof WriteBackConflictError) {
+          return err.outcome === "conflict" ? { reason: "merge_target_changed" } : { indeterminate: true };
+        }
+        throw err;
+      }
+      if ("skip" in outcome) {
+        return { reason: (outcome.reason as SkipReason | undefined) ?? "presence_invalid_shape" };
+      }
+      return { merged: true };
+    };
+
+    const mergeOne = async (record: SyncRecord): Promise<MergeOutcome> => {
+      let writeBackStarted = false;
       try {
         if (payloadIdMismatch(record)) {
-          recordSkip("id_mismatch");
-          continue;
+          return { reason: "id_mismatch" };
         }
         const table = (record.table in tableMap)
           ? tableMap[record.table as FederationSyncTable]
@@ -1147,8 +1374,13 @@ export class FederationSync extends Resource {
         );
 
         if (decision.action === "skip") {
-          recordSkip(decision.reason);
-          continue;
+          return { reason: decision.reason };
+        }
+
+        // With the flag OFF, an eligible Presence record reaching receipt skips
+        // as presence_receive_disabled; earlier key/classifier refusals answer first.
+        if (record.table === "Presence" && !presenceReceiveEnabled()) {
+          return { reason: "presence_receive_disabled" };
         }
 
         // ── Per-record signature verification (federation-edge-hardening slice 3b) ──
@@ -1176,8 +1408,7 @@ export class FederationSync extends Resource {
             : (await (databases as any).flair.Peer.get(originator))?.publicKey;
 
           if (!originatorPublicKey) {
-            recordSkip("unknown_originator_key");
-            continue;
+            return { reason: "unknown_originator_key" };
           }
 
           // CONTRACT — reconstruct from the record (v defaults to 1 when
@@ -1193,15 +1424,13 @@ export class FederationSync extends Resource {
             originatorPublicKey,
           );
           if (!signatureValid) {
-            recordSkip("invalid_signature");
-            continue;
+            return { reason: "invalid_signature" };
           }
         } else if (requireRecordSignatures()) {
           // require-mode: unsigned records are no longer trusted on
           // batch-level auth alone. Default mode (verify-if-present) falls
           // through here and merges — see requireRecordSignatures() above.
-          recordSkip("missing_signature");
-          continue;
+          return { reason: "missing_signature" };
         }
 
         // ── Per-record principal entitlement (flair#1416 / slice 3a) ──
@@ -1214,8 +1443,12 @@ export class FederationSync extends Resource {
           enforceV1Principal: requireRecordPrincipal(),
         });
         if (principalSkip) {
-          recordSkip(principalSkip);
-          continue;
+          return { reason: principalSkip };
+        }
+
+        // ── flair#2578 slice 1: Presence receipt ──
+        if (record.table === "Presence") {
+          return await mergePresence(record, instanceId, local, table, () => { writeBackStarted = true; });
         }
 
         const incoming = { ...record.data };
@@ -1226,8 +1459,7 @@ export class FederationSync extends Resource {
           // Malformed or out-of-bound ephemeral expiry skips the record before merging.
           const expiryError = stampEphemeralExpiry(incoming, local, { incoming: true });
           if (expiryError) {
-            recordSkip("invalid_expiry");
-            continue;
+            return { reason: "invalid_expiry" };
           }
         }
         const mergedData = mergeRecord(local, { ...record, data: incoming });
@@ -1236,8 +1468,7 @@ export class FederationSync extends Resource {
         // rule as a locally-created one. This raw merge is the receiver's write
         // path, so a peer pushing a malformed id must not land a row here.
         if (record.table === "Agent" && !isValidAgentId(record.id)) {
-          recordSkip(AGENT_ID_ERROR);
-          continue;
+          return { reason: AGENT_ID_ERROR };
         }
 
         // ── flair#1940 A1'' item 8: the SAME declared-attribute whitelist the
@@ -1256,15 +1487,13 @@ export class FederationSync extends Resource {
         // would land an unscanned, possibly non-persistent skill — bypassing the
         // gate. Skip it: skills are written locally via skill_store, never synced.
         if (record.table === "Memory" && isSkillWrite(mergedData)) {
-          recordSkip("skill_not_federated");
-          continue;
+          return { reason: "skill_not_federated" };
         }
 
         // flair#2141 S2: the merge skips a row on the seed's fixed id
         // (resources/seed-reservation.ts), whatever its tags.
         if (isReservedSeedId(record.table, record.id)) {
-          recordSkip("seed_id_not_federated");
-          continue;
+          return { reason: "seed_id_not_federated" };
         }
 
         // flair#2307: Harper's REST by-id path reads a trailing `.content` as a
@@ -1273,8 +1502,7 @@ export class FederationSync extends Resource {
         // seed reservation does just above. A legacy row with such an id that
         // already exists on the sending peer is therefore not federated.
         if (record.table === "Memory" && endsWithContentSelectorSuffix(mergedData.id)) {
-          recordSkip("content_suffix_id_not_federated");
-          continue;
+          return { reason: "content_suffix_id_not_federated" };
         }
 
         mergedData._originatorInstanceId = decision.originator;
@@ -1316,18 +1544,19 @@ export class FederationSync extends Resource {
         // merge read and built from): a change to any field committed between that
         // read and the helper's in-transaction read skips the record as
         // merge_target_changed. The committed row is checked again before commit.
-        // A change committed after that final read is not seen: Harper has no
-        // compare-and-set (write-back.ts).
         //
         // flair#2450 set `wholeRow` for Soul, Agent, Relationship and Message;
         // flair#2475 extends it to Memory: Memory's identity fields
         // (instanceToken, contentHash, createdAt, agentId) do not move on a
-        // field-only update, and the merge writes the whole row, so an
-        // identity-only check let it put back the changed field's pre-change
-        // value.
+        // field-only update, so an identity-only check let the merge put back
+        // a changed field's pre-change value. For an existing row, Memory
+        // writes the fields that differ from the in-transaction row as an
+        // incremental update, and rewrites the whole row only when a stripped
+        // field must be removed; a new row is a full put.
         let outcome: any;
+        writeBackStarted = true;
         try {
-          outcome = await writeBackCommittedRow(
+          const writeMerge = async () => await writeBackCommittedRow(
             table,
             record.id,
             (row) => {
@@ -1339,7 +1568,26 @@ export class FederationSync extends Resource {
               // also be present; neither is an admin claim), so a second field
               // in the record does not land either.
               if (record.table === "Agent" && inboundChangesExistingPrincipalStatus(record, row)) {
-                return { skip: true };
+                return { skip: true, reason: "agent_status_not_federated" };
+              }
+              // flair#2266: skip an inbound Agent record carrying a publicKey
+              // different from stored `pending`, regardless of timestamps.
+              if (record.table === "Agent" && inboundChangesExistingPendingKey(record, row)) {
+                return { skip: true, reason: "agent_pending_key_not_federated" };
+              }
+              // flair#2665: a new row whose id the receiver's FLAIR_ADMIN_AGENTS
+              // names is not created. An existing row's publicKey and home
+              // change only through a record whose batch-verified sender
+              // (`instanceId`) is the row's stored home; a record from another
+              // sender that would change either is skipped whole. The merge
+              // does not set or change the `role: "admin"` / `admin: true`
+              // fields.
+              if (record.table === "Agent") {
+                const agentRefusal =
+                  agentAdminIdCreateRefusal(record, row, configuredAdminAgentIds()) ??
+                  agentIdentityRefusal(record, row, instanceId);
+                if (agentRefusal) return { skip: true, reason: agentRefusal };
+                keepReceiverAgentAuthority(mergedData, row);
               }
               // Absorbing-state guard for the Message table (flair#1521 §12
               // P0-3). Generic newer-wins LWW would let a deadline-sweep `failed`
@@ -1358,7 +1606,29 @@ export class FederationSync extends Resource {
                   mergedData.consumedAt = row?.consumedAt ?? mergedData.consumedAt ?? null;
                 }
               }
-              return { write: mergedData };
+              if (record.table === "Memory") {
+                normalizeEmptyEmbedding(mergedData);
+                // flair#2478 slice 3c: mergedData was built before the id's
+                // lock was taken; this write decision runs under the lock, on
+                // the in-transaction row, and the whole-row check against
+                // `local` follows it. A new row is a full put. An existing row
+                // gets an incremental update of the fields where mergedData
+                // differs from it, unless the strip fallback below rewrites
+                // the whole row.
+                if (row == null) return { idempotent: true, write: mergedData };
+                // A field the merge stripped (a pointer attribute on a dirty
+                // row) is absent from mergedData; an incremental update cannot
+                // remove it, so rewrite the whole row as before.
+                if (Object.keys(row).some((field) => !Object.hasOwn(mergedData, field))) {
+                  return { idempotent: true, write: mergedData };
+                }
+                const patch: Record<string, unknown> = {};
+                for (const [field, value] of Object.entries(mergedData)) {
+                  if (!isDeepStrictEqual(row[field], value)) patch[field] = value;
+                }
+                return { idempotent: true, update: patch };
+              }
+              return { idempotent: true, write: mergedData };
             },
             {
               label: "FederationSync",
@@ -1372,31 +1642,46 @@ export class FederationSync extends Resource {
               wholeRow: true,
               pausePre: () => txnPausePoint("federation-merge-pre"),
               pausePoint: () => txnPausePoint("federation-merge"),
+              pauseAfterStage: () => txnPausePoint("federation-merge-staged"),
+              pauseBeforeCommit: () => txnPausePoint("federation-merge-commit"),
             },
           );
+          if (record.table === "Memory") {
+            // flair#2478 slice 3c: the merge takes the id's per-id Memory write
+            // lock, once and without waiting, around its write-back. The lock
+            // does not serialize it against a PUT that joined another
+            // transaction, which can commit after that PUT releases the lock
+            // (resources/memory-write-lock.ts). A held id, an unresolved earlier
+            // write or a store with no lock writes nothing for the record and is
+            // reported as merge_target_busy (a retryable skip reason: the
+            // response carries it, the best-effort SyncLog row records it when
+            // that write succeeds, and a later re-offer can merge it).
+            const locked = await withMemoryWriteLockOnce(memoryLockStore(), [record.id], writeMerge, { phase: "federation-merge" });
+            if (locked.kind !== "done") return { reason: "merge_target_busy" };
+            outcome = locked.value;
+          } else {
+            outcome = await writeMerge();
+          }
         } catch (err) {
-          // The target disappeared or failed the applicable identity or whole-row
-          // comparison. The transaction aborts; one attempt, no retry.
           if (err instanceof WriteBackConflictError) {
-            recordSkip("merge_target_changed");
-            continue;
+            return err.outcome === "conflict" ? { reason: "merge_target_changed" } : { indeterminate: true };
           }
           throw err;
         }
-        // The plan's only skip is the Agent status guard above.
+        // Each skip above carries its OWN name on the plan's `reason`; the
+        // fallback is the status rule's name for any future skip that does not.
+        // (Every skip this plan returns names a reason today.)
         if ("skip" in outcome) {
-          recordSkip("agent_status_not_federated");
-          continue;
+          return { reason: outcome.reason ?? "agent_status_not_federated" };
         }
-        // embedding-space-guard slice 1: a federation-merged Memory can carry a
-        // FOREIGN embeddingModel (LWW remote-win) — trip the guard's latch so
-        // recall/dedup degrade instead of cosining a foreign vector. See
-        // noteFederationMergedMemory's doc.
-        noteFederationMergedMemory(record.table, mergedData);
-        merged++;
+        try {
+          noteFederationMergedMemory(record.table, mergedData, local ?? null);
+        } catch (err) {
+          console.warn(`[Federation] post-commit note failed for ${record.table}/${record.id}: ${String(err)}`);
+        }
+        return { merged: true };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        recordSkip("merge_error");
         // Cap the captured-error list so a hostile/buggy peer can't blow up
         // the SyncLog row, but ALWAYS log to console so operators don't lose
         // the per-record signal — the silent-swallow is the bug we're fixing.
@@ -1406,7 +1691,24 @@ export class FederationSync extends Resource {
         console.warn(
           `[Federation] merge error for ${record.table}/${record.id} from ${instanceId}: ${msg}`,
         );
+        return writeBackStarted ? { indeterminate: true } : { reason: "merge_error" };
       }
+    };
+
+    for (const record of records as SyncRecord[]) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<MergeOutcome>((resolve) => {
+        timer = setTimeout(() => resolve({ indeterminate: true }), RECORD_MERGE_DEADLINE_MS);
+      });
+      let outcome: MergeOutcome;
+      try {
+        outcome = await Promise.race([mergeOne(record), deadline]);
+      } finally {
+        clearTimeout(timer);
+      }
+      if ("reason" in outcome) recordSkip(outcome.reason, record);
+      else if ("merged" in outcome) merged++;
+      else indeterminate.push({ table: record.table, id: record.id });
     }
 
     // Peer cursor update — distinguish liveness from progress:
@@ -1429,8 +1731,12 @@ export class FederationSync extends Resource {
     await (databases as any).flair.Peer.put(peerUpdate);
 
     // Log sync operation with skip-reason breakdown so the partial state
-    // is debuggable instead of a black box.
+    // is debuggable instead of a black box. The response reports what the put
+    // did: true when it returned; false when it threw, so the row's state is
+    // unconfirmed (there is no confirmation read).
+    let syncLogWritten = false;
     try {
+      if (txnFault("federation-synclog")) throw new Error("injected SyncLog write failure");
       const errorParts: string[] = [];
       if (Object.keys(skippedReasons).length > 0) {
         errorParts.push(
@@ -1446,7 +1752,7 @@ export class FederationSync extends Resource {
       const errorSummary = errorParts.length > 0 ? errorParts.join(" | ") : undefined;
       const status = mergeErrors.length > 0
         ? "partial"
-        : skipped > 0 ? "partial" : "success";
+        : skipped > 0 || indeterminate.length > 0 ? "partial" : "success";
 
       await (databases as any).flair.SyncLog.put({
         id: `sync_${Date.now()}_${randomBytes(4).toString("hex")}`,
@@ -1460,14 +1766,20 @@ export class FederationSync extends Resource {
         durationMs: Date.now() - startTime,
         createdAt: nowIso,
       });
-    } catch { /* non-fatal */ }
+      syncLogWritten = true;
+    } catch (err) {
+      console.warn(`[Federation] SyncLog write failed for ${instanceId}: ${String(err)}`);
+    }
 
     return {
       merged,
       skipped,
       skippedReasons,
+      refused,
+      indeterminate,
       total: records.length,
       durationMs: Date.now() - startTime,
+      syncLogWritten,
     };
   }
 }
@@ -1497,12 +1809,62 @@ export class FederationPeers extends Resource {
           endpoint: p.endpoint,
           lastSyncAt: p.lastSyncAt,
           lastMergeAt: p.lastMergeAt,
+          presenceLastSyncAt: p.presenceLastSyncAt,
           relayOnly: p.relayOnly,
           pairedAt: p.pairedAt,
         });
       }
     } catch {}
     return { peers };
+  }
+}
+
+/**
+ * GET /FederationRetries — the rows of the sender's FederationRetry table
+ * (flair#2455), admin view, split into `pending`, `terminal` and `malformed`.
+ * The generic-Memory sender (`runFederationSyncOnce`) creates a pending row on
+ * a retryable refusal or a first indeterminate outcome, and updates it on
+ * later attempts, outcomes and source changes; rows an admin writes are
+ * readable too.
+ *
+ * A row that breaks a sender convention (retryRowProblem: an id that is not its
+ * tuple's key, an unknown state, reason or outcome) is listed under
+ * `malformed` with the problem's name, and never as pending or terminal.
+ *
+ * allowRead()=allowAdmin, the same gate as FederationPeers above. Read-only:
+ * it never writes a row, and a read failure propagates instead of being
+ * reported as an empty set. `flair federation status` renders it.
+ */
+export class FederationRetries extends Resource {
+  async allowRead(): Promise<boolean> {
+    return allowAdmin((this as any).getContext?.());
+  }
+
+  async get() {
+    const pending: any[] = [];
+    const terminal: any[] = [];
+    const malformed: any[] = [];
+    for await (const r of (databases as any).flair.FederationRetry.search()) {
+      const problem = retryRowProblem(r);
+      if (problem) {
+        malformed.push({ key: r.id, peerId: r.peerId, table: r.table, id: r.recordId, state: r.state, problem });
+        continue;
+      }
+      const row = {
+        peerId: r.peerId,
+        table: r.table,
+        id: r.recordId,
+        reason: r.lastReason,
+        attempts: r.attempts,
+        bound: r.bound,
+        resolution: r.resolution,
+        state: r.state,
+        firstRefusedAt: r.firstRefusedAt,
+        completedAt: r.completedAt,
+      };
+      (r.state === "pending" ? pending : terminal).push(row);
+    }
+    return { pending, terminal, malformed };
   }
 }
 

@@ -233,6 +233,19 @@ describe("fixture 13 — a non-regular destination is REFUSED by name (F1)", () 
   });
 });
 
+it("a replacement failure without a stage step does not mention staged files", () => {
+  writeConfig("ORIGINAL");
+  const res = withConfigCriticalSection(cfg, () => ({ write: enc("NEW") }), {
+    testHooks: { afterTempCreate: () => { throw new Error("injected replacement failure"); } },
+  });
+  expect(res.status).toBe("refused");
+  expect(res.message).toContain("target was not replaced:");
+  expect(res.message).toContain("injected replacement failure");
+  expect(res.message).not.toContain("staged files");
+  expect(readFileSync(cfg, "utf-8")).toBe("ORIGINAL");
+  expect(readdirSync(dir)).toEqual(["settings.json"]);
+});
+
 // ── fixture 14 — the link's OWN identity, alone (F3) ────────────────────────
 
 describe("fixture 14 — a replaced SYMLINK entry holds on its own link identity (F3)", () => {
@@ -484,7 +497,7 @@ function functionBody(src: string, name: string): string {
 // ── boundary — the DOCTOR hook sinks write only through the primitive ─────────
 
 describe("import boundary over the migrated DOCTOR sink module", () => {
-  it("src/doctor-client.ts routes each of the four hook-file writers through the primitive; fixClaudeMdBootstrap is the only raw write left", () => {
+  it("src/doctor-client.ts routes hook-file writers through the primitive", () => {
     const src = readFileSync(join(import.meta.dirname, "..", "..", "src", "doctor-client.ts"), "utf-8");
     expect(src).toContain('from "./lib/config-critical-section.js"');
 
@@ -502,10 +515,8 @@ describe("import boundary over the migrated DOCTOR sink module", () => {
       expect(functionBody(src, sink), `${sink} does not route through the primitive`).toContain("withConfigCriticalSection(");
     }
 
-    // fixClaudeMdBootstrap is the ONLY remaining raw writeFileSync in the
-    // module — it writes CLAUDE.md, which is not a hook config file.
     const rawWrites = [...src.matchAll(/writeFileSync\(/g)];
-    expect(rawWrites.length, "expected exactly ONE raw writeFileSync in doctor-client.ts").toBe(1);
+    expect(rawWrites.length, "raw writes are CLAUDE.md and the temporary probe wrapper").toBe(2);
     expect(functionBody(src, "fixClaudeMdBootstrap")).toContain("writeFileSync(");
     for (const sink of sinks) {
       expect(functionBody(src, sink), `${sink} still carries a raw writeFileSync`).not.toContain("writeFileSync(");

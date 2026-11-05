@@ -36,6 +36,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assessTreeDivergence, withRunningVersion, type TreeAssessment } from "../../src/lib/tree-divergence.ts";
 import { installLaunchctlTripwire } from "../helpers/fake-launchctl.ts";
+import { setInstancePairOsReadsForTests } from "../../src/lib/local-instance-pair.ts";
 
 const home = mkdtempSync(join(tmpdir(), "flair-2520-reverify-"));
 const savedEnv = { ...process.env };
@@ -343,6 +344,17 @@ describe("flair#2520 — doctor --fix resolves the admin credential again after 
     const flairAdminPass = process.env.FLAIR_ADMIN_PASS;
     delete process.env.FLAIR_ADMIN_PASS;
     process.env.HDB_ADMIN_PASSWORD = INSTANCE_PASS;
+    // flair#2526: the real pair check also proves from the OS listener table
+    // that one process with a Harper command line listens on both ports. The
+    // probed instance here exists only at the fetch layer, so its listener
+    // table is simulated the same way: one simulated process with a Harper
+    // command line on fixture port 9 and its ops port, with a fixed start
+    // time. No such process exists.
+    setInstancePairOsReadsForTests({
+      listeners: (port) => ({ kind: "listeners", pids: port === 9 || port === INSTANCE_OPS ? [25_200] : [] }),
+      birth: (pid) => ({ kind: "birth", id: `${pid}@simulated` }),
+      commandLine: () => "node\u0000/simulated/node_modules/harper/dist/bin/harper.js\u0000run\u0000.",
+    });
     try {
       expect(existsSync(PASS_FILE)).toBe(false);
       const r = await runDoctorFix({ change: "launchd-repair", repairWritesPassFile: true });
@@ -369,6 +381,7 @@ describe("flair#2520 — doctor --fix resolves the admin credential again after 
       expect(after.map((op) => op.operation)).toContain("search_by_value:Agent");
       expect(after.every((op) => op.authorized)).toBe(true);
     } finally {
+      setInstancePairOsReadsForTests(null);
       if (flairAdminPass === undefined) delete process.env.FLAIR_ADMIN_PASS;
       else process.env.FLAIR_ADMIN_PASS = flairAdminPass;
       delete process.env.HDB_ADMIN_PASSWORD;

@@ -32,7 +32,7 @@ test("copied CLI imports without the harper package", () => {
   }
   symlinkSync(join(root, "packages"), join(dir, "packages"));
   writeFileSync(join(dir, "drive.ts"), 'import { program } from "./src/cli.ts"; console.log(program.name());');
-  const result = spawnSync(process.execPath, [join(dir, "drive.ts")], { cwd: dir, encoding: "utf8", timeout: 10_000 });
+  const result = spawnSync(process.execPath, [join(dir, "drive.ts")], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise mcp-oauth-env-2270 process fixture arguments" }, cwd: dir, encoding: "utf8", timeout: 10_000 });
   expect(result.error).toBeUndefined();
   expect(result.status, result.stderr).toBe(0);
   expect(result.stdout.trim()).toBe("flair");
@@ -109,7 +109,7 @@ describe("redirect migration files", () => {
         migration: planRedirectMigration({ env: {} }) }));`;
     const run = () => {
       const result = spawnSync(process.execPath, ["-e", script], {
-        cwd, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: "utf8", timeout: 10_000,
+        cwd, env: { ...({ ...process.env, HOME: home, USERPROFILE: home }), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise mcp-oauth-env-2270 process fixture arguments" }, encoding: "utf8", timeout: 10_000,
       });
       expect(result.error).toBeUndefined();
       expect(result.status, result.stderr).toBe(0);

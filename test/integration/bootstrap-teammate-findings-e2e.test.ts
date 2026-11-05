@@ -46,7 +46,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -87,7 +87,7 @@ async function insertGrant(harper: HarperInstance, ownerId: string, granteeId: s
   expect(res.status, `MemoryGrant insert ${ownerId}->${granteeId} returned ${res.status}`).toBe(200);
 }
 
-/** Signed PUT to /Memory/<id> — the only HTTP-reachable create path, so the
+/** Signed PUT to /Memory/<id> — the write path these tests use, so the
  *  embedding is generated for real (Memory.ts put() → getEmbedding()), not
  *  synthesized. */
 async function putMemory(harper: HarperInstance, agent: TestAgent, id: string, body: Record<string, any>): Promise<void> {
@@ -211,7 +211,7 @@ describe("flair#550 — MemoryBootstrap 'Teammate findings relevant to your task
     });
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("grantee's bootstrap surfaces the teammate's SHARED finding attributed in 'Teammate findings', keeps own finding in 'Relevant Knowledge', excludes the teammate's PRIVATE finding entirely", async () => {
     const body = await bootstrap(harper, grantee, { agentId: grantee.id, maxTokens: 8000, currentTask: CURRENT_TASK });

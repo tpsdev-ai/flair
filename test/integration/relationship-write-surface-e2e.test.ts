@@ -31,7 +31,7 @@ import { randomUUID } from "node:crypto";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { FlairClient, canonicalRelationshipId } from "../../packages/flair-client/src/client";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; keyPath: string }
@@ -110,7 +110,7 @@ describe("relationship-write-surface e2e (RelationshipApi -> Relationship.put() 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     if (keyDir) rmSync(keyDir, { recursive: true, force: true });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("round-trip: a triple written via RelationshipApi surfaces in bootstrap for a predicted subject (lowercasing + read contract)", async () => {
     const subject = `Flair-${randomUUID().slice(0, 8)}`;

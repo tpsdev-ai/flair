@@ -27,7 +27,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -112,7 +112,7 @@ describe("Soul writes are owner-scoped on every mutating verb", () => {
     }
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   // ── POSITIVE CONTROL ──────────────────────────────────────────────────────
   // Without these, every "denied" assertion below would pass just as happily if

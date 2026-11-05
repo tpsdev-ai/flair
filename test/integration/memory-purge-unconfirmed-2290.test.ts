@@ -20,7 +20,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import {
   componentWithConcurrentWrites,
   CONCURRENT_WRITE_MODULE_REL,
@@ -89,7 +89,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (component) component.cleanup();
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("POST /MemoryPurge", () => {
   it("healthy purge confirms pointer cleanup after a contextless read pins the request snapshot", async () => {

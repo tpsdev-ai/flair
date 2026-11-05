@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import nacl from "tweetnacl";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HarperInstance, startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -97,7 +97,7 @@ beforeAll(async () => {
   await insertRow(harper, DEEP_BASE, "DEEP BASE BODY");
 }, 240_000);
 
-afterAll(async () => { if (harper) await stopHarper(harper); });
+afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2199 — the ordinary `.content` selector still works", () => {
   it("a non-admin GET of `/Memory/<id>.content` returns the row named by `<id>`", async () => {
@@ -142,22 +142,26 @@ describe("flair#2199 — an encoded `/` before a declared suffix is refused, nev
 });
 
 describe("flair#2199 — Memory resource writes and feed POST refuse an id ending in `.content`", () => {
-  const cases: Array<{ name: string; method: string; path: string; body: unknown }> = [
-    { name: "collection POST /Memory", method: "POST", path: "/Memory", body: { id: "mcs-post.content", agentId: author.id, content: "x" } },
-    { name: "POST to a `.content` address", method: "POST", path: "/Memory/mcs-post.content", body: { id: "mcs-post", agentId: author.id, content: "x" } },
-    { name: "PUT to a `.content` address", method: "PUT", path: "/Memory/mcs-put.content", body: { id: "mcs-put.content", agentId: author.id, content: "x" } },
-    { name: "PATCH to a `.content` address", method: "PATCH", path: "/Memory/mcs-patch.content", body: { id: "mcs-patch.content", agentId: author.id, content: "x" } },
-    { name: "PUT with an encoded-slash `.content` id", method: "PUT", path: "/Memory/mcs-s%2Fput.content", body: { id: "mcs-s/put.content", agentId: author.id, content: "x" } },
-    { name: "feed POST /FeedMemories", method: "POST", path: "/FeedMemories", body: { id: "mcs-feed.content", agentId: author.id, content: "x" } },
+  // Harper strips a trailing `.content` property selector from the URL, so a
+  // body whose own id keeps that suffix names a different record than the URL
+  // addresses; the guard returns write_id_not_addressed before checking ownership.
+  // A matching body id reaches the stored-owner check before Memory's id rule.
+  const cases: Array<{ name: string; method: string; path: string; body: unknown; status: number; error: string }> = [
+    { name: "collection POST /Memory", method: "POST", path: "/Memory", body: { id: "mcs-post.content", agentId: author.id, content: "x" }, status: 400, error: "memory_id_content_suffix" },
+    { name: "POST to a `.content` address", method: "POST", path: "/Memory/mcs-post.content", body: { id: "mcs-post", agentId: author.id, content: "x" }, status: 400, error: "memory_id_content_suffix" },
+    { name: "PUT to a `.content` address", method: "PUT", path: "/Memory/mcs-put.content", body: { id: "mcs-put.content", agentId: author.id, content: "x" }, status: 403, error: "write_id_not_addressed" },
+    { name: "PATCH to a `.content` address", method: "PATCH", path: "/Memory/mcs-patch.content", body: { id: "mcs-patch.content", agentId: author.id, content: "x" }, status: 403, error: "write_id_not_addressed" },
+    { name: "PUT with an encoded-slash `.content` id", method: "PUT", path: "/Memory/mcs-s%2Fput.content", body: { id: "mcs-s/put.content", agentId: author.id, content: "x" }, status: 403, error: "write_id_not_addressed" },
+    { name: "feed POST /FeedMemories", method: "POST", path: "/FeedMemories", body: { id: "mcs-feed.content", agentId: author.id, content: "x" }, status: 400, error: "memory_id_content_suffix" },
   ];
 
   for (const c of cases) {
-    it(`${c.name} → 400 memory_id_content_suffix`, async () => {
+    it(`${c.name} → ${c.status} ${c.error}`, async () => {
       const res = await authSend(harper, author, c.method, c.path, c.body);
       const body = await res.json();
       console.log(`${c.name}:`, res.status, JSON.stringify(body).slice(0, 160));
-      expect(res.status).toBe(400);
-      expect(body.error).toBe("memory_id_content_suffix");
+      expect(res.status).toBe(c.status);
+      expect(body.error).toBe(c.error);
     }, 30_000);
   }
 
@@ -211,10 +215,13 @@ describe("flair#2199 — Memory resource writes and feed POST refuse an id endin
     expect((await after.json()).id).toBe(DEL_BASE);
   }, 30_000);
 
-  it("non-owner DELETE of a `.content` address → 400 memory_id_content_suffix and the base record is not deleted", async () => {
+  it("non-owner DELETE of a `.content` address → 403 owner refusal and the base record is not deleted", async () => {
+    // The address resolves to a record the caller does not own, so the shared
+    // owner-scoped write rule (resources/owner-scoped-write-policy.ts) refuses
+    // it before the Memory resource's own id rule runs.
     const res = await authSend(harper, reader, "DELETE", `/Memory/${DEL_OTHER_BASE}.content`);
-    expect(res.status).toBe(400);
-    expect((await res.json()).error).toBe("memory_id_content_suffix");
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("forbidden: cannot modify Memory owned by another principal");
     const after = await authSend(harper, author, "GET", `/Memory/${DEL_OTHER_BASE}`);
     expect(after.status).toBe(200);
     const row = await after.json();

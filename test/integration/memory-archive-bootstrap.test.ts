@@ -22,7 +22,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -163,7 +163,7 @@ describe("flair#1472 Deliverable A — archived is real end-to-end", () => {
     expect(putOther.status, `seed ${OTHER_MEM} → ${putOther.status}`).toBe(200);
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("a. a durability:permanent memory with archived=true is ABSENT from bootstrap", async () => {
     // Basement the permanent memory (the user-facing action).

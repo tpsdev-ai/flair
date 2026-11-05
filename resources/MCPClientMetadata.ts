@@ -1,6 +1,7 @@
 import { Resource, databases } from "harper";
 import { mcpIssuer } from "./mcp-oauth-flag.js";
 import { agentPublicKeyToJwk, buildCimdDocument } from "./mcp-client-metadata-fields.js";
+import { refuseRewrittenAgentId } from "./path-id-rewrite.js";
 
 /**
  * MCPClientMetadata — serves a Client ID Metadata Document (CIMD) for a
@@ -56,6 +57,8 @@ export class MCPClientMetadata extends Resource {
         { status: 400, headers: { "Content-Type": "application/json" } },
       );
     }
+    const rewritten = refuseRewrittenAgentId((this as any).getContext?.(), agentId);
+    if (rewritten) return rewritten;
 
     const issuer = mcpIssuer();
     if (!issuer) {

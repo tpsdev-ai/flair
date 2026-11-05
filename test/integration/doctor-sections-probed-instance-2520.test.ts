@@ -33,7 +33,8 @@ import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { nodeBin } from "../helpers/node-runtime";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
@@ -97,7 +98,7 @@ function runDoctor(opts: { args: string[]; opsPort?: string }): Promise<{ code: 
     };
     if (opts.opsPort === undefined) delete env.FLAIR_OPS_PORT;
     else env.FLAIR_OPS_PORT = opts.opsPort;
-    const child = spawn(process.execPath, [CLI, "doctor", ...opts.args], { env, timeout: 60_000 });
+    const child = spawn(nodeBin({ env }), [CLI, "doctor", ...opts.args], { env, timeout: 60_000 });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
@@ -173,10 +174,14 @@ beforeAll(async () => {
 }, 300_000);
 
 afterAll(async () => {
-  if (a) await stopHarper(a);
-  if (b) await stopHarper(b);
-  if (home) rmSync(home, { recursive: true, force: true });
-});
+  // flair#2568: stop both instances concurrently so neither stop's deadline
+  // waits on the other, and remove the temp home even when a stop fails.
+  try {
+    await stopHarpers([a, b]);
+  } finally {
+    if (home) rmSync(home, { recursive: true, force: true });
+  }
+}, HARPER_STOP_BUDGET_MS);
 
 /**
  * Both sections ran on the probed instance and printed their success results:

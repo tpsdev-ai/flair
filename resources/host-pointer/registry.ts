@@ -39,3 +39,30 @@ export const productionHostPointerAdapter: HostPointerAdapter = {
 export function currentHostPointerAdapter(): HostPointerAdapter {
   return productionHostPointerAdapter;
 }
+
+export class PointerAlreadyStoredError extends Error {
+  constructor(public readonly pointer: any) {
+    super("MemoryHostSource replacement already stored");
+  }
+}
+
+/** Guard the table put with Harper's commit-time entry and conflict retry. */
+export async function restorePointerRowIfAbsent(row: any, ctx: any): Promise<void> {
+  const store = pointerTable()?.primaryStore;
+  if (!store || typeof ctx?.transaction?.addWrite !== "function") {
+    throw new Error("MemoryHostSource conditional restore unavailable");
+  }
+  const guard = {
+    key: row.memoryId,
+    store,
+    reloadCommitBase: true,
+    entry: undefined as any,
+    commit(_time: number, entry: any) {
+      if (entry?.value) throw new PointerAlreadyStoredError(entry.value);
+    },
+  };
+  ctx.transaction.addWrite(guard);
+  // Distinguish a read absence from an entry Harper's save() has not read yet.
+  if (guard.entry === undefined) guard.entry = null;
+  await currentHostPointerAdapter().putPointerRow(row, ctx);
+}

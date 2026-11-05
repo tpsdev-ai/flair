@@ -4,7 +4,8 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const agent = (id: string) => ({ id, ...nacl.sign.keyPair() });
 const owner = agent("authority-owner"), other = agent("authority-other");
@@ -55,8 +56,8 @@ beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires isolated Harper; unset HARPER_HTTP_URL");
   harper = await startHarper();
   await seed("Agent", [owner, other].map(a => ({ id: a.id, name: a.id, role: "agent", publicKey: Buffer.from(a.publicKey).toString("base64"), createdAt: now })));
-}, 120_000);
-afterAll(async () => { if (harper) await stopHarper(harper); });
+}, HARPER_START_BUDGET_MS);
+afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
 describe("Memory authority fields over HTTP", () => {
   test("PUT and PATCH reject changed authority-field values", async () => {
@@ -77,6 +78,20 @@ describe("Memory authority fields over HTTP", () => {
       expect(await read(`new-${field}`)).toBeUndefined();
     }
   }, 30_000);
+  test("request bodies cannot set a write-back marker", async () => {
+    const id = "authority-write-marker";
+    await seed("Memory", [{ id, agentId: owner.id, content: "marker guard", createdAt: now, writeBackWriteId: "stored-attempt" }]);
+    for (const method of ["PUT", "PATCH"]) {
+      for (const value of ["forged", null]) {
+        expect((await request(owner, method, `/Memory/${id}`, { writeBackWriteId: value })).status).toBe(method === "PATCH" ? 204 : 403);
+        expect((await read(id)).writeBackWriteId).toBe("stored-attempt");
+      }
+    }
+    expect((await request(owner, "POST", "/Memory", { id: `${id}-post`, agentId: owner.id, content: "forged marker", writeBackWriteId: "forged" })).status).toBe(403);
+    expect((await request(owner, "POST", "/FeedMemories", { id: `${id}-feed`, content: "forged feed marker", writeBackWriteId: "forged" })).status).toBe(403);
+    const row = await read(id);
+    expect(row.writeBackWriteId).toBe("stored-attempt");
+  }, 60_000);
   test("administrator REST writes cannot manufacture verdicts either", async () => {
     for (const method of ["PUT", "PATCH"]) {
       const response = await fetch(`${harper.httpURL}/Memory/stamped`, {
@@ -157,8 +172,9 @@ describe("Memory authority fields over HTTP", () => {
     try {
       await writeFile(join(home, `${owner.id}.key`), owner.secretKey.slice(0, 32), { mode: 0o600 });
       const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(FLAIR_|HARPER_|HDB_|FABRIC_)/.test(key)));
-      const child = Bun.spawn(["bun", "dist/cli.js", "rem", "promote", "cli-candidate", "--to", "memory", "--rationale", "verified rollback procedure"], {
-        env: { ...env, HOME: home, FLAIR_URL: harper.httpURL, FLAIR_AGENT_ID: owner.id, FLAIR_KEY_DIR: home }, stdout: "pipe", stderr: "pipe",
+      const childEnv = { ...env, HOME: home, FLAIR_URL: harper.httpURL, FLAIR_AGENT_ID: owner.id, FLAIR_KEY_DIR: home };
+      const child = Bun.spawn([nodeBin({ env: childEnv }), "dist/cli.js", "rem", "promote", "cli-candidate", "--to", "memory", "--rationale", "verified rollback procedure"], {
+        env: childEnv, stdout: "pipe", stderr: "pipe", timeout: 20_000,
       });
       const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
       expect(code, stderr).toBe(0);

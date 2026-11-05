@@ -33,11 +33,51 @@ type Peer @table(database: "flair") @export {
   lastSyncAt: String               # last contact with this peer (liveness signal)
   lastMergeAt: String              # last sync where merged > 0 (data-progress signal)
   lastSyncCursor: String           # Lamport clock or ISO timestamp for incremental sync
+  presenceLastSyncAt: String       # sender-side per-table Presence watermark (flair#2578).
   relayOnly: Boolean               # true for spoke-to-spoke peers announced by hub
   pairedAt: String
   createdAt: String! @indexed
   updatedAt: String
 }
+
+# Sender-owned federation retry bookkeeping (flair#2455). The table is shaped
+# for one row per (peer, table, record) the receiver refused for a reason a
+# later re-offer could clear, plus locally observed unconfirmed sends. The
+# generic-Memory sender (`runFederationSyncOnce`) creates a pending row on a
+# retryable refusal or a first indeterminate outcome, and updates it on later
+# attempts, outcomes and source changes; rows an admin writes are readable now.
+# Local bookkeeping, EXCLUDED from
+# federation policy and the receive mapping, so no inbound sync record can write
+# it (a pushed record naming it that passes the receiver's payload-id check
+# skips as `unknown_table`). Admin-only on every
+# operation; see resources/FederationRetry.ts.
+#
+# ENFORCED: @sealed makes Harper refuse a write that names a field not declared
+# below. CONVENTIONS, not enforced by this schema: `id` is retryEntryKey(peerId,
+# table, recordId) (resources/federation-retry-lib.ts), and the commented
+# values of state, lastReason, resolution and bound. The reader and the
+# transition check these (retryRowProblem) and treat a row that breaks one as
+# malformed.
+type FederationRetry @table(database: "flair") @sealed @export {
+  id: ID @primaryKey               # by convention retryEntryKey(peerId, table, recordId)
+  peerId: String! @indexed         # the peer that refused (or never answered)
+  table: String!                   # the source table name
+  recordId: String!                # the source row id
+  state: String! @indexed          # "pending" | "terminal"
+  firstRefusedAt: String! @indexed # the obligation's first recorded time (a refusal or an indeterminate outcome); the sender enforces no age bound yet
+  attempts: Int! @indexed          # incremented and persisted once per sender-level offer of a row that already has a valid pending row, before the send (a first ordinary offer has none); adaptive batch splitting can send the row more than once under one reservation; the sender enforces no attempt bound yet
+  episodeId: String                # RESERVED: the sender does not generate it; a terminal update copies an existing value from the row it transitions — intended as the obligation's generation, for rejecting stale completions
+  recordFingerprint: String        # content fingerprint, for exhausted-row suppression
+  lastReason: String               # the closed SkipReason, or a local reason
+  lastAttemptSyncId: String        # the sync that last reserved an attempt
+  lastAttemptAt: String
+  completedAt: String              # when the row became terminal
+  resolution: String               # which terminal outcome ended it
+  bound: String                    # RESERVED: the sender does not set a non-null value; a terminal update writes null — "attempts" | "age" | "both" for retry_exhausted; null otherwise
+  createdAt: String!
+  updatedAt: String
+}
+
 
 # Federation body-signature nonces are recorded in `ReplayNonce`
 # (schemas/replay.graphql), shared with agent auth (flair#2061).
@@ -49,7 +89,7 @@ type SyncLog @table(database: "flair") {
   direction: String! @indexed      # "push" | "pull"
   recordCount: Int                 # how many records merged in this batch
   skippedCount: Int                # how many records skipped (sum of skippedReasons)
-  skippedReasons: String           # JSON: { unknown_table: N, non_originator: N, future_timestamp: N, no_op_same_hash: N, merge_error: N, unknown_originator_key: N, invalid_signature: N, missing_signature: N, principal_mismatch: N }
+  skippedReasons: String           # JSON counts by SkipReason, for example { unknown_table: N, non_originator: N, merge_error: N }; the full vocabulary is SKIP_REASON_CLASS in resources/federation-classify.ts
   status: String @indexed          # "success" | "partial" | "failed"
   error: String                    # human-readable summary if partial/failed (includes per-record error messages, capped)
   durationMs: Int                  # how long the sync took

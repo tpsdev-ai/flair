@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
+import { HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const CLI = join(REPO_ROOT, "dist", "cli.js");
@@ -28,7 +29,7 @@ let savedUmask: number;
 
 function freePort(): number {
   const r = spawnSync(
-    process.execPath,
+    nodeBin(),
     ["-e", "const n=require('net');const s=n.createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close();});"],
     { encoding: "utf-8", timeout: 5_000 },
   );
@@ -152,7 +153,7 @@ afterAll(() => {
   try { stopHarper(); } catch { /* best effort */ }
   if (root) rmSync(root, { recursive: true, force: true });
   process.umask(savedUmask);
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe.skipIf(process.platform !== "linux")("flair#2271 — supplied credentials on an existing install", () => {
   test("a real init establishes a running instance with a working admin-pass", async () => {
@@ -275,7 +276,7 @@ describe.skipIf(process.platform !== "linux")("flair#2271 — supplied credentia
   }, 150_000);
 
   describe("stopped Harper install", () => {
-    beforeAll(() => stopHarper());
+    beforeAll(() => stopHarper(), HARPER_STOP_BUDGET_MS);
     for (const skipStart of [false, true]) {
       for (const source of ["inline", "file", "FLAIR_ADMIN_PASS", "HDB_ADMIN_PASSWORD"] as const) {
         test(`${source}: refuses a supplied credential, skip-start=${skipStart}`, async () => {

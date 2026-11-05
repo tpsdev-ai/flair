@@ -1,0 +1,257 @@
+/**
+ * embedding-space-guard-consumers-2559.test.ts — flair#2559 (real Harper).
+ *
+ * The two consumers this change routes through the query-time embedding-space
+ * guard, driven against a real Harper instance:
+ *   - MemoryDedupStats returns its vector-derived counts only on a uniform
+ *     verdict; on a mixed or unknown one it returns no counts and names the
+ *     guard state.
+ *   - MemoryBootstrap's task-relevant selection refuses its task embedding on a
+ *     verdict that does not establish uniformity and surfaces SemanticSearch's warning.
+ *     (Gated on the embedding model, like the other bootstrap
+ *     real-Harper tests — the consult only happens when a query embedding was
+ *     generated.)
+ *
+ * The unknown verdict is held the way embedding-space-guard-unknown-2530 holds
+ * it: the boot pre-warm's first scan parks at the test-only `space-guard-scan`
+ * pause point, armed before Harper starts. Releasing it publishes a uniform
+ * verdict and reopens the gate; an admin-authenticated PATCH that stores a foreign
+ * `embeddingModel` stamp then trips the latch immediately (the #2425 path), for
+ * the mixed verdict. No production port is used: all traffic is loopback to the
+ * ephemeral instance this file started.
+ */
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import nacl from "tweetnacl";
+import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { TEST_FAULT_INJECTION_ENV, TEST_PAUSE_DIR_ENV } from "../../resources/txn-pause-point.ts";
+import { getModelId } from "../../resources/embeddings-provider.ts";
+
+const POINT = "space-guard-scan";
+const SWEEP_POINT = "dedup-sweep-persist";
+const AGENT = "agent-a";
+const ROW = "row-a";
+const FOREIGN = "other-engine:not-the-current-space"; // a genuinely different vector space
+
+const MODEL_FILE = "nomic-embed-text-v1.5.Q4_K_M.gguf";
+function modelPresent(): boolean {
+  const dirs = [process.env.FLAIR_MODELS_DIR, join(process.cwd(), "models")].filter(Boolean) as string[];
+  return dirs.some((d) => existsSync(join(d as string, MODEL_FILE)));
+}
+const HAS_MODEL = modelPresent();
+const gate = HAS_MODEL ? describe : describe.skip;
+
+function basicAuthOf(h: HarperInstance): string {
+  return "Basic " + btoa(`${h.admin.username}:${h.admin.password}`);
+}
+
+async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return true;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return false;
+}
+
+/** Poll /Health until the guard reaches `state` (bounded). */
+async function waitForGuardState(h: HarperInstance, state: string, timeoutMs: number): Promise<unknown> {
+  const deadline = Date.now() + timeoutMs;
+  let last: unknown;
+  while (Date.now() < deadline) {
+    const res = await fetch(`${h.httpURL}/Health`, { signal: AbortSignal.timeout(10_000) });
+    const body = (await res.json()) as { embeddingSpace?: { state?: unknown } };
+    last = body.embeddingSpace?.state;
+    if (last === state) return last;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return last;
+}
+
+async function adminOp(h: HarperInstance, op: Record<string, unknown>): Promise<any> {
+  const res = await fetch(h.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: basicAuthOf(h) },
+    body: JSON.stringify(op),
+    signal: AbortSignal.timeout(15_000),
+  });
+  expect(res.status, `${op.operation} returned ${res.status}`).toBe(200);
+  return res.json();
+}
+
+async function dedupStats(h: HarperInstance): Promise<any> {
+  const res = await fetch(`${h.httpURL}/MemoryDedupStats`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: basicAuthOf(h) },
+    body: JSON.stringify({}),
+    signal: AbortSignal.timeout(60_000),
+  });
+  const text = await res.text();
+  expect(res.status, `MemoryDedupStats → ${res.status}: ${text.slice(0, 300)}`).toBe(200);
+  return JSON.parse(text);
+}
+
+/** An admin-authenticated PATCH that stores a foreign embedding stamp — the write-maintained
+ *  latch path (#2425). */
+async function patchForeignStamp(h: HarperInstance): Promise<void> {
+  const res = await fetch(`${h.httpURL}/Memory/${ROW}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Authorization: basicAuthOf(h) },
+    body: JSON.stringify({ embedding: [0, 1, 0, 0], embeddingModel: FOREIGN }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  expect(res.status, `PATCH foreign stamp → ${res.status}: ${(await res.text()).slice(0, 200)}`).toBeLessThan(300);
+}
+
+describe("MemoryDedupStats consults the guard against a real Harper (flair#2559)", () => {
+  let h: HarperInstance | undefined;
+  let pauseDir = "";
+
+  beforeAll(async () => {
+    pauseDir = mkdtempSync(join(tmpdir(), "flair-2559-dedup-pause-"));
+    writeFileSync(join(pauseDir, `arm.${POINT}`), ""); // armed before Harper starts
+    h = await startHarper({ serverEnv: { [TEST_FAULT_INJECTION_ENV]: "1", [TEST_PAUSE_DIR_ENV]: pauseDir } });
+    expect(h.external).toBe(false);
+    expect(h.ownsInstallDir).toBe(true);
+    // One row to PATCH later. Its vector carries the current model stamp (the
+    // spawned instance's, same env), so the scan reads the store as uniform; a
+    // stored vector without a trusted stamp would make it non-uniform (flair#2573).
+    await adminOp(h, {
+      operation: "insert", database: "flair", table: "Memory", records: [
+        { id: ROW, agentId: AGENT, content: "seeded row", embedding: [1, 0, 0, 0], embeddingModel: getModelId(), durability: "standard", visibility: "shared", createdAt: new Date().toISOString() },
+      ],
+    });
+  }, 180_000);
+
+  afterAll(async () => {
+    if (pauseDir) writeFileSync(join(pauseDir, `go.${POINT}`), ""); // never leave a scan parked
+    if (pauseDir) writeFileSync(join(pauseDir, `go.${SWEEP_POINT}`), "");
+    if (h) await stopHarper(h);
+    if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+  }, 60_000);
+
+  test("a foreign-stamp Memory PATCH during a paused sweep returns mixed and preserves the existing stat file", async () => {
+    // The boot pre-warm's scan is parked ⇒ the guard verdict is unknown.
+    expect(await waitFor(join(pauseDir, `paused.${POINT}`), 30_000), "no scan reached the boot pause").toBe(true);
+
+    const unknown = await dedupStats(h!);
+    expect(unknown.clusterCount).toBeNull();
+    expect(unknown.largestClusterSize).toBeNull();
+    expect(unknown.totalMemoriesInClusters).toBeNull();
+    expect(unknown.embeddingSpace?.state).toBe("unverified");
+    expect(unknown.embeddingSpace?.reason).toBeNull();
+
+    // Release the scan to publish a uniform verdict.
+    writeFileSync(join(pauseDir, `go.${POINT}`), "");
+    expect(await waitForGuardState(h!, "uniform", 60_000)).toBe("uniform");
+
+    const uniform = await dedupStats(h!);
+    expect(typeof uniform.clusterCount).toBe("number");
+    expect(uniform.embeddingSpace).toBeUndefined();
+
+    const statsPath = join(h!.installDir, ".flair", "rem-dedup-stats.json");
+    const priorStat = readFileSync(statsPath);
+    expect(JSON.parse(priorStat.toString())).toEqual(uniform);
+    writeFileSync(join(pauseDir, `arm.${SWEEP_POINT}`), "");
+    const sweep = dedupStats(h!);
+    let mixed: any;
+    try {
+      expect(await waitFor(join(pauseDir, `paused.${SWEEP_POINT}`), 10_000)).toBe(true);
+      expect(readFileSync(join(pauseDir, `released.${SWEEP_POINT}`), "utf8")).toBe("");
+      await patchForeignStamp(h!);
+      expect(await waitForGuardState(h!, "mixed", 10_000)).toBe("mixed");
+    } finally {
+      writeFileSync(join(pauseDir, `go.${SWEEP_POINT}`), "");
+      mixed = await sweep;
+    }
+    expect(readFileSync(join(pauseDir, `released.${SWEEP_POINT}`), "utf8")).toBe("go");
+    expect(mixed.clusterCount).toBeNull();
+    expect(mixed.largestClusterSize).toBeNull();
+    expect(mixed.totalMemoriesInClusters).toBeNull();
+    expect(mixed.embeddingSpace).toEqual({ state: "mixed", reason: null });
+    expect(readFileSync(statsPath)).toEqual(priorStat);
+    expect((await dedupStats(h!)).embeddingSpace).toEqual({ state: "mixed", reason: null });
+  }, 120_000);
+});
+
+gate("MemoryBootstrap's task-relevant selection consults the guard against a real Harper (flair#2559)", () => {
+  let h: HarperInstance | undefined;
+  let pauseDir = "";
+
+  interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
+  const agent: TestAgent = (() => {
+    const kp = nacl.sign.keyPair();
+    return { id: AGENT, publicKey: Buffer.from(kp.publicKey).toString("base64"), secretKey: kp.secretKey };
+  })();
+
+  function ed25519Header(method: string, path: string): string {
+    const ts = Date.now().toString();
+    const nonce = randomUUID();
+    const payload = `${agent.id}:${ts}:${nonce}:${method}:${path}`;
+    const sig = nacl.sign.detached(new TextEncoder().encode(payload), agent.secretKey);
+    return `TPS-Ed25519 ${agent.id}:${ts}:${nonce}:${Buffer.from(sig).toString("base64")}`;
+  }
+
+  async function bootstrap(): Promise<any> {
+    const path = "/BootstrapMemories";
+    const res = await fetch(`${h!.httpURL}${path}`, {
+      method: "POST",
+      headers: { Authorization: ed25519Header("POST", path), "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: AGENT, currentTask: "federation direction" }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const text = await res.text();
+    expect(res.status, `BootstrapMemories → ${res.status}: ${text.slice(0, 300)}`).toBe(200);
+    return JSON.parse(text);
+  }
+
+  beforeAll(async () => {
+    pauseDir = mkdtempSync(join(tmpdir(), "flair-2559-boot-pause-"));
+    writeFileSync(join(pauseDir, `arm.${POINT}`), "");
+    h = await startHarper({ serverEnv: { [TEST_FAULT_INJECTION_ENV]: "1", [TEST_PAUSE_DIR_ENV]: pauseDir, FLAIR_RETRIEVAL_MODE: "vector-only" } });
+    expect(h.external).toBe(false);
+    expect(h.ownsInstallDir).toBe(true);
+    await adminOp(h, {
+      operation: "insert", database: "flair", table: "Agent", records: [
+        { id: agent.id, name: agent.id, role: "agent", publicKey: agent.publicKey, createdAt: new Date().toISOString() },
+      ],
+    });
+  }, 180_000);
+
+  afterAll(async () => {
+    if (pauseDir) writeFileSync(join(pauseDir, `go.${POINT}`), "");
+    if (h) await stopHarper(h);
+    if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+  }, 60_000);
+
+  test("unknown warning, verified-uniform response, then mixed warning with lexical task results", async () => {
+    expect(await waitFor(join(pauseDir, `paused.${POINT}`), 30_000), "no scan reached the boot pause").toBe(true);
+
+    const unknown = await bootstrap();
+    expect(String(unknown._warning)).toContain("embedding space not yet verified");
+    expect(String(unknown._warning)).not.toContain("non-current embedding model stamp was observed");
+
+    writeFileSync(join(pauseDir, `go.${POINT}`), "");
+    expect(await waitForGuardState(h!, "uniform", 60_000)).toBe("uniform");
+
+    const uniform = await bootstrap();
+    expect(uniform._warning).toBeUndefined();
+
+    const old = new Date(Date.now() - 90 * 24 * 3600_000).toISOString();
+    await adminOp(h!, {
+      operation: "insert", database: "flair", table: "Memory", records: [
+        { id: ROW, agentId: AGENT, content: "federation replication direction", durability: "persistent", visibility: "shared", archived: false, createdAt: old, updatedAt: old },
+      ],
+    });
+    await patchForeignStamp(h!);
+    const mixed = await bootstrap();
+    expect(String(mixed._warning)).toContain("non-current embedding model stamp was observed");
+    expect(String(mixed._warning)).toContain("results are keyword-only");
+    expect(mixed.memories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: ROW, section: "relevant" }),
+    ]));
+  }, 180_000);
+});

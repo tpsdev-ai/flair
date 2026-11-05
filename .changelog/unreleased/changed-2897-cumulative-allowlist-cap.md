@@ -1,0 +1,1 @@
+- **The audit allowlist checks parsed Git snapshots before applying its severity cap.** `added` must be a real calendar date on or before the first commit day containing the id in those snapshots, following file renames and comparing ids case-insensitively; an entry over its cap requires a dated `overCapApproval`.

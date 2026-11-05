@@ -4,7 +4,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
@@ -100,7 +100,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (installDir) await rm(installDir, { recursive: true, force: true, maxRetries: 4 });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2263 — the URL-bound id is the skill write target when the body ID is absent or null", () => {
   test("PUT /Memory/<X> with a skill body that has only the URL id creates at X, and an identical retry writes a successor id with supersedes X and skillSubjectId X", async () => {

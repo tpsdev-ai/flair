@@ -1,3 +1,4 @@
+import { nodeBin } from "../helpers/node-runtime.ts";
 /**
  * flair#2113 — `flair mcp enable --cimd-allowed-hosts` ensures the list the
  * @harperfast/oauth component reads in the edited config.yaml, and reads it
@@ -576,7 +577,7 @@ describe("checkTargetRunsFromConfig — against a real process on this machine",
     const other = mkdtempSync(join(tmpdir(), "flair-2113-other-"));
     copyFileSync(REPO_CONFIG, join(other, "config.yaml"));
     // Started like flair starts Harper: `... run .` in the application directory.
-    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)", "run", "."], { cwd: dir, stdio: "ignore" });
+    const child = spawn(nodeBin(), ["-e", "setTimeout(() => {}, 60000)", "run", "."], { cwd: dir, stdio: "ignore" });
     try {
       const pid = child.pid!;
       expect(pid).toBeGreaterThan(0);

@@ -34,6 +34,7 @@ const FLAIR_RESERVED_FIELDS_SET = new Set([
   "retrievalCount",
   "lastRetrieved",
   "promotionStatus",
+  "promotionContentHash",
   "_safetyFlags",
   "createdBy",
   "updatedBy",

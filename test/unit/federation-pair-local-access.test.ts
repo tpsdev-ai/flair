@@ -303,10 +303,12 @@ describe("pair-access remedies resolve against CLI / docs (PLAN ACCEPTED #820)",
 
   test("FLAIR_ADMIN_AGENTS is a current server-process env surface", () => {
     const example = readFileSync(join(import.meta.dir, "../../.env.example"), "utf8");
-    const reader = readFileSync(join(import.meta.dir, "../../resources/agent-auth.ts"), "utf8");
+    const reader = readFileSync(join(import.meta.dir, "../../resources/agent-admin.ts"), "utf8");
+    const gate = readFileSync(join(import.meta.dir, "../../resources/agent-auth.ts"), "utf8");
     expect(example).toContain(ADMIN_AGENTS_ENV);
     expect(example).toMatch(new RegExp(`${ADMIN_AGENTS_ENV}=agent-a,agent-b flair start`));
     expect(reader).toContain(`process.env.${ADMIN_AGENTS_ENV}`);
+    expect(gate).toContain("configuredAdminAgentIds()");
   });
 
   test("flair principal add --admin is the admin-grant surface in principal.ts", () => {

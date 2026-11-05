@@ -30,6 +30,7 @@ export interface SpawnCall {
   text: string;
   isCliEntry: boolean;
   hasTimeout: boolean;
+  timeoutMs?: number | null;
   scope?: string;
 }
 
@@ -60,11 +61,19 @@ export interface SpawnOffender {
 export function topLevelArgs(src: string, open: number): { spans: Array<{ start: number; end: number; text: string }>; close: number } | null;
 export function cliEntryIdentifiers(source: string): Set<string>;
 export function aliasedSpawnFns(source: string): Map<string, string>;
-export function findSpawnCalls(source: string): { calls: SpawnCall[]; ids: Set<string> };
-export function functionBodies(source: string): Array<{ name: string; start: number; end: number }>;
-export function localHelpersThatSpawn(source: string, calls: SpawnCall[]): Set<string>;
+/** The source with every JSX text node masked by spaces, keeping length and every line break (flair#2808). */
+export function maskJsxText(source: string, fileName?: string): string;
+/** The source with every comment and string/template/regex literal text masked by spaces, keeping length and every line break (flair#2774, flair#2808). */
+export function maskLiteralsAndComments(source: string, fileName?: string): string;
+/** The comment masker the case and helper walks read; it keeps the length and every line break (flair#2808). */
+export function maskComments(source: string): string;
+
+/** Throws, naming `fileName`, when TypeScript's parser reports a syntax error in `source` (flair#2774). */
+export function findSpawnCalls(source: string, fileName?: string): { calls: SpawnCall[]; ids: Set<string> };
+export function functionBodies(source: string, fileName?: string): Array<{ name: string; start: number; end: number }>;
+export function localHelpersThatSpawn(source: string, calls: SpawnCall[], fileName?: string): Set<string>;
 export function findCases(source: string, calls: SpawnCall[], helpers: Set<string>): CaseRecord[];
-export function analyzeTestFile(source: string): { calls: SpawnCall[]; ids: Set<string>; helpers: Set<string>; cases: CaseRecord[]; bodies: Array<{ name: string; start: number; end: number }> };
+export function analyzeTestFile(source: string, fileName?: string): { calls: SpawnCall[]; ids: Set<string>; helpers: Set<string>; cases: CaseRecord[]; bodies: Array<{ name: string; start: number; end: number }> };
 export function normalizeFingerprint(text: string): string;
 export function offenderKey(o: { file: string; scope: string; fingerprint: string; kind: string; occurrence?: number }): string;
 export function scanTree(root: string): { files: string[]; spawnOffenders: SpawnOffender[]; caseOffenders: SpawnOffender[] };
@@ -80,8 +89,14 @@ export function gateBaseRef(env?: Record<string, string | undefined>): string;
 export function loadBaselineAtRef(ref: string, root: string): BaselineEntry[] | null;
 /** The PR tree's copy of the baseline. */
 export function readPrBaseline(root: string): BaselineEntry[];
-/** Entries a PR added relative to the trusted base (a PR may only remove). */
+/** Entries with exception keys absent from the trusted base. */
 export function addedExceptions(baseEntries: BaselineEntry[], prEntries: BaselineEntry[]): BaselineEntry[];
+/** Re-keys pair added spawn-no-timeout keys one-to-one with removed keys of identical file, fingerprint, kind and occurrence when the scanned working-tree file is byte-identical to the trusted base blob (flair#2854). */
+export function classifyAddedExceptions(
+  baseEntries: BaselineEntry[],
+  prEntries: BaselineEntry[],
+  fileUnchanged?: (file: string) => boolean,
+): { added: BaselineEntry[]; rekeyed: Array<{ from: BaselineEntry; to: BaselineEntry }> };
 
 /** End-to-end check used by main() and the gate-level tests. */
 export function runGate(opts?: { root?: string; baseRef?: string; env?: Record<string, string | undefined>; seedBase?: string }): {
@@ -99,6 +114,7 @@ export function runGate(opts?: { root?: string; baseRef?: string; env?: Record<s
   baseEntries: BaselineEntry[];
   errors: string[];
   added: BaselineEntry[];
+  rekeyed: Array<{ from: BaselineEntry; to: BaselineEntry }>;
   newOffenders: SpawnOffender[];
   staleEntries: BaselineEntry[];
   ok: boolean;

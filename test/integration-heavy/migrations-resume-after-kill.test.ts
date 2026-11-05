@@ -54,7 +54,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { rm } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider";
 
 const RESERVED_TEST_AGENT_ID = "__flair_migration_synthetic_test_agent__";
@@ -62,9 +62,14 @@ const SYNTHETIC_TARGET_MARKER = "synthetic-ci-schema-stamp-done";
 const SYNTHETIC_MIGRATION_ID = "synthetic-ci-schema-stamp";
 const ROW_COUNT = 140; // 3 batches at the schema-additive batch size (50) — two observable mid-flight windows
 const TEST_BATCH_DELAY_MS = 2500; // widens each mid-flight window to ~2.5s (vs the 100ms prod default)
-// Pinned base id — see "MIGRATION ISOLATION" above. Set as FLAIR_EMBEDDING_MODEL
-// for the spawned Harper (beforeAll, below).
+// Pinned base id — see "MIGRATION ISOLATION" above. Passed as FLAIR_EMBEDDING_MODEL
+// for the spawned Harper through serverEnv.
 const PINNED_EMBEDDING_MODEL = "resume-test-pinned-model";
+const SERVER_ENV = {
+  FLAIR_ENABLE_TEST_MIGRATIONS: "1",
+  FLAIR_MIGRATION_TEST_BATCH_DELAY_MS: String(TEST_BATCH_DELAY_MS),
+  FLAIR_EMBEDDING_MODEL: PINNED_EMBEDDING_MODEL,
+};
 // The EXACT stamp getModelId() computes for PINNED_EMBEDDING_MODEL under
 // this build's THE GATE (flair#504) — derived by calling the real,
 // harper-free `getModelId()` (it only reads env vars + the module-level
@@ -149,11 +154,7 @@ async function diagnose(inst: HarperInstance): Promise<string> {
 
 describe("zero-touch migrations — resume after a mid-migration process kill (real Harper)", () => {
   beforeAll(async () => {
-    process.env.FLAIR_ENABLE_TEST_MIGRATIONS = "1";
-    process.env.FLAIR_MIGRATION_TEST_BATCH_DELAY_MS = String(TEST_BATCH_DELAY_MS);
-    process.env.FLAIR_EMBEDDING_MODEL = PINNED_EMBEDDING_MODEL;
-
-    const first = await startHarper();
+    const first = await startHarper({ serverEnv: SERVER_ENV });
     installDir = first.installDir;
     authHeader = "Basic " + Buffer.from(`${first.admin.username}:${first.admin.password}`).toString("base64");
 
@@ -179,15 +180,12 @@ describe("zero-touch migrations — resume after a mid-migration process kill (r
   }, 180_000);
 
   afterAll(async () => {
-    delete process.env.FLAIR_ENABLE_TEST_MIGRATIONS;
-    delete process.env.FLAIR_MIGRATION_TEST_BATCH_DELAY_MS;
-    delete process.env.FLAIR_EMBEDDING_MODEL;
     if (harper) await stopHarper(harper).catch(() => {});
     await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("kills mid-migration, restarts against the same data dir, and the migration resumes to completion with every row correctly stamped", async () => {
-    harper = await startHarper({ installDir });
+    harper = await startHarper({ installDir, serverEnv: SERVER_ENV });
     captureBootLog(harper);
 
     // ── Phase 1: wait for the migration to REACH "running" (generous
@@ -246,7 +244,7 @@ describe("zero-touch migrations — resume after a mid-migration process kill (r
     await stopHarper(harper, { keepInstallDir: true });
 
     // ── Restart fresh against the SAME (partially-migrated) data. ──
-    harper = await startHarper({ installDir });
+    harper = await startHarper({ installDir, serverEnv: SERVER_ENV });
     captureBootLog(harper);
 
     const completeDeadline = Date.now() + 120_000;

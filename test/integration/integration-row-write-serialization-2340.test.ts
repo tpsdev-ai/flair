@@ -21,7 +21,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HarperInstance, startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const POINT = "integration-row-write";
 const PLATFORM = "tps-mail";
@@ -164,21 +164,7 @@ function transferPublishPatch(harper: HarperInstance, id: string, agentId: strin
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-irw-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper();
-  } finally {
-    // The spawned Harper has its copy; no later Harper in this process inherits it.
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
   assertOwnInstance(harper);
   await registerAgent(harper, owner);
   await registerAgent(harper, other);
@@ -194,7 +180,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2340 — the Integration per-row write under a publish committed after its read (real Harper)", () => {
   it("an owner PUT that changes the email is refused once the row was published during the write", async () => {

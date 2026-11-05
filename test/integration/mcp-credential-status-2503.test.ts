@@ -24,7 +24,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { provisionIdpIdentityMapping } from "../../src/lib/mcp-enable.ts";
 
 const REPO_ROOT = process.cwd();
@@ -128,14 +128,7 @@ beforeAll(async () => {
   await mkdir(join(appDir, "node_modules", "@tpsdev-ai"), { recursive: true });
   await symlink(REPO_ROOT, join(appDir, "node_modules", "@tpsdev-ai", "flair"), "dir");
   // JIT ON for the whole file: a revoked mapping must NOT fall through to it.
-  const prior = process.env.FLAIR_MCP_JIT_PROVISION;
-  process.env.FLAIR_MCP_JIT_PROVISION = "1";
-  try {
-    harper = await startHarper({ cwd: appDir, harperBinDir: REPO_ROOT });
-  } finally {
-    if (prior === undefined) delete process.env.FLAIR_MCP_JIT_PROVISION;
-    else process.env.FLAIR_MCP_JIT_PROVISION = prior;
-  }
+  harper = await startHarper({ cwd: appDir, harperBinDir: REPO_ROOT, serverEnv: { FLAIR_MCP_JIT_PROVISION: "1" } });
   // Talk only to this test's own ephemeral instance.
   const http = new URL(harper.httpURL);
   const ops = new URL(harper.opsURL);
@@ -159,7 +152,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (dataDir) await rm(dataDir, { recursive: true, force: true, maxRetries: 4 });
   if (appDir) await rm(appDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2503 — the /mcp resolver accepts a Credential only when its status is \"active\"", () => {
   test("an ACTIVE credential resolves through the real resolver (positive control)", async () => {

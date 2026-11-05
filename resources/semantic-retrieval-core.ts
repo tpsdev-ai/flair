@@ -63,6 +63,8 @@ import { buildBM25, fuseRrfNormalized, SEM_LIMIT, type RetrievalMode } from "./b
 import { isAllowedBm25Candidate, type Condition } from "./bm25-filter.js";
 import { indexedBm25Ids } from "./bm25-index-service.js";
 import { byRecencyThenId } from "./sort-comparators.js";
+import { isTrustedVectorStamp, trustedVectorCondition } from "./embedding-space-guard.js";
+import { applyPromotionBinding } from "./promotion-binding.js";
 
 /**
  * Internal ranked retrieval row (flair#1415). `_rank` is required so a
@@ -119,7 +121,7 @@ function distanceToSimilarity(distance: number): number {
 // a permitted reader would never see their pointer.
 export const DEFAULT_SELECT = ["id", "agentId", "content", "contentHash", "visibility", "instanceToken", "tags", "durability",
   "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "usageCount", "lastRetrieved",
-  "promotionStatus", "promotedAt", "promotedBy", "archived", "archivedAt", "archivedBy",
+  "promotionStatus", "promotedAt", "promotedBy", "promotionContentHash", "archived", "archivedAt", "archivedBy",
   "parentId", "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject", "summary",
   "validFrom", "validTo", "_safetyFlags"];
 
@@ -278,7 +280,14 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         select: hnswSelect,
         limit,
       };
-      if (conditions.length > 0) semQuery.conditions = conditions;
+      // flair#2573 slice 1: defence in depth on the vector leg. The guard's
+      // verdict is the load-bearing exclusion — a non-uniform verdict makes the
+      // caller drop the query embedding. This condition is added to the HNSW
+      // query alone — never to `conditions`, which the lexical leg shares (a row
+      // with an untrusted stamp remains eligible for lexical matching). A query
+      // condition cannot keep a vector out of Harper's HNSW traversal; it only
+      // excludes the row from the returned set.
+      semQuery.conditions = [...conditions, trustedVectorCondition()];
       const semResults = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search(semQuery));
       for await (const record of semResults) {
         if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
@@ -403,7 +412,8 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         const projected: any = {};
         for (const key of select) if (key in full) projected[key] = (full as any)[key];
         allowedById.set(id, projected);
-        if (qEmb) {
+        // A trusted stamp permits cosine scoring; an absent vector scores zero.
+        if (qEmb && isTrustedVectorStamp((full as any).embeddingModel)) {
           const storedEmbedding = Array.isArray((full as any).embedding) ? (full as any).embedding : [];
           semSimById.set(id, cosineSimilarity(qEmb, storedEmbedding));
         }
@@ -423,7 +433,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
         const source = record.agentId !== agentId ? record.agentId : undefined;
         pushRanked(results, {
-          ...record,
+          ...applyPromotionBinding(record),
           content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
           _score: Math.round(finalScore * 1000) / 1000,
           _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
@@ -462,9 +472,12 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         let semSim = semSimById.get(id);
         if (semSim === undefined && qEmb) {
           const full = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(id));
-          const storedEmbedding = Array.isArray(full?.embedding) ? full.embedding : [];
-          semSim = cosineSimilarity(qEmb, storedEmbedding);
-          semSimById.set(id, semSim);
+          // A trusted stamp permits cosine scoring; an absent vector scores zero.
+          if (isTrustedVectorStamp(full?.embeddingModel)) {
+            const storedEmbedding = Array.isArray(full?.embedding) ? full.embedding : [];
+            semSim = cosineSimilarity(qEmb, storedEmbedding);
+            semSimById.set(id, semSim);
+          }
         }
         let keywordHit = false;
         if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
@@ -480,7 +493,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         // composite mode (composite ordering is unchanged by #985 — its
         // rrfRaw input and result order are exactly the pre-#985 behavior).
         pushRanked(results, {
-          ...record,
+          ...applyPromotionBinding(record),
           content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
           _score: Math.round(finalScore * 1000) / 1000,
           _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
@@ -570,7 +583,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
       const source = record.agentId !== agentId ? record.agentId : undefined;
       pushRanked(results, {
-        ...record,
+        ...applyPromotionBinding(record),
         content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
@@ -585,10 +598,10 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       sort: { attribute: "embedding", target: qEmb, distance: "cosine" },
       select: hnswSelect,
       limit,
+      // flair#2573 slice 1: defence in depth on the vector leg (see the hybrid
+      // sem leg above); the guard's verdict is the load-bearing exclusion.
+      conditions: [...conditions, trustedVectorCondition()],
     };
-    if (conditions.length > 0) {
-      query.conditions = conditions;
-    }
 
     const memoryResults = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search(query));
     for await (const record of memoryResults) {
@@ -632,7 +645,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       // bump) is the abstention confidence signal on this legacy/bootstrap
       // (HNSW-leg-only) path.
       pushRanked(results, {
-        ...rest,
+        ...applyPromotionBinding(rest),
         content: isFlagged ? wrapUntrusted(rest.content, source) : rest.content,
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
@@ -672,7 +685,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       const isFlagged = rest._safetyFlags && Array.isArray(rest._safetyFlags) && rest._safetyFlags.length > 0;
       const source = record.agentId !== agentId ? record.agentId : undefined;
       pushRanked(results, {
-        ...rest,
+        ...applyPromotionBinding(rest),
         content: isFlagged ? wrapUntrusted(rest.content, source) : rest.content,
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,

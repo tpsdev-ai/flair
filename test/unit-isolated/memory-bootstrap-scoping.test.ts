@@ -70,7 +70,11 @@ function matchesCondition(record: any, cond: any): boolean {
   return true;
 }
 
-let memoryStore: Map<string, any>;
+// Initialized at module scope: the embedding-space guard's boot pre-warm scans
+// `databases.flair.Memory` before the first test runs, and an undefined store
+// would make that scan throw and leave the task-relevant leg keyword-only
+// (flair#2559). An empty store is vacuously uniform under the stamp check.
+let memoryStore: Map<string, any> = new Map();
 // flair#2141 — when set, the skill-row read (a Memory search on the `skill`
 // tag) fails, for the failed-read case: "call" throws from the search call,
 // "iterate" from the first read of its results.
@@ -398,7 +402,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     // + currentTask (mocked getEmbedding → cosine 1.0 tops the fused pool).
     memoryStore.set("shared-attr", {
       id: "shared-attr", agentId: "agent-owner", content: "TEAMMATE-ATTR-FINDING",
-      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
 
@@ -435,7 +439,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     // reaches the teammate section where it renders — see the note above.
     memoryStore.set("shared-flagged", {
       id: "shared-flagged", agentId: "agent-owner", content: "TEAMMATE-FLAGGED-FINDING",
-      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
       _safetyFlags: ["prompt_injection"],
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
@@ -461,7 +465,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     reset();
     memoryStore.set("teammate-task", {
       id: "teammate-task", agentId: "agent-owner", content: "TEAMMATE-TASK-RELEVANT-FINDING",
-      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
 
@@ -479,7 +483,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     reset();
     memoryStore.set("own-task", {
       id: "own-task", agentId: "agent-grantee", content: "MY-OWN-TASK-RELEVANT-FINDING",
-      durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
@@ -497,11 +501,11 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     reset();
     memoryStore.set("own-task-2", {
       id: "own-task-2", agentId: "agent-grantee", content: "MIXED-OWN-FINDING",
-      durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
     memoryStore.set("teammate-task-2", {
       id: "teammate-task-2", agentId: "agent-owner", content: "MIXED-TEAMMATE-FINDING",
-      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
 
@@ -519,7 +523,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     reset();
     memoryStore.set("teammate-private-task", {
       id: "teammate-private-task", agentId: "agent-owner", content: "TEAMMATE-PRIVATE-TASK-FINDING",
-      visibility: "private", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "private", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
 
@@ -549,7 +553,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     // verified in-org agent regardless.
     memoryStore.set("ungranted-shared-task", {
       id: "ungranted-shared-task", agentId: "agent-owner", content: "UNGRANTED-TEAMMATE-TASK-FINDING",
-      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
@@ -569,7 +573,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     // memory that isn't theirs, regardless of any grant history.
     memoryStore.set("ungranted-private-task", {
       id: "ungranted-private-task", agentId: "agent-owner", content: "UNGRANTED-TEAMMATE-PRIVATE-FINDING",
-      visibility: "private", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "private", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
@@ -673,7 +677,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     // (own-only) permanent section yet still reaches the scored teammate path.
     memoryStore.set("teammate-perm-task", {
       id: "teammate-perm-task", agentId: "agent-owner", content: "TEAMMATE-PERMANENT-TASK-FINDING",
-      visibility: "shared", durability: "permanent", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+      visibility: "shared", durability: "permanent", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
 
@@ -819,7 +823,7 @@ describe("small task budgets (#1431)", () => {
   it("retrieves below the former 200-token gate and reports records that cannot fit", async () => {
     reset();
     memoryStore.set("small", { id: "small", agentId: "small-budget", content: "Check the CI date.",
-      durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING });
+      durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model" });
     const b = makeBootstrap(agentCtx("small-budget"));
     const small = await b.post({ agentId: "small-budget", currentTask: "CI date", maxTokens: 180, includeSoul: false });
     expect(small.memories.map((m: any) => m.id)).toContain("small");

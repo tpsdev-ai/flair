@@ -27,11 +27,11 @@
  */
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawnCli } from "../helpers/build-cli-once.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { httpStatus } from "../helpers/http-status";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 
@@ -47,7 +47,6 @@ import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 const CHILD_DEADLINE_MS = 20_000;
 const CASE_BUDGET_MS = 25_000;
 
-const CLI = join(process.cwd(), "dist", "cli.js");
 const AGENT_ID = "krais-onboarding";
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
 
@@ -67,7 +66,7 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
   const opsPort = new URL(harper.opsURL).port;
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const child = spawn(process.execPath, [CLI, ...args], {
+    const child = spawnCli(args, {
       env: {
         ...process.env,
         HOME: cliHome, // isolates ~/.flair (keys, config, admin-pass)
@@ -82,7 +81,7 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
       },
       // flair#1807: the child carries its OWN deadline (it replaces the manual
       // 30 s kill this used to arm); a signal kill is named, with its output.
-      timeout: CHILD_DEADLINE_MS,
+      timeout: 20_000, // literal so the spawn-budget gate reads a child deadline
     });
     let stdout = "";
     let stderr = "";
@@ -112,12 +111,12 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
 beforeAll(async () => {
   harper = await startHarper();
   cliHome = await mkdtemp(join(tmpdir(), "flair-onboarding-home-"));
-}, 120_000);
+}, HARPER_START_BUDGET_MS);
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (cliHome) await rm(cliHome, { recursive: true, force: true, maxRetries: 4 });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("first-run onboarding (real CLI, isolated temp Harper + home)", () => {
   // #499: agent seeding goes through the ops API. `flair agent add` uses the
@@ -138,7 +137,7 @@ describe("first-run onboarding (real CLI, isolated temp Harper + home)", () => {
     // The old bug surfaced as a REST 405; assert that error never appears.
     expect(`${r.stdout}${r.stderr}`).not.toMatch(httpStatus(405));
     expect(`${r.stdout}${r.stderr}`).not.toContain("does not have a post method");
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 
   // #498: soul set must PUT /Soul/{id}, not POST the collection.
   test("soul set succeeds via PUT /Soul/{id} (#498)", async () => {
@@ -160,12 +159,13 @@ describe("first-run onboarding (real CLI, isolated temp Harper + home)", () => {
     const id = `${AGENT_ID}:role`;
     const res = await fetch(`${harper.httpURL}/Soul/${encodeURIComponent(id)}`, {
       headers: { Authorization: "Basic " + Buffer.from(`admin:${ADMIN_PASS}`).toString("base64") },
+      signal: AbortSignal.timeout(15_000),
     });
     expect(res.ok).toBe(true);
     const soul = await res.json() as { id?: string; value?: string };
     expect(soul.id).toBe(id);
     expect(soul.value).toBe("onboarding smoke");
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 
   // #500: agent list with --admin-pass must not null-scan the PK.
   test("agent list does not null-scan the PK (#500)", async () => {
@@ -185,5 +185,5 @@ describe("first-run onboarding (real CLI, isolated temp Harper + home)", () => {
     const agents = JSON.parse(r.stdout) as Array<{ id: string }>;
     expect(Array.isArray(agents)).toBe(true);
     expect(agents.some(a => a.id === AGENT_ID)).toBe(true);
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 });

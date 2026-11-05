@@ -40,7 +40,8 @@ export interface SnapshotMeta {
   flairVersion: string;
   createdAt: string;
   memoryCount: number;
-  pendingCandidateCount: number;
+  /** `null` when the count was not taken (flair#2680). */
+  pendingCandidateCount: number | null;
   soulPresent: boolean;
 }
 
@@ -49,7 +50,8 @@ export interface CreateOpts {
   flairVersion: string;
   memories: Array<Record<string, unknown>>;
   soul: Record<string, unknown> | null;
-  pendingCandidateCount: number;
+  /** `null` when the count was not taken (flair#2680). */
+  pendingCandidateCount: number | null;
   /** Override the run id (defaults to `rem-nightly-<iso-ts>`). */
   runId?: string;
   /** Override the snapshot root for testing. */

@@ -6,12 +6,12 @@
  * pause behaviour, while malformed names throw before the gate.
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
-import { InvalidPausePointError, PAUSE_POINT_PATTERN, TEST_FAULT_INJECTION_ENV, TEST_PAUSE_DIR_ENV, txnPausePoint } from "../../resources/txn-pause-point.ts";
+import { InvalidPausePointError, PAUSE_POINT_PATTERN, TEST_FAULT_INJECTION_ENV, TEST_PAUSE_DIR_ENV, txnPausePoint, txnPausePointSync } from "../../resources/txn-pause-point.ts";
 
 let dir: string;
 const env = (overrides: Record<string, string | undefined> = {}) => ({
@@ -83,6 +83,20 @@ describe("an armed point releases on go or timeout", () => {
     expect(readdirSync(dir).sort()).toEqual(["claimed.supersede-close", "paused.supersede-close", "released.supersede-close"]);
     writeFileSync(join(dir, "go.supersede-close"), "");
     await pause;
+    expect(readFileSync(join(dir, "released.supersede-close"), "utf8")).toBe("go");
+  });
+
+  it("writes the supplied snapshot to the pause marker", async () => {
+    arm();
+    const row = { id: "seeded", name: "Seeded", publicKey: "pending", createdAt: "2026-01-01T00:00:00.000Z" };
+    const pause = txnPausePoint("supersede-close", env(), 1_000, row);
+    expect(pause).toBeInstanceOf(Promise);
+    try {
+      expect(JSON.parse(readFileSync(join(dir, "paused.supersede-close"), "utf8"))).toEqual(row);
+    } finally {
+      writeFileSync(join(dir, "go.supersede-close"), "");
+      await pause;
+    }
     expect(readFileSync(join(dir, "released.supersede-close"), "utf8")).toBe("go");
   });
 
@@ -193,6 +207,9 @@ describe("pause-point names (flair#2382)", () => {
     for (const { file, text } of sources) {
       const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
       const pauseNames = new Set(["txnPausePoint"]);
+      // The synchronous form arms the same marker files, keyed by the name
+      // alone, so it shares one name space with the asynchronous form.
+      const syncNames = new Set(["txnPausePointSync"]);
       const deleteNames = new Set(["deleteOwnedRow"]);
       for (const statement of source.statements) {
         if (!ts.isImportDeclaration(statement)) continue;
@@ -201,11 +218,12 @@ describe("pause-point names (flair#2382)", () => {
         for (const binding of bindings.elements) {
           const imported = (binding.propertyName ?? binding.name).text;
           if (imported === "txnPausePoint") pauseNames.add(binding.name.text);
+          if (imported === "txnPausePointSync") syncNames.add(binding.name.text);
           if (imported === "deleteOwnedRow") deleteNames.add(binding.name.text);
         }
       }
       const visit = (node: ts.Node): void => {
-        if (ts.isIdentifier(node) && (pauseNames.has(node.text) || deleteNames.has(node.text))) {
+        if (ts.isIdentifier(node) && (pauseNames.has(node.text) || syncNames.has(node.text) || deleteNames.has(node.text))) {
           let reference: ts.Node = node;
           while (ts.isParenthesizedExpression(reference.parent) || ts.isAsExpression(reference.parent) ||
                  ts.isTypeAssertionExpression(reference.parent) || ts.isNonNullExpression(reference.parent) ||
@@ -245,6 +263,7 @@ describe("pause-point names (flair#2382)", () => {
               forwardsProperty = true;
             } else add(argument, where);
           }
+          if (syncNames.has(name)) add(node.arguments[0], where);
           if (deleteNames.has(name)) {
             const spec = node.arguments[1];
             if (!spec || !ts.isObjectLiteralExpression(spec) ||
@@ -292,15 +311,56 @@ describe("pause-point names (flair#2382)", () => {
     ["unscanned property argument", "txnPausePoint(other.point);", "unresolved pause point"],
     ["unresolvable spec", "deleteOwnedRow(ctx, spec);", "unresolved pause point"],
     ["spread override of point", 'deleteOwnedRow(ctx, { point: "fixture-delete", ...other });', "unresolved pause point"],
+    ["malformed sync name", 'txnPausePointSync("Bad Name");', "malformed pause point"],
+    ["duplicate sync name", 'txnPausePointSync("fixture-sync-pause"); txnPausePointSync("fixture-sync-pause");', "duplicate pause point"],
+    ["sync name shared with an async call", 'txnPausePointSync("supersede-close");', "duplicate pause point"],
+    ["unresolvable sync property argument", "txnPausePointSync(other.point);", "unresolved pause point"],
+    ["aliased sync call", 'import { txnPausePointSync as pauseAt } from "../txn-pause-point.js"; pauseAt("Bad Name");', "malformed pause point"],
   ]) {
     it(`scan rejects ${title}`, () => {
       expect(() => scanPausePoints([...sources(), { file: "fixture.ts", text }])).toThrow(error);
     });
   }
 
+  it("accepts a well-formed sync name", () => {
+    expect(() => scanPausePoints([...sources(), { file: "fixture.ts", text: 'txnPausePointSync("fixture-sync-accept");' }]))
+      .not.toThrow();
+  });
+
   it("refuses a malformed name at call time with a named error", () => {
     for (const bad of ["Bad Name", "no_underscores", "-leading", "trailing-", "double--hyphen", ""]) {
       expect(() => txnPausePoint(bad, {} as NodeJS.ProcessEnv)).toThrow(InvalidPausePointError);
     }
+  });
+});
+
+describe("txnPausePointSync — synchronous pause (flair#2866)", () => {
+  it("is inert without the fault-injection opt-in", () => {
+    txnPausePointSync("migration-lock-publish", {} as NodeJS.ProcessEnv);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it("claims the arm, records the markers and returns when go already exists", () => {
+    arm();
+    writeFileSync(join(dir, "go.supersede-close"), "");
+    txnPausePointSync("supersede-close", env());
+    expect(readdirSync(dir).sort()).toEqual([
+      "claimed.supersede-close",
+      "go.supersede-close",
+      "paused.supersede-close",
+      "released.supersede-close",
+    ]);
+    expect(existsSync(join(dir, "arm.supersede-close"))).toBe(false);
+    expect(readFileSync(join(dir, "released.supersede-close"), "utf-8")).toBe("go");
+  });
+
+  it("releases itself at its limit and records a timeout", () => {
+    arm();
+    txnPausePointSync("supersede-close", env(), 30);
+    expect(readFileSync(join(dir, "released.supersede-close"), "utf-8")).toBe("timeout");
+  });
+
+  it("refuses a malformed name at call time with a named error", () => {
+    expect(() => txnPausePointSync("Bad Name", {} as NodeJS.ProcessEnv)).toThrow(InvalidPausePointError);
   });
 });

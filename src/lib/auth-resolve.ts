@@ -40,9 +40,9 @@
  *      remote instance; see `resolveLocalAdminPass`).
  *   5. THE FLOOR (flair#747, generalizing flair#742's upgrade-only
  *      fallback) — when NOTHING above resolved to anything sendable at
- *      all, sign the SAME request with every registered key under
- *      `~/.flair/keys` (sorted, deterministic order), first one the server
- *      accepts wins. This is the credential every headless/agent machine
+ *      all, tries candidate key files under `~/.flair/keys` in order (sorted,
+ *      deterministic) until one succeeds or an answer is final. This is the
+ *      credential a headless/agent machine
  *      actually has, and is exactly the flair#741 incident's fix: an agent
  *      key existed the whole time, nothing tried it.
  *
@@ -71,9 +71,13 @@ import {
 } from "node:fs";
 
 import { join } from "node:path";
+import { Option, type Command } from "commander";
 import { createPrivateKey, randomUUID, sign as nodeCryptoSign } from "node:crypto";
 import type { SigningIdentitySource } from "./signing-identity.js";
 import { resolveHome } from "./home.js";
+import { isConnectPhaseFailure } from "./connect-phase.js";
+
+export { isConnectPhaseFailure, REFUSED_CODES } from "./connect-phase.js";
 
 // ─── Failure classification ─────────────────────────────────────────────────
 
@@ -89,16 +93,748 @@ import { resolveHome } from "./home.js";
  *     case — distinguishes "we had nothing to send" from "we sent
  *     something and it was rejected", which is exactly the signal
  *     `authedRequest` uses to decide whether tier 5 (the floor) applies.
+ *   - `body` (flair#2764): the display form of the response body, set by
+ *     `fromResponse` (`displayBody`), with the credential values
+ *     `credentialsInHeader` read from the request's Authorization header: a
+ *     JSON body re-serialized with every string in it redacted after decoding,
+ *     or withheld when it cannot be; any other body redacted as text; and any
+ *     non-empty body withheld when that header names basic, bearer or
+ *     tps-ed25519 but its credential could not be read (an empty body stays
+ *     empty, and the message is then the status alone). The message's reason is decided
+ *     separately (`describeHttpFailure`), from the unredacted text:
+ *     BODY_WITHHELD for any non-empty body when the header's credential could
+ *     not be read; otherwise the JSON body's named error, redacted, even when
+ *     `body` is withheld; otherwise an excerpt of the text, redacted, or
+ *     BODY_WITHHELD when displayBody withholds the body. Its `HTTP <status>`
+ *     prefix is not passed through redaction. Classifiers read the unredacted
+ *     text through `apiErrorRawBody`; the rem formatters that derive display
+ *     text from it pass that text through `boundErrorText`, which redacts it,
+ *     or withholds it when the header's credential could not be read and the
+ *     response text was non-empty (even when the text derived from it is
+ *     empty). Within
+ *     the scope below, each of those values becomes `[redacted]` in the
+ *     server's text as displayed.
+ * Scope: redaction removes the request's credential values from the text the
+ * server supplied (literal, inside any JSON string, percent-encoded); text the
+ * CLI writes itself (the `HTTP <status>: ` prefix, the debug line's labels, a
+ * caller's `Error: ` prefix) is never altered, so a credential that matches the
+ * CLI's own wording, or matches only once that wording is joined to the
+ * server's text, is not covered.
  */
 export class ApiHttpError extends Error {
   readonly status: number;
   readonly noCredentials: boolean;
-  constructor(status: number, message: string, noCredentials = false) {
+  readonly body: string | undefined;
+  constructor(status: number, message: string, noCredentials = false, body?: string) {
     super(message);
     this.name = "ApiHttpError";
     this.status = status;
     this.noCredentials = noCredentials;
+    this.body = body;
   }
+
+  /**
+   * The error for a non-2xx response whose body text is `body` (flair#2764).
+   * `sentValues` are the credential values `credentialsInHeader` read from the
+   * request's Authorization header: the message and `body` are redacted with them
+   * (within the scope on ApiHttpError). `withhold` is credentialsInHeader's
+   * flag: when set, the server's non-empty text is shown as BODY_WITHHELD in the message
+   * and `body`. The unredacted text, the values and the flag are kept in a
+   * module-private map for apiErrorRawBody and boundErrorText.
+   */
+  static fromResponse(status: number, body: string, sentValues: readonly string[] = [], withhold = false): ApiHttpError {
+    const err = new ApiHttpError(
+      status,
+      describeHttpFailure(status, body, sentValues, withhold),
+      false,
+      displayBody(body, sentValues, withhold),
+    );
+    privateText.set(err, { raw: body, sentValues: [...sentValues], withhold });
+    return err;
+  }
+}
+
+/**
+ * The whole-request deadline `sendJsonRequest` enforces when
+ * `FLAIR_REQUEST_TIMEOUT_MS` is unset and the caller passes no deadline. Five
+ * minutes is above the figures the repo's responsiveness fixture reports for
+ * the CLI: a dedup pass at 23.07 s over 403 live vectors, and a
+ * 3,065-row repro that exceeded a 60 s client deadline
+ * (test/bench/rem-responsiveness.md); the repro's own duration was not
+ * measured. A single memory write's server-side embedding provider bound is
+ * 20 s (resources/memory-write-lock.ts).
+ */
+export const DEFAULT_REQUEST_DEADLINE_MS = 300_000;
+
+/** The env var that overrides {@link DEFAULT_REQUEST_DEADLINE_MS}. */
+export const REQUEST_DEADLINE_ENV = "FLAIR_REQUEST_TIMEOUT_MS";
+
+/** Bounds of {@link REQUEST_DEADLINE_ENV}: an integer from 1 ms to one hour. */
+export const REQUEST_DEADLINE_MIN_MS = 1;
+export const REQUEST_DEADLINE_MAX_MS = 3_600_000;
+
+/** The env var that overrides {@link DEFAULT_REM_REQUEST_DEADLINE_MS}. */
+export const REM_REQUEST_DEADLINE_ENV = "FLAIR_REM_REQUEST_TIMEOUT_MS";
+
+/**
+ * The single whole-request deadline for the REM work routes: POST
+ * /MemoryMaintenance, POST /ReflectMemories, POST /MemoryDedupStats and POST
+ * /AutoPromoteCandidates. The sizing basis is the dedup sweep: the repo
+ * fixture's 23.07 s over 403 live vectors is ~57 ms/memory, and the route
+ * scans every Memory row before it selects the capped ANN set of up to 20,000
+ * (DEDUP_CLUSTER_MAX_MEMORIES_DEFAULT), so 20,000 x ~57 ms = ~1,140 s and this
+ * deadline sits above it. It is a sizing estimate, not a throughput claim, and
+ * is within {@link REQUEST_DEADLINE_MAX_MS}. {@link REM_REQUEST_DEADLINE_ENV}
+ * overrides it; every other request through the shared REST sender that passes
+ * no explicit deadline resolves FLAIR_REQUEST_TIMEOUT_MS, else the shared
+ * default.
+ */
+export const DEFAULT_REM_REQUEST_DEADLINE_MS = 1_800_000;
+
+/**
+ * One deadline value from `raw`: undefined when the variable is unset, empty or
+ * whitespace-only; the number when it is an integer in range; a refusal naming
+ * `name` otherwise.
+ */
+function parseDeadlineEnv(name: string, raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < REQUEST_DEADLINE_MIN_MS || value > REQUEST_DEADLINE_MAX_MS) {
+    throw new Error(
+      `${name} must be an integer from ${REQUEST_DEADLINE_MIN_MS} to ${REQUEST_DEADLINE_MAX_MS} (milliseconds)`,
+    );
+  }
+  return value;
+}
+
+/**
+ * The whole-request deadline in force: `explicit` when given, else the env
+ * override, else the default. An explicit deadline is validated and returned
+ * before `FLAIR_REQUEST_TIMEOUT_MS` is read, so an invalid value of that
+ * variable refuses only the requests it governs — those with no explicit
+ * deadline. An out-of-range or non-integer env value is refused here, before
+ * any request is sent, naming the variable and the range; it is never
+ * silently defaulted. An empty or whitespace-only value is unset.
+ */
+export function resolveRequestDeadlineMs(
+  explicit: number | undefined = undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  if (explicit !== undefined) {
+    if (!Number.isSafeInteger(explicit) || explicit < REQUEST_DEADLINE_MIN_MS || explicit > REQUEST_DEADLINE_MAX_MS) {
+      throw new Error(
+        `request deadline must be an integer from ${REQUEST_DEADLINE_MIN_MS} to ${REQUEST_DEADLINE_MAX_MS} (milliseconds)`,
+      );
+    }
+    return explicit;
+  }
+  return parseDeadlineEnv(REQUEST_DEADLINE_ENV, env[REQUEST_DEADLINE_ENV]) ?? DEFAULT_REQUEST_DEADLINE_MS;
+}
+
+/**
+ * The REM work deadline in force: {@link REM_REQUEST_DEADLINE_ENV} when set,
+ * else {@link DEFAULT_REM_REQUEST_DEADLINE_MS}. An out-of-range or non-integer
+ * value is refused here, before the REM work request is sent, naming the
+ * variable and the range; an empty or whitespace-only value is unset.
+ */
+export function resolveRemRequestDeadlineMs(env: NodeJS.ProcessEnv = process.env): number {
+  return parseDeadlineEnv(REM_REQUEST_DEADLINE_ENV, env[REM_REQUEST_DEADLINE_ENV]) ?? DEFAULT_REM_REQUEST_DEADLINE_MS;
+}
+
+/** The `HTTP <status>` clause for a deadline that fired after a status line. */
+function deadlineStatusClause(status: number | undefined): string {
+  return status === undefined ? "" : `; the instance answered HTTP ${status} but its response body did not complete`;
+}
+
+/**
+ * Where a deadline in force came from: `env` is FLAIR_REQUEST_TIMEOUT_MS, or
+ * the default when it is unset; `rem` is FLAIR_REM_REQUEST_TIMEOUT_MS, or the
+ * REM work routes' own default when it is unset; `explicit` is a caller's own
+ * override, which no variable changes.
+ */
+export type RequestDeadlineSource = "env" | "rem" | "explicit";
+
+/** The variable, if any, that governs a deadline from `source`. */
+function deadlineEnvName(source: RequestDeadlineSource): string | undefined {
+  if (source === "env") return REQUEST_DEADLINE_ENV;
+  if (source === "rem") return REM_REQUEST_DEADLINE_ENV;
+  return undefined;
+}
+
+/** The remedy named in an expiry message for a deadline from `source`. */
+function deadlineRemedy(source: RequestDeadlineSource): string {
+  const envName = deadlineEnvName(source);
+  if (envName === undefined) {
+    return `This command sets its own deadline; raise it there if this request legitimately runs longer.`;
+  }
+  return `Raise ${envName} (${REQUEST_DEADLINE_MIN_MS} to ${REQUEST_DEADLINE_MAX_MS}) if this request legitimately runs longer.`;
+}
+
+/**
+ * Thrown when a GET or HEAD crosses the whole-request deadline. The split is by
+ * method, not by effect: GET and HEAD that reach the deadline throw this type,
+ * and every other method throws {@link ApiRequestOutcomeUnknown}. A GET is not
+ * proof of no effect — `GET /FederationInstance` creates the identity row on
+ * first boot — so this type reports only that no complete response arrived.
+ */
+export class ApiRequestTimeout extends Error {
+  readonly method: string;
+  readonly path: string;
+  readonly deadlineMs: number;
+  /** The status line that arrived before the deadline fired, when one did. */
+  readonly status: number | undefined;
+  constructor(method: string, path: string, deadlineMs: number, status: number | undefined, source: RequestDeadlineSource) {
+    const envName = deadlineEnvName(source);
+    super(
+      `${method} ${path} did not complete within ${deadlineMs} ms` +
+        (envName === undefined ? "" : ` (${envName})`) +
+        deadlineStatusClause(status),
+    );
+    this.name = "ApiRequestTimeout";
+    this.method = method;
+    this.path = path;
+    this.deadlineMs = deadlineMs;
+    this.status = status;
+  }
+}
+
+/**
+ * Thrown for a write's deadline expiry, non-connect-phase fetch failure, or
+ * failed 2xx body read. No caller may retry the write blindly.
+ */
+export class ApiRequestOutcomeUnknown extends Error {
+  readonly method: string;
+  readonly path: string;
+  /** The deadline that expired, or undefined for a transport failure. */
+  readonly deadlineMs: number | undefined;
+  /** The status line that arrived before the deadline expired or the response read failed, when one did. */
+  readonly status: number | undefined;
+  constructor(method: string, path: string, deadlineMs: number | undefined, status: number | undefined, source: RequestDeadlineSource, detail?: string) {
+    const envName = deadlineEnvName(source);
+    super(
+      detail ??
+        `${method} ${path} may or may not have taken effect: no complete response within ${deadlineMs} ms` +
+          (envName === undefined ? "" : ` (${envName})`) +
+          `${deadlineStatusClause(status)}. Expiry does not show whether the request was delivered or took effect; do not retry it blindly. ${deadlineRemedy(source)}`,
+    );
+    this.name = "ApiRequestOutcomeUnknown";
+    this.method = method;
+    this.path = path;
+    this.deadlineMs = deadlineMs;
+    this.status = status;
+  }
+
+  /** Name the requested origin and warn against retrying. */
+  static fromTransportFailure(method: string, path: string, url: string, cause: unknown, status?: number): ApiRequestOutcomeUnknown {
+    const detail = status === undefined
+      ? `${method} ${path} to ${url}: no final response; outcome unknown, write may have been applied. ` +
+        `Check the server (or the origin it redirected to) before retrying.`
+      : `${method} ${path} to ${url}: the successful response body could not be read (HTTP ${status}); outcome unknown, write may have been applied. ` +
+        `Check the server (or the origin it redirected to) before retrying.`;
+    const err = new ApiRequestOutcomeUnknown(method, path, undefined, status, "explicit", detail);
+    (err as { cause?: unknown }).cause = cause;
+    return err;
+  }
+}
+
+/**
+ * An ApiHttpError's unredacted response text and the credential values its
+ * request sent (flair#2764), kept for classification and redaction: only
+ * apiErrorRawBody (the text) and boundErrorText (which uses the values to
+ * redact) read this map. No field of the error holds the sent values; `body`
+ * and the message are display forms of the raw text, which may equal it.
+ */
+const privateText = new WeakMap<ApiHttpError, { raw: string; sentValues: readonly string[]; withhold: boolean }>();
+
+/** What a credential value the request sent becomes in the server's text as displayed. */
+export const REDACTED_CREDENTIAL = "[redacted]";
+
+/**
+ * Copy of TPS_ED25519_HEADER_RE in resources/ed25519-auth.ts, the grammar
+ * Flair's server parses a TPS-Ed25519 header with. The CLI build cannot import
+ * from resources/, so test/unit/http-error-reason-2764.test.ts asserts the two
+ * have the same source and flags (flair#2764).
+ */
+export const TPS_ED25519_HEADER_GRAMMAR = /^TPS-Ed25519\s+([^:\s]+):(\d+):([^:\s]+):(.+)$/i;
+
+/** Copy of BASIC_AUTH_HEADER_RE in resources/basic-auth-header.ts, held to it by the same test (flair#2764). */
+export const BASIC_HEADER_GRAMMAR = /^Basic /i;
+
+/** The schemes credentialsInHeader extracts a credential from (lower case). */
+const KNOWN_SCHEMES = new Set(["basic", "bearer", "tps-ed25519"]);
+
+/** What credentialsInHeader reads from a sent Authorization header. */
+export interface SentCredentials {
+  /** The credential values to redact from the server's text. */
+  values: string[];
+  /** True when the header names a known scheme but its credential could not be extracted. */
+  withhold: boolean;
+}
+
+/**
+ * The credential values an Authorization header carries (flair#2764), read
+ * from the value Fetch sends: the header with leading and trailing HTTP
+ * whitespace (tab, line feed, carriage return, space) removed, as Fetch
+ * normalizes it. The scheme is the text before the first run of whitespace
+ * (any character the regular expression class for whitespace matches),
+ * compared without regard to case. The values are that header value, the
+ * part after the scheme (as written and with surrounding whitespace trimmed),
+ * and for:
+ *   - basic: the decoded `user:password` (or the decoded text, without a
+ *     colon) and the password. When the header matches BASIC_HEADER_GRAMMAR,
+ *     the server's own grammar, the decoded text is read as the server reads
+ *     it (the text after its first six characters); otherwise from the part
+ *     after the scheme;
+ *   - tps-ed25519: the signature, read with TPS_ED25519_HEADER_GRAMMAR, the
+ *     server's own grammar.
+ * `withhold` is set when the scheme is basic, bearer or tps-ed25519 but no
+ * decoded text, token or signature could be extracted that way; the server's
+ * text is then withheld rather than shown. Empty values are left out.
+ */
+export function credentialsInHeader(authHeader: string | undefined): SentCredentials {
+  if (!authHeader) return { values: [], withhold: false };
+  const sent = authHeader.replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, "");
+  const scheme = (/^\S+/.exec(sent)?.[0] ?? "").toLowerCase();
+  const credential = /^\S+\s+([\s\S]*)$/.exec(sent)?.[1] ?? "";
+  const values = [sent, credential, credential.trim()];
+  let extracted = false;
+  if (scheme === "basic") {
+    const encoded = BASIC_HEADER_GRAMMAR.test(sent) ? sent.slice(6) : credential.trim();
+    const decoded = Buffer.from(encoded, "base64").toString("utf8");
+    if (decoded.length > 0) {
+      const colon = decoded.indexOf(":");
+      values.push(decoded);
+      if (colon !== -1) values.push(decoded.slice(colon + 1));
+      extracted = true;
+    }
+  } else if (scheme === "tps-ed25519") {
+    const parsed = TPS_ED25519_HEADER_GRAMMAR.exec(sent);
+    if (parsed) {
+      values.push(parsed[4]!);
+      extracted = true;
+    }
+  } else if (scheme === "bearer") {
+    extracted = credential.trim().length > 0;
+  }
+  return { values: values.filter((value) => value.length > 0), withhold: KNOWN_SCHEMES.has(scheme) && !extracted };
+}
+
+const HEX2 = /^[0-9A-Fa-f]{2}$/;
+const HEX4 = /^[0-9A-Fa-f]{4}$/;
+
+/** The character each one-character JSON string escape (backslash, then this character) stands for. */
+const JSON_SHORT_ESCAPES: Record<string, string> = {
+  '"': '"',
+  "\\": "\\",
+  "/": "/",
+  b: "\b",
+  f: "\f",
+  n: "\n",
+  r: "\r",
+  t: "\t",
+};
+
+/**
+ * One decoded unit of credentialIntervals' view at `i` in `text`: the string it
+ * stands for and how many characters of `text` it spans. A valid %XX escape
+ * (either hex case) stands for its byte, given as a one-byte buffer; a JSON
+ * string escape (backslash then one of the characters in JSON_SHORT_ESCAPES,
+ * or backslash-u with four hex digits, a surrogate pair of two such escapes
+ * read as one character) stands for its character; anything else stands for
+ * itself.
+ */
+function viewUnit(text: string, i: number): { bytes: Buffer; width: number } {
+  if (text[i] === "%" && HEX2.test(text.slice(i + 1, i + 3))) {
+    return { bytes: Buffer.from([Number.parseInt(text.slice(i + 1, i + 3), 16)]), width: 3 };
+  }
+  if (text[i] === "\\" && i + 1 < text.length) {
+    const next = text[i + 1]!;
+    const short = JSON_SHORT_ESCAPES[next];
+    if (short !== undefined) return { bytes: Buffer.from(short, "utf8"), width: 2 };
+    if (next === "u" && HEX4.test(text.slice(i + 2, i + 6))) {
+      const unit = Number.parseInt(text.slice(i + 2, i + 6), 16);
+      if (unit >= 0xd800 && unit <= 0xdbff && text.slice(i + 6, i + 8) === "\\u" && HEX4.test(text.slice(i + 8, i + 12))) {
+        const low = Number.parseInt(text.slice(i + 8, i + 12), 16);
+        if (low >= 0xdc00 && low <= 0xdfff) {
+          return { bytes: Buffer.from(String.fromCharCode(unit, low), "utf8"), width: 12 };
+        }
+      }
+      if (unit < 0xd800 || unit > 0xdfff) return { bytes: Buffer.from(String.fromCharCode(unit), "utf8"), width: 6 };
+    }
+  }
+  const width = (text.codePointAt(i) ?? 0) > 0xffff ? 2 : 1;
+  return { bytes: Buffer.from(text.slice(i, i + width), "utf8"), width };
+}
+
+/**
+ * Every occurrence in `text` of each value in `sentValues`, overlapping ones
+ * included, as merged [start, end) intervals of `text` (flair#2764): intervals
+ * that overlap or touch become one. A value is found where `text` holds it
+ * literally, and, when `text` contains a "%" or a backslash, where `text`
+ * spells it with %XX escapes (either hex case) or JSON string escapes, for all
+ * or some of its characters: that search runs over a view of `text` with each
+ * such escape decoded (viewUnit), and maps each match back to the characters
+ * it came from. This holds whether or not `text` as a whole is valid JSON.
+ */
+function credentialIntervals(text: string, sentValues: readonly string[]): Array<[number, number]> {
+  const found: Array<[number, number]> = [];
+  const values = sentValues.filter((value) => value.length > 0);
+  if (values.length === 0 || text.length === 0) return found;
+  for (const value of values) {
+    for (let at = text.indexOf(value); at !== -1; at = text.indexOf(value, at + 1)) {
+      found.push([at, at + value.length]);
+    }
+  }
+  if (text.includes("%") || text.includes("\\")) {
+    // bytes: the decoded view; from/to: the [start, end) of `text` each byte came from.
+    const bytes: number[] = [];
+    const from: number[] = [];
+    const to: number[] = [];
+    for (let i = 0; i < text.length; ) {
+      const unit = viewUnit(text, i);
+      for (const byte of unit.bytes) {
+        bytes.push(byte);
+        from.push(i);
+        to.push(i + unit.width);
+      }
+      i += unit.width;
+    }
+    const view = Buffer.from(bytes);
+    for (const value of values) {
+      const needle = Buffer.from(value, "utf8");
+      for (let at = view.indexOf(needle); at !== -1; at = view.indexOf(needle, at + 1)) {
+        found.push([from[at]!, to[at + needle.length - 1]!]);
+      }
+    }
+  }
+  found.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged: Array<[number, number]> = [];
+  for (const [start, end] of found) {
+    const last = merged[merged.length - 1];
+    if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  return merged;
+}
+
+/** `text` with each interval replaced by `marker`. */
+function replaceIntervals(text: string, intervals: Array<[number, number]>, marker: string): string {
+  if (intervals.length === 0) return text;
+  let out = "";
+  let at = 0;
+  for (const [start, end] of intervals) {
+    out += text.slice(at, start) + marker;
+    at = end;
+  }
+  return out + text.slice(at);
+}
+
+/** `text` when credentialIntervals finds no sent value in it, else `fallback` (flair#2764). */
+function withoutOccurrence(text: string, sentValues: readonly string[], fallback: string): string {
+  return credentialIntervals(text, sentValues).length === 0 ? text : fallback;
+}
+
+/**
+ * Server-supplied `text` with each merged interval of credentialIntervals
+ * replaced once by REDACTED_CREDENTIAL (flair#2764), in one pass: the server's
+ * text left in the result holds no occurrence credentialIntervals finds. The
+ * marker, and anything the CLI writes around the result, is not checked. The
+ * scope is the one on ApiHttpError.
+ */
+export function redactSentCredentials(text: string, sentValues: readonly string[]): string {
+  return replaceIntervals(text, credentialIntervals(text, sentValues), REDACTED_CREDENTIAL);
+}
+
+/**
+ * A parsed JSON value with every string in it, object keys included, redacted,
+ * and every number, boolean or null whose JSON text holds a sent value replaced
+ * by the string REDACTED_CREDENTIAL (flair#2764).
+ */
+function redactJsonValues(value: unknown, sentValues: readonly string[]): unknown {
+  if (typeof value === "string") return redactSentCredentials(value, sentValues);
+  if (Array.isArray(value)) return value.map((item) => redactJsonValues(item, sentValues));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = Object.create(null);
+    for (const [key, item] of Object.entries(value)) {
+      out[redactSentCredentials(key, sentValues)] = redactJsonValues(item, sentValues);
+    }
+    return out;
+  }
+  return credentialIntervals(JSON.stringify(value), sentValues).length === 0 ? value : REDACTED_CREDENTIAL;
+}
+
+/** What displayBody shows for a body it cannot show: see displayBody. */
+export const BODY_WITHHELD = "[body withheld]";
+
+/**
+ * A response body for display (flair#2764). A body JSON.parse rejects with a
+ * SyntaxError (not JSON) is shown as received, redacted as text. A JSON body
+ * is shown re-serialized, with every string in it (keys included) redacted
+ * after JSON decoding and any other value whose JSON text holds a sent value
+ * replaced; or as BODY_WITHHELD when it cannot be: when parsing fails any
+ * other way (for example a nesting too deep to parse), when its redaction or
+ * re-serialization fails, or when the re-serialized JSON still holds a sent
+ * value (for example a value that occurs in JSON syntax). With `withhold` set
+ * (credentialsInHeader), a non-empty body is shown as BODY_WITHHELD.
+ */
+function displayBody(body: string, sentValues: readonly string[], withhold = false): string {
+  if (withhold && body.length > 0) return BODY_WITHHELD;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch (err) {
+    if (err instanceof SyntaxError) return redactSentCredentials(body, sentValues);
+    return BODY_WITHHELD;
+  }
+  try {
+    return withoutOccurrence(JSON.stringify(redactJsonValues(parsed, sentValues)), sentValues, BODY_WITHHELD);
+  } catch {
+    return BODY_WITHHELD;
+  }
+}
+
+/** What displayPath shows for a path it cannot show. */
+export const PATH_WITHHELD = "[path withheld]";
+
+/** C0 controls, DEL, C1 controls and the Unicode line and paragraph separators. */
+const CONTROL_CHARACTER = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/;
+
+/**
+ * A request path for display (flair#2764): percent-decoded, then redacted.
+ * PATH_WITHHELD when it does not decode or the decoded path holds a
+ * CONTROL_CHARACTER.
+ */
+function displayPath(path: string, sentValues: readonly string[]): string {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
+    return PATH_WITHHELD;
+  }
+  if (CONTROL_CHARACTER.test(decoded)) return PATH_WITHHELD;
+  return redactSentCredentials(decoded, sentValues);
+}
+
+/** The most characters boundServerText keeps before it cuts the text and appends "..." (flair#2764). */
+export const SERVER_TEXT_MAX_CHARS = 200;
+
+/**
+ * Server text as one line: control characters that are not whitespace are
+ * removed, each run of whitespace (line breaks included) becomes one space,
+ * and the ends are trimmed.
+ */
+function oneLine(text: string): string {
+  return text
+    .replace(/[\u0000-\u0008\u000E-\u001F\u007F-\u0084\u0086-\u009F]/g, "")
+    .replace(/[\s\u0085]+/g, " ")
+    .trim();
+}
+
+/** `line` cut after SERVER_TEXT_MAX_CHARS characters, ending in "...", when it is longer. */
+function cutToBound(line: string): string {
+  let count = 0;
+  let index = 0;
+  for (const ch of line) {
+    if (count === SERVER_TEXT_MAX_CHARS) return `${line.slice(0, index).trimEnd()}...`;
+    count++;
+    index += ch.length;
+  }
+  return line;
+}
+
+/**
+ * Server text as one line: control characters that are not whitespace are
+ * removed, each run of whitespace (line breaks included) becomes one space and
+ * the ends are trimmed, and text longer than SERVER_TEXT_MAX_CHARS characters
+ * is cut there and ends in "...".
+ */
+export function boundServerText(text: string): string {
+  return cutToBound(oneLine(text));
+}
+
+/**
+ * A private-use character no value in `sentValues` contains, standing in for
+ * REDACTED_CREDENTIAL while boundAndRedact works: line-making leaves it alone
+ * and no sent value can match it, so the second pass does not alter the marker.
+ * The private-use ranges hold over 137,000 characters, more than an
+ * Authorization header the transport sends can contain; were none free, the
+ * marker itself would stand in.
+ */
+function standInFor(sentValues: readonly string[]): string {
+  for (const [first, last] of [[0xe000, 0xf8ff], [0xf0000, 0xffffd], [0x100000, 0x10fffd]]) {
+    for (let cp = first; cp <= last; cp++) {
+      const ch = String.fromCodePoint(cp);
+      if (!sentValues.some((value) => value.includes(ch))) return ch;
+    }
+  }
+  return REDACTED_CREDENTIAL;
+}
+
+/**
+ * The text of `line` (holding stand-ins `standIn`, each displayed as
+ * REDACTED_CREDENTIAL) that fits SERVER_TEXT_MAX_CHARS displayed characters,
+ * ending before a stand-in that does not fit and never inside a %XX or JSON
+ * string escape credentialIntervals decodes (viewUnit), with trailing
+ * whitespace trimmed; null when all of `line` fits (flair#2764).
+ */
+function keptBeforeCut(line: string, standIn: string): string | null {
+  let count = 0;
+  let index = 0;
+  let cut = -1;
+  for (const ch of line) {
+    const width = ch === standIn ? REDACTED_CREDENTIAL.length : 1;
+    if (count + width > SERVER_TEXT_MAX_CHARS) {
+      cut = index;
+      break;
+    }
+    count += width;
+    index += ch.length;
+  }
+  if (cut === -1) return null;
+  let boundary = cut;
+  if (line.includes("%") || line.includes("\\")) {
+    for (let i = 0; i < cut; ) {
+      const width = viewUnit(line, i).width;
+      if (i + width > cut) {
+        boundary = i;
+        break;
+      }
+      i += width;
+    }
+  }
+  return line.slice(0, boundary).trimEnd();
+}
+
+/**
+ * boundServerText for output, with `sentValues` redacted from the server's
+ * text (flair#2764). Order: redact, make one line, redact again, cut. Each
+ * occurrence is replaced by a stand-in character (standInFor) while this
+ * works; the first pass catches a credential before line-making can change it
+ * (a whitespace run collapsed, a control character removed), and the second
+ * catches one that line-making forms. The cut (keptBeforeCut) counts each
+ * stand-in as the marker's length and falls between view units, so it splits
+ * neither the marker nor an occurrence; then the stand-ins become
+ * REDACTED_CREDENTIAL and "..." is appended to a cut text. Neither the marker
+ * nor "..." is passed through redaction.
+ */
+function boundAndRedact(text: string, sentValues: readonly string[]): string {
+  if (sentValues.length === 0) return boundServerText(text);
+  const standIn = standInFor(sentValues);
+  let line = oneLine(replaceIntervals(text, credentialIntervals(text, sentValues), standIn));
+  line = replaceIntervals(line, credentialIntervals(line, sentValues), standIn);
+  const shown = (t: string) => t.split(standIn).join(REDACTED_CREDENTIAL);
+  const kept = keptBeforeCut(line, standIn);
+  return kept === null ? shown(line) : `${shown(kept)}...`;
+}
+
+/**
+ * The message of an ApiHttpError built from a response body (flair#2764):
+ * `HTTP <status>`, then the body's named error when the body is a JSON object
+ * with an `error`, else `code`, else `message` string that is non-empty once
+ * bounded; otherwise an excerpt of the body, or BODY_WITHHELD when displayBody
+ * withholds the body. The named error and the excerpt are read from the
+ * unredacted body and go through boundAndRedact with `sentValues`. The
+ * `HTTP <status>` prefix and BODY_WITHHELD are written by this function and
+ * are not passed through redaction. With `withhold` set (credentialsInHeader),
+ * the reason for a non-empty body is BODY_WITHHELD.
+ */
+export function describeHttpFailure(
+  status: number,
+  body: string,
+  sentValues: readonly string[] = [],
+  withhold = false,
+): string {
+  if (withhold && body.length > 0) return `HTTP ${status}: ${BODY_WITHHELD}`;
+  let reason = "";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    parsed = undefined;
+  }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    for (const key of ["error", "code", "message"]) {
+      const value = (parsed as Record<string, unknown>)[key];
+      if (typeof value === "string") reason = boundAndRedact(value, sentValues);
+      if (reason) break;
+    }
+  }
+  if (!reason) {
+    reason = displayBody(body, sentValues) === BODY_WITHHELD ? BODY_WITHHELD : boundAndRedact(body, sentValues);
+  }
+  return reason ? `HTTP ${status}: ${reason}` : `HTTP ${status}`;
+}
+
+/**
+ * The display form of the response body an ApiHttpError carries (`body`):
+ * when fromResponse built the error, displayBody's form of the server's text,
+ * redacted with the values credentialsInHeader read from its request's
+ * Authorization header (within the scope on ApiHttpError), or withheld.
+ * Undefined for any other error (flair#2764).
+ */
+export function apiErrorBody(err: unknown): string | undefined {
+  return err instanceof ApiHttpError ? err.body : undefined;
+}
+
+/**
+ * The unredacted response text, for code that classifies a failure by the
+ * server's text (flair#2764). It may hold a credential the request sent:
+ * classifiers read it, and text displayed from it goes through boundErrorText,
+ * which redacts it within the scope on ApiHttpError or withholds it. For an
+ * ApiHttpError not built by fromResponse it is `body`; undefined for any other
+ * error.
+ */
+export function apiErrorRawBody(err: unknown): string | undefined {
+  if (!(err instanceof ApiHttpError)) return undefined;
+  return privateText.get(err)?.raw ?? err.body;
+}
+
+/**
+ * `text` (taken from apiErrorRawBody) as one bounded line for output, with
+ * the credential values credentialsInHeader read from `err`'s request header
+ * redacted from it (boundAndRedact, within the scope on ApiHttpError), or
+ * BODY_WITHHELD when credentialsInHeader set `withhold` for that header and
+ * the response text `err` was built from is non-empty, whatever `text` is
+ * (an empty `text` derived from it, such as an empty `error` string, included).
+ * When that response text is empty nothing is withheld. For an error that has
+ * no sent values, boundServerText(text) (flair#2764).
+ */
+export function boundErrorText(err: unknown, text: string): string {
+  const kept = err instanceof ApiHttpError ? privateText.get(err) : undefined;
+  if (kept?.withhold && kept.raw.length > 0) return BODY_WITHHELD;
+  return boundAndRedact(text, kept?.sentValues ?? []);
+}
+
+/**
+ * With FLAIR_DEBUG set (any non-empty value), write the display form of a
+ * failed response's body to stderr as one JSON string (flair#2764). The path
+ * is shown by displayPath (percent-decoded, then redacted, or withheld) and
+ * the body by displayBody (a JSON body re-serialized, or withheld; any
+ * non-empty body withheld when `withhold` is set, an empty one shown as ""),
+ * each redacted within the scope on
+ * ApiHttpError; the labels, method, status and the JSON encoding of the body
+ * are written by this function and are not passed through redaction. In the
+ * JSON-encoded body, DEL, C1 control characters and the Unicode line and
+ * paragraph separators are escaped as well, so the line holds no
+ * CONTROL_CHARACTER but its final newline. `sendJsonRequest` calls it where it
+ * builds the error from the body. `env` and `write` are injectable for tests.
+ */
+export function emitHttpErrorBodyDebug(
+  method: string,
+  path: string,
+  status: number,
+  body: string,
+  sentValues: readonly string[] = [],
+  withhold = false,
+  env: Record<string, string | undefined> = process.env,
+  write: (s: string) => void = (s) => { process.stderr.write(s); },
+): void {
+  if (!env.FLAIR_DEBUG) return;
+  const shownBody = JSON.stringify(displayBody(body, sentValues, withhold)).replace(
+    /[\u007F-\u009F\u2028\u2029]/g,
+    (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+  write(`[flair] ${method} ${displayPath(path, sentValues)} answered HTTP ${status}; response body: ${shownBody}\n`);
 }
 
 // ─── Admin-pass file handling ───────────────────────────────────────────────
@@ -147,6 +883,10 @@ export function readAdminPassFileSecure(path: string): string {
 /** Thrown by `resolveAdminPassFromSources` when two credential sources are given at once. */
 export class AdminPassSourceError extends Error {}
 
+export class AdminPassEmptyError extends Error {
+  override name = "AdminPassEmptyError";
+}
+
 /**
  * Resolve an admin password from the credential sources a command exposes, in
  * the precedence its usage text states: an explicit option — `--admin-pass-file`
@@ -160,9 +900,7 @@ export class AdminPassSourceError extends Error {}
  * with a message naming the path and its mode.
  *
  * Returns "" when no source is set, so the caller owns its own "credential
- * required" message; throws `AdminPassSourceError` on a conflict, or
- * `readAdminPassFileSecure`'s error when the file is missing, empty or too
- * open. Neither message carries the password value.
+ * required" message.
  */
 export function resolveAdminPassFromSources(input: {
   adminPassFile?: string;
@@ -170,14 +908,20 @@ export function resolveAdminPassFromSources(input: {
   envPass?: string;
 }): string {
   const { adminPassFile, adminPass, envPass } = input;
-  if (adminPassFile && adminPass) {
+  if (adminPassFile !== undefined && adminPass !== undefined) {
     throw new AdminPassSourceError(
       "--admin-pass and --admin-pass-file cannot be combined; pass exactly one. " +
         "Prefer --admin-pass-file: it keeps the password out of shell history and the process list.",
     );
   }
-  if (adminPassFile) return readAdminPassFileSecure(adminPassFile);
-  if (adminPass) return adminPass;
+  if (adminPassFile !== undefined) {
+    if (adminPassFile === "") throw new AdminPassEmptyError("--admin-pass-file must not be empty");
+    return readAdminPassFileSecure(adminPassFile);
+  }
+  if (adminPass !== undefined) {
+    if (adminPass === "") throw new AdminPassEmptyError("--admin-pass must not be empty");
+    return adminPass;
+  }
   return envPass ?? "";
 }
 
@@ -196,11 +940,91 @@ export function defaultAdminPassPath(): string {
 // every sibling command uses.
 export const ADMIN_PASS_FILE_FLAG = "--admin-pass-file <path>";
 export const ADMIN_PASS_FILE_HELP =
-  "Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. " +
+  "Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. " +
   "An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.";
 export const ADMIN_PASS_FLAG = "--admin-pass <pass>";
 export const ADMIN_PASS_HELP =
   "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)";
+
+/** Commands whose admin-password pair `addAdminPassOptions` wired. A test walks
+ *  the registered tree and asserts every command that declares `--admin-pass`
+ *  is in it, and every command that declares `--admin-pass-file` except
+ *  `rem nightly enable`, which declares that flag itself as path-only. Inherited
+ *  leaves are not in this set: `federation sync enable` stores the path in the
+ *  unit it installs, and `sync status`/`disable` apply the pair in their own
+ *  hooks. */
+export const adminPassFileWired = new WeakSet<Command>();
+
+export interface AddAdminPassOptionsConfig {
+  adminPassFileHelp?: string;
+  /** Report a refusal instead of the default one-line error. Must not return. */
+  onAdminPassRefusal?: (err: unknown, actionCommand: Command) => never;
+}
+
+/**
+ * Declare the admin-password pair on `cmd`: the argv form and the file form
+ * together, in that order, and apply it in a preAction hook. For a command that
+ * declares the pair, the hook runs after option parsing and before the action
+ * body, so a refused file exits before any request the action makes. A
+ * subcommand that inherits the pair from `cmd` stores the values on `cmd`; the
+ * leaves that apply them (`federation sync status`/`disable`) do so in their
+ * own hooks.
+ */
+export function addAdminPassOptions(
+  cmd: Command,
+  adminPassHelp: string = ADMIN_PASS_HELP,
+  opts: AddAdminPassOptionsConfig = {},
+): Command {
+  const adminPassFile = new Option(ADMIN_PASS_FILE_FLAG, opts.adminPassFileHelp ?? ADMIN_PASS_FILE_HELP);
+  cmd.option(ADMIN_PASS_FLAG, adminPassHelp).addOption(adminPassFile);
+  adminPassFileWired.add(cmd);
+  cmd.hook("preAction", (_thisCommand, actionCommand) => {
+    // A subcommand that inherits the pair (`federation sync status`) stores the
+    // values on this command, not on itself; the leaves that read an inherited
+    // pair apply it in their own hook. Reading only the leaf's opts() would ignore
+    // the inherited pair, leaving `status` able to send its request with the
+    // ambient admin password.
+    if (!actionCommand.options.some((o) => o.long === "--admin-pass-file")) return;
+    const actionOpts = actionCommand.opts() as {
+      adminPass?: string;
+      adminPassFile?: string;
+      inlineAdminPass?: string;
+    };
+    // Recorded before the file is applied: the warning keys on whether
+    // --admin-pass itself was given, not on the value that ends up in the slot.
+    actionOpts.inlineAdminPass =
+      actionCommand.getOptionValueSource("adminPass") === "cli" ? actionOpts.adminPass : undefined;
+    applyAdminPassFile(
+      actionOpts,
+      opts.onAdminPassRefusal
+        ? (err) => opts.onAdminPassRefusal!(err, actionCommand)
+        : undefined,
+    );
+  });
+  return cmd;
+}
+
+/**
+ * Copy a nonempty explicit password into `opts.adminPass`; callers own environment fallback.
+ * Refuse combined options and missing, empty or group-/world-accessible files.
+ * Group/world permission refusals name the path and mode; missing and empty file errors name only the path.
+ */
+export function applyAdminPassFile(
+  opts: { adminPass?: string; adminPassFile?: string },
+  onRefusal?: (err: unknown) => never,
+): void {
+  try {
+    const pass = resolveAdminPassFromSources({
+      adminPassFile: opts.adminPassFile,
+      adminPass: opts.adminPass,
+    });
+    if (pass) opts.adminPass = pass;
+  } catch (err: any) {
+    if (onRefusal) onRefusal(err);
+    console.error(`Error: ${err.message}`);
+    process.exit(1);
+  }
+}
 
 /** The admin username Harper's bootstrap creates and every Basic-auth path
  * historically hardcoded. Kept as the default; overridable per call via
@@ -301,8 +1125,12 @@ export function resolveKeyPath(agentId: string): string | null {
   return candidates.find((p) => existsSync(p)) ?? null;
 }
 
-/** Build a TPS-Ed25519 auth header from a raw 32-byte seed on disk. */
-export function buildEd25519Auth(agentId: string, method: string, path: string, keyPath: string): string {
+/**
+ * Load a signing key from disk: read the file, decode it (raw 32-byte seed,
+ * base64 seed, full PKCS8 DER or PEM), and require an Ed25519 key. A throw here
+ * is a failure of THIS key file; nothing has been sent for it.
+ */
+function loadEd25519SigningKey(keyPath: string): ReturnType<typeof createPrivateKey> {
   const raw = readFileSync(keyPath);
   const pkcs8Header = Buffer.from("302e020100300506032b657004220420", "hex");
   let privKey: ReturnType<typeof createPrivateKey>;
@@ -324,11 +1152,29 @@ export function buildEd25519Auth(agentId: string, method: string, path: string, 
       }
     }
   }
+  if (privKey.asymmetricKeyType !== "ed25519") {
+    throw new Error(`signing key ${keyPath} is not an Ed25519 private key`);
+  }
+  return privKey;
+}
+
+/** Build a TPS-Ed25519 auth header from an already-loaded Ed25519 key. */
+function buildEd25519AuthFromKey(
+  agentId: string,
+  method: string,
+  path: string,
+  privKey: ReturnType<typeof createPrivateKey>,
+): string {
   const ts = Date.now().toString();
   const nonce = randomUUID();
   const payload = `${agentId}:${ts}:${nonce}:${method}:${path}`;
   const sig = nodeCryptoSign(null, Buffer.from(payload), privKey).toString("base64");
   return `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${sig}`;
+}
+
+/** Build a TPS-Ed25519 auth header from the key file at `keyPath`. */
+export function buildEd25519Auth(agentId: string, method: string, path: string, keyPath: string): string {
+  return buildEd25519AuthFromKey(agentId, method, path, loadEd25519SigningKey(keyPath));
 }
 
 /** Join a Flair route to an optional base path before signing or sending it. */
@@ -462,6 +1308,23 @@ export async function authFetch(
   path: string,
   body?: unknown,
 ): Promise<Response> {
+  return (await authFetchWithSentCredentials(baseUrl, agentId, keyPath, method, path, body)).res;
+}
+
+/**
+ * `authFetch`'s request, with the credentials it sent: a caller that renders a
+ * non-ok response needs them to redact a body that echoes the Authorization
+ * header (flair#2889). `sent` is `credentialsInHeader`'s reading of the header
+ * this request sent.
+ */
+export async function authFetchWithSentCredentials(
+  baseUrl: string,
+  agentId: string,
+  keyPath: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ res: Response; sent: SentCredentials }> {
   const url = requestUrl(baseUrl, path);
   let auth: string;
   try {
@@ -471,11 +1334,12 @@ export async function authFetch(
   }
   const headers: Record<string, string> = { Authorization: auth };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  return fetch(url.href, {
+  const res = await fetch(url.href, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  return { res, sent: credentialsInHeader(auth) };
 }
 
 export function isLocalBase(base: string): boolean {
@@ -490,6 +1354,30 @@ export function isLocalBase(base: string): boolean {
 // ─── HTTP + response handling ───────────────────────────────────────────────
 
 /**
+ * The signing context of a `signedOnly` request (flair#2749), for its
+ * no-credentials 403 hint: the agent id the request names, if any, and the
+ * directory the tier-5 floor reads keys from.
+ */
+export interface SignedOnlyHintContext {
+  agentId?: string;
+  keysDir: string;
+}
+
+function noCredentialsHint(isLocal: boolean, signedOnly: SignedOnlyHintContext | undefined): string {
+  if (signedOnly) {
+    // No admin password leaves a signedOnly request, so only an agent key helps.
+    const remedy = signedOnly.agentId
+      ? `Provide the key of agent '${signedOnly.agentId}' at ${join(defaultKeysDir(), `${signedOnly.agentId}.key`)} ` +
+        `(or set FLAIR_KEY_DIR to a directory containing ${signedOnly.agentId}.key).`
+      : `Provide the key of an agent registered on the target instance at ${join(signedOnly.keysDir, "<agent-id>.key")}.`;
+    return `This request can send only an Ed25519 agent signature; the admin password is not sent on this path. ${remedy}`;
+  }
+  return isLocal
+    ? "Set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass or an agent key."
+    : "Set FLAIR_ADMIN_PASS (remote targets have no local admin-pass fallback).";
+}
+
+/**
  * Perform the actual Flair REST call with an already-resolved Authorization
  * header (or none) and classify the response. Shared by the primary
  * (tiers 1-4) attempt and each tier-5 floor attempt below, so both paths
@@ -502,50 +1390,222 @@ export async function sendJsonRequest(
   body: unknown,
   authHeader: string | undefined,
   isLocal: boolean,
+  transport: {
+    refuseRedirects?: boolean;
+    signedOnly?: SignedOnlyHintContext;
+    deadlineMs?: number;
+    deadlineSource?: RequestDeadlineSource;
+    /** Withhold the response body from the FLAIR_DEBUG HTTP-error line. */
+    withholdResponseBodyDebug?: boolean;
+    /**
+     * Treat a 2xx whose body is not JSON as a success instead of throwing.
+     * For a caller that has its own confirmation step (prune's DELETE, which
+     * reads the row back): the server may have acted before the client parsed
+     * the body, so a parse failure must not become a definite failure.
+     */
+    tolerateUnparsedSuccessBody?: boolean;
+  } = {},
 ): Promise<any> {
-  const res = await fetch(url.href, {
-    method,
-    headers: {
-      "content-type": "application/json",
-      ...(authHeader ? { authorization: authHeader } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  // Handle 204 No Content (e.g., PUT upsert returns empty body)
-  if (res.status === 204 || res.headers.get("content-length") === "0") {
-    if (!res.ok) throw new ApiHttpError(res.status, `HTTP ${res.status}`);
-    return { ok: true };
+  // The deadline covers the request AND the response body read: a server that
+  // sends headers and then stalls the body is bounded too. Resolved before the
+  // request, so an invalid FLAIR_REQUEST_TIMEOUT_MS sends nothing for a request
+  // that resolves that variable (one with no explicit deadline).
+  const deadlineSource: RequestDeadlineSource =
+    transport.deadlineSource ?? (transport.deadlineMs === undefined ? "env" : "explicit");
+  const deadlineMs = resolveRequestDeadlineMs(transport.deadlineMs);
+  const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
+  // Serialize before the transport call: a body that cannot be serialized was
+  // never sent, so it is a serialization failure, not a delivery failure.
+  // Every supplied body is checked (a falsy one such as 0n can still fail to
+  // serialize); a falsy body that does serialize is still omitted, as before.
+  let serializedBody: string | undefined;
+  if (body !== undefined) {
+    try {
+      const serialized = JSON.stringify(body);
+      if (serialized === undefined) throw new Error("JSON.stringify returned undefined");
+      if (body) serializedBody = serialized;
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`${method} ${url.pathname} was not sent: the request body could not be serialized to JSON (${reason}).`);
+    }
   }
-  const text = await res.text();
-  if (!res.ok) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, deadlineMs);
+  let res: Response | undefined;
+  let fetchRejected = false;
+  let bodyReadFailed = false;
+  const readBody = async (): Promise<string> => {
+    try {
+      return await res!.text();
+    } catch (err: unknown) {
+      bodyReadFailed = true;
+      throw err;
+    }
+  };
+  try {
+    try {
+      res = await fetch(url.href, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          ...(authHeader ? { authorization: authHeader } : {}),
+        },
+        body: serializedBody,
+        signal: controller.signal,
+        // "manual" hands back the 3xx itself, so the refusal can name its status;
+        // the location it names is never requested.
+        ...(transport.refuseRedirects ? { redirect: "manual" as const } : {}),
+      });
+    } catch (err: unknown) {
+      fetchRejected = true;
+      throw err;
+    }
+    if (transport.refuseRedirects && res.status >= 300 && res.status < 400) {
+      throw new ApiHttpError(res.status, `HTTP ${res.status}: the instance answered with a redirect, which this request does not follow`);
+    }
     // 403 with no credentials sent at all is the flair#634 case: a gated
     // resource rejected a credential-less call. Name the fix instead of
-    // surfacing the raw "forbidden" body — never a stack trace.
+    // surfacing the raw "forbidden" body — never a stack trace. Classified
+    // before the empty-body shortcut below, so a zero-length 403 gets the same
+    // hint and noCredentials as one with a body (flair#2749).
     if (res.status === 403 && !authHeader) {
-      const hint = isLocal
-        ? "Set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass or an agent key."
-        : "Set FLAIR_ADMIN_PASS (remote targets have no local admin-pass fallback).";
+      await readBody();
+      const hint = noCredentialsHint(isLocal, transport.signedOnly);
       throw new ApiHttpError(403, `HTTP 403: no credentials sent. ${hint}`, /* noCredentials */ true);
     }
-    throw new ApiHttpError(res.status, text || `HTTP ${res.status}`);
+    // Handle 204 No Content (e.g., PUT upsert returns empty body)
+    if (res.status === 204 || res.headers.get("content-length") === "0") {
+      if (!res.ok) throw ApiHttpError.fromResponse(res.status, "");
+      return { ok: true };
+    }
+    const text = await readBody();
+    if (!res.ok) {
+      // The FLAIR_DEBUG line's path and body, the message's reason and `body`
+      // are redacted with the credential values credentialsInHeader reads from
+      // this request's Authorization header, within the scope on ApiHttpError,
+      // and the server's text is withheld when it sets `withhold`; classifiers
+      // read the unredacted text through apiErrorRawBody.
+      const sent = credentialsInHeader(authHeader);
+      emitHttpErrorBodyDebug(
+        method,
+        url.pathname,
+        res.status,
+        text,
+        sent.values,
+        sent.withhold || transport.withholdResponseBodyDebug === true,
+      );
+      throw ApiHttpError.fromResponse(res.status, text, sent.values, sent.withhold);
+    }
+    if (!text) return { ok: true };
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      if (transport.tolerateUnparsedSuccessBody) return { ok: true };
+      throw err;
+    }
+  } catch (err: unknown) {
+    // A fired deadline is reported by the deadline, not by the abort error
+    // fetch raised: a non-GET/HEAD request may have committed, so it is an
+    // unknown outcome, and a GET or HEAD is a plain timeout.
+    if (timedOut) {
+      const status = res?.status;
+      if (readOnly) throw new ApiRequestTimeout(method, url.pathname, deadlineMs, status, deadlineSource);
+      throw new ApiRequestOutcomeUnknown(method, url.pathname, deadlineMs, status, deadlineSource);
+    }
+    // A connect-phase code identifies failure of the current connection attempt;
+    // it proves unsent delivery only if no earlier redirect was followed.
+    if (fetchRejected && !readOnly && !isConnectPhaseFailure(err)) {
+      throw ApiRequestOutcomeUnknown.fromTransportFailure(method, url.pathname, url.origin, err);
+    }
+    // The status line arrived but the body could not be read. A write's 2xx
+    // response leaves the outcome unknown, and the message names the status
+    // received; a non-2xx status is reported by that status.
+    if (bodyReadFailed && res !== undefined && !readOnly) {
+      if (res.ok) throw ApiRequestOutcomeUnknown.fromTransportFailure(method, url.pathname, url.origin, err, res.status);
+      throw ApiHttpError.fromResponse(res.status, "");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  if (!text) return { ok: true };
-  return JSON.parse(text);
+}
+
+/**
+ * The 401 error codes the Ed25519 authentication middleware in
+ * resources/auth-middleware.ts returns when it refuses the credential: an
+ * unparseable header, a timestamp outside the replay window, an unknown agent,
+ * a deactivated principal, or a signature that does not verify. The
+ * middleware's catch around signature verification also covers key import
+ * errors.
+ * A 401 carrying one of these codes moves the tier-5 floor to the next key.
+ * `nonce_replay_detected` is an answer about the REQUEST (a reused nonce) and
+ * `replay_store_unavailable` is a server-side failure; neither is a credential
+ * rejection, so both are final.
+ */
+export const CREDENTIAL_REJECTION_CODES: ReadonlySet<string> = new Set([
+  "invalid_authorization_header",
+  "timestamp_out_of_window",
+  "unknown_agent",
+  "principal_deactivated",
+  "invalid_signature",
+  "signature_verification_failed",
+]);
+
+/** True when the server answered 401 with one of its Ed25519 credential-rejection codes. */
+function isEd25519CredentialRejection(err: unknown): boolean {
+  if (!(err instanceof ApiHttpError) || err.status !== 401) return false;
+  const raw = apiErrorRawBody(err);
+  if (raw === undefined) return false;
+  try {
+    const parsed = JSON.parse(raw);
+    const code = parsed && typeof parsed === "object" ? (parsed as { error?: unknown }).error : undefined;
+    return typeof code === "string" && CREDENTIAL_REJECTION_CODES.has(code);
+  } catch {
+    return false;
+  }
 }
 
 /**
  * Tier 5, the floor (flair#747, generalizing flair#742's `verifyAuthedGet`
- * GET-only fallback to any method/body): try every registered key in
- * `keysDir` in sorted (deterministic) filename order, first one that
- * authenticates wins. Returns `undefined` — never throws — when every key
- * fails or none exist, so the caller can rethrow its ORIGINAL
- * no-credentials error rather than a floor-specific one.
+ * GET-only fallback to any method/body): tries candidate key files in
+ * `keysDir` in sorted (deterministic) filename order until one authenticates
+ * or an answer is final. Returns `undefined` when there are no candidate key
+ * files, or when no candidate authenticated: every attempt was skipped for a
+ * key file that cannot be read or decoded as an Ed25519 key, credential-rejected,
+ * or a connect failure; a final answer throws. That lets the caller rethrow its
+ * ORIGINAL no-credentials error rather than a floor-specific one.
+ *
+ * Every request the floor sends refuses redirects (flair#2955), whatever the
+ * caller asked for: the location a 3xx names receives no request, and the 3xx
+ * is thrown as itself — a final answer, never a reason to try another key.
+ *
+ * The floor moves to the next key ONLY when the server refused the Ed25519
+ * credential itself (the 401 codes in `CREDENTIAL_REJECTION_CODES`), when an
+ * attempt that does not follow redirects fails in the connect phase (the
+ * existing network-blip case), or when that candidate's key file cannot be read
+ * or decoded as an Ed25519 key (nothing was sent for it). Failures after a key
+ * is loaded (nonce, signing) are final. Every other response is final too: a
+ * failed HTTP response whose body was read is thrown as itself with its status
+ * and any error code its body names, and a refused redirect is thrown as itself
+ * with its status before any body is read. When
+ * every candidate is refused as a credential, the floor returns `undefined`, so
+ * the caller rethrows its original no-credentials hint, which carries the
+ * operator's remedy.
  */
 export async function tryAgentKeyFloor(
   url: URL,
   method: string,
   body: unknown,
   keysDir: string,
+  transport: {
+    deadlineMs?: number;
+    deadlineSource?: RequestDeadlineSource;
+    tolerateUnparsedSuccessBody?: boolean;
+  } = {},
 ): Promise<any> {
   let keyFiles: string[] = [];
   try {
@@ -554,17 +1614,46 @@ export async function tryAgentKeyFloor(
     // No keys dir at all — nothing to fall back to.
   }
   const isLocal = isLocalBase(url.origin);
+  // The signed target is identical for every candidate, so build it once,
+  // before any key is loaded. A failure here is about the request itself, not
+  // about any one candidate, so it is final.
+  const target = requestTarget(url);
   for (const kf of keyFiles) {
     const agentId = kf.replace(/\.key$/, "");
     const keyPath = join(keysDir, kf);
+    let privKey: ReturnType<typeof createPrivateKey>;
     try {
-      const authHeader = buildEd25519Auth(agentId, method, requestTarget(url), keyPath);
-      return await sendJsonRequest(url, method, body, authHeader, isLocal);
+      privKey = loadEd25519SigningKey(keyPath);
     } catch {
-      // This key didn't work (unregistered, bad signature, network blip on
-      // this one attempt) — try the next one.
+      // This candidate's key file could not be loaded as an Ed25519 key.
+      // Nothing was sent for it, and every other candidate is exactly as
+      // usable as it was before this file was read, so skip this one.
+      continue;
+    }
+    // The key loaded: a failure from here (nonce, signing) is not about this
+    // key file and is thrown as itself, with no later key sent.
+    const authHeader = buildEd25519AuthFromKey(agentId, method, target, privKey);
+    try {
+      return await sendJsonRequest(url, method, body, authHeader, isLocal, { ...transport, refuseRedirects: true });
+    } catch (err: unknown) {
+      // A write whose outcome is unknown stops the floor. Trying the next key
+      // would send the same write again — a blind replay of a request that may
+      // have committed.
+      if (err instanceof ApiRequestOutcomeUnknown) throw err;
+      // The server rejected THIS credential (unregistered agent, bad
+      // signature, expired timestamp, deactivated principal): another key may
+      // authenticate.
+      if (isEd25519CredentialRejection(err)) continue;
+      // A connect-phase failure on an attempt that refuses redirects is the
+      // existing network-blip case: another key may connect.
+      if (isConnectPhaseFailure(err)) continue;
+      // A server answer is final — resending it as a different agent would hide
+      // what the server said. Local request failures are rethrown as they are.
+      throw err;
     }
   }
+  // No key authenticated. Returning `undefined` lets the caller rethrow its
+  // original no-credentials hint, which carries the operator's remedy.
   return undefined;
 }
 
@@ -694,7 +1783,47 @@ export interface AuthedRequestOptions {
    *  resolved `--admin-user` flag. Falls back to FLAIR_ADMIN_USER env, then
    *  `"admin"`, via resolveAdminUser (flair#1345). */
   adminUser?: string;
+  /**
+   * Send no shared secret (flair#2526): no Basic and no Bearer header, from any
+   * source (an explicit admin pass is refused; FLAIR_TOKEN, FLAIR_ADMIN_PASS,
+   * HDB_ADMIN_PASSWORD and ~/.flair/admin-pass are skipped). Only an Ed25519
+   * agent signature, or nothing, goes out. For a target whose instance is not
+   * proven, such as `flair doctor`'s listener-only fallback.
+   */
+  signedOnly?: boolean;
+  /**
+   * Refuse a redirect instead of following it (flair#2708): the location a 3xx
+   * names receives no request, and that attempt throws `ApiHttpError` with its
+   * status. Unset, a redirect is followed (fetch's default), as for every
+   * caller that does not pass this. The tier-5 agent-key floor always refuses
+   * redirects (flair#2955), whatever this option says.
+   */
+  refuseRedirects?: boolean;
+  /**
+   * Whole-request deadline in milliseconds, overriding
+   * FLAIR_REQUEST_TIMEOUT_MS and the default. A caller whose request can
+   * legitimately run longer than the default passes its own value here, with a
+   * comment saying why. It is validated and returned before
+   * FLAIR_REQUEST_TIMEOUT_MS is read, so an invalid shared value does not
+   * refuse a request that passes this.
+   */
+  deadlineMs?: number;
+  /**
+   * Where `deadlineMs` came from, when it is not the value `env` names. A REM
+   * work route passes `rem` so its expiry names FLAIR_REM_REQUEST_TIMEOUT_MS,
+   * the variable that overrides that route's deadline.
+   */
+  deadlineSource?: RequestDeadlineSource;
+  /**
+   * Treat a 2xx whose body is not JSON as a success instead of throwing. Only
+   * pass this from a caller that confirms the write independently; the default
+   * keeps every other caller's behaviour (an unparseable success body throws).
+   */
+  tolerateUnparsedSuccessBody?: boolean;
 }
+
+/** The Authorization scheme of an Ed25519 agent signature (buildEd25519Auth). */
+const ED25519_SCHEME = "TPS-Ed25519 ";
 
 /**
  * The shared resolver: given a Flair REST call and whatever credential
@@ -719,6 +1848,13 @@ export async function authedRequest(
   // Which tier supplied authHeader — drives the never-silent override notice
   // below (see describeIdentityOverride).
   let credSource: ResolvedCredentialSource | undefined;
+
+  if (opts.signedOnly && opts.explicitAdminPass) {
+    throw new Error(
+      "refusing to send an admin password to a target that may receive only an Ed25519 signature or no Authorization header " +
+        "(its instance is not proven); pass --agent <a registered agent id> instead",
+    );
+  }
 
   // Tier 1: explicit — caller-resolved flag material always wins.
   if (opts.explicitAdminPass) {
@@ -754,7 +1890,8 @@ export async function authedRequest(
   }
 
   // Tier 2: env — FLAIR_TOKEN (Bearer), else FLAIR_ADMIN_PASS/HDB_ADMIN_PASSWORD (Basic).
-  if (!authHeader) {
+  // Skipped when only a signature may be sent.
+  if (!authHeader && !opts.signedOnly) {
     if (process.env.FLAIR_TOKEN) {
       authHeader = `Bearer ${process.env.FLAIR_TOKEN}`;
       credSource = "env-token";
@@ -782,7 +1919,8 @@ export async function authedRequest(
   }
 
   // Tier 4: LOCAL TARGETS ONLY — the secure ~/.flair/admin-pass file.
-  if (!authHeader) {
+  // Skipped when only a signature may be sent.
+  if (!authHeader && !opts.signedOnly) {
     try {
       const filePass = resolveLocalAdminPass(undefined, !isLocal);
       if (filePass) {
@@ -812,14 +1950,30 @@ export async function authedRequest(
     if (notice) emitIdentityOverrideNotice(notice);
   }
 
+  // The last word for signedOnly: whatever resolved above, nothing but an
+  // agent signature leaves (flair#2526).
+  if (opts.signedOnly && authHeader !== undefined && !authHeader.startsWith(ED25519_SCHEME)) {
+    throw new Error("refusing to send a Basic or Bearer credential to a target that may receive only an Ed25519 signature or no Authorization header");
+  }
+
   try {
-    return await sendJsonRequest(url, method, body, authHeader, isLocal);
+    return await sendJsonRequest(url, method, body, authHeader, isLocal, {
+      refuseRedirects: opts.refuseRedirects,
+      deadlineMs: opts.deadlineMs,
+      deadlineSource: opts.deadlineSource,
+      tolerateUnparsedSuccessBody: opts.tolerateUnparsedSuccessBody,
+      ...(opts.signedOnly ? { signedOnly: { agentId: opts.agentId, keysDir } } : {}),
+    });
   } catch (err: unknown) {
     // Tier 5 — the floor. Only engages when NOTHING above resolved to
     // anything sendable (see module header for why a rejected credential
     // does not retry here).
     if (err instanceof ApiHttpError && err.noCredentials) {
-      const floorResult = await tryAgentKeyFloor(url, method, body, keysDir);
+      const floorResult = await tryAgentKeyFloor(url, method, body, keysDir, {
+        deadlineMs: opts.deadlineMs,
+        deadlineSource: opts.deadlineSource,
+        tolerateUnparsedSuccessBody: opts.tolerateUnparsedSuccessBody,
+      });
       if (floorResult !== undefined) return floorResult;
     }
     throw err;

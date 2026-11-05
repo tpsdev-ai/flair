@@ -43,7 +43,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const MODEL_FILE = "nomic-embed-text-v1.5.Q4_K_M.gguf";
 function modelPresent(): boolean {
@@ -183,7 +183,7 @@ gate("flair#1246 — bootstrap teammate ranking agrees with memory_search (one r
     }
   }, 300_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("the on-task record is search's top result AND bootstrap's top teammate pick — and the two picks agree", async () => {
     // ── Search half: the fused ranking is the reference ranker. ──

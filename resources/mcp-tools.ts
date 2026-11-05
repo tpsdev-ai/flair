@@ -221,8 +221,12 @@ function stripInternalFields(value: any): any {
  *  through its lazy handler loaders. */
 const STORED_TEXT_FIELDS = ["content", "summary", "trigger"] as const;
 
+/** The skill fields a redacted skill write's `stored` also reports (flair#2575):
+ *  REDACTED_SKILL_FIELDS plus the accepted `tags` entries. */
+const STORED_SKILL_FIELDS = ["name", "description", "tags"] as const;
+
 /**
- * flair#2537 — the /mcp write echo after a server-side redaction. A Memory
+ * flair#2537, flair#2541 — the /mcp write echo after a server-side redaction. A Memory
  * write whose text the server redacted answers with `redactedValues` and, since
  * flair#2467, `stored`: the post-redaction values of the `content`, `summary`
  * and `trigger` the write carried, as it committed them. The echo takes those
@@ -230,7 +234,10 @@ const STORED_TEXT_FIELDS = ["content", "summary", "trigger"] as const;
  * write, so a later write to the row cannot change what this one reports. With
  * the count and no string `stored.content`, the echo has no `content`,
  * `summary` or `trigger` and sets `contentWithheld: true`; the caller's input
- * is never put in their place. A response with no count, an error result
+ * is never put in their place. flair#2575: a skill-tagged write's `stored` also
+ * carries the redacted `name`, `description` and `tags` when the write supplied
+ * them, and the echo reports them from `stored` the same way. A response with
+ * no count, an error result
  * included, is returned as it came.
  */
 function redactedWriteEcho(response: any): any {
@@ -246,6 +253,16 @@ function redactedWriteEcho(response: any): any {
   }
   for (const field of STORED_TEXT_FIELDS) {
     if (typeof stored[field] === "string") echo[field] = stored[field];
+  }
+  // flair#2575 — a skill write's `stored` also carries the redacted skill fields
+  // (its `metadata` `name`/`description` and the whole `tags` array); the echo
+  // reports them from `stored` just as it does the Memory text fields.
+  for (const field of STORED_SKILL_FIELDS) {
+    if (field === "tags") {
+      if (Array.isArray(stored.tags)) echo.tags = stored.tags;
+    } else if (typeof stored[field] === "string") {
+      echo[field] = stored[field];
+    }
   }
   return echo;
 }
@@ -384,7 +401,9 @@ async function skillStore(agent: ResolvedAgent, args: any) {
   if (typeof args?.name === "string" && args.name.length > 0) meta.name = args.name;
   if (typeof args?.description === "string" && args.description.length > 0) meta.description = args.description;
   if (Object.keys(meta).length > 0) body.metadata = JSON.stringify(meta);
-  return stripInternalFields(await unwrap(await h.post(body)));
+  // flair#2541 — a redacted write reports the stored text from its own
+  // response (redactedWriteEcho); the skill's write path is Memory.post().
+  return redactedWriteEcho(stripInternalFields(await unwrap(await h.post(body))));
 }
 
 /**
@@ -469,8 +488,11 @@ async function skillSearch(agent: ResolvedAgent, args: any) {
  * A thin wrapper over Memory.get() — the SAME by-id read as memory_get, under
  * the SAME read-scope gate (makeByIdReadGate → resolveReadScope): a non-admin
  * caller cannot read another agent's private skill; administrators retain
- * access, exactly as a private memory does. skill_get is the disclosure step after skill_search's catalog:
- * it returns the full procedure (`content`) + trigger + metadata.
+ * access, exactly as a private memory does. Non-admin reads of retained closed
+ * skill payloads also apply `closedSkillPayloadReadable`; a failed check
+ * returns 404 by id or omits the collection row. skill_get is the disclosure
+ * step after skill_search's catalog: it returns the full procedure
+ * (`content`) + trigger + metadata.
  *
  * It is a SKILL tool, not a general reader: a readable id that is NOT a skill
  * returns the same 404 as an unreadable id. Returning it would (a) make
@@ -609,13 +631,18 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
 
 // ── flair#1472 memory_basement / memory_restore ──────────────────────────────
 // The user-facing archive action. `archived` is a VISIBILITY flag, not a
-// deletion: basementing a memory removes it from bootstrap + default search
-// but leaves the row, its provenance, and its history fully intact (still
-// retrievable via memory_get and memory_search(includeArchived:true)). Restore
-// is the deliberate, GLOBAL inverse — it un-retires the memory for EVERY
-// session, not a session-local view (that is drawers, Deliverable B, which does
-// not exist yet). Non-admin agent reads use Memory.get()'s owner-and-
-// visibility scope; administrator and trusted internal reads are unfiltered.
+// deletion. Basementing retains the row and excludes it from bootstrap and
+// default semantic search; the write still applies Memory.put()'s validation,
+// redaction and provenance stamping. By-id retrieval remains subject to
+// Memory's read checks; `includeArchived: true` removes the semantic-search
+// archive filter while retaining the other retrieval filters. Restore is the
+// deliberate inverse: it clears the archive state globally, not in a
+// session-local view (that is drawers, Deliverable B, which does not exist
+// yet); other read and retrieval conditions still apply. Non-admin agent reads
+// use Memory.get()'s owner-and-visibility scope; administrator and trusted
+// internal reads are unfiltered. Non-admin reads of retained closed skill
+// payloads also apply `closedSkillPayloadReadable`; a failed check returns 404
+// by id or omits the collection row.
 // Mutating another agent's record requires administrator or trusted internal
 // authority (Memory.put()'s stampAttribution gate).
 async function memoryBasement(agent: ResolvedAgent, args: any) {
@@ -632,11 +659,14 @@ async function memoryBasement(agent: ResolvedAgent, args: any) {
     updatedAt: new Date().toISOString(),
   };
   // Memory.put() stamps archivedAt when archived===true (see Memory.ts). The
-  // content is unchanged, so the existing embedding stays valid — do NOT clear
-  // it (clearing would force a needless re-embed and, if the embedding engine
-  // is unavailable, would silently drop the vector).
+  // archive request retains the existing embedding and delegates text
+  // redaction and embedding handling to Memory.put() — do NOT clear it
+  // (clearing would force a needless re-embed and, if the embedding engine is
+  // unavailable, would silently drop the vector).
   if (agent.clientId) merged.claimedClient = agent.clientId;
-  return stripInternalFields(await unwrap(await Cls.put(merged, delegationContext(agent))));
+  // flair#2541 — the write path redacts the row it re-puts; report the stored
+  // text from that write's own response (redactedWriteEcho).
+  return redactedWriteEcho(stripInternalFields(await unwrap(await Cls.put(merged, delegationContext(agent)))));
 }
 
 async function memoryRestore(agent: ResolvedAgent, args: any) {
@@ -654,7 +684,9 @@ async function memoryRestore(agent: ResolvedAgent, args: any) {
   delete merged.archivedAt;
   delete merged.archivedBy;
   if (agent.clientId) merged.claimedClient = agent.clientId;
-  return stripInternalFields(await unwrap(await Cls.put(merged, delegationContext(agent))));
+  // flair#2541 — the write path redacts the row it re-puts; report the stored
+  // text from that write's own response (redactedWriteEcho).
+  return redactedWriteEcho(stripInternalFields(await unwrap(await Cls.put(merged, delegationContext(agent)))));
 }
 
 async function memoryGet(agent: ResolvedAgent, args: any) {
@@ -670,7 +702,9 @@ async function memoryGet(agent: ResolvedAgent, args: any) {
   // `RequestTarget` (never a bare string), and still dispatches through
   // Memory.get() → makeByIdReadGate → resolveReadScope, so the scope model is
   // unchanged: non-admin agents can read their own and other agents'
-  // non-private records; administrator reads are unfiltered. See
+  // non-private records; administrator reads are unfiltered. Non-admin reads of
+  // retained closed skill payloads also apply `closedSkillPayloadReadable`; a
+  // failed check returns 404 by id or omits the collection row. See
   // resources/in-process.ts:223.
   //
   // flair#744 slice 1 — opt-in inline trust block. The instance call passed
@@ -727,10 +761,8 @@ async function bootstrap(agent: ResolvedAgent, args: any) {
   // flair#744 slice 2 — opt-in task-relevance abstention verdict. Forwarded
   // ONLY when requested so a plain bootstrap delegates a byte-identical body.
   if (args?.abstain === true) body.abstain = true;
-  // flair#1199 — org-event knobs. `includeEventDetail` opts the verbose per-event
-  // `detail` JSON back in (default OFF: a connector reads lean events); `maxEvents`
-  // overrides the default cap. Both forwarded ONLY when set, so a plain bootstrap
-  // delegates a byte-identical body.
+  // flair#1199 — `includeEventDetail` opts ordinary event detail in;
+  // `maxEvents` overrides the default cap.
   if (args?.includeEventDetail === true) body.includeEventDetail = true;
   if (args?.maxEvents !== undefined) body.maxEvents = args.maxEvents;
   // flair#831 — attach the running Flair version to the RESPONSE (not the
@@ -1289,7 +1321,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   skill_store: {
         impl: skillStore,
     contract: {
-      summary: "Write echo { id, written:true, deduplicated } for the skill-tagged memory. No internal embedding fields; round-trips via memory_get.",
+      summary: "Write result { id, written:true, visibility } for the skill-tagged memory. No internal embedding fields; round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored text from the write's own response: `content` (with `summary`/`trigger` when written, and `name`/`description`/`tags` for the skill when supplied); if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
       requiredFields: ["id", "written"],
       fieldTypes: { id: "string", written: "boolean", deduplicated: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
@@ -1344,9 +1376,9 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_basement: {
         impl: memoryBasement,
     contract: {
-      summary: "Write echo of the archived record { id, archived:true, archivedAt, ... }. No internal embedding fields; the flip round-trips via memory_get.",
-      requiredFields: ["id", "archived"],
-      fieldTypes: { id: "string", archived: "boolean" },
+      summary: "Write result for the archive operation; read the persisted archive state through memory_get. No internal embedding fields; the flip round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when the row carries them) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
+      requiredFields: ["id", "written"],
+      fieldTypes: { id: "string", written: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
       errorShape: { trigger: "basementing a non-existent, unreadable, or unauthorized id", fields: ["error", "status"] },
@@ -1355,9 +1387,9 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_restore: {
         impl: memoryRestore,
     contract: {
-      summary: "Write echo of the restored record { id, archived:false, ... }. No internal embedding fields; the flip round-trips via memory_get.",
-      requiredFields: ["id", "archived"],
-      fieldTypes: { id: "string", archived: "boolean" },
+      summary: "Write result for the restore operation; read the persisted archive state through memory_get. No internal embedding fields; the flip round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when the row carries them) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
+      requiredFields: ["id", "written"],
+      fieldTypes: { id: "string", written: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
       errorShape: { trigger: "restoring a non-existent, unreadable, or unauthorized id", fields: ["error", "status"] },
@@ -1436,8 +1468,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
           { path: "events", type: "array" }, { path: "sections", type: "object" },
           { path: "skills", type: "array" }, { path: "skillDiagnostics", type: "array" }, // #2141
         ],
-        // #1200 — dedup by the SEMANTIC content key (excludes id/createdAt, which
-        // vary across physical duplicate rows). See ToolInvariants.dedupSignature.
+        // #1200 — content dedup; instruction events use refId in the checker.
         dedupSignature: { container: "events", signatureFields: ["kind", "summary", "detail", "targetIds"] },
         // #1199 — tokenEstimate via the wrapper's own estimator over the delivered
         // payload (minus the two fields added after it was measured).
@@ -1585,7 +1616,38 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   },
 });
 
-/** The tool definitions for a tools/list response (exactly the 18 curated tools). */
-export function listToolDefs(): McpToolDef[] {
-  return Object.values(TOOLS).map((t) => t.def);
+/**
+ * `tools/list` gates: a tool named here is advertised only to a caller this
+ * predicate admits. `soul_set`'s predicate is the soul write policy's
+ * source-authorization step (resources/soul-write-policy.ts), evaluated on the
+ * same delegation context `soulSet` builds; `Soul.post` applies its content
+ * guards after that step. The policy module links harper's `databases` at module
+ * top, so it is imported lazily — same reason as the handlers above.
+ */
+const LIST_GATES: Record<string, (agent: ResolvedAgent) => Promise<boolean>> = {
+  soul_set: async (agent) => {
+    const { soulWriteAllowed } = await import("./soul-write-policy.js");
+    return soulWriteAllowed(delegationContext(agent));
+  },
+};
+
+for (const name of Object.keys(LIST_GATES)) {
+  if (!Object.prototype.hasOwnProperty.call(TOOLS, name)) {
+    throw new Error(`tools/list gate names a tool that is not in TOOLS: ${name}`);
+  }
+}
+
+/**
+ * The tool defs `tools/list` returns for `agent`: every `TOOLS` entry whose gate
+ * (if any) admits this caller. `agent` is null for a caller whose token subject
+ * resolved to no principal; that caller gets no gated tool.
+ */
+export async function listToolDefs(agent: ResolvedAgent | null): Promise<McpToolDef[]> {
+  const defs: McpToolDef[] = [];
+  for (const [name, entry] of Object.entries(TOOLS)) {
+    const gate = LIST_GATES[name];
+    if (gate && !(agent && (await gate(agent)))) continue;
+    defs.push(entry.def);
+  }
+  return defs;
 }

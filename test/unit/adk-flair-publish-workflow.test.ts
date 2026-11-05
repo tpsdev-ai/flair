@@ -1,3 +1,4 @@
+import { shellScript } from "../helpers/shell-script.ts";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -72,13 +73,13 @@ function runVersion(ref: string, projectVersion: string, input?: string) {
   writeFileSync(join(cwd, "packages/adk-flair/pyproject.toml"), `[project]\nversion = "${projectVersion}"\n`);
   const output = join(cwd, "output");
   writeFileSync(output, "");
-  const resolved = spawnSync("bash", ["-e", "-o", "pipefail", "-c", resolve.run!], {
+  const resolved = spawnSync("bash", ["-e", "-o", "pipefail", shellScript(resolve.run!)], {
     cwd, encoding: "utf8",
     env: { ...process.env, EVENT: input === undefined ? "push" : "workflow_dispatch", REF_NAME: ref, INPUT_VERSION: input ?? "", GITHUB_OUTPUT: output },
   });
   if (resolved.status !== 0) return { status: resolved.status, text: resolved.stdout + resolved.stderr, version: "" };
   const version = readFileSync(output, "utf8").trim().replace(/^version=/, "");
-  const checked = spawnSync("bash", ["-e", "-o", "pipefail", "-c", guard.run!], {
+  const checked = spawnSync("bash", ["-e", "-o", "pipefail", shellScript(guard.run!)], {
     cwd, encoding: "utf8", env: { ...process.env, VERSION: version },
   });
   return { status: checked.status, text: resolved.stdout + resolved.stderr + checked.stdout + checked.stderr, version };
@@ -196,7 +197,7 @@ describe("adk-flair publishing", () => {
       git(["remote", "add", "origin", mode === "fetch failure" ? join(cwd, "absent") : origin], checkout);
       const rejected = commit(checkout, "rejected");
       const sha = mode === "rejected" ? rejected : accepted;
-      const result = spawnSync("bash", ["-c", ancestry.run!], {
+      const result = spawnSync("bash", [shellScript(ancestry.run!)], {
         cwd: checkout, encoding: "utf8", env: { ...noAutomaticMaintenance(), GITHUB_SHA: sha },
       });
       const text = result.stdout + result.stderr;
@@ -231,7 +232,7 @@ while [ "$#" -gt 0 ]; do
 done
 exit "$LOOKUP_EXIT"
 `, { mode: 0o755 });
-      const result = spawnSync("bash", ["-c", verify.run!], {
+      const result = spawnSync("bash", [shellScript(verify.run!)], {
         cwd, encoding: "utf8",
         env: { ...process.env, PATH: `${cwd}:${process.env.PATH}`, VERSION: "0.59.0", RUNNER_TEMP: cwd, LOOKUP_ARGS: args,
           LOOKUP_BODY: scenario === "invalid JSON" ? "invalid" : JSON.stringify({ urls }),

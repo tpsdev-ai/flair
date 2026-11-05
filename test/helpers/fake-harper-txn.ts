@@ -11,21 +11,31 @@
  * callback is running, every `stage()` call is staged, whatever context the
  * write carries (the simulation does not check it); get() still returns the
  * committed store, so a staged write is invisible to the committed re-read;
- * the staged writes land when the callback resolves and are discarded if it
- * throws. A test's fake table's put() calls `stage()` and, when it returns
+ * staged writes land on explicit commit or successful callback completion.
+ * A test's fake table's put() calls `stage()` and, when it returns
  * true, leaves the commit to this simulation.
  */
 export function installFakeHarperTransaction(commit: (id: string, row: any) => void) {
   const saved = (globalThis as { transaction?: unknown }).transaction;
   let staged: Map<string, any> | null = null;
-  (globalThis as { transaction?: unknown }).transaction = async (_ctx: unknown, cb: (ctx: any) => any) => {
+  (globalThis as { transaction?: unknown }).transaction = async (ctx: any, cb: (txn: any) => any) => {
     const map = new Map<string, any>();
     staged = map;
+    const txn = {
+      open: 1,
+      async commit() {
+        for (const [id, row] of map) await commit(id, row);
+        map.clear();
+      },
+    };
+    const shared = ctx ?? {};
+    shared.transaction = txn;
     try {
-      const out = await cb({});
-      for (const [id, row] of map) commit(id, row);
+      const out = await cb(txn);
+      await txn.commit();
       return out;
     } finally {
+      txn.open = 0;
       staged = null;
     }
   };

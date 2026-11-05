@@ -152,7 +152,9 @@ for (const failure of ["search", "unavailable", "memory-read"] as const) {
       const originalGet = databasesMock.flair.Memory.get;
       let reads = 0;
       spies.push(spyOn(databasesMock.flair.Memory, "get").mockImplementation(async (...args) => {
-        if (++reads === 5) throw new Error("memory confirmation read failed");
+        // Five reads precede it: the two target-set resolves and the re-reads of
+        // the delete, its confirmation, and the pointer transaction.
+        if (++reads === 6) throw new Error("memory confirmation read failed");
         return originalGet(...args);
       }));
     }

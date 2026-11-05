@@ -56,14 +56,13 @@ function parseEntitiesOptionOrExit(csv: string): string[] {
 // (WorkspaceState.put(), resources/WorkspaceState.ts), so this is a
 // self-declaration the server verifies 1:1, not attribution-from-body.
 //
-// (flair#679, measured against a real spawned Harper): table-backed resources
-// only accept writes via PUT /<Table>/<id> — a bare POST /WorkspaceState 405s
-// ("does not have a post method implemented to handle HTTP method POST"),
-// same restriction documented in resources/Memory.ts and already fixed for
-// `soul set` (#498). WorkspaceState.ts DOES define a post() method, but
-// Harper's REST layer never routes a real HTTP POST to it — post() is only
-// reachable via in-process resource instantiation, never the wire. put(),
-// unlike post(), does NOT default createdAt/timestamp/agentId — the CLI
+// (flair#679, measured against a real spawned Harper): through Harper 5.1.x a
+// bare POST /WorkspaceState 405'd ("does not have a post method implemented to
+// handle HTTP method POST"); the Harper this repo now pins routes it to
+// WorkspaceState.post() and accepts it (harper#1956; the sanity test in
+// test/integration/workspace-orgevent-cli-e2e.test.ts asserts 201). The CLI
+// writes with PUT /<Table>/<id>, which works on both, as `soul set` does (#498).
+// put(), unlike post(), does NOT default createdAt/timestamp/agentId — the CLI
 // supplies them all explicitly below.
 
 export const MAX_WORKSPACE_FIELD_LENGTH = 2000;

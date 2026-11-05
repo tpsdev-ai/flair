@@ -15,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HarperInstance, startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { FlairClient, FlairError } from "../../packages/flair-client/src/client";
 
 interface TestAgent {
@@ -58,7 +58,7 @@ describe("flair#1940 slice 2a — a host source through the production client (r
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     if (keyDir) await rm(keyDir, { recursive: true, force: true, maxRetries: 4 });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   async function clientFor(agent: TestAgent): Promise<FlairClient> {
     await registerAgent(harper, agent);

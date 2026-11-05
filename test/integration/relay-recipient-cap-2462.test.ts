@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { sealMessage, type MessageEnvelope } from "../../resources/relay-lib.js";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 
 // A production Flair's HTTP and ops API ports: this test must never target them.
@@ -168,26 +168,7 @@ async function waitForRows(toId: string, target: number, deadlineMs: number): Pr
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2462-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-    FLAIR_RELAY_INBOX_CAP: process.env.FLAIR_RELAY_INBOX_CAP,
-    FLAIR_RELAY_PER_SENDER_CAP: process.env.FLAIR_RELAY_PER_SENDER_CAP,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  process.env.FLAIR_RELAY_INBOX_CAP = String(RECIPIENT_CAP);
-  // Far above each sender's single message, so the refusal under test is the
-  // recipient-wide cap, never the per-sender sub-cap.
-  process.env.FLAIR_RELAY_PER_SENDER_CAP = "100";
-  try {
-    harper = await startHarper();
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir, FLAIR_RELAY_INBOX_CAP: String(RECIPIENT_CAP), FLAIR_RELAY_PER_SENDER_CAP: "100" } });
   assertOwnInstance(harper);
 
   await ensureFlairAgentRole(harper.opsURL, harper.admin.username, harper.admin.password);
@@ -210,7 +191,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2462 — the recipient-wide inbox cap holds under concurrent senders (real Harper)", () => {
   it("CONTROL: an uncontended send to the recipient is delivered", async () => {

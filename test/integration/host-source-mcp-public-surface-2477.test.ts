@@ -103,18 +103,16 @@ describe("the /mcp public surface carries the memory_store host-source envelope 
     privateKeyPem = privateKey;
     publicKeyPem = publicKey;
 
-    // startHarper copies process.env into the spawned Harper. These variables
-    // stay set for the awaited startup; the finally block restores them (it
-    // guarantees restoration, not isolation from concurrent code).
-    const envKeys = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET", "OAUTH_GITHUB_REDIRECT_URI"] as const;
-    const prior = envKeys.map((key) => [key, process.env[key]] as const);
-    process.env.FLAIR_MCP_OAUTH = "true";
-    process.env.FLAIR_MCP_ISSUER = ISSUER;
-    process.env.OAUTH_GITHUB_CLIENT_ID = "host-source-public-client";
-    process.env.OAUTH_GITHUB_CLIENT_SECRET = "host-source-public-secret";
-    process.env.OAUTH_GITHUB_REDIRECT_URI = `${ISSUER}/oauth`;
-    try {
-      harper = await startHarper();
+    // MCP enablement for the spawned Harper only.
+    const serverEnv = {
+      FLAIR_MCP_OAUTH: "true",
+      FLAIR_MCP_ISSUER: ISSUER,
+      OAUTH_GITHUB_CLIENT_ID: "host-source-public-client",
+      OAUTH_GITHUB_CLIENT_SECRET: "host-source-public-secret",
+      OAUTH_GITHUB_REDIRECT_URI: `${ISSUER}/oauth`,
+    };
+    {
+      harper = await startHarper({ serverEnv });
       // Talk only to this test's own ephemeral instance: loopback, the
       // OS-assigned ports it started on, never a shared/production port, and a
       // data directory under the temp dir — checked before this test's first
@@ -129,11 +127,6 @@ describe("the /mcp public surface carries the memory_store host-source envelope 
       }
       if (http.port === ops.port || !harper.process?.pid || !harper.installDir.startsWith(tmpdir())) {
         throw new Error(`refusing to run: ${harper.httpURL} / ${harper.opsURL} is not an instance this test started`);
-      }
-    } finally {
-      for (const [key, value] of prior) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
       }
     }
 

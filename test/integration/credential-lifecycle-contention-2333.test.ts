@@ -60,7 +60,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SignJWT, exportJWK, generateKeyPair } from "jose";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 // A production Flair's HTTP and ops API ports: this test must never target them.
 const FORBIDDEN_PORTS = new Set([9925, 9926]);
@@ -218,20 +218,7 @@ function grantJwtBearer(assertion: string): Promise<Response> {
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-cred-2333-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper();
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
   assertOwnInstance(harper);
 
   // A test IdP: an ephemeral loopback JWKS server, and an IdpConfig row that
@@ -272,7 +259,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (jwksServer) jwksServer.close();
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2333 slice 2 — credential lifecycle writes preserve committed revocations within one Harper process (real Harper)", () => {
   // ── OAuth refresh vs revoke ────────────────────────────────────────────────
@@ -550,5 +537,32 @@ describe("flair#2333 slice 2 — credential lifecycle writes preserve committed 
     expect(await readTokensForPrincipal(principalId), "the refused grant issued a token").toEqual([]);
     const row = await readRow("Credential", credentialId);
     expect(row, "the stored row is not the committed delete").toBeNull();
+  }, 60_000);
+
+  it("a revoke committed in the touch's confirmation-to-commit gap refuses the grant", async () => {
+    const subject = `user-gap-${randomUUID()}`;
+    const principalId = `agent-2333-gap-${randomUUID().slice(0, 8)}`;
+    const credentialId = `cred_idp_gap_${randomUUID().slice(0, 8)}`;
+    const lastUsedAt = "2020-01-02T03:04:05.000Z";
+    await ops({
+      operation: "insert", database: "flair", table: "Credential",
+      records: [{ id: credentialId, principalId, kind: "idp", label: "gap", status: "active", idpProvider: IDP_ID, idpSubject: subject, createdAt: new Date().toISOString(), lastUsedAt }],
+    });
+    const assertion = await jwtBearerAssertion(subject);
+    const { response, competed, released } = await withPaused(
+      "xaa-credential-touch-commit",
+      () => grantJwtBearer(assertion),
+      () => ops({ operation: "update", database: "flair", table: "Credential", records: [{ id: credentialId, status: "revoked" }] }).then(() => 200),
+    );
+    expect(released, "the credential touch was not paused and released by this test").toBe("go");
+    expect(competed, "the competing revoke did not return 200").toBe(200);
+    const text = await response.text();
+    expect(response.status, `grant returned ${response.status}: ${text.slice(0, 300)}`).toBe(400);
+    const body = JSON.parse(text);
+    expect(body.error).toBe("invalid_grant");
+    expect(body.access_token).toBeUndefined();
+    expect(await readTokensForPrincipal(principalId), "the refused grant issued a token").toEqual([]);
+    const row = await readRow("Credential", credentialId);
+    expect(row?.status, "the stored credential is not the committed revoke").toBe("revoked");
   }, 60_000);
 });

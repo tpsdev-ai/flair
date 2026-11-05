@@ -7,13 +7,15 @@
  * may write its own `status` can deactivate itself. Liveness belongs on the
  * Presence beacon, not on this column.
  *
- * resources/Agent.ts's PUT and PATCH admit a trusted internal call and an
- * administrator, and refuse anonymous and any verdict kind the auth resolver
- * does not define. A non-admin agent's PUT or PATCH whose body carries the
- * `status` key is refused whole, on any row including its own, so the other
- * fields in that request are not written either; without `status`, it goes on
- * to Agent.ts's other per-record rules. A non-admin agent's POST (create) is
- * refused earlier, at allowCreate(). (A federation peer's record is merged
+ * resources/Agent.ts's PUT is an administrator operation: it admits a trusted
+ * internal call and an administrator and refuses every other caller, whatever
+ * its body. Its PATCH admits a trusted internal call and an administrator,
+ * refuses anonymous and any verdict kind the auth resolver does not define,
+ * and admits a non-admin agent to the rules below. A non-admin agent's PATCH
+ * whose body carries the `status` key is refused whole, on any row including
+ * its own, so the other fields in that request are not written either; without
+ * `status`, it goes on to Agent.ts's other per-record rules. A non-admin
+ * agent's POST (create) is refused earlier, at allowCreate(). (A federation peer's record is merged
  * through the raw table, not this resource; resources/Federation.ts skips an
  * inbound Agent record whose `status` differs from an existing local
  * principal's stored value.)

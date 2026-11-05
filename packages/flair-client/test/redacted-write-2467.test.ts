@@ -148,6 +148,15 @@ describe("flair#2467 — write()/update() report the text the write stored, from
     expect(gets()).toEqual(["/Memory/mem-1"]);
   });
 
+  test("update() with a `stored` that holds only the content returns no summary or trigger (flair#2561)", async () => {
+    storedOverride = { content: STORED };
+    const res: any = await client().memory.update("mem-1", ORIGINAL);
+    expect(res.content).toBe(STORED);
+    expect(res.contentWithheld).toBeUndefined();
+    expect("summary" in res || "trigger" in res).toBe(false);
+    expect(strings(res).some((s) => s.includes(TOKEN))).toBe(false);
+  });
+
   test("a write the server did not redact returns the input, no count and no extra read", async () => {
     const res: any = await client().memory.write("a plain note", { id: "mem-2" });
     expect(res.content).toBe("a plain note");

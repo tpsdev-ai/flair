@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { shellScript } from "../helpers/shell-script.ts";
 
 import {
   SESSION_START_HOOK_MARKER,
@@ -12,6 +13,7 @@ import {
   fixSessionStartHook,
   hookCommandIsSilenced,
   inspectSessionStartHook,
+  runProbeInOwnGroup,
   upgradeSessionStartHookCommand,
   type HookProbeOutcome,
 } from "../../src/doctor-client.ts";
@@ -211,6 +213,12 @@ describe("inspectSessionStartHook (injected probe)", () => {
   });
 });
 
+const reasonedRealProbe = (command: string, timeoutMs: number) => runProbeInOwnGroup(command, timeoutMs, {
+  input: "",
+  env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise the real SessionStart shell probe",
+    FLAIR_HOOK_PROBE: "1", FLAIR_HOOK_TIMEOUT_MS: "1500", FLAIR_PRESENCE_TIMEOUT_MS: "500" },
+});
+
 describe("inspectSessionStartHook — REAL probe against a command that cannot resolve", () => {
   // This is the defect end to end: a well-formed settings entry whose command
   // stopped resolving. Simulated by a PATH carrying `sh` and nothing else, so
@@ -243,19 +251,19 @@ describe("inspectSessionStartHook — REAL probe against a command that cannot r
     // were simply always reporting failure.
     installFakeNpx("#!/bin/sh\nprintf '%s' '{}'\n");
     writeHook(buildSessionStartHookCommand("me"));
-    expect(inspectSessionStartHook(isoHome, { timeoutMs: 20_000 }).execution).toBe("runs");
+    expect(inspectSessionStartHook(isoHome, { timeoutMs: 20_000, probe: reasonedRealProbe }).execution).toBe("runs");
   });
 
   it("the CURRENT (silenced) command that cannot resolve is reported broken", () => {
     writeHook(buildSessionStartHookCommand("me"));
-    const res = inspectSessionStartHook(isoHome, { timeoutMs: 20_000 });
+    const res = inspectSessionStartHook(isoHome, { timeoutMs: 20_000, probe: reasonedRealProbe });
     expect(res.execution).toBe("broken");
     expect(res.detail).toContain("never ran");
   });
 
   it("the LEGACY command that cannot resolve is reported broken, with the shell's own error as evidence", () => {
     writeHook(LEGACY_COMMAND);
-    const res = inspectSessionStartHook(isoHome, { timeoutMs: 20_000 });
+    const res = inspectSessionStartHook(isoHome, { timeoutMs: 20_000, probe: reasonedRealProbe });
     expect(res.execution).toBe("broken");
     expect(res.detail).toContain("npx");
   });
@@ -263,7 +271,7 @@ describe("inspectSessionStartHook — REAL probe against a command that cannot r
   it("a resolver that exits non-zero is broken, not 'runs'", () => {
     installFakeNpx("#!/bin/sh\necho 'boom' >&2\nexit 1\n");
     writeHook(LEGACY_COMMAND);
-    expect(inspectSessionStartHook(isoHome, { timeoutMs: 20_000 }).execution).toBe("broken");
+    expect(inspectSessionStartHook(isoHome, { timeoutMs: 20_000, probe: reasonedRealProbe }).execution).toBe("broken");
   });
 
   it("the probe sets FLAIR_HOOK_PROBE, so a real adapter answers without side effects", () => {
@@ -271,11 +279,11 @@ describe("inspectSessionStartHook — REAL probe against a command that cannot r
     // is set — the same contract session-start-hook.ts honours.
     installFakeNpx('#!/bin/sh\nif [ -n "$FLAIR_HOOK_PROBE" ]; then printf \'%s\' \'{}\'; else printf \'%s\' \'SIDE_EFFECTS_RAN\'; fi\n');
     writeHook(buildSessionStartHookCommand("me"));
-    expect(inspectSessionStartHook(isoHome, { timeoutMs: 20_000 }).execution).toBe("runs");
+    expect(inspectSessionStartHook(isoHome, { timeoutMs: 20_000, probe: reasonedRealProbe }).execution).toBe("runs");
 
     // And the control: without probe mode the stub would have produced the
     // other branch, so the assertion above is not vacuous.
-    const direct = Bun.spawnSync(["/bin/sh", "-c", buildSessionStartHookCommand("me")], {
+    const direct = Bun.spawnSync(["/bin/sh", shellScript(buildSessionStartHookCommand("me"))], {
       env: { PATH: binDir, HOME: isoHome },
     });
     expect(new TextDecoder().decode(direct.stdout)).toBe("SIDE_EFFECTS_RAN");

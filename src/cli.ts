@@ -124,16 +124,14 @@ import {
 } from "./hook-install.js";
 import {
   ApiHttpError,
+  ApiRequestOutcomeUnknown,
+  isConnectPhaseFailure,
   readSecretFileSecure,
   readAdminPassFileSecure,
   defaultAdminPassPath,
   defaultKeysDir,
   resolveLocalAdminPass,
-  resolveAdminPassFromSources,
-  ADMIN_PASS_FLAG,
-  ADMIN_PASS_HELP,
-  ADMIN_PASS_FILE_FLAG,
-  ADMIN_PASS_FILE_HELP,
+  addAdminPassOptions,
   DEFAULT_ADMIN_USER,
   resolveAdminUser,
   resolveKeyPath,
@@ -142,6 +140,7 @@ import {
   KeyLoadError,
   isLocalBase,
   authedRequest,
+  type RequestDeadlineSource,
 } from "./lib/auth-resolve.js";
 import {
   resolveSigningIdentity,
@@ -224,6 +223,8 @@ import { applyRepointPlan, repointSystemdUserUnit, restartOnLinux, type MainServ
 import { snapshotRegularFile, type AtomicWriteHooks, type FileSnapshot as AtomicFileSnapshot } from "./lib/atomic-write.js";
 import { preferVersionManagerAlias } from "./lib/node-alias-path.js";
 import { stabilizeMqttNetworkKeyOrder } from "./lib/stabilize-mqtt-network.js";
+import { MQTT_DISABLED_CONFIG } from "./lib/mqtt-config.js";
+import { FABRIC_OPS_PORT, resolveOpsUrlFromTarget } from "./lib/ops-url.js";
 import { detectOpsApiAllInterfacesBind } from "./lib/ops-api-bind.js";
 import {
   applyUpgradeHookConsent,
@@ -304,6 +305,7 @@ import {
 } from "./commands/soul.js";
 import {
   bindCli as bindRemCli,
+  exitUnknownOutcome,
   register as registerRem,
 } from "./commands/rem.js";
 import {
@@ -413,6 +415,7 @@ import {
   bindCli as bindAttentionCli,
   register as registerAttention,
 } from "./commands/attention.js";
+import { registerHelp } from "./commands/help.js";
 import {
   bindCli as bindBootstrapCli,
   register as registerBootstrap,
@@ -449,6 +452,10 @@ import {
   bindCli as bindRestoreCli,
   register as registerRestore,
 } from "./commands/restore.js";
+import {
+  bindCli as bindBackupApprovalCli,
+  register as registerBackupApproval,
+} from "./commands/backup-approval.js";
 import {
   bindCli as bindExportCli,
   register as registerExport,
@@ -552,11 +559,15 @@ function shouldShowInlineSecretWarning(
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
 const DEFAULT_PORT = 19926;
-const DEFAULT_OPS_PORT = 19925;
-const FABRIC_OPS_PORT = 9925;
+// DEFAULT_OPS_PORT and FABRIC_OPS_PORT live in src/lib/ops-url.ts with
+// resolveOpsUrlFromTarget, shared with the deploy channel (src/deploy.ts).
 // DEFAULT_ADMIN_USER + resolveAdminUser (flag > FLAIR_ADMIN_USER env > "admin")
 // live in src/lib/auth-resolve.ts — imported above (flair#1345).
-const STARTUP_TIMEOUT_MS = 60_000;
+//
+// Exported (flair#2568) so the test harness's readiness budget
+// (HARPER_STARTUP_BUDGET_MS in test/helpers/harper-lifecycle.ts) can be pinned
+// equal to the budget `flair init`'s TCP readiness check polls under.
+export const STARTUP_TIMEOUT_MS = 60_000;
 const ADOPT_STOP_TIMEOUT_MS = 60_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
 
@@ -1478,9 +1489,7 @@ export const SHARED_IDENTITY_FLAGS = {
 } as const;
 
 function addSharedCredentialOptions(cmd: Command): Command {
-  return cmd
-    .option(ADMIN_PASS_FLAG, ADMIN_PASS_HELP)
-    .option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP)
+  return addAdminPassOptions(cmd)
     .option(SHARED_CREDENTIAL_FLAGS.adminUser, "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)");
 }
 
@@ -1488,43 +1497,13 @@ function addSharedIdentityOption(cmd: Command): Command {
   return cmd.option(SHARED_IDENTITY_FLAGS.agent, "Agent ID (or set FLAIR_AGENT_ID env)");
 }
 
-/**
- * Resolve the admin password for the commands that declare the shared
- * credential flags, through the ONE resolver (`resolveAdminPassFromSources` —
- * the same one `federation token`/`pair` use, flair#1873/#1910). The resolved
- * value is written back into the `adminPass` slot every call site reads.
- *
- * Precedence, as the usage text states: an explicit `--admin-pass-file` or
- * `--admin-pass` over the ambient `FLAIR_ADMIN_PASS`/`HDB_ADMIN_PASSWORD`.
- * Supplying BOTH the file and the flag is a usage error (it used to let the
- * flag silently win); a file that is missing, empty or group-/world-readable
- * is refused naming the path and its mode. Never prints the value.
- */
-function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
-  try {
-    // envPass is DELIBERATELY omitted: this wrapper folds an explicit
-    // `--admin-pass-file` (or `--admin-pass`) into `opts.adminPass`, and each
-    // call site keeps its own `opts.adminPass ?? FLAIR_ADMIN_PASS` fallback —
-    // exactly main's shape. Resolving the ambient env HERE would pre-fill
-    // `opts.adminPass`, and a call site that threads it as `explicitAdminPass`
-    // (memory add, soul, …) would then send ambient admin Basic auth where it
-    // used to send nothing and let the `--agent`/env tier decide (flair#1910
-    // round 2: `federation sync` merged nothing in the mixed-version compat
-    // lane because `memory add --agent X` with FLAIR_ADMIN_PASS set signed as
-    // admin, not as X).
-    const pass = resolveAdminPassFromSources({
-      adminPassFile: opts.adminPassFile,
-      adminPass: opts.adminPass,
-    });
-    if (pass) opts.adminPass = pass;
-  } catch (err: any) {
-    console.error(`Error: ${err.message}`);
-    process.exit(1);
-  }
-}
-
 // Ops port resolution: valid --ops-port flag > FLAIR_OPS_PORT env > config opsPort > httpPort - 1.
 // An explicit invalid --ops-port refuses; it never falls through to another rung.
+//
+// `httpPortBase` is the HTTP port the last rung derives from. A caller that
+// already resolved the HTTP port — or, for `flair doctor`, probed the port it
+// actually reached — passes it so that rung matches that port rather than
+// re-resolving the configured one (flair#2562).
 //
 // Deliberately NOT routed through Harper's per-instance config the way
 // resolveHttpPort is (flair#914). The last rung couples the ops port to the HTTP
@@ -1534,7 +1513,7 @@ function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }
 // which is the bug flair#914 fixed pointing the other way. The ops port becomes
 // per-instance when the lifecycle commands grow `--data-dir` and there is a
 // named instance to attribute it to.
-function resolveOpsPort(opts: { opsPort?: string | number; port?: string | number }): number {
+function resolveOpsPort(opts: { opsPort?: string | number; port?: string | number }, httpPortBase?: number): number {
   if (opts.opsPort !== undefined && opts.opsPort !== null) {
     const n = Number(opts.opsPort);
     if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
@@ -1556,7 +1535,7 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
     }
   } catch { /* ignore */ }
   // Default: httpPort - 1
-  return resolveHttpPort(opts) - 1;
+  return (httpPortBase ?? resolveHttpPort(opts)) - 1;
 }
 
 /** The named refusal for a configured-pair conflict or an unpaired one-sided target (flair#2474). */
@@ -1577,7 +1556,7 @@ export interface AgentHomeTargetInputs {
   configuredHttp: number | null;
   /** The ops port resolved from config, or null. */
   configuredOps: number | null;
-  /** The ops port the ordinary ladder (`resolveOpsPort`) derives; used only when neither port is named and the config records no complete pair. */
+  /** The ops port the ordinary ladder (`resolveOpsPort`) derives from the resolved HTTP port `httpPort`; used only when neither port is named and the config records no complete pair. */
   deriveOps: () => number;
 }
 
@@ -1653,7 +1632,10 @@ export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?:
 } {
   // `flair doctor` probes the port it actually reached (a PID-discovered
   // `effectivePort` can differ from the configured one), so it passes that port
-  // here; every other caller lets the resolver resolve it.
+  // here; every other caller lets the resolver resolve it. When neither port is
+  // named and the config records no complete pair, `deriveOps` takes THIS port
+  // as the base for its port-minus-one default, so the fallback matches the
+  // port doctor reached rather than the configured one (flair#2562).
   const httpPort = httpPortOverride ?? resolveHttpPort(opts);
   const dataDir = instanceDataDir(opts);
   const fromHarper = harperPortValue(readHarperConfig(dataDir)?.operationsApi?.network?.port);
@@ -1677,7 +1659,7 @@ export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?:
     namedOps,
     configuredHttp,
     configuredOps,
-    deriveOps: () => resolveOpsPort(opts),
+    deriveOps: () => resolveOpsPort(opts, httpPort),
   });
 }
 
@@ -1703,7 +1685,8 @@ export const DOCTOR_ROSTER_CREDENTIAL_REMEDY =
 /** Whether `flair doctor` may read the probed instance over the ops API, and from which ops endpoint. */
 export type DoctorRosterTargetDecision =
   | { kind: "run"; opsPort: number }
-  | { kind: "not-run"; reason: string; remedy: string };
+  /** `credentialRefused`: the ops endpoint refused the admin credential (HTTP 401/403), so the pair was never checked. */
+  | { kind: "not-run"; reason: string; remedy: string; credentialRefused?: true };
 
 /**
  * The candidate ops endpoint for `flair doctor`'s instance reads (flair#2483,
@@ -1736,16 +1719,16 @@ export function resolveDoctorRosterTarget(
 }
 
 /**
- * Whether the candidate ops endpoint's own configured HTTP/ops pair matches the
- * HTTP port doctor probed (flair#2483). `proof` is
- * {@link proveLocalInstancePair}'s answer for `opsPort` — the same check the
- * local delete paths use (src/lib/local-delete-instance.ts): the configuration
- * records `opsPort` as its ops port and an HTTP port bound on loopback or on all
- * interfaces. This decides `run` only when that configured HTTP port is
- * `probedHttpPort`. A check that could not complete, or a configuration naming
- * another HTTP port, is `not-run`: the pair check cannot be established.
- * Configured ports are not proof of the live process, so a match establishes
- * only that the configuration agrees.
+ * Whether the candidate ops endpoint pairs with the HTTP port doctor probed
+ * (flair#2483). `proof` is {@link proveLocalInstancePair}'s answer for
+ * `opsPort`, the check the local delete paths use
+ * (src/lib/local-delete-instance.ts): the configuration records `opsPort` as
+ * its ops port and an HTTP port bound on loopback or on all interfaces, and the
+ * OS listener table shows one process listening on both, with a recognized
+ * Harper command line and the same pid and start time on two reads. This
+ * decides `run` only when that configured HTTP port is `probedHttpPort`. An unproven
+ * pair, or a proven one naming another HTTP port, is `not-run`, with the
+ * proof's own remedy when it carries one.
  */
 export function decideDoctorRosterPair(
   opsPort: number,
@@ -1753,10 +1736,12 @@ export function decideDoctorRosterPair(
   proof: LocalInstancePairProof,
 ): DoctorRosterTargetDecision {
   if (proof.kind === "unproven") {
+    const credentialRefused = proof.status === 401 || proof.status === 403;
     return {
       kind: "not-run",
-      reason: `the ops endpoint on port ${opsPort} did not report a usable configured HTTP/ops pair (${proof.detail}), so this check cannot be established for the probed HTTP port ${probedHttpPort}`,
-      remedy: proof.status === 401 || proof.status === 403 ? DOCTOR_ROSTER_CREDENTIAL_REMEDY : DOCTOR_ROSTER_TARGET_REMEDY,
+      reason: `the ops endpoint on port ${opsPort} did not prove a live HTTP/ops pair (${proof.detail}), so this check cannot be established for the probed HTTP port ${probedHttpPort}`,
+      remedy: proof.remedy ?? (credentialRefused ? DOCTOR_ROSTER_CREDENTIAL_REMEDY : DOCTOR_ROSTER_TARGET_REMEDY),
+      ...(credentialRefused ? { credentialRefused: true as const } : {}),
     };
   }
   if (proof.httpPort !== probedHttpPort) {
@@ -1770,14 +1755,13 @@ export function decideDoctorRosterPair(
 }
 
 /**
- * The additional instance-identity comparison behind doctor's instance reads
+ * The instance-identity comparison behind doctor's instance reads
  * (flair#2483), applied only after {@link decideDoctorRosterPair} decided
- * `run`. The configuration read reports CONFIGURED ports, not which instance
- * serves the probed port. When the probed HTTP port and the ops endpoint each
- * report one `flair.Instance` id and the two differ, they are two instances:
- * `not-run`. Every other identity outcome (equal ids, no row on either side as
- * on a fresh install, several rows, or an unread table) leaves the
- * configuration check's `run` standing.
+ * `run`. When the probed HTTP port and the ops endpoint each report one
+ * `flair.Instance` id and the two differ, they are two instances: `not-run`.
+ * Every other identity outcome (equal ids, no row on either side as on a fresh
+ * install, several rows, or an unread table) leaves the pair check's `run`
+ * standing.
  */
 export function decideDoctorRosterIdentity(opsPort: number, pair: ProbedPairIdentity): DoctorRosterTargetDecision {
   if (pair.kind === "different") {
@@ -1799,7 +1783,9 @@ export function decideDoctorRosterIdentity(opsPort: number, pair: ProbedPairIden
  * 2. Asks the candidate for its configuration ({@link proveLocalInstancePair},
  *    the check the local delete paths use) and requires it to record the
  *    candidate as its ops port and the probed port as its HTTP port, bound on
- *    loopback or on all interfaces ({@link decideDoctorRosterPair}). No
+ *    loopback or on all interfaces, with the OS listener table showing one
+ *    process listening on both, with a recognized Harper command line and the
+ *    same pid and start time on two reads ({@link decideDoctorRosterPair}). No
  *    Instance row is needed, so a fresh install passes.
  * 3. Only then compares the instance identities both endpoints report
  *    ({@link decideDoctorRosterIdentity}): two different single ids refuse.
@@ -1808,11 +1794,17 @@ export function decideDoctorRosterIdentity(opsPort: number, pair: ProbedPairIden
  * RUN, and their diagnostic reads do not run: all four section reads, unless a
  * `--fix` step that may have changed the serving process made the roster and
  * home sections ask again (the answer describes the process serving the probed
- * port when it was taken). Reaching a `not-run` may itself have read the
- * candidate's configuration (step 2) and both endpoints' instance identities
- * (step 3). The limit: step 2 reads configured ports, which are not proof of
- * the live process, and step 3 adds a check only when both endpoints have
- * exactly one Instance row.
+ * port when it was taken). Doctor also derives from it whether its later
+ * diagnostic requests to the probed HTTP port may be sent (flair#2526); the
+ * pair proof (step 2) precedes any credentialed HTTP request, and step 3's
+ * Basic identity read on the HTTP port follows only a proven pair. Reaching a
+ * `not-run` may itself have read the candidate's configuration (step 2) and
+ * both endpoints' instance identities (step 3).
+ * Step 2 sees only the listeners this CLI can see: one outside that view
+ * (another network namespace or container, or a user this CLI may not
+ * inspect), or a port held by a forwarder whose command line does not match
+ * Harper's, is NOT RUN; step 3 adds a
+ * check only when both endpoints have exactly one Instance row.
  */
 export async function verifyDoctorRosterInstance(
   opts: { port?: string | number; opsPort?: string | number; dataDir?: string },
@@ -1957,26 +1949,9 @@ export function buildOperationsApiConfig(
   };
 }
 
-/**
- * Harper config that fully disables the MQTT broker (flair#1586).
- *
- * Flair does not use MQTT. Harper's mqtt component (server/mqtt.ts
- * `handleApplication`) binds a TCP listener on `mqtt.network.port` (1883) and
- * a TLS listener on `mqtt.network.securePort` (8883) whenever EITHER is truthy
- * (`if (port || securePort)`), plus a WebSocket upgrade path when
- * `mqtt.webSocket` is true. Nulling only `network.port` leaves
- * `network.securePort` at its 8883 default, so the TLS listener still binds.
- * Fully disabling MQTT requires nulling BOTH ports and turning off the
- * WebSocket path.
- *
- * Note: config-root.schema.json still documents a flat `mqtt.port` /
- * `mqtt.securePort`, but the runtime reads the nested `mqtt.network.*` form
- * (see static/defaultConfig.yaml) — the flat keys are stale.
- */
-const MQTT_DISABLED_CONFIG = {
-  network: { port: null, securePort: null },
-  webSocket: false,
-};
+// MQTT_DISABLED_CONFIG — the Harper `mqtt` section with every MQTT listener
+// off — lives in src/lib/mqtt-config.ts, shared with the component-deployment
+// channel (src/deploy.ts) and `flair doctor`.
 
 /**
  * Build the flair-owned environment overrides for a DIRECT (non-launchd)
@@ -2563,17 +2538,6 @@ function resolveOpsTarget(opts: { opsTarget?: string }): string | undefined {
   return opts.opsTarget || process.env.FLAIR_OPS_TARGET || undefined;
 }
 
-/** Derive the ops API URL from a Flair base URL.
- *  https with effective port 443 (no explicit port, or explicit :443): returns
- *    <host>:9925 (FABRIC_OPS_PORT) — the Fabric managed case where port-1/:442
- *    is a dead-end.
- *  All other cases unchanged:
- *    https with non-443 explicit port → port-1 (self-hosted TLS: 19926→19925, 8443→8442)
- *    http with explicit port → port-1 (19926→19925)
- *    http with no port → DEFAULT_OPS_PORT (19925)
- *  Bare hosts are normalised to https:// (effective-443 → Fabric path).
- *  Throws on unparseable URLs or out-of-range ports.
- */
 /** Compute the effective ops API URL for remote commands.
  *  - If --ops-target is set, use it directly (no derivation).
  *  - Else if --target is set, derive ops URL via resolveOpsUrlFromTarget.
@@ -2585,39 +2549,6 @@ function resolveEffectiveOpsUrl(opts: { target?: string; opsTarget?: string }): 
   const target = resolveTarget(opts);
   if (target) return resolveOpsUrlFromTarget(target);
   return undefined;
-}
-
-function resolveOpsUrlFromTarget(targetUrl: string): string {
-  // Normalise bare hosts: add https:// prefix so URL parser can handle them.
-  const normalised = targetUrl.includes("://") ? targetUrl : `https://${targetUrl}`;
-  const url = new URL(normalised);
-
-  // https target with effective port 443 (no explicit port, or explicit :443):
-  // this is the Fabric managed case — the ops API is on the well-known Fabric
-  // ops port, never REST-adjacent. The port-1 / :442 logic is a dead-end here.
-  if (url.protocol === "https:" && (url.port === "" || url.port === "443")) {
-    url.port = String(FABRIC_OPS_PORT);
-    return url.toString().replace(/\/$/, "");
-  }
-
-  // All other cases: unchanged port-1 convention.
-  //   https with non-443 explicit port → port-1 (self-hosted TLS: 19926→19925, 8443→8442)
-  //   http with explicit port → port-1 (19926→19925)
-  //   http with no port → DEFAULT_OPS_PORT (19925)
-  const port = parseInt(url.port, 10);
-  if (!isNaN(port) && port > 0 && port <= 65535) {
-    const opsPort = port - 1;
-    if (opsPort < 1) throw new Error(`Derived ops port ${opsPort} is out of range; target port must be > 1`);
-    url.port = String(opsPort);
-    return url.toString().replace(/\/$/, "");
-  }
-  // No valid explicit port — reject port 0 or out-of-range
-  if (url.port !== "" && url.port !== undefined) {
-    throw new Error(`Invalid target port: ${url.port} (must be 1-65535)`);
-  }
-  // No explicit port on http — use the default ops port.
-  url.port = String(DEFAULT_OPS_PORT);
-  return url.toString().replace(/\/$/, "");
 }
 
 /**
@@ -2867,7 +2798,7 @@ function b64url(bytes: Uint8Array): string {
  * / disabling authorizeLocal there) is tracked separately in flair#654 and is
  * out of scope for this HTTP/REST auth path.
  */
-async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string }): Promise<any> {
+async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string; signedOnly?: boolean; refuseRedirects?: boolean; deadlineMs?: number; deadlineSource?: RequestDeadlineSource; tolerateUnparsedSuccessBody?: boolean }): Promise<any> {
   // Resolve port via the canonical path (flair#1129): options.baseUrl > FLAIR_URL > resolveHttpPort.
   // api() callers mean the default install, so resolveHttpPort({}) with no --data-dir is correct.
   const hasExplicitBase = !!(options?.baseUrl || process.env.FLAIR_URL);
@@ -2898,16 +2829,37 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     explicitAdminPass: options?.explicitAdminPass,
     adminUser: options?.adminUser,
     agentIdSource: options?.agentIdSource,
+    signedOnly: options?.signedOnly,
+    refuseRedirects: options?.refuseRedirects,
+    deadlineMs: options?.deadlineMs,
+    deadlineSource: options?.deadlineSource,
+    tolerateUnparsedSuccessBody: options?.tolerateUnparsedSuccessBody,
   };
+
+  // The port the operator wrote in ~/.flair/config.yaml, when it differs from
+  // the resolved one and no explicit base was given: the only port a
+  // connect-phase failure may fall back to (flair#1719).
+  const altPort = hasExplicitBase ? null : alternateConfiguredLocalPort({});
+  const readOnly = method.toUpperCase() === "GET" || method.toUpperCase() === "HEAD";
+  // Following a redirect can start another connection attempt; a connect-phase
+  // failure there could cause the original write to be replayed on the alternate.
+  // Refusing it (redirect: "manual") yields a named HTTP 3xx error, which is
+  // never fallback-eligible because it is not a connect-phase failure.
+  if (altPort !== null && !readOnly) requestOptions.refuseRedirects = true;
 
   try {
     return await authedRequest(method, path, body, requestOptions);
   } catch (err) {
+    // A write that reached its deadline may have committed. Never replay it
+    // against another port: that is a blind retry of an unknown outcome.
+    // pinned by test/unit/request-deadline-2789.test.ts "a write whose deadline
+    // expires exits 3 and the alternate configured port receives no request"
+    if (err instanceof ApiRequestOutcomeUnknown) throw err;
     // flair#1719: the resolved port came from Harper's boot record, which can
     // be stale for the default install. Before surfacing a connect failure,
-    // try the port the operator actually wrote in ~/.flair/config.yaml.
-    const altPort = hasExplicitBase ? null : alternateConfiguredLocalPort({});
-    if (altPort !== null && isFederationStatusConnectFailure(err)) {
+    // try the port the operator actually wrote in ~/.flair/config.yaml. Only a
+    // connect-phase failure qualifies (flair#2869).
+    if (altPort !== null && isConnectPhaseFailure(err)) {
       const altUrl = `http://127.0.0.1:${altPort}`;
       try {
         return await authedRequest(method, path, body, { ...requestOptions, baseUrl: altUrl });
@@ -2920,15 +2872,11 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
 }
 
 /**
- * Turn undici/Node's bare `TypeError: fetch failed` into a sentence naming the
- * actor (the Flair instance URL), the state (no HTTP response) and a remedy
- * the operator can act on — flair#1719 requirement 3. Non-connect errors
- * (HTTP 401/403/5xx, auth failures) pass through unchanged so callers keep
- * their own handling. The `flairFriendly` marker lets the top-level CLI entry
- * print just the message instead of a stack.
+ * Give connect-phase errors a URL and remedy; pass other errors through.
+ * `flairFriendly` prints the message without a stack.
  */
 function describeApiConnectFailure(err: unknown, url: string): unknown {
-  if (!isFederationStatusConnectFailure(err)) return err;
+  if (!isConnectPhaseFailure(err)) return err;
   const friendly = new Error(
     `Cannot reach the Flair instance at ${url} — the connection failed (no HTTP response).\n`
     + `  Start it with \`flair start\`, or point this command at the right instance with `
@@ -4931,6 +4879,9 @@ program.configureHelp({ showGlobalOptions: true });
 // redundant noise on the one command whose whole job is this exact report.
 program.hook("preAction", async (_thisCommand, actionCommand) => {
   if (actionCommand.name() === "doctor") return;
+  // flair#2887: `help` only prints. Skip the handshake probe so showing help
+  // never reaches the server.
+  if (actionCommand.name() === "help") return;
   // flair#2034 §2: `status` reports the server's version itself, next to this
   // CLI's and the install tree that serves it, and decides the advice from
   // that one comparison — a second, tree-blind "run: flair restart" line here
@@ -5122,7 +5073,6 @@ bindFederationCli({
   resolveBaseUrl,
   resolveEffectiveOpsUrl,
   resolveOpsPort,
-  applyAdminPassFile,
   addSharedCredentialOptions,
   addSharedIdentityOption,
   shouldShowInlineSecretWarning,
@@ -5135,10 +5085,12 @@ registerFederation(program);
 bindRemCli({
   api,
   resolveOpsPort,
-  applyAdminPassFile,
   addSharedCredentialOptions,
   readPortFromConfig,
   resolveHttpPort,
+  resolveOpsUrlFromTarget,
+  resolveAgentHomeTarget,
+  INSTANCE_TARGET_REMEDY,
   humanBytes,
   relativeTime,
   DEFAULT_PORT,
@@ -5370,6 +5322,7 @@ bindUpgradeCli({
   probeOpenclawPluginVersion,
   relativeTime,
   resolveFabricCredentials,
+  resolveEffectiveOpsUrl,
   resolveFlairMcpFinding,
   resolveHttpPort,
   resolveInstalledFlairCli,
@@ -6861,9 +6814,10 @@ export async function proveAdminPassAgainstInstance(
     if (err instanceof ApiHttpError && (err.status === 401 || err.status === 403)) {
       return `the supplied admin credential was rejected (HTTP ${err.status})`;
     }
+    // Each ApiHttpError sendJsonRequest raises for this request begins its
+    // message with `HTTP <status>`.
     const detail = err instanceof Error ? err.message : String(err);
-    const status = err instanceof ApiHttpError ? `HTTP ${err.status}: ` : "";
-    return `admin credential verification could not be completed (${status}${detail})`;
+    return `admin credential verification could not be completed (${detail})`;
   }
 }
 
@@ -8963,6 +8917,7 @@ registerTest(program);
 // Command registration lives in src/commands/deploy.ts (flair#1636).
 // Bind shared cli-locals first so the extracted module never imports this file.
 bindDeployCli({
+  resolveEffectiveOpsUrl,
   fleetSweepCallerExitMessage,
   resolveFabricCredentials,
   shouldRunFleetVerify,
@@ -9063,16 +9018,17 @@ const ENTITIES_OPTION_DESCRIPTION =
 // Command group lives in src/commands/memory.ts (flair#1621). Bind shared
 // helpers first so the extracted module never imports this file.
 bindMemoryCli({
+  resolveEffectiveOpsUrl,
   api,
   resolveBaseUrl,
   resolveSigningAgentId,
-  applyAdminPassFile,
   addSharedCredentialOptions,
   addSharedIdentityOption,
   resolveOpsPort,
   resolveHttpPort,
   parseEntitiesOptionOrExit,
   ENTITIES_OPTION_DESCRIPTION,
+  resolveFabricCredentials,
 });
 registerMemory(program);
 
@@ -9110,7 +9066,6 @@ registerRelationship(program);
 bindSoulCli({
   api,
   resolveSigningAgentId,
-  applyAdminPassFile,
   addSharedCredentialOptions,
 });
 registerSoul(program);
@@ -9130,7 +9085,6 @@ registerBridge(program);
 // Bind shared cli-locals first so the extracted module never imports this file.
 bindBackupCli({
   addSharedCredentialOptions,
-  applyAdminPassFile,
   resolveHttpPort,
   resolveOpsPort,
   resolveOpsTarget,
@@ -9145,6 +9099,15 @@ bindRestoreCli({
   resolveHttpPort,
 });
 registerRestore(program);
+
+// ─── flair backup-approval ───────────────────────────────────────────────────
+// Command registration lives in src/commands/backup-approval.ts (flair#2664).
+// Bind shared cli-locals first so the extracted module never imports this file.
+bindBackupApprovalCli({
+  addSharedCredentialOptions,
+  resolveOpsPort,
+});
+registerBackupApproval(program);
 
 // ─── flair export ────────────────────────────────────────────────────────────
 // Command registration lives in src/commands/export.ts (flair#1636).
@@ -9223,6 +9186,10 @@ bindAttentionCli({
 });
 registerAttention(program);
 
+// ─── flair help ──────────────────────────────────────────────────────────────
+// Command registration lives in src/commands/help.ts (flair#2887).
+registerHelp(program);
+
 // Parse argv and run the CLI. Exported so the CommonJS preflight shim
 // (cli-shim.cts → dist/cli-shim.cjs, the real bin entry) can invoke it after
 // its Node-version check passes. The shim imports this module, so import.meta.main
@@ -9257,6 +9224,10 @@ async function runCli(): Promise<void> {
   try {
     await program.parseAsync();
   } catch (err: any) {
+    // A write that crossed its whole-request deadline may have committed.
+    // Report it exactly as `flair rem` does and exit 3 ("unknown"), so every
+    // command that lets the error propagate gives the same answer.
+    if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
     // Errors the API layer already translated (flair#1719) carry a sentence
     // naming the actor, state and remedy; print it without the undici stack.
     if (err && typeof err === "object" && err.flairFriendly === true) {

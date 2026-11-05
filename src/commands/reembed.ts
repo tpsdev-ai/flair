@@ -43,11 +43,81 @@ function resolveOpsPort(...args: any[]): any {
 }
 
 /**
+ * flair#2561: reads the `embeddingModel` stored on Memory row `id`, resolving
+ * undefined when the read fails or returns no such row. `flair reembed` reads
+ * the stamp from the stored row after each re-embed PATCH, because the PATCH
+ * response carries no embedding field.
+ */
+export type StoredModelReader = (id: string) => Promise<unknown>;
+
+/**
+ * A StoredModelReader over the Harper operations API with the administrator
+ * credentials `flair reembed` lists the rows with: `search_by_id` for the row's
+ * `id` and `embeddingModel` only.
+ */
+export function opsStoredModelReader(opsPort: string | number, opsAuth: string): StoredModelReader {
+  return async (id) => {
+    let rows: unknown;
+    try {
+      const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: opsAuth },
+        body: JSON.stringify({
+          operation: "search_by_id",
+          database: "flair",
+          table: "Memory",
+          ids: [id],
+          get_attributes: ["id", "embeddingModel"],
+        }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!res.ok) return undefined;
+      rows = await res.json();
+    } catch {
+      return undefined;
+    }
+    const row = Array.isArray(rows) ? rows.find((r) => (r as { id?: unknown } | null)?.id === id) : undefined;
+    return (row as { embeddingModel?: unknown } | undefined)?.embeddingModel;
+  };
+}
+
+/**
+ * A StoredModelReader that reads the row with a signed `GET /Memory/<id>` as
+ * the agent whose key signs the re-embed PATCH (the single-agent path without
+ * administrator credentials).
+ */
+export function agentStoredModelReader(baseUrl: string, agentId: string, keyPath: string): StoredModelReader {
+  return async (id) => {
+    let row: unknown;
+    try {
+      const res = await authFetch(baseUrl, agentId, keyPath, "GET", `/Memory/${encodeRecordId(id)}`);
+      if (!res.ok) return undefined;
+      row = await res.json();
+    } catch {
+      return undefined;
+    }
+    const record = row as { id?: unknown; embeddingModel?: unknown } | null;
+    return record?.id === id ? record.embeddingModel : undefined;
+  };
+}
+
+/**
  * flair#2296: re-embed one stored row. The PATCH body names only the two
  * embedding fields; the server embeds the stored row and writes embedding,
  * embeddingModel and updatedAt.
+ *
+ * flair#2561: the server answers `{ id, updatedAt }`. The row counts as
+ * re-embedded when that response names this row and the stored row then
+ * carries `intendedModel`, read with `readStoredModel`.
  */
-export async function reembedRow(baseUrl: string, agentId: string, keyPath: string, id: string, intendedModel: string): Promise<boolean> {
+export async function reembedRow(
+  baseUrl: string,
+  agentId: string,
+  keyPath: string,
+  id: string,
+  intendedModel: string,
+  readStoredModel: StoredModelReader,
+): Promise<boolean> {
   const res = await authFetch(baseUrl, agentId, keyPath, "PATCH", `/Memory/${encodeRecordId(id)}`, {
     embedding: null, embeddingModel: null,
   });
@@ -58,8 +128,8 @@ export async function reembedRow(baseUrl: string, agentId: string, keyPath: stri
   } catch {
     return false;
   }
-  const model = (body as { embeddingModel?: unknown } | null)?.embeddingModel;
-  return model === intendedModel;
+  if ((body as { id?: unknown } | null)?.id !== id) return false;
+  return (await readStoredModel(id)) === intendedModel;
 }
 
 /**
@@ -215,6 +285,7 @@ program
       // reembed` could not recover from the very condition it exists to fix.
       const opsPort = resolveOpsPort(opts);
       const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
+      const readStoredModel = opsStoredModelReader(opsPort, opsAuth);
       // Harper rejects empty-value conditions ("not indexed for nulls"). Use
       // `createdAt > 1970-01-01` as the "select all" pattern: every Memory row
       // has a createdAt, the index is built, and the comparison is total.
@@ -275,7 +346,7 @@ program
           const batch = memories.slice(i, i + batchSize);
           for (const memory of batch) {
             try {
-              if (await reembedRow(baseUrl, agent, privPath, memory.id, currentModel)) processed++;
+              if (await reembedRow(baseUrl, agent, privPath, memory.id, currentModel, readStoredModel)) processed++;
               else errors++;
             } catch { errors++; }
           }
@@ -306,9 +377,14 @@ program
 
     const adminPassSingle = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
     let allMemories: any[] = [];
+    // flair#2561: the stamp of each re-embedded row is read back the way the
+    // rows were listed: the operations API with administrator credentials,
+    // else a signed GET as this agent.
+    let readStoredModel: StoredModelReader = agentStoredModelReader(baseUrl, agentId, privPath);
     if (adminPassSingle) {
       const opsPort = resolveOpsPort(opts);
       const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPassSingle}`).toString("base64")}`;
+      readStoredModel = opsStoredModelReader(opsPort, opsAuth);
       const searchRes = await fetch(`http://127.0.0.1:${opsPort}/`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: opsAuth },
@@ -366,7 +442,7 @@ program
       const batch = candidates.slice(i, i + batchSize);
       for (const memory of batch) {
         try {
-          if (await reembedRow(baseUrl, agentId, privPath, memory.id, currentModel)) processed++;
+          if (await reembedRow(baseUrl, agentId, privPath, memory.id, currentModel, readStoredModel)) processed++;
           else errors++;
         } catch { errors++; }
       }

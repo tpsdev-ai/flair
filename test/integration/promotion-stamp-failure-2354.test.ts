@@ -17,7 +17,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import {
   componentWithFailingPromotionStamp, FAILING_STAMP_MODULE_REL, FAILING_STAMP_MODULE_SRC, type FailingComponent,
 } from "../helpers/host-pointer-failing-component";
@@ -99,7 +99,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (component) component.cleanup();
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2354 — a failed manual promotion stamp (real Harper)", () => {
   it("ctrl: the composed copy carries the failing stamp module, and an unmarked agent's promotion is stamped", async () => {

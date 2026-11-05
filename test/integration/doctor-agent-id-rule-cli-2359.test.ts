@@ -26,7 +26,9 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline";
+import { nodeBin } from "../helpers/node-runtime";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { MQTT_CONFIGURATION_NOTE } from "../../src/lib/mqtt-listener-doctor";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
@@ -56,16 +58,17 @@ function runDoctor(adminPass: string): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const args = ["doctor", "--port", new URL(harper.httpURL).port];
     const startedAt = Date.now();
-    const child = spawn(process.execPath, [CLI, ...args], {
-      env: {
-        ...process.env,
-        HOME: cliHome,
-        FLAIR_URL: harper.httpURL,
-        FLAIR_OPS_PORT: new URL(harper.opsURL).port,
-        FLAIR_TOKEN: "",
-        FLAIR_ADMIN_PASS: adminPass,
-        NO_COLOR: "1",
-      },
+    const env = {
+      ...process.env,
+      HOME: cliHome,
+      FLAIR_URL: harper.httpURL,
+      FLAIR_OPS_PORT: new URL(harper.opsURL).port,
+      FLAIR_TOKEN: "",
+      FLAIR_ADMIN_PASS: adminPass,
+      NO_COLOR: "1",
+    };
+    const child = spawn(nodeBin({ env }), [CLI, ...args], {
+      env,
       timeout: 20_000,
     });
     let stdout = "";
@@ -138,6 +141,10 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     const reported = await runDoctor(ADMIN_PASS);
     expect(reported.stdout, "the below-filter invalid id was not reported").toContain(seeded);
     expect(reported.stdout).toContain("outside the agent-ID rule");
+    const reportedFlat = reported.stdout.replace(/\s+/g, " ");
+    expect(reportedFlat, "the revised fix hint was not printed").toContain(
+      "run its own authenticated non-admin maintenance when the stored id can authenticate (the signed TPS-Ed25519 header cannot carry a colon or whitespace); that run deletes the agent's expired ephemeral Memory rows",
+    );
     expect(issueCount(reported.stdout), "the reported invalid id did not move the summary").toBe(baseCount + 1);
 
     // 3. A roster read that fails (wrong admin credential) is a counted issue —
@@ -146,21 +153,33 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     //    cannot show the two ports are one instance, and both checks are
     //    reported NOT RUN rather than read. flair#2520: the audit-log and
     //    instance-identity sections share that pair check, so they are NOT RUN
+    //    and counted too; the instruction-event, skill-tombstone and MQTT
+    //    listener sections read through the same ops endpoint and are NOT RUN
     //    and counted too.
     const unreadable = await runDoctor("wrong-admin-pass-not-a-secret");
     expect(unreadable.stdout).toContain("Agent IDs: NOT RUN");
     expect(unreadable.stdout).toContain("Agent homes: NOT RUN");
     expect(unreadable.stdout).toContain("Audit log: NOT RUN");
     expect(unreadable.stdout).toContain("Instance identity: NOT RUN");
+    expect(unreadable.stdout).toContain("Instruction events: NOT RUN");
+    expect(unreadable.stdout).toContain("Skill tombstones: NOT RUN");
+    expect(unreadable.stdout).toContain("MQTT listeners: NOT RUN");
+    // The MQTT section's saved-configuration note is printed on this NOT RUN path too.
+    expect(unreadable.stdout.replace(/\s+/g, " ")).toContain(MQTT_CONFIGURATION_NOTE);
     expect(unreadable.stdout).not.toContain("No stored agent id is outside");
-    expect(issueCount(unreadable.stdout), "the unrun check left the summary clean").toBe(baseCount + 4);
+    expect(issueCount(unreadable.stdout), "the unrun checks left the summary clean").toBe(baseCount + 7);
 
     // 4. No admin credential at all: the Agent-ID check is a counted issue, not
-    //    a pass; the Agent homes check is reported skipped and not counted.
+    //    a pass; the Agent homes check is reported skipped and not counted; the
+    //    skill-tombstone check cannot read its tables and the MQTT listener
+    //    check cannot read the configuration, so both are NOT RUN and counted.
     const noCred = await runDoctor("");
     expect(noCred.stdout).toContain("no admin credentials");
     expect(noCred.stdout).toContain("Agent homes check skipped (no admin credential)");
-    expect(issueCount(noCred.stdout), "the skipped check left the summary clean").toBe(baseCount + 1);
+    expect(noCred.stdout).toContain("Skill tombstones: NOT RUN");
+    expect(noCred.stdout).toContain("MQTT listeners: NOT RUN");
+    expect(noCred.stdout.replace(/\s+/g, " ")).toContain(MQTT_CONFIGURATION_NOTE);
+    expect(issueCount(noCred.stdout), "the skipped check left the summary clean").toBe(baseCount + 3);
   }, 120_000);
 
   test("an unsafe or empty admin-pass file: doctor completes and counts the unrun check with the resolver's reason", async () => {

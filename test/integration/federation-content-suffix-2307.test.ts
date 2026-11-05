@@ -7,7 +7,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const sfx = Date.now().toString(36);
 const PEER = `fcs-peer-${sfx}`;
@@ -62,7 +62,7 @@ describe("flair#2307 — a federated Memory row whose id ends in `.content` is s
     });
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("the suffixed row is skipped by name, the ordinary row merges, and SyncLog records both", async () => {
     const signed = signBodyFresh({

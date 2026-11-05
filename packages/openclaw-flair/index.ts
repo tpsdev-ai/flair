@@ -211,14 +211,15 @@ interface CaptureState {
  * field — so identity is a digest over fields the host does provide and that do
  * not depend on a message's position in the snapshot: its role, its `content`
  * serialized as JSON (not the capture text; missing content serializes as
- * `null`), and its timestamp converted to a string, hashed to a 64-bit digest.
- * The identity is not unique: messages whose role, JSON content and
- * stringified timestamp are equal share one (a numeric timestamp `1` and a
- * string timestamp `"1"` stringify alike, and a missing timestamp or one of any
- * other type becomes the empty string), and two different messages can share
- * one through a digest collision.
+ * `null`), and its timestamp encoded with its type (flair#2560: a number and a
+ * string are encoded apart, so `1` and `"1"` differ), hashed to a 64-bit
+ * digest. The identity is not unique: messages whose encoded fields are equal
+ * share one (a role that is not a string encodes as the empty string, and a
+ * missing timestamp or one that is neither a number nor a string encodes as
+ * absent), and two different messages can share one through a digest
+ * collision.
  * The scan therefore counts occurrences per identity rather than treating it as
- * one message. A message whose role, stringified timestamp or JSON form the host
+ * one message. A message whose encoded role, timestamp or JSON form the host
  * changes gets a different identity unless the digests collide; an unchanged
  * message keeps its identity across snapshots and runs. Returns null for a
  * value that is not an object, or whose content JSON cannot represent
@@ -228,7 +229,7 @@ export function messageIdentity(msg: { role?: unknown; content?: unknown; timest
   if (!msg || typeof msg !== "object") return null;
   const role = typeof msg.role === "string" ? msg.role : "";
   const ts = msg.timestamp;
-  const stamp = typeof ts === "number" || typeof ts === "string" ? String(ts) : "";
+  const stamp = typeof ts === "number" ? `n${ts}` : typeof ts === "string" ? `s${ts}` : "";
   let content: string | undefined;
   try {
     content = JSON.stringify(msg.content ?? null);
@@ -237,7 +238,17 @@ export function messageIdentity(msg: { role?: unknown; content?: unknown; timest
   }
   // A function or symbol serializes to undefined: no identity, not a digest of "".
   if (content === undefined) return null;
-  return hashContent(`${role}\u0000${stamp}\u0000${content}`);
+  return hashContent(JSON.stringify([role, stamp, content]));
+}
+
+/**
+ * flair#2560: whether the nth auto-capture that Flair flags `deduplicated`
+ * logs a line: exactly when n is a power of two (the 1st, 2nd, 4th, ...).
+ * Exact for any count: after n flagged captures it has held 0 times for n = 0
+ * and floor(log2 n) + 1 times for n >= 1.
+ */
+export function isRepeatLogPoint(n: bigint): boolean {
+  return n > 0n && (n & (n - 1n)) === 0n;
 }
 
 /**
@@ -246,6 +257,30 @@ export function messageIdentity(msg: { role?: unknown; content?: unknown; timest
  * recorded. `tail` is the settle of the last queued scan, so the next one chains
  * after it; `scans` counts scans queued or running. `disabled` stops this
  * session's later `agent_end` scans (see `disableSession`).
+ *
+ * flair#2560: `entries` is the only record of what the session has already
+ * seen, and it lasts only while this state is retained. The pinned host gives a
+ * snapshot message no host-owned id or position that would prove it was in an
+ * earlier snapshot. Its only ordering field is a millisecond `timestamp` the
+ * host takes from `Date.now()`, which can tie, and the host does not sort a
+ * snapshot by it. While this state is retained, the identity cap does not
+ * evict a recorded identity present in the current snapshot (see
+ * `sessionMessageCap`). `warm` is false until the session's first scan in this
+ * process has run: that first scan cannot tell which messages a run added (a
+ * new session, a gateway restart, or state that was evicted), so it offers the
+ * last eligible positions of the snapshot up to the run's cap and records the
+ * rest of the identifiable messages as seen. If it captures a message that
+ * was captured before, the write has a new id, so Flair stores a second row.
+ * `deferred` holds the identities a warm scan left unseen because the run's
+ * cap was spent. Another cap can leave it unseen. A refused scan settles its
+ * occurrences: an identical copy cannot be distinguished from the deferred one.
+ * Same-run excerpt dedup settles it without a new write, and so does a failure
+ * before the write (recorded as skipped if the scan continues past its stop
+ * and disable check). A write that starts and then fails, or whose run is
+ * aborted while it is in flight, records it as skipped if the scan continues
+ * past its stop and disable check: an aborted write may still reach Flair,
+ * so it is not retried. `deferred` holds only identities of the last snapshot
+ * accounted for; disabled callbacks do not update it.
  */
 interface SessionCapture {
   agentId: string;
@@ -253,7 +288,21 @@ interface SessionCapture {
   tail: Promise<void>;
   scans: number;
   disabled: boolean;
+  warm: boolean;
+  deferred: Set<string>;
 }
+
+/**
+ * flair#2560: what `tryAutoCapture` did with one text. `stored`: written.
+ * `capped`: eligible and not yet captured by this run, but the run's capture
+ * cap (`autoCaptureMaxPerSession`) is spent. `refused`: the run is no longer
+ * admitted (stopped, or refused or aborted meanwhile), and no write started.
+ * `settled`: not stored as this run's capture, and final for the scan: no
+ * trigger phrase, an excerpt this run already holds, or a write whose run was
+ * aborted while it was in flight. That result is discarded, but the request
+ * may already have reached Flair and been stored.
+ */
+type CaptureOutcome = "stored" | "capped" | "refused" | "settled";
 
 /**
  * Injectable clock for the run-state retirement rule (D10). Production reads
@@ -292,10 +341,12 @@ export const captureBounds = {
    * or its next callback is admitted and captured (the failed-run re-admission
    * the round-4 review found). The abort path may therefore exceed
    * `capacityCap` by at most this many records. When even that overflow is
-   * full, the abort records nothing and logs once — the documented residual.
+   * full, the abort records nothing and logs once per retained key — the
+   * documented residual.
    */
   abortOverflowCap: 1_000,
-  /** Max distinct one-time log keys remembered; the oldest are evicted. */
+  /** Max distinct one-time log keys remembered; the oldest are evicted, so a
+   * forgotten key logs its line again. "Once" is once per retained key. */
   logOnceCap: 10_000,
   /**
    * flair#2513: max sessions whose capture-identity state is remembered. When a
@@ -303,24 +354,41 @@ export const captureBounds = {
    * sessions with no scan queued or running are evicted until the map is within
    * the cap. A session with a scan queued or running is never evicted, so the
    * map exceeds the cap only while more sessions than the cap have a scan in
-   * flight. Eviction forgets the session: its next `agent_end` treats every
-   * message in its snapshot as new and may capture a message again.
+   * flight. Eviction forgets the session: its next `agent_end` scan is a first
+   * scan (flair#2560, `SessionCapture`), which treats every identifiable
+   * occurrence as new, offers the last eligible positions of the snapshot up to
+   * the run's cap (a message captured before can be captured again, if it
+   * passes the trigger rule, the run's dedup and cap, and its write succeeds;
+   * it then lands as a second row) and records the rest of the identifiable
+   * messages as seen.
    */
   sessionStateCap: 10_000,
   /**
-   * flair#2513: max message identities remembered per session. When a new
-   * identity would exceed it, the identity whose last recorded occurrence is
-   * oldest is evicted. A forgotten identity that re-appears in a later snapshot
-   * is treated as new and may be captured again. (A scan also builds a
+   * flair#2513: max recorded identities (`entries`) per session, for
+   * identities that have left the snapshot. flair#2560: this cap never evicts
+   * a recorded identity present in the current snapshot, so while the
+   * session's state is retained, `entries` holds at most
+   * max(`sessionMessageCap`, D) identities, where D is the number of distinct
+   * identities in the last snapshot it accounted for. Disabled callbacks do not
+   * update that snapshot. `deferred` holds only its identities, so at most D.
+   * (The whole state can still
+   * go: see `sessionStateCap` and `gateway_stop`.) When `entries` holds more
+   * than this cap and has an absent prefix, its first identity is evicted. An
+   * evicted identity has left the snapshot; if it re-appears it is treated as new
+   * and may be captured again, as a second
+   * row. A message whose encoded fields (`messageIdentity`) differ from an
+   * earlier one's has a different identity, barring digest collisions, and is
+   * new to the scan whether or not anything was evicted. (A scan also builds a
    * temporary per-identity count of its own snapshot, sized by the snapshot.)
    */
   sessionMessageCap: 4_096,
   /**
    * flair#2513: max `agent_end` scans queued or running per session. A callback
    * that finds that many is not scanned and records nothing: `agent_end`
-   * capture is disabled for that session (fail closed, logged once; see
-   * `disableSession`), because its snapshot cannot be accounted in order
-   * without waiting in the queue.
+   * capture is disabled for that session while its capture state is held (fail
+   * closed, one line per retained log key; see `disableSession`), because its
+   * snapshot cannot be accounted in order without waiting in the queue. Eviction
+   * forgets the disable with the rest of the session's state.
    */
   sessionScanQueueCap: 32,
   /** How often the unref'd sweep timer runs. */
@@ -342,6 +410,8 @@ export const captureInternals: {
   sessionStateCount: () => number;
   /** flair#2513: message identities remembered across all sessions. */
   sessionIdentityCount: () => number;
+  /** flair#2560: deferred (cap-missed, unseen) identities across all sessions. */
+  sessionDeferredCount: () => number;
   /** flair#2513: the most `agent_end` scans queued or running for any one session. */
   maxSessionScans: () => number;
   /** The record for a run BY IDENTITY, or undefined (round-5 tests). */
@@ -354,6 +424,7 @@ export const captureInternals: {
   logOnceCount: () => 0,
   sessionStateCount: () => 0,
   sessionIdentityCount: () => 0,
+  sessionDeferredCount: () => 0,
   maxSessionScans: () => 0,
   recordOf: () => undefined,
 };
@@ -862,6 +933,11 @@ export default {
     captureInternals.logOnceCount = () => loggedOnce.size;
     captureInternals.sessionStateCount = () => sessions.size;
     captureInternals.sessionIdentityCount = () => identityCount();
+    captureInternals.sessionDeferredCount = () => {
+      let total = 0;
+      for (const session of sessions.values()) total += session.deferred.size;
+      return total;
+    };
     captureInternals.maxSessionScans = () => {
       let most = 0;
       for (const session of sessions.values()) most = Math.max(most, session.scans);
@@ -909,7 +985,8 @@ export default {
      * CLASS (`errorClass`, above) — a failure's KIND, not its instance. Keying by
      * agent ALONE silenced a LATER, DIFFERENT failure for the same agent: a
      * missing key at 10:00 hid an HTTP 500 on a capture write at 11:00, which is
-     * exactly the line an operator needs. Now every distinct failure logs once,
+     * exactly the line an operator needs. Now a distinct failure is logged once
+     * per retained key,
      * and repeats of it do not. The key set stays bounded by `logOnceCap`.
      */
     function refuseKey(agentId: string | undefined, site: string, err: unknown): void {
@@ -967,35 +1044,64 @@ export default {
       if (session) {
         sessions.delete(key);
       } else {
-        session = { agentId, entries: new Map(), tail: Promise.resolve(), scans: 0, disabled: false };
+        session = { agentId, entries: new Map(), tail: Promise.resolve(), scans: 0, disabled: false, warm: false, deferred: new Set() };
       }
       sessions.set(key, session);
       return session;
     }
 
     /**
-     * Account for `count` more occurrences of `identity` in the session. `entries`
-     * stays within `sessionMessageCap` by evicting the identity whose last
-     * recorded occurrence is oldest; a forgotten identity that re-appears is
-     * treated as new.
+     * flair#2560: start a scan of a snapshot whose identities are the keys of
+     * `live`. Every identity the session records that is in the snapshot moves
+     * to the back of `entries`, in snapshot order, leaving an optional prefix of
+     * absent identities, least recently present first. `trimEntries` evicts
+     * only while that prefix exists.
      */
-    function recordOccurrence(session: SessionCapture, identity: string, count = 1): void {
-      const seen = session.entries.get(identity) ?? 0;
-      session.entries.delete(identity);
-      session.entries.set(identity, seen + count);
+    function markLive(session: SessionCapture, live: Map<string, number>): void {
+      for (const identity of session.deferred) if (!live.has(identity)) session.deferred.delete(identity);
+      for (const identity of live.keys()) {
+        const seen = session.entries.get(identity);
+        if (seen === undefined) continue;
+        session.entries.delete(identity);
+        session.entries.set(identity, seen);
+      }
+      trimEntries(session, live);
+    }
+
+    /**
+     * flair#2560: evict identities that have left the snapshot (`live`) while
+     * the session holds more than `sessionMessageCap`. `entries` has an optional
+     * prefix of absent identities (`markLive`, and
+     * `recordOccurrence` moves what it records to the back). Eviction stops
+     * when that prefix is empty; no live identity is evicted.
+     */
+    function trimEntries(session: SessionCapture, live: Map<string, number>): void {
       while (session.entries.size > captureBounds.sessionMessageCap) {
         const oldest = session.entries.keys().next().value as string | undefined;
-        if (oldest === undefined) break;
+        if (oldest === undefined || live.has(oldest)) break;
         session.entries.delete(oldest);
       }
     }
 
     /**
+     * Account for `count` more occurrences of `identity`, an identity of the
+     * snapshot being scanned (`live`), in the session; then evict identities
+     * that have left the snapshot, as `trimEntries` does.
+     */
+    function recordOccurrence(session: SessionCapture, identity: string, live: Map<string, number>, count = 1): void {
+      session.deferred.delete(identity);
+      const seen = session.entries.get(identity) ?? 0;
+      session.entries.delete(identity);
+      session.entries.set(identity, seen + count);
+      trimEntries(session, live);
+    }
+
+    /**
      * flair#2513: fail closed for one session whose snapshots can no longer be
      * accounted in order: no later `agent_end` scan of it captures or records
-     * anything. `llm_input` and `llm_output` capture is not affected. Logged
-     * once per session while its log key is retained. Eviction forgets the flag
-     * with the rest of the session's state.
+     * anything. `llm_input` and `llm_output` capture is not affected. One line
+     * per retained log key, not a guarantee of exactly one. Eviction forgets the
+     * flag with the rest of the session's state.
      */
     function disableSession(key: string, session: SessionCapture, why: string): void {
       if (session.disabled) return;
@@ -1109,7 +1215,8 @@ export default {
      *   2. a key with NO record: purge what is removable, then admit ONLY when
      *      the map is below `capacityCap` — the abort overflow is never counted
      *      as room;
-     *   3. otherwise refuse (`capture-capacity: full`, logged once) and change
+     *   3. otherwise refuse (`capture-capacity: full`, one line per retained
+     *      key) and change
      *      nothing else.
      */
     function captureGate(agentId: string, runId: string | null): RunRecord | null {
@@ -1179,7 +1286,8 @@ export default {
      * `abortOverflowCap`: recording nothing there would let the run's next
      * callback be admitted and captured — exactly the failed-run re-admission
      * the round-4 review found. If even the overflow is full the record is not
-     * inserted and the line is logged once (the documented residual); it is safe
+     * inserted and the line is logged once per retained key (the documented
+     * residual); it is safe
      * because admission is refused while the budget AND its overflow are full.
      *
      * Round 13 guard: while `captureStopped` is set there is no registration to
@@ -1241,11 +1349,40 @@ export default {
       runs.set(key, aborted);
     }
 
-    async function tryAutoCapture(client: FlairClient, agentId: string, runId: string | null, sessionId: string | null, text: string): Promise<boolean> {
+    /**
+     * flair#2560: Flair flags a write `deduplicated` when its near-duplicate
+     * check matched an existing memory (it never suppresses the write). Count
+     * those for auto-captures since this registration and log a line at the
+     * 1st, 2nd, 4th, 8th, ... one (`isRepeatLogPoint`): the count stays
+     * visible: no line for n = 0 flagged captures, and floor(log2 n) + 1 lines
+     * for n >= 1. The count is a bigint, so the bound holds for any n.
+     */
+    let captureRepeats = 0n;
+    function noteRepeat(agentId: string): void {
+      captureRepeats += 1n;
+      if (!isRepeatLogPoint(captureRepeats)) return;
+      api.logger.warn(
+        `openclaw-flair: an auto-capture for agent ${agentId} stored a near-duplicate of an existing memory (Flair flagged the write deduplicated); ${captureRepeats} such capture(s) since the plugin registered. A repeat is expected after a gateway restart or evicted session state (see the README, Auto-capture)`,
+      );
+    }
+
+    /**
+     * Offer one text for capture under its run (see `CaptureOutcome`). Only the
+     * run's cap running out yields `capped`; a text the trigger rule rejects, or
+     * whose excerpt this run already holds, is `settled` even when the cap is
+     * also spent.
+     */
+    async function tryAutoCapture(client: FlairClient, agentId: string, runId: string | null, sessionId: string | null, text: string): Promise<CaptureOutcome> {
       const state = captureGate(agentId, runId);
-      if (!state) return false;
+      if (!state) return "refused";
       const decision = evaluateAutoCapture(text, state, autoCaptureMaxPerSession);
-      if (!decision) return false;
+      if (!decision) {
+        const capped =
+          shouldCapture(text) &&
+          !state.hashes.has(hashContent(excerptForCapture(text))) &&
+          state.count >= autoCaptureMaxPerSession;
+        return capped ? "capped" : "settled";
+      }
       // Round 6: the entity scan is COMPUTED BEFORE the reservation. It must not
       // sit between the reservation and the `try` below — a throw there would
       // strand `inFlight` above 0, and the record would never become removable
@@ -1271,8 +1408,9 @@ export default {
       state.count++;
       state.hashes.add(decision.hash);
       state.inFlight++;
+      let written: unknown;
       try {
-        await client.memory.write(decision.excerpt, {
+        written = await client.memory.write(decision.excerpt, {
           type: "session",
           tags: ["auto-captured"],
           subject,
@@ -1300,11 +1438,12 @@ export default {
           `discarded:${runKeyOf(agentId, runId as string)}`,
           `openclaw-flair: discarded a capture for run ${runId} (agent ${agentId}) that completed after the run was aborted`,
         );
-        return false;
+        return "settled";
       }
+      if ((written as { deduplicated?: unknown } | null)?.deduplicated === true) noteRepeat(agentId);
       // Round 5: nothing to finalize — a settled write leaves the record in
       // place, and only `removable()` frees its slot.
-      return true;
+      return "stored";
     }
 
     const displayAgent = allowAgentId ?? "host-provided (per invocation)";
@@ -1571,20 +1710,47 @@ export default {
          * flair#2513: scan one `agent_end` snapshot (the whole session's
          * messages). With a session key, occurrences are counted per identity:
          * of the n identifiable occurrences of an identity in the snapshot, the
-         * trailing n - m beyond the m the session has recorded are treated as
-         * new, and as the callback's run's; the first min(n, m) are left alone.
+         * m the session has recorded are taken to be the earliest positions, and
+         * the n - m at the latest positions are treated as new, and as the
+         * callback's run's; when n <= m none is new.
+         * `entries` is the only "already seen" signal (flair#2560): an identity
+         * the session no longer records is new to the scan. Timestamp ordering
+         * never suppresses a message. Every identity in the snapshot is marked
+         * live first, so the identity cap does not evict it while the snapshot holds it
+         * (`markLive`).
+         * flair#2560: the scan walks the snapshot from its LAST position to its
+         * first, so the run's capture cap is spent on the last eligible
+         * positions in the supplied snapshot. (That is position, not proof of
+         * which run added a message.)
          * In `capture` mode a new eligible occurrence is offered to
          * `tryAutoCapture`; in `skip` mode it is not. Each new occurrence is then
-         * recorded, unless the scan stops first: before each message and after
-         * each awaited write the scan checks the stop and the session's disabled
-         * flag and, if either is set, returns without recording anything more.
+         * recorded as seen, unless the scan stops first: before each message and
+         * after each awaited write the scan checks the stop and the session's
+         * disabled flag and, if either is set, returns without recording
+         * anything more. The exception: in a warm session an occurrence the
+         * run's cap left out (`capped`) stays unseen and is held in `deferred`,
+         * eligible for a later capture scan unless settled, subject to its gates and
+         * cap. A later capture carries that later run's id only when it passes
+         * the `hostSource` grammar; otherwise it lands without that field, with
+         * a rate-limited warning. Another cap can leave it unseen. Refusal
+         * settles its occurrences, since identical copies cannot be distinguished.
+         * Same-run excerpt dedup settles it. A failure before the write, a write
+         * that fails, or a write discarded by an abort settles it if the scan
+         * continues past its stop and disable check (see `SessionCapture`). In the
+         * session's first scan in
+         * this process a capped occurrence is recorded as seen (see
+         * `SessionCapture.warm`).
          * A failed write is logged and recorded as skipped only if the scan
-         * continues past that check, and no retry is scheduled. When n < m,
+         * continues past that check. For a session-keyed scan that record keeps
+         * a later scan of the session from offering the message again while
+         * the session retains its identity and its encoded fields are unchanged.
+         * A session-less scan records nothing and a later callback may offer the
+         * same message again. When n < m,
          * nothing of that identity is new, and a `capture` scan logs a
          * diagnostic. In a `capture` scan, a message with capture text and no
          * identity is not captured, with a diagnostic. Without a session key
          * nothing is recorded and only a `capture` scan proceeds: it offers every
-         * eligible message.
+         * eligible message, from the last position to the first.
          */
         const scanSnapshot = async (
           agentId: string,
@@ -1624,12 +1790,13 @@ export default {
               // one, so a capturing scan handles every eligible message as new.
               if (mode.kind !== "capture" || !client) return;
               let stored = 0;
-              for (const msg of messages) {
+              for (let i = messages.length - 1; i >= 0; i--) {
                 if (captureStopped) break;
+                const msg = messages[i];
                 const text = msg?.role === "user" || msg?.role === "assistant" ? captureText(msg?.content) : "";
                 if (!text) continue;
                 try {
-                  if (await tryAutoCapture(client, agentId, runId, sessionId, text)) stored++;
+                  if ((await tryAutoCapture(client, agentId, runId, sessionId, text)) === "stored") stored++;
                 } catch (err) {
                   logOnce(
                     `capture-failed-no-session:${agentId}:${run}`,
@@ -1651,10 +1818,15 @@ export default {
             const identities = messages.map((msg) => messageIdentity(msg));
             const total = new Map<string, number>();
             for (const id of identities) if (id) total.set(id, (total.get(id) ?? 0) + 1);
+            markLive(session, total);
+            // Read before the loop: this scan is the session's first in this
+            // process until it has run.
+            const warm = session.warm;
             const baseline = new Map<string, number>();
+            // Occurrences of each identity met so far, counting from the LAST position.
             const position = new Map<string, number>();
             let stored = 0;
-            for (let i = 0; i < messages.length; i++) {
+            for (let i = messages.length - 1; i >= 0; i--) {
               if (captureStopped || session.disabled) break;
               const msg = messages[i];
               const text = msg?.role === "user" || msg?.role === "assistant" ? captureText(msg?.content) : "";
@@ -1671,25 +1843,26 @@ export default {
               if (!baseline.has(identity)) baseline.set(identity, session.entries.get(identity) ?? 0);
               const m = baseline.get(identity)!;
               const n = total.get(identity)!;
-              const j = position.get(identity) ?? 0;
-              position.set(identity, j + 1);
-              if (j === 0 && n < m && mode.kind === "capture") {
+              const r = position.get(identity) ?? 0;
+              position.set(identity, r + 1);
+              if (r === 0 && n < m && mode.kind === "capture") {
                 logOnce(
                   `ambiguous:${agentId}:${run}:${identity}`,
                   `openclaw-flair: agent_end for run ${run} (agent ${agentId}): the snapshot holds ${n} of ${m} recorded copies of a message (as after a compaction); no copy of it is captured for this run, since a new copy with the same role, JSON content and stringified timestamp cannot be told apart from an earlier one`,
                 );
               }
-              // An occurrence the session has already recorded: left alone.
-              if (j < m) continue;
+              // The n - m occurrences at the latest positions are new; the m at
+              // the earliest positions are taken as the recorded ones, left alone.
+              if (r >= n - m) continue;
               // A new occurrence, treated as this run's.
               if (mode.kind === "skip" || !text || !client) {
-                recordOccurrence(session, identity);
+                recordOccurrence(session, identity, total);
                 continue;
               }
               let failure: unknown = undefined;
-              let captured = false;
+              let outcome: CaptureOutcome = "settled";
               try {
-                captured = await tryAutoCapture(client, agentId, runId, sessionId, text);
+                outcome = await tryAutoCapture(client, agentId, runId, sessionId, text);
               } catch (err) {
                 failure = err;
               }
@@ -1697,8 +1870,9 @@ export default {
               // meanwhile ends the scan before anything more is recorded.
               if (captureStopped || session.disabled) break;
               if (failure !== undefined) {
-                // Dropped: recorded as skipped below, no retry scheduled. An
-                // abort meanwhile is the reason when the run was aborted.
+                // Dropped: recorded as skipped below, so the session does not
+                // retry that identity while retained. An abort meanwhile is
+                // the reason when the run was aborted.
                 const reason = mode.record.phase === "aborted" ? "its run was aborted" : errorClass(failure);
                 logOnce(
                   `capture-failed:${agentId}:${run}:${identity}`,
@@ -1707,9 +1881,17 @@ export default {
               }
               // Captured, or skipped: a result that settled after an abort was
               // already discarded by `tryAutoCapture`, so it records no capture.
-              if (captured) stored++;
-              recordOccurrence(session, identity);
+              if (outcome === "stored") stored++;
+              // flair#2560: left out by the run's cap, in a warm session: it
+              // stays unseen, eligible for a later capture scan unless settled.
+              // Refusal settles even deferred copies, whose origin is ambiguous.
+              if (outcome === "capped" && warm) {
+                session.deferred.add(identity);
+                continue;
+              }
+              recordOccurrence(session, identity, total);
             }
+            session.warm = true;
             if (stored > 0) api.logger.info(`openclaw-flair: auto-captured ${stored} memories`);
           } catch (err: any) {
             refuseKey(agentId, "auto-capture", err);
@@ -1799,7 +1981,7 @@ export default {
           try {
             const client = clientFor(agentId);
             const captured = await tryAutoCapture(client, agentId, runIdOf(event, ctx), sessionIdForCapture(event, ctx), text);
-            if (captured) api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_input)");
+            if (captured === "stored") api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_input)");
           } catch (err: any) {
             refuseKey(agentId, "live auto-capture (llm_input)", err);
           }
@@ -1818,7 +2000,7 @@ export default {
           try {
             const client = clientFor(agentId);
             const captured = await tryAutoCapture(client, agentId, runIdOf(event, ctx), sessionIdForCapture(event, ctx), text);
-            if (captured) api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_output)");
+            if (captured === "stored") api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_output)");
           } catch (err: any) {
             refuseKey(agentId, "live auto-capture (llm_output)", err);
           }

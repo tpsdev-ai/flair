@@ -1,10 +1,13 @@
+import { pinFixtureHistory, readFixtureHistory } from "../helpers/audit-history.ts";
 import { describe, it, expect } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { delimiter, dirname, join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
+// @ts-expect-error — plain .mjs helper, no type declarations by design.
+import { validateAllowlist, validateAllowlistHistory } from "../../scripts/audit-gate.mjs";
 
 /**
  * The dependency audit gate run against the real audit tools (flair#2278).
@@ -19,8 +22,10 @@ import { tempDir } from "../helpers/temp-dir.ts";
  * gate's exit status and output. The servers record every request, and each
  * gate case checks which fixture each tool reached.
  *
- * The fixture allowlist has no entries, so a gate run that gets past both
- * audit stages passes exactly when both stages report zero advisories.
+ * The fixture allowlist has no entries unless a case writes its own (the ADK
+ * uuid cases copy the committed uuid entries); with no entries, a gate run that
+ * gets past both audit stages passes exactly when both stages report zero
+ * advisories.
  */
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -32,6 +37,11 @@ const TEST_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"
 /** The bun version the `audit` job installs with setup-bun. */
 const PINNED_BUN = /\n  audit:\n[\s\S]*?bun-version: "([^"]+)"/.exec(TEST_YML)?.[1];
 
+/**
+ * The day the fixture gate runs as "today": after the committed uuid entries'
+ * `added` (2026-10-09) and before their `expires` (2026-11-15).
+ */
+const FIXTURE_TODAY = "2026-10-10";
 /** Ports production Flair listens on; a fixture server must never hold one. */
 const RESERVED_PORTS = new Set([9925, 9926, 19925, 19926]);
 /** A fixture server drops a connection idle this long. */
@@ -49,6 +59,64 @@ const DEP = "audit-fixture-dep";
 const GHSA = "GHSA-0000-0000-0001";
 const BULK_REQUEST = "POST /-/npm/v1/security/advisories/bulk";
 const PASS_MARKER = "PASS —";
+/**
+ * The six consumer-install inputs: the flag, the allowlist source, the package
+ * the flag's prefix must hold, and the workspace directory the job packs it
+ * from.
+ */
+const CONSUMER_INPUTS = [
+  { flag: "--npm-install-prefix", source: "npm-install", pkg: "@tpsdev-ai/flair", dir: "." },
+  { flag: "--adk-npm-install-prefix", source: "npm-install-adk", pkg: "@tpsdev-ai/adk-flair", dir: "packages/adk-flair-js" },
+  { flag: "--mcp-npm-install-prefix", source: "npm-install-mcp", pkg: "@tpsdev-ai/flair-mcp", dir: "packages/flair-mcp" },
+  { flag: "--openclaw-npm-install-prefix", source: "npm-install-openclaw", pkg: "@tpsdev-ai/openclaw-flair", dir: "packages/openclaw-flair" },
+  { flag: "--pi-npm-install-prefix", source: "npm-install-pi", pkg: "@tpsdev-ai/pi-flair", dir: "packages/pi-flair" },
+  { flag: "--n8n-npm-install-prefix", source: "npm-install-n8n", pkg: "@tpsdev-ai/n8n-nodes-flair", dir: "packages/n8n-nodes-flair" },
+];
+/** The version of every fixture workspace manifest, and so of every packed fixture package. */
+const FIXTURE_VERSION = "1.0.0";
+/** The `dependencies` makeFixture gives the root input's workspace manifest; it gives the others none. */
+const ROOT_DEPENDENCIES = { [DEP]: "1.0.0" };
+/** The file name stem `npm pack` gives a package: `@scope/name` becomes `scope-name`. */
+const tarballStem = (pkg: string) => pkg.replace(/^@/, "").replace("/", "-");
+/** The gate's arguments: each input's flag followed by the prefix `prefixOf` gives it. */
+const prefixArgs = (prefixOf: (input: (typeof CONSUMER_INPUTS)[number]) => string) =>
+  CONSUMER_INPUTS.flatMap((input) => [input.flag, prefixOf(input)]);
+
+/**
+ * Commits a fixture's allowlist so the gate can read the history it checks.
+ * The default commit day is the latest `added` day in the file, so the history
+ * boundary and the pinned today agree with the entries' dates.
+ */
+function commitAllowlistHistory(root: string, date?: string) {
+  const entries = JSON.parse(readFileSync(join(root, ".github/audit-allowlist.json"), "utf8")).entries ?? [];
+  const addedDays = entries.map((entry: { added?: string }) => entry.added)
+    .filter((day: unknown): day is string => typeof day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(day));
+  date ??= `${addedDays.sort().at(-1) ?? "2026-01-01"}T12:00:00Z`;
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "fixture",
+    GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+    GIT_COMMITTER_NAME: "fixture",
+    GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+    GIT_AUTHOR_DATE: date,
+    GIT_COMMITTER_DATE: date,
+  };
+  for (const args of [["init", "-q"], ["add", ".github/audit-allowlist.json"], ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "fixture allowlist"]]) {
+    const res = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", env, timeout: 20_000 });
+    if (res.status !== 0) throw new Error(`fixture git ${args[0]} failed (${res.status}): ${res.stderr}`);
+  }
+  pinFixtureHistory(root);
+}
+
+/** The validator's problems for a fixture's allowlist on the pinned day. */
+function allowlistProblems(root: string, today = FIXTURE_TODAY): string[] {
+  const allowlist = JSON.parse(readFileSync(join(root, ".github/audit-allowlist.json"), "utf8"));
+  const day = new Date(`${today}T00:00:00Z`);
+  return [
+    ...validateAllowlist(allowlist, day),
+    ...validateAllowlistHistory(allowlist, readFixtureHistory(root), day),
+  ];
+}
 
 /** The advisory the "advisory" registry answer lists for DEP. */
 const ADVISORY_ANSWER = {
@@ -180,7 +248,7 @@ const BUN_LOCK = `{
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "audit-fixture",
+      "name": "@tpsdev-ai/flair",
       "dependencies": {
         "${DEP}": "1.0.0",
       },
@@ -194,7 +262,8 @@ const BUN_LOCK = `{
 
 interface Fixture {
   root: string;
-  prefix: string;
+  /** Each input's own prefix, by source. */
+  prefixes: Record<string, string>;
   env: Record<string, string>;
 }
 
@@ -207,15 +276,19 @@ interface FixtureOptions {
 
 /**
  * A fixture repo holding a copy of the gate, an allowlist with no entries, a
- * bun project with one dependency, and an installed npm prefix with the same
- * dependency. The tools' environment is not inherited: it holds only PATH
- * (the pinned bun's directory first), HOME, TMPDIR, the npm config file
- * locations, both tool caches and the gate's date.
+ * bun project with one dependency (its manifest is also the root input's
+ * workspace manifest), the workspace manifest of each other input, and one
+ * npm prefix per input. Each prefix holds the fixture dependency and its
+ * input's install record, the files and rows an npm install of the packed
+ * tarball writes (the real-npm identity cases below check that shape against
+ * real npm). The tools' environment is not inherited: it holds only PATH (the
+ * pinned bun's directory first), HOME, TMPDIR, the npm config file locations,
+ * both tool caches and the gate's date. `npmLockfile: false` removes the root
+ * input's prefix's package-lock.json.
  */
 function makeFixture(opts: FixtureOptions): Fixture {
   const root = tempDir("flair-audit-real-tools-");
-  const prefix = join(root, "prefix");
-  for (const dir of ["scripts", ".github", "home", "tmp", "cache", join("prefix", "node_modules", DEP)]) {
+  for (const dir of ["scripts", ".github", "home", "tmp", "cache"]) {
     mkdirSync(join(root, dir), { recursive: true });
   }
   copyFileSync(GATE_SCRIPT, join(root, "scripts", "audit-gate.mjs"));
@@ -223,31 +296,51 @@ function makeFixture(opts: FixtureOptions): Fixture {
     join(root, ".github", "audit-allowlist.json"),
     JSON.stringify({ policy: ALLOWLIST_POLICY, entries: [] }),
   );
+  commitAllowlistHistory(root);
 
   writeFileSync(
     join(root, "package.json"),
-    JSON.stringify({ name: "audit-fixture", private: true, dependencies: { [DEP]: "1.0.0" } }),
+    JSON.stringify({ name: "@tpsdev-ai/flair", version: FIXTURE_VERSION, private: true, dependencies: ROOT_DEPENDENCIES }),
   );
   if (opts.bunLockfile !== false) writeFileSync(join(root, "bun.lock"), BUN_LOCK);
   writeFileSync(join(root, "bunfig.toml"), `[install]\nregistry = "${opts.bunRegistry}"\n`);
 
-  const manifest = { name: "audit-fixture-prefix", version: "1.0.0", dependencies: { [DEP]: "1.0.0" } };
-  writeFileSync(join(prefix, "package.json"), JSON.stringify(manifest));
-  if (opts.npmLockfile !== false) {
-    writeFileSync(
-      join(prefix, "package-lock.json"),
-      JSON.stringify({
-        ...manifest,
-        lockfileVersion: 3,
-        requires: true,
-        packages: { "": manifest, [`node_modules/${DEP}`]: { version: "1.0.0" } },
-      }),
-    );
+  const prefixes: Record<string, string> = {};
+  for (const input of CONSUMER_INPUTS) {
+    if (input.dir !== ".") {
+      mkdirSync(join(root, input.dir), { recursive: true });
+      writeFileSync(join(root, input.dir, "package.json"), JSON.stringify({ name: input.pkg, version: FIXTURE_VERSION }));
+    }
+    const prefix = join(root, `prefix-${input.source}`);
+    prefixes[input.source] = prefix;
+    const tgz = `file:../packed/${tarballStem(input.pkg)}-${FIXTURE_VERSION}.tgz`;
+    const manifest = { name: "consumer", version: "1.0.0", dependencies: { [DEP]: "1.0.0", [input.pkg]: tgz } };
+    // The installed package declares its workspace manifest's dependencies.
+    const dependencies = input.dir === "." ? ROOT_DEPENDENCIES : {};
+    for (const [pkg, record] of [
+      [DEP, { version: "1.0.0" }],
+      [input.pkg, { version: FIXTURE_VERSION, dependencies }],
+    ] as const) {
+      mkdirSync(join(prefix, "node_modules", pkg), { recursive: true });
+      writeFileSync(join(prefix, "node_modules", pkg, "package.json"), JSON.stringify({ name: pkg, ...record }));
+    }
+    writeFileSync(join(prefix, "package.json"), JSON.stringify(manifest));
+    if (opts.npmLockfile !== false || input.source !== "npm-install") {
+      writeFileSync(
+        join(prefix, "package-lock.json"),
+        JSON.stringify({
+          ...manifest,
+          lockfileVersion: 3,
+          requires: true,
+          packages: {
+            "": manifest,
+            [`node_modules/${DEP}`]: { version: "1.0.0" },
+            [`node_modules/${input.pkg}`]: { version: FIXTURE_VERSION, resolved: tgz, dependencies },
+          },
+        }),
+      );
+    }
   }
-  writeFileSync(
-    join(prefix, "node_modules", DEP, "package.json"),
-    JSON.stringify({ name: DEP, version: "1.0.0" }),
-  );
   writeFileSync(
     join(root, "npmrc"),
     `registry=${opts.npmRegistry}\nfetch-retries=0\nfetch-timeout=10000\nupdate-notifier=false\nfund=false\n`,
@@ -256,7 +349,7 @@ function makeFixture(opts: FixtureOptions): Fixture {
 
   return {
     root,
-    prefix,
+    prefixes,
     env: {
       // The pinned bun first, so the gate's `bun audit` runs the same binary.
       PATH: `${dirname(process.execPath)}${delimiter}${process.env.PATH ?? ""}`,
@@ -266,7 +359,7 @@ function makeFixture(opts: FixtureOptions): Fixture {
       npm_config_globalconfig: join(root, "npmrc-global"),
       npm_config_cache: join(root, "cache", "npm"),
       BUN_INSTALL_CACHE_DIR: join(root, "cache", "bun"),
-      AUDIT_GATE_TODAY: "2026-10-01",
+      AUDIT_GATE_TODAY: FIXTURE_TODAY,
     },
   };
 }
@@ -340,7 +433,7 @@ async function gateCase(
     const f = makeFixture({ bunRegistry: bunRegistry.url, npmRegistry: npmRegistry.url, ...lockfiles });
     const run = await runProcess(
       process.execPath,
-      [join(f.root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", f.prefix, "--adk-npm-install-prefix", f.prefix],
+      [join(f.root, "scripts", "audit-gate.mjs"), ...prefixArgs((input) => f.prefixes[input.source]!)],
       f.root,
       f.env,
       GATE_TIMEOUT_MS,
@@ -411,10 +504,10 @@ describe("audit gate with the real bun and npm against a local registry (flair#2
       expect(run.timedOut).toBe(false);
       expect(run.status).toBe(1);
       expect(run.stderr).not.toContain("FAILED TO RUN");
-      // bun's report, the root-tarball npm report, and the ADK consumer-install
-      // npm report each reach the fixture registry and see the same advisory, so
-      // the gate counts three (flair#2398 added the third observation).
-      expect(run.stdout).toContain("advisories reported: 3 (3 high)");
+      // bun's report and the npm report of each of the six fixture prefixes
+      // (each holds the fixture dependency) see the same advisory, so the gate
+      // counts seven (flair#2398 added the ADK input, flair#2757 four more).
+      expect(run.stdout).toContain("advisories reported: 7 (7 high)");
       expect(run.stdout).toContain(`HIGH ${GHSA} in ${DEP} (<1.0.1) is NOT allowlisted`);
       expect(run.stdout).not.toContain(PASS_MARKER);
       expect(bunRequests).toContain(BULK_REQUEST);
@@ -438,6 +531,9 @@ describe("audit gate with the real bun and npm against a local registry (flair#2
       CASE_BUDGET_MS,
     );
 
+    // Without the root input's package-lock.json the gate refuses that prefix
+    // at the identity check, before either stage runs (the case after this loop).
+    if (!failure.lockfile) continue;
     it(
       `fails closed on ${failure.name} in the npm stage`,
       async () => {
@@ -453,6 +549,24 @@ describe("audit gate with the real bun and npm against a local registry (flair#2
   }
 });
 
+describe("a prefix without package-lock.json", () => {
+  it(
+    "is refused at the identity check, before either audit stage runs",
+    async () => {
+      const { run, bunRequests, npmRequests } = await gateCase("clean", "clean", { npmLockfile: false });
+      expect(run.timedOut).toBe(false);
+      expect(run.status).toBe(2);
+      expect(run.stderr).toContain("--npm-install-prefix ");
+      expect(run.stderr).toContain(`is not an npm install of the packed @tpsdev-ai/flair@${FIXTURE_VERSION}`);
+      expect(run.stderr).toContain("no readable package-lock.json");
+      expect(run.stdout).toBe("");
+      expect(bunRequests).toEqual([]);
+      expect(npmRequests).toEqual([]);
+    },
+    CASE_BUDGET_MS,
+  );
+});
+
 describe("ADK uuid paths from real npm audit", () => {
   for (const { outside, version, title } of [
     { outside: false, version: "9.0.1", title: "allows the named uuid chain at the allowlist version" },
@@ -466,9 +580,14 @@ describe("ADK uuid paths from real npm audit", () => {
         const f = makeFixture({ bunRegistry: bunRegistry.url, npmRegistry: npmRegistry.url });
         const adkPrefix = join(f.root, "adk-prefix");
         const chain = ["@tpsdev-ai/adk-flair", "@google/adk", "@google-cloud/vertexai", "google-auth-library", "gaxios", "uuid"];
+        const adkTgz = `file:../packed/${tarballStem(chain[0]!)}-${FIXTURE_VERSION}.tgz`;
         const manifest = { name: "adk-consumer", version: "1.0.0", dependencies: {
-          "@tpsdev-ai/adk-flair": "1.0.0", ...(outside ? { uuid: "9.0.1" } : {}),
+          "@tpsdev-ai/adk-flair": adkTgz, ...(outside ? { uuid: "9.0.1" } : {}),
         } };
+        // The ADK workspace manifest declares the dependency its installed package does.
+        writeFileSync(join(f.root, "packages/adk-flair-js/package.json"), JSON.stringify({
+          name: chain[0], version: FIXTURE_VERSION, dependencies: { [chain[1]!]: "*" },
+        }));
         const packages: Record<string, object> = { "": manifest };
         let node = "";
         for (const [i, pkg] of chain.entries()) {
@@ -476,7 +595,8 @@ describe("ADK uuid paths from real npm audit", () => {
           const row = { name: pkg, version: pkg === "uuid" ? version : "1.0.0",
             dependencies: i + 1 < chain.length ? { [chain[i + 1]!]: "*" } : {},
           };
-          packages[node] = row;
+          // The ADK package's row is its install record from the packed tarball.
+          packages[node] = i === 0 ? { ...row, resolved: adkTgz } : row;
           mkdirSync(join(adkPrefix, node), { recursive: true });
           writeFileSync(join(adkPrefix, node, "package.json"), JSON.stringify(row));
         }
@@ -491,11 +611,15 @@ describe("ADK uuid paths from real npm audit", () => {
         }));
         const allowlist = JSON.parse(readFileSync(join(REPO_ROOT, ".github/audit-allowlist.json"), "utf8"));
         writeFileSync(join(f.root, ".github/audit-allowlist.json"), JSON.stringify({
-          policy: ALLOWLIST_POLICY, entries: allowlist.entries.filter((entry: { package: string }) => entry.package === "uuid"),
+          // The single-chain entry: the uuid copy under @google-cloud/vertexai.
+          policy: ALLOWLIST_POLICY, entries: allowlist.entries.filter((entry: { package: string; introducedBy: string }) =>
+            entry.package === "uuid" && entry.introducedBy === chain.join(" -> ")),
         }));
+        commitAllowlistHistory(f.root);
+        expect(allowlistProblems(f.root)).toEqual([]);
         const run = await runProcess(process.execPath, [
-          join(f.root, "scripts/audit-gate.mjs"), "--npm-install-prefix", f.prefix,
-          "--adk-npm-install-prefix", adkPrefix,
+          join(f.root, "scripts/audit-gate.mjs"),
+          ...prefixArgs((input) => (input.source === "npm-install-adk" ? adkPrefix : f.prefixes[input.source]!)),
         ], f.root, f.env, GATE_TIMEOUT_MS);
         expect(run.timedOut).toBe(false);
         expect(run.stderr).not.toContain("FAILED TO RUN");
@@ -515,6 +639,259 @@ describe("ADK uuid paths from real npm audit", () => {
       }
     }, CASE_BUDGET_MS);
   }
+});
+
+describe("two ADK uuid copies from real npm audit, one allowlist entry per copy", () => {
+  for (const { extra, title } of [
+    { extra: false, title: "allows both copies when each chain covers its own node" },
+    { extra: true, title: "blocks a third uuid copy that no entry's chain covers" },
+  ]) {
+    it(title, async () => {
+      const bunRegistry = await startRegistry("clean");
+      const npmRegistry = await startRegistry("uuid");
+      try {
+        const f = makeFixture({ bunRegistry: bunRegistry.url, npmRegistry: npmRegistry.url });
+        const adkPrefix = join(f.root, "adk-prefix");
+        const adkTgz = `file:../packed/${tarballStem("@tpsdev-ai/adk-flair")}-${FIXTURE_VERSION}.tgz`;
+        const manifest = { name: "adk-consumer", version: "1.0.0", dependencies: {
+          "@tpsdev-ai/adk-flair": adkTgz, ...(extra ? { uuid: "9.0.1" } : {}),
+        } };
+        writeFileSync(join(f.root, "packages/adk-flair-js/package.json"), JSON.stringify({
+          name: "@tpsdev-ai/adk-flair", version: FIXTURE_VERSION, dependencies: { "@google/adk": "*" },
+        }));
+        const deps = (...names: string[]) => Object.fromEntries(names.map((name) => [name, "*"]));
+        const rows: [string, Record<string, unknown>][] = [
+          ["node_modules/@tpsdev-ai/adk-flair", { name: "@tpsdev-ai/adk-flair", version: FIXTURE_VERSION, dependencies: deps("@google/adk"), resolved: adkTgz }],
+          ["node_modules/@google/adk", { name: "@google/adk", version: "1.0.0", dependencies: deps("@google-cloud/vertexai") }],
+          ["node_modules/@google-cloud/vertexai", { name: "@google-cloud/vertexai", version: "1.0.0", dependencies: deps("google-auth-library") }],
+          ["node_modules/@google-cloud/vertexai/node_modules/google-auth-library", { name: "google-auth-library", version: "1.0.0", dependencies: deps("gaxios", "gtoken") }],
+          ["node_modules/@google-cloud/vertexai/node_modules/gaxios", { name: "gaxios", version: "1.0.0", dependencies: deps("uuid") }],
+          ["node_modules/@google-cloud/vertexai/node_modules/uuid", { name: "uuid", version: "9.0.1" }],
+          ["node_modules/gtoken", { name: "gtoken", version: "1.0.0", dependencies: deps("gaxios") }],
+          ["node_modules/gtoken/node_modules/gaxios", { name: "gaxios", version: "1.0.0", dependencies: deps("uuid") }],
+          ["node_modules/gtoken/node_modules/uuid", { name: "uuid", version: "9.0.1" }],
+          ...(extra ? [["node_modules/uuid", { name: "uuid", version: "9.0.1" }] as [string, Record<string, unknown>]] : []),
+        ];
+        const packages: Record<string, object> = { "": manifest };
+        for (const [node, row] of rows) {
+          packages[node] = row;
+          mkdirSync(join(adkPrefix, node), { recursive: true });
+          const { resolved: _resolved, ...installed } = row;
+          writeFileSync(join(adkPrefix, node, "package.json"), JSON.stringify(installed));
+        }
+        writeFileSync(join(adkPrefix, "package.json"), JSON.stringify(manifest));
+        writeFileSync(join(adkPrefix, "package-lock.json"), JSON.stringify({
+          ...manifest, lockfileVersion: 3, requires: true, packages,
+        }));
+        const allowlist = JSON.parse(readFileSync(join(REPO_ROOT, ".github/audit-allowlist.json"), "utf8"));
+        const uuidEntries = allowlist.entries.filter((entry: { package: string }) => entry.package === "uuid");
+        expect(uuidEntries.length).toBe(2);
+        writeFileSync(join(f.root, ".github/audit-allowlist.json"), JSON.stringify({ policy: ALLOWLIST_POLICY, entries: uuidEntries }));
+        commitAllowlistHistory(f.root);
+        expect(allowlistProblems(f.root)).toEqual([]);
+        const run = await runProcess(process.execPath, [
+          join(f.root, "scripts/audit-gate.mjs"),
+          ...prefixArgs((input) => (input.source === "npm-install-adk" ? adkPrefix : f.prefixes[input.source]!)),
+        ], f.root, f.env, GATE_TIMEOUT_MS);
+        expect(run.timedOut).toBe(false);
+        expect(run.stderr).not.toContain("FAILED TO RUN");
+        expect(npmRegistry.requests).toContain(BULK_REQUEST);
+        if (extra) {
+          expect(run.status).toBe(1);
+          expect(run.stdout).toContain('node "node_modules/uuid" in npm-install-adk is covered by no allowlist entry');
+          expect(run.stdout).not.toContain(PASS_MARKER);
+        } else {
+          expect(run.status).toBe(0);
+          expect(run.stdout).toContain(PASS_MARKER);
+        }
+      } finally {
+        await Promise.all([bunRegistry.close(), npmRegistry.close()]);
+      }
+    }, CASE_BUDGET_MS);
+  }
+});
+
+describe("prefix identity against real npm installs (flair#2757)", () => {
+  /** Deadline for one npm command run while building the real installs. */
+  const NPM_TIMEOUT_MS = 30_000;
+  const UNRELATED = "clean-fixture";
+
+  function npm(args: string[], cwd: string, env: Record<string, string>): void {
+    const res = spawnSync("npm", args, { cwd, env, encoding: "utf8", timeout: NPM_TIMEOUT_MS });
+    if (res.status !== 0) {
+      throw new Error(`npm ${args[0]} in ${cwd} exited ${res.status}: ${res.error?.message ?? res.stderr}`);
+    }
+  }
+
+  const ROOT = "@tpsdev-ai/flair";
+  const MCP = "@tpsdev-ai/flair-mcp";
+  const PI = "@tpsdev-ai/pi-flair";
+  /** Keys of the two extra installs below. */
+  const DEV_MCP = "dev-only MCP";
+  const BARE_ROOT = "dependency-free root";
+
+  /**
+   * Real installs, each by a real `npm install --ignore-scripts --offline`
+   * into its own prefix from archives real `npm pack` runs made: for each
+   * input, with --omit=dev, its package packed from the fixture's workspace
+   * manifest for it (without `private`), plus the packed fixture dependency
+   * that manifest declares (the root input's); with --omit=dev, an unrelated
+   * package; under DEV_MCP, the MCP archive installed with --save-dev and
+   * without --omit=dev, so it is on disk; under BARE_ROOT, with --omit=dev, a
+   * dependency-free archive with the root package's name and version.
+   * Returns each prefix by package name or by those keys.
+   */
+  function realInstalls(f: Fixture): Record<string, string> {
+    const packed = join(f.root, "packed");
+    const bare = join(f.root, "packed-bare");
+    mkdirSync(packed);
+    mkdirSync(bare);
+    const source = (name: string, manifest: object) => {
+      const dir = join(f.root, "pkgsrc", name);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "package.json"), JSON.stringify(manifest));
+      return dir;
+    };
+    const workspace = (input: (typeof CONSUMER_INPUTS)[number]) => {
+      const { private: _private, ...manifest } = JSON.parse(readFileSync(join(f.root, input.dir, "package.json"), "utf8"));
+      return manifest as { dependencies?: Record<string, string> };
+    };
+    npm([
+      "pack", "--ignore-scripts", "--pack-destination", packed,
+      ...CONSUMER_INPUTS.map((input) => source(tarballStem(input.pkg), workspace(input))),
+      source(DEP, { name: DEP, version: ROOT_DEPENDENCIES[DEP] }),
+      source(UNRELATED, { name: UNRELATED, version: FIXTURE_VERSION }),
+    ], f.root, f.env);
+    npm(["pack", "--ignore-scripts", "--pack-destination", bare, source("bare-root", { name: ROOT, version: FIXTURE_VERSION })], f.root, f.env);
+    const tgz = (dir: string, pkg: string, version = FIXTURE_VERSION) => join(dir, `${tarballStem(pkg)}-${version}.tgz`);
+    const install = (name: string, args: string[]) => {
+      const prefix = join(f.root, "real", name);
+      mkdirSync(prefix, { recursive: true });
+      writeFileSync(join(prefix, "package.json"), JSON.stringify({ name: "consumer", version: "1.0.0" }));
+      npm(["install", "--ignore-scripts", "--offline", "--no-audit", "--no-fund", ...args], prefix, f.env);
+      return prefix;
+    };
+    const prefixes: Record<string, string> = {};
+    for (const input of CONSUMER_INPUTS) {
+      const deps = Object.entries(workspace(input).dependencies ?? {}).map(([dep, version]) => tgz(packed, dep, version));
+      prefixes[input.pkg] = install(tarballStem(input.pkg), ["--omit=dev", ...deps, tgz(packed, input.pkg)]);
+    }
+    prefixes[UNRELATED] = install(UNRELATED, ["--omit=dev", tgz(packed, UNRELATED)]);
+    prefixes[DEV_MCP] = install("dev-mcp", ["--save-dev", tgz(packed, MCP)]);
+    prefixes[BARE_ROOT] = install("bare-root", ["--omit=dev", tgz(bare, ROOT)]);
+    return prefixes;
+  }
+
+  /** Run the gate with `pick` choosing each flag's prefix from the real installs; both registries answer clean. */
+  async function identityCase(pick: (real: Record<string, string>, input: (typeof CONSUMER_INPUTS)[number]) => string) {
+    const bunRegistry = await startRegistry("clean");
+    const npmRegistry = await startRegistry("clean");
+    try {
+      const f = makeFixture({ bunRegistry: bunRegistry.url, npmRegistry: npmRegistry.url });
+      const real = realInstalls(f);
+      const run = await runProcess(
+        process.execPath,
+        [join(f.root, "scripts", "audit-gate.mjs"), ...prefixArgs((input) => pick(real, input))],
+        f.root,
+        f.env,
+        GATE_TIMEOUT_MS,
+      );
+      return { run, real, bunRequests: [...bunRegistry.requests], npmRequests: [...npmRegistry.requests] };
+    } finally {
+      await Promise.all([bunRegistry.close(), npmRegistry.close()]);
+    }
+  }
+
+  const own = (real: Record<string, string>, input: (typeof CONSUMER_INPUTS)[number]) => real[input.pkg]!;
+
+  function expectRefusedBeforeAudits(c: Awaited<ReturnType<typeof identityCase>>, ...lines: string[]): void {
+    expect(c.run.timedOut).toBe(false);
+    expect(c.run.status).toBe(2);
+    for (const line of lines) expect(c.run.stderr).toContain(line);
+    expect(c.run.stdout).toBe("");
+    expect(c.bunRequests).toEqual([]);
+    expect(c.npmRequests).toEqual([]);
+  }
+
+  it(
+    "passes when each flag names a real npm install of its own package",
+    async () => {
+      const c = await identityCase(own);
+      expect(c.run.timedOut).toBe(false);
+      expect(c.run.status).toBe(0);
+      expect(c.run.stdout).toContain(PASS_MARKER);
+      expect(c.npmRequests).toContain(BULK_REQUEST);
+    },
+    CASE_BUDGET_MS,
+  );
+
+  it(
+    "exits 2 naming both flags when two packages' prefixes are exchanged",
+    async () => {
+      const c = await identityCase((real, input) =>
+        input.pkg === MCP ? real[PI]! : input.pkg === PI ? real[MCP]! : own(real, input));
+      expectRefusedBeforeAudits(
+        c,
+        `--mcp-npm-install-prefix ${c.real[PI]} is not an npm install of the packed ${MCP}@${FIXTURE_VERSION}`,
+        `found direct dependencies ${PI}`,
+        `--pi-npm-install-prefix ${c.real[MCP]} is not an npm install of the packed ${PI}@${FIXTURE_VERSION}`,
+        `found direct dependencies ${MCP}`,
+      );
+    },
+    CASE_BUDGET_MS,
+  );
+
+  it(
+    "exits 2 when a flag names a clean install of an unrelated package",
+    async () => {
+      const c = await identityCase((real, input) => (input.pkg === MCP ? real[UNRELATED]! : own(real, input)));
+      expectRefusedBeforeAudits(
+        c,
+        `--mcp-npm-install-prefix ${c.real[UNRELATED]} is not an npm install of the packed ${MCP}@${FIXTURE_VERSION}`,
+        `found direct dependencies ${UNRELATED}`,
+      );
+    },
+    CASE_BUDGET_MS,
+  );
+
+  it(
+    "exits 2 when two flags name the same real prefix",
+    async () => {
+      const c = await identityCase((real, input) => (input.pkg === PI ? real[MCP]! : own(real, input)));
+      expectRefusedBeforeAudits(c, "--mcp-npm-install-prefix and --pi-npm-install-prefix name the same prefix");
+    },
+    CASE_BUDGET_MS,
+  );
+
+  it(
+    "exits 2 when a flag names a consumer that installs its package as a devDependency",
+    async () => {
+      const c = await identityCase((real, input) => (input.pkg === MCP ? real[DEV_MCP]! : own(real, input)));
+      expectRefusedBeforeAudits(
+        c,
+        `--mcp-npm-install-prefix ${c.real[DEV_MCP]} is not an npm install of the packed ${MCP}@${FIXTURE_VERSION}`,
+        'package.json does not name it in "dependencies" from a local .tgz (found null)',
+        'package.json also names it in "devDependencies"',
+        `package-lock.json marks "node_modules/${MCP}" "dev": true`,
+      );
+    },
+    CASE_BUDGET_MS,
+  );
+
+  it(
+    "exits 2 when a flag names an install of a dependency-free archive with its package's name and version",
+    async () => {
+      const c = await identityCase((real, input) => (input.pkg === ROOT ? real[BARE_ROOT]! : own(real, input)));
+      const differences = `declares dependencies that differ from package.json: ${DEP} is missing (expected "1.0.0")`;
+      expectRefusedBeforeAudits(
+        c,
+        `--npm-install-prefix ${c.real[BARE_ROOT]} is not an npm install of the packed ${ROOT}@${FIXTURE_VERSION}`,
+        `node_modules/${ROOT}/package.json ${differences}`,
+        `package-lock.json's "node_modules/${ROOT}" row ${differences}`,
+      );
+    },
+    CASE_BUDGET_MS,
+  );
 });
 
 describe("what the pinned bun prints for each registry answer (flair#2278)", () => {

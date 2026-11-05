@@ -95,6 +95,10 @@ function pointerTable(): any {
   return (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
 }
 
+export function isMemoryHostSourceStore(store: unknown): boolean {
+  return store != null && pointerTable()?.primaryStore === store;
+}
+
 /**
  * flair#1940 A1'' item 6 (adjudication B, hardened in round 5/adjudication 0e)
  * — is an incoming hostSource an ECHO of the STORED pointer? Preservation (do
@@ -208,8 +212,8 @@ export async function projectRowsThroughPointers<T extends { id?: unknown }>(
 
 /** Read ONE stored pointer row (the write path's echo check). Kept here so the
  *  MemoryHostSource table is touched ONLY by this module. */
-export async function loadStoredPointer(memoryId: string): Promise<PointerRow | null> {
-  return (await loadPointerRows([memoryId])).get(memoryId) ?? null;
+export async function loadStoredPointer(memoryId: string, context?: unknown): Promise<PointerRow | null> {
+  return (await loadPointerRows([memoryId], context)).get(memoryId) ?? null;
 }
 
 /** The Memory attributes that would carry a pointer into an inbound federated

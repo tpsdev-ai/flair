@@ -13,6 +13,7 @@
  * and memory-host-source tests can run in the same process without racing.
  */
 import { mock } from "bun:test";
+import { memoryLockDouble } from "./memory-lock-double";
 
 /** The shared, mutable state both files read and write. */
 export const harnessState = {
@@ -20,6 +21,8 @@ export const harnessState = {
   pointerStore: new Map<string, any>(),
   // flair#2213: Flair's deletion writers append records here in the row delete's transaction.
   deletionStore: new Map<string, any>(),
+  // flair#2139 3b: instruction-version writes append one OrgEvent row in the same transaction.
+  eventStore: new Map<string, any>(),
   instanceRow: null as any,
   pointerSearchCalls: 0,
   failNextPointerPut: false,
@@ -42,6 +45,7 @@ export function resetHarnessState(): void {
   harnessState.memoryStore.clear();
   harnessState.pointerStore.clear();
   harnessState.deletionStore.clear();
+  harnessState.eventStore.clear();
   harnessState.instanceRow = null;
   harnessState.pointerSearchCalls = 0;
   harnessState.failNextPointerPut = false;
@@ -83,6 +87,11 @@ export function mockTransaction(ctx: any, cb: (txn: any) => any): any {
     saveCommits: false,
     staged,
     aborted: false,
+    // Harper passes a commit-time guard its commit time and the stored entry.
+    addWrite(write: any) {
+      staged.push(() => write.commit(1, write.store.getEntry(write.key)));
+      return write;
+    },
     abort() { this.open = 0; this.aborted = true; staged.length = 0; },
     commit() { this.open = 0; for (const f of staged) f(); staged.length = 0; },
   };
@@ -105,11 +114,29 @@ function stageOrRun(ctx: any, apply: () => void): void {
 }
 
 export class BaseMemory {
+  static _readTxnForContext(_ctx: any) { return undefined; }
+  static transformEntryForSelect(select: any) {
+    return ({ value: row }: any) => {
+      if (typeof select === "string") return row[select];
+      return Object.fromEntries(select.map((key: string) => [key, row[key]]));
+    };
+  }
+  /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
+   *  double injects one (test/helpers/memory-lock-double.ts). */
+  static primaryStore = memoryLockDouble();
   /** Real Harper binds the resource to the URL target (`getId()`); a PUT writes
    *  to THAT id. `_targetId` models the URL-bound target; unset for a direct
    *  in-process call, where the body id IS the write key. See
    *  resources/originator-instance.ts. */
   getId() { return (this as any)._targetId; }
+  /** flair#2478 part 3a: real Harper's `Table.getResource` returns a resource
+   *  bound to its target and context; the checked Memory writes use it. */
+  static getResource(target: any, ctx: any) {
+    const resource: any = new this();
+    resource._targetId = target?.id;
+    resource.getContext = () => ctx;
+    return resource;
+  }
   async get(target?: any) {
     harnessState.lastBaseGetTarget = target;
     const id = typeof target === "string" ? target : target?.id;
@@ -229,20 +256,20 @@ function mhsGet(target?: any) {
   const id = typeof target === "string" ? target : (target?.memoryId ?? target?.id);
   return Promise.resolve(harnessState.pointerStore.get(id) ?? null);
 }
-function mhsPut(row: any) {
+function mhsPut(row: any, ctx?: any) {
   if (harnessState.failNextPointerPut) {
     harnessState.failNextPointerPut = false;
     return Promise.reject(new Error("boom: pointer store down"));
   }
-  harnessState.pointerStore.set(row.memoryId, { ...row });
+  stageOrRun(ctx, () => harnessState.pointerStore.set(row.memoryId, { ...row }));
   return Promise.resolve({ ...row });
 }
-function mhsDelete(id: any) {
+function mhsDelete(id: any, ctx?: any) {
   if (harnessState.failNextPointerDelete) {
     harnessState.failNextPointerDelete = false;
     return Promise.reject(new Error("boom: pointer delete down"));
   }
-  harnessState.pointerStore.delete(typeof id === "string" ? id : id?.memoryId);
+  stageOrRun(ctx, () => harnessState.pointerStore.delete(typeof id === "string" ? id : id?.memoryId));
   return Promise.resolve({ ok: true });
 }
 function mhsSearch(query?: any) {
@@ -270,6 +297,12 @@ function mhsSearch(query?: any) {
   })();
 }
 export class BaseMemoryHostSource {
+  static primaryStore = {
+    getEntry(id: string) {
+      const value = harnessState.pointerStore.get(id);
+      return value ? { value } : undefined;
+    },
+  };
   get(t?: any) {
     return mhsGet(t);
   }
@@ -295,8 +328,8 @@ export class BaseMemoryHostSource {
   static get(t?: any) {
     return mhsGet(t);
   }
-  static put(r: any) {
-    return mhsPut(r);
+  static put(r: any, ctx?: any) {
+    return mhsPut(r, ctx);
   }
   static post(r: any) {
     return mhsPut(r);
@@ -304,8 +337,8 @@ export class BaseMemoryHostSource {
   static patch(r: any) {
     return mhsPut(r);
   }
-  static delete(id: any) {
-    return mhsDelete(id);
+  static delete(id: any, ctx?: any) {
+    return mhsDelete(id, ctx);
   }
   static search(q?: any) {
     return mhsSearch(q);
@@ -322,9 +355,23 @@ export class BaseMemoryDeletionHistory {
   }
 }
 
+// flair#2139 3b: the instruction-version writer appends one event per version
+// through `databases.flair.OrgEvent.create(record, shared)`.
+export class BaseOrgEvent {
+  static async create(record: any, ctx?: any) {
+    stageOrRun(ctx, () => harnessState.eventStore.set(record.id, { ...record }));
+  }
+  async create(record: any, ctx?: any) {
+    return BaseOrgEvent.create(record, ctx);
+  }
+  static async *search() {}
+  async *search() {}
+}
+
 export const databasesMock = {
   flair: {
     Memory: BaseMemory,
+    OrgEvent: BaseOrgEvent,
     MemoryHostSource: BaseMemoryHostSource,
     MemoryDeletionHistory: BaseMemoryDeletionHistory,
     Agent: { get: async () => null, search: async () => [] },

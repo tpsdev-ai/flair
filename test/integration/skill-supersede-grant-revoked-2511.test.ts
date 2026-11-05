@@ -27,7 +27,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HarperInstance, startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const POINT = "skill-close-staged";
 
@@ -162,20 +162,7 @@ const successorBody = (id: string, agentId: string, supersedes: string, content:
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-s2511-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper();
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
   assertOwnInstance(harper);
   await seedAgent(harper, owner);
   await seedAgent(harper, grantee);
@@ -192,7 +179,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2511 — a grant-authorized cross-agent skill-version supersede re-checks its write grant (real Harper)", () => {
   it("control: with the grant intact the cross-agent supersede closes the predecessor and appends a version", async () => {

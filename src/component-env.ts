@@ -41,6 +41,7 @@
 // else, and `assertNoSecretKeys` is a runtime guard, not a comment.
 
 import { parseMcpComponentEnv } from "./lib/mcp-oauth-env-core.js";
+import { NEVER_GENERATED_SECRET_KEYS } from "./lib/secret-keys.js";
 
 /** The file Harper's `loadEnv` plugin is pointed at by flair's config.yaml. */
 export const COMPONENT_ENV_FILENAME = ".env";
@@ -52,27 +53,11 @@ export const PUBLIC_URL_KEY = "FLAIR_PUBLIC_URL";
  *  `@harperfast/oauth` authorization server advertises. */
 export const MCP_ISSUER_KEY = "FLAIR_MCP_ISSUER";
 
-/**
- * Key names that must never appear in a `.env` flair GENERATES.
- *
- * An operator's own file is a different matter — see `planComponentEnv`, which
- * preserves whatever they wrote and warns by key NAME (never value) rather than
- * silently dropping or shipping it.
- */
-export const NEVER_GENERATED_SECRET_KEYS = [
-  "HDB_ADMIN_PASSWORD",
-  "FLAIR_ADMIN_PASSWORD",
-  "FLAIR_ADMIN_PASS",
-  "FABRIC_PASSWORD",
-  "FLAIR_CLUSTER_ADMIN_PASS",
-  "CLI_TARGET_PASSWORD",
-  // The DCR initial access token (resources/dcr-gate.ts). It is a bearer
-  // credential for an unauthenticated public endpoint, so it belongs in the
-  // process environment, never in a deploy payload — that payload is ingested
-  // into an hdb_deployment row and replicated to every node, per the argument
-  // at the top of this file.
-  "FLAIR_OAUTH_DCR_TOKEN",
-] as const;
+// Re-exported from ./lib/secret-keys.js, which has no imports so a plain
+// `node` script can load it without a build step (flair#2589). The list lives
+// there; the deploy-payload rationale remains above. This module keeps the
+// public name stable for existing importers.
+export { NEVER_GENERATED_SECRET_KEYS };
 
 /**
  * A key name that looks like it carries a credential. Used for the operator-facing

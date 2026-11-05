@@ -40,7 +40,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -76,16 +76,7 @@ const PARAPHRASE_QUERY = "When are we getting together to go over quarterly spen
 
 describe("SemanticSearch singleton-result scoring (real Harper, real embeddings)", () => {
   beforeAll(async () => {
-    // Pin the legacy path: startHarper() inherits process.env at spawn time,
-    // so this must be set before the call, not just before the request.
-    const prevHybrid = process.env.FLAIR_HYBRID_RETRIEVAL;
-    process.env.FLAIR_HYBRID_RETRIEVAL = "false";
-    try {
-      harper = await startHarper();
-    } finally {
-      if (prevHybrid === undefined) delete process.env.FLAIR_HYBRID_RETRIEVAL;
-      else process.env.FLAIR_HYBRID_RETRIEVAL = prevHybrid;
-    }
+    harper = await startHarper({ serverEnv: { FLAIR_HYBRID_RETRIEVAL: "false" } });
     const res = await adminOp(harper, {
       operation: "insert", database: "flair", table: "Agent",
       records: [{ id: agent.id, name: agent.id, role: "agent", publicKey: agent.publicKey, createdAt: new Date().toISOString() }],
@@ -106,7 +97,7 @@ describe("SemanticSearch singleton-result scoring (real Harper, real embeddings)
     if (![200, 204].includes(put.status)) throw new Error(`seed PUT ${MEMORY_ID} → ${put.status}: ${await put.text()}`);
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("SemanticSearch singleton-result scoring: a singleton semantic-search result scores as a real positive similarity, not 0/DEGRADED", async () => {
     const path = "/SemanticSearch";

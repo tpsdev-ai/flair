@@ -51,7 +51,7 @@ import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import {
   TOOLS,
   INTERNAL_MEMORY_FIELDS,
@@ -329,7 +329,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (dataDir) await rm(dataDir, { recursive: true, force: true, maxRetries: 4 });
   if (appDir) await rm(appDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 // ── contract-driven assertion engine ────────────────────────────────────────
 // `conform()` (and its helpers) live in test/helpers/mcp-conformance.ts —

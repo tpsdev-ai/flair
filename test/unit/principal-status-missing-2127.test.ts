@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const CHILD_DEADLINE_MS = 20_000;
 const CLI_PATH = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
@@ -25,9 +26,10 @@ type Mode = "ok" | "missing" | "unreadable";
 function runCli(args: string[], env: Record<string, string> = {}): Promise<{ stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const child = spawn("bun", [CLI_PATH, ...args], {
+    const childEnv = { ...process.env, FLAIR_AGENT_ID: "", FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TARGET: "", FLAIR_OPS_TARGET: "", ...env };
+    const child = spawn(nodeBin({ env: childEnv, cwd: env.HOME }), [CLI_PATH, ...args], {
       cwd: env.HOME,
-      env: { ...process.env, FLAIR_AGENT_ID: "", FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TARGET: "", FLAIR_OPS_TARGET: "", ...env },
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 20_000,
     });

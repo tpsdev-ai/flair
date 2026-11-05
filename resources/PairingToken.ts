@@ -4,7 +4,7 @@ import { allowAdmin } from "./agent-auth.js";
 /**
  * PairingToken holds one-time federation pairing secrets — admin/system only,
  * no agent grant. The FederationPair endpoint consumes tokens via internal calls
- * (allowAdmin permits internal), so dedicated flows keep working; direct anonymous
+ * through the raw table rather than this resource, so dedicated flows keep working; direct anonymous
  * table access is denied. Self-authorizes now that the global gate is non-rejecting.
  */
 export class PairingToken extends (databases as any).flair.PairingToken {

@@ -142,11 +142,18 @@ export function statusVersionAdvice(input: {
  * The ops-API bind is read from the same harper-config.yaml doctor reads.
  * Only judged for a loopback target: the LOCAL install's config says nothing
  * about a remote instance, and warning about the wrong machine is its own lie.
+ *
+ * `dataDir` defaults to `defaultDataDir()`, so both call sites (plain `status`
+ * and `status deep`) behave as before. It is injectable so a test can drive the
+ * decision against a temp data dir, without touching process.env.
  */
-function localOpsApiWarnings(baseUrl: string): Array<{ level: string; message: string }> {
+export function localOpsApiWarnings(
+  baseUrl: string,
+  dataDir: string = defaultDataDir(),
+): Array<{ level: string; message: string }> {
   const out: Array<{ level: string; message: string }> = [];
   if (!isLocalhostUrl(baseUrl)) return out;
-  const finding = opsApiBindFinding(readHarperConfig(defaultDataDir()));
+  const finding = opsApiBindFinding(readHarperConfig(dataDir));
   if (finding?.allInterfaces) {
     // Name where the full explanation + fix live, matching the status warning
     // convention (docs/quickstart.md: a warning names the command to run).

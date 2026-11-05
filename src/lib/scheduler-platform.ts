@@ -268,9 +268,11 @@ export function resolveNodeBin(explicit?: string): string {
   if (!process.versions.bun && process.execPath && isAbsolute(process.execPath)) {
     return process.execPath;
   }
-  const r = spawnReport(["/bin/sh", "-c", "command -v node"], STATUS_CHECK_TIMEOUT_MS);
-  const found = r.stdout.trim().split("\n")[0]?.trim() ?? "";
-  if (r.code === 0 && found && isAbsolute(found) && existsSync(found)) return found;
+  const r = spawnSync("/bin/sh", ["-s"], {
+    input: "command -v node\n", encoding: "utf8", timeout: STATUS_CHECK_TIMEOUT_MS,
+  });
+  const found = r.stdout?.trim().split("\n")[0]?.trim() ?? "";
+  if (r.status === 0 && found && isAbsolute(found) && existsSync(found)) return found;
   throw new Error(
     "unable to resolve an absolute path to a node binary (not running under node, and `command -v node` " +
       "found nothing). The scheduler shim runs `<node> <flair-script>` with the node path baked in at " +
@@ -380,9 +382,11 @@ export function formatFlairBinWarning(baked: string, publicBin: string | null, e
 }
 
 function lookupPublicFlairBin(): string | null {
-  const r = spawnReport(["/bin/sh", "-c", "command -v flair"], STATUS_CHECK_TIMEOUT_MS);
-  const found = r.stdout.trim().split("\n")[0]?.trim() ?? "";
-  if (r.code === 0 && found && isAbsolute(found) && existsSync(found)) return found;
+  const r = spawnSync("/bin/sh", ["-s"], {
+    input: "command -v flair\n", encoding: "utf8", timeout: STATUS_CHECK_TIMEOUT_MS,
+  });
+  const found = r.stdout?.trim().split("\n")[0]?.trim() ?? "";
+  if (r.status === 0 && found && isAbsolute(found) && existsSync(found)) return found;
   return null;
 }
 

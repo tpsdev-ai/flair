@@ -8,7 +8,7 @@
 //      cannot.
 //   2. cross-agent write succeeds WITHOUT ownership — agent B can report
 //      usage on agent A's memory (unlike Memory.put(), which would 403 this)
-//      — and no OTHER field on A's memory changes. The cross-agent fixtures
+//      The cross-agent fixtures
 //      are `visibility: "shared"`: B can only report a memory in its read
 //      scope (property 5), and a `standard` memory defaults to private.
 //   3. dedup — each (agentId, memoryId) pair contributes AT MOST 1 to
@@ -27,7 +27,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -64,7 +64,7 @@ async function registerAgent(harper: HarperInstance, agent: TestAgent): Promise<
   expect(res.status, `Agent insert for ${agent.id} returned ${res.status}`).toBe(200);
 }
 
-/** Signed PUT to /Memory/<id> — the only HTTP-reachable Memory create/update path. */
+/** Signed PUT to /Memory/<id> — the write path these tests use. */
 async function putMemory(harper: HarperInstance, agent: TestAgent, id: string, body: Record<string, any>): Promise<Response> {
   const path = `/Memory/${id}`;
   return fetch(`${harper.httpURL}${path}`, {
@@ -153,7 +153,7 @@ describe("RecordUsage e2e (real Harper) — flair#683 usage-feedback signal", ()
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("auth: anonymous (unsigned) call is denied — 403 (allowCreate gate denies anonymous, same convention as every other action resource — see auth-middleware-e2e.test.ts's AUTH INVARIANT tests), no ledger side effect", async () => {
     const owner = mkAgent(`ru-anon-owner-${randomUUID()}`);
@@ -183,7 +183,7 @@ describe("RecordUsage e2e (real Harper) — flair#683 usage-feedback signal", ()
     expect(res.body).toEqual({ recorded: true });
   }, 60_000);
 
-  test("cross-agent write: agent B increments agent A's memory usageCount WITHOUT ownership — and no OTHER field changes", async () => {
+  test("cross-agent usage updates the count and commit marker while preserving content, tags and owner", async () => {
     const owner = mkAgent(`ru-cross-owner-${randomUUID()}`);
     const reporter = mkAgent(`ru-cross-reporter-${randomUUID()}`);
     await registerAgent(harper, owner);
@@ -209,8 +209,7 @@ describe("RecordUsage e2e (real Harper) — flair#683 usage-feedback signal", ()
     expect(check.status).toBe(200);
     const rec: any = await check.json();
     expect(rec.usageCount).toBe(1);
-    // Ownership NOT required, but ONLY usageCount changed — never content,
-    // tags, agentId, or any other field (module doc's "targeted ... ONLY").
+    expect(rec.writeBackWriteId).toBeString();
     expect(rec.content).toBe(originalContent);
     expect(rec.tags).toEqual(["original-tag"]);
     expect(rec.agentId).toBe(owner.id);

@@ -1,0 +1,1 @@
+- **Owner-targeted memory maintenance searches Memory by its indexed `agentId` condition.** The item loop now supplies that condition to the read instead of scanning the whole table; a fleet-wide admin run still scans every row.

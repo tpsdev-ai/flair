@@ -6,14 +6,15 @@
 //   H3 `POST /FederationPair` re-pair: a peer revoked before, or during, the re-pair;
 //      a pinned key changed, or a row deleted, during the re-pair.
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { ensureFlairPairInitiatorRole } from "../../src/cli";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
-import { componentWithFailingRepairPeerWrite, type FailingComponent } from "../helpers/host-pointer-failing-component";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { componentWithFailingRepairPeerWrite, FAILING_REPAIR_PEER_WRITE_MODULE_REL, type FailingComponent } from "../helpers/host-pointer-failing-component";
 
 const sfx = Date.now().toString(36);
 const now = () => new Date().toISOString();
@@ -104,6 +105,17 @@ async function updatePeer(id: string, fields: Record<string, unknown>): Promise<
   return { status: res.status, row: await readPeer(id) };
 }
 
+/** A competing whole-row replace (REST PUT): its HTTP status and the peer row it left. */
+async function replacePeer(id: string, row: Record<string, unknown>): Promise<{ status: number; row: any }> {
+  const res = await fetch(`${harper.httpURL}/Peer/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: opsAuth() },
+    body: JSON.stringify(row),
+    signal: AbortSignal.timeout(30_000),
+  });
+  return { status: res.status, row: await readPeer(id) };
+}
+
 async function seedToken(token: string): Promise<void> {
   await ops({
     operation: "insert", database: "flair", table: "PairingToken",
@@ -181,24 +193,25 @@ async function withPaused<T>(point: string, trigger: () => Promise<Response>, co
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2333-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    // The whole file runs against a composed copy of the built component that
-    // adds the failing re-pair Peer-write module (test/helpers/
-    // host-pointer-failing-component.ts). It throws only for an armed peer ID.
-    component = componentWithFailingRepairPeerWrite();
-    harper = await startHarper({ cwd: component.dir });
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
+  // The whole file runs against a composed copy of the built component that
+  // adds the failing re-pair Peer-write module (test/helpers/
+  // host-pointer-failing-component.ts). It throws only for an armed peer ID.
+  component = componentWithFailingRepairPeerWrite();
+  appendFileSync(join(component.dir, FAILING_REPAIR_PEER_WRITE_MODULE_REL), `
+const peerGet = Peer.get;
+Peer.get = function (id, ...rest) {
+  const dir = process.env.FLAIR_TEST_PAUSE_DIR;
+  if (dir && typeof id === "string") {
+  const arm = join(dir, "arm.converted-peer-read-fail." + id);
+  if (existsSync(arm)) {
+    unlinkSync(arm);
+    throw new Error("test component: forced converted first-pair read-back failure");
   }
+  }
+  return peerGet.call(this, id, ...rest);
+};
+`);
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir }, cwd: component.dir });
   assertOwnInstance(harper);
 }, 240_000);
 
@@ -206,7 +219,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (component) component.cleanup();
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2333 — a pairing token pairs at most one peer (real Harper)", () => {
   it("two concurrent pairings with the same token: one consumes it, the other is refused", async () => {
@@ -840,6 +853,8 @@ describe("flair#2333 — a token re-pair whose Peer row was deleted pairs as a f
     const row = await readPeer(peer);
     expect(row?.id).toBe(peer);
     expect(row?.publicKey).toBe(pub);
+    expect(row?.pairAttemptWriteId).toBeTruthy();
+    expect((await readToken(token))?.pairAttemptWriteId).toBe(row?.pairAttemptWriteId);
     expect(firstPairShape(row)).toEqual({
       role: "spoke", endpoint: null, status: "paired", relayOnly: false,
       lastSyncAt: null, lastMergeAt: null, lastSyncCursor: null,
@@ -863,6 +878,61 @@ describe("flair#2333 — a token re-pair whose Peer row was deleted pairs as a f
     const users = await ops({ operation: "list_users" }) as any[];
     expect(users.map((u) => u.username), "the token's bootstrap user is dropped").not.toContain(bootstrapUser);
   }, 90_000);
+
+  for (const fault of ["dropped-write", "unreadable-read-back"] as const) {
+    it(`a converted first pair with ${fault} does not report paired`, async () => {
+      const k = nacl.sign.keyPair();
+      const pub = b64url(k.publicKey);
+      const peer = `converted-${fault}-${sfx}`;
+      const token = `pt-converted-${fault}-${sfx}`;
+      await seedPeer(peer, pub);
+      await seedToken(token);
+      const readFault = join(pauseDir, `arm.converted-peer-read-fail.${peer}`);
+      try {
+        const { response, paused, released, competed } = await withPaused(
+          "federation-pair-first-commit",
+          async () => {
+            const converted = await withPaused(
+              "federation-pair-repair-token-pre",
+              () => pairRequest(pairBody(peer, pub, k.secretKey, token)),
+              () => deletePeer(peer),
+            );
+            expect(converted.paused).toBe(true);
+            expect(converted.released).toBe("go");
+            expect(converted.competed?.status).toBe(200);
+            expect(converted.competed?.row).toBeNull();
+            return converted.response;
+          },
+          async () => {
+            if (fault === "dropped-write") {
+              await seedPeer(peer, pub);
+              return readPeer(peer);
+            }
+            writeFileSync(readFault, "");
+            return undefined;
+          },
+        );
+        expect(paused).toBe(true);
+        expect(released).toBe("go");
+        const body = await response.json() as any;
+        expect(response.status, JSON.stringify(body)).toBe(fault === "dropped-write" ? 409 : 503);
+        expect(body.error).toBe(fault === "dropped-write" ? "peer_pair_unconfirmed" : "peer_read_back_unconfirmed");
+        expect(body.outcome).toBe("unconfirmed");
+        expect(body.paired).toBeUndefined();
+        if (fault === "dropped-write") {
+          expect(await readPeer(peer)).toEqual(competed);
+          expect((await readPeer(peer))?.pairAttemptWriteId).toBeUndefined();
+        } else {
+          expect(existsSync(readFault), "the read-back consumed the fault").toBe(false);
+          const row = await readPeer(peer);
+          expect(row?.pairAttemptWriteId).toBeTruthy();
+          expect((await readToken(token))?.pairAttemptWriteId).toBe(row?.pairAttemptWriteId);
+        }
+      } finally {
+        rmSync(readFault, { force: true });
+      }
+    }, 90_000);
+  }
 });
 
 // ─── A first-time pair confirms its Peer row is still absent in committed state (#2512) ───
@@ -903,7 +973,7 @@ describe("flair#2512 — a first-time pair confirms its Peer row is still absent
     );
     expect(paused, "the first pairing was not paused before its owned transaction").toBe(true);
     expect(released, "the first pairing was not released by this test").toBe("go");
-    expect(competed?.publicKey, "the competing pair committed its own key").toBe(b64url(b.publicKey));
+    expect(competed?.publicKey, "the competing direct write committed its own key").toBe(b64url(b.publicKey));
     const resBody = await response.json() as any;
     const rowAfter = await readPeer(peer);
     const tokenAfter = await readToken(token);
@@ -962,7 +1032,7 @@ describe("flair#2512 — a first-time pair confirms its Peer row is still absent
     );
     expect(paused, "the first pairing was not paused after its token read").toBe(true);
     expect(released, "the first pairing was not released by this test").toBe("go");
-    expect(competed?.publicKey, "the competing pair committed its own key").toBe(b64url(b.publicKey));
+    expect(competed?.publicKey, "the competing direct write committed its own key").toBe(b64url(b.publicKey));
     const resBody = await response.json() as any;
     const rowAfter = await readPeer(peer);
     const tokenAfter = await readToken(token);
@@ -1020,4 +1090,335 @@ describe("flair#2512 — a first-time pair confirms its Peer row is still absent
     expect(row?.publicKey).toBe(b64url(k.publicKey));
     expect((await readToken(token))?.consumedBy, "the first pair consumed the token").toBe(peer);
   }, 60_000);
+});
+
+describe("flair#2656 — a first-time pair confirms the committed row after its commit (real Harper)", () => {
+  it("a direct write committed in the confirmation-to-commit gap is refused, and the committed row is the competitor's", async () => {
+    const token = `pt-2656-gap-${sfx}`;
+    const a = nacl.sign.keyPair();
+    const b = nacl.sign.keyPair();
+    const peer = `f2656-peer-${sfx}`;
+    await seedToken(token);
+    const { response, competed, released, paused } = await withPaused(
+      "federation-pair-first-commit",
+      () => pairRequest(pairBody(peer, b64url(a.publicKey), a.secretKey, token)),
+      async () => {
+        // The first pair has staged its row but not committed. A competing direct
+        // write for the same instance commits in the gap.
+        await seedPeer(peer, b64url(b.publicKey));
+        return readPeer(peer);
+      },
+    );
+    expect(paused, "the first pair was not paused at its commit gap").toBe(true);
+    expect(released, "the first pair was not released by this test").toBe("go");
+    expect(competed?.publicKey, "the competing direct write committed its own key").toBe(b64url(b.publicKey));
+    const body = await response.json() as any;
+    expect(response.status, JSON.stringify(body)).toBe(409);
+    expect(body.error).toBe("peer_pair_unconfirmed");
+    expect(body.outcome).toBe("unconfirmed");
+    expect(body.paired, "this request did not store its row, so it does not report paired").toBeUndefined();
+    expect((await readPeer(peer))?.publicKey, "the committed row is the competitor's").toBe(b64url(b.publicKey));
+  }, 60_000);
+
+  for (const converted of [false, true]) {
+    it(`a ${converted ? "converted" : "plain"} first pair with consumedBy cleared after commit does not report paired`, async () => {
+      const token = `pt-2656-cleared-${converted}-${sfx}`;
+      const k = nacl.sign.keyPair();
+      const peer = `f2656-cleared-${converted}-${sfx}`;
+      const pub = b64url(k.publicKey);
+      await seedToken(token);
+      if (converted) await seedPeer(peer, pub);
+      const { response, competed, released, paused } = await withPaused(
+        "federation-pair-first-read-back",
+        async () => {
+          if (!converted) return pairRequest(pairBody(peer, pub, k.secretKey, token));
+          const repair = await withPaused(
+            "federation-pair-repair-token-pre",
+            () => pairRequest(pairBody(peer, pub, k.secretKey, token)),
+            () => deletePeer(peer),
+          );
+          expect(repair.paused).toBe(true);
+          expect(repair.released).toBe("go");
+          expect(repair.competed?.status).toBe(200);
+          expect(repair.competed?.row).toBeNull();
+          return repair.response;
+        },
+        async () => {
+          const before = await readToken(token);
+          expect(before?.consumedBy).toBe(peer);
+          expect(before?.consumedAt).toBeTruthy();
+          expect(before?.pairAttemptWriteId).toBeTruthy();
+          expect((await readPeer(peer))?.pairAttemptWriteId).toBe(before.pairAttemptWriteId);
+          await ops({
+            operation: "update", database: "flair", table: "PairingToken",
+            records: [{ id: token, expiresAt: before.expiresAt, createdAt: before.createdAt, consumedBy: null }],
+          });
+          const after = await readToken(token);
+          expect(after?.consumedBy).toBeNull();
+          expect(after?.consumedAt).toBe(before.consumedAt);
+          expect(after?.pairAttemptWriteId).toBe(before.pairAttemptWriteId);
+          return after;
+        },
+      );
+      expect(paused).toBe(true);
+      expect(released).toBe("go");
+      const body = await response.json() as any;
+      expect(response.status, JSON.stringify(body)).toBe(409);
+      expect(body.error).toBe("peer_pair_unconfirmed");
+      expect(body.outcome).toBe("unconfirmed");
+      expect(body.paired).toBeUndefined();
+      expect(await readToken(token)).toEqual(competed);
+    }, 90_000);
+  }
+
+  it("a competing direct write at the same consumedAt: an uncommitted marker does not report success", async () => {
+    // A frozen child clock gives the pair and competing direct write the same `consumedAt`.
+    const clockPreload = fileURLToPath(new URL("../helpers/harper-freeze-clock.cjs", import.meta.url));
+    const frozenAt = Date.now();
+    const frozenISO = new Date(frozenAt).toISOString();
+    const outer = harper;
+    let frozen: HarperInstance | undefined;
+    try {
+      frozen = await startHarper({
+        cwd: component.dir,
+        env: {
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${clockPreload}`.trim(),
+        },
+        serverEnv: {
+          FLAIR_ENABLE_TEST_FAULT_INJECTION: "1",
+          FLAIR_TEST_PAUSE_DIR: pauseDir,
+          FLAIR_TEST_FROZEN_NOW: String(frozenAt),
+        },
+      });
+      assertOwnInstance(frozen);
+      harper = frozen;
+
+      const token = `pt-2656-same-ms-${sfx}`;
+      const a = nacl.sign.keyPair();
+      const peer = `f2656-same-ms-${sfx}`;
+      const publicKey = b64url(a.publicKey);
+      await seedToken(token);
+      const { response, released, paused } = await withPaused(
+        "federation-pair-first-commit",
+        () => pairRequest(pairBody(peer, publicKey, a.secretKey, token)),
+        async () => {
+          // A competing direct write at the SAME frozen instant stores value-equal
+          // Peer and token rows with its own marker. This attempt's write is
+          // the one the commit drops.
+          await ops({
+            operation: "insert", database: "flair", table: "Peer",
+            records: [{
+              id: peer, publicKey, role: "spoke", endpoint: null, status: "paired",
+              relayOnly: false, pairedAt: frozenISO, createdAt: frozenISO, updatedAt: frozenISO,
+              pairAttemptWriteId: "competitor-marker",
+            }],
+          });
+          await ops({
+            operation: "update", database: "flair", table: "PairingToken",
+            records: [{ id: token, consumedBy: peer, consumedAt: frozenISO, pairAttemptWriteId: "competitor-marker" }],
+          });
+        },
+      );
+      expect(paused, "the first pair was not paused at its commit gap").toBe(true);
+      expect(released, "the first pair was not released by this test").toBe("go");
+      const body = await response.json() as any;
+      expect(response.status, JSON.stringify(body)).toBe(409);
+      expect(body.error).toBe("peer_pair_unconfirmed");
+      expect(body.outcome).toBe("unconfirmed");
+      expect(body.paired, "this request's own marker did not commit, so it does not report paired").toBeUndefined();
+      expect((await readPeer(peer))?.publicKey, "the committed Peer row carries this attempt's staged values").toBe(publicKey);
+      const tokenRow = await readToken(token);
+      expect(tokenRow?.consumedBy, "the committed consume names this attempt's instance").toBe(peer);
+      expect(tokenRow?.consumedAt, "the committed consume shares this attempt's consumedAt").toBe(frozenISO);
+    } finally {
+      harper = outer;
+      if (frozen) await stopHarper(frozen);
+    }
+  }, 300_000);
+
+  it("the ordinary success path confirms this attempt's marker on both committed rows", async () => {
+    const token = `pt-2656-ok-marker-${sfx}`;
+    const k = nacl.sign.keyPair();
+    const peer = `f2656-ok-marker-${sfx}`;
+    await seedToken(token);
+    const res = await pairRequest(pairBody(peer, b64url(k.publicKey), k.secretKey, token));
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body.paired).toBe(true);
+    const row = await readPeer(peer);
+    const tokenRow = await readToken(token);
+    expect(row?.publicKey).toBe(b64url(k.publicKey));
+    expect(row?.pairAttemptWriteId, "the committed Peer row carries this attempt's marker").toBeTruthy();
+    expect(tokenRow?.pairAttemptWriteId, "the committed token consume carries the same marker").toBe(row?.pairAttemptWriteId);
+  }, 60_000);
+});
+
+describe("flair#2656 — re-pair post-commit confirmation (real Harper)", () => {
+  for (const withToken of [true, false]) {
+    for (const evidence of withToken ? ["Peer", "PairingToken", "unreadable"] : ["Peer", "unreadable"]) {
+      it(`${withToken ? "token" : "no-token"} re-pair refuses unconfirmed evidence (${evidence})`, async () => {
+        const token = `pt-2656-repair-${withToken}-${evidence}-${sfx}`;
+        const k = nacl.sign.keyPair();
+        const peer = `f2656-repair-${withToken}-${evidence}-${sfx}`;
+        await seedPeer(peer, b64url(k.publicKey));
+        if (withToken) await seedToken(token);
+        const { response, competed, released, paused } = await withPaused(
+          withToken ? "federation-pair-repair-token-commit" : "federation-pair-repair-commit",
+          () => pairRequest(pairBody(peer, b64url(k.publicKey), k.secretKey, withToken ? token : undefined)),
+          async () => {
+            const peerRow = await readPeer(peer);
+            expect(peerRow?.pairAttemptWriteId).toBeTruthy();
+            if (withToken) {
+              const tokenRow = await readToken(token);
+              expect(tokenRow?.pairAttemptWriteId).toBe(peerRow.pairAttemptWriteId);
+              expect(tokenRow?.consumedBy).toBe(peer);
+              expect(tokenRow?.consumedAt).toBeTruthy();
+            }
+            if (evidence === "unreadable") {
+              writeFileSync(join(pauseDir, `arm.converted-peer-read-fail.${peer}`), "");
+              return peerRow;
+            }
+            const table = evidence;
+            const row = table === "Peer" ? peerRow : await readToken(token);
+            await ops({
+              operation: "update", database: "flair", table,
+              records: [{ ...row, pairAttemptWriteId: "other-attempt" }],
+            });
+            const committed = table === "Peer" ? await readPeer(peer) : await readToken(token);
+            expect(committed?.pairAttemptWriteId).toBe("other-attempt");
+            return committed;
+          },
+        );
+        expect(paused).toBe(true);
+        expect(released).toBe("go");
+        const body = await response.json() as any;
+        expect(response.status, JSON.stringify(body)).toBe(withToken ? 409 : 503);
+        expect(body.error).toBe(withToken ? "peer_pair_unconfirmed" : "write_outcome_unknown");
+        expect(body.outcome).toBe("unconfirmed");
+        expect(body.paired).toBeUndefined();
+        expect(evidence === "PairingToken" ? await readToken(token) : await readPeer(peer)).toEqual(competed);
+      }, 90_000);
+    }
+  }
+});
+
+describe("flair#2691 — a re-pair write dropped in the confirmation-to-commit window (real Harper)", () => {
+  for (const withToken of [true, false]) {
+    it(`${withToken ? "token" : "no-token"} re-pair refuses a Peer write dropped before its commit`, async () => {
+      const token = `pt-2691-${withToken}-${sfx}`;
+      const k = nacl.sign.keyPair();
+      const competitor = nacl.sign.keyPair();
+      const peer = `f2691-${withToken}-${sfx}`;
+      const pub = b64url(k.publicKey);
+      const competitorKey = b64url(competitor.publicKey);
+      await seedPeer(peer, pub);
+      if (withToken) await seedToken(token);
+      const seededPeer = await readPeer(peer);
+      // The competitor replaces the whole row. A field-level update would merge
+      // over the staged row and keep this attempt's pairAttemptWriteId.
+      const competitorRow = { ...seededPeer, publicKey: competitorKey };
+      let tokenInPause: any;
+      const { response, competed, released, paused } = await withPaused(
+        withToken ? "federation-pair-repair-token-before-commit" : "federation-pair-repair-before-commit",
+        () => pairRequest(pairBody(peer, pub, k.secretKey, withToken ? token : undefined)),
+        async () => {
+          // While the pause holds, the re-pair's own transaction has not
+          // committed: the Peer read still returns the seeded row, with none of
+          // this attempt's staged values.
+          const inPause = await readPeer(peer);
+          expect(inPause?.publicKey, "the committed Peer still holds the seeded key while the re-pair is paused").toBe(pub);
+          expect(inPause, "the committed Peer carries none of this attempt's staged values while the re-pair is paused").toEqual(seededPeer);
+          if (withToken) {
+            tokenInPause = await readToken(token);
+            expect(tokenInPause?.consumedBy, "the pairing token is still unconsumed while the re-pair is paused").toBeUndefined();
+            expect(tokenInPause?.pairAttemptWriteId, "no consume staged by this attempt is committed while the re-pair is paused").toBeUndefined();
+          }
+          // The re-pair's row is staged but not committed. A competing write
+          // replaces the whole Peer row and commits here.
+          return replacePeer(peer, competitorRow);
+        },
+      );
+      expect(paused, "the re-pair was not paused before its owned transaction committed").toBe(true);
+      expect(released, "the re-pair was not released by this test").toBe("go");
+      expect(competed?.status, "the competing replace committed").toBe(204);
+      expect(competed?.row, "the committed Peer is the competitor's row after its replace").toEqual(competitorRow);
+      const body = await response.json() as any;
+      expect(response.status, JSON.stringify(body)).toBe(withToken ? 409 : 503);
+      expect(body.error).toBe(withToken ? "peer_pair_unconfirmed" : "write_outcome_unknown");
+      expect(body.outcome).toBe("unconfirmed");
+      expect(body.paired, "the refused re-pair does not report paired").toBeUndefined();
+      const committed = await readPeer(peer);
+      expect(committed, "after the re-pair is released, the committed Peer is the competitor's row").toEqual(competitorRow);
+      // The staged re-pair row (resources/Federation.ts) holds the seeded key, a
+      // new updatedAt and a pairAttemptWriteId; its other fields equal the
+      // competitor's row.
+      expect(committed?.publicKey, "the committed Peer does not hold the key this re-pair staged").not.toBe(pub);
+      expect(committed?.updatedAt, "the committed Peer has no updatedAt; this re-pair staged one").toBeUndefined();
+      expect(committed?.pairAttemptWriteId, "the committed Peer has no pairAttemptWriteId; this re-pair staged one").toBeUndefined();
+      if (withToken) {
+        // The token route stages one pairAttemptWriteId on both the consume and the Peer row.
+        const tokenRow = await readToken(token);
+        expect(tokenRow, "the committed token is the paused-read token plus a consume by this peer").toEqual({
+          ...tokenInPause, consumedBy: peer, consumedAt: expect.any(String), pairAttemptWriteId: expect.any(String),
+        });
+        expect(committed?.pairAttemptWriteId, "the committed Peer does not carry the committed consume's pairAttemptWriteId").not.toBe(tokenRow?.pairAttemptWriteId);
+      }
+    }, 90_000);
+  }
+});
+
+describe("flair#2763 — a refused re-pair under a field-level competing update (real Harper)", () => {
+  for (const withToken of [true, false]) {
+    for (const shape of ["publicKey", "revoked"] as const) {
+      it(`${withToken ? "token" : "no-token"} re-pair refuses a field-level ${shape} change and leaves its last-writer marker`, async () => {
+        const token = `pt-2763-${withToken}-${shape}-${sfx}`;
+        const k = nacl.sign.keyPair();
+        const competitor = nacl.sign.keyPair();
+        const peer = `f2763-${withToken}-${shape}-${sfx}`;
+        const pub = b64url(k.publicKey);
+        const competitorKey = b64url(competitor.publicKey);
+        await seedPeer(peer, pub);
+        if (withToken) await seedToken(token);
+        const seededPeer = await readPeer(peer);
+        const tokenBefore = withToken ? await readToken(token) : null;
+        const { response, competed, released, paused } = await withPaused(
+          withToken ? "federation-pair-repair-token-before-commit" : "federation-pair-repair-before-commit",
+          () => pairRequest(pairBody(peer, pub, k.secretKey, withToken ? token : undefined)),
+          () => updatePeer(peer, shape === "publicKey" ? { publicKey: competitorKey } : { status: "revoked" }),
+        );
+        expect(paused, "the re-pair was not paused before its owned transaction committed").toBe(true);
+        expect(released, "the re-pair was not released by this test").toBe("go");
+        expect(competed?.status, "the competing field-level update committed").toBe(200);
+        expect(competed?.row, "the competitor's update is on the row while the re-pair is paused").toEqual(
+          shape === "publicKey"
+            ? { ...seededPeer, publicKey: competitorKey, updatedAt: expect.any(String) }
+            : { ...seededPeer, status: "revoked", updatedAt: expect.any(String) },
+        );
+        const body = await response.json() as any;
+        expect(response.status, JSON.stringify(body)).toBe(withToken ? 409 : 503);
+        expect(body.error).toBe(withToken ? "peer_pair_unconfirmed" : "write_outcome_unknown");
+        expect(body.outcome).toBe("unconfirmed");
+        expect(body.paired, "the refused re-pair does not report paired").toBeUndefined();
+        const committed = await readPeer(peer);
+        if (shape === "publicKey") {
+          expect(committed?.publicKey, "the competing key is the committed key").toBe(competitorKey);
+        } else {
+          expect(committed?.status, "the competing revoke stays revoked").toBe("revoked");
+        }
+        // A field-level competitor does not write pairAttemptWriteId, so the
+        // refused attempt's id stays on the merged row: it is a last-WRITER
+        // marker, not a confirmation. Its own updatedAt is not the row's when
+        // the competing update carries one; the competitor's value is kept.
+        expect(committed?.pairAttemptWriteId, "the committed Peer carries the refused attempt's last-writer marker").toBeTruthy();
+        expect(committed?.updatedAt, "the row's updatedAt is the competing update's").toBe(competed?.row?.updatedAt);
+        if (withToken) {
+          const tokenRow = await readToken(token);
+          expect(tokenRow, "the token keeps its seed fields and carries this attempt's consume").toEqual({
+            ...tokenBefore, consumedBy: peer, consumedAt: expect.any(String),
+            pairAttemptWriteId: committed?.pairAttemptWriteId,
+          });
+        }
+      }, 90_000);
+    }
+  }
 });

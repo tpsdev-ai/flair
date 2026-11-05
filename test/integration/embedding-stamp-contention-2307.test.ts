@@ -27,7 +27,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const POINT = "embedding-stamp-content-suffix";
 const LEGACY_ID = "esc-legacy.content";
@@ -81,21 +81,7 @@ beforeAll(async () => {
   // Armed before the row exists, so whichever cycle first re-embeds it (the
   // boot pass or a follow-up recheck) pauses.
   writeFileSync(join(pauseDir, `arm.${POINT}`), "");
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper();
-  } finally {
-    // The spawned Harper has its copy; no later Harper in this process inherits it.
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
   authHeader = "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
   await opsCall({
     operation: "insert", database: "flair", table: "Memory",
@@ -109,7 +95,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper).catch(() => {});
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2307 — the `.content`-suffix re-embed under a change committed after its read (real Harper)", () => {
   it("the competing content is kept, and the row stays pending with its stale stamp", async () => {

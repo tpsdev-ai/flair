@@ -14,7 +14,7 @@
  */
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { persistLocalPeerLastSyncAt } from "../../src/commands/federation.ts";
 
 let harper: HarperInstance;
@@ -76,7 +76,7 @@ describe("flair#1835 PR-B — Harper field-only update is safe (merge blocker)",
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("(a) the field-only update preserves every other field of a keyless row", async () => {
     const stamp = new Date().toISOString();

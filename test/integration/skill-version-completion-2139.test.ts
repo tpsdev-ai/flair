@@ -24,7 +24,7 @@ import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 import { SEED_SKILL_ROW_ID } from "../../resources/seed-ids.js";
 import { componentWithReplayProbe, type ProbeComponent, type ProbeFiles } from "../helpers/component-with-replay-probe";
@@ -144,7 +144,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (installDir) await rm(installDir, { recursive: true, force: true, maxRetries: 4 });
   composed?.cleanup();
-});
+}, HARPER_STOP_BUDGET_MS);
 
 // ─── Item 1: retained-payload predicate on Memory GET/search ────────────────
 

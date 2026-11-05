@@ -21,7 +21,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { rm } from "node:fs/promises";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const EMBEDDING_STAMP_ID = "embedding-stamp";
@@ -135,7 +135,7 @@ describe("flair#2307 item 5 — a `.content`-suffixed legacy row converges (real
   afterAll(async () => {
     if (harper) await stopHarper(harper).catch(() => {});
     await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   it("the row is re-embedded, and /HealthDetail stops naming the migration", async () => {
     const deadline = Date.now() + 120_000;

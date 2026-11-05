@@ -22,7 +22,7 @@
  */
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { randomBytes } from "node:crypto";
 import nacl from "tweetnacl";
 
@@ -97,7 +97,7 @@ describe("Presence read gate — default (PRESENCE_PUBLIC_ROSTER absent)", () =>
     await seedFreshHeartbeat(harper, agent.id, agent, "gate test: default verified reader");
   }, 120_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   // (a) anonymous GET, key absent → 401
   test("(a) anonymous GET /Presence → 401, no redacted roster", async () => {
@@ -174,7 +174,7 @@ describe("Presence read gate — PRESENCE_PUBLIC_ROSTER=false", () => {
   let harper: HarperInstance;
 
   beforeAll(async () => { harper = await bootWith("false"); }, 120_000);
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("(b) PRESENCE_PUBLIC_ROSTER=false → anonymous GET /Presence → 401", async () => {
     const res = await fetch(`${harper.httpURL}/Presence`);
@@ -194,7 +194,7 @@ describe("Presence read gate — PRESENCE_PUBLIC_ROSTER=true (opt-in)", () => {
     await seedFreshHeartbeat(harper, agent.id, agent, "gate test: public opt-in");
   }, 120_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("(c) opt-in: anonymous GET /Presence → allowlisted roster, gated fields null", async () => {
     const res = await fetch(`${harper.httpURL}/Presence`);

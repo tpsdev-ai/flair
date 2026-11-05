@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HarperInstance, startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { FlairClient } from "../../packages/flair-client/src/client";
 import { launchReceiptId, wakeAgentId } from "../../packages/cursor-wake-runner/src/index.ts";
 import { main } from "../../packages/cursor-wake-runner/src/cli.ts";
@@ -91,6 +91,7 @@ async function seedEvent(record: Record<string, unknown>): Promise<void> {
 /** Point the CLI env at this Harper and the loopback Cursor fixture; return a restore fn. */
 function setCliEnv(agent: TestAgent): () => void {
   const saved = { ...process.env };
+  // Kept in process.env: the in-process cursor-wake CLI configuration reader reads these three.
   process.env.FLAIR_AGENT_ID = agent.id;
   process.env.FLAIR_URL = harper.httpURL;
   process.env.FLAIR_KEY_PATH = keyPathFor(agent);
@@ -102,7 +103,6 @@ function setCliEnv(agent: TestAgent): () => void {
     "CURSOR_REPO_URL",
     "CURSOR_STARTING_REF",
     "CURSOR_AUTO_CREATE_PR",
-    "FLAIR_CATCHUP_BACKFILL_MS",
   ]) {
     delete process.env[key];
   }
@@ -116,7 +116,9 @@ function setCliEnv(agent: TestAgent): () => void {
 
 describe("flair#1944 — the shipped CLI records a launch receipt (real Harper + local Cursor fixture)", () => {
   beforeAll(async () => {
-    harper = await startHarper();
+    // FLAIR_CATCHUP_BACKFILL_MS is read by the server, so its absence is declared
+    // here rather than deleted from this process after Harper has started.
+    harper = await startHarper({ serverEnv: { FLAIR_CATCHUP_BACKFILL_MS: undefined } });
     keyDir = await mkdtemp(join(tmpdir(), "flair-1944-cli-keys-"));
     // Every HTTP target this test talks to is a loopback server we started.
     expect(new URL(harper.httpURL).hostname, "http target must be the ephemeral instance").toBe("127.0.0.1");
@@ -151,7 +153,7 @@ describe("flair#1944 — the shipped CLI records a launch receipt (real Harper +
     if (cursor) await new Promise<void>((resolve) => cursor.close(() => resolve()));
     if (harper) await stopHarper(harper);
     if (keyDir) await rm(keyDir, { recursive: true, force: true, maxRetries: 4 });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("`main([\"--once\"])` writes the receipt with its stable id and hostSource, then acks", async () => {
     const agent = mkAgent(`agent-cli-${randomUUID()}`);

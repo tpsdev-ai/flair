@@ -39,7 +39,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { deriveActiveAdkTags, type ApiCall } from "../../src/rem/runner.ts";
 
 interface TestAgent {
@@ -180,7 +180,7 @@ describe("ADK per-tag distillation — cross-user bleed (#1205b-1)", () => {
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("enumeration: deriveActiveAdkTags over the real snapshot fetch returns the DISTINCT active adk tags", async () => {
     // GET /Memory?agentId=<id> is the runner's snapshot fetch; deriveActiveAdkTags

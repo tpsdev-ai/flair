@@ -2,6 +2,7 @@ import { Resource, databases } from "harper";
 import { layout, htmlResponse, esc } from "./admin-layout.js";
 import { allowAdmin } from "./agent-auth.js";
 import { applyHitStats } from "./hit-tracking.js";
+import { applyPromotionBinding } from "./promotion-binding.js";
 
 /**
  * GET /AdminMemory                browse + search memories (list view)
@@ -234,6 +235,7 @@ export class AdminMemory extends Resource {
   // ─── Provenance pane HTML ──────────────────────────────────────────────────
 
   renderProvenancePane(m: any, supersededBy: any[], derivatives: any[]): string {
+    m = applyPromotionBinding(m);
     const tags: string[] = Array.isArray(m.tags) ? m.tags : [];
     const sourceTag = tags.find((t) => t.startsWith("source:"));
     const importTag = tags.find((t) => t.startsWith("import:"));

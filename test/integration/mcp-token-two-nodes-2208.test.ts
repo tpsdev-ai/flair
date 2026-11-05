@@ -3,107 +3,72 @@
  *
  * With flair#2194 (oauth 2.9.0) the MCP signing key defaults to the key
  * @harperfast/oauth generates on the first token mint and persists in its
- * `harper_oauth_mcp_keys` table. The open question: on two REPLICATED Harper
- * nodes running flair with MCP on and NO pinned key, does a token minted on one
- * node verify on the other — and how long does convergence take?
+ * `harper_oauth_mcp_keys` table. This file measures the replicated case: two
+ * Harper nodes running flair with MCP on and NO pinned key, where a token
+ * minted on one node verifies on the other.
  *
- * What this file asserts:
+ * The two-node case requires Harper Pro: the open-source `harper` core ships no
+ * replication transport (`server.replication.replicateOperation` rejects with
+ * `Replication not implemented.`). Set `FLAIR_TEST_HARPER_PRO_DIR` to a Harper
+ * Pro install root to run it. When the variable is absent the cross-node test
+ * is skipped with that reason logged — never silently passed.
  *
- *   1. CROSS-NODE CONVERGENCE (gated). Boots two real ephemeral Harpers through
- *      test/helpers/replicated-nodes (the replicated path has not run on any build
- *      available here; only node B carries a best-effort replication route, to
- *      node A's ops port, and that port and the one-sided config are unverified),
- *      mints an MCP token on each node (the component's real token endpoint, no
- *      seeded key). Prints elapsed time from mint request start to peer HTTP
- *      200, including the mint request and self-verification. Fails if that time exceeds
- *      CROSS_NODE_BOUND_MS.
- *
- *      This test is GATED on replication being available in the installed
- *      Harper build. Multi-node replication is a Harper Pro feature; the OSS
- *      `harper` core that flair depends on does not ship the transport
- *      (`server.replication.replicateOperation` rejects with
- *      `Replication not implemented.`). `probeReplicationSupport()` measures
- *      that on the real build at collection time; when unsupported the test is
- *      registered with `test.skipIf` and the reason (the observed error excerpt) is
- *      logged — an explicit skip, never a silent pass.
- *
- *   2. KEY ISOLATION / FALSE-PASS GUARD (always runs). Boots two independent
- *      nodes with DIFFERENT pinned signing keys and proves a token minted on
- *      node A is accepted by A (200) and REJECTED by B (401). This is the
- *      mutation the gated test would catch: cross-node verification can only
- *      pass when the peers share the same key material.
+ * The key isolation case needs only the open-source build and always runs: two
+ * nodes pinned with DIFFERENT keys, where a token minted on one is 200 on its
+ * own node and 401 on the peer. That is the false-pass guard for the cross-node
+ * case: a peer 200 requires shared key material.
  *
  * Fixtures use neutral names (node-a/node-b, host-a/host-b).
  */
 import { describe, test, expect, afterAll } from "bun:test";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { rmSync } from "node:fs";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
+import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import {
+  PRO_INSTALL_DIR,
   REPO_ROOT,
   assertOwnedInstance,
   makeNodeWorkDir,
-  probeReplicationSupport,
+  replicatedPairUnsupportedReason,
   startReplicatedPair,
   waitUntil,
 } from "../helpers/replicated-nodes.js";
 
-// ── MCP enablement env, staged for every boot in this file ──────────────────
-const MCP_ENV_KEYS = [
-  "FLAIR_MCP_OAUTH",
-  "FLAIR_MCP_ISSUER",
-  "FLAIR_MCP_SIGNING_KEY_PEM",
-  "OAUTH_GITHUB_CLIENT_ID",
-  "OAUTH_GITHUB_CLIENT_SECRET",
-  "OAUTH_GITHUB_REDIRECT_URI",
-] as const;
-let savedEnv: Record<(typeof MCP_ENV_KEYS)[number], string | undefined> | undefined;
-
-/** Whole-token env ref staged ON by `flair mcp enable`; the component accepts
- *  only "true"/"false" (flair#1152). */
-function setMcpEnv(): void {
-  savedEnv ??= Object.fromEntries(MCP_ENV_KEYS.map((k) => [k, process.env[k]])) as Record<
-    (typeof MCP_ENV_KEYS)[number],
-    string | undefined
-  >;
-  process.env.FLAIR_MCP_OAUTH = "true";
-  process.env.FLAIR_MCP_ISSUER = `https://${ISSUER_HOST}`;
-  process.env.OAUTH_GITHUB_CLIENT_ID = "host-a-client-id";
-  process.env.OAUTH_GITHUB_CLIENT_SECRET = "host-a-client-secret";
-  process.env.OAUTH_GITHUB_REDIRECT_URI = `https://${ISSUER_HOST}/oauth`;
-}
-
 // Neutral fixture host name — never a real fleet host.
 const ISSUER_HOST = "node-a.flair.test";
+
+/** The default unpinned MCP enablement environment for this file's boots: no
+ *  signing key, so the component generates one on first mint. The key
+ *  isolation case overrides the pin, with a different key for each node. */
+const MCP_SERVER_ENV: Record<string, string | undefined> = {
+  FLAIR_MCP_OAUTH: "true",
+  FLAIR_MCP_ISSUER: `https://${ISSUER_HOST}`,
+  FLAIR_MCP_SIGNING_KEY_PEM: undefined,
+  OAUTH_GITHUB_CLIENT_ID: "host-a-client-id",
+  OAUTH_GITHUB_CLIENT_SECRET: "host-a-client-secret",
+  OAUTH_GITHUB_REDIRECT_URI: `https://${ISSUER_HOST}/oauth`,
+};
 // The shipped config carries NO `resource` key, so the component derives
 // `<issuer>/mcp` at request time (flair#1180).
 const RESOURCE = `https://${ISSUER_HOST}/mcp`;
-const CLIENT_ID = "two-node-2208-client";
+const CLIENT_ID_A = "two-node-2208-client-a";
+const CLIENT_ID_B = "two-node-2208-client-b";
 const REDIRECT_URI = `https://${ISSUER_HOST}/callback`;
 const HTTP_TIMEOUT_MS = 15_000;
+/** Stated bound for one direction: mint start to peer HTTP 200. */
 const CROSS_NODE_BOUND_MS = 60_000;
 
-// ── Collection-time capability probe ────────────────────────────────────────
-// Boots one ephemeral Harper and measures whether replication is implemented in
-// this build. Decides the gate; the reason is logged so a skip is never silent.
-const support = await probeReplicationSupport();
-if (!support.supported) {
+const PAIR_UNSUPPORTED = replicatedPairUnsupportedReason();
+if (PRO_INSTALL_DIR && PAIR_UNSUPPORTED) {
+  console.log(`[flair#2208] SKIPPING the cross-node convergence test: ${PAIR_UNSUPPORTED}.`);
+}
+if (!PRO_INSTALL_DIR) {
   console.log(
-    `[flair#2208] GATING the cross-node convergence test: could not confirm replication support, ` +
-      `so two replicated nodes are not started. ` +
-      `Observed: ${support.error}`,
+    "[flair#2208] SKIPPING the cross-node convergence test: FLAIR_TEST_HARPER_PRO_DIR is not set. " +
+      "Multi-node replication is a Harper Pro feature; point that variable at a Harper Pro install root " +
+      "(and NODE_BIN at a Node version that build supports) to run it.",
   );
 }
-
-afterAll(async () => {
-  if (savedEnv) {
-    for (const k of MCP_ENV_KEYS) {
-      const v = savedEnv[k];
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-  }
-});
 
 // ── MCP mint/verify helpers (the component's real endpoints) ────────────────
 
@@ -126,13 +91,13 @@ function pkcePair(): { verifier: string; challenge: string } {
   return { verifier, challenge };
 }
 
-async function seedClientAndCode(h: HarperInstance, code: string, challenge: string): Promise<void> {
+async function seedClientAndCode(h: HarperInstance, clientId: string, code: string, challenge: string): Promise<void> {
   const clientRes = await adminOp(h, {
     operation: "insert",
     database: "oauth",
     table: "harper_oauth_mcp_clients",
     records: [{
-      client_id: CLIENT_ID,
+      client_id: clientId,
       grant_types: JSON.stringify(["authorization_code"]),
       response_types: JSON.stringify(["code"]),
       redirect_uris: JSON.stringify([REDIRECT_URI]),
@@ -146,7 +111,7 @@ async function seedClientAndCode(h: HarperInstance, code: string, challenge: str
     table: "mcp_auth_codes",
     records: [{
       code,
-      client_id: CLIENT_ID,
+      client_id: clientId,
       user: "agent-a",
       resource: RESOURCE,
       code_challenge: challenge,
@@ -160,14 +125,19 @@ async function seedClientAndCode(h: HarperInstance, code: string, challenge: str
 }
 
 /** Exchange a seeded code at the live token endpoint — the plugin's real mint. */
-async function mint(h: HarperInstance, code: string, verifier: string): Promise<{ token: string; mintStartedAt: number }> {
+async function mint(
+  h: HarperInstance,
+  clientId: string,
+  code: string,
+  verifier: string,
+): Promise<{ token: string; mintStartedAt: number }> {
   const mintStartedAt = Date.now();
   const res = await fetch(`${h.httpURL}/oauth/mcp/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "authorization_code",
-      client_id: CLIENT_ID,
+      client_id: clientId,
       code,
       code_verifier: verifier,
       redirect_uri: REDIRECT_URI,
@@ -200,53 +170,65 @@ function jwtKid(token: string): string | undefined {
   }
 }
 
-// ── 1. Cross-node convergence (gated on replication availability) ───────────
+// ── 1. Cross-node convergence (requires Harper Pro) ─────────────────────────
 
 describe(
   "flair#2208 cross-node convergence: an MCP token minted on one replicated node verifies on the peer",
   () => {
-    const instances: HarperInstance[] = [];
     let stopPair: (() => Promise<void>) | undefined;
 
     afterAll(async () => {
       if (stopPair) await stopPair();
-      for (const h of instances) { try { await stopHarper(h); } catch { /* best effort */ } }
-    });
+    }, HARPER_STOP_BUDGET_MS);
 
-    test.skipIf(!support.supported)(
-      "each node's freshly minted token verifies on the other after a measured wait",
+    test.skipIf(!PRO_INSTALL_DIR || PAIR_UNSUPPORTED !== null)(
+      "tokens minted on each node verify on the other after a measured wait",
       async () => {
-        setMcpEnv();
-        delete process.env.FLAIR_MCP_SIGNING_KEY_PEM; // NO pin, on purpose.
-
-        const pair = await startReplicatedPair();
+        const pair = await startReplicatedPair({ serverEnv: MCP_SERVER_ENV });
         stopPair = pair.stop;
-        instances.push(pair.a, pair.b);
-        // Never call anything but the ephemeral instances this test started.
-        assertOwnedInstance(pair.a, "node-a");
-        assertOwnedInstance(pair.b, "node-b");
+        try {
+          assertOwnedInstance(pair.a, "node-a");
+          assertOwnedInstance(pair.b, "node-b");
+          await pair.connect();
 
-        const mintAndVerify = async (node: HarperInstance, peer: HarperInstance, code: string) => {
-          const pkce = pkcePair();
-          await seedClientAndCode(node, code, pkce.challenge);
-          const { token, mintStartedAt } = await mint(node, code, pkce.verifier);
-          expect(jwtKid(token)).toBeDefined();
-          expect(await postMcp(node, token), `${code}: node verifies its own token`).toBe(200);
-          return waitUntil(async () => (await postMcp(peer, token,
-            Math.max(1, Math.min(HTTP_TIMEOUT_MS, CROSS_NODE_BOUND_MS - (Date.now() - mintStartedAt))),
-          )) === 200, {
-            startMs: mintStartedAt,
-            timeoutMs: CROSS_NODE_BOUND_MS,
-            what: `${code}: peer verification`,
-          });
-        };
-        const [abMs, baMs] = await Promise.all([
-          mintAndVerify(pair.a, pair.b, "code-node-a"),
-          mintAndVerify(pair.b, pair.a, "code-node-b"),
-        ]);
-        console.log(`[flair#2208] elapsed from mint request start to peer HTTP 200 (includes mint request and self-verification): node-a→node-b ${abMs}ms, node-b→node-a ${baMs}ms`);
-        expect(abMs).toBeLessThanOrEqual(CROSS_NODE_BOUND_MS);
-        expect(baMs).toBeLessThanOrEqual(CROSS_NODE_BOUND_MS);
+          // Sequential on purpose: the first mint on node-a creates and persists
+          // the key, and replication carries that row to node-b. Node-b's mint
+          // then reuses it. Minting on both at once is a different scenario: each
+          // node may generate its own key before the rows meet.
+          const mintAndVerify = async (
+            node: HarperInstance,
+            peer: HarperInstance,
+            clientId: string,
+            code: string,
+          ): Promise<number> => {
+            const pkce = pkcePair();
+            await seedClientAndCode(node, clientId, code, pkce.challenge);
+            const { token, mintStartedAt } = await mint(node, clientId, code, pkce.verifier);
+            expect(jwtKid(token)).toBeDefined();
+            expect(await postMcp(node, token), `${code}: node verifies its own token`).toBe(200);
+            return waitUntil(
+              async () =>
+                (await postMcp(
+                  peer,
+                  token,
+                  Math.max(1, Math.min(HTTP_TIMEOUT_MS, CROSS_NODE_BOUND_MS - (Date.now() - mintStartedAt))),
+                )) === 200,
+              { startMs: mintStartedAt, timeoutMs: CROSS_NODE_BOUND_MS, what: `${code}: peer verification` },
+            );
+          };
+
+          const abMs = await mintAndVerify(pair.a, pair.b, CLIENT_ID_A, "code-node-a");
+          const baMs = await mintAndVerify(pair.b, pair.a, CLIENT_ID_B, "code-node-b");
+          console.log(
+            `[flair#2208] elapsed from mint request start to peer HTTP 200 ` +
+              `(includes mint request and self-verification): node-a→node-b ${abMs}ms, node-b→node-a ${baMs}ms`,
+          );
+          expect(abMs).toBeLessThanOrEqual(CROSS_NODE_BOUND_MS);
+          expect(baMs).toBeLessThanOrEqual(CROSS_NODE_BOUND_MS);
+        } finally {
+          await pair.stop();
+          stopPair = undefined;
+        }
       },
       10 * 60_000,
     );
@@ -260,14 +242,14 @@ describe("flair#2208 key isolation: a token verifies only where the signing key 
   const tempDirs: string[] = [];
 
   afterAll(async () => {
-    for (const h of instances) { try { await stopHarper(h); } catch { /* best effort */ } }
+    // flair#2568: concurrent, so the set settles within one stop deadline.
+    await stopHarpers(instances).catch(() => { /* best effort */ });
     for (const d of tempDirs) { try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test(
     "two nodes with different pinned keys: node-a's token is 200 on node-a and 401 on node-b",
     async () => {
-      setMcpEnv();
       const keyA = generateKeyPairSync("rsa", {
         modulusLength: 2048,
         publicKeyEncoding: { type: "spki", format: "pem" },
@@ -286,28 +268,36 @@ describe("flair#2208 key isolation: a token verifies only where the signing key 
           "    enabled: ${FLAIR_MCP_OAUTH}\n    signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}",
         );
 
-      process.env.FLAIR_MCP_SIGNING_KEY_PEM = keyA;
       const dirA = makeNodeWorkDir("flair-test-2208-keyiso-a-", pinConfig);
       tempDirs.push(dirA);
-      const nodeA = await startHarper({ cwd: dirA, harperBinDir: REPO_ROOT, multiWorkerUnsafe: false });
+      const nodeA = await startHarper({
+        cwd: dirA,
+        harperBinDir: REPO_ROOT,
+        multiWorkerUnsafe: false,
+        serverEnv: { ...MCP_SERVER_ENV, FLAIR_MCP_SIGNING_KEY_PEM: keyA },
+      });
       instances.push(nodeA);
 
-      process.env.FLAIR_MCP_SIGNING_KEY_PEM = keyB;
       const dirB = makeNodeWorkDir("flair-test-2208-keyiso-b-", pinConfig);
       tempDirs.push(dirB);
-      const nodeB = await startHarper({ cwd: dirB, harperBinDir: REPO_ROOT, multiWorkerUnsafe: false });
+      const nodeB = await startHarper({
+        cwd: dirB,
+        harperBinDir: REPO_ROOT,
+        multiWorkerUnsafe: false,
+        serverEnv: { ...MCP_SERVER_ENV, FLAIR_MCP_SIGNING_KEY_PEM: keyB },
+      });
       instances.push(nodeB);
 
       assertOwnedInstance(nodeA, "node-a");
       assertOwnedInstance(nodeB, "node-b");
 
       const pkceA = pkcePair();
-      await seedClientAndCode(nodeA, "code-node-a", pkceA.challenge);
-      const { token: tokenA } = await mint(nodeA, "code-node-a", pkceA.verifier);
+      await seedClientAndCode(nodeA, CLIENT_ID_A, "code-node-a", pkceA.challenge);
+      const { token: tokenA } = await mint(nodeA, CLIENT_ID_A, "code-node-a", pkceA.verifier);
 
       const pkceB = pkcePair();
-      await seedClientAndCode(nodeB, "code-node-b", pkceB.challenge);
-      const { token: tokenB } = await mint(nodeB, "code-node-b", pkceB.verifier);
+      await seedClientAndCode(nodeB, CLIENT_ID_B, "code-node-b", pkceB.challenge);
+      const { token: tokenB } = await mint(nodeB, CLIENT_ID_B, "code-node-b", pkceB.verifier);
 
       expect(await postMcp(nodeA, tokenA), "node-a accepts its own token").toBe(200);
       expect(await postMcp(nodeB, tokenB), "node-b accepts its own token").toBe(200);

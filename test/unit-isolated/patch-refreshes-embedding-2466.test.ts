@@ -16,6 +16,7 @@
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
 import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -64,6 +65,9 @@ function memorySearchGen(query: any) {
 }
 
 class BaseMemory {
+  /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
+   *  double injects one (test/helpers/memory-lock-double.ts). */
+  static primaryStore = memoryLockDouble();
   async post(content: any) {
     const id = content.id ?? `mock-${++idCounter}`;
     content.id = id;
@@ -210,6 +214,12 @@ function memoryFor(id: string) {
   r._targetId = id;
   return r;
 }
+/** The same, acting as an administrator: a supplied vector is kept (flair#2573 slice 2). */
+function adminMemoryFor(id: string) {
+  const r: any = makeMemory(agentCtx(AGENT, true));
+  r._targetId = id;
+  return r;
+}
 const agentCtx = (agentId: string, isAdmin = false) => ({ tpsAgent: agentId, tpsAgentIsAdmin: isAdmin });
 
 beforeEach(() => {
@@ -260,9 +270,9 @@ describe("flair#2466 — ordinary PATCH embedding cases", () => {
     expect(embedInputs).toEqual([]);
   });
 
-  it("a PATCH that supplies a vector stores it and embeds nothing", async () => {
+  it("an administrator's PATCH that supplies a vector stores it and embeds nothing", async () => {
     seed("mem-3", "a note replaced by a supplied vector");
-    const m = memoryFor("mem-3");
+    const m = adminMemoryFor("mem-3");
     await m.patch({ content: "the replacement text", embedding: [0.5, 0.25, 0.125] });
 
     const stored = await (BaseMemory as any).get("mem-3");
@@ -271,12 +281,24 @@ describe("flair#2466 — ordinary PATCH embedding cases", () => {
     expect(embedInputs).toEqual([]);
   });
 
+  it("a non-admin PATCH that supplies a vector discards it and embeds the new text", async () => {
+    seed("mem-3n", "a note whose supplied vector is discarded");
+    const m = memoryFor("mem-3n");
+    await m.patch({ content: "the replacement text", embedding: [0.5, 0.25, 0.125] });
+
+    const stored = await (BaseMemory as any).get("mem-3n");
+    expect(stored.content).toBe("the replacement text");
+    expect(stored.embedding).toEqual(FAKE_EMBEDDING);
+    expect(stored.embeddingModel).toBe("mock-embedding-model");
+    expect(embedInputs).toEqual(["the replacement text"]);
+  });
+
   for (const pairedNulls of [false, true]) {
     it(`a content-changing PATCH with explicit null embedding clears it (null model: ${pairedNulls})`, async () => {
       seed("mem-null", "the earlier text");
       const body: Record<string, unknown> = { content: "the replacement text", embedding: null };
       if (pairedNulls) body.embeddingModel = null;
-      await memoryFor("mem-null").patch(body);
+      await (pairedNulls ? adminMemoryFor("mem-null") : memoryFor("mem-null")).patch(body);
 
       const stored = await BaseMemory.get("mem-null");
       expect(stored.content).toBe("the replacement text");
@@ -294,11 +316,15 @@ describe("flair#2466 — ordinary PATCH embedding cases", () => {
     BaseMemory.get = async (id: any) => {
       tableReads++;
       const stored = await get(id);
-      return tableReads === 1 ? stored : { ...stored, content: "a concurrent edit" };
+      // Reads 1 and 2 belong to the patch itself: the pre-write resolve (1) and
+      // the post-commit verification read (2, flair#2478). A THIRD read would be
+      // the conditional committed-row embedding check this case skips; hand it
+      // the concurrent edit so the case stays discriminating.
+      return tableReads <= 2 ? stored : { ...stored, content: "a concurrent edit" };
     };
     try {
       await memoryFor("mem-null-reread").patch({ content: "the unchanged text", embedding: null });
-      expect(tableReads).toBe(1);
+      expect(tableReads).toBe(2);
       const stored = await get("mem-null-reread");
       expect(stored.content).toBe("the unchanged text");
       expect(stored.embedding).toBeNull();

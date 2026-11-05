@@ -50,6 +50,20 @@ const databasesMock = {
         memoryStore.set(id, { ...memoryStore.get(id), ...data });
         return data;
       },
+      // Fake per-key lock for the per-id Memory write lock (flair#2478).
+      primaryStore: (() => {
+        const held = new Set<string>();
+        return {
+          tryLock: (key: unknown) => {
+            const k = JSON.stringify(key);
+            if (held.has(k)) return false;
+            held.add(k);
+            return true;
+          },
+          unlock: (key: unknown) => { held.delete(JSON.stringify(key)); },
+          resetReadTxn: () => {},
+        };
+      })(),
     },
     MemoryHostSource: {
       search: () => (async function* () { yield* pointerStore.values(); })(),

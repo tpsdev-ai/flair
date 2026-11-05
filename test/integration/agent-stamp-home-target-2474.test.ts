@@ -30,7 +30,8 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 
@@ -48,8 +49,9 @@ function cliHome(): string {
 function runStampHome(extra: string[], homeDir: string = cliHome()): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const args = ["agent", "stamp-home", "--admin-pass", a.admin.password, ...extra];
-    const child = spawn(process.execPath, [CLI, ...args], {
-      env: { ...process.env, HOME: homeDir, FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TOKEN: "", NO_COLOR: "1" },
+    const env = { ...process.env, HOME: homeDir, FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TOKEN: "", NO_COLOR: "1" };
+    const child = spawn(nodeBin({ env }), [CLI, ...args], {
+      env,
       timeout: 30_000,
     });
     let stdout = "";
@@ -71,8 +73,9 @@ const opsPort = (h: HarperInstance) => new URL(h.opsURL).port;
 function runPrincipalAdd(id: string, extra: string[], homeDir: string = cliHome()): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const args = ["principal", "add", id, "--admin-pass", a.admin.password, "--keys-dir", join(homeDir, "keys"), ...extra];
-    const child = spawn(process.execPath, [CLI, ...args], {
-      env: { ...process.env, HOME: homeDir, FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TOKEN: "", NO_COLOR: "1" },
+    const env = { ...process.env, HOME: homeDir, FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TOKEN: "", NO_COLOR: "1" };
+    const child = spawn(nodeBin({ env }), [CLI, ...args], {
+      env,
       timeout: 30_000,
     });
     let stdout = "";
@@ -128,11 +131,15 @@ beforeAll(async () => {
 }, 300_000);
 
 afterAll(async () => {
-  if (a) await stopHarper(a);
-  if (b) await stopHarper(b);
-  if (home) rmSync(home, { recursive: true, force: true });
-  if (partialHome) rmSync(partialHome, { recursive: true, force: true });
-});
+  // flair#2568: stop both instances concurrently so neither stop's deadline
+  // waits on the other, and remove the temp homes even when a stop fails.
+  try {
+    await stopHarpers([a, b]);
+  } finally {
+    if (home) rmSync(home, { recursive: true, force: true });
+    if (partialHome) rmSync(partialHome, { recursive: true, force: true });
+  }
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2474 — stamp-home checks its two ports against a complete configured pair", () => {
   test("an ops port that conflicts with the configured pair is refused by name", async () => {

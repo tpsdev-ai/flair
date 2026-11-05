@@ -41,7 +41,7 @@ function resolveInChild(env: Record<string, string>): {
   const home = join(root, "home");
   mkdirSync(home, { recursive: true });
   const child = Bun.spawnSync([process.execPath, "-e", script], {
-    env: { ...process.env, HOME: home },
+    env: { ...({ ...process.env, HOME: home }), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise migrations-symlinked-datadir-2277 process fixture arguments" },
     timeout: 15_000,
   });
   if (child.exitCode !== 0) throw new Error(`child failed: ${child.stderr.toString()}`);

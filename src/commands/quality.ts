@@ -7,6 +7,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { ApiRequestOutcomeUnknown } from "../lib/auth-resolve.js";
 import { Command } from "commander";
 import { SigningIdentitySource } from "../lib/signing-identity.js";
 import * as render from "../render.js";
@@ -1371,6 +1372,7 @@ program
       try {
         emitResult.snapshotId = await storeQualitySnapshot(agentId, source, baseUrl, subject, current);
       } catch (err: any) {
+        if (err instanceof ApiRequestOutcomeUnknown) throw err;
         emitResult.errors.push(`snapshot store failed: ${err?.message ?? String(err)}`);
       }
     }

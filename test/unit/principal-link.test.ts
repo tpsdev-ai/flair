@@ -1055,3 +1055,32 @@ describe("flair#2222 — the pre-write re-validation bound", () => {
     expect(st.writes()).toEqual([]);
   });
 });
+
+// The linker reads a new mapping's createdAt and lastUsedAt from its clock
+// immediately before sending the mapping upsert, not at the start of its run,
+// however long the run's earlier reads took.
+describe("the linker stamps a new mapping immediately before sending its upsert", () => {
+  test("a run whose reads take ten minutes each stamps the clock as the upsert is sent", async () => {
+    const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: ["alice"] });
+    let clockMs = Date.parse("2026-10-02T00:00:00.000Z");
+    const clock = () => new Date(clockMs).toISOString();
+    const startedAt = clock();
+    let writeAt: number | null = null;
+    // Each operations-API call before the mapping write takes ten minutes on this clock.
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.table === "Credential" && body.operation === "upsert") writeAt = clockMs; // the clock as the upsert is sent
+      else clockMs += 10 * 60_000;
+      return st.fetchImpl(url, init);
+    }) as typeof fetch;
+    await provisionIdpIdentityMapping(
+      { hostedOrigin: HOSTED, ...ADMIN, principal: "alice", principalKind: "human", ...SUBJECT },
+      { fetchImpl, now: clock },
+    );
+    expect(writeAt).not.toBeNull();
+    expect(writeAt!).toBeGreaterThan(Date.parse(startedAt));
+    const [mapping] = st.writes().find((w) => w.body.table === "Credential" && w.body.operation === "upsert")!.body.records;
+    expect(mapping.createdAt).toBe(new Date(writeAt!).toISOString());
+    expect(mapping.lastUsedAt).toBe(mapping.createdAt);
+  });
+});

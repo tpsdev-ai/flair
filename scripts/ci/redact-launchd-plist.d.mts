@@ -2,6 +2,8 @@
 
 export const REDACTED_KEYS: string[];
 
+export const REPORT_SCHEMA: string;
+
 export function adminPassFileCandidates(env?: Record<string, string | undefined>): string[];
 
 export function collectAdminPassSecrets(paths?: string[]): string[];

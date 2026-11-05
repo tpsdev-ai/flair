@@ -1,3 +1,4 @@
+import { shellScript } from "../helpers/shell-script.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -37,7 +38,7 @@ function fixtureRoot(): string {
 const BUN_TEST_NAME = /(?:\.test|_test|\.spec|_spec)\.(?:[cm]?[jt]s|[jt]sx)$/i;
 
 function findFiles(): string[] {
-  const r = spawnSync("bash", ["-c", "{ find test/unit -type f; find test -maxdepth 1 -type f; } | LC_ALL=C sort"], {
+  const r = spawnSync("bash", [shellScript("{ find test/unit -type f; find test -maxdepth 1 -type f; } | LC_ALL=C sort")], {
     cwd: ROOT, encoding: "utf8", timeout: 15_000,
   });
   if (r.status !== 0) throw new Error(`find failed: ${r.stderr}`);

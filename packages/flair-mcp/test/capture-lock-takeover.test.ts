@@ -34,6 +34,7 @@ process.stdout.write(JSON.stringify({ result, warnings, lockExists, retry }));
 async function captureChild(home: string, dir: string, extra: Record<string, string> = {}) {
   const child = spawn(process.execPath, ["-e", CAPTURE_CHILD], {
     env: { ...process.env, HOME: home, CAPTURE_TEST_DIR: dir, ...extra,
+      FLAIR_TEST_ALLOW_BUN_HARPER: "exercise Bun module mocks in the capture child",
       CAPTURE_TEST_MODULE: new URL("../src/capture-spool.ts", import.meta.url).pathname },
     timeout: 5000,
   });
@@ -88,7 +89,7 @@ test("an aged lock with an unrelated live pid is reclaimed with its age warning"
   const home = mkdtempSync(join(tmpdir(), "flair-live-pid-home-"));
   const dir = join(home, ".flair", "capture");
   const child = spawn(process.execPath, ["-e", 'process.stdout.write("ready"); setInterval(() => {}, 1000);'], {
-    env: { ...process.env, HOME: home }, timeout: 10_000,
+    env: { ...process.env, HOME: home, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise the unrelated live Bun lock owner" }, timeout: 10_000,
   });
   try {
     await new Promise<void>((resolve, reject) => {
@@ -222,7 +223,7 @@ for (const kind of ["append", "flush"]) {
       writeFileSync(lock, JSON.stringify({ pid: dead.pid, nonce: "dead-owner" }), { flag: "wx", mode: 0o600 });
       function contender(name: string) {
         const child = spawn(process.execPath, ["-e", CONTENDER], {
-          env: { ...process.env, CONTENDER: name, CAPTURE_TEST_DIR: dir, LOCK_KIND: kind, PROBE: "1",
+          env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise the Bun capture-lock contender", CONTENDER: name, CAPTURE_TEST_DIR: dir, LOCK_KIND: kind, PROBE: "1",
             CAPTURE_TEST_MODULE: new URL("../src/capture-spool.ts", import.meta.url).pathname },
           timeout: 10_000,
         });
@@ -291,7 +292,7 @@ for (const scenario of ["inode", "owner", "occupied", "unreadable"]) {
       writeFileSync(lock, identity, { flag: "wx", mode: 0o600 });
       const inode = statSync(lock).ino;
       child = spawn(process.execPath, ["-e", CONTENDER], {
-        env: { ...process.env, CONTENDER: "a", CAPTURE_TEST_DIR: dir,
+        env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise the Bun capture-lock contender", CONTENDER: "a", CAPTURE_TEST_DIR: dir,
           CAPTURE_TEST_MODULE: new URL("../src/capture-spool.ts", import.meta.url).pathname },
         timeout: 10_000,
       });

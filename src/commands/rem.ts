@@ -17,8 +17,8 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 
 import { dirname, resolve } from "node:path";
 import * as render from "../render.js";
-import { isLocalBase, resolveAdminUser, resolveLocalAdminPass } from "../lib/auth-resolve.js";
-import type { OpsSearch } from "../rem/restore.js";
+import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, addAdminPassOptions, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_HELP, ApiRequestOutcomeUnknown, apiErrorRawBody, boundErrorText, resolveRemRequestDeadlineMs, DEFAULT_REM_REQUEST_DEADLINE_MS } from "../lib/auth-resolve.js";
+import type { OpsSearch } from "../rem/runner.js";
 import {
   validatePromoteOpts,
   validateRejectOpts,
@@ -49,10 +49,12 @@ export type { SourceMemoryFetch, PromotedTagsDecision } from "../rem/promote-pol
 export type RemCli = {
   api: (...args: any[]) => Promise<any>;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
-  applyAdminPassFile: (opts: { adminPass?: string; adminPassFile?: string }) => void;
   addSharedCredentialOptions: (cmd: Command) => Command;
   readPortFromConfig: () => number | null;
   resolveHttpPort: (opts: { port?: string | number; dataDir?: string }, mode?: "address" | "create") => number;
+  resolveOpsUrlFromTarget: (target: string) => string;
+  resolveAgentHomeTarget: (opts: { port?: string | number; opsPort?: string | number; dataDir?: string }) => { httpPort: number; opsPort: number };
+  INSTANCE_TARGET_REMEDY: string;
   humanBytes: (n: number) => string;
   relativeTime: (iso: string | null | undefined) => string;
   DEFAULT_PORT: number;
@@ -60,6 +62,48 @@ export type RemCli = {
 };
 
 let cli: RemCli;
+
+/** The REM work routes that share {@link REM_WORK_REQUEST_DEADLINE_MS}. */
+const REM_WORK_ROUTES: ReadonlySet<string> = new Set([
+  "/MemoryMaintenance",
+  "/ReflectMemories",
+  "/MemoryDedupStats",
+  "/AutoPromoteCandidates",
+]);
+
+/**
+ * The single whole-request deadline for every REM work route: POST
+ * /MemoryMaintenance, POST /ReflectMemories, POST /MemoryDedupStats and POST
+ * /AutoPromoteCandidates. Its sizing basis is documented on
+ * {@link DEFAULT_REM_REQUEST_DEADLINE_MS}. FLAIR_REM_REQUEST_TIMEOUT_MS
+ * overrides it and is read only for these four routes, so an invalid value of
+ * that variable refuses only those requests, before they are sent. Every other
+ * request through the shared REST sender that passes no explicit deadline
+ * resolves FLAIR_REQUEST_TIMEOUT_MS, else the shared default; an explicit
+ * deadline is validated and returned before that variable is read, so an
+ * invalid value of it does not refuse a request that passes one.
+ */
+export const REM_WORK_REQUEST_DEADLINE_MS = DEFAULT_REM_REQUEST_DEADLINE_MS;
+
+/**
+ * `{ deadlineMs, deadlineSource }` for every REM work route, `{}` for every
+ * other request. The new-variable value is resolved per call, so an invalid
+ * FLAIR_REM_REQUEST_TIMEOUT_MS is refused for these routes before the request
+ * is sent. The source travels with the deadline so its expiry names the
+ * variable that governs it, whether the value came from the variable or the
+ * default.
+ */
+export function longRemRequestDeadline(
+  method: string,
+  path: string,
+  env: NodeJS.ProcessEnv = process.env,
+): { deadlineMs?: number; deadlineSource?: "rem" } {
+  if (method !== "POST") return {};
+  if (REM_WORK_ROUTES.has(path)) {
+    return { deadlineMs: resolveRemRequestDeadlineMs(env), deadlineSource: "rem" };
+  }
+  return {};
+}
 
 /** Bind shared CLI helpers. cli.ts calls this immediately before register(program). */
 export function bindCli(fns: RemCli): void {
@@ -72,9 +116,6 @@ function api(...args: any[]): Promise<any> {
 function resolveOpsPort(opts: { opsPort?: string | number; port?: string | number }): number {
   return cli.resolveOpsPort(opts);
 }
-function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
-  cli.applyAdminPassFile(opts);
-}
 function addSharedCredentialOptions(cmd: Command): Command {
   return cli.addSharedCredentialOptions(cmd);
 }
@@ -83,6 +124,12 @@ function readPortFromConfig(): number | null {
 }
 function resolveHttpPort(opts: { port?: string | number; dataDir?: string }, mode: "address" | "create" = "address"): number {
   return cli.resolveHttpPort(opts, mode);
+}
+function deriveOpsUrl(target: string): string {
+  return cli.resolveOpsUrlFromTarget(target);
+}
+function resolvePair(opts: { port?: string | number; opsPort?: string | number }): { httpPort: number; opsPort: number } {
+  return cli.resolveAgentHomeTarget(opts);
 }
 function humanBytes(n: number): string {
   return cli.humanBytes(n);
@@ -96,25 +143,307 @@ function relativeTime(iso: string | null | undefined): string {
  * rem commands. `search_by_conditions` is an ops-API operation, not a Harper
  * REST route — Harper's REST dispatcher maps `POST /<table>` to
  * `resource.post()` and never routes a URL suffix, so `/MemoryCandidate/
- * search_by_conditions` 405s. Both the nightly pending-candidate count and
- * the restore-time candidate cleanup must reach the ops port this way.
- * `fetchImpl` is injectable for tests.
+ * search_by_conditions` 405s. The nightly pending-candidate count reaches the
+ * ops port this way. `opsUrl`, when given, takes precedence over `opsPort` (a
+ * loopback port). A redirect is refused, so the admin credential goes only to
+ * the URL built here. `fetchImpl` is injectable for tests.
  */
 export function buildOpsSearch(
-  opts: { opsPort: number; adminUser?: string; adminPass: string },
+  opts: { opsPort?: number; opsUrl?: string; adminUser?: string; adminPass: string },
   fetchImpl: typeof fetch = fetch,
 ): OpsSearch {
+  const root = (opts.opsUrl ?? `http://127.0.0.1:${opts.opsPort}`).replace(/\/+$/, "");
   const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${opts.adminPass}`).toString("base64")}`;
   return async (table, conditions, getAttributes) => {
-    const res = await fetchImpl(`http://127.0.0.1:${opts.opsPort}/`, {
+    const res = await fetchImpl(`${root}/`, {
       method: "POST",
+      redirect: "error",
       headers: { "Content-Type": "application/json", Authorization: auth },
       body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions, get_attributes: getAttributes }),
     });
     if (!res.ok) throw new Error(`ops API failed (${res.status})`);
-    const raw = await res.json() as unknown;
-    return Array.isArray(raw) ? raw : ((raw as { results?: any[] })?.results ?? []);
+    let raw: unknown;
+    try {
+      raw = await res.json();
+    } catch {
+      throw new Error("ops API returned invalid JSON");
+    }
+    if (Array.isArray(raw)) return raw;
+    const results = (raw as { results?: unknown } | null)?.results;
+    // flair#2680: an unrecognised body is an error, not zero rows.
+    if (Array.isArray(results)) return results;
+    throw new Error("ops API returned an unexpected response shape");
   };
+}
+
+/**
+ * The restore target: the base URL its reads, deletes and writes go to. The
+ * candidate listing uses the same URL (GET /AdminMemoryCandidates/{agentId}).
+ */
+export interface RestoreTarget {
+  /** Base URL of the restore's reads, deletes and writes (on 127.0.0.1 for a loopback target). */
+  baseUrl: string;
+  /** Operations API URL resolved from the target; not used by restore's listing. */
+  opsUrl: string;
+  /** The target's HTTP port: the URL's port, or 80/443 for a URL without one. */
+  httpPort: number;
+  /** The operations port in `opsUrl`. */
+  opsPort: number;
+  /**
+   * Whether the target URL names a loopback host: 127.0.0.1, localhost or ::1
+   * (written `[::1]` in a URL), or no FLAIR_URL is set. A dry run to a
+   * non-loopback target without an admin password reads signed-only.
+   */
+  loopback: boolean;
+}
+
+/** The environment {@link resolveRestoreTarget} reads. */
+export interface RestoreTargetEnv {
+  /** FLAIR_URL: the target's base URL; unset means the local instance. */
+  flairUrl?: string;
+  /** FLAIR_OPS_PORT: an explicit operations port for the target. */
+  opsPort?: string;
+  /**
+   * FLAIR_OPS_TARGET: an operations endpoint other commands use. It does not
+   * select restore's listing endpoint; restore compares it with the operations
+   * URL it resolves, and refuses unless the two are the same root URL.
+   */
+  opsTarget?: string;
+}
+
+/** Injectable seams for {@link resolveRestoreTarget}. */
+export interface RestoreTargetDeps {
+  /** The paired resolver (`resolveAgentHomeTarget`, flair#2474). */
+  resolvePair?: (opts: { port?: string | number; opsPort?: string | number }) => { httpPort: number; opsPort: number };
+  /** The conventional operations URL of a target URL (`resolveOpsUrlFromTarget`). Reads no environment. */
+  deriveOpsUrl?: (target: string) => string;
+}
+
+/**
+ * A URL as restore prints it: scheme, host, port and path. User info, a query
+ * and a fragment are never printed. A value that is not an http(s) URL prints
+ * as `placeholder`: its parts are hidden, so untrusted input is not echoed.
+ */
+export function displayRestoreUrl(raw: string, placeholder: string): string {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return placeholder;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return placeholder;
+  return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`;
+}
+
+/** Whether a target URL names a loopback host: 127.0.0.1, localhost, or ::1 (`[::1]` in a URL). */
+function isLoopbackTargetUrl(u: URL): boolean {
+  return u.hostname === "127.0.0.1" || u.hostname === "localhost" || u.hostname === "[::1]";
+}
+
+/** A URL's port, or its scheme's default port when the URL names none. */
+function effectivePort(u: URL): number {
+  if (u.port) return Number(u.port);
+  return u.protocol === "https:" ? 443 : 80;
+}
+
+/** The paired resolver's message without its stamp-home remedy, which names flags restore does not have. */
+function withoutPairRemedy(message: string): string {
+  const remedy = cli?.INSTANCE_TARGET_REMEDY;
+  return remedy && message.endsWith(remedy) ? message.slice(0, -remedy.length).trimEnd() : message;
+}
+
+/**
+ * Resolves the restore target's base URL (flair#2708), plus the operations
+ * fields its FLAIR_OPS_PORT and FLAIR_OPS_TARGET checks name. Restore's reads,
+ * deletes, writes and candidate listing all use `baseUrl`.
+ *
+ * - With no FLAIR_URL, the target is the local instance: its port pair comes
+ *   from the paired resolver (`resolveAgentHomeTarget`, flair#2474), which
+ *   refuses FLAIR_OPS_PORT when no complete configured pair can show which
+ *   HTTP port it belongs with.
+ * - With FLAIR_URL, the target is the resolved base URL (the URL's scheme,
+ *   port and path, with a loopback host pinned to 127.0.0.1). Its HTTP port is
+ *   the URL's port, or 80/443 when it names none. The operations port is
+ *   FLAIR_OPS_PORT when set, else the conventional derivation from the target
+ *   URL (`resolveOpsUrlFromTarget`); a target with no derivable operations
+ *   port and no FLAIR_OPS_PORT is refused. For a loopback URL (127.0.0.1,
+ *   localhost or [::1]) the two ports also go through the paired resolver,
+ *   which refuses a pair that conflicts with this host's configured pair. Any
+ *   other URL, including one with this machine's LAN address, is not compared
+ *   with this host's configuration.
+ * - A FLAIR_URL carrying user info, a query or a fragment is refused, and the
+ *   message prints none of their values.
+ * - FLAIR_OPS_TARGET does not select the listing endpoint. When it is set to
+ *   anything but exactly the root URL of the operations API resolved here
+ *   (compared as normalized root URLs, with no user info, query, fragment or
+ *   path), restore refuses; a value of only whitespace is refused too. An
+ *   empty value counts as unset, as FLAIR_URL and FLAIR_OPS_PORT do here.
+ */
+export function resolveRestoreTarget(env: RestoreTargetEnv, deps: RestoreTargetDeps = {}): RestoreTarget {
+  const resolvePairImpl = deps.resolvePair ?? resolvePair;
+  const deriveOpsUrlImpl = deps.deriveOpsUrl ?? deriveOpsUrl;
+  const opsPortEnv = env.opsPort;
+  const declared = opsPortEnv === undefined || opsPortEnv === "" ? null : Number(opsPortEnv);
+  if (declared !== null && (!Number.isInteger(declared) || declared < 1 || declared > 65535)) {
+    throw new Error(
+      `invalid FLAIR_OPS_PORT ${JSON.stringify(opsPortEnv)}. Set it to the restore target instance's operations port (1-65535), or unset it.`,
+    );
+  }
+
+  let target: RestoreTarget;
+  if (!env.flairUrl) {
+    let pair: { httpPort: number; opsPort: number };
+    try {
+      pair = resolvePairImpl(declared === null ? {} : { opsPort: declared });
+    } catch (err: any) {
+      throw new Error(
+        `the local restore target could not be paired: ${withoutPairRemedy(err?.message ?? String(err))} `
+          + "Set FLAIR_URL to the instance's base URL and FLAIR_OPS_PORT to its operations port, or unset FLAIR_OPS_PORT to use the configured pair.",
+      );
+    }
+    target = {
+      baseUrl: `http://127.0.0.1:${pair.httpPort}`,
+      opsUrl: `http://127.0.0.1:${pair.opsPort}`,
+      httpPort: pair.httpPort,
+      opsPort: pair.opsPort,
+      loopback: true,
+    };
+  } else {
+    target = resolveUrlRestoreTarget(env.flairUrl, declared, resolvePairImpl, deriveOpsUrlImpl);
+  }
+  refuseOtherOpsTarget(env.opsTarget, target);
+  return target;
+}
+
+function resolveUrlRestoreTarget(
+  raw: string,
+  declared: number | null,
+  resolvePairImpl: NonNullable<RestoreTargetDeps["resolvePair"]>,
+  deriveOpsUrlImpl: NonNullable<RestoreTargetDeps["deriveOpsUrl"]>,
+): RestoreTarget {
+  const example = "for example http://127.0.0.1:19926";
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(
+      `FLAIR_URL is not a parseable URL, so restore has no instance to address. Set FLAIR_URL to the instance's base URL (${example}), or unset it to restore the local instance.`,
+    );
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new Error(
+      `FLAIR_URL is not an http:// or https:// URL, so restore has no instance to address. Set FLAIR_URL to the instance's base URL (${example}), or unset it to restore the local instance.`,
+    );
+  }
+  const shown = displayRestoreUrl(raw, "<FLAIR_URL>");
+  const carried: string[] = [];
+  if (u.username || u.password) carried.push("user info");
+  if (u.search || raw.includes("?")) carried.push("a query");
+  if (u.hash || raw.includes("#")) carried.push("a fragment");
+  if (carried.length > 0) {
+    throw new Error(
+      `FLAIR_URL ${shown} carries ${carried.join(" and ")}. Restore refuses a target URL that carries user info, a query or a fragment, and prints none of their values. `
+        + "Set FLAIR_URL to the instance's base URL (scheme, host and port), and pass the admin credential with --admin-pass or --admin-pass-file (FLAIR_ADMIN_PASS is read only for a loopback target).",
+    );
+  }
+
+  const base = shown;
+  const httpPort = effectivePort(u);
+  let opsPort: number;
+  if (declared !== null) {
+    opsPort = declared;
+  } else {
+    let derived: URL;
+    try {
+      derived = new URL(deriveOpsUrlImpl(base));
+    } catch (err: any) {
+      throw new Error(
+        `restore target ${shown} has no derivable operations API URL (${err?.message ?? String(err)}). `
+          + "Restore resolves an operations port for its target, from FLAIR_URL when FLAIR_OPS_PORT is unset. "
+          + "Set FLAIR_OPS_PORT to that instance's operations port, or set FLAIR_URL to the instance's base URL with its HTTP port.",
+      );
+    }
+    opsPort = effectivePort(derived);
+  }
+
+  const loopback = isLoopbackTargetUrl(u);
+  if (loopback) {
+    try {
+      resolvePairImpl({ port: httpPort, opsPort });
+    } catch (err: any) {
+      throw new Error(
+        `restore target ${shown} could not be paired with operations port ${opsPort}`
+          + `${declared === null ? " (derived from FLAIR_URL)" : " (FLAIR_OPS_PORT)"}: ${withoutPairRemedy(err?.message ?? String(err))} `
+          + `Set FLAIR_OPS_PORT to the operations port of the instance serving HTTP port ${httpPort}, or unset it to derive the operations port from FLAIR_URL.`,
+      );
+    }
+    // Both endpoints on 127.0.0.1, whichever loopback name the URL uses.
+    const pinned = new URL(base);
+    pinned.hostname = "127.0.0.1";
+    return { baseUrl: pinned.toString().replace(/\/$/, ""), opsUrl: `http://127.0.0.1:${opsPort}`, httpPort, opsPort, loopback };
+  }
+
+  const ops = new URL(base);
+  ops.port = String(opsPort);
+  ops.pathname = "";
+  return { baseUrl: base, opsUrl: ops.toString().replace(/\/$/, ""), httpPort, opsPort, loopback };
+}
+
+/** `scheme://host:port/` with the scheme's default port written out, for comparing two root URLs. */
+function normalizedRoot(u: URL): string {
+  return `${u.protocol}//${u.hostname}:${effectivePort(u)}/`;
+}
+
+/**
+ * Refuses a FLAIR_OPS_TARGET that is not exactly the root URL of `target`'s
+ * operations API. The two are compared as normalized root URLs (scheme, host
+ * and port, with the default port written out). User info, a query, a fragment
+ * or a path other than `/` refuses even on the same scheme, host and port, and
+ * the message prints only the override's scheme, host and port. A value of
+ * only whitespace is set, not unset, and is refused; an empty value counts as
+ * unset. The setting does not select restore's listing endpoint, which is the
+ * target's base URL.
+ */
+function refuseOtherOpsTarget(opsTargetEnv: string | undefined, target: RestoreTarget): void {
+  if (opsTargetEnv === undefined || opsTargetEnv === "") return;
+  const raw = opsTargetEnv.trim();
+  if (!raw) {
+    throw new Error(
+      `FLAIR_OPS_TARGET is set but holds only whitespace, so it names no operations endpoint to compare with the one restore resolves for its target (${target.opsUrl}); `
+        + `nothing was sent. Unset FLAIR_OPS_TARGET for this command, or set it to ${target.opsUrl}.`,
+    );
+  }
+  let named: URL | null;
+  try {
+    named = new URL(raw);
+  } catch {
+    named = null;
+  }
+  const httpLike = named !== null && (named.protocol === "http:" || named.protocol === "https:");
+  const shown = httpLike ? `${named!.protocol}//${named!.host}` : "<not an http(s) URL>";
+  const remedy = `Unset FLAIR_OPS_TARGET for this command, or set it to ${target.opsUrl}.`;
+  if (named === null || !httpLike) {
+    throw new Error(
+      `FLAIR_OPS_TARGET is not an http(s) URL, so it cannot be the operations API restore resolves for its target (${target.opsUrl}); nothing was sent to it. ${remedy}`,
+    );
+  }
+  const carried: string[] = [];
+  if (named.username || named.password) carried.push("user info");
+  if (named.search || raw.includes("?")) carried.push("a query");
+  if (named.hash || raw.includes("#")) carried.push("a fragment");
+  if (named.pathname !== "/") carried.push("a path other than /");
+  if (carried.length > 0) {
+    throw new Error(
+      `FLAIR_OPS_TARGET ${shown} carries ${carried.join(" and ")}. Restore accepts FLAIR_OPS_TARGET only when it is exactly the root URL `
+        + `of the operations API it resolves for its target (${target.opsUrl}), prints none of its user info, path, query or fragment, and sent nothing to it. ${remedy}`,
+    );
+  }
+  if (normalizedRoot(named) !== normalizedRoot(new URL(target.opsUrl))) {
+    throw new Error(
+      `FLAIR_OPS_TARGET names the operations endpoint ${shown}, but the operations API restore resolves `
+        + `from its own target ${target.baseUrl} is ${target.opsUrl}; nothing was sent to FLAIR_OPS_TARGET. ${remedy}`,
+    );
+  }
 }
 
 // ─── flair rem rapid — pure helpers ──────────────────────────────────────────
@@ -153,26 +482,42 @@ export function candidateIncompleteFlag(claim: unknown): string | null {
 
 /**
  * Classifies a thrown /ReflectMemories execute-mode error for CLI display.
- * `api()` throws `Error(responseBodyText)` for non-2xx responses (see api()
- * above) — the two execute-mode failure bodies are:
+ * `api()` throws an ApiHttpError for a non-2xx response (flair#2764). The kind
+ * is read from its unredacted text (apiErrorRawBody) when the error was built
+ * from a non-empty response body (ApiHttpError.fromResponse), and from the
+ * message otherwise (the credential-less 403 and a refused redirect carry only
+ * a message, as does any other error); for a JSON error read either way, the
+ * text shown is derived from that text through boundErrorText, which
+ * redacts the credential values read from the request's Authorization header
+ * (credentialsInHeader) from the server's text within the scope stated on
+ * ApiHttpError, or withholds that text when the header's credential could not
+ * be read and the response text was non-empty, even when the text derived
+ * from it is empty (the prefix the caller prints is outside the scope). The two
+ * classified distillation failures are:
  *   503 no-backend:        { error: "No generative backend configured..." }
  *   502 distillation_failed: { error: "distillation_failed", detail: "..." }
+ * The 503 pause refusal ({ error: "rem_aborted", detail: "..." }, sent while the
+ * pause sentinel or FLAIR_REM_PAUSE=1 is set) has no kind of its own: it reads
+ * as "other" with the text `rem_aborted`.
  * Any other shape (network errors, the 400/403 actor-resolution errors
  * prompt mode shares) falls back to "other" — printed as a plain message,
- * no docs pointer or retry hint attached since neither applies.
+ * no docs pointer or retry hint attached since neither applies. Accepts the
+ * thrown error or its message string.
  */
-export function describeReflectError(message: string): { kind: "no-backend" | "distillation-failed" | "other"; text: string } {
+export function describeReflectError(err: unknown): { kind: "no-backend" | "distillation-failed" | "other"; text: string } {
+  const message = typeof err === "string" ? err : String((err as { message?: unknown })?.message ?? err);
   try {
-    const parsed = JSON.parse(message);
+    const parsed = JSON.parse(apiErrorRawBody(err) || message);
     if (parsed && typeof parsed === "object") {
       if (parsed.error === "distillation_failed") {
-        return { kind: "distillation-failed", text: String(parsed.detail ?? parsed.error) };
+        const detail = typeof parsed.detail === "string" ? parsed.detail : "";
+        return { kind: "distillation-failed", text: boundErrorText(err, detail || parsed.error) };
       }
       if (typeof parsed.error === "string" && parsed.error.startsWith("No generative backend configured")) {
-        return { kind: "no-backend", text: parsed.error };
+        return { kind: "no-backend", text: boundErrorText(err, parsed.error) };
       }
       if (typeof parsed.error === "string") {
-        return { kind: "other", text: parsed.error };
+        return { kind: "other", text: boundErrorText(err, parsed.error) };
       }
     }
   } catch {
@@ -181,10 +526,10 @@ export function describeReflectError(message: string): { kind: "no-backend" | "d
   return { kind: "other", text: message };
 }
 
-/** Print skips and errors; errors alone set exit 1. */
-export function summarizeNightlyOutcome(row: { errors: string[]; skips: string[] }): {
+/** Print skips, unknown outcomes and errors; errors alone set exit 1, an unknown outcome exit 3. */
+export function summarizeNightlyOutcome(row: { errors: string[]; skips: string[]; outcomeUnknown?: string[] }): {
   lines: string[];
-  exitCode: 0 | 1;
+  exitCode: 0 | 1 | 3;
 } {
   const lines: string[] = [];
   if (row.errors.length > 0) {
@@ -195,10 +540,30 @@ export function summarizeNightlyOutcome(row: { errors: string[]; skips: string[]
     lines.push("Skips:");
     for (const s of row.skips) lines.push(`  - ${s}`);
   }
-  return { lines, exitCode: row.errors.length > 0 ? 1 : 0 };
+  if (row.outcomeUnknown && row.outcomeUnknown.length > 0) {
+    lines.push("Unknown outcome:");
+    for (const u of row.outcomeUnknown) lines.push(`  - ${u}`);
+    lines.push("  These writes may or may not have taken effect. Inspect what was staged before re-running this cycle, once the server has settled.");
+  }
+  // Exit 3 for an unknown write outcome, as `flair memory verify` and
+  // `memory compare-nodes` use 3 for "unknown": distinct from the 1 an
+  // ordinary failure exits with.
+  const exitCode = (row.outcomeUnknown?.length ?? 0) > 0 ? 3 : row.errors.length > 0 ? 1 : 0;
+  return { lines, exitCode };
 }
 
 const REM_PAUSE_FLAG = resolve(resolveHome(), ".flair", "rem.paused");
+
+/**
+ * Print a write's unknown outcome and exit 3, the CLI's "unknown" code (as
+ * `flair memory verify` uses it), distinct from the 1 an ordinary failure
+ * exits with.
+ */
+export function exitUnknownOutcome(err: ApiRequestOutcomeUnknown): never {
+  console.error(`Unknown outcome: ${err.message}`);
+  console.error(`The request may or may not have taken effect; inspect the target before re-running.`);
+  process.exit(3);
+}
 
 function writeRemPauseSentinel(): void {
   const dir = dirname(REM_PAUSE_FLAG);
@@ -232,7 +597,7 @@ export function register(program: Command): void {
         const maint = await api("POST", "/MemoryMaintenance", {
           ...(agentId ? { agentId } : {}),
           dryRun,
-        });
+        }, longRemRequestDeadline("POST", "/MemoryMaintenance"));
 
         if (maint.error) {
           console.error(`Maintenance error: ${maint.error}`);
@@ -285,6 +650,7 @@ export function register(program: Command): void {
 
         console.log(`\nDone.${dryRun ? " No changes applied (dry run)." : ""}`);
       } catch (err: any) {
+        if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
         console.error(`Error: ${err.message}`);
         process.exit(1);
       }
@@ -322,7 +688,7 @@ export function register(program: Command): void {
       if (opts.promptOnly) {
         // --prompt-only: EXACT pre-#710 behavior — prompt-return mode, unchanged.
         try {
-          const result = await api("POST", "/ReflectMemories", body);
+          const result = await api("POST", "/ReflectMemories", body, longRemRequestDeadline("POST", "/ReflectMemories"));
 
           if (result.error) {
             console.error(`Reflection error: ${result.error}`);
@@ -340,6 +706,7 @@ export function register(program: Command): void {
           console.log("Feed the prompt above to your LLM, then write insights back with:");
           console.log("  flair memory add --agent <id> --content <insight> --durability persistent --derived-from <source-ids>");
         } catch (err: any) {
+          if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
           console.error(`Error: ${err.message}`);
           process.exit(1);
         }
@@ -348,7 +715,7 @@ export function register(program: Command): void {
 
       // Default: execute mode — distill server-side, stage candidates.
       try {
-        const result = await api("POST", "/ReflectMemories", { ...body, execute: true });
+        const result = await api("POST", "/ReflectMemories", { ...body, execute: true }, longRemRequestDeadline("POST", "/ReflectMemories"));
         const candidates: any[] = Array.isArray(result.candidates) ? result.candidates : [];
 
         console.log(`\nModel:      ${result.model ?? "?"}`);
@@ -359,7 +726,8 @@ export function register(program: Command): void {
         }
         console.log(`\nreview: flair rem candidates / flair rem promote <id>`);
       } catch (err: any) {
-        const desc = describeReflectError(err.message ?? String(err));
+        if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
+        const desc = describeReflectError(err);
         if (desc.kind === "no-backend") {
           console.error(`Reflection error: ${desc.text}`);
           console.error(`See docs/rem.md#configuration for how to point Flair at a models: backend.`);
@@ -392,7 +760,7 @@ export function register(program: Command): void {
         const maint = await api("POST", "/MemoryMaintenance", {
           ...(agentId ? { agentId } : {}),
           dryRun,
-        });
+        }, longRemRequestDeadline("POST", "/MemoryMaintenance"));
 
         if (maint.error) {
           console.error(`Maintenance error: ${maint.error}`);
@@ -437,7 +805,7 @@ export function register(program: Command): void {
           const reflect = await api("POST", "/ReflectMemories", {
             agentId,
             scope: "all",
-          });
+          }, longRemRequestDeadline("POST", "/ReflectMemories"));
 
           if (reflect.error) {
             console.error(`Reflection error: ${reflect.error}`);
@@ -458,6 +826,7 @@ export function register(program: Command): void {
 
         console.log(`\nRestorative cycle complete.${dryRun ? " No changes applied (dry run)." : ""}`);
       } catch (err: any) {
+        if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
         console.error(`Error: ${err.message}`);
         process.exit(1);
       }
@@ -469,12 +838,14 @@ export function register(program: Command): void {
   // populating. Per spec § 5: candidates are NEVER auto-promoted; this command
   // is the operator's review surface.
 
-  rem
-    .command("candidates")
-    .description("List staged memory candidates from the FLAIR-NIGHTLY-REM cycle (pending review)")
-    .option("--port <port>", "Harper HTTP port")
-    .option("--ops-port <port>", "Harper operations API port")
-    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+  addAdminPassOptions(
+    rem
+      .command("candidates")
+      .description("List staged memory candidates from the FLAIR-NIGHTLY-REM cycle (pending review)")
+      .option("--port <port>", "Harper HTTP port")
+      .option("--ops-port <port>", "Harper operations API port"),
+    "Admin password (or set FLAIR_ADMIN_PASS)",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--agent <id>", "Agent ID (or FLAIR_AGENT_ID env)")
     .option("--status <s>", "Filter by status: pending | promoted | rejected (default: pending)")
@@ -722,6 +1093,7 @@ export function register(program: Command): void {
         }
         console.log(`✅ Candidate ${candidateId} marked promoted → ${opts.to}, reviewer=${reviewerId}`);
       } catch (err: any) {
+        if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
         console.error(`Error: ${err.message}`);
         process.exit(1);
       }
@@ -776,6 +1148,7 @@ export function register(program: Command): void {
         console.log(`✅ Candidate ${candidateId} rejected by ${reviewerId}`);
         console.log(`   Reason: ${opts.reason}`);
       } catch (err: any) {
+        if (err instanceof ApiRequestOutcomeUnknown) exitUnknownOutcome(err);
         console.error(`Error: ${err.message}`);
         process.exit(1);
       }
@@ -805,7 +1178,12 @@ export function register(program: Command): void {
     .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
     .option("--at <HH:MM>", "Local time to run nightly (default 03:00)", "03:00")
     .option("--flair-url <url>", "Flair HTTP URL the runner will hit (default http://127.0.0.1:<port>)")
+    .option(ADMIN_PASS_FILE_FLAG, "Absolute path of the owner-only admin-password file the shim passes to run-once (default: ~/.flair/admin-pass)")
     .action(async (opts: any) => {
+      if (opts.adminPassFile === "") {
+        console.error("Error: --admin-pass-file must not be empty");
+        process.exit(1);
+      }
       const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
       if (!agentId) {
         console.error("Error: --agent or FLAIR_AGENT_ID env required");
@@ -824,7 +1202,7 @@ export function register(program: Command): void {
 
       const { enableScheduler, formatEnableReport } = await import("../rem/scheduler.js");
       try {
-        const r = enableScheduler({ agentId, flairUrl, hour, minute });
+        const r = enableScheduler({ agentId, flairUrl, hour, minute, adminPassFile: opts.adminPassFile });
         // formatEnableReport() owns the success-vs-failure decision (flair#850:
         // do not print a success headline before activation is known to have
         // succeeded) — see src/rem/scheduler.ts for the unit-tested logic.
@@ -879,12 +1257,28 @@ export function register(program: Command): void {
       }
     });
 
-  remNightly
-    .command("run-once")
-    .description("Run one nightly cycle now (snapshot + log). Same code path the scheduler will use.")
-    .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
-    .option("--ops-port <port>", "Harper operations API port")
-    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+  addAdminPassOptions(
+    remNightly
+      .command("run-once")
+      .description("Run one nightly cycle now (snapshot + log). Same code path the scheduler will use.")
+      .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
+      .option("--ops-port <port>", "Harper operations API port"),
+    ADMIN_PASS_HELP,
+    {
+      onAdminPassRefusal: (err, actionCommand) => {
+        const refused = actionCommand.opts() as { adminPassFile?: string };
+        const message = (err as Error).message;
+        console.error(`Error: ${message}`);
+        if (refused.adminPassFile !== undefined) {
+          const remedy = err instanceof AdminPassSourceError
+            ? ""
+            : ` Provide an owner-only (chmod 600), non-empty admin password file${refused.adminPassFile === "" ? " via --admin-pass-file <path>" : ` at ${refused.adminPassFile}`}, then re-run \`flair rem nightly run-once\`.`;
+          console.error(`Dedup:      NOT RUN — ${message}${remedy}`);
+        }
+        process.exit(1);
+      },
+    },
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--dry-run", "Log the row but skip the snapshot write")
     .action(async (opts: any) => {
@@ -893,12 +1287,38 @@ export function register(program: Command): void {
         console.error("Error: --agent or FLAIR_AGENT_ID env required");
         process.exit(1);
       }
-      const { runNightlyCycle } = await import("../rem/runner.js");
+      const { runNightlyCycle, RunnerLogWriteError, formatPendingCandidates, formatCount, formatAutoPromoted } = await import("../rem/runner.js");
       // The runner is agent-authed and cannot reach the ops port itself. When
-      // admin credentials are available, inject an ops-API `search_by_conditions`
-      // helper so the pending-candidate count can be sampled; otherwise the count
-      // is best-effort 0 (the cycle still runs).
-      const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+      // admin credentials are available, inject ops-API and admin-authed REST
+      // helpers so the pending-candidate count and the admin-gated dedup step
+      // can run. An explicit file or flag is applied by the pair's preAction
+      // hook before any cycle work. A refused FILE is reported as `Dedup: NOT
+      // RUN` rather than issuing an agent-authed call that an agent key cannot
+      // authorize.
+      const adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
+      // Every agent-scoped call is signed by the selected agent and nothing
+      // else: the identity is pinned here (never FLAIR_AGENT_ID), and
+      // signedOnly refuses FLAIR_TOKEN / FLAIR_ADMIN_PASS / the local
+      // admin-pass file. A selected agent with no key is refused, not
+      // silently replaced by an ambient credential.
+      //
+      // The REM work calls can legitimately outrun the shared default:
+      // maintenance scans its scoped rows with no run row cap, reflection
+      // waits on a generative backend, the auto-promote sweep carries up to
+      // DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE promotions, and the instance-wide
+      // dedup sweep is sized from the fixture's 23.07 s over 403 live vectors
+      // (test/bench/rem-responsiveness.md). All four REM work routes get the
+      // one 1,800 s deadline from longRemRequestDeadline,
+      // FLAIR_REM_REQUEST_TIMEOUT_MS overrides it, and every other call
+      // through the shared REST sender that passes no explicit deadline
+      // resolves FLAIR_REQUEST_TIMEOUT_MS when it is set, else the default.
+      const remDeadline = longRemRequestDeadline;
+      const agentApiCall = (method: string, path: string, body?: unknown) =>
+        api(method, path, body, { agentId, agentIdSource: "flag", signedOnly: true, ...remDeadline(method, path) });
+      const adminApiCall = adminPass
+        ? (method: string, path: string, body?: unknown) =>
+            api(method, path, body, { explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null, ...remDeadline(method, path) })
+        : undefined;
       const opsSearch = adminPass
         ? buildOpsSearch({ opsPort: resolveOpsPort(opts), adminUser: opts.adminUser, adminPass })
         : undefined;
@@ -907,7 +1327,8 @@ export function register(program: Command): void {
         const result = await runNightlyCycle({
           agentId,
           flairVersion: __pkgVersion,
-          apiCall: api,
+          apiCall: agentApiCall,
+          adminApiCall,
           opsSearch,
           dryRun: !!opts.dryRun,
           healthProbe: async (timeoutMs) => {
@@ -930,9 +1351,9 @@ export function register(program: Command): void {
         if (result.snapshotPath) {
           console.log(`Snapshot:   ${result.snapshotPath}`);
         }
-        console.log(`Memories:   ${row.memoryCount ?? "—"}`);
-        console.log(`Souls:      ${row.soulCount ?? "—"}`);
-        console.log(`Pending:    ${row.pendingCandidates ?? "—"}`);
+        console.log(`Memories:   ${formatCount(row.memoryCount)}`);
+        console.log(`Souls:      ${formatCount(row.soulCount)}`);
+        console.log(`Pending:    ${formatPendingCandidates(row.pendingCandidates)}`);
         if (typeof row.archived === "number" || typeof row.expired === "number") {
           // #1503: `archived` counts validTo-expired and old-session rows the
           // pass soft-archived; `expired` counts ephemeral rows past their
@@ -951,23 +1372,31 @@ export function register(program: Command): void {
           console.log(`Distilled:  ${row.distill.gathered} memor${row.distill.gathered === 1 ? "y" : "ies"} (cap ${row.distill.maxMemories}; ${remaining} unreflected remaining)`);
           if (row.distill.aborted) console.log(`Aborted:    yes — in-flight distillation stopped (flair rem pause)`);
         }
-        // row.autoPromoted populates when step 5b (#1205b-2 ADK auto-promote) ran
-        // this cycle — i.e. a non-dry-run cycle for an ADK agentId.
+        // row.autoPromoted populates when step 5b (#1205b-2 auto-promote) ran
+        // this cycle and the server returned a response without an error — i.e.
+        // a non-aborted, non-dry-run
+        // cycle with active ADK tags or selected settled continuity sessions
+        // (flair#1257 slice 3); successful distillation is not required.
+        // Incomplete and unconfirmed promotions are named on the line
+        // (flair#2714).
         if (row.autoPromoted) {
-          console.log(`Auto-promoted: ${row.autoPromoted.promoted} to own memory (${row.autoPromoted.skipped} left pending)`);
+          console.log(formatAutoPromoted(row.autoPromoted));
         }
-        // row.dedup populates when step 6 (instance-wide dedup-cluster stat,
-        // flair-quality Slice 1c) succeeded this cycle. Absent on dry-run skip
-        // or a non-fatal failure (see Errors below — e.g. non-admin caller).
-        if (row.dedup) {
-          console.log(`Dedup:      ${row.dedup.clusterCount} cluster${row.dedup.clusterCount === 1 ? "" : "s"} (${row.dedup.totalMemoriesInClusters} memories, largest ${row.dedup.largestClusterSize})`);
+        // A guard refusal carries null counts and the guard's named state.
+        const dedupRow = row.dedup;
+        if (dedupRow) {
+          if ("embeddingSpace" in dedupRow) {
+            console.log(`Dedup:      not computed — embedding space ${dedupRow.embeddingSpace.state} (no new counts were written)`);
+          } else {
+            console.log(`Dedup:      ${dedupRow.clusterCount} cluster${dedupRow.clusterCount === 1 ? "" : "s"} (${dedupRow.totalMemoriesInClusters} memories, largest ${dedupRow.largestClusterSize})`);
+          }
         }
         console.log(`Duration:   ${row.durationMs}ms`);
         if (result.status === "refused") {
           console.log(`\nNote: REM refused to start because /Health could not be served.`);
           console.log(`Restore /Health before retrying, or \`flair rem pause\` to stop the scheduler.`);
         }
-        if (row.errors.length > 0 || row.skips.length > 0) {
+        if (row.errors.length > 0 || row.skips.length > 0 || (row.outcomeUnknown?.length ?? 0) > 0) {
           const outcome = summarizeNightlyOutcome(row);
           for (const line of outcome.lines) console.log(line);
           if (outcome.exitCode !== 0) process.exit(outcome.exitCode);
@@ -977,6 +1406,13 @@ export function register(program: Command): void {
           console.log(`Resume with: flair rem resume`);
         }
       } catch (err: any) {
+        if (err instanceof RunnerLogWriteError && (err.row.outcomeUnknown?.length ?? 0) > 0) {
+          console.log(`Status:     ${err.row.status}`);
+          const outcome = summarizeNightlyOutcome(err.row);
+          for (const line of outcome.lines) console.log(line);
+          console.error(`Log write failed: ${err.message}`);
+          process.exit(3);
+        }
         console.error(`Error: ${err.message}`);
         process.exit(1);
       }
@@ -1039,7 +1475,7 @@ export function register(program: Command): void {
     .description("Restore from a REM snapshot (inspect by default; --apply rewinds Harper state)")
     .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
     .option("--target <dir>", "Directory to extract into (default: <snapshot>.restored, only used without --apply)")
-    .option("--dry-run", "Plan-only — list contents or planned counts without writing")
+    .option("--dry-run", "Plan-only — list contents or planned counts without writing; with --apply to a non-loopback target and no --admin-pass or --admin-pass-file, credentials are resolved signed-only (no Basic credential is sent)")
     .option("--apply", "Live replay: rewind Harper state to the snapshot (irreversible without the pre-restore snapshot)")
     .action(async (date: string, opts: any) => {
       const { listSnapshots, extractSnapshot } = await import("../rem/snapshot.js");
@@ -1071,44 +1507,69 @@ export function register(program: Command): void {
 
       // --apply path: live replay via src/rem/restore.ts
       if (opts.apply) {
-        const { applySnapshot } = await import("../rem/restore.js");
-        applyAdminPassFile(opts);
-        const restoreBase = process.env.FLAIR_URL || `http://127.0.0.1:${resolveHttpPort({})}`;
-        // Candidates are only reachable through the ops port (Harper has no
-        // REST search_by_conditions route), so the dry-run candidate count
-        // needs admin creds too. Dry-run treats credential resolution as
-        // best-effort — a plan-only command must not fail on a bad credential
-        // file — while --apply requires creds (Soul rewrite) and fails loudly.
+        const { applySnapshot, formatUnknownState } = await import("../rem/restore.js");
+        let restoreTarget: RestoreTarget;
+        try {
+          restoreTarget = resolveRestoreTarget({
+            flairUrl: process.env.FLAIR_URL,
+            opsPort: process.env.FLAIR_OPS_PORT,
+            opsTarget: process.env.FLAIR_OPS_TARGET,
+          });
+        } catch (err: any) {
+          console.error(`Error: ${err.message}`);
+          process.exit(1);
+        }
+        // The CLI lists candidates only with a resolved admin password, so the
+        // dry-run candidate count needs one too. Dry-run treats reading the ambient
+        // local admin-password file as best-effort (an unusable file leaves
+        // it without an admin credential), while --apply requires creds (Soul
+        // rewrite) and fails loudly. A bad --admin-pass-file given explicitly
+        // is refused earlier, by the option pair's preAction hook, dry run or not.
         let adminPass: string | undefined;
         try {
-          adminPass = resolveLocalAdminPass(opts.adminPass, !isLocalBase(restoreBase));
+          adminPass = resolveLocalAdminPass(opts.adminPass, !isLocalBase(restoreTarget.baseUrl));
         } catch (err: any) {
           if (!opts.dryRun) throw err;
           adminPass = undefined;
         }
         if (!opts.dryRun && !adminPass) {
           console.error(
-            "Error: --admin-pass, --admin-pass-file, or FLAIR_ADMIN_PASS required for rem restore --apply " +
+            (isLocalBase(restoreTarget.baseUrl)
+              ? "Error: --admin-pass, --admin-pass-file, FLAIR_ADMIN_PASS or the local admin-password file required for rem restore --apply "
+              : "Error: --admin-pass or --admin-pass-file required for rem restore --apply to a non-loopback target (FLAIR_ADMIN_PASS and the local admin-password file are read only for a loopback target) ") +
               "(Soul rewrite is operator-only; an agent key is refused).",
           );
           process.exit(1);
         }
-        const opsSearch = adminPass
-          ? buildOpsSearch({ opsPort: resolveOpsPort(opts), adminUser: opts.adminUser, adminPass })
-          : undefined;
-        const soulApiCall = adminPass
-          ? (method: string, path: string, body?: unknown) =>
-              api(method, path, body, { explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null })
-          : undefined;
+        // Every Memory, Soul and candidate read, delete and write goes to the
+        // resolved base URL: the candidate listing is
+        // GET /AdminMemoryCandidates/{agentId} on that same endpoint. Without
+        // an admin password (a dry run only) there is no candidate listing.
+        // Every REST call below refuses redirects, so it stays at that target.
+        // With a resolved admin credential (a live replay always has one; an
+        // --apply --dry-run may not), every Memory, Soul and MemoryCandidate
+        // read, delete and write sends it explicitly:
+        // --admin-pass, --admin-pass-file, or the default resolveLocalAdminPass
+        // fell back to. A dry run to a non-loopback target without one reads
+        // signed-only: no Basic credential is sent, and FLAIR_ADMIN_PASS and the
+        // local admin-password file are not read for a target this machine's
+        // secret was not given for. A loopback dry run without one keeps the
+        // shared resolver's own tiers.
+        const signedOnly = !!opts.dryRun && !adminPass && !restoreTarget.loopback;
+        const targetApi = (method: string, path: string, body?: unknown) =>
+          api(method, path, body, adminPass
+            ? { baseUrl: restoreTarget.baseUrl, explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null, refuseRedirects: true }
+            : { baseUrl: restoreTarget.baseUrl, refuseRedirects: true, ...(signedOnly ? { signedOnly: true } : {}) });
+        const soulApiCall = adminPass ? targetApi : undefined;
         try {
           const result = await applySnapshot({
             agentId,
             snapshotPath: match.path,
             flairVersion: __pkgVersion,
-            apiCall: api,
-            opsSearch,
+            apiCall: targetApi,
             soulApiCall,
             dryRun: !!opts.dryRun,
+            listCandidates: !!adminPass,
           });
           const verb = opts.dryRun ? "(dry-run) would" : "";
           console.log(`${opts.dryRun ? "(dry-run) " : ""}flair rem restore --apply${opts.dryRun ? "" : ""}`);
@@ -1120,11 +1581,42 @@ export function register(program: Command): void {
           }
           console.log(`  Deleted:      ${result.deleted.memories} memories, ${result.deleted.souls} souls, ${result.deleted.candidates} candidates`);
           console.log(`  Restored:     ${result.restored.memories} memories, ${result.restored.souls} souls`);
+          if (result.retried.memories.length > 0) {
+            console.log(`  Retried:      ${result.retried.memories.length} memories (${result.retried.memories.join(", ")})`);
+          }
+          const unknownCount =
+            result.unknown.memories.length + result.unknown.souls.length + result.unknown.candidates.length;
+          if (unknownCount > 0) {
+            console.log(`  Unknown:      ${unknownCount} ids ended at the request deadline; their write may or may not have taken effect, and no later write to the same table and record id was sent`);
+            for (const id of result.unknown.memories) {
+              const state = result.verified?.unknownStates.find((s) => s.entity === "memory" && s.id === id);
+              console.log(`    - ${state ? formatUnknownState(state) : `memory ${id}: post-restore verification did not complete; its state is unverified`}`);
+            }
+            for (const id of result.unknown.souls) {
+              const state = result.verified?.unknownStates.find((s) => s.entity === "soul" && s.id === id);
+              console.log(`    - ${state ? formatUnknownState(state) : `soul ${id}: post-restore verification did not complete; its state is unverified`}`);
+            }
+            for (const id of result.unknown.candidates) {
+              console.log(`    - MemoryCandidate ${id}: verification does not read candidates back; its state is unverified`);
+            }
+            if (result.skippedAfterUnknownDelete.memories.length + result.skippedAfterUnknownDelete.souls.length > 0) {
+              const ids = [...result.skippedAfterUnknownDelete.memories, ...result.skippedAfterUnknownDelete.souls];
+              console.log(`    - not written again after an unknown write to the same table and record id: ${ids.join(", ")} (a late write could still change the row)`);
+            }
+            if (!result.verified) {
+              console.log(`    - memory and soul state not checked: post-restore verification did not complete`);
+            }
+            console.log(`  Re-run once the server has settled: \`flair rem restore ${date} --agent ${agentId} --apply\` (restore is re-runnable).`);
+          }
           if (result.errors.length > 0) {
             console.log(`  Errors:`);
             for (const e of result.errors) console.log(`    - ${e}`);
           }
           if (result.status === "failed") process.exit(1);
+          // Exit 3 for an unknown write outcome, as `flair memory verify` and
+          // `memory compare-nodes` use 3 for "unknown": distinct from the 1 an
+          // ordinary restore failure exits with.
+          if (result.status === "unresolved") process.exit(3);
         } catch (err: any) {
           console.error(`Error: ${err.message}`);
           process.exit(1);

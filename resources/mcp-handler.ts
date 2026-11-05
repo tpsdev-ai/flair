@@ -34,6 +34,7 @@ import { stampOriginatorOnCreate } from "./originator-instance.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
 import { credentialMapsPrincipal, credentialPrincipalId, credentialRefusal } from "../src/lib/credential-status-rule.js";
 import { resolveVersion } from "./version.js";
+import { TEST_FAULT_INJECTION_ENV } from "./txn-pause-point.js";
 
 // The MCP protocol revision we implement (initialize handshake).
 const PROTOCOL_VERSION = "2025-06-18";
@@ -161,6 +162,56 @@ function rpcError(id: any, code: number, message: string, httpStatus = 200) {
 
 // ─── sub → Agent resolution ─────────────────────────────────────────────────
 
+// Test-only read failures (flair#2794): the `Credential(kind:"idp",
+// idpSubject=sub)` lookup and the mapped principal's `Agent` read, each failing
+// for a token subject that contains its setting's value. A setting is read only
+// when FLAIR_ENABLE_TEST_FAULT_INJECTION=1 (resources/txn-pause-point.ts), and
+// each matching subject fails once, so the request after the failing one is
+// answered normally. Nothing in a request can arm either hook.
+//
+// flair#2799 — the fired-subject state is process-lifetime: it lives here for as
+// long as the server process does and never resets between requests. It holds
+// at most TEST_READ_FAILURE_FIRED_LIMIT (setting, subject) pairs so that a
+// long-lived process driven with many distinct subjects stops arming new faults
+// instead of growing without limit. Once the set is full, the hook answers false
+// (no fault) for every further pair and logs that once. An empty setting value
+// is inert: it matches nothing and is never added to the set.
+const TEST_CREDENTIAL_READ_FAIL_SUB_ENV = "FLAIR_TEST_MCP_CREDENTIAL_READ_FAIL_SUB";
+const TEST_PRINCIPAL_READ_FAIL_SUB_ENV = "FLAIR_TEST_MCP_PRINCIPAL_READ_FAIL_SUB";
+export const TEST_READ_FAILURE_FIRED_LIMIT = 1024;
+const testReadFailuresFired = new Set<string>();
+let testReadFailuresFullLogged = false;
+
+/**
+ * Should this subject's read fail once? Test-only; false unless
+ * FLAIR_ENABLE_TEST_FAULT_INJECTION=1 and the setting names a non-empty value
+ * the subject contains. Exported for the fired-state bound's unit test.
+ */
+export function testReadFailure(setting: string, sub: string): boolean {
+  if (process.env[TEST_FAULT_INJECTION_ENV] !== "1") return false;
+  const match = process.env[setting];
+  if (!match || !sub.includes(match)) return false;
+  const key = `${setting}\n${sub}`;
+  if (testReadFailuresFired.has(key)) return false;
+  if (testReadFailuresFired.size >= TEST_READ_FAILURE_FIRED_LIMIT) {
+    if (!testReadFailuresFullLogged) {
+      testReadFailuresFullLogged = true;
+      console.warn(
+        `[flair] test-only read-failure hook fired state reached its ${TEST_READ_FAILURE_FIRED_LIMIT}-pair limit; ` +
+          "no further test read failures will be injected in this process.",
+      );
+    }
+    return false;
+  }
+  testReadFailuresFired.add(key);
+  return true;
+}
+
+/** The fired-subject set's current size. Exported for the bound's unit test. */
+export function testReadFailureFiredCount(): number {
+  return testReadFailuresFired.size;
+}
+
 /**
  * Should an unknown IdP subject be JIT-provisioned into a new Principal+
  * Credential? Gated by an explicit, auditable trust anchor — an OPEN JIT-provision
@@ -195,6 +246,10 @@ function jitProvisionEnabled(): boolean {
  * `undefined` — so existing callers/tests that don't pass one see the exact
  * same `{ agentId, isAdmin }` shape as before this field existed.
  *
+ * `allowJitProvision` (default true) is false for a read-only caller such as
+ * `tools/list`: a subject with no matching credential resolves to null instead
+ * of creating a principal.
+ *
  * When a Credential maps the sub, the mapped principal must exist and be
  * active — the rule the Ed25519 path applies (resources/agent-auth.ts,
  * `isPrincipalDeactivated`) — and its record is read on every resolution, so a
@@ -222,8 +277,8 @@ function jitProvisionEnabled(): boolean {
  * the mapped principal is deactivated or missing, or when the credential or
  * principal could not be read.
  */
-export async function resolveAgentFromSub(sub: string, clientId?: string): Promise<ResolvedAgent | null> {
-  return (await resolveMapping(sub, clientId))?.agent ?? null;
+export async function resolveAgentFromSub(sub: string, clientId?: string, allowJitProvision = true): Promise<ResolvedAgent | null> {
+  return (await resolveMapping(sub, clientId, allowJitProvision))?.agent ?? null;
 }
 
 /**
@@ -236,7 +291,7 @@ interface SubMapping {
   credential: any | null;
 }
 
-async function resolveMapping(sub: string, clientId?: string): Promise<SubMapping | null> {
+async function resolveMapping(sub: string, clientId?: string, allowJitProvision = true): Promise<SubMapping | null> {
   if (!sub) return null;
 
   // 1. Existing IdP credential → its principalId is the Agent id.
@@ -251,6 +306,9 @@ async function resolveMapping(sub: string, clientId?: string): Promise<SubMappin
   let mapped: any = null;
   let refused: any = null;
   try {
+    if (testReadFailure(TEST_CREDENTIAL_READ_FAIL_SUB_ENV, sub)) {
+      throw new Error("test-only fault: the IdP credential read failed");
+    }
     for await (const cred of (databases as any).flair.Credential.search({
       conditions: [
         { attribute: "kind", comparator: "equals", value: "idp" },
@@ -273,7 +331,7 @@ async function resolveMapping(sub: string, clientId?: string): Promise<SubMappin
 
   if (mapped) {
     const principalId = credentialPrincipalId(mapped)!;
-    const principal = await requireActivePrincipal(principalId);
+    const principal = await requireActivePrincipal(principalId, sub);
     const resolved: ResolvedAgent = { agentId: principalId, isAdmin: agentRecordIsAdmin(principal) };
     if (clientId) resolved.clientId = clientId;
     return { agent: resolved, credential: mapped };
@@ -287,8 +345,10 @@ async function resolveMapping(sub: string, clientId?: string): Promise<SubMappin
   }
 
   // 2. No matching Credential(kind:"idp", idpSubject:sub) row. JIT-provision
-  //    only behind the explicit trust anchor.
-  if (!jitProvisionEnabled()) return null;
+  //    only behind the explicit trust anchor, and only for a caller that may
+  //    create a principal — `tools/list` passes allowJitProvision:false, since
+  //    a listing must not write.
+  if (!allowJitProvision || !jitProvisionEnabled()) return null;
 
   try {
     const { principalId, credential } = await jitProvisionPrincipal(sub);
@@ -379,9 +439,12 @@ export class PrincipalRefusedError extends Error {
  * never elevates on its own. This surface is gated behind FLAIR_MCP_OAUTH and is
  * default-OFF.
  */
-async function requireActivePrincipal(principalId: string): Promise<any> {
+async function requireActivePrincipal(principalId: string, sub = ""): Promise<any> {
   let principal: any;
   try {
+    if (testReadFailure(TEST_PRINCIPAL_READ_FAIL_SUB_ENV, sub)) {
+      throw new Error("test-only fault: the principal read failed");
+    }
     principal = await (databases as any).flair.Agent.get(principalId);
   } catch {
     throw new PrincipalRefusedError(
@@ -461,7 +524,7 @@ export async function mcpHandler(request: any): Promise<any> {
       return rpcResult(id, {});
 
     case "tools/list":
-      return rpcResult(id, { tools: listToolDefs() });
+      return handleToolsList(request, id);
 
     case "tools/call":
       return handleToolCall(request, id, params);
@@ -469,6 +532,46 @@ export async function mcpHandler(request: any): Promise<any> {
     default:
       return rpcError(id, -32601, `method not found: ${rpcMethod}`);
   }
+}
+
+/**
+ * tools/list: the tools advertised to this request's caller. The caller is
+ * resolved the way handleToolCall resolves it (same sub lookup, same
+ * active-principal rule), except that listing never JIT-provisions: for a
+ * mapped subject each tool's `tools/list` gate is decided for the agent the
+ * call would run as, while an unmapped subject lists with no principal even
+ * when JIT provisioning is on (a call by it may provision one), and gets no
+ * gated tool. A resolution that fails or is refused is answered with the
+ * JSON-RPC error a tools/call of a known tool by the same caller gets, and no
+ * list (flair#2760).
+ *
+ * JIT provisioning is off here: a listing is a read and must not create a
+ * principal.
+ */
+async function handleToolsList(request: any, id: any): Promise<any> {
+  const clientId = typeof request?.mcp?.client_id === "string" ? request.mcp.client_id : undefined;
+  let agent: ResolvedAgent | null;
+  try {
+    agent = await resolveAgentFromSub(String(request?.mcp?.sub ?? ""), clientId, false);
+  } catch (err) {
+    return resolutionFailure(id, err);
+  }
+  return rpcResult(id, { tools: await listToolDefs(agent) });
+}
+
+/**
+ * The JSON-RPC error for a caller whose token subject could not be resolved to
+ * a principal: a refusal's own code and message, otherwise a generic
+ * `unavailable` error. tools/list and tools/call both answer with it.
+ */
+function resolutionFailure(id: any, err: unknown) {
+  if (err instanceof PrincipalRefusedError) return rpcError(id, err.rpcCode, err.message);
+  return rpcError(
+    id,
+    -32000,
+    "unavailable: the token subject could not be resolved to a principal, so the call was refused. " +
+      "Retry; if this persists, an operator should check the flair server log.",
+  );
 }
 
 /**
@@ -509,13 +612,7 @@ async function handleToolCall(request: any, id: any, params: any): Promise<any> 
   try {
     mapping = await resolveMapping(String(sub), clientId);
   } catch (err) {
-    if (err instanceof PrincipalRefusedError) return rpcError(id, err.rpcCode, err.message);
-    return rpcError(
-      id,
-      -32000,
-      "unavailable: the token subject could not be resolved to a principal, so the call was refused. " +
-        "Retry; if this persists, an operator should check the flair server log.",
-    );
+    return resolutionFailure(id, err);
   }
   if (!mapping) {
     // Sub verified by the AS but not mapped to a flair Agent (and JIT disabled /

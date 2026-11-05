@@ -60,11 +60,25 @@ function isStoredRow(value: unknown): value is Record<string, any> {
 /**
  * CREATE path — stamp this instance's own federation id, ignoring any value the
  * request body carried. Used by `post()` (always a create) and by a
- * `put()`/`patch()` whose target id has no stored row yet.
+ * `put()`/`patch()` whose target id has no stored row yet. The id is this
+ * module's process-cached {@link localInstanceId}.
  */
 export async function stampOriginatorOnCreate(content: unknown): Promise<void> {
+  applyOriginatorInstanceIdWith(content, null, await localInstanceId());
+}
+
+/**
+ * CREATE path with a CALLER-RESOLVED local id: the same stamp as
+ * {@link stampOriginatorOnCreate}, but the id is one the caller read from the
+ * CURRENT `Instance` table (a fresh read), never this module's process cache. A
+ * caller that must agree with a second decision on the same write — the
+ * Presence local home guard (resources/Presence.ts) compares an agent's home
+ * against the same id — resolves it once and passes it here, so both use ONE
+ * read and cannot disagree. A null id stamps null (the local-origin state).
+ */
+export function stampOriginatorOnCreateWith(content: unknown, localInstanceId: string | null): void {
   if (!isPlainObject(content)) return;
-  content.originatorInstanceId = await localInstanceId();
+  content.originatorInstanceId = localInstanceId;
 }
 
 /**
@@ -93,7 +107,8 @@ export function keepStoredOriginator(
 /**
  * Apply the full create/update rule: `stored` is the row this write is over
  * (null/undefined ⇒ a create). This is the one call a `put()` or `patch()` needs
- * after it has resolved the pre-existing row.
+ * after it has resolved the pre-existing row. The create id is this module's
+ * process-cached {@link localInstanceId}.
  */
 export async function applyOriginatorInstanceId(
   content: unknown,
@@ -103,6 +118,26 @@ export async function applyOriginatorInstanceId(
     keepStoredOriginator(content, stored);
   } else {
     await stampOriginatorOnCreate(content);
+  }
+}
+
+/**
+ * Apply the full create/update rule with an explicitly resolved local id:
+ * `stored` is the row this write is over (null/undefined ⇒ a create, stamped
+ * with `localInstanceId`). The id is the caller's fresh read of the CURRENT
+ * `Instance` table, not this module's cache — used where a caller also decides
+ * the write by the current instance id (the Presence local home guard,
+ * resources/Presence.ts) so the two share ONE read.
+ */
+export function applyOriginatorInstanceIdWith(
+  content: unknown,
+  stored: Record<string, any> | null | undefined,
+  localInstanceId: string | null,
+): void {
+  if (isStoredRow(stored)) {
+    keepStoredOriginator(content, stored);
+  } else {
+    stampOriginatorOnCreateWith(content, localInstanceId);
   }
 }
 

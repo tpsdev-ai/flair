@@ -1,0 +1,173 @@
+2026-10-13T13:45:23.0154098Z ##[group]test/integration/patch-refreshes-embedding-2466.test.ts:
+2026-10-13T13:45:30.2088414Z [harper-lifecycle] waitForHealth: polling http://127.0.0.1:39801/health (timeout 60000ms)
+2026-10-13T13:45:30.2090613Z [harper-lifecycle] waitForHealth: polling http://127.0.0.1:45501/health (timeout 60000ms)
+2026-10-13T13:45:30.2092049Z [harper-lifecycle] waitForHealth: attempt 1 → error: Unable to connect. Is the computer able to access the url? (0ms elapsed)
+2026-10-13T13:45:30.2332624Z [harper-lifecycle] waitForHealth: attempt 1 → HTTP 200 (0ms elapsed)
+2026-10-13T13:45:30.2333642Z [harper-lifecycle] waitForHealth: server alive after 0ms
+2026-10-13T13:45:30.7099832Z [harper-lifecycle] waitForHealth: attempt 2 → error: Unable to connect. Is the computer able to access the url? (501ms elapsed)
+2026-10-13T13:45:31.2116001Z [harper-lifecycle] waitForHealth: attempt 3 → error: Unable to connect. Is the computer able to access the url? (1003ms elapsed)
+2026-10-13T13:45:31.7123625Z [harper-lifecycle] waitForHealth: attempt 4 → error: Unable to connect. Is the computer able to access the url? (1503ms elapsed)
+2026-10-13T13:45:32.2121265Z [harper-lifecycle] waitForHealth: attempt 5 → error: Unable to connect. Is the computer able to access the url? (2003ms elapsed)
+2026-10-13T13:45:32.7121998Z [harper-lifecycle] waitForHealth: attempt 6 → error: Unable to connect. Is the computer able to access the url? (2503ms elapsed)
+2026-10-13T13:45:33.2134891Z [harper-lifecycle] waitForHealth: attempt 7 → error: Unable to connect. Is the computer able to access the url? (3004ms elapsed)
+2026-10-13T13:45:33.7137787Z [harper-lifecycle] waitForHealth: attempt 8 → error: Unable to connect. Is the computer able to access the url? (3505ms elapsed)
+2026-10-13T13:45:34.2150886Z [harper-lifecycle] waitForHealth: attempt 9 → error: Unable to connect. Is the computer able to access the url? (4006ms elapsed)
+2026-10-13T13:45:34.7160626Z [harper-lifecycle] waitForHealth: attempt 10 → error: Unable to connect. Is the computer able to access the url? (4507ms elapsed)
+2026-10-13T13:45:35.2169017Z [harper-lifecycle] waitForHealth: attempt 11 → error: Unable to connect. Is the computer able to access the url? (5008ms elapsed)
+2026-10-13T13:45:35.7180682Z [harper-lifecycle] waitForHealth: attempt 12 → error: Unable to connect. Is the computer able to access the url? (5509ms elapsed)
+2026-10-13T13:45:36.2291101Z [harper-lifecycle] waitForHealth: attempt 13 → HTTP 404 (6009ms elapsed)
+2026-10-13T13:45:36.2291940Z [harper-lifecycle] waitForHealth: server alive after 6009ms
+2026-10-13T13:45:36.3951524Z (pass) flair#2466 — ordinary PATCH embedding cases (real Harper) > (a) a redacting PATCH of content with no vector stores the vector of the redacted text [165.00ms]
+2026-10-13T13:45:36.4089523Z (pass) flair#2466 — ordinary PATCH embedding cases (real Harper) > (c) a summary-only PATCH keeps the vector [14.00ms]
+2026-10-13T13:45:36.5815266Z (pass) flair#2466 — ordinary PATCH embedding cases (real Harper) > (b) semantic search for the removed text no longer yields the old vector's high score [172.00ms]
+2026-10-13T13:45:36.5936495Z (pass) flair#2466 — ordinary PATCH embedding cases (real Harper) > (d) a PATCH supplying a vector stores that vector [12.00ms]
+2026-10-13T13:45:36.6093113Z (pass) flair#2466 — ordinary PATCH embedding cases (real Harper) > a text-changing PATCH with explicit null embedding clears it over HTTP [16.00ms]
+2026-10-13T13:45:36.7080859Z (pass) flair#2466 — ordinary PATCH embedding cases (real Harper) > an overlapping content edit leaves an ordinary PATCH's explicit null embedding cleared [99.00ms]
+2026-10-13T13:45:36.7220443Z (pass) flair#2466 — ordinary PATCH embedding cases (real Harper) > (e) a trigger-only PATCH omitting embedding after redaction keeps the stored vector and its stamps [14.00ms]
+2026-10-13T13:45:36.9804249Z (pass) flair#2466 — ordinary PATCH embedding cases (real Harper) > (f) an edit committed while a trigger-only PATCH is held ends with the edited text's vector [258.00ms]
+2026-10-13T13:45:37.2099901Z (pass) flair#2466 — ordinary PATCH embedding cases (real Harper) > (g) an edit committed while a content PATCH is held ends with the PATCH's text and its vector [230.00ms]
+2026-10-13T13:45:37.2180994Z (pass) flair#2466 — ordinary PATCH embedding cases (real Harper) > (i) unchanged content with a redaction-removed vector keeps the stored vector and its stamps [8.00ms]
+2026-10-13T13:45:37.5537998Z (pass) flair#2466 — ordinary PATCH embedding cases (real Harper) > (k) an edit committed while a PATCH carrying the read-time text is held ends with the PATCH's text and its vector [335.00ms]
+2026-10-13T13:45:43.0117479Z [harper-lifecycle] waitForHealth: polling http://127.0.0.1:40447/health (timeout 60000ms)
+2026-10-13T13:45:43.0119085Z [harper-lifecycle] waitForHealth: polling http://127.0.0.1:38445/health (timeout 60000ms)
+2026-10-13T13:45:43.0121823Z [harper-lifecycle] waitForHealth: attempt 1 → error: Unable to connect. Is the computer able to access the url? (0ms elapsed)
+2026-10-13T13:45:43.0315949Z [harper-lifecycle] waitForHealth: attempt 1 → HTTP 200 (0ms elapsed)
+2026-10-13T13:45:43.0317245Z [harper-lifecycle] waitForHealth: server alive after 0ms
+2026-10-13T13:45:43.5132623Z [harper-lifecycle] waitForHealth: attempt 2 → error: Unable to connect. Is the computer able to access the url? (501ms elapsed)
+2026-10-13T13:45:44.0147633Z [harper-lifecycle] waitForHealth: attempt 3 → error: Unable to connect. Is the computer able to access the url? (1003ms elapsed)
+2026-10-13T13:45:44.5162125Z [harper-lifecycle] waitForHealth: attempt 4 → error: Unable to connect. Is the computer able to access the url? (1504ms elapsed)
+2026-10-13T13:45:45.0169170Z [harper-lifecycle] waitForHealth: attempt 5 → error: Unable to connect. Is the computer able to access the url? (2005ms elapsed)
+2026-10-13T13:45:45.5175179Z [harper-lifecycle] waitForHealth: attempt 6 → error: Unable to connect. Is the computer able to access the url? (2506ms elapsed)
+2026-10-13T13:45:46.0181082Z [harper-lifecycle] waitForHealth: attempt 7 → error: Unable to connect. Is the computer able to access the url? (3006ms elapsed)
+2026-10-13T13:45:46.5199843Z [harper-lifecycle] waitForHealth: attempt 8 → error: Unable to connect. Is the computer able to access the url? (3508ms elapsed)
+2026-10-13T13:45:47.0210628Z [harper-lifecycle] waitForHealth: attempt 9 → error: Unable to connect. Is the computer able to access the url? (4009ms elapsed)
+2026-10-13T13:45:47.5212036Z [harper-lifecycle] waitForHealth: attempt 10 → error: Unable to connect. Is the computer able to access the url? (4509ms elapsed)
+2026-10-13T13:45:48.0302242Z [harper-lifecycle] waitForHealth: attempt 11 → error: Unable to connect. Is the computer able to access the url? (5017ms elapsed)
+2026-10-13T13:45:48.5334631Z [harper-lifecycle] waitForHealth: attempt 12 → error: Unable to connect. Is the computer able to access the url? (5521ms elapsed)
+2026-10-13T13:45:49.0525706Z [harper-lifecycle] waitForHealth: attempt 13 → HTTP 404 (6021ms elapsed)
+2026-10-13T13:45:49.0526746Z [harper-lifecycle] waitForHealth: server alive after 6021ms
+2026-10-13T13:45:49.1347030Z (pass) flair#2466 — ordinary PATCH cases with a failing backend (real Harper) > (h) a text-changing PATCH clears a stored, searchable vector and leaves a null stamp the re-embed selects [84.00ms]
+2026-10-13T13:45:49.1465704Z (pass) flair#2466 — ordinary PATCH cases with a failing backend (real Harper) > (j) unchanged content with a redaction-removed vector keeps a valid stored vector [12.00ms]
+2026-10-13T13:45:49.3560896Z 
+2026-10-13T13:45:49.3562056Z ##[endgroup]
+2026-10-13T13:45:49.3565217Z 
+2026-10-13T13:45:49.3565973Z ##[group]test/integration/host-pointer-negatives-1940.test.ts:
+2026-10-13T13:45:55.0036284Z [harper-lifecycle] waitForHealth: polling http://127.0.0.1:44929/health (timeout 60000ms)
+2026-10-13T13:45:55.0037882Z [harper-lifecycle] waitForHealth: polling http://127.0.0.1:43781/health (timeout 60000ms)
+2026-10-13T13:45:55.0068229Z [harper-lifecycle] waitForHealth: attempt 1 → error: Unable to connect. Is the computer able to access the url? (0ms elapsed)
+2026-10-13T13:45:55.0249260Z [harper-lifecycle] waitForHealth: attempt 1 → HTTP 200 (0ms elapsed)
+2026-10-13T13:45:55.0250246Z [harper-lifecycle] waitForHealth: server alive after 0ms
+2026-10-13T13:45:55.5073411Z [harper-lifecycle] waitForHealth: attempt 2 → error: Unable to connect. Is the computer able to access the url? (503ms elapsed)
+2026-10-13T13:45:56.0091016Z [harper-lifecycle] waitForHealth: attempt 3 → error: Unable to connect. Is the computer able to access the url? (1005ms elapsed)
+2026-10-13T13:45:56.5102359Z [harper-lifecycle] waitForHealth: attempt 4 → error: Unable to connect. Is the computer able to access the url? (1506ms elapsed)
+2026-10-13T13:45:57.0109522Z [harper-lifecycle] waitForHealth: attempt 5 → error: Unable to connect. Is the computer able to access the url? (2007ms elapsed)
+2026-10-13T13:45:57.5116094Z [harper-lifecycle] waitForHealth: attempt 6 → error: Unable to connect. Is the computer able to access the url? (2507ms elapsed)
+2026-10-13T13:45:58.0110754Z [harper-lifecycle] waitForHealth: attempt 7 → error: Unable to connect. Is the computer able to access the url? (3007ms elapsed)
+2026-10-13T13:45:58.5111333Z [harper-lifecycle] waitForHealth: attempt 8 → error: Unable to connect. Is the computer able to access the url? (3507ms elapsed)
+2026-10-13T13:45:59.0123471Z [harper-lifecycle] waitForHealth: attempt 9 → error: Unable to connect. Is the computer able to access the url? (4008ms elapsed)
+2026-10-13T13:45:59.5123970Z [harper-lifecycle] waitForHealth: attempt 10 → error: Unable to connect. Is the computer able to access the url? (4508ms elapsed)
+2026-10-13T13:46:00.0130852Z [harper-lifecycle] waitForHealth: attempt 11 → error: Unable to connect. Is the computer able to access the url? (5009ms elapsed)
+2026-10-13T13:46:00.5166825Z [harper-lifecycle] waitForHealth: attempt 12 → error: Unable to connect. Is the computer able to access the url? (5509ms elapsed)
+2026-10-13T13:46:01.0268390Z [harper-lifecycle] waitForHealth: attempt 13 → HTTP 404 (6012ms elapsed)
+2026-10-13T13:46:01.0269414Z [harper-lifecycle] waitForHealth: server alive after 6012ms
+2026-10-13T13:46:01.2056305Z (pass) flair#1940 A1-iv — host pointer negative cases (real Harper) > n1a: a write that supplies its own instanceToken does not change the stored token [161.00ms]
+2026-10-13T13:46:01.2350670Z (pass) flair#1940 A1-iv — host pointer negative cases (real Harper) > n1b: a pointer whose stored token does not match its row's token is not returned [30.00ms]
+2026-10-13T13:46:01.2801230Z (pass) flair#1940 A1-iv — host pointer negative cases (real Harper) > n2: an author-only pointer on another agent's memory is withheld from a reader [45.00ms]
+2026-10-13T13:46:01.3825128Z (pass) flair#1940 A1-iv — host pointer negative cases (real Harper) > n3: after the memory row is deleted a by-id read is 404 without the pointer, and the list omits the row and its pointer [102.00ms]
+2026-10-13T13:46:01.4707140Z (pass) flair#1940 A1-iv — host pointer negative cases (real Harper) > n4: after a same-id replace the old pointer is not returned for the new row [87.00ms]
+2026-10-13T13:46:01.5461432Z (pass) flair#1940 A1-iv — host pointer negative cases (real Harper) > n5: a PATCH keeps the stored token, so the pointer stays attached [77.00ms]
+2026-10-13T13:46:01.6512010Z (pass) flair#1940 A1-iv — host pointer negative cases (real Harper) > n6: a POST's own instanceToken is not stored, and a POST over an existing id is refused [105.00ms]
+2026-10-13T13:46:01.6651169Z (pass) flair#1940 A1-iv — host pointer negative cases (real Harper) > n7: a pointer whose authorId differs from the memory's agentId is not returned [14.00ms]
+2026-10-13T13:46:01.6781851Z (pass) flair#1940 A1-iv — host pointer negative cases (real Harper) > n8: a pointer on an archived memory is not returned [13.00ms]
+2026-10-13T13:46:01.7901655Z 
+2026-10-13T13:46:01.7902499Z ##[endgroup]
+2026-10-13T13:46:01.7902662Z 
+2026-10-13T13:46:01.7903090Z ##[group]test/integration/local-delete-instance-2225.test.ts:
+2026-10-13T13:46:08.4565556Z [harper-lifecycle] waitForHealth: polling http://127.0.0.1:34437/health (timeout 60000ms)
+2026-10-13T13:46:08.4567099Z [harper-lifecycle] waitForHealth: polling http://127.0.0.1:42285/health (timeout 60000ms)
+2026-10-13T13:46:08.4569245Z [harper-lifecycle] waitForHealth: attempt 1 → error: Unable to connect. Is the computer able to access the url? (0ms elapsed)
+2026-10-13T13:46:08.4765409Z [harper-lifecycle] waitForHealth: attempt 1 → HTTP 200 (0ms elapsed)
+2026-10-13T13:46:08.4766440Z [harper-lifecycle] waitForHealth: server alive after 0ms
+2026-10-13T13:46:08.9580221Z [harper-lifecycle] waitForHealth: attempt 2 → error: Unable to connect. Is the computer able to access the url? (501ms elapsed)
+2026-10-13T13:46:09.4599623Z [harper-lifecycle] waitForHealth: attempt 3 → error: Unable to connect. Is the computer able to access the url? (1003ms elapsed)
+2026-10-13T13:46:09.9612329Z [harper-lifecycle] waitForHealth: attempt 4 → error: Unable to connect. Is the computer able to access the url? (1504ms elapsed)
+2026-10-13T13:46:10.4611927Z [harper-lifecycle] waitForHealth: attempt 5 → error: Unable to connect. Is the computer able to access the url? (2004ms elapsed)
+2026-10-13T13:46:10.9618454Z [harper-lifecycle] waitForHealth: attempt 6 → error: Unable to connect. Is the computer able to access the url? (2505ms elapsed)
+2026-10-13T13:46:11.4621706Z [harper-lifecycle] waitForHealth: attempt 7 → error: Unable to connect. Is the computer able to access the url? (3005ms elapsed)
+2026-10-13T13:46:11.9624329Z [harper-lifecycle] waitForHealth: attempt 8 → error: Unable to connect. Is the computer able to access the url? (3505ms elapsed)
+2026-10-13T13:46:12.4631236Z [harper-lifecycle] waitForHealth: attempt 9 → error: Unable to connect. Is the computer able to access the url? (4006ms elapsed)
+2026-10-13T13:46:12.9632696Z [harper-lifecycle] waitForHealth: attempt 10 → error: Unable to connect. Is the computer able to access the url? (4506ms elapsed)
+2026-10-13T13:46:13.4635188Z [harper-lifecycle] waitForHealth: attempt 11 → error: Unable to connect. Is the computer able to access the url? (5006ms elapsed)
+2026-10-13T13:46:13.9640826Z [harper-lifecycle] waitForHealth: attempt 12 → error: Unable to connect. Is the computer able to access the url? (5507ms elapsed)
+2026-10-13T13:46:14.4755697Z [harper-lifecycle] waitForHealth: attempt 13 → HTTP 404 (6008ms elapsed)
+2026-10-13T13:46:14.4756737Z [harper-lifecycle] waitForHealth: server alive after 6008ms
+2026-10-13T13:46:15.6853153Z (pass) flair#2225 — CLI local deletes on a real Harper > memory hygiene --apply deletes on the scanned instance and records each delete the watcher reads [1197.02ms]
+2026-10-13T13:46:16.3469067Z (pass) flair#2225 — CLI local deletes on a real Harper > agent remove deletes on the scanned instance and records the delete the watcher reads [662.01ms]
+2026-10-13T13:46:16.5663080Z (pass) flair#2225 — CLI local deletes on a real Harper > memory hygiene refuses a conflicting explicit HTTP port [219.00ms]
+2026-10-13T13:46:16.7757762Z (pass) flair#2225 — CLI local deletes on a real Harper > agent remove refuses a conflicting explicit HTTP port [210.00ms]
+2026-10-13T13:46:17.3929381Z (pass) flair#2225 — CLI local deletes on a real Harper > an unreadable or unpaired configuration refuses before any delete [617.01ms]
+2026-10-13T13:46:17.7106672Z (pass) audit #2225 — CLI deletes leave no skill-tagged Memory row stored > agent remove physically removes the removed agent's skill-tagged Memory row [317.00ms]
+2026-10-13T13:46:18.0387112Z (pass) audit #2225 — CLI deletes leave no skill-tagged Memory row stored > agent remove completes and removes every version row of an updated skill [328.00ms]
+2026-10-13T13:46:18.3063239Z (pass) audit #2225 — CLI deletes leave no skill-tagged Memory row stored > memory hygiene --apply physically removes a matched skill-tagged row it reports as deleted [267.00ms]
+2026-10-13T13:46:18.3931049Z (pass) audit #2225 — CLI deletes leave no skill-tagged Memory row stored > POST /MemoryPurge given only the first version id of an updated skill removes every version row [87.00ms]
+2026-10-13T13:46:18.4727530Z (pass) audit #2225 — CLI deletes leave no skill-tagged Memory row stored > POST /MemoryPurge given only the latest version id of an updated skill removes every version row [79.00ms]
+2026-10-13T13:46:18.5251483Z (pass) POST /MemoryPurge on a real Harper > an agent signature and an admin agent signature are refused with nothing deleted; Basic operator credentials remove the row [53.00ms]
+2026-10-13T13:46:18.5350365Z (pass) POST /MemoryPurge on a real Harper > a named id that is not stored fails the call by name and removes nothing [10.00ms]
+2026-10-13T13:46:18.5411551Z (pass) POST /MemoryPurge on a real Harper > an id list with a non-string entry is refused and removes nothing [6.00ms]
+2026-10-13T13:46:18.7900371Z (pass) flair#2351 — agent remove confirms the agent's Soul rows are gone > agent remove preserves other owners’ Memory and Soul rows and confirms the selected owner’s removal [249.00ms]
+2026-10-13T13:46:18.9261864Z 
+2026-10-13T13:46:18.9262701Z ##[endgroup]
+2026-10-13T13:46:18.9262885Z 
+2026-10-13T13:46:18.9263356Z ##[group]test/integration/skill-version-completion-inproc-2139.test.ts:
+2026-10-13T13:46:25.2544943Z [harper-lifecycle] waitForHealth: polling http://127.0.0.1:35073/health (timeout 60000ms)
+2026-10-13T13:46:25.2546824Z [harper-lifecycle] waitForHealth: polling http://127.0.0.1:39211/health (timeout 60000ms)
+2026-10-13T13:46:25.2549309Z [harper-lifecycle] waitForHealth: attempt 1 → error: Unable to connect. Is the computer able to access the url? (0ms elapsed)
+2026-10-13T13:46:25.2746661Z [harper-lifecycle] waitForHealth: attempt 1 → HTTP 200 (0ms elapsed)
+2026-10-13T13:46:25.2747688Z [harper-lifecycle] waitForHealth: server alive after 0ms
+2026-10-13T13:46:25.7558998Z [harper-lifecycle] waitForHealth: attempt 2 → error: Unable to connect. Is the computer able to access the url? (501ms elapsed)
+2026-10-13T13:46:26.2590478Z [harper-lifecycle] waitForHealth: attempt 3 → error: Unable to connect. Is the computer able to access the url? (1004ms elapsed)
+2026-10-13T13:46:26.7598131Z [harper-lifecycle] waitForHealth: attempt 4 → error: Unable to connect. Is the computer able to access the url? (1505ms elapsed)
+2026-10-13T13:46:27.2602660Z [harper-lifecycle] waitForHealth: attempt 5 → error: Unable to connect. Is the computer able to access the url? (2005ms elapsed)
+2026-10-13T13:46:27.7606631Z [harper-lifecycle] waitForHealth: attempt 6 → error: Unable to connect. Is the computer able to access the url? (2506ms elapsed)
+2026-10-13T13:46:28.2609217Z [harper-lifecycle] waitForHealth: attempt 7 → error: Unable to connect. Is the computer able to access the url? (3005ms elapsed)
+2026-10-13T13:46:28.7616009Z [harper-lifecycle] waitForHealth: attempt 8 → error: Unable to connect. Is the computer able to access the url? (3507ms elapsed)
+2026-10-13T13:46:29.2622617Z [harper-lifecycle] waitForHealth: attempt 9 → error: Unable to connect. Is the computer able to access the url? (4007ms elapsed)
+2026-10-13T13:46:29.7622350Z [harper-lifecycle] waitForHealth: attempt 10 → error: Unable to connect. Is the computer able to access the url? (4507ms elapsed)
+2026-10-13T13:46:30.2637157Z [harper-lifecycle] waitForHealth: attempt 11 → error: Unable to connect. Is the computer able to access the url? (5008ms elapsed)
+2026-10-13T13:46:30.7636997Z [harper-lifecycle] waitForHealth: attempt 12 → error: Unable to connect. Is the computer able to access the url? (5509ms elapsed)
+2026-10-13T13:46:31.2741609Z [harper-lifecycle] waitForHealth: attempt 13 → HTTP 404 (6009ms elapsed)
+2026-10-13T13:46:31.2742558Z [harper-lifecycle] waitForHealth: server alive after 6009ms
+2026-10-13T13:46:31.3626563Z (pass) flair#2139 S2c (6) — in-process POST / MCP skill update returns the successor id > skill_store (in-process Memory.post) appends a create version at the returned id [63.00ms]
+2026-10-13T13:46:31.4267140Z (pass) flair#2139 S2c (6) — in-process POST / MCP skill update returns the successor id > memory_update (default) returns the ACTUAL successor id and chains the version [64.00ms]
+2026-10-13T13:46:31.4797266Z (pass) flair#2139 S2c (6) — in-process POST / MCP skill update returns the successor id > memory_update with preserveHistory:true returns the successor id and closes the predecessor [53.00ms]
+2026-10-13T13:46:31.5972557Z 
+2026-10-13T13:46:31.5973373Z ##[endgroup]
+2026-10-13T13:46:31.5973538Z 
+2026-10-13T13:46:31.5973929Z ##[group]test/integration/memory-purge-unconfirmed-2290.test.ts:
+2026-10-13T13:46:37.1981061Z [harper-lifecycle] waitForHealth: polling http://127.0.0.1:46615/health (timeout 60000ms)
+2026-10-13T13:46:37.1982341Z [harper-lifecycle] waitForHealth: polling http://127.0.0.1:34521/health (timeout 60000ms)
+2026-10-13T13:46:37.1984852Z [harper-lifecycle] waitForHealth: attempt 1 → error: Unable to connect. Is the computer able to access the url? (0ms elapsed)
+2026-10-13T13:46:37.2198206Z [harper-lifecycle] waitForHealth: attempt 1 → HTTP 200 (0ms elapsed)
+2026-10-13T13:46:37.2199206Z [harper-lifecycle] waitForHealth: server alive after 0ms
+2026-10-13T13:46:37.6991522Z [harper-lifecycle] waitForHealth: attempt 2 → error: Unable to connect. Is the computer able to access the url? (501ms elapsed)
+2026-10-13T13:46:38.2004123Z [harper-lifecycle] waitForHealth: attempt 3 → error: Unable to connect. Is the computer able to access the url? (1002ms elapsed)
+2026-10-13T13:46:38.7009197Z [harper-lifecycle] waitForHealth: attempt 4 → error: Unable to connect. Is the computer able to access the url? (1503ms elapsed)
+2026-10-13T13:46:39.2019673Z [harper-lifecycle] waitForHealth: attempt 5 → error: Unable to connect. Is the computer able to access the url? (2004ms elapsed)
+2026-10-13T13:46:39.7023093Z [harper-lifecycle] waitForHealth: attempt 6 → error: Unable to connect. Is the computer able to access the url? (2504ms elapsed)
+2026-10-13T13:46:40.2032255Z [harper-lifecycle] waitForHealth: attempt 7 → error: Unable to connect. Is the computer able to access the url? (3005ms elapsed)
+2026-10-13T13:46:40.7040143Z [harper-lifecycle] waitForHealth: attempt 8 → error: Unable to connect. Is the computer able to access the url? (3506ms elapsed)
+2026-10-13T13:46:41.2040621Z [harper-lifecycle] waitForHealth: attempt 9 → error: Unable to connect. Is the computer able to access the url? (4006ms elapsed)
+2026-10-13T13:46:41.7052694Z [harper-lifecycle] waitForHealth: attempt 10 → error: Unable to connect. Is the computer able to access the url? (4507ms elapsed)
+2026-10-13T13:46:42.2057362Z [harper-lifecycle] waitForHealth: attempt 11 → error: Unable to connect. Is the computer able to access the url? (5008ms elapsed)
+2026-10-13T13:46:42.7066816Z [harper-lifecycle] waitForHealth: attempt 12 → error: Unable to connect. Is the computer able to access the url? (5508ms elapsed)
+2026-10-13T13:46:43.2166966Z [harper-lifecycle] waitForHealth: attempt 13 → HTTP 404 (6008ms elapsed)
+2026-10-13T13:46:43.2168061Z [harper-lifecycle] waitForHealth: server alive after 6008ms
+2026-10-13T13:46:43.2588983Z (pass) POST /MemoryPurge > healthy purge confirms pointer cleanup after a contextless read pins the request snapshot [42.00ms]
+2026-10-13T13:46:43.2767316Z (pass) POST /MemoryPurge > ctrl: with no concurrent write, the row and its pointer row are removed and its history record is written [18.00ms]
+2026-10-13T13:46:43.3116591Z (pass) POST /MemoryPurge > a row delete that loses to a newer write fails the call by name; the row keeps its pointer row and no history record [34.00ms]
+2026-10-13T13:46:43.3249903Z (pass) POST /MemoryPurge > a history-record delete that loses to a newer write fails the call by name and names the record [14.00ms]
+2026-10-13T13:46:43.3476591Z (pass) POST /MemoryPurge > a pointer-row delete that loses to a newer write fails the call by name after the row is removed [22.00ms]
+2026-10-13T13:46:43.3786356Z (pass) POST /MemoryPurge > a mixed batch with a skipped pointer delete reports removedIds and stillStoredIds [30.00ms]
+2026-10-13T13:46:43.3925801Z (pass) POST /MemoryPurge > pointer confirmation failure returns the named 500 after the row deletion commits [15.00ms]
+2026-10-13T13:46:43.5156340Z 
+2026-10-13T13:46:43.5157202Z ##[endgroup]

@@ -3,13 +3,15 @@
  * vector computation, before or during the write transaction (flair#2484),
  * real Harper.
  *
- * The backfill computes the vector before its owned write transaction opens.
- * Rows without content or with an embedding longer than 100 entries skip
- * before content comparison. For eligible rows, content is compared before
- * staging and the committed row is confirmed afterward. Drift observed by
- * either check aborts the attempt; remaining outer attempts re-read and may
- * recompute. Changes after confirmation and before commit are not detected by
- * these checks.
+ * The backfill computes the vector before its owned write transaction opens,
+ * from the row's embedding text (flair#2465: a skill's non-empty `trigger`,
+ * else `content`). Rows without that text or with an embedding longer than 100
+ * entries skip before the text comparison. For eligible rows, the fields that
+ * select the text (`content`, `trigger`, `tags`) are compared before staging
+ * and the committed row is confirmed afterward. Drift observed by either check
+ * aborts the attempt; remaining outer attempts re-read and may recompute.
+ * Changes after confirmation and before commit are not detected by these
+ * checks.
  *
  * The spawned Harper carries the test-only pause (resources/txn-pause-point.ts,
  * enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION and FLAIR_TEST_PAUSE_DIR).
@@ -23,8 +25,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
+import { computeContentHash } from "../../resources/memory-feed-lib.ts";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -56,9 +59,10 @@ async function authSend(harper: HarperInstance, agent: TestAgent, method: string
   });
 }
 async function seedAgent(harper: HarperInstance, agent: TestAgent): Promise<void> {
+  // The short-vector skill fixture uses this administrator to store its supplied vector.
   const res = await adminOp(harper, {
     operation: "insert", database: "flair", table: "Agent",
-    records: [{ id: agent.id, name: agent.id, role: "agent", publicKey: agent.publicKey, createdAt: new Date().toISOString() }],
+    records: [{ id: agent.id, name: agent.id, role: "admin", publicKey: agent.publicKey, createdAt: new Date().toISOString() }],
   });
   expect(res.status, `seed agent returned ${res.status}`).toBe(200);
 }
@@ -163,20 +167,7 @@ const agent = mkAgent("bfx-agent");
 beforeAll(async () => {
   home = mkdtempSync(join(tmpdir(), "flair-2484-home-"));
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2484-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper({ homeDir: home });
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir }, homeDir: home });
   // Every request in this file goes to the ephemeral instance this test started.
   const http = new URL(harper.httpURL);
   const ops = new URL(harper.opsURL);
@@ -196,7 +187,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (home) rmSync(home, { recursive: true, force: true });
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2484 — the embedding backfill and a concurrent text change (real Harper)", () => {
   for (const point of ["backfill-embedding-pre", "backfill-embedding"]) {
@@ -245,4 +236,61 @@ describe("flair#2484 — the embedding backfill and a concurrent text change (re
     const vector = await serverEmbedding(harper, "a control text about quiet walks");
     expect(cosine(row.embedding, vector), "the stored vector is not the row's own text vector").toBeGreaterThan(0.999);
   }, 120_000);
+});
+
+describe("flair#2465 — the embedding backfill embeds a skill's trigger and binds it (real Harper)", () => {
+  const TRIGGER = "when the nightly backup job fails to upload its archive";
+  const PROCEDURE = "open the job log, find the failed step, and rerun that step once";
+  const NEW_TRIGGER = "when a satellite telemetry window closes before the downlink completes";
+
+  /** PUT-create a skill whose supplied vector has fewer than 100 entries, so the
+   *  write's backfill embeds it. The writer is the administrator (seedAgent): from
+   *  flair#2573 slice 2 a non-admin write discards a supplied vector. */
+  function putShortVectorSkill(id: string): Promise<Response> {
+    return authSend(harper, agent, "PUT", `/Memory/${id}`, {
+      id, agentId: agent.id, tags: ["skill"], trigger: TRIGGER, content: PROCEDURE,
+      embedding: [0.1, 0.1, 0.1], embeddingModel: getModelId(),
+    });
+  }
+
+  it("stores the trigger's vector, not the content's, and records the trigger's hash", async () => {
+    const id = "bfx-skill-control";
+    const res = await putShortVectorSkill(id);
+    expect(res.status, (await res.clone().text()).slice(0, 300)).toBeLessThan(300);
+
+    const row = await waitForEmbedding(id);
+    expect(row?.trigger).toBe(TRIGGER);
+    expect(row?.content).toBe(PROCEDURE);
+    expect(row?.embedding?.length, "the backfill wrote a computed embedding").toBeGreaterThan(100);
+    const triggerVector = await serverEmbedding(harper, TRIGGER);
+    const contentVector = await serverEmbedding(harper, PROCEDURE);
+    expect(cosine(row.embedding, triggerVector), "the backfill did not embed the trigger").toBeGreaterThan(0.999);
+    expect(cosine(row.embedding, triggerVector)).toBeGreaterThan(cosine(row.embedding, contentVector));
+    expect(row.embeddedContentHash).toBe(computeContentHash(agent.id, TRIGGER));
+  }, 180_000);
+
+  for (const point of ["backfill-embedding-pre", "backfill-embedding"]) {
+    it(`stores the NEW trigger's vector after a concurrent trigger-only change (${point})`, async () => {
+      const id = `bfx-skill-drift-${point}`;
+      const { response, competed, released, paused } = await withPaused(
+        point,
+        () => putShortVectorSkill(id),
+        () => updateRow(harper, { id, trigger: NEW_TRIGGER }),
+      );
+
+      expect(paused, `the backfill was not paused at ${point}`).toBe(true);
+      expect(released, "the pause ended by timeout, not by this test").toBe("go");
+      expect(competed, "the competing trigger edit was not applied").toBe(200);
+      expect(response.status, (await response.clone().text()).slice(0, 300)).toBeLessThan(300);
+
+      const row = await waitForEmbedding(id);
+      expect(row?.trigger, "the competing trigger edit is kept").toBe(NEW_TRIGGER);
+      expect(row?.content).toBe(PROCEDURE);
+      const newVector = await serverEmbedding(harper, NEW_TRIGGER);
+      const oldVector = await serverEmbedding(harper, TRIGGER);
+      expect(cosine(row.embedding, newVector), "the backfill stored a vector for the superseded trigger").toBeGreaterThan(0.999);
+      expect(cosine(row.embedding, newVector)).toBeGreaterThan(cosine(row.embedding, oldVector));
+      expect(row.embeddedContentHash).toBe(computeContentHash(agent.id, NEW_TRIGGER));
+    }, 180_000);
+  }
 });

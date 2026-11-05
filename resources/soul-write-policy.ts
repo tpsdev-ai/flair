@@ -1,8 +1,9 @@
 import { resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
+import { isDeliberateInternalVerdict } from "./internal-authority.js";
 import { FORBIDDEN, UNAUTH } from "./record-type-kit.js";
 import { buildProvenance } from "./provenance.js";
 import { databases } from "harper";
-import { refuseAdkSourcedSoulWrite } from "./soul-adk-guard.js";
+import { SOUL_SCOPE_FIELDS_REFUSAL, suppliesSoulScopeFields } from "../src/lib/soul-scope-fields.js";
 
 export type SoulWriteSource = "operator" | "internal";
 
@@ -12,7 +13,7 @@ export type SoulWriteSource = "operator" | "internal";
 export function soulWriteSource(context: any, auth: AgentAuthVerdict): SoulWriteSource | null {
   const request = context?.request ?? context;
   // Internal path needs a deliberate __flairInternal marker; a contextless call is refused.
-  if (auth.kind === "internal" && context?.__flairInternal === true && !request?.headers) return "internal";
+  if (isDeliberateInternalVerdict(context, auth)) return "internal";
   const header = request?.headers?.get?.("authorization") ?? request?.headers?.asObject?.authorization ?? "";
   if (auth.kind === "agent" && auth.isAdmin && /^Basic\s/i.test(header)) return "operator";
   return null;
@@ -24,6 +25,16 @@ export async function authorizeSoulWrite(context: any) {
   const denied = auth.kind === "anonymous" ? UNAUTH()
     : source ? null : FORBIDDEN("soul_write_requires_operator: use authenticated operator credentials");
   return { auth, source, denied };
+}
+
+/**
+ * Whether this context's soul write would pass source authorization: the
+ * decision {@link authorizeSoulWrite} returns, so a surface that must decide
+ * BEFORE a write (the /mcp `tools/list` gate) asks the write's
+ * source-authorization question instead of restating the rule.
+ */
+export async function soulWriteAllowed(context: any): Promise<boolean> {
+  return (await authorizeSoulWrite(context)).denied === null;
 }
 
 export function soulProvenance(auth: AgentAuthVerdict, source: SoulWriteSource, now: string): string {
@@ -55,10 +66,20 @@ export async function refuseLearnedSoulWrite(content: any): Promise<Response | n
   return null;
 }
 
-/** Content guards after source authorization: dated vendor-tag bridge, then the
- *  generic learned-content backstop. New connectors need no Soul-side branch. */
+/** Refuse a write that would store a non-empty `scopeTag` or a non-empty
+ *  `tags` array: Soul has no dedicated or enforced per-user scope field (flair#1540). */
+export function refuseSoulScopeFields(content: any): Response | null {
+  return suppliesSoulScopeFields(content) ? FORBIDDEN(SOUL_SCOPE_FIELDS_REFUSAL) : null;
+}
+
+/** Content guards after source authorization: the vendor-neutral scope-field
+ *  refusal, then the generic learned-content backstop. New connectors need no
+ *  Soul-side branch.
+ *
+ *  `content` is the row this write would store: POST and PUT pass the request
+ *  body, PATCH the merged row, so a stored row's scope fields decide a PATCH. */
 export async function refuseSoulWriteContent(content: any): Promise<Response | null> {
-  const adk = await refuseAdkSourcedSoulWrite(content);
-  if (adk) return adk;
+  const scope = refuseSoulScopeFields(content);
+  if (scope) return scope;
   return refuseLearnedSoulWrite(content);
 }
