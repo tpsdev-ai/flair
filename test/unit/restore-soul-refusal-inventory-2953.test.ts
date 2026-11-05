@@ -7,9 +7,12 @@
  * Prove JSON/Response against TypeScript library symbols and globalThis against
  * its intrinsic symbol. A built-in or proven alias may occur only as receiver
  * or callee of a recognised member call or new, the right operand of instanceof,
- * the operand of typeof, or an alias initializer the resolver tracks. Imports
- * and exports must be followed; alias uses obey this rule. A refusal helper may
- * occur only as the callee of a direct call the classifier resolves, its own
+ * the operand of typeof, or an alias initializer the resolver tracks. Follow
+ * side-effect/default/named imports, named exports (local or from), and bare-star
+ * re-exports. Namespace imports carrying trusted values or helpers, namespace re-exports,
+ * export assignments, import-equals aliases and other import/export declaration
+ * forms are unresolved with file:line:column; alias uses obey this rule. A refusal
+ * helper may occur only as the callee of a direct call the classifier resolves, its own
  * declaration, or an import/re-export binding the resolver follows. Every other
  * built-in or refusal-helper use is unresolved with file:line:column and reason.
  * eval/Function are out of scope. #2970 replaces this inventory with a server dry run.
@@ -843,6 +846,34 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
     const at = siteOf(sources.get(file)!, node);
     if (!unresolved.has(at)) unresolved.set(at, detail);
   };
+  for (const [file, source] of sources) {
+    const visit = (node: ts.Node): void => {
+      if (ts.isExportDeclaration(node)) {
+        const module = node.moduleSpecifier;
+        const clause = node.exportClause;
+        if (clause && ts.isNamespaceExport(clause)) {
+          recordUnresolved(file, clause.name, `unresolved namespace re-export: ${clause.name.text}`);
+        } else if (node.attributes || (module && !ts.isStringLiteral(module)) ||
+            !(clause ? ts.isNamedExports(clause) : module && ts.isStringLiteral(module))) {
+          recordUnresolved(file, node, "unsupported export declaration");
+        }
+      } else if (ts.isExportAssignment(node)) {
+        recordUnresolved(file, node, `unsupported export assignment: ${node.isExportEquals ? "export =" : "export default"}`);
+      } else if (ts.isNamespaceExportDeclaration(node)) {
+        recordUnresolved(file, node, "unsupported namespace export declaration");
+      } else if (ts.isImportEqualsDeclaration(node)) {
+        recordUnresolved(file, node, `unsupported import-equals alias: ${node.name.text}`);
+      } else if (ts.isImportDeclaration(node)) {
+        const bindings = node.importClause?.namedBindings;
+        if (!ts.isStringLiteral(node.moduleSpecifier) || node.attributes ||
+            (bindings && !ts.isNamedImports(bindings) && !ts.isNamespaceImport(bindings))) {
+          recordUnresolved(file, node, "unsupported import declaration");
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
 
   // (a) Calls to a function whose parameter is forwarded into a refusal.
   for (const [file, source] of sources) {
@@ -2278,6 +2309,46 @@ test.each([
   expect(inventory.unresolved.get("fixture.ts:2:16")).toBe("unsupported refusal-helper use: refuse in PropertyAccessExpression");
 });
 
+
+test.each([
+  ['export const RProbe = Response;', 'ProbeNS.RProbe.json({ error: "x_ns_export" }, { status: 403 });'],
+  ['export function RProbe(msg: string) { return Response.json({ error: msg }, { status: 403 }); }', 'ProbeNS.RProbe("x_ns_export");'],
+])("reports a namespace re-export in the Soul closure: %s", (declaration, call) => {
+  const sources = collectSourceSet();
+  for (const [file, addition] of [
+    ["resources/soul-write-policy.ts", declaration],
+    ["resources/owner-field-guard.ts", 'export * as ProbeNS from "./soul-write-policy.js";'],
+    ["resources/Soul.ts", `import { ProbeNS } from "./owner-field-guard.js";\n${call}`],
+  ]) {
+    const text = `${sources.get(file)!.text}\n${addition}\n`;
+    sources.set(file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true));
+  }
+  const inventory = buildInventory(sources);
+  const source = sources.get("resources/owner-field-guard.ts")!;
+  const at = siteIn(source, "ProbeNS");
+  expect(at).toEndWith(":13");
+  expect(inventory.unresolved.get(at)).toBe("unresolved namespace re-export: ProbeNS");
+  expect(UNRESOLVED_SITES.has(at)).toBe(false);
+});
+
+test.each([
+  ['export = Response;', 'unsupported export assignment: export ='],
+  ['export default Response;', 'unsupported export assignment: export default'],
+  ['export default deny;', 'unsupported export assignment: export default'],
+  ['export default (msg: string) => Response.json({ error: msg }, { status: 403 });', 'unsupported export assignment: export default'],
+  ['export import R = NS.RProbe;', 'unsupported import-equals alias: R'],
+  ['export as namespace NS;', 'unsupported namespace export declaration'],
+  ['import R = NS.RProbe;', 'unsupported import-equals alias: R'],
+  ['import R = require("./soul-write-policy.js");', 'unsupported import-equals alias: R'],
+  ['export { RProbe } from "./soul-write-policy.js" with { type: "json" };', 'unsupported export declaration'],
+  ['import { RProbe } from "./soul-write-policy.js" with { type: "json" };', 'unsupported import declaration'],
+])("reports an unsupported module form in a closure module: %s", (statement, detail) => {
+  const sources = collectSourceSet();
+  const file = "resources/owner-field-guard.ts";
+  const source = ts.createSourceFile(file, `import * as NS from "./soul-write-policy.js";\nfunction deny(msg: string) { return Response.json({ error: msg }, { status: 403 }); }\n  ${statement}`, ts.ScriptTarget.Latest, true);
+  sources.set(file, source);
+  expect(buildInventory(sources).unresolved.get(`${file}:3:3`)).toBe(detail);
+});
 
 test("rejects a namespace import containing a refusal helper", () => {
   const files = new Map([
