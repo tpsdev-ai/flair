@@ -274,7 +274,7 @@ describe("commit-fence (invariant 7)", () => {
   it.each([
     ["generation", "restored"], ["commit marker", "restored"], ["tombstone marker", "restored"],
     ["generation", "retained"], ["commit marker", "retained"], ["tombstone marker", "retained"],
-  ] as const)("preserves publication on %s staging refusal (%s)", (artifact, disposition) => {
+  ] as const)("keeps the prior published generation on %s staging refusal (%s)", (artifact, disposition) => {
     const state = init();
     commit(state, 0);
     const before = snapshotCustody(custodyDir);

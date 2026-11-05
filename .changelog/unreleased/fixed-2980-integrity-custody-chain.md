@@ -1,28 +1,7 @@
-- **Integrity custody checks directory identities and the generation file and UNCERTAIN marker around commit and tombstone publication.**
+- **Integrity commit and tombstone publication compare custody identities.**
 
-  The open handle records directory devices and inodes with `lstat`.
-  Commit and tombstone recheck the chain, then verify identities of
-  the generation file and UNCERTAIN marker immediately before and after publication rename.
-  The shared writer's publication staging file is protected only by the chain check around the rename.
-  Detected drift before rename
-  refuses `custody_invalid`;
-  detected drift after rename reports `status: "commit_uncertain"`.
-  For commits, restore valid custody, re-open it and verify the generation.
-  For tombstones, re-open custody to reconcile uncertainty
-  and verify the generation if an active enrollment remains.
-  When the last enrollment was tombstoned, re-open refusal is expected;
-  callers read registry.json, verify its HMAC with verifyIntegrityRecord and custody.key,
-  and check sequence against expectedSequence + 1 and the enrollment's status against tombstoned.
-  Custody paths are absolute.
-  Generation exhaustion reports `status: "commit_failed"` (its
-  reason remains `commit_conflict`); callers of commit and tombstone refusals
-  decide whether to retry on the status, never on the reason.
-  Initialization holds name the registry path to inspect and direct callers to
-  preserve partial custody and use a different custodyDir for a fresh start.
-  Unrecognised commit and tombstone holds direct callers to inspect the destination and restore valid custody before retrying;
-  observation changes report that the destination changed between observations.
-  Missing markers during post-publication marker cleanup for commits or tombstones report `status: "commit_uncertain"`.
-  Before publication, cleanup errors are not reported and the write returns `status: "commit_failed"`.
-  Tombstone cleanup warnings report `status: "commit_uncertain"` with the tombstone remedy.
-  Identity checks for the custody chain, the generation file and UNCERTAIN marker compare device and inode values as bigint.
-  Generation refusals after publication report `committed: true` and the published generation.
+  | Operation | Recorded identities and comparisons | Before publication rename | After publication rename |
+  | --- | --- | --- | --- |
+  | COMMIT | At open: `lstat` dev/ino and symlink state of custody, ancestors through root, and generations directory (`src/lib/integrity-state.ts:1196`). At stage: `fstat` dev/ino of generation file and UNCERTAIN (`src/lib/integrity-state.ts:1610`, `src/lib/integrity-state.ts:1638`). Around rename: re-`lstat` the chain; if it matches, compare staged regular-file dev/ino (`src/lib/integrity-state.ts:1446`, `src/lib/integrity-state.ts:1453`). | Mismatch: `status: "commit_failed"`, `reason: "custody_invalid"`; CURRENT is not replaced (`src/lib/integrity-state.ts:1446`). | Mismatch: `status: "commit_uncertain"`, `reason: "commit_uncertain"`, `committed: true`, published generation (`src/lib/integrity-state.ts:1453`, `src/lib/integrity-state.ts:1665`). |
+  | TOMBSTONE | Same directory-chain recording and comparison; stages and compares only UNCERTAIN, not a generation file (`src/lib/integrity-state.ts:1772`, `src/lib/integrity-state.ts:1780`). | Mismatch: `status: "commit_failed"`, `reason: "custody_invalid"`; registry.json is not replaced (`src/lib/integrity-state.ts:1446`). | Mismatch: `status: "commit_uncertain"`, `reason: "commit_uncertain"` (`src/lib/integrity-state.ts:1453`, `src/lib/integrity-state.ts:1791`). |
+  | Shared writer: publication staging file | No file identity recorded or compared; only the custody directory chain is rechecked around this file's rename (`src/lib/config-critical-section.ts:733`, `src/lib/config-critical-section.ts:740`). | Replacement of this file inside an unchanged directory before rename is not detected; deferred to #2980 (`src/lib/config-critical-section.ts:735`). | Chain mismatch returns the operation's post-rename result above (`src/lib/integrity-state.ts:1453`). |
