@@ -87,6 +87,8 @@ function msg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+const TOMBSTONE_UNCERTAIN_REMEDY = "Re-open custody, reconcile uncertainty, then verify the authenticated registry sequence and the enrollment's tombstone status.";
+
 const UNCERTAIN_COMMIT_PREFIX = "commit:";
 const UNCERTAIN_REGISTRY_PREFIX = "registry:";
 
@@ -123,7 +125,7 @@ export const INTEGRITY_REASON_REMEDIES: Record<IntegrityReason, string> = {
   scan_failed: "Resolve the read failure and rerun.",
   store_over_ceiling: "Resolve store capacity or raise the configured ceiling, then rerun.",
   commit_conflict: "Resolve the generation or sequence mismatch and rerun.",
-  commit_uncertain: "Recover the durable generation before another operation, then rerun.",
+  commit_uncertain: "Recover the durable custody state before another operation, then rerun.",
 };
 
 // ── record shapes ───────────────────────────────────────────────────────────
@@ -938,8 +940,8 @@ export interface CommitGenerationOptions {
   };
 }
 
-function fail(reason: IntegrityReason, detail: string): IntegrityStateResult {
-  return { ok: false, reason, detail, remedy: INTEGRITY_REASON_REMEDIES[reason] };
+function fail(reason: IntegrityReason, detail: string, remedy = INTEGRITY_REASON_REMEDIES[reason]): IntegrityStateResult {
+  return { ok: false, reason, detail, remedy };
 }
 
 function resolveServerUid(opts: IntegrityStateOptions): { ok: true; uid: number; source: string } | { ok: false; detail: string } {
@@ -1101,7 +1103,7 @@ function createInitialRegistry(key: Buffer, operatorUid: number, machineId: stri
 function writeInitialRegistry(
   paths: IntegrityPaths,
   registry: IntegrityRegistry,
-): { ok: true; registry: IntegrityRegistry } | { ok: false; reason: IntegrityReason; detail: string } {
+): { ok: true; registry: IntegrityRegistry } | { ok: false; reason: IntegrityReason; detail: string; remedy?: string } {
   const result = withConfigCriticalSection(paths.registryPath, (bytes) => {
     if (bytes !== null) {
       return { hold: "custody_invalid: the registry already exists; refusing to re-initialize it" };
@@ -1112,7 +1114,7 @@ function writeInitialRegistry(
   if (result.status === "written") return { ok: false, reason: "commit_uncertain", detail: result.cleanupWarning! };
   if (result.status === "held") {
     const parsed = parseHold(result.message);
-    return { ok: false, reason: parsed.reason, detail: parsed.detail };
+    return { ok: false, reason: parsed.reason, detail: parsed.detail, remedy: holdRemedy(parsed, paths.registryPath, result.changed !== undefined) };
   }
   return { ok: false, reason: "unavailable", detail: result.message };
 }
@@ -1294,7 +1296,7 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
   if (!key.ok) return fail(key.reason, key.detail);
   opts.beforeRegistryPublication?.();
   const written = writeInitialRegistry(paths, initialRegistry);
-  if (!written.ok) return fail(written.reason, written.detail);
+  if (!written.ok) return fail(written.reason, written.detail, written.remedy);
   const registry = written.registry;
 
   const custody = checkCustody({
@@ -1401,6 +1403,13 @@ function parseHold(message: string): { reason: IntegrityReason; detail: string; 
  *  every other hold maps to `commit_failed`. */
 function holdStatus(parsed: { reason: IntegrityReason; recognized: boolean }): "commit_conflict" | "commit_failed" {
   return parsed.recognized && parsed.reason === "commit_conflict" ? "commit_conflict" : "commit_failed";
+}
+
+function holdRemedy(parsed: ReturnType<typeof parseHold>, path: string, changed: boolean): string {
+  if (parsed.recognized) return INTEGRITY_REASON_REMEDIES[parsed.reason];
+  return changed
+    ? `The destination changed between the writer's observations; re-open custody and inspect ${path} before retrying.`
+    : `Re-open custody and inspect ${path} before retrying: ${parsed.detail}`;
 }
 
 type CustodyPublicationFailure = {
@@ -1649,7 +1658,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
       status: holdStatus(parsed),
       reason: parsed.reason,
       detail: parsed.detail,
-      remedy: INTEGRITY_REASON_REMEDIES[parsed.reason],
+      remedy: holdRemedy(parsed, state.paths.currentPath, result.changed !== undefined),
     };
   }
 
@@ -1729,7 +1738,7 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
   try {
     result = withConfigCriticalSection(state.paths.registryPath, decide, {
       stage,
-      ...custodyPublicationChecks(state.custodyChain, (failure) => { chainRefusal = failure; }, "Re-open custody, reconcile uncertainty, then verify the authenticated registry sequence and the enrollment's tombstone status."),
+      ...custodyPublicationChecks(state.custodyChain, (failure) => { chainRefusal = failure; }, TOMBSTONE_UNCERTAIN_REMEDY),
       lockPath: custodyLockPath(state.paths),
       onCommitted: () => clearUncertainMarker(state.paths),
       testHooks: opts.testHooks,
@@ -1742,7 +1751,7 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
     return { ok: true, sequence: nextSequence };
   }
   if (result.status === "written" && result.cleanupWarning) {
-    return { ok: false, status: "commit_failed", reason: "commit_uncertain", detail: result.cleanupWarning, remedy: INTEGRITY_REASON_REMEDIES.commit_uncertain };
+    return { ok: false, status: "commit_failed", reason: "commit_uncertain", detail: result.cleanupWarning, remedy: TOMBSTONE_UNCERTAIN_REMEDY };
   }
   if (result.status === "held") {
     const chain = verifyCustodyChain(state.custodyChain);
@@ -1750,7 +1759,7 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
       return { ok: false, status: "commit_failed", reason: "custody_invalid", detail: chain.detail, remedy: CUSTODY_CHAIN_REMEDY };
     }
     const parsed = parseHold(result.message);
-    return { ok: false, status: holdStatus(parsed), reason: parsed.reason, detail: parsed.detail, remedy: INTEGRITY_REASON_REMEDIES[parsed.reason] };
+    return { ok: false, status: holdStatus(parsed), reason: parsed.reason, detail: parsed.detail, remedy: holdRemedy(parsed, state.paths.registryPath, result.changed !== undefined) };
   }
   return { ok: false, status: "commit_failed", reason: "unavailable", detail: result.message || String(result.cleanupWarning), remedy: INTEGRITY_REASON_REMEDIES.unavailable };
 }

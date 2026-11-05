@@ -297,6 +297,44 @@ describe("commit-fence (invariant 7)", () => {
     }
   });
 
+  it.each(["commit", "tombstone"] as const)("reports %s destination type changes between observations", (writer) => {
+    const state = init();
+    commit(state, 0);
+    const path = writer === "commit" ? state.paths.currentPath : state.paths.registryPath;
+    let observations = 0;
+    const testHooks = {
+      afterPreObserve: () => {
+        observations++;
+        unlinkSync(path);
+        mkdirSync(path, { mode: 0o700 });
+      },
+    };
+    const result = writer === "commit"
+      ? commitGeneration({ state, expectedGeneration: 1, checkpoint: payload(), testHooks })
+      : tombstoneEnrollment({ ...options({ newCustody: false }), expectedSequence: 1, testHooks });
+    expect(observations).toBe(1);
+    expect(result).toMatchObject({
+      ok: false,
+      status: "commit_failed",
+      reason: "commit_conflict",
+      remedy: `The destination changed between the writer's observations; re-open custody and inspect ${path} before retrying.`,
+    });
+    expect(lstatSync(path).isDirectory()).toBe(true);
+    expect(existsSync(state.paths.uncertainPath)).toBe(false);
+    expect(generationNumbers(state.paths)).toEqual([1]);
+  });
+
+  it("names the registry path when initialization cannot observe its destination", () => {
+    const path = integrityPaths(custodyDir).registryPath;
+    const result = initializeIntegrityCustody(options({
+      beforeRegistryPublication: () => symlinkSync(join(root, "absent-registry"), path),
+    }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("commit_conflict");
+    expect(result.remedy).toBe(`Re-open custody and inspect ${path} before retrying: ${result.detail}`);
+  });
+
   it("rechecks custody when committing a generation", () => {
     const state = init();
     chmodSync(integrityPaths(custodyDir).keyPath, 0o644);
@@ -697,6 +735,20 @@ describe("commit-fence (invariant 7)", () => {
     expect(existsSync(paths.currentPath)).toBe(false);
   });
 
+  it("returns a custody-state remedy when registry recovery finds a stale intent", () => {
+    const state = init();
+    commit(state, 0);
+    expect(tombstoneEnrollment({ ...options({ newCustody: false }), expectedSequence: 1 })).toEqual({ ok: true, sequence: 2 });
+    writeFileSync(state.paths.uncertainPath, "registry:1", { mode: 0o600 });
+    const result = openIntegrityState(options({ newCustody: false }));
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "commit_uncertain",
+      detail: "the uncertainty marker names registry sequence 1, but the registry is at 2",
+      remedy: "Recover the durable custody state before another operation, then rerun.",
+    });
+  });
+
   it("keeps the registry intent marker when the tombstone's pre-fsync hook throws", () => {
     const state = init();
     commit(state, 0);
@@ -707,7 +759,9 @@ describe("commit-fence (invariant 7)", () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
     expect(result.reason).toBe("commit_uncertain");
+    expect(result.remedy).toBe("Re-open custody, reconcile uncertainty, then verify the authenticated registry sequence and the enrollment's tombstone status.");
     expect(readFileSync(integrityPaths(custodyDir).uncertainPath, "utf-8")).toBe("registry:2");
 
     const opened = openIntegrityState(options({ newCustody: false }));
