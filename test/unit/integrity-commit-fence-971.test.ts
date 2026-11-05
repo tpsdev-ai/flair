@@ -354,8 +354,8 @@ describe("commit-fence (invariant 7)", () => {
       expect(result.detail).toContain(path);
       expect(result.remedy).toContain("Re-open custody");
       if (phase === "after") expect(result.remedy).toBe(artifact === "tombstone marker"
-        ? "Re-open custody, reconcile uncertainty, then verify the authenticated registry sequence and the enrollment's tombstone status."
-        : "Re-open custody and verify the generation.");
+        ? "Re-open custody to reconcile uncertainty; if an active enrollment remains, verify the generation. If the last enrollment was tombstoned, re-open refusal is expected. Read registry.json, verify its HMAC with verifyIntegrityRecord and custody.key, and check sequence against expectedSequence + 1 and the enrollment's status against tombstoned."
+        : "Re-open custody after restoring valid custody state, then verify the generation.");
     }
     if (artifact !== "tombstone marker") {
       if (phase === "after") expect(result).toMatchObject({ committed: true, generation: 2 });
@@ -478,11 +478,11 @@ describe("commit-fence (invariant 7)", () => {
       expect(generationNumbers(state.paths)).toEqual(writer === "commit" ? [1, 2] : [1]);
     } else {
       if (writer === "commit") {
-        expect(result.remedy).toBe("Re-open custody and verify the generation.");
+        expect(result.remedy).toBe("Re-open custody after restoring valid custody state, then verify the generation.");
         expect(JSON.parse(readFileSync(state.paths.currentPath, "utf-8")).generation).toBe(2);
         expect(readFileSync(state.paths.uncertainPath, "utf-8")).toBe("commit:2");
       } else {
-        expect(result.remedy).toBe("Re-open custody, reconcile uncertainty, then verify the authenticated registry sequence and the enrollment's tombstone status.");
+        expect(result.remedy).toBe("Re-open custody to reconcile uncertainty; if an active enrollment remains, verify the generation. If the last enrollment was tombstoned, re-open refusal is expected. Read registry.json, verify its HMAC with verifyIntegrityRecord and custody.key, and check sequence against expectedSequence + 1 and the enrollment's status against tombstoned.");
         expect(JSON.parse(readFileSync(state.paths.registryPath, "utf-8")).entries[0].status).toBe("tombstoned");
         expect(readFileSync(state.paths.uncertainPath, "utf-8")).toBe("registry:2");
       }
@@ -509,7 +509,7 @@ describe("commit-fence (invariant 7)", () => {
       ok: false,
       status: "commit_failed",
       reason: "commit_conflict",
-      remedy: `The destination changed between the writer's observations; re-open custody and inspect ${path} before retrying.`,
+      remedy: `The destination changed between the writer's observations; inspect ${path} and restore valid custody before retrying.`,
     });
     expect(lstatSync(path).isDirectory()).toBe(true);
     expect(existsSync(state.paths.uncertainPath)).toBe(false);
@@ -994,13 +994,21 @@ describe("commit-fence (invariant 7)", () => {
     if (result.ok) return;
     expect(result.status).toBe("commit_uncertain");
     expect(result.reason).toBe("commit_uncertain");
-    expect(result.remedy).toBe("Re-open custody, reconcile uncertainty, then verify the authenticated registry sequence and the enrollment's tombstone status.");
+    expect(result.remedy).toBe("Re-open custody to reconcile uncertainty; if an active enrollment remains, verify the generation. If the last enrollment was tombstoned, re-open refusal is expected. Read registry.json, verify its HMAC with verifyIntegrityRecord and custody.key, and check sequence against expectedSequence + 1 and the enrollment's status against tombstoned.");
     expect(readFileSync(integrityPaths(custodyDir).uncertainPath, "utf-8")).toBe("registry:2");
 
     const opened = openIntegrityState(options({ newCustody: false }));
     expect(opened.ok).toBe(false);
-    if (!opened.ok) expect(opened.reason).toBe("custody_invalid");
+    expect(opened).toMatchObject({
+      ok: false,
+      reason: "custody_invalid",
+      detail: "the registry has no active enrollment",
+    });
     expect(lstatSync(integrityPaths(custodyDir).uncertainPath, { throwIfNoEntry: false })).toBeUndefined();
+    const registry = JSON.parse(readFileSync(state.paths.registryPath, "utf-8"));
+    expect(verifyIntegrityRecord(registry, readFileSync(state.paths.keyPath))).toBe(true);
+    expect(registry.sequence).toBe(2);
+    expect(registry.entries.find((entry: { enrollmentId: string }) => entry.enrollmentId === state.enrollment.enrollmentId)?.status).toBe("tombstoned");
   });
 
   it("orders a tombstone after a commit that holds the one custody lock", async () => {

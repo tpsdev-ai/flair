@@ -32,9 +32,7 @@
  *     of changes between checks or after the post-rename check (which runs
  *     before directory fsync and marker cleanup).
  *
- * Callers decide whether to retry on `status`, never on `reason`: generation
- * exhaustion is `status: "commit_failed"` with `reason: "commit_conflict"`, so
- * a non-retryable refusal can carry the conflict reason.
+ * For commit and tombstone refusals, decide retry on `status`, never on `reason`.
  *
  * The custody key and state live in the caller-supplied custody directory.
  * Modes alone cannot prove a server cannot reach them. The enrollment registry
@@ -84,13 +82,13 @@ export const INTEGRITY_MAX_GENERATION = 999_999_999_999;
 const CUSTODY_CHAIN_MAX = 256;
 
 /** The remedy for a custody chain that no longer matches the open handle. */
-const CUSTODY_CHAIN_REMEDY = "Re-open custody to record the current directory chain, then retry.";
+const CUSTODY_CHAIN_REMEDY = "Re-open custody after restoring valid custody paths, then retry.";
 
 function msg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-const TOMBSTONE_UNCERTAIN_REMEDY = "Re-open custody, reconcile uncertainty, then verify the authenticated registry sequence and the enrollment's tombstone status.";
+const TOMBSTONE_UNCERTAIN_REMEDY = "Re-open custody to reconcile uncertainty; if an active enrollment remains, verify the generation. If the last enrollment was tombstoned, re-open refusal is expected. Read registry.json, verify its HMAC with verifyIntegrityRecord and custody.key, and check sequence against expectedSequence + 1 and the enrollment's status against tombstoned.";
 
 const UNCERTAIN_COMMIT_PREFIX = "commit:";
 const UNCERTAIN_REGISTRY_PREFIX = "registry:";
@@ -1405,13 +1403,12 @@ function parseHold(message: string): { reason: IntegrityReason; detail: string; 
   if ((INTEGRITY_REASONS as readonly string[]).includes(head!) && rest.length > 0) {
     return { reason: head as IntegrityReason, detail: rest.join(":").trim(), recognized: true };
   }
-  // An unrecognized hold reports a non-retryable status.
   return { reason: "commit_conflict", detail: message, recognized: false };
 }
 
-/** A recognized `commit_conflict` reason maps to `commit_conflict`; other holds
- *  map to `commit_failed`. The caller overrides generation exhaustion with an
- *  explicit `commit_failed` refusal. */
+/** For commit and tombstone holds, a recognized `commit_conflict` reason maps
+ *  to `commit_conflict`; other holds map to `commit_failed`. The caller overrides
+ *  generation exhaustion with an explicit `commit_failed` refusal. */
 function holdStatus(parsed: { reason: IntegrityReason; recognized: boolean }): "commit_conflict" | "commit_failed" {
   return parsed.recognized && parsed.reason === "commit_conflict" ? "commit_conflict" : "commit_failed";
 }
@@ -1419,8 +1416,8 @@ function holdStatus(parsed: { reason: IntegrityReason; recognized: boolean }): "
 function holdRemedy(parsed: ReturnType<typeof parseHold>, path: string, changed: boolean): string {
   if (parsed.recognized) return INTEGRITY_REASON_REMEDIES[parsed.reason];
   return changed
-    ? `The destination changed between the writer's observations; re-open custody and inspect ${path} before retrying.`
-    : `Re-open custody and inspect ${path} before retrying: ${parsed.detail}`;
+    ? `The destination changed between the writer's observations; inspect ${path} and restore valid custody before retrying.`
+    : `Inspect ${path} and restore valid custody before retrying: ${parsed.detail}`;
 }
 
 type CustodyPublicationFailure = {
@@ -1653,7 +1650,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   try {
     result = withConfigCriticalSection(state.paths.currentPath, decide, {
       stage,
-      ...custodyPublicationChecks(state.custodyChain, stagedFiles, (failure) => { refusal = failure; }, "Re-open custody and verify the generation."),
+      ...custodyPublicationChecks(state.custodyChain, stagedFiles, (failure) => { refusal = failure; }, "Re-open custody after restoring valid custody state, then verify the generation."),
       lockPath: custodyLockPath(state.paths),
       onCommitted: () => {
         opts.testHooks?.beforeUncertainMarkerClear?.();
