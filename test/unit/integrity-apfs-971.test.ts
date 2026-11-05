@@ -1,9 +1,8 @@
 /**
  * integrity-apfs-971.test.ts — flair#971 slice 1a.
  *
- * Runs custody initialization against a real temporary directory whose backing
- * filesystem the custody predicate supports (APFS in the macOS lane, an
- * allowlisted local filesystem in the Linux lane).
+ * Runs custody initialization in a real temporary directory if its filesystem
+ * passes the custody predicate.
  */
 import { describe, it, expect } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -160,7 +159,7 @@ describe("macOS mount table classification", () => {
 
 const tempBacking = assertSupportedLocalFilesystem(tmpdir());
 
-/** The backing filesystem's reported name, for the skip reason. */
+/** Best-effort filesystem label for the skip reason; falls back to "unknown". */
 function tempFilesystemLabel(path: string): string {
   try {
     if (process.platform === "darwin") {

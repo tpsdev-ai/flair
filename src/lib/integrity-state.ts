@@ -1302,9 +1302,6 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
       opts.expectedGeneration > INTEGRITY_MAX_GENERATION) {
     return { ok: false, status: "commit_failed", reason: "commit_conflict", detail: `the expected generation must be a non-negative integer at or below the twelve-digit bound ${INTEGRITY_MAX_GENERATION}`, remedy: "Use the generation from the opened custody state." };
   }
-  if (opts.expectedGeneration === INTEGRITY_MAX_GENERATION) {
-    return { ok: false, status: "commit_failed", reason: "commit_conflict", detail: "the generation sequence has reached its twelve-digit limit", remedy: "The generation sequence has reached its twelve-digit limit; no further generation can be committed to this custody. Start a new custody in a different custodyDir with initializeIntegrityCustody and newCustody: true." };
-  }
 
   const measuredOperatorUid = currentUid();
   if (measuredOperatorUid === null) {
@@ -1340,27 +1337,8 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   }
 
   const nextGeneration = opts.expectedGeneration + 1;
-  let checkpoint: IntegrityCheckpointV3;
-  let pointer: IntegrityCurrentPointer;
   let generationBytes: Uint8Array;
-  try {
-    checkpoint = prepareIntegrityRecord<IntegrityCheckpointV3>(() => checkpointPayloadFor(opts, nextGeneration), state.key);
-    pointer = prepareIntegrityRecord<IntegrityCurrentPointer>(() => ({
-      version: INTEGRITY_STATE_VERSION,
-      kind: "current",
-      enrollmentId: state.enrollment.enrollmentId,
-      generation: nextGeneration,
-    }), state.key);
-    generationBytes = jsonBytes(checkpoint);
-  } catch (err) {
-    return {
-      ok: false,
-      status: "commit_failed",
-      reason: "checkpoint_incompatible",
-      detail: `cannot prepare the checkpoint: ${msg(err)}`,
-      remedy: INTEGRITY_REASON_REMEDIES.checkpoint_incompatible,
-    };
-  }
+  let refusal: Extract<CommitGenerationResult, { ok: false }> | undefined;
 
   const decide = (bytes: Uint8Array | null): { write: Uint8Array } | { hold: string } => {
     const marker = readUncertainMarker(state.paths);
@@ -1409,7 +1387,31 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     if (onDisk !== opts.expectedGeneration) {
       return holdMessage("commit_conflict", `the on-disk generation is ${onDisk}, expected ${opts.expectedGeneration}`);
     }
-    return { write: jsonBytes(pointer) };
+    if (onDisk === INTEGRITY_MAX_GENERATION) {
+      refusal = { ok: false, status: "commit_failed", reason: "commit_conflict", detail: "the generation sequence has reached its twelve-digit limit", remedy: "The generation sequence has reached its twelve-digit limit; no further generation can be committed to this custody. Start a new custody in a different custodyDir with initializeIntegrityCustody and newCustody: true." };
+      return holdMessage(refusal.reason, refusal.detail);
+    }
+
+    try {
+      const checkpoint = prepareIntegrityRecord<IntegrityCheckpointV3>(() => checkpointPayloadFor(opts, nextGeneration), state.key);
+      const pointer = prepareIntegrityRecord<IntegrityCurrentPointer>(() => ({
+        version: INTEGRITY_STATE_VERSION,
+        kind: "current",
+        enrollmentId: state.enrollment.enrollmentId,
+        generation: nextGeneration,
+      }), state.key);
+      generationBytes = jsonBytes(checkpoint);
+      return { write: jsonBytes(pointer) };
+    } catch (err) {
+      refusal = {
+        ok: false,
+        status: "commit_failed",
+        reason: "checkpoint_incompatible",
+        detail: `cannot prepare the checkpoint: ${msg(err)}`,
+        remedy: INTEGRITY_REASON_REMEDIES.checkpoint_incompatible,
+      };
+      return holdMessage(refusal.reason, refusal.detail);
+    }
   };
 
   const stage = (): (() => void) => {
@@ -1471,6 +1473,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   }
 
   if (result.status === "held") {
+    if (refusal) return refusal;
     const parsed = parseHold(result.message);
     return {
       ok: false,

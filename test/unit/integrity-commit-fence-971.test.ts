@@ -561,6 +561,27 @@ describe("commit-fence (invariant 7)", () => {
     expect(reads).toBe(1);
   });
 
+  it("refuses a stale maximum expected generation with the conflict remedy without writing custody", () => {
+    const state = init();
+    expect(state.generation).toBe(0);
+    const paths = integrityPaths(custodyDir);
+    const registryBefore = readFileSync(paths.registryPath);
+    const entriesBefore = readdirSync(custodyDir).sort();
+    const refused = commitGeneration({ state, expectedGeneration: INTEGRITY_MAX_GENERATION, checkpoint: payload() });
+    expect(refused).toMatchObject({
+      ok: false,
+      status: "commit_conflict",
+      reason: "commit_conflict",
+      detail: `the on-disk generation is 0, expected ${INTEGRITY_MAX_GENERATION}`,
+      remedy: "Resolve the competing writer and rerun.",
+    });
+    expect(readFileSync(paths.registryPath)).toEqual(registryBefore);
+    expect(readdirSync(custodyDir).sort()).toEqual(entriesBefore);
+    expect(readdirSync(paths.generationsDir)).toEqual([]);
+    expect(existsSync(paths.currentPath)).toBe(false);
+    expect(existsSync(paths.uncertainPath)).toBe(false);
+  });
+
   it("bounds a generation to the twelve-digit filename format on write", () => {
     const state = init();
     const paths = integrityPaths(custodyDir);
