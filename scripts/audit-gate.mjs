@@ -618,26 +618,27 @@ function utcDay(value) {
 /** The ancestor-commit ceiling for one allowlist history walk in CI. */
 const MAX_ALLOWLIST_HISTORY_COMMITS = 10_000;
 
-/** A repo-relative path whose name marks an allowlist snapshot. */
-const ALLOWLIST_PATH_PATTERN = /(?:^|\/)[^/]*allowlist[^/]*\.json$/i;
-
 /**
- * The first ancestor-commit day each advisory id appears in parsed allowlist
- * snapshots, comparing ids case-insensitively. Dates are read as UTC calendar
+ * The first ancestor-commit day each advisory id appears at the start of its
+ * lineage, comparing ids case-insensitively. Dates are read as UTC calendar
  * days, because a commit made late in a negative offset is already the next day.
  *
- * Every ancestor commit is walked with `git rev-list`; the allowlist at each
- * commit is located by its tracked path(s), and each distinct blob is parsed
- * once. A rename is followed only from a commit that both removes a tracked
- * allowlist path and adds another, never from git's rename heuristic, so a
- * low-similarity rename cannot hide history and a merge cannot attach a side
- * branch's entry to the wrong path.
+ * Every ancestor commit is walked with `git rev-list`, and the allowlist is
+ * tracked along each parent->child edge, per parent. A path the child carries
+ * is carried back when the parent has that same path. When the parent lacks it,
+ * the parent's tree is searched for every file containing any advisory id the
+ * child's file holds; each such file must parse as an allowlist and is followed
+ * as a predecessor. A commit where the path appears and no file in its parent's
+ * tree holds one of its ids starts the lineage, so nothing earlier is claimed.
+ * File names and git's rename detection play no part.
  *
- * A shallow clone, a rename split across commits with no explicit link, or an
- * ancestry above MAX_ALLOWLIST_HISTORY_COMMITS throws a named lineage problem.
- * The returned map's `cost` property reports the commits walked and blobs read.
- * The repository root comes from the script location, so the gate behaves the
- * same whatever directory it is run from.
+ * An id's introduction commits are those that contain it while none of their
+ * parents do; its first day is the earliest introduction commit's day. A
+ * shallow clone, a candidate predecessor that cannot be read or classified, or
+ * an ancestry above MAX_ALLOWLIST_HISTORY_COMMITS throws a named lineage
+ * problem. The returned map's `cost` property reports the commits walked and
+ * blobs read. The repository root comes from the script location, so the gate
+ * behaves the same whatever directory it is run from.
  */
 export function readAllowlistHistory(repoRoot = REPO_ROOT) {
   const allowlistPath = join(repoRoot, ".github", "audit-allowlist.json");
@@ -651,7 +652,7 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
     throw new Error(`${allowlistPath} must have an "entries" array`);
   }
 
-  const runGit = (args, input) => {
+  const git = (args, { input, allowExit1 = false } = {}) => {
     const res = spawnSync("git", ["-C", repoRoot, ...args], {
       encoding: "utf8",
       timeout: 120_000,
@@ -659,11 +660,12 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
       ...(input === undefined ? {} : { input }),
     });
     if (res.error) throw new Error(`git ${args[0]} failed: ${res.error.message}`);
-    if (res.status !== 0) {
+    if (res.status !== 0 && !(allowExit1 && res.status === 1)) {
       throw new Error(`git ${args[0]} failed (exit ${res.status}): ${(res.stderr ?? "").trim()}`);
     }
-    return res.stdout;
+    return res;
   };
+  const runGit = (args, input) => git(args, { input }).stdout;
 
   if (runGit(["rev-parse", "--is-shallow-repository"]).trim() === "true") {
     throw new Error(
@@ -747,96 +749,133 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
     return snapshot;
   };
 
-  /** Whether an added candidate itself carries an allowlist's policy and entries. */
-  const looksLikeSnapshot = (oid) => {
-    try {
-      const snapshot = JSON.parse(runGit(["cat-file", "blob", oid]));
-      return (
-        snapshot !== null &&
-        typeof snapshot === "object" &&
-        !Array.isArray(snapshot) &&
-        Array.isArray(snapshot.entries) &&
-        snapshot.policy !== null &&
-        typeof snapshot.policy === "object" &&
-        !Array.isArray(snapshot.policy)
-      );
-    } catch {
-      return false;
-    }
-  };
-
-  const knownPaths = new Set([".github/audit-allowlist.json"]);
-  const snapshots = [];
-  let seenAny = false;
-  let previousHadPath = false;
-
-  // Newest first: a commit is visited before every parent, so the first commit
-  // that lacks a tracked path is the point where the path entered (or left).
-  for (let i = commits.length - 1; i >= 0; i--) {
-    const commit = commits[i];
-    let present = false;
-    for (const path of knownPaths) {
-      const row = presencesFor(path)[i];
-      if (!row) continue;
-      present = true;
-      snapshots.push({ sha: commit.sha, day: commit.day, path, oid: row.oid });
-    }
-
-    if (!present && seenAny && previousHadPath) {
-      const additions = new Set();
-      const linked = new Set();
-      for (const parent of commit.parents) {
-        const deleted = new Set();
-        const added = [];
-        for (const line of runGit(["diff-tree", "-r", "--no-renames", "--name-status", parent, commit.sha]).split("\n")) {
-          if (!line) continue;
-          const [status, file] = line.split("\t");
-          if (status === "D" && knownPaths.has(file)) deleted.add(file);
-          if (status === "A" && ALLOWLIST_PATH_PATTERN.test(file)) added.push(file);
-        }
-        for (const file of added) {
-          additions.add(file);
-          if (deleted.size) linked.add(file);
-        }
-      }
-      const unlinked = [...additions]
-        .filter((file) => !knownPaths.has(file) && !linked.has(file))
-        .filter((file) => {
-          const row = presencesFor(file)[i];
-          return row ? looksLikeSnapshot(row.oid) : false;
-        });
-      if (unlinked.length) {
+  const indexOf = new Map(commits.map((commit, i) => [commit.sha, i]));
+  const children = new Map(commits.map((commit) => [commit.sha, []]));
+  for (const commit of commits) {
+    for (const parent of commit.parents) {
+      const parentIndex = indexOf.get(parent);
+      if (parentIndex === undefined) {
         throw new Error(
-          `allowlist lineage cannot be established: commit ${commit.sha} adds ${unlinked.join(", ")} ` +
-            "while no parent commit removes a tracked allowlist path in the same commit",
+          `allowlist lineage cannot be established: commit ${commit.sha} names parent ${parent}, ` +
+            "which is not in the walked ancestry",
         );
       }
-      for (const file of additions) {
-        if (linked.has(file)) knownPaths.add(file);
-      }
-      for (const path of knownPaths) {
-        const row = presencesFor(path)[i];
-        if (!row) continue;
-        present = true;
-        snapshots.push({ sha: commit.sha, day: commit.day, path, oid: row.oid });
-      }
-    }
-
-    if (present) {
-      seenAny = true;
-      previousHadPath = true;
-    } else {
-      previousHadPath = false;
+      children.get(parent).push({ sha: commit.sha, index: indexOf.get(commit.sha) });
     }
   }
 
-  const firstDays = new Map();
-  for (const { sha, day, path, oid } of snapshots) {
+  /**
+   * Files in `commit`'s tree that hold an advisory id from the child's file,
+   * each parsed as an allowlist. No match means the path starts its lineage
+   * there; an unreadable or unclassifiable candidate is a named failure.
+   */
+  const predecessorsOf = (commit, childSha, childPath, childOid) => {
+    const childSnapshot = parseBlob(childOid, childSha, childPath);
+    const childIds = new Set();
+    for (const entry of childSnapshot.entries) {
+      if (typeof entry?.ghsa === "string") childIds.add(entry.ghsa.toUpperCase());
+    }
+    if (childIds.size === 0) return [];
+    const grepArgs = ["grep", "-i", "-F", "-l"];
+    for (const id of childIds) grepArgs.push("-e", id);
+    grepArgs.push(commit.sha, "--");
+    const res = git(grepArgs, { allowExit1: true });
+    if (res.status === 1) return [];
+    const found = [];
+    for (const line of res.stdout.split("\n").filter(Boolean)) {
+      // A tree-ish makes git grep prefix every result with "<commit>:".
+      const file = line.startsWith(`${commit.sha}:`) ? line.slice(commit.sha.length + 1) : line;
+      const row = presencesFor(file)[indexOf.get(commit.sha)];
+      if (!row) {
+        throw new Error(
+          `allowlist lineage cannot be established: commit ${commit.sha} lists ${file} as holding an ` +
+            `advisory id from ${childPath}, but the path is not a blob in that commit`,
+        );
+      }
+      let snapshot;
+      try {
+        snapshot = JSON.parse(runGit(["cat-file", "blob", row.oid]));
+      } catch (e) {
+        throw new Error(
+          `allowlist lineage cannot be established: commit ${commit.sha} holds ${file}, which contains an ` +
+            `advisory id from ${childPath}, but it cannot be read as an allowlist: ${e.message}`,
+        );
+      }
+      if (!Array.isArray(snapshot?.entries)) {
+        throw new Error(
+          `allowlist lineage cannot be established: commit ${commit.sha} holds ${file}, which contains an ` +
+            `advisory id from ${childPath}, but it is not an allowlist (no "entries" array)`,
+        );
+      }
+      parsedBlobs.set(row.oid, snapshot);
+      found.push({ path: file, oid: row.oid });
+    }
+    return found;
+  };
+
+  const snapshots = [];
+  const trackedAt = new Map();
+  const head = commits[commits.length - 1];
+  const headPath = ".github/audit-allowlist.json";
+  const headRow = presencesFor(headPath)[commits.length - 1];
+  // Seed even when HEAD does not carry the path, so its deletion still exposes
+  // the snapshots before it.
+  trackedAt.set(head.sha, new Set([headPath]));
+  if (headRow) snapshots.push({ sha: head.sha, day: head.day, path: headPath, oid: headRow.oid });
+
+  // Newest first: every child is visited before its parents, so each edge is
+  // resolved in the direction the path travelled.
+  for (let i = commits.length - 2; i >= 0; i--) {
+    const commit = commits[i];
+    const paths = new Set();
+    const add = (path, oid) => {
+      if (paths.has(path)) return;
+      paths.add(path);
+      snapshots.push({ sha: commit.sha, day: commit.day, path, oid });
+    };
+    for (const child of children.get(commit.sha)) {
+      const childPaths = trackedAt.get(child.sha);
+      if (!childPaths) continue;
+      for (const path of childPaths) {
+        const childRow = presencesFor(path)[child.index];
+        const hereRow = presencesFor(path)[i];
+        if (childRow && hereRow) {
+          add(path, hereRow.oid);
+        } else if (childRow) {
+          for (const predecessor of predecessorsOf(commit, child.sha, path, childRow.oid)) {
+            add(predecessor.path, predecessor.oid);
+          }
+        } else if (hereRow) {
+          add(path, hereRow.oid);
+        }
+      }
+    }
+    trackedAt.set(commit.sha, paths);
+  }
+
+  const idsByCommit = new Map();
+  for (const { sha, path, oid } of snapshots) {
+    let ids = idsByCommit.get(sha);
+    if (!ids) {
+      ids = new Set();
+      idsByCommit.set(sha, ids);
+    }
     for (const entry of parseBlob(oid, sha, path).entries) {
-      if (typeof entry?.ghsa !== "string") continue;
-      const id = entry.ghsa.toUpperCase();
+      if (typeof entry?.ghsa === "string") ids.add(entry.ghsa.toUpperCase());
+    }
+  }
+
+  // Introduction commits contain the id while none of their parents do; the
+  // earliest introduction day is the id's first appearance, whatever order the
+  // committer dates fall in.
+  const firstDays = new Map();
+  for (const commit of commits) {
+    const ids = idsByCommit.get(commit.sha);
+    if (!ids) continue;
+    for (const id of ids) {
+      if (commit.parents.some((parent) => idsByCommit.get(parent)?.has(id))) continue;
       const previous = firstDays.get(id);
-      if (previous === undefined || day < previous) firstDays.set(id, day);
+      if (previous === undefined || commit.day < previous) firstDays.set(id, commit.day);
     }
   }
   firstDays.cost = {
