@@ -15,7 +15,8 @@
   preserve partial custody and use a different custodyDir for a fresh start.
   Unrecognised commit and tombstone holds name the destination to inspect before retrying;
   observation changes report that the destination changed between observations.
-  Missing markers during commit or tombstone cleanup report `status: "commit_uncertain"`.
+  Missing markers during post-publication marker cleanup for commits or tombstones report `status: "commit_uncertain"`.
+  Before publication, cleanup errors are not reported and the write returns `status: "commit_failed"`.
   Tombstone cleanup warnings report `status: "commit_uncertain"` and require
   uncertainty reconciliation and verification of the authenticated registry
   sequence and enrollment tombstone status.

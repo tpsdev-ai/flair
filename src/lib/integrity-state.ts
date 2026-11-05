@@ -28,7 +28,9 @@
  *     custody_invalid; detected drift after rename reports commit_uncertain.
  *     Staged files are checked with the chain before and after publication.
  *     Recorded identities are dev+ino and inherit filesystem inode reuse.
- *     The remaining unchecked window is between the last check and the rename itself.
+ *     The checks detect drift present when they run and cannot guarantee detection
+ *     of changes between checks or after the post-rename check (which runs
+ *     before directory fsync and marker cleanup).
  *
  * Callers decide whether to retry on `status`, never on `reason`: generation
  * exhaustion is `status: "commit_failed"` with `reason: "commit_conflict"`, so
