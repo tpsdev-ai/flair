@@ -20,6 +20,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import ts from "typescript";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -204,6 +205,42 @@ function resultOf(stdout: string): Record<string, unknown> {
 }
 
 describe("commit-fence (invariant 7)", () => {
+  it("records custody device and inode identities as bigint", () => {
+    const state = init();
+    expect(state.custodyChain.length).toBeGreaterThan(0);
+    for (const entry of state.custodyChain) {
+      expect(typeof entry.dev).toBe("bigint");
+      expect(typeof entry.ino).toBe("bigint");
+      const stat = lstatSync(entry.path, { bigint: true });
+      expect(entry.dev).toBe(stat.dev);
+      expect(entry.ino).toBe(stat.ino);
+    }
+    commit(state);
+  });
+
+  it.each(["dev", "ino"] as const)("distinguishes adjacent %s identities at 2^53 in chain and staged checks", (field) => {
+    const source = ts.createSourceFile(modulePath, readFileSync(modulePath, "utf-8"), ts.ScriptTarget.Latest, true);
+    const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) &&
+      ["verifyCustodyChain", "verifyStagedFiles"].includes(node.name?.text ?? ""));
+    expect(declarations).toHaveLength(2);
+    const code = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const identity = { path: "identity", dev: 2n ** 53n, ino: 2n ** 53n, symbolicLink: false };
+    let observed = { ...identity };
+    const checks = new Function("lstatSync", `${code}\nreturn [verifyCustodyChain, verifyStagedFiles];`)(
+      (_path: string, options: unknown) => {
+        expect(options).toEqual({ bigint: true });
+        return { ...observed, isFile: () => true, isSymbolicLink: () => false };
+      },
+    ) as ((entries: typeof identity[]) => { ok: boolean })[];
+    for (const check of checks) expect(check([identity]).ok).toBe(true);
+    observed = { ...identity, [field]: identity[field] + 1n };
+    expect(Number(observed[field])).toBe(Number(identity[field]));
+    expect(observed[field]).not.toBe(identity[field]);
+    for (const check of checks) expect(check([identity]).ok).toBe(false);
+  });
+
   it.each(["initialize", "open"] as const)("keeps relative-path custody after chdir (%s)", (operation) => {
     const initialCwd = process.cwd();
     const original = join(root, "original");
@@ -320,6 +357,10 @@ describe("commit-fence (invariant 7)", () => {
         ? "Re-open custody, reconcile uncertainty, then verify the authenticated registry sequence and the enrollment's tombstone status."
         : "Re-open custody and verify the generation.");
     }
+    if (artifact !== "tombstone marker") {
+      if (phase === "after") expect(result).toMatchObject({ committed: true, generation: 2 });
+      else expect("committed" in result && result.committed).toBeFalsy();
+    }
     expect(publications).toBe(phase === "before" ? 0 : 1);
     if (phase === "before") {
       expect(readFileSync(state.paths.currentPath, "utf-8")).toBe(before.CURRENT!);
@@ -425,7 +466,8 @@ describe("commit-fence (invariant 7)", () => {
     expect(result.reason).toBe(hook === "afterFsync" ? "custody_invalid" : "commit_uncertain");
     expect(result.detail).toContain(tree);
     expect(result.remedy).toContain("Re-open custody");
-    expect(result).not.toHaveProperty("committed");
+    if (writer === "commit" && hook === "afterRename") expect(result).toMatchObject({ committed: true, generation: 2 });
+    else expect(result).not.toHaveProperty("committed");
     expect(renames).toBe(hook === "afterFsync" ? 0 : 1);
     expect(existsSync(state.paths.uncertainPath)).toBe(hook === "afterRename");
     expect(existsSync(join(nested, ".custody.lock"))).toBe(false);

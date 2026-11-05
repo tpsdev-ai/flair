@@ -20,3 +20,5 @@
   Tombstone cleanup warnings report `status: "commit_uncertain"` and require
   uncertainty reconciliation and verification of the authenticated registry
   sequence and enrollment tombstone status.
+  Custody-chain and staged-file identity checks compare device and inode values as bigint.
+  Generation refusals after publication report `committed: true` and the published generation.

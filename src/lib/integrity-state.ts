@@ -53,6 +53,7 @@ import {
   readdirSync,
   renameSync,
   unlinkSync,
+  type BigIntStats,
   type Stats,
 } from "node:fs";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
@@ -448,8 +449,8 @@ export function checkCustody(opts: CustodyCheckOptions): CustodyCheck {
 /** One recorded path in the custody ancestry, including whether it is a symlink. */
 export interface CustodyChainEntry {
   path: string;
-  dev: number;
-  ino: number;
+  dev: bigint;
+  ino: bigint;
   symbolicLink: boolean;
 }
 
@@ -485,9 +486,9 @@ function recordCustodyChain(
   if (!chain.ok) return chain;
   const entries: CustodyChainEntry[] = [];
   for (const path of chain.paths) {
-    let st: Stats;
+    let st: BigIntStats;
     try {
-      st = lstatSync(path);
+      st = lstatSync(path, { bigint: true });
     } catch (err) {
       return { ok: false, detail: `cannot record the identity of ${path}: ${msg(err)}` };
     }
@@ -501,9 +502,9 @@ function verifyCustodyChain(
   entries: readonly CustodyChainEntry[],
 ): { ok: true } | { ok: false; detail: string } {
   for (const entry of entries) {
-    let st: Stats;
+    let st: BigIntStats;
     try {
-      st = lstatSync(entry.path);
+      st = lstatSync(entry.path, { bigint: true });
     } catch (err) {
       const detail = (err as NodeJS.ErrnoException).code === "ENOENT"
         ? `${entry.path} disappeared after custody was opened`
@@ -569,7 +570,7 @@ function fsyncDir(path: string): void {
   }
 }
 
-type StagedFileIdentity = { path: string; dev: number; ino: number };
+type StagedFileIdentity = { path: string; dev: bigint; ino: bigint };
 
 /** Create a new file durably (`wx`, explicit mode, full write, fsync). Never
  *  replaces an existing path. */
@@ -580,7 +581,7 @@ function writeNewDurable(path: string, bytes: Uint8Array, mode: number, onCreate
     onCreated?.();
     writeAllSync(fd, Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
     fsyncSync(fd);
-    const { dev, ino } = fstatSync(fd);
+    const { dev, ino } = fstatSync(fd, { bigint: true });
     identity = { path, dev, ino };
   } finally {
     try { closeSync(fd); } catch { /* already closed */ }
@@ -601,7 +602,7 @@ function replaceDurable(path: string, bytes: Uint8Array, mode: number): StagedFi
     try {
       writeAllSync(fd, Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
       fsyncSync(fd);
-      const { dev, ino } = fstatSync(fd);
+      const { dev, ino } = fstatSync(fd, { bigint: true });
       identity = { path, dev, ino };
     } finally {
       try { closeSync(fd); } catch { /* already closed */ }
@@ -912,8 +913,7 @@ export type CommitGenerationResult =
       reason: IntegrityReason;
       detail: string;
       remedy: string;
-      /** True when CURRENT was replaced even though the result is not success
-       *  (a post-rename durability warning). */
+      /** True when CURRENT was replaced even though the result is not success. */
       committed?: boolean;
       generation?: number;
     };
@@ -1433,7 +1433,7 @@ type CustodyPublicationFailure = {
 function verifyStagedFiles(files: readonly StagedFileIdentity[]): { ok: true } | { ok: false; detail: string } {
   for (const file of files) {
     try {
-      const entry = lstatSync(file.path);
+      const entry = lstatSync(file.path, { bigint: true });
       if (!entry.isFile() || entry.dev !== file.dev || entry.ino !== file.ino) {
         return { ok: false, detail: `staged file identity changed: ${file.path}` };
       }
@@ -1623,7 +1623,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
       let identity: StagedFileIdentity;
       try {
         existing = readFileSync(fd);
-        const { dev, ino } = fstatSync(fd);
+        const { dev, ino } = fstatSync(fd, { bigint: true });
         identity = { path, dev, ino };
       } finally {
         closeSync(fd);
@@ -1670,7 +1670,9 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     };
   }
 
-  if (refusal) return refusal;
+  if (refusal) return result.status === "written"
+    ? { ...refusal, committed: true, generation: nextGeneration }
+    : refusal;
   if (result.status === "written") {
     if (result.cleanupWarning) {
       return {
