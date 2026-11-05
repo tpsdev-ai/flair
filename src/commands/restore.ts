@@ -222,9 +222,8 @@ addAdminPassOptions(
       // process's tmpdir/TMPDIR/TMP/TEMP and working directory, while the
       // server uses its own environment (resources/skill-provenance.ts), so a
       // filesystem-path source can be durable to one and not the other.
-      // Replace refuses every such row before any delete; a non-path source
-      // keeps the copied predicate, whose verdict does not depend on the
-      // environment.
+      // Non-dry-run replace refuses every such row before any delete; a
+      // non-path source keeps the environment-independent copied predicate.
       const filesystemSourceRefused = new Set<string>();
       for (const row of writtenSouls) {
         const id = String(row.id);

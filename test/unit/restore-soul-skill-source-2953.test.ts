@@ -1,5 +1,5 @@
 /**
- * restore-soul-skill-source-2953.test.ts — `flair restore --replace` refuses an
+ * restore-soul-skill-source-2953.test.ts — non-dry-run replace refuses an
  * archived skill-assignment Soul row whose source is a filesystem path, before
  * any delete, because the server's durability verdict for such a source
  * depends on the server's environment (flair#2953).
@@ -73,7 +73,7 @@ async function restore(source: string): Promise<{ exitCode: number; stdout: stri
   return { exitCode, stdout, stderr, calls: JSON.parse(readFileSync(callsPath, "utf8")) };
 }
 
-describe("restore --replace refuses a filesystem skill source before any delete (flair#2953)", () => {
+describe("non-dry-run restore --replace refuses a filesystem skill source before any delete (flair#2953)", () => {
   test("a source the CLI would call durable is refused", async () => {
     const result = await restore("/flair-durable-skills/a-skill/SKILL.md");
 

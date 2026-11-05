@@ -1364,7 +1364,7 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
 
 // ─── The three lists ────────────────────────────────────────────────────────
 
-/** Refusal codes `restore --replace` decides before its first delete. */
+/** Refusal codes non-dry-run replace decides before its first delete. */
 const PREFLIGHTED = [
   "soul_scope_fields_not_writable", // suppliesSoulScopeFields in src/commands/restore.ts
   "soul_value_is_learned_content", // LEARNED_REFUSAL plus the Memory and candidate comparisons
@@ -1580,7 +1580,7 @@ test("each function that forwards a parameter into an unresolvable callee is opa
   expect(stale).toEqual([]);
 });
 
-test("restore --replace names each preflighted Soul write rule", () => {
+test("non-dry-run restore --replace names each preflighted Soul write rule", () => {
   const source = readFileSync(join(root, "src/commands/restore.ts"), "utf8");
   for (const marker of [
     "suppliesSoulScopeFields(row)",

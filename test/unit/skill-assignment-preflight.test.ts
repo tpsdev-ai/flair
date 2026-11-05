@@ -6,7 +6,7 @@
  * src/ cannot import resources/ (those imports do not survive npm packaging),
  * so the predicate is copied; this test runs both copies in one process over
  * the same fixtures and compares the outcome. A filesystem-path source is not
- * environment-independent: `flair restore --replace` refuses every such row
+ * environment-independent: non-dry-run replace refuses every such row
  * before any delete instead of deciding it (src/commands/restore.ts).
  */
 import { describe, expect, test } from "bun:test";

@@ -1,7 +1,7 @@
 /**
  * skill-assignment-preflight.ts — the CLI-side copy of the server's
  * `refuseSkillAssignmentWrite` (resources/skill-provenance.ts) used by
- * `flair restore --replace` to decide an archived Soul row before any delete.
+ * non-dry-run `flair restore --replace` before any delete.
  *
  * A copy, not an import: `src/` must not import `resources/` (those imports do
  * not survive npm packaging). test/unit/skill-assignment-preflight.test.ts

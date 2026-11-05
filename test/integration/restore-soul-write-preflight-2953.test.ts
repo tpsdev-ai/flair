@@ -2,10 +2,10 @@
  * restore-soul-write-preflight-2953.test.ts — `flair restore --replace`
  * against a REAL Harper and the REAL built CLI (flair#2953).
  *
- * Replace attempts to delete the archived ids before it writes them back,
- * with no rollback snapshot: a failed Memory DELETE stops the run before any
- * Soul is deleted; a failed Soul DELETE is recorded and that row's PUT still
- * runs. The cases here seed through the admin ops route or a
+ * After admission and preflight, a non-dry-run replace attempts the archived
+ * Memory DELETEs and, only if that stage completes without failure, the archived
+ * Soul DELETEs. There is no rollback snapshot; a failed Soul DELETE is recorded
+ * and that row's PUT still runs. The cases here seed through the admin ops route or a
  * resource PUT, and cover these refusals: a skill-assignment row whose source
  * is a filesystem path (including one under the server's TMPDIR), a
  * skill-assignment row with a non-boolean optOut, and a Soul row without a
@@ -163,7 +163,7 @@ afterAll(async () => {
   if (serverTempRoot) rmSync(serverTempRoot, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
-describe("flair restore --replace refuses the Soul write rules it covers before deleting (flair#2953)", () => {
+describe("non-dry-run flair restore --replace refuses the Soul write rules it covers before deleting (flair#2953)", () => {
   test("a skill-assignment row with a filesystem source is refused before any delete", async () => {
     const home = tempDir("flair-2953-real-home-");
     const agent = "skill-source-agent";
