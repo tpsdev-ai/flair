@@ -7,15 +7,27 @@
  * Prove JSON/Response against TypeScript library symbols and globalThis against
  * its intrinsic symbol. A built-in or proven alias may occur only as receiver
  * or callee of a recognised member call or new, the right operand of instanceof,
- * the operand of typeof, or an alias initializer the resolver tracks. Follow
- * side-effect/default/named imports, named exports (local or from), and bare-star
- * re-exports. Relative literal dynamic imports enter the closure; their yielded
- * namespaces are unresolved. Non-literal specifiers, bare modules carrying trusted
- * values or helpers, and unknown bare modules are unresolved; Node built-ins and
- * harper stay out as for static imports. Namespace imports carrying trusted values or helpers, namespace re-exports,
- * export assignments, import-equals aliases and other import/export declaration
- * forms are unresolved with file:line:column; alias uses obey this rule. A refusal
- * helper may occur only as the callee of a direct call the classifier resolves, its own
+ * the operand of typeof, or an alias initializer the resolver tracks.
+ * Declaration-kind policy (followed uses obey the rules above):
+ * | ts.SyntaxKind | Inventory policy |
+ * |---|---|
+ * | VariableStatement, VariableDeclarationList, VariableDeclaration, BindingElement, ObjectBindingPattern, ArrayBindingPattern, Parameter | Followed under built-in/helper use rules; ambient value statements fail closed. |
+ * | FunctionDeclaration, ClassDeclaration | Followed, including runtime class bases and default functions; ambient values fail closed. |
+ * | FunctionExpression, ArrowFunction, ClassExpression, MethodDeclaration, Constructor, PropertyDeclaration, GetAccessor, SetAccessor, ClassStaticBlockDeclaration, Decorator | Expressions/bodies followed under built-in/helper use rules; qualified member values have no property resolution. |
+ * | PropertyAssignment, ShorthandPropertyAssignment, SpreadAssignment, ComputedPropertyName | Followed under built-in/helper use rules. |
+ * | ImportDeclaration, ImportClause, NamedImports, ImportSpecifier | Side-effect/default/named imports followed without attributes and with literal module specifiers. |
+ * | NamespaceImport | Followed only without trusted values or refusal helpers. |
+ * | ExportDeclaration, NamedExports, ExportSpecifier | Local/from named exports and bare-star re-exports followed without attributes and with literal module specifiers. |
+ * | NamespaceExport, NamespaceExportDeclaration, ExportAssignment, ImportEqualsDeclaration (including export import) | Fail closed. |
+ * | EnumDeclaration, EnumMember | Fail closed. |
+ * | ModuleDeclaration | Non-ambient bodies and ambient value contents fail closed, including nested/merged namespaces and declare global. Ambient containers with only interfaces, type aliases, empty statements, nested such containers, type imports or empty/type exports are accepted; bodyless ambient modules are accepted. |
+ * | ModuleBlock | Traversed. |
+ * | InterfaceDeclaration, TypeAliasDeclaration, TypeParameter, PropertySignature, MethodSignature, CallSignature, ConstructSignature, IndexSignature, FunctionType, ConstructorType, ImportType, NamedTupleMember | Erased; accepted. |
+ * | CatchClause, CaseBlock, CaseClause, DefaultClause, Block, EmptyStatement, ExpressionStatement, IfStatement, DoStatement, WhileStatement, ForStatement, ForInStatement, ForOfStatement, ContinueStatement, BreakStatement, ReturnStatement, WithStatement, SwitchStatement, LabeledStatement, ThrowStatement, TryStatement, DebuggerStatement, SemicolonClassElement | Traversed. |
+ * | Unlisted statement/declaration-statement/class-element kinds | Fail closed. |
+ * Relative literal dynamic imports enter the closure; their yielded namespaces are
+ * unresolved. Other dynamic imports retain the exclusions in EXTERNAL_DYNAMIC_IMPORTS.
+ * A refusal helper may occur only as the callee of a direct call the classifier resolves, its own
  * declaration, or an import/re-export binding the resolver follows. Every other
  * built-in or refusal-helper use is unresolved with file:line:column and reason.
  * eval/Function are out of scope. #2970 replaces this inventory with a server dry run.
@@ -47,6 +59,43 @@ const REQUIRED_SOURCES = [
   "resources/instruction-version-record.ts",
   "src/lib/soul-scope-fields.ts",
 ] as const;
+
+const FOLLOWED_STATEMENT_KINDS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.VariableStatement, ts.SyntaxKind.FunctionDeclaration, ts.SyntaxKind.ClassDeclaration,
+  ts.SyntaxKind.ImportDeclaration, ts.SyntaxKind.ExportDeclaration,
+  ts.SyntaxKind.InterfaceDeclaration, ts.SyntaxKind.TypeAliasDeclaration,
+  ts.SyntaxKind.Block, ts.SyntaxKind.EmptyStatement, ts.SyntaxKind.ExpressionStatement,
+  ts.SyntaxKind.IfStatement, ts.SyntaxKind.DoStatement, ts.SyntaxKind.WhileStatement,
+  ts.SyntaxKind.ForStatement, ts.SyntaxKind.ForInStatement, ts.SyntaxKind.ForOfStatement,
+  ts.SyntaxKind.ContinueStatement, ts.SyntaxKind.BreakStatement, ts.SyntaxKind.ReturnStatement,
+  ts.SyntaxKind.WithStatement, ts.SyntaxKind.SwitchStatement, ts.SyntaxKind.LabeledStatement,
+  ts.SyntaxKind.ThrowStatement, ts.SyntaxKind.TryStatement, ts.SyntaxKind.DebuggerStatement,
+]);
+const FOLLOWED_CLASS_ELEMENT_KINDS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.MethodDeclaration, ts.SyntaxKind.Constructor, ts.SyntaxKind.PropertyDeclaration,
+  ts.SyntaxKind.GetAccessor, ts.SyntaxKind.SetAccessor, ts.SyntaxKind.ClassStaticBlockDeclaration,
+  ts.SyntaxKind.SemicolonClassElement, ts.SyntaxKind.IndexSignature,
+]);
+
+function isAmbient(node: ts.Node): boolean {
+  for (let current: ts.Node | undefined = node; current; current = current.parent) {
+    if (ts.isSourceFile(current) && current.isDeclarationFile) return true;
+    if (ts.canHaveModifiers(current) && ts.getModifiers(current)?.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword)) return true;
+  }
+  return false;
+}
+
+function typeOnlyAmbientModule(node: ts.ModuleDeclaration): boolean {
+  if (!node.body) return true;
+  if (ts.isModuleDeclaration(node.body)) return typeOnlyAmbientModule(node.body);
+  if (!ts.isModuleBlock(node.body)) return false;
+  return node.body.statements.every((statement) =>
+    ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement) || ts.isEmptyStatement(statement) ||
+    (ts.isModuleDeclaration(statement) && typeOnlyAmbientModule(statement)) ||
+    (ts.isImportDeclaration(statement) && !!statement.importClause?.isTypeOnly) ||
+    (ts.isExportDeclaration(statement) && (statement.isTypeOnly ||
+      (statement.exportClause && ts.isNamedExports(statement.exportClause) && statement.exportClause.elements.every((element) => element.isTypeOnly)))));
+}
 
 // ─── Module graph ───────────────────────────────────────────────────────────
 
@@ -853,6 +902,20 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   };
   for (const [file, source] of sources) {
     const visit = (node: ts.Node): void => {
+      if (ts.isModuleDeclaration(node)) {
+        if (!isAmbient(node) || !typeOnlyAmbientModule(node)) {
+          recordUnresolved(file, node, "unsupported value declaration: ModuleDeclaration");
+        }
+      } else if (ts.isEnumDeclaration(node) || ts.isEnumMember(node)) {
+        recordUnresolved(file, node, `unsupported value declaration: ${ts.SyntaxKind[node.kind]}`);
+      } else if (isAmbient(node) && (ts.isVariableStatement(node) || ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node))) {
+        const kind = ts.isVariableStatement(node) ? "VariableStatement" : ts.SyntaxKind[node.kind];
+        recordUnresolved(file, node, `unsupported ambient value declaration: ${kind}`);
+      } else if (((ts.isStatement(node) || ts.isDeclarationStatement(node)) && !FOLLOWED_STATEMENT_KINDS.has(node.kind) &&
+          !ts.isExportAssignment(node) && !ts.isImportEqualsDeclaration(node) && !ts.isNamespaceExportDeclaration(node)) ||
+          (ts.isClassElement(node) && !FOLLOWED_CLASS_ELEMENT_KINDS.has(node.kind))) {
+        recordUnresolved(file, node, `unsupported declaration/statement kind: ${ts.SyntaxKind[node.kind]}`);
+      }
       if (ts.isExportDeclaration(node)) {
         const module = node.moduleSpecifier;
         const clause = node.exportClause;
@@ -1001,6 +1064,9 @@ function buildInventory(sources: Map<string, ts.SourceFile>): RefusalInventory {
   const isTypePosition = (node: ts.Node): boolean => {
     let current: ts.Node | undefined = node.parent;
     while (current) {
+      if (ts.isExpressionWithTypeArguments(current) && ts.isHeritageClause(current.parent) &&
+          current.parent.token === ts.SyntaxKind.ExtendsKeyword &&
+          (ts.isClassDeclaration(current.parent.parent) || ts.isClassExpression(current.parent.parent))) return false;
       if (ts.isTypeNode(current)) return true;
       if (ts.isExpression(current) || ts.isStatement(current) || ts.isSourceFile(current)) return false;
       current = current.parent;
@@ -2188,7 +2254,10 @@ test("an authored no-default-lib declaration cannot prove Response", () => {
     '/// <reference no-default-lib="true"/>\ndeclare const Response: { json(body: any, init: any): any };', ts.ScriptTarget.Latest, true);
   const inventory = buildInventory(new Map([[file, source], [declarationFile, declarations]]));
   expect([...inventory.codes]).toEqual([]);
-  expect([...inventory.unresolved]).toEqual([[`${file}:1:1`, "unrecognised Response reference"]]);
+  expect([...inventory.unresolved]).toEqual([
+    [`${declarationFile}:2:1`, "unsupported ambient value declaration: VariableStatement"],
+    [`${file}:1:1`, "unrecognised Response reference"],
+  ]);
 });
 
 
@@ -2469,4 +2538,120 @@ test("excludes a resolved bare dynamic import without trusted values or helpers"
     ["resources/soul-write-policy.ts", 'export const value = 1;'],
   ].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
   expect([...buildInventory(sources).unresolved]).toEqual([]);
+});
+
+
+test.each([
+  ['namespace alias', 'export namespace N { export const R = Response; }', 'import { N } from "./helper.js"; N.R.json({ error: "x_new" }, { status: 403 });', 'unsupported value declaration: ModuleDeclaration'],
+  ['nested namespace', 'export namespace Outer { export namespace Inner { export const R = Response; } }', 'import { Outer } from "./helper.js"; Outer.Inner.R.json({ error: "x_new" }, { status: 403 });', 'unsupported value declaration: ModuleDeclaration'],
+  ['merged namespace', 'export function N() {}\nexport namespace N { export const R = Response; }', 'import { N } from "./helper.js"; N.R.json({ error: "x_new" }, { status: 403 });', 'unsupported value declaration: ModuleDeclaration'],
+  ['enum trusted initializer', 'export enum E { A = (Response, 1) }', 'import { E } from "./helper.js"; E.A;', 'unsupported value declaration: EnumDeclaration'],
+  ['enum helper initializer', 'function FORBIDDEN(msg: string) { return Response.json({ error: msg }, { status: 403 }); }\nexport enum E { A = (FORBIDDEN("x"), 1) }', 'import { E } from "./helper.js"; E.A;', 'unsupported value declaration: EnumDeclaration'],
+  ['global value', 'declare global { const R: typeof Response; }', 'R.json({ error: "x_new" }, { status: 403 });', 'unsupported value declaration: ModuleDeclaration'],
+  ['ambient namespace value', 'export declare namespace N { const R: typeof Response; }', 'import { N } from "./helper.js"; N.R.json({ error: "x_new" }, { status: 403 });', 'unsupported value declaration: ModuleDeclaration'],
+  ['ambient module value', 'declare module "external" { export const R: typeof Response; }', '', 'unsupported value declaration: ModuleDeclaration'],
+  ['ambient variable', 'export declare const R: typeof Response;', '', 'unsupported ambient value declaration: VariableStatement'],
+  ['ambient function', 'export declare function deny(msg: string): Response;', '', 'unsupported ambient value declaration: FunctionDeclaration'],
+  ['ambient class', 'export declare class C {}', '', 'unsupported ambient value declaration: ClassDeclaration'],
+])("refuses the declaration kind for %s", (_name, declaration, call, detail) => {
+  const file = "helper.ts";
+  const sources = new Map([
+    [file, ts.createSourceFile(file, declaration, ts.ScriptTarget.Latest, true)],
+    ["importer.ts", ts.createSourceFile("importer.ts", call, ts.ScriptTarget.Latest, true)],
+  ]);
+  const source = sources.get(file)!;
+  const statement = source.statements[source.statements.length - 1];
+  expect(buildInventory(sources).unresolved.get(siteOf(source, statement))).toBe(detail);
+});
+
+test.each([
+  'export interface Shape { value: string }',
+  'export type Shape = { value: string };',
+  'declare namespace Types { interface Shape { value: string } }',
+  'declare namespace Types { namespace Nested { type Shape = string; } }',
+  'declare global { interface Shape { value: string } }',
+  'declare module "external" { export interface Shape { value: string } }',
+  'declare module "external";',
+  'export declare interface Shape { value: string }',
+  'export declare type Shape = string;',
+])("accepts a type-only declaration: %s", (text) => {
+  const file = "fixture.ts";
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  expect([...buildInventory(new Map([[file, source]])).unresolved]).toEqual([]);
+});
+
+
+test.each([
+  'class C { static deny() { return Response.json({ error: "x_member" }, { status: 403 }); } }',
+  'const C = class { deny() { return Response.json({ error: "x_member" }, { status: 403 }); } };',
+  'class C { constructor() { Response.json({ error: "x_member" }, { status: 403 }); } }',
+  'class C { static deny = () => Response.json({ error: "x_member" }, { status: 403 }); }',
+  'class C { static get denial() { return Response.json({ error: "x_member" }, { status: 403 }); } }',
+  'class C { static set denial(value: unknown) { Response.json({ error: "x_member" }, { status: 403 }); } }',
+  'class C { static { Response.json({ error: "x_member" }, { status: 403 }); } }',
+  'function FORBIDDEN(msg: string) { return Response.json({ error: msg }, { status: 403 }); } @FORBIDDEN("x_member") class C {}',
+])("visits a refusal inside a followed declaration: %s", (text) => {
+  const file = "fixture.ts";
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  expect(buildInventory(new Map([[file, source]])).codes.get("x_member")).toBe("fixture.ts:1");
+});
+
+test.each([
+  'class C { static R = Response; } C.R.json({ error: "x_new" }, { status: 403 });',
+  'class C { static get R() { return Response; } } C.R.json({ error: "x_new" }, { status: 403 });',
+  '@decorate(Response) class C {}',
+  'function f(R = Response) { R.json({ error: "x_new" }, { status: 403 }); }',
+])("refuses a built-in use in a followed declaration: %s", (text) => {
+  const file = "fixture.ts";
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  const inventory = buildInventory(new Map([[file, source]]));
+  expect([...inventory.unresolved.values()].some((detail) => detail.startsWith("unsupported trusted built-in use:"))).toBe(true);
+});
+
+test("refuses a parser-produced missing declaration", () => {
+  const file = "fixture.ts";
+  const source = ts.createSourceFile(file, '@decorator', ts.ScriptTarget.Latest, true);
+  expect(buildInventory(new Map([[file, source]])).unresolved.get("fixture.ts:1:1")).toBe(
+    "unsupported declaration/statement kind: MissingDeclaration");
+});
+
+
+test.each([
+  'export class C { static deny(msg: string) { return Response.json({ error: msg }, { status: 403 }); } }',
+  'export class C { static deny = (msg: string) => Response.json({ error: msg }, { status: 403 }); }',
+])("refuses an imported static helper member use: %s", (declaration) => {
+  const sources = new Map([
+    ["helper.ts", declaration],
+    ["importer.ts", 'import { C } from "./helper.js"; C.deny("x_new");'],
+  ].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
+  expect(buildInventory(sources).unresolved.get("importer.ts:1:36")).toBe(
+    "unsupported refusal-helper use: deny in PropertyAccessExpression");
+});
+
+
+test.each([
+  'export class C extends Response {}',
+  'export const C = class extends Response {};',
+  'const R = Response; export class C extends R {}',
+  'export class C extends globalThis.Response {}',
+])("refuses a trusted runtime class base: %s", (declaration) => {
+  const sources = new Map([
+    ["helper.ts", declaration],
+    ["importer.ts", 'import { C } from "./helper.js"; C.json({ error: "x_new" }, { status: 403 });'],
+  ].map(([file, text]) => [file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)]));
+  const source = sources.get("helper.ts")!;
+  const base = declaration.slice(declaration.indexOf("extends ") + "extends ".length).split(" ")[0];
+  const at = siteIn(source, base + " {}");
+  expect(buildInventory(sources).unresolved.get(at)).toBe(
+    `unsupported trusted built-in use: ${base} in ExpressionWithTypeArguments`);
+});
+
+test.each([
+  'interface Shape extends Response {}',
+  'class C implements Response {}',
+  'class C extends Base<Response> {}',
+])("accepts an erased heritage type: %s", (text) => {
+  const file = "fixture.ts";
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  expect([...buildInventory(new Map([[file, source]])).unresolved]).toEqual([]);
 });
