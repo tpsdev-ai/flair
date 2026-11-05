@@ -356,7 +356,7 @@ describe("checkpoint-gate (invariant 1)", () => {
   });
 
   const hasSetfacl = spawnSync("setfacl", ["--version"], { encoding: "utf8" }).status === 0;
-  (process.platform === "darwin" || hasSetfacl || process.env.GITHUB_JOB === "custody-denial-root" ? it : it.skip)("refuses an ACL grant on the key", () => {
+  (process.platform === "darwin" || hasSetfacl || process.env.GITHUB_JOB === "custody-denial-root" ? it : it.skip)("refuses an ACL entry on the key", () => {
     expect(process.platform === "darwin" || hasSetfacl).toBe(true);
     commitFirst();
     const paths = integrityPaths(custodyDir);

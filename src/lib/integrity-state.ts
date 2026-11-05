@@ -11,7 +11,7 @@
  *     report;
  *   - the custody predicate: custody and generations directories 0700; key,
  *     registry, CURRENT and generation files 0600; these entries checked for
- *     symlinks and ACL grants; a caller-supplied
+ *     symlinks and any ACL entry; a caller-supplied
  *     server uid that can neither read the key nor write state, and the
  *     recorded operator uid and machine identity compared when custody is
  *     opened and when a generation is committed;
