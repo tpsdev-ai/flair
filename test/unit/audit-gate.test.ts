@@ -1,3 +1,4 @@
+import { pinFixtureHistory, readFixtureHistory } from "../helpers/audit-history.ts";
 import { describe, it, expect } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -137,6 +138,7 @@ function commitAllowlistHistory(root: string, date?: string) {
     const res = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", env, timeout: 20_000 });
     if (res.status !== 0) throw new Error(`fixture git ${args[0]} failed (${res.status}): ${res.stderr}`);
   }
+  pinFixtureHistory(root);
 }
 
 /**
@@ -1329,6 +1331,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       gitAt(root, commit.date, ["add", ".github/audit-allowlist.json"]);
       gitAt(root, commit.date, ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "--allow-empty", "-q", "-m", `fixture ${i}`]);
     });
+    pinFixtureHistory(root);
     return root;
   }
 
@@ -1377,7 +1380,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
   it("rejects a nonexistent added date that normalizes to a shorter lifetime than the Git history", () => {
     const root = historyRepo([{ date: "2026-03-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
     try {
-      const firstDays = readAllowlistHistory(root);
+      const firstDays = readFixtureHistory(root);
       const firstDay = firstDays.get(GHSA.toUpperCase());
       expect(firstDay).toBe("2026-03-01");
       const candidate = entry({ added: "2026-02-30", expires: "2026-05-01" });
@@ -1408,7 +1411,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       { date: "2026-09-20T12:00:00Z", entries: [{ ghsa: GHSA }] },
     ]);
     try {
-      const firstDays = readAllowlistHistory(root);
+      const firstDays = readFixtureHistory(root);
       expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
       expect(validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21"))).not.toEqual([]);
     } finally {
@@ -1425,7 +1428,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       { date: "2026-09-21T12:00:00Z", entries: [renewed] },
     ]);
     try {
-      const firstDays = readAllowlistHistory(root);
+      const firstDays = readFixtureHistory(root);
       expect(validateAllowlist({ policy, entries: [renewed] }, new Date("2026-09-21"))).toEqual([]);
       const problems = validateAllowlistHistory({ policy, entries: [renewed] }, firstDays, new Date("2026-09-21"));
       expect(problems.join("\n")).toContain("first day this advisory appears in parsed allowlist history (2026-09-01)");
@@ -1445,22 +1448,122 @@ describe("cumulative allowlist lifetime (#2897)", () => {
     ]);
     try {
       const sha = gitAt(root, "2026-09-21T12:00:00Z", ["rev-parse", "HEAD~1"]).trim();
-      expect(() => readAllowlistHistory(root)).toThrow(`cannot parse allowlist snapshot ${sha}:.github/audit-allowlist.json`);
+      expect(() => readFixtureHistory(root)).toThrow(`cannot parse allowlist snapshot ${sha}:.github/audit-allowlist.json`);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it("finds the first day before an allowlist file rename", () => {
-    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [] }]);
+  /** Writes a snapshot and commits it at the supplied committer date. */
+  function commitPath(root: string, date: string, path: string, value: object, message: string) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), JSON.stringify(value));
+    gitAt(root, date, ["add", "-A", "."]);
+    gitAt(root, date, ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", message]);
+  }
+
+  for (const operation of ["rename", "delete"] as const) {
+    it(`refuses a ${operation} after the pinned start even when the fixed path is restored`, () => {
+      const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [entry()] }]);
+      try {
+        if (operation === "rename") gitAt(root, "2026-09-05T12:00:00Z", ["mv", ".github/audit-allowlist.json", ".github/old-allowlist.json"]);
+        else rmSync(join(root, ".github/audit-allowlist.json"));
+        gitAt(root, "2026-09-05T12:00:00Z", ["add", "-A", "."]);
+        gitAt(root, "2026-09-05T12:00:00Z", ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", operation]);
+        const missing = gitAt(root, "2026-09-05T12:00:00Z", ["rev-parse", "HEAD"]).trim();
+        commitPath(root, "2026-09-10T12:00:00Z", ".github/audit-allowlist.json", { entries: [entry()] }, "restore");
+        expect(() => readFixtureHistory(root)).toThrow(`allowlist lineage cannot be established: missing .github/audit-allowlist.json at ${missing}`);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("reads an escaped advisory id from the pinned snapshot", () => {
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [], raw: JSON.stringify({ entries: [entry()] }).replace("GHSA", "\\u0047HSA") },
+      { date: "2026-09-20T12:00:00Z", entries: [entry()] },
+    ]);
     try {
-      gitAt(root, "2026-09-02T12:00:00Z", ["mv", ".github/audit-allowlist.json", ".github/old-allowlist.json"]);
-      writeFileSync(join(root, ".github/old-allowlist.json"), JSON.stringify({ policy, entries: [{ ghsa: GHSA }] }));
-      gitAt(root, "2026-09-02T12:00:00Z", ["add", ".github/old-allowlist.json"]);
-      gitAt(root, "2026-09-02T12:00:00Z", ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "first id in old path"]);
-      gitAt(root, "2026-09-20T12:00:00Z", ["mv", ".github/old-allowlist.json", ".github/audit-allowlist.json"]);
-      gitAt(root, "2026-09-20T12:00:00Z", ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "rename allowlist"]);
-      expect(readAllowlistHistory(root).get(GHSA.toUpperCase())).toBe("2026-09-02");
+      expect(readFixtureHistory(root).get(GHSA.toUpperCase())).toBe("2026-09-01");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a pinned start outside HEAD ancestry", () => {
+    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [entry()] }]);
+    try {
+      const start = gitAt(root, "2026-09-01T12:00:00Z", ["rev-parse", "HEAD"]).trim();
+      gitAt(root, "2026-09-02T12:00:00Z", ["checkout", "--orphan", "unrelated"]);
+      gitAt(root, "2026-09-02T12:00:00Z", ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "unrelated root"]);
+      expect(() => readFixtureHistory(root)).toThrow(`allowlist lineage cannot be established: pinned start ${start} is not an ancestor of HEAD`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores snapshots outside the pinned start's descendants", () => {
+    const root = historyRepo([
+      { date: "2026-08-01T12:00:00Z", entries: [], raw: "invalid JSON" },
+      { date: "2026-09-01T12:00:00Z", entries: [entry()] },
+    ]);
+    try {
+      pinFixtureHistory(root, gitAt(root, "2026-09-01T12:00:00Z", ["rev-parse", "HEAD"]).trim());
+      expect(readFixtureHistory(root).get(GHSA.toUpperCase())).toBe("2026-09-01");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  for (const first of ["2026-09-10", "2030-01-01"]) {
+    it(`keeps first introduction ${first} through removal and an earlier-dated reintroduction`, () => {
+      const root = historyRepo([
+        { date: `${first}T12:00:00Z`, entries: [entry()] },
+        { date: "2026-09-15T12:00:00Z", entries: [] },
+        { date: "2026-08-01T12:00:00Z", entries: [entry()] },
+      ]);
+      try {
+        const days = readFixtureHistory(root);
+        expect(days.get(GHSA.toUpperCase())).toBe(first);
+        if (first === "2030-01-01") {
+          expect(validateAllowlistHistory({ entries: [entry()] }, days, new Date("2026-09-21")).join("\n"))
+            .toContain("first history day (2030-01-01) is after today (2026-09-21)");
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("reads first appearance from a side-branch commit merged later", () => {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-merge-"));
+    try {
+      gitAt(root, "2026-09-01T12:00:00Z", ["init", "-q", "-b", "main"]);
+      commitPath(root, "2026-09-01T12:00:00Z", ".github/audit-allowlist.json",
+        { policy, entries: [] }, "base");
+      pinFixtureHistory(root);
+      gitAt(root, "2026-09-02T12:00:00Z", ["checkout", "-q", "-b", "side"]);
+      commitPath(root, "2026-09-05T12:00:00Z", ".github/audit-allowlist.json",
+        { policy, entries: [entry({ ghsa: NEW_GHSA, added: "2026-09-05" })] }, "side adds the advisory");
+      gitAt(root, "2026-09-10T12:00:00Z", ["checkout", "-q", "main"]);
+      writeFileSync(join(root, "README.md"), "fixture\n");
+      gitAt(root, "2026-09-10T12:00:00Z", ["add", "README.md"]);
+      gitAt(root, "2026-09-10T12:00:00Z", ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "main moves on"]);
+      gitAt(root, "2026-09-15T12:00:00Z", ["merge", "--no-ff", "-q", "-m", "merge side", "side"]);
+      expect(readFixtureHistory(root).get(NEW_GHSA.toUpperCase())).toBe("2026-09-05");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an introduction day when a descendant has an earlier committer date", () => {
+    const root = historyRepo([
+      { date: "2026-09-10T12:00:00Z", entries: [entry()] },
+      { date: "2026-08-01T12:00:00Z", entries: [entry()] },
+    ]);
+    try {
+      expect(readFixtureHistory(root).get(GHSA.toUpperCase())).toBe("2026-09-10");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1469,7 +1572,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
   it("rejects a future-dated first history commit", () => {
     const root = historyRepo([{ date: "2030-01-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
     try {
-      expect(validateAllowlistHistory({ entries: [entry({ added: "2026-09-01" })] }, readAllowlistHistory(root), new Date("2026-09-21")).join("\n"))
+      expect(validateAllowlistHistory({ entries: [entry({ added: "2026-09-01" })] }, readFixtureHistory(root), new Date("2026-09-21")).join("\n"))
         .toContain("first history day (2030-01-01) is after today (2026-09-21)");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1479,7 +1582,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
   it("rejects a future added date with existing history", () => {
     const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
     try {
-      const history = readAllowlistHistory(root);
+      const history = readFixtureHistory(root);
       expect(history.get(GHSA.toUpperCase())).toBe("2026-09-01");
       const candidate = entry({ added: "2026-09-22", expires: "2026-10-01" });
       expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-09-21")).join("\n"))
@@ -1504,7 +1607,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
           expires: "2026-09-25",
         },
       });
-      expect(readAllowlistHistory(root).get(GHSA.toUpperCase())).toBe("2026-08-01");
+      expect(readFixtureHistory(root).get(GHSA.toUpperCase())).toBe("2026-08-01");
       expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-08-02")).join("\n"))
         .toContain('"overCapApproval.approvedOn" (2026-08-03) is after today (2026-08-02)');
     } finally {
@@ -1525,7 +1628,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
           expires: "2026-09-25",
         },
       });
-      expect(readAllowlistHistory(root).get(GHSA.toUpperCase())).toBe("2026-08-01");
+      expect(readFixtureHistory(root).get(GHSA.toUpperCase())).toBe("2026-08-01");
       expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-08-02")).join("\n"))
         .toContain('"overCapApproval.approvedOn" (2026-08-03) is after today (2026-08-02)');
     } finally {
@@ -1539,7 +1642,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       { date: "2026-09-20T12:00:00Z", entries: [{ ghsa: GHSA }] },
     ]);
     try {
-      const firstDays = readAllowlistHistory(root);
+      const firstDays = readFixtureHistory(root);
       expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
       expect(
         validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21")).join("\n"),
@@ -1557,7 +1660,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       { date: "2026-09-20T12:00:00Z", entries: [{ ghsa: GHSA, package: "pkg-b", sources: ["npm-install"] }] },
     ]);
     try {
-      const firstDays = readAllowlistHistory(root);
+      const firstDays = readFixtureHistory(root);
       expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
       expect(
         validateAllowlistHistory(
@@ -1578,7 +1681,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       { date: "2026-09-20T12:00:00Z", entries: [{ ghsa: GHSA }] },
     ]);
     try {
-      const firstDays = readAllowlistHistory(root);
+      const firstDays = readFixtureHistory(root);
       expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
       expect(
         validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21")).join("\n"),
@@ -1591,7 +1694,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
   it("accepts an added date moved earlier", () => {
     const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
     try {
-      expect(validateAllowlistHistory({ entries: [entry({ added: "2026-08-15" })] }, readAllowlistHistory(root), new Date("2026-09-21"))).toEqual([]);
+      expect(validateAllowlistHistory({ entries: [entry({ added: "2026-08-15" })] }, readFixtureHistory(root), new Date("2026-09-21"))).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1600,7 +1703,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
   it("accepts a new id on or before today and rejects one added later", () => {
     const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
     try {
-      const firstDays = readAllowlistHistory(root);
+      const firstDays = readFixtureHistory(root);
       expect(firstDays.has(NEW_GHSA.toUpperCase())).toBe(false);
       expect(
         validateAllowlistHistory({ entries: [entry({ ghsa: NEW_GHSA, added: "2026-09-15" })] }, firstDays, new Date("2026-09-15")),
@@ -1622,7 +1725,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
         timeout: 20_000,
       });
       expect(clone.status).toBe(0);
-      expect(() => readAllowlistHistory(shallow)).toThrow(/shallow/);
+      expect(() => readAllowlistHistory(shallow)).toThrow(/allowlist lineage cannot be established: .*shallow clone/);
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(shallow, { recursive: true, force: true });

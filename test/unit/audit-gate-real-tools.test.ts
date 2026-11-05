@@ -1,3 +1,4 @@
+import { pinFixtureHistory, readFixtureHistory } from "../helpers/audit-history.ts";
 import { describe, it, expect } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -6,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { delimiter, dirname, join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 // @ts-expect-error — plain .mjs helper, no type declarations by design.
-import { readAllowlistHistory, validateAllowlist, validateAllowlistHistory } from "../../scripts/audit-gate.mjs";
+import { validateAllowlist, validateAllowlistHistory } from "../../scripts/audit-gate.mjs";
 
 /**
  * The dependency audit gate run against the real audit tools (flair#2278).
@@ -104,6 +105,7 @@ function commitAllowlistHistory(root: string, date?: string) {
     const res = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", env, timeout: 20_000 });
     if (res.status !== 0) throw new Error(`fixture git ${args[0]} failed (${res.status}): ${res.stderr}`);
   }
+  pinFixtureHistory(root);
 }
 
 /** The validator's problems for a fixture's allowlist on the pinned day. */
@@ -112,7 +114,7 @@ function allowlistProblems(root: string, today = FIXTURE_TODAY): string[] {
   const day = new Date(`${today}T00:00:00Z`);
   return [
     ...validateAllowlist(allowlist, day),
-    ...validateAllowlistHistory(allowlist, readAllowlistHistory(root), day),
+    ...validateAllowlistHistory(allowlist, readFixtureHistory(root), day),
   ];
 }
 
