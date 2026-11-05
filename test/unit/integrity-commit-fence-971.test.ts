@@ -324,15 +324,56 @@ describe("commit-fence (invariant 7)", () => {
     expect(generationNumbers(state.paths)).toEqual([1]);
   });
 
-  it("names the registry path when initialization cannot observe its destination", () => {
-    const path = integrityPaths(custodyDir).registryPath;
+  it.each(["unpublished", "published"] as const)("follows the initialization-hold remedy with an %s registry", (publication) => {
+    const paths = integrityPaths(custodyDir);
     const result = initializeIntegrityCustody(options({
-      beforeRegistryPublication: () => symlinkSync(join(root, "absent-registry"), path),
+      beforeRegistryPublication: () => {
+        if (publication === "unpublished") {
+          symlinkSync(join(root, "absent-registry"), paths.registryPath);
+        } else {
+          writeFileSync(paths.registryPath, `${canonicalJson(signIntegrityRecord({
+            version: 3, kind: "registry", sequence: 1,
+            entries: [{
+              enrollmentId: "enr_partial", sequence: 1, createdAt: new Date().toISOString(),
+              operatorUid: OPERATOR_UID, machineId: MACHINE, status: "active",
+            }],
+          }, readFileSync(paths.keyPath)))}\n`, { mode: 0o600 });
+        }
+      },
     }));
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.reason).toBe("commit_conflict");
-    expect(result.remedy).toBe(`Inspect ${path} to establish whether a registry was published; retry initialization if none was published, or open the existing custody if one was published.`);
+    expect(result.reason).toBe(publication === "unpublished" ? "commit_conflict" : "custody_invalid");
+    expect(result.remedy).toBe(`Inspect ${paths.registryPath} and reconcile partial initialization before proceeding. Initialization cannot resume with an existing custody key, and opening custody requires a committed generation. For a fresh start, preserve this directory and initialize a different custodyDir with newCustody: true.`);
+    const keyBefore = readFileSync(paths.keyPath);
+    expect(existsSync(paths.currentPath)).toBe(false);
+    expect(generationNumbers(paths)).toEqual([]);
+
+    if (publication === "unpublished") {
+      expect(lstatSync(paths.registryPath).isSymbolicLink()).toBe(true);
+      expect(existsSync(paths.registryPath)).toBe(false);
+      unlinkSync(paths.registryPath);
+      const retry = initializeIntegrityCustody(options());
+      expect(retry).toMatchObject({ ok: false, reason: "unavailable" });
+      if (!retry.ok) expect(retry.detail).toContain("EEXIST");
+    } else {
+      expect(lstatSync(paths.registryPath).isFile()).toBe(true);
+      expect(openIntegrityState(options({ newCustody: false }))).toMatchObject({
+        ok: false, reason: "checkpoint_missing", detail: "no CURRENT pointer and no retained generation",
+      });
+    }
+    expect(readFileSync(paths.keyPath)).toEqual(keyBefore);
+    const partialBefore = snapshotCustody(custodyDir);
+    const freshDir = join(root, "fresh-custody");
+    const fresh = init({ custodyDir: freshDir, newCustody: true });
+    expect(commit(fresh, 0).generation).toBe(1);
+    const reopened = openIntegrityState(options({ custodyDir: freshDir, newCustody: false }));
+    expect(reopened.ok).toBe(true);
+    if (reopened.ok) {
+      expect(reopened.state.generation).toBe(1);
+      expect(reopened.state.checkpoint?.baseline).toEqual(payload().baseline);
+    }
+    expect(snapshotCustody(custodyDir)).toEqual(partialBefore);
   });
 
   it("rechecks custody when committing a generation", () => {

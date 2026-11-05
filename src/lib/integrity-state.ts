@@ -1114,7 +1114,7 @@ function writeInitialRegistry(
   if (result.status === "written") return { ok: false, reason: "commit_uncertain", detail: result.cleanupWarning! };
   if (result.status === "held") {
     const parsed = parseHold(result.message);
-    return { ok: false, reason: parsed.reason, detail: parsed.detail, remedy: `Inspect ${paths.registryPath} to establish whether a registry was published; retry initialization if none was published, or open the existing custody if one was published.` };
+    return { ok: false, reason: parsed.reason, detail: parsed.detail, remedy: `Inspect ${paths.registryPath} and reconcile partial initialization before proceeding. Initialization cannot resume with an existing custody key, and opening custody requires a committed generation. For a fresh start, preserve this directory and initialize a different custodyDir with newCustody: true.` };
   }
   return { ok: false, reason: "unavailable", detail: result.message };
 }
