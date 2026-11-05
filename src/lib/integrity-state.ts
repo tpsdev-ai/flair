@@ -26,7 +26,10 @@
  *     open and rechecked under the commit and tombstone lock, immediately before
  *     and after publication rename. Detected drift before rename refuses with
  *     custody_invalid; detected drift after rename reports commit_uncertain.
- *     Staged files are checked with the chain before and after publication.
+ *     The generation file and UNCERTAIN marker are checked with the chain
+ *     before and after publication.
+ *     The shared writer's publication staging file is protected only by the
+ *     chain check around the rename.
  *     Recorded identities are dev+ino and inherit filesystem inode reuse.
  *     The checks detect drift present when they run and cannot guarantee detection
  *     of changes between checks or after the post-rename check (which runs

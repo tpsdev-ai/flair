@@ -1,8 +1,10 @@
-- **Integrity custody checks directory and staged file identities around commit and tombstone publication.**
+- **Integrity custody checks directory identities and the generation file and UNCERTAIN marker around commit and tombstone publication.**
 
   The open handle records directory devices and inodes with `lstat`.
-  Commit and tombstone recheck the chain, then verify staged file identities,
-  immediately before and after publication rename. Detected drift before rename
+  Commit and tombstone recheck the chain, then verify identities of
+  the generation file and UNCERTAIN marker immediately before and after publication rename.
+  The shared writer's publication staging file is protected only by the chain check around the rename.
+  Detected drift before rename
   refuses `custody_invalid`;
   detected drift after rename reports `status: "commit_uncertain"`.
   For commits, restore valid custody, re-open it and verify the generation.
@@ -22,5 +24,5 @@
   Missing markers during post-publication marker cleanup for commits or tombstones report `status: "commit_uncertain"`.
   Before publication, cleanup errors are not reported and the write returns `status: "commit_failed"`.
   Tombstone cleanup warnings report `status: "commit_uncertain"` with the tombstone remedy.
-  Custody-chain and staged-file identity checks compare device and inode values as bigint.
+  Identity checks for the custody chain, the generation file and UNCERTAIN marker compare device and inode values as bigint.
   Generation refusals after publication report `committed: true` and the published generation.
