@@ -1409,8 +1409,9 @@ function parseHold(message: string): { reason: IntegrityReason; detail: string; 
   return { reason: "commit_conflict", detail: message, recognized: false };
 }
 
-/** A recognized generation or sequence mismatch maps to `commit_conflict`;
- *  every other hold maps to `commit_failed`. */
+/** A recognized `commit_conflict` reason maps to `commit_conflict`; other holds
+ *  map to `commit_failed`. The caller overrides generation exhaustion with an
+ *  explicit `commit_failed` refusal. */
 function holdStatus(parsed: { reason: IntegrityReason; recognized: boolean }): "commit_conflict" | "commit_failed" {
   return parsed.recognized && parsed.reason === "commit_conflict" ? "commit_conflict" : "commit_failed";
 }
