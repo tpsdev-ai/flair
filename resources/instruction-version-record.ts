@@ -277,11 +277,10 @@ function jsonResponse(status: number, body: Record<string, unknown>): Response {
  * Harper's REST responder uses for it (harper@5.3.1 dist/server/REST.js:498).
  * Harper's `ValidationError` class (dist/utility/errors/hdbError.js:243) is
  * constructed only at its two schema-validation sites (dist/resources/Table.js:6461
- * and dist/resources/defineResource.js:432), and its constructor gives every
- * instance all four markers: `name` and `code` of "ValidationError", a 400
- * `statusCode`, and a non-empty `errors` array of `{ path, code, message }`.
- * A non-validation throw does not carry that combination, and the status check
- * refuses any 5xx.
+ * and dist/resources/defineResource.js:432). Its constructor sets `name` and
+ * `code` to "ValidationError", a 400 `statusCode`, and the `errors` array, and
+ * both call sites throw only with a non-empty issue list. No other Harper path
+ * constructs a `ValidationError`, and the status check refuses any 5xx.
  */
 function validationErrorResponse(err: unknown): Response | null {
   if (!err || typeof err !== "object") return null;
