@@ -437,8 +437,8 @@ export function checkCustody(opts: CustodyCheckOptions): CustodyCheck {
 }
 
 /** One recorded path in the custody ancestry. `symbolicLink` records the type
- *  observed at open so a later replacement is reported even when inode numbers
- *  happen to be reused. */
+ *  observed at open so a replacement that changes the entry type is reported
+ *  even when inode numbers happen to be reused. */
 export interface CustodyChainEntry {
   path: string;
   dev: number;
@@ -892,10 +892,10 @@ export type IntegrityStateResult =
 export type CommitStatus = "committed" | "commit_conflict" | "commit_uncertain" | "commit_failed";
 
 /** Decide whether to retry on `status`, never on `reason`. `commit_conflict`
- *  is a competing writer and may be retried; `commit_failed` and
- *  `commit_uncertain` are not retryable without operator action. A
- *  non-retryable refusal can carry `reason: "commit_conflict"` (generation
- *  exhaustion), so the reason alone is not a retry signal. */
+ *  reports a competing writer; `commit_failed` is a refusal that is not a
+ *  competing-writer conflict (generation exhaustion is one, and carries
+ *  `reason: "commit_conflict"`), and `commit_uncertain` requires recovery. The
+ *  reason alone is not a retry signal. */
 export type CommitGenerationResult =
   | { ok: true; status: "committed"; generation: number; attempts: number }
   | {
@@ -1392,13 +1392,14 @@ function parseHold(message: string): { reason: IntegrityReason; detail: string; 
   if ((INTEGRITY_REASONS as readonly string[]).includes(head!) && rest.length > 0) {
     return { reason: head as IntegrityReason, detail: rest.join(":").trim(), recognized: true };
   }
-  // An unrecognized hold line is still a refusal: report it as non-retryable
-  // rather than letting the conflict reason imply a competing writer.
+  // An unrecognized hold line is still a refusal: report its status as
+  // non-retryable rather than letting the conflict reason imply a competing
+  // writer.
   return { reason: "commit_conflict", detail: message, recognized: false };
 }
 
 /** Only a recognized `commit_conflict` hold is a competing writer a caller may
- *  retry; every other hold is a non-retryable refusal. */
+ *  retry; every other hold maps to `commit_failed`. */
 function holdStatus(parsed: { reason: IntegrityReason; recognized: boolean }): "commit_conflict" | "commit_failed" {
   return parsed.recognized && parsed.reason === "commit_conflict" ? "commit_conflict" : "commit_failed";
 }

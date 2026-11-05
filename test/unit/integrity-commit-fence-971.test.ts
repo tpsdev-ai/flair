@@ -89,7 +89,7 @@ function payload() {
   };
 }
 
-/** Every custody entry that carries evidence, excluding transient lock files. */
+/** Snapshot every custody entry except the transient lock file. */
 function snapshotCustody(dir: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const name of readdirSync(dir).sort()) {
