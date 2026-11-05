@@ -5,12 +5,15 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -84,6 +87,23 @@ function payload() {
       instanceTokens: { "mem-a": "tok-a" },
     },
   };
+}
+
+/** Every custody entry that carries evidence, excluding transient lock files. */
+function snapshotCustody(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of readdirSync(dir).sort()) {
+    const full = join(dir, name);
+    if (name === "generations") {
+      for (const generation of readdirSync(full).sort()) {
+        out[`generations/${generation}`] = readFileSync(join(full, generation), "utf-8");
+      }
+      continue;
+    }
+    if (name === ".custody.lock") continue;
+    out[name] = readFileSync(full, "utf-8");
+  }
+  return out;
 }
 
 function commit(state = init(), expectedGeneration = 0) {
@@ -189,6 +209,120 @@ describe("commit-fence (invariant 7)", () => {
     expect(denied.ok).toBe(false);
     if (denied.ok) return;
     expect(denied.reason).toBe("custody_invalid");
+  });
+
+  it("refuses a commit after an ancestor directory is renamed and replaced", () => {
+    const tree = join(root, "tree");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    commit(state, 0);
+    const before = snapshotCustody(nested);
+
+    const moved = join(root, "tree-away");
+    renameSync(tree, moved);
+    mkdirSync(tree, { mode: 0o700 });
+
+    const result = commitGeneration({ state, expectedGeneration: 1, checkpoint: payload() });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
+    expect(result.reason).toBe("custody_invalid");
+    expect(result.detail).toContain(tree);
+    expect(result.detail).toContain("identity changed");
+    expect(result.remedy).toContain("Re-open custody");
+    expect(snapshotCustody(join(moved, "custody"))).toEqual(before);
+    expect(existsSync(join(tree, "custody"))).toBe(false);
+  });
+
+  it("refuses a commit when an ancestor becomes a symlink to a copy", () => {
+    const tree = join(root, "tree");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    commit(state, 0);
+
+    const copy = join(root, "copy");
+    cpSync(tree, copy, { recursive: true });
+    const before = snapshotCustody(join(copy, "custody"));
+    renameSync(tree, join(root, "tree-original"));
+    symlinkSync(copy, tree);
+    expect(readlinkSync(tree)).toBe(copy);
+
+    const result = commitGeneration({ state, expectedGeneration: 1, checkpoint: payload() });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
+    expect(result.reason).toBe("custody_invalid");
+    expect(result.detail).toContain(tree);
+    expect(result.detail).toContain("became a symlink");
+    expect(result.remedy).toContain("Re-open custody");
+    expect(snapshotCustody(join(copy, "custody"))).toEqual(before);
+  });
+
+  it("refuses a commit when an ancestor is removed", () => {
+    const tree = join(root, "tree");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    commit(state, 0);
+
+    const safe = join(root, "safe");
+    cpSync(tree, safe, { recursive: true });
+    const before = snapshotCustody(join(safe, "custody"));
+    rmSync(tree, { recursive: true, force: true });
+
+    const result = commitGeneration({ state, expectedGeneration: 1, checkpoint: payload() });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
+    expect(result.reason).toBe("custody_invalid");
+    expect(result.detail).toContain(tree);
+    expect(result.detail).toContain("disappeared");
+    expect(result.remedy).toContain("Re-open custody");
+    expect(snapshotCustody(join(safe, "custody"))).toEqual(before);
+    expect(existsSync(tree)).toBe(false);
+  });
+
+  it("commits on an unchanged custody chain", () => {
+    const tree = join(root, "tree");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    expect(commit(state, 0).generation).toBe(1);
+    expect(commit(state, 1).generation).toBe(2);
+    expect(generationNumbers(integrityPaths(nested))).toEqual([1, 2]);
+  });
+
+  it("refuses a tombstone when an ancestor becomes a symlink after open", () => {
+    const tree = join(root, "tree");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    commit(state, 0);
+
+    const copy = join(root, "copy");
+    cpSync(tree, copy, { recursive: true });
+    const before = snapshotCustody(join(copy, "custody"));
+
+    const result = tombstoneEnrollment({
+      ...options({ custodyDir: nested, newCustody: false }),
+      expectedSequence: 1,
+      testHooks: {
+        afterRead: () => {
+          renameSync(tree, join(root, "tree-original"));
+          symlinkSync(copy, tree);
+        },
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
+    expect(result.reason).toBe("custody_invalid");
+    expect(result.detail).toContain(tree);
+    expect(result.detail).toContain("became a symlink");
+    expect(result.remedy).toContain("Re-open custody");
+    expect(snapshotCustody(join(copy, "custody"))).toEqual(before);
   });
 
   it("commits a generation and holds a stale expected generation", () => {
@@ -306,6 +440,7 @@ describe("commit-fence (invariant 7)", () => {
     const result = commitGeneration({ state, expectedGeneration: 0, checkpoint: changed });
     expect(result.ok).toBe(false);
     if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
     expect(result.reason).toBe("custody_invalid");
     expect(existsSync(paths.currentPath)).toBe(false);
     expect(generationNumbers(paths)).toEqual([1]);
@@ -621,6 +756,7 @@ describe("commit-fence (invariant 7)", () => {
     const refused = commitGeneration({ state: reopened.state, expectedGeneration: INTEGRITY_MAX_GENERATION, checkpoint: payload() });
     expect(refused).toMatchObject({
       ok: false,
+      status: "commit_failed",
       reason: "commit_conflict",
       remedy: "The generation sequence has reached its twelve-digit limit; no further generation can be committed to this custody. Start a new custody in a different custodyDir with initializeIntegrityCustody and newCustody: true.",
     });
