@@ -84,8 +84,7 @@
  * preservation are NOT handled and are documented, not silently dropped.
  *
  * Leaf module: imports only node:fs, node:child_process, node:crypto, node:os
- * and node:path. NEVER import src/cli.ts here — its `writeFileAtomic` lacks exclusive temp
- * creation, fsync, locking and identity checks (flair#1778 2c-i-b ruling).
+ * and node:path. NEVER import src/cli.ts here.
  */
 import {
   closeSync,
@@ -184,7 +183,7 @@ export interface ConfigSectionOptions {
    *  same path for registry publication, commit, tombstone and recovery;
    *  initial directory and key creation occur outside it. */
   lockPath?: string;
-  /** In-lock staging for a protocol that must publish IMMUTABLE side records
+  /** In-lock staging for a protocol that must publish side records
    *  before the target replacement. Runs after `decide` returns a write and
    *  before the temp file is created for the target. It must not replace the
    *  target or any name a reader can resolve to current state; an unreferenced

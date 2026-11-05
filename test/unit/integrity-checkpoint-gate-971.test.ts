@@ -356,16 +356,28 @@ describe("checkpoint-gate (invariant 1)", () => {
   });
 
   const hasSetfacl = spawnSync("setfacl", ["--version"], { encoding: "utf8" }).status === 0;
-  (hasSetfacl || process.env.GITHUB_JOB === "custody-denial-root" ? it : it.skip)("refuses an ACL grant on the key", () => {
-    expect(hasSetfacl).toBe(true);
-    init();
+  (process.platform === "darwin" || hasSetfacl || process.env.GITHUB_JOB === "custody-denial-root" ? it : it.skip)("refuses an ACL grant on the key", () => {
+    expect(process.platform === "darwin" || hasSetfacl).toBe(true);
+    commitFirst();
     const paths = integrityPaths(custodyDir);
-    const granted = spawnSync("setfacl", ["-m", `u:${SERVER_UID}:r--`, paths.keyPath], { encoding: "utf8" });
+    expect(openIntegrityState(options({ newCustody: false })).ok).toBe(true);
+    const granted = process.platform === "darwin"
+      ? spawnSync("chmod", ["+a", "everyone allow read", paths.keyPath], { encoding: "utf8" })
+      : spawnSync("setfacl", ["-m", `u:${SERVER_UID}:r--,m::---`, paths.keyPath], { encoding: "utf8" });
     expect(granted.status).toBe(0);
+    expect(statSync(paths.keyPath).mode & 0o777).toBe(0o600);
     const result = openIntegrityState(options({ newCustody: false }));
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.reason).toBe("custody_invalid");
+    expect(result).toMatchObject({ ok: false, reason: "custody_invalid" });
+    if (!result.ok) expect(result.detail).toMatch(/^an ACL (entry )?is present on /);
+    const removed = process.platform === "darwin"
+      ? spawnSync("chmod", ["-N", paths.keyPath], { encoding: "utf8" })
+      : spawnSync("setfacl", ["-b", paths.keyPath], { encoding: "utf8" });
+    expect(removed.status).toBe(0);
+    expect(openIntegrityState(options({ newCustody: false })).ok).toBe(true);
+    chmodSync(paths.keyPath, 0o644);
+    const modeOnly = openIntegrityState(options({ newCustody: false }));
+    expect(modeOnly).toMatchObject({ ok: false, reason: "custody_invalid" });
+    if (!modeOnly.ok) expect(modeOnly.detail).toBe(`${paths.keyPath} mode is 644, expected 600`);
   }, 20_000);
 
   it("rejects a tampered registry HMAC", () => {

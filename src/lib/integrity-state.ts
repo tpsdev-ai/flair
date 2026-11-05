@@ -621,6 +621,7 @@ function validateRegistryShape(value: unknown): value is IntegrityRegistry {
     if (!Number.isSafeInteger(entry.operatorUid)) return false;
     if (typeof entry.machineId !== "string" || entry.machineId.length === 0) return false;
     if (entry.status !== "active" && entry.status !== "tombstoned") return false;
+    if (entry.tombstonedAt !== undefined && typeof entry.tombstonedAt !== "string") return false;
     if (entry.status === "tombstoned" && typeof entry.tombstonedAt !== "string") return false;
   }
   return maxSeq <= (r.sequence as number);
