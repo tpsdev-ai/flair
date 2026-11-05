@@ -233,6 +233,19 @@ describe("fixture 13 — a non-regular destination is REFUSED by name (F1)", () 
   });
 });
 
+it("a replacement failure without a stage step does not mention staged files", () => {
+  writeConfig("ORIGINAL");
+  const res = withConfigCriticalSection(cfg, () => ({ write: enc("NEW") }), {
+    testHooks: { afterTempCreate: () => { throw new Error("injected replacement failure"); } },
+  });
+  expect(res.status).toBe("refused");
+  expect(res.message).toContain("target was not replaced:");
+  expect(res.message).toContain("injected replacement failure");
+  expect(res.message).not.toContain("staged files");
+  expect(readFileSync(cfg, "utf-8")).toBe("ORIGINAL");
+  expect(readdirSync(dir)).toEqual(["settings.json"]);
+});
+
 // ── fixture 14 — the link's OWN identity, alone (F3) ────────────────────────
 
 describe("fixture 14 — a replaced SYMLINK entry holds on its own link identity (F3)", () => {
