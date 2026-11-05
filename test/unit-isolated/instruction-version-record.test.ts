@@ -442,6 +442,58 @@ describe("instruction version — guard, collisions and failure injection", () =
 });
 
 
+describe("instruction version — validator client errors", () => {
+  const issue = { path: "value", code: "type", message: "Value 123 in property value must be a string" };
+  const validationError = () => Object.assign(new Error(issue.message), {
+    name: "ValidationError",
+    code: "ValidationError",
+    statusCode: 400,
+    errors: [issue],
+    detail: [issue],
+  });
+  const throwing = (err: unknown) => ({
+    subjectType: "soul" as const,
+    prepare: async () => { throw err; },
+  });
+
+  test("the validator's 400 is passed through with its field message and writes nothing", async () => {
+    const res = await recordVersion(context(), throwing(validationError()) as any, async () => okRow());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.response.status).toBe(400);
+    const body = await res.response.clone().json() as any;
+    expect(body.code).toBe("ValidationError");
+    expect(body.title).toContain("value");
+    expect(body.detail).toEqual([issue]);
+    expect(store.size).toBe(0);
+    expect(soulStore.size).toBe(0);
+  });
+
+  test("an arbitrary error carrying statusCode 400 is not passed through", async () => {
+    const res = await recordVersion(context(), throwing(Object.assign(new Error("not a validator"), { statusCode: 400 })) as any, async () => okRow());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.response.status).toBe(500);
+    expect((await res.response.clone().json() as any).error).toBe("instruction_version_append_failed");
+  });
+
+  test("a 5xx named like the validator is not passed through", async () => {
+    const res = await recordVersion(context(), throwing(Object.assign(validationError(), { statusCode: 500 })) as any, async () => okRow());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.response.status).toBe(500);
+    expect((await res.response.clone().json() as any).error).toBe("instruction_version_append_failed");
+  });
+
+  test("a ValidationError shape without structured issues is not passed through", async () => {
+    const res = await recordVersion(context(), throwing(Object.assign(validationError(), { errors: [] })) as any, async () => okRow());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.response.status).toBe(500);
+    expect((await res.response.clone().json() as any).error).toBe("instruction_version_append_failed");
+  });
+});
+
 describe("Soul resource version snapshots", () => {
   test("collection and unbound deletes are refused without changing rows or history", async () => {
     const row = { id: "agent-a:role", agentId: "agent-a", key: "role", value: "before" };
