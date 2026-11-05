@@ -602,6 +602,7 @@ function releaseGuard(guardPath: string, generation: string): { ok: true } | { o
     return { ok: true };
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { ok: true };
+    abandonedGuardGenerations.set(guardPath, generation);
     return {
       ok: false,
       reason: `its owner entry ${ownerEntryName(generation)} cannot be removed (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`,
@@ -739,9 +740,8 @@ function isAbandonedOwnRecord(lockPath: string, holder: LockHolder): boolean {
   );
 }
 
-function rememberAbandonedRecord(lockPath: string, holder: LockHolder, guardGeneration?: string): void {
+function rememberAbandonedRecord(lockPath: string, holder: LockHolder): void {
   abandonedOwnRecords.set(lockPath, holder);
-  if (guardGeneration !== undefined) abandonedGuardGenerations.set(guardPathFor(lockPath), guardGeneration);
 }
 
 // ─── migration lock protocol ────────────────────────────────────────────────
@@ -911,7 +911,7 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
 
     const released = releaseGuard(guardPath, guard.generation);
     if (!released.ok) {
-      if (outcome.kind === "handle") rememberAbandonedRecord(lockPath, outcome.holder, guard.generation);
+      if (outcome.kind === "handle") rememberAbandonedRecord(lockPath, outcome.holder);
       return abortError(
         `refusing to return the migration lock at ${lockPath}: the mutex could not be released ` +
           `(${released.reason})`,

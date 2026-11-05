@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, readdirSync, renameSync, rmSync, existsSync, re
 import { join } from "node:path";
 import { hostname, tmpdir } from "node:os";
 import { probeMigrationDataDir } from "../../resources/migrations/data-dir.ts";
-import { acquireMigrationLock, _resetInProcessLockForTests, migrationLockStillHeld, DEFAULT_STALE_MS, defaultIsProcessAlive } from "../../resources/migrations/lock.ts";
+import { acquireMigrationLock, _resetInProcessLockForTests, migrationLockStillHeld, DEFAULT_STALE_MS, defaultIsProcessAlive, MigrationLockProbeError } from "../../resources/migrations/lock.ts";
 
 let testRoot: string;
 let lockPath: string;
@@ -396,6 +396,73 @@ describe("acquireMigrationLock — directory mutex (flair#2866)", () => {
       expect(readdirSync(guardPath())).toEqual([]);
       next.release();
     }
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it.each(["held", "refused", "retry", "exception"] as const)("recovers a failed guard release after %s", (transition) => {
+    mkdirSync(join(testRoot, ".migrations"), { recursive: true, mode: 0o700 });
+    const timestamp = Date.now();
+    const holder = { pid: process.pid + 1, hostname: hostname(), startedAt: new Date(timestamp).toISOString() };
+    const record = JSON.stringify(holder);
+    if (transition !== "retry") writeFileSync(lockPath, record);
+    let owner = "";
+    let ownerRecord = "";
+    const blockRelease = () => {
+      owner = join(guardPath(), readdirSync(guardPath())[0]);
+      ownerRecord = readFileSync(owner, "utf-8");
+      unlinkSync(owner);
+      mkdirSync(owner);
+    };
+    let clockReads = 0;
+    let probes = 0;
+    const result = acquireMigrationLock({
+      lockPath,
+      now: () => {
+        if (++clockReads === 2 && transition === "retry") {
+          blockRelease();
+          writeFileSync(lockPath, record);
+        }
+        return timestamp;
+      },
+      isProcessAlive: (pid) => {
+        expect(pid).toBe(holder.pid);
+        probes++;
+        blockRelease();
+        if (transition === "refused") throw new MigrationLockProbeError(pid, "EINVAL");
+        if (transition === "exception") throw new Error("transition failed");
+        return true;
+      },
+    });
+    expect(probes).toBe(transition === "retry" ? 0 : 1);
+    expect(result.acquired).toBe(false);
+    if (result.acquired) throw new Error("expected refusal");
+    expect(result.kind).toBe("error");
+    expect(result.reason).toContain("could not be released");
+    expect(result.reason).toContain("cannot be removed");
+    if (transition === "exception") expect(result.reason).toContain("transition failed");
+    expect(readFileSync(lockPath, "utf-8")).toBe(record);
+
+    const blocked = acquireMigrationLock({ lockPath, now: () => timestamp });
+    expect(blocked.acquired).toBe(false);
+    if (blocked.acquired) throw new Error("expected refusal");
+    expect(blocked.kind).toBe("error");
+    expect(blocked.reason).toContain("MigrationLockMutexError");
+    expect(blocked.reason).toContain("owner entry is not a regular file");
+
+    rmSync(owner, { recursive: true });
+    writeFileSync(owner, ownerRecord);
+    const contended = acquireMigrationLock({ lockPath, now: () => timestamp, isProcessAlive: () => true });
+    expect(contended.acquired).toBe(false);
+    if (contended.acquired) throw new Error("expected contention");
+    expect(contended.kind).toBe("held");
+    if (contended.kind !== "held") throw new Error("expected holder");
+    expect(contended.holder).toEqual(holder);
+    expect(readFileSync(lockPath, "utf-8")).toBe(record);
+    expect(readdirSync(guardPath())).toEqual([]);
+
+    const next = acquireMigrationLock({ lockPath, now: () => timestamp, isProcessAlive: () => false });
+    expect(next.acquired ? "handle" : next.kind).toBe("handle");
+    if (next.acquired) next.release();
     expect(existsSync(lockPath)).toBe(false);
   });
 
