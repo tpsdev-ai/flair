@@ -72,5 +72,7 @@ export function pinCheck(spec: string | null | undefined, packageName: string, v
 export function assertPublishedResolve(resolvedPath: string, prefix: string): PinCheck;
 export function readInstalledVersion(prefix: string, packageName: string): InstalledVersion;
 export function resolvePublished(prefix: string, packageName: string, subpath?: string): string;
+export const PLUGIN_STEP_CONDITIONS: readonly string[];
+export function pluginStepCondition(yml: string): string | null;
 export function pluginCanaryWired(yml: string): PluginWired;
 export function main(argv?: string[]): Promise<number>;
