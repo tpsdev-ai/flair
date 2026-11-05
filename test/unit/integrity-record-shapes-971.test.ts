@@ -99,6 +99,7 @@ for (const node of source.statements) {
   const signature = checker.getSignatureFromDeclaration(node);
   const predicate = signature && checker.getTypePredicateOfSignature(signature);
   if (!predicate?.type) continue;
+  if (predicate.type.flags & ts.TypeFlags.NumberLike) continue; // a primitive predicate, not a persisted record
   const type = predicate.type;
   const kindProperty = type.getProperty("kind");
   if (!kindProperty) throw new Error(`unmapped validator predicate: ${checker.typeToString(type)}`);

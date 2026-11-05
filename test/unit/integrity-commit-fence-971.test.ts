@@ -21,6 +21,8 @@ import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 
 import {
+  INTEGRITY_MAX_GENERATION,
+  canonicalJson,
   commitGeneration,
   generationNumbers,
   generationPath,
@@ -28,6 +30,7 @@ import {
   integrityPaths,
   machineIdentity,
   openIntegrityState,
+  signIntegrityRecord,
   tombstoneEnrollment,
   type IntegrityStateOptions,
 } from "../../src/lib/integrity-state.ts";
@@ -556,6 +559,94 @@ describe("commit-fence (invariant 7)", () => {
     expect(reopened.ok).toBe(true);
     if (reopened.ok) expect(reopened.state.checkpoint?.pendingEvents).toEqual([{ value: 1 }]);
     expect(reads).toBe(1);
+  });
+
+  it("bounds a generation to the twelve-digit filename format on write", () => {
+    const state = init();
+    const paths = integrityPaths(custodyDir);
+    const prior = INTEGRITY_MAX_GENERATION - 1;
+    writeFileSync(
+      generationPath(paths.generationsDir, prior),
+      `${canonicalJson(signIntegrityRecord({
+        version: 3, kind: "checkpoint", enrollmentId: state.enrollment.enrollmentId,
+        generation: prior, operatorUid: state.operatorUid, machineId: state.machineId,
+        baseline: payload().baseline,
+      }, state.key))}\n`,
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      paths.currentPath,
+      `${canonicalJson(signIntegrityRecord({
+        version: 3, kind: "current", enrollmentId: state.enrollment.enrollmentId, generation: prior,
+      }, state.key))}\n`,
+      { mode: 0o600 },
+    );
+
+    const opened = openIntegrityState(options({ newCustody: false }));
+    expect(opened).toMatchObject({ ok: true });
+    if (!opened.ok) return;
+    expect(opened.state.generation).toBe(prior);
+    const committed = commitGeneration({ state: opened.state, expectedGeneration: prior, checkpoint: payload() });
+    expect(committed).toMatchObject({ ok: true, generation: INTEGRITY_MAX_GENERATION });
+    expect(generationNumbers(paths)).toEqual([prior, INTEGRITY_MAX_GENERATION]);
+
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    expect(reopened).toMatchObject({ ok: true });
+    if (!reopened.ok) return;
+    expect(reopened.state.generation).toBe(INTEGRITY_MAX_GENERATION);
+
+    const currentBefore = readFileSync(paths.currentPath);
+    const entriesBefore = readdirSync(custodyDir).sort();
+    const refused = commitGeneration({ state: reopened.state, expectedGeneration: INTEGRITY_MAX_GENERATION, checkpoint: payload() });
+    expect(refused).toMatchObject({ ok: false, reason: "commit_conflict" });
+    if (!refused.ok) expect(refused.detail).toContain("twelve-digit");
+    expect(readFileSync(paths.currentPath)).toEqual(currentBefore);
+    expect(readdirSync(custodyDir).sort()).toEqual(entriesBefore);
+    expect(existsSync(generationPath(paths.generationsDir, INTEGRITY_MAX_GENERATION + 1))).toBe(false);
+    expect(generationNumbers(paths)).toEqual([prior, INTEGRITY_MAX_GENERATION]);
+  });
+
+  it("refuses a non-integer, negative or over-bound generation read from a record", () => {
+    const state = init();
+    const paths = integrityPaths(custodyDir);
+    for (const generation of [0, -1, 1.5, INTEGRITY_MAX_GENERATION + 1]) {
+      writeFileSync(
+        paths.currentPath,
+        `${canonicalJson(signIntegrityRecord({
+          version: 3, kind: "current", enrollmentId: state.enrollment.enrollmentId, generation,
+        }, state.key))}\n`,
+        { mode: 0o600 },
+      );
+      const current = openIntegrityState(options({ newCustody: false }));
+      expect(current.ok).toBe(false);
+      if (!current.ok) {
+        expect(current.reason).toBe("tampered");
+        expect(current.detail).toContain("not a valid v3 record");
+      }
+
+      writeFileSync(
+        paths.currentPath,
+        `${canonicalJson(signIntegrityRecord({
+          version: 3, kind: "current", enrollmentId: state.enrollment.enrollmentId, generation: 2,
+        }, state.key))}\n`,
+        { mode: 0o600 },
+      );
+      writeFileSync(
+        generationPath(paths.generationsDir, 2),
+        `${canonicalJson(signIntegrityRecord({
+          version: 3, kind: "checkpoint", enrollmentId: state.enrollment.enrollmentId,
+          generation, operatorUid: state.operatorUid, machineId: state.machineId,
+          baseline: payload().baseline,
+        }, state.key))}\n`,
+        { mode: 0o600 },
+      );
+      const checkpoint = openIntegrityState(options({ newCustody: false }));
+      expect(checkpoint.ok).toBe(false);
+      if (!checkpoint.ok) {
+        expect(checkpoint.reason).toBe("tampered");
+        expect(checkpoint.detail).toContain("not a valid v3 record");
+      }
+    }
   });
 
   it("round-trips a committed checkpoint through JSON and reopens", () => {
