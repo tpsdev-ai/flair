@@ -615,44 +615,30 @@ function utcDay(value) {
   return (value instanceof Date ? value : new Date(value)).toISOString().slice(0, 10);
 }
 
-/** The ancestor-commit ceiling for one allowlist history walk in CI. */
 const MAX_ALLOWLIST_HISTORY_COMMITS = 10_000;
 
+const ALLOWLIST_LINEAGE_START = "847c40549c85dd9eb805b20f1790bf6956e8f38c";
+const ALLOWLIST_HISTORY_PATH = ".github/audit-allowlist.json";
+
 /**
- * The first ancestor-commit day each advisory id appears at the start of its
- * lineage, comparing ids case-insensitively. Dates are read as UTC calendar
- * days, because a commit made late in a negative offset is already the next day.
- *
- * Every ancestor commit is walked with `git rev-list`, and the allowlist is
- * tracked along each parent->child edge, per parent. A path the child carries
- * is carried back when the parent has that same path. When the parent lacks it,
- * the parent's tree is searched for every file containing any advisory id the
- * child's file holds; each such file must parse as an allowlist and is followed
- * as a predecessor. A commit where the path appears and no file in its parent's
- * tree holds one of its ids starts the lineage, so nothing earlier is claimed.
- * File names and git's rename detection play no part.
- *
- * An id's introduction commits are those that contain it while none of their
- * parents do; its first day is the earliest introduction commit's day. A
- * shallow clone, a candidate predecessor that cannot be read or classified, or
- * an ancestry above MAX_ALLOWLIST_HISTORY_COMMITS throws a named lineage
- * problem. The returned map's `cost` property reports the commits walked and
- * blobs read. The repository root comes from the script location, so the gate
- * behaves the same whatever directory it is run from.
+ * Reads only the fixed path from the pinned start and every descendant in HEAD's
+ * ancestry; a missing or invalid snapshot refuses the lineage. An introduction
+ * contains an id never seen in any parent's ancestry. Its earliest introduction
+ * day is retained, comparing ids case-insensitively and dates as UTC days.
  */
 export function readAllowlistHistory(repoRoot = REPO_ROOT) {
-  const allowlistPath = join(repoRoot, ".github", "audit-allowlist.json");
+  const allowlistPath = join(repoRoot, ALLOWLIST_HISTORY_PATH);
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(allowlistPath, "utf8"));
   } catch (e) {
-    throw new Error(`cannot read ${allowlistPath}: ${e.message}`);
+    throw new Error(`allowlist lineage cannot be established: cannot read ${allowlistPath}: ${e.message}`);
   }
   if (!Array.isArray(parsed?.entries)) {
-    throw new Error(`${allowlistPath} must have an "entries" array`);
+    throw new Error(`allowlist lineage cannot be established: ${allowlistPath} must have an "entries" array`);
   }
 
-  const git = (args, { input, allowExit1 = false } = {}) => {
+  const git = (args, { input } = {}) => {
     const res = spawnSync("git", ["-C", repoRoot, ...args], {
       encoding: "utf8",
       timeout: 120_000,
@@ -660,7 +646,7 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
       ...(input === undefined ? {} : { input }),
     });
     if (res.error) throw new Error(`git ${args[0]} failed: ${res.error.message}`);
-    if (res.status !== 0 && !(allowExit1 && res.status === 1)) {
+    if (res.status !== 0) {
       throw new Error(`git ${args[0]} failed (exit ${res.status}): ${(res.stderr ?? "").trim()}`);
     }
     return res;
@@ -669,8 +655,7 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
 
   if (runGit(["rev-parse", "--is-shallow-repository"]).trim() === "true") {
     throw new Error(
-      `allowlist lineage cannot be established: repository ${repoRoot} is a shallow clone, ` +
-        "so its ancestry stops before the allowlist's first appearance. " +
+      `allowlist lineage cannot be established: repository ${repoRoot} is a shallow clone. ` +
         "Fetch full history (fetch-depth: 0) before running the gate.",
     );
   }
@@ -712,175 +697,77 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
     );
   }
 
-  const presenceCache = new Map();
-  const presencesFor = (path) => {
-    if (presenceCache.has(path)) return presenceCache.get(path);
-    const input = commits.map((commit) => `${commit.sha}:${path}\n`).join("");
-    const lines = runGit(["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], input).split("\n");
-    if (lines.at(-1) === "") lines.pop();
-    if (lines.length !== commits.length) {
-      throw new Error(`git cat-file returned ${lines.length} rows for ${commits.length} commits`);
-    }
-    const presence = lines.map((line) => {
-      if (line.endsWith(" missing")) return null;
-      const [oid, type, size] = line.split(" ");
-      if (type !== "blob" || !oid || !Number.isSafeInteger(Number(size))) {
-        throw new Error(`git cat-file returned an unparseable row: ${line}`);
-      }
-      return { oid, size: Number(size) };
-    });
-    presenceCache.set(path, presence);
-    return presence;
-  };
-
-  const parsedBlobs = new Map();
-  const parseBlob = (oid, sha, path) => {
-    if (parsedBlobs.has(oid)) return parsedBlobs.get(oid);
-    let snapshot;
-    try {
-      snapshot = JSON.parse(runGit(["cat-file", "blob", oid]));
-    } catch (e) {
-      throw new Error(`cannot parse allowlist snapshot ${sha}:${path}: ${e.message}`);
-    }
-    if (!Array.isArray(snapshot?.entries)) {
-      throw new Error(`allowlist snapshot ${sha}:${path} must have an "entries" array`);
-    }
-    parsedBlobs.set(oid, snapshot);
-    return snapshot;
-  };
-
-  const indexOf = new Map(commits.map((commit, i) => [commit.sha, i]));
-  const children = new Map(commits.map((commit) => [commit.sha, []]));
+  if (!commits.some((commit) => commit.sha === ALLOWLIST_LINEAGE_START)) {
+    throw new Error(
+      `allowlist lineage cannot be established: pinned start ${ALLOWLIST_LINEAGE_START} is not an ancestor of HEAD`,
+    );
+  }
+  const descendants = new Set();
+  const walked = new Set();
+  const lineage = [];
   for (const commit of commits) {
     for (const parent of commit.parents) {
-      const parentIndex = indexOf.get(parent);
-      if (parentIndex === undefined) {
-        throw new Error(
-          `allowlist lineage cannot be established: commit ${commit.sha} names parent ${parent}, ` +
-            "which is not in the walked ancestry",
-        );
+      if (!walked.has(parent)) {
+        throw new Error(`allowlist lineage cannot be established: parent ${parent} of ${commit.sha} is outside the walked ancestry`);
       }
-      children.get(parent).push({ sha: commit.sha, index: indexOf.get(commit.sha) });
+    }
+    walked.add(commit.sha);
+    if (commit.sha === ALLOWLIST_LINEAGE_START || commit.parents.some((parent) => descendants.has(parent))) {
+      descendants.add(commit.sha);
+      lineage.push(commit);
     }
   }
 
-  /**
-   * Files in `commit`'s tree that hold an advisory id from the child's file,
-   * each parsed as an allowlist. No match means the path starts its lineage
-   * there; an unreadable or unclassifiable candidate is a named failure.
-   */
-  const predecessorsOf = (commit, childSha, childPath, childOid) => {
-    const childSnapshot = parseBlob(childOid, childSha, childPath);
-    const childIds = new Set();
-    for (const entry of childSnapshot.entries) {
-      if (typeof entry?.ghsa === "string") childIds.add(entry.ghsa.toUpperCase());
+  const input = lineage.map((commit) => `${commit.sha}:${ALLOWLIST_HISTORY_PATH}\n`).join("");
+  const rows = runGit(["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], input).trimEnd().split("\n");
+  if (rows.length !== lineage.length) {
+    throw new Error(`allowlist lineage cannot be established: git cat-file returned ${rows.length} rows for ${lineage.length} commits`);
+  }
+  const parsedBlobs = new Map();
+  const seenByCommit = new Map();
+  const firstDays = new Map();
+  for (const [index, commit] of lineage.entries()) {
+    const row = rows[index];
+    if (row.endsWith(" missing")) {
+      throw new Error(`allowlist lineage cannot be established: missing ${ALLOWLIST_HISTORY_PATH} at ${commit.sha}`);
     }
-    if (childIds.size === 0) return [];
-    const grepArgs = ["grep", "-i", "-F", "-l"];
-    for (const id of childIds) grepArgs.push("-e", id);
-    grepArgs.push(commit.sha, "--");
-    const res = git(grepArgs, { allowExit1: true });
-    if (res.status === 1) return [];
-    const found = [];
-    for (const line of res.stdout.split("\n").filter(Boolean)) {
-      // A tree-ish makes git grep prefix every result with "<commit>:".
-      const file = line.startsWith(`${commit.sha}:`) ? line.slice(commit.sha.length + 1) : line;
-      const row = presencesFor(file)[indexOf.get(commit.sha)];
-      if (!row) {
-        throw new Error(
-          `allowlist lineage cannot be established: commit ${commit.sha} lists ${file} as holding an ` +
-            `advisory id from ${childPath}, but the path is not a blob in that commit`,
-        );
-      }
+    const [oid, type, size] = row.split(" ");
+    if (type !== "blob" || !oid || !Number.isSafeInteger(Number(size))) {
+      throw new Error(`allowlist lineage cannot be established: invalid snapshot at ${commit.sha}:${ALLOWLIST_HISTORY_PATH}: ${row}`);
+    }
+    let snapshotIds = parsedBlobs.get(oid);
+    if (!snapshotIds) {
       let snapshot;
       try {
-        snapshot = JSON.parse(runGit(["cat-file", "blob", row.oid]));
+        snapshot = JSON.parse(runGit(["cat-file", "blob", oid]));
       } catch (e) {
-        throw new Error(
-          `allowlist lineage cannot be established: commit ${commit.sha} holds ${file}, which contains an ` +
-            `advisory id from ${childPath}, but it cannot be read as an allowlist: ${e.message}`,
-        );
+        throw new Error(`allowlist lineage cannot be established: cannot parse allowlist snapshot ${commit.sha}:${ALLOWLIST_HISTORY_PATH}: ${e.message}`);
       }
       if (!Array.isArray(snapshot?.entries)) {
-        throw new Error(
-          `allowlist lineage cannot be established: commit ${commit.sha} holds ${file}, which contains an ` +
-            `advisory id from ${childPath}, but it is not an allowlist (no "entries" array)`,
-        );
+        throw new Error(`allowlist lineage cannot be established: snapshot ${commit.sha}:${ALLOWLIST_HISTORY_PATH} must have an "entries" array`);
       }
-      parsedBlobs.set(row.oid, snapshot);
-      found.push({ path: file, oid: row.oid });
+      snapshotIds = new Set();
+      for (const entry of snapshot.entries) {
+        if (typeof entry?.ghsa === "string") snapshotIds.add(entry.ghsa.toUpperCase());
+      }
+      parsedBlobs.set(oid, snapshotIds);
     }
-    return found;
-  };
-
-  const snapshots = [];
-  const trackedAt = new Map();
-  const head = commits[commits.length - 1];
-  const headPath = ".github/audit-allowlist.json";
-  const headRow = presencesFor(headPath)[commits.length - 1];
-  // Seed even when HEAD does not carry the path, so its deletion still exposes
-  // the snapshots before it.
-  trackedAt.set(head.sha, new Set([headPath]));
-  if (headRow) snapshots.push({ sha: head.sha, day: head.day, path: headPath, oid: headRow.oid });
-
-  // Newest first: every child is visited before its parents, so each edge is
-  // resolved in the direction the path travelled.
-  for (let i = commits.length - 2; i >= 0; i--) {
-    const commit = commits[i];
-    const paths = new Set();
-    const add = (path, oid) => {
-      if (paths.has(path)) return;
-      paths.add(path);
-      snapshots.push({ sha: commit.sha, day: commit.day, path, oid });
-    };
-    for (const child of children.get(commit.sha)) {
-      const childPaths = trackedAt.get(child.sha);
-      if (!childPaths) continue;
-      for (const path of childPaths) {
-        const childRow = presencesFor(path)[child.index];
-        const hereRow = presencesFor(path)[i];
-        if (childRow && hereRow) {
-          add(path, hereRow.oid);
-        } else if (childRow) {
-          for (const predecessor of predecessorsOf(commit, child.sha, path, childRow.oid)) {
-            add(predecessor.path, predecessor.oid);
-          }
-        } else if (hereRow) {
-          add(path, hereRow.oid);
-        }
+    const seen = new Set();
+    for (const parent of commit.parents) {
+      for (const id of seenByCommit.get(parent) ?? []) seen.add(id);
+    }
+    for (const id of snapshotIds) {
+      if (!seen.has(id)) {
+        const previous = firstDays.get(id);
+        if (previous === undefined || commit.day < previous) firstDays.set(id, commit.day);
       }
     }
-    trackedAt.set(commit.sha, paths);
-  }
-
-  const idsByCommit = new Map();
-  for (const { sha, path, oid } of snapshots) {
-    let ids = idsByCommit.get(sha);
-    if (!ids) {
-      ids = new Set();
-      idsByCommit.set(sha, ids);
-    }
-    for (const entry of parseBlob(oid, sha, path).entries) {
-      if (typeof entry?.ghsa === "string") ids.add(entry.ghsa.toUpperCase());
-    }
-  }
-
-  // Introduction commits contain the id while none of their parents do; the
-  // earliest introduction day is the id's first appearance, whatever order the
-  // committer dates fall in.
-  const firstDays = new Map();
-  for (const commit of commits) {
-    const ids = idsByCommit.get(commit.sha);
-    if (!ids) continue;
-    for (const id of ids) {
-      if (commit.parents.some((parent) => idsByCommit.get(parent)?.has(id))) continue;
-      const previous = firstDays.get(id);
-      if (previous === undefined || commit.day < previous) firstDays.set(id, commit.day);
-    }
+    for (const id of snapshotIds) seen.add(id);
+    seenByCommit.set(commit.sha, seen);
   }
   firstDays.cost = {
     commitsWalked: commits.length,
-    commitsWithAllowlist: new Set(snapshots.map((snapshot) => snapshot.sha)).size,
+    commitsWithAllowlist: lineage.length,
     blobsRead: parsedBlobs.size,
     commitLimit: MAX_ALLOWLIST_HISTORY_COMMITS,
   };
@@ -888,8 +775,7 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
 }
 
 /**
- * Each entry's `added` must be a real calendar date no later than the first day its advisory id
- * appears in the parsed snapshots. An id absent from those snapshots uses today.
+ * Checks `added` against the first introduction day; an id absent from history uses today.
  */
 export function validateAllowlistHistory(allowlist, firstDays, today) {
   const problems = [];
