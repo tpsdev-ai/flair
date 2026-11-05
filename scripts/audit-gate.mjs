@@ -924,6 +924,15 @@ export function validateAllowlist(allowlist, today, enforcedCaps) {
         );
       }
     }
+    if (entry.hoistedNode !== undefined) {
+      if (entry.class !== "vendor-pinned") {
+        problems.push(`${where}: "hoistedNode" is only valid on a vendor-pinned entry`);
+      } else if (typeof entry.hoistedNode !== "string" || entry.hoistedNode !== `node_modules/${entry.package}`) {
+        problems.push(
+          `${where}: "hoistedNode" must name this package's hoisted install-relative node ("node_modules/${entry.package}")`,
+        );
+      }
+    }
     if (!isCalendarDate(entry.added)) problems.push(`${where}: "added" must be a real calendar date (YYYY-MM-DD)`);
     if (!isCalendarDate(entry.expires)) problems.push(`${where}: "expires" must be a real calendar date (YYYY-MM-DD)`);
     if (!isCalendarDate(entry.added) || !isCalendarDate(entry.expires)) return;
@@ -1247,31 +1256,151 @@ function harperShrinkwrapDecides(npmPrefix, harperRoot) {
   }
 }
 
+/** The install-relative top-level node for `pkg` in a consumer install. */
+function hoistedNodeFor(pkg) {
+  return `node_modules/${pkg}`;
+}
+
+/** A dependency spec that names one exact version, not a range, tag or URL. */
+function isExactVersion(value) {
+  return typeof value === "string" &&
+    /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(value);
+}
+
 /**
- * For a vendor-pinned exception, reject any npm-audit-reported node path outside
- * harper. When all reported paths are under harper, compare each installed version
- * and any audit-reported version with the version harper shipped it at: the
- * shrinkwrap pin for releases that carry one, otherwise the bundle evidence in the
- * consumer install's package-lock and harper's package.json. Empty node lists,
- * a node package.json, package directory or directory between harper's and it
- * whose real path is outside harper's installed tree, unreadable required
- * metadata, and version mismatches block the gate; errors name a node when one
- * was reported.
+ * The node_modules path a dependency edge from `fromKey` resolves to in an npm
+ * v2/v3 package-lock, following Node's walk-up search: the requiring package's
+ * own node_modules first, then each ancestor's. `fromKey` is `""` for the
+ * consumer root or an install-relative package path. Returns null when the edge
+ * resolves to no installed package.
  */
-export function vendorPinnedNodeProblems(adv, npmPrefix) {
+function resolveLockEdge(packages, fromKey, dep) {
+  let dir = fromKey;
+  while (true) {
+    const candidate = dir === "" ? `node_modules/${dep}` : `${dir}/node_modules/${dep}`;
+    if (Object.hasOwn(packages, candidate)) return candidate;
+    if (dir === "") return null;
+    const marker = dir.lastIndexOf("/node_modules/");
+    dir = marker >= 0 ? dir.slice(0, marker) : "";
+  }
+}
+
+/**
+ * Evidence that harper is the only dependent of a hoisted top-level node and
+ * that its dependency edge pins it: harper ships no npm-shrinkwrap.json, declares
+ * the package in `dependencies` at an exact version, and the consumer
+ * package-lock records no other package whose edge for it lands on the same
+ * node. The installed version and any audit-reported version must equal that
+ * exact version. Every unreadable input throws, and the caller blocks with the
+ * node named.
+ */
+function harperHoistedVersion(npmPrefix, pkg, node) {
+  const harperRoot = "node_modules/harper";
+  if (node !== hoistedNodeFor(pkg)) throw new Error(`${JSON.stringify(node)} is not the hoisted node for ${JSON.stringify(pkg)}`);
+  let hasShrinkwrap = false;
+  try {
+    readFileSync(join(npmPrefix, harperRoot, "npm-shrinkwrap.json"));
+    hasShrinkwrap = true;
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
+  if (hasShrinkwrap) {
+    throw new Error("harper ships npm-shrinkwrap.json, so this package is pinned in harper's own tree, not hoisted");
+  }
+
+  const harperManifest = JSON.parse(readFileSync(join(npmPrefix, harperRoot, "package.json"), "utf8"));
+  const declared = harperManifest?.dependencies?.[pkg];
+  if (!isExactVersion(declared)) {
+    throw new Error(`harper's package.json declares ${JSON.stringify(pkg)} as ${JSON.stringify(declared ?? null)}, not an exact version`);
+  }
+
+  const installed = JSON.parse(readFileSync(join(npmPrefix, node, "package.json"), "utf8"))?.version;
+  if (typeof installed !== "string" || !installed) throw new Error(`missing or invalid version for ${node}`);
+  if (installed !== declared) {
+    throw new Error(`the installed node has version ${installed}, but harper declares ${declared}`);
+  }
+
+  const lock = JSON.parse(readFileSync(join(npmPrefix, "package-lock.json"), "utf8"));
+  const packages = lock?.packages;
+  if (!packages || typeof packages !== "object" || Array.isArray(packages)) {
+    throw new Error("the consumer package-lock has no packages map");
+  }
+  const row = packages[node];
+  if (!row || typeof row !== "object") throw new Error(`the consumer package-lock has no entry for ${node}`);
+  if (row.version !== declared) {
+    throw new Error(`the consumer package-lock records ${JSON.stringify(row.version ?? null)} for ${node}, but harper declares ${declared}`);
+  }
+
+  const dependents = [];
+  for (const [key, pkgRow] of Object.entries(packages)) {
+    if (key === node || !pkgRow || typeof pkgRow !== "object") continue;
+    const edges = { ...pkgRow.dependencies, ...pkgRow.optionalDependencies, ...pkgRow.peerDependencies };
+    if (!Object.hasOwn(edges, pkg)) continue;
+    if (resolveLockEdge(packages, key, pkg) === node) dependents.push(key);
+  }
+  const others = dependents.filter((key) => key !== harperRoot);
+  if (others.length > 0) {
+    const names = others.map((key) => (key === "" ? 'the root package ("")' : JSON.stringify(key))).join(", ");
+    throw new Error(`the consumer package-lock resolves ${JSON.stringify(pkg)} to ${node} from ${names} as well as harper; harper is not its only dependent`);
+  }
+  if (!dependents.includes(harperRoot)) {
+    throw new Error(`the consumer package-lock resolves ${JSON.stringify(pkg)} from no package that requires it`);
+  }
+  return { version: declared, label: "harper's package.json declares" };
+}
+
+/**
+ * For a vendor-pinned exception, compare each node under harper with its
+ * shrinkwrap pin or bundle evidence. A hoisted top-level node requires the
+ * entry's `hoistedNode` and the exact-pin evidence in `harperHoistedVersion`.
+ * Other node paths and empty node lists block the gate.
+ */
+export function vendorPinnedNodeProblems(adv, npmPrefix, entry = undefined) {
   const nodes = adv.nodes;
   if (!Array.isArray(nodes) || nodes.length === 0) {
     return [`${adv.ghsa} (${adv.package}): npm audit reported no nodes. Inspect the npm-install audit report; the vendor-pinned entry cannot cover unknown nodes.`];
   }
+  const hoistedNode = hoistedNodeFor(adv.package);
   const isHarperNode = (node) => harperNodeRoot(node, adv.package) !== null;
-  if (!nodes.every(isHarperNode)) {
-    return nodes.filter((node) => !isHarperNode(node)).map((node) =>
+  const isHoistedNode = (node) => node === hoistedNode;
+  if (!nodes.every((node) => isHarperNode(node) || isHoistedNode(node))) {
+    return nodes.filter((node) => !isHarperNode(node) && !isHoistedNode(node)).map((node) =>
       `${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} is outside harper's dependency path. Fix the dependency, or extend the allowlist schema and add a separate, justified entry scoped to that node.`,
     );
   }
 
   const problems = [];
-  for (const node of nodes.filter(isHarperNode)) {
+  for (const node of nodes) {
+    if (isHoistedNode(node)) {
+      if (entry?.hoistedNode !== node) {
+        problems.push(
+          `${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} is hoisted, but the allowlist entry does not name that node. Fix the dependency, or extend the allowlist schema and add a separate, justified entry scoped to that node ("hoistedNode": ${JSON.stringify(node)}).`,
+        );
+        continue;
+      }
+      try {
+        const shipped = harperHoistedVersion(npmPrefix, adv.package, node);
+        const reported = adv.nodeVersions?.[node];
+        if (reported !== undefined && (typeof reported !== "string" || reported !== shipped.version)) {
+          problems.push(
+            `${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} has audit version ${JSON.stringify(reported)}, but ${shipped.label} ${shipped.version}. Fix the dependency, or name the node the install reports.`,
+          );
+        }
+      } catch (e) {
+        problems.push(
+          `${adv.ghsa} (${adv.package}): cannot verify hoisted node ${JSON.stringify(node)} against harper's exact dependency and the consumer package-lock: ${e.message}. Fix the dependency, or restore a readable harper package.json, the installed node's package.json and the consumer package-lock whose only dependency edge for it comes from harper, then rerun the gate.`,
+        );
+      }
+      continue;
+    }
+
+    if (entry?.hoistedNode !== undefined) {
+      problems.push(
+        `${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} is nested under harper, but the allowlist entry is scoped to hoisted node ${JSON.stringify(entry.hoistedNode)}. Fix the dependency, or add a nested entry for the nested node.`,
+      );
+      continue;
+    }
+
     const harperRoot = harperNodeRoot(node, adv.package);
     const pinKey = node.slice(harperRoot.length + 1);
     try {
@@ -1779,7 +1908,7 @@ async function main() {
 
     if (entry.class === "vendor-pinned" && adv.source !== "bun" && !chainChecked) {
       const nodeProblems = adv.source === "npm-install"
-        ? vendorPinnedNodeProblems(adv, prefixes.get(adv.source))
+        ? vendorPinnedNodeProblems(adv, prefixes.get(adv.source), entry)
         : consumerVendorPinnedNodeProblems(
             adv,
             prefixes.get(adv.source),
@@ -1801,7 +1930,7 @@ async function main() {
     // like validate.js).
     if (
       adv.source === "npm-install" &&
-      (adv.nodes ?? []).some((n) => n.includes("node_modules/harper/"))
+      (adv.nodes ?? []).some((n) => n.includes("node_modules/harper/") || n === entry.hoistedNode)
     ) {
       if (!String(entry.introducedBy ?? "").startsWith("harper -> ")) {
         fail(
