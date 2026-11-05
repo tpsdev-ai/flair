@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import {
   isVulnerable,
   validateAllowlist,
+  MAX_LIFETIME_DAYS_BY_SEVERITY,
   flattenAdvisories,
   flattenNpmAdvisories,
   parseNpmAuditOutput,
@@ -715,7 +716,7 @@ describe("vendor-pinned npm-install nodes", () => {
       writeFileSync(join(tree, harperNode, "package.json"), JSON.stringify({ version: installedVersion }));
       writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts/audit-gate.mjs")));
       writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({
-        policy: { maxLifetimeDaysBySeverity: { moderate: 180 } },
+        policy: ALLOWLIST.policy,
         entries: [adk ? {
           ...ALLOWLIST.entries.find((entry: { package: string }) => entry.package === "uuid"),
           added: "2026-09-03",
@@ -1284,7 +1285,7 @@ describe("several allowlist entries for one advisory, per source and per locatio
 describe("cumulative allowlist lifetime (#2897)", () => {
   const GHSA = "GHSA-aaaa-bbbb-cccc";
   const NEW_GHSA = "GHSA-dddd-eeee-ffff";
-  const policy = { maxLifetimeDaysBySeverity: { high: 60 } };
+  const policy = ALLOWLIST.policy;
   const entry = (extra: Record<string, unknown> = {}) => ({
     ghsa: GHSA,
     package: "pkg-a",
@@ -1725,10 +1726,135 @@ describe("cumulative allowlist lifetime (#2897)", () => {
 
   it("rejects an unknown severity or a missing cap instead of skipping the cap check", () => {
     expect(problems(overCapEntry({ severity: "severe" }))).toContain('no lifetime cap is configured for severity "severe"');
-    expect(validateAllowlist({ policy: {}, entries: [entry()] }, TODAY).join("\n")).toContain(
-      'no lifetime cap is configured for severity "high"',
+    expect(validateAllowlist({ policy: { maxLifetimeDaysBySeverity: {} }, entries: [entry()] }, TODAY).join("\n")).toContain(
+      'policy.maxLifetimeDaysBySeverity is missing "critical"',
     );
   });
+});
+
+// ─── Pinned lifetime ceilings (#2973) ────────────────────────────────────────
+
+describe("pinned lifetime ceilings", () => {
+  const TODAY = new Date("2026-11-02");
+  const SEVERITIES = ["critical", "high", "moderate", "low"] as const;
+  const policy = (overrides: Record<string, unknown> = {}) => ({
+    maxLifetimeDaysBySeverity: {
+      critical: 30, high: 60, moderate: 180, low: 180, ...overrides,
+    },
+  });
+  const problems = (allowlist: object) => validateAllowlist(allowlist, TODAY).join("\n");
+  const entryAt = (severity: string, days: number) => ({
+    ghsa: "GHSA-aaaa-bbbb-cccc",
+    package: "pkg-a",
+    severity,
+    class: "remediation-available",
+    sources: ["bun"],
+    approvedBy: "reviewer-a",
+    introducedBy: "pkg-a -> pkg-b",
+    reason: "Fixture entry for the pinned ceiling tests.",
+    added: "2026-01-01",
+    expires: new Date(Date.parse("2026-01-01T00:00:00Z") + days * 86_400_000).toISOString().slice(0, 10),
+    removeWhen: "the fixture resolves a patched copy",
+  });
+
+  for (const severity of SEVERITIES) {
+    const ceiling = MAX_LIFETIME_DAYS_BY_SEVERITY[severity];
+
+    it(`accepts ${severity} at its ${ceiling}d pinned ceiling`, () => {
+      expect(problems({ policy: policy(), entries: [] })).toBe("");
+    });
+
+    it(`accepts ${severity} below its ${ceiling}d pinned ceiling`, () => {
+      expect(problems({ policy: policy({ [severity]: ceiling - 1 }), entries: [] })).toBe("");
+    });
+
+    it(`rejects ${severity} above its ${ceiling}d pinned ceiling`, () => {
+      expect(problems({ policy: policy({ [severity]: ceiling + 1 }), entries: [] })).toContain(
+        `is ${ceiling + 1}d, above the ${ceiling}d ceiling pinned in scripts/audit-gate.mjs`,
+      );
+    });
+
+    it(`enforces a below-ceiling cap on ${severity} entries`, () => {
+      expect(problems({ policy: policy({ [severity]: ceiling - 1 }), entries: [entryAt(severity, ceiling)] }))
+        .toContain(`lifetime ${ceiling}d exceeds the ${ceiling - 1}d cap for severity "${severity}"`);
+    });
+
+    it(`rejects a policy block that omits ${severity}`, () => {
+      const partial = policy();
+      delete (partial.maxLifetimeDaysBySeverity as Record<string, unknown>)[severity];
+      expect(problems({ policy: partial, entries: [] })).toContain(
+        `is missing "${severity}"; its pinned ceiling is ${ceiling}d`,
+      );
+    });
+  }
+
+  for (const [value, label] of [
+    ["30", "a numeric string"], [null, "null"], [0, "zero"], [-1, "a negative number"],
+    [Number.NaN, "NaN"], [Number.POSITIVE_INFINITY, "Infinity"], ["NaN", "the string NaN"],
+    ["Infinity", "the string Infinity"],
+  ] as const) {
+    it(`rejects ${label} as a severity cap`, () => {
+      expect(problems({ policy: policy({ critical: value }), entries: [] })).toContain(
+        'policy.maxLifetimeDaysBySeverity["critical"] must be a finite positive number',
+      );
+    });
+  }
+
+  it("rejects a severity outside the four instead of accepting a new cap", () => {
+    expect(problems({ policy: policy({ unknown: 365 }), entries: [] })).toContain(
+      'names "unknown", which has no pinned ceiling',
+    );
+  });
+
+  it("keeps the committed allowlist at or below every pinned ceiling", () => {
+    expect(problems(ALLOWLIST)).toBe("");
+    for (const severity of SEVERITIES) {
+      expect(ALLOWLIST.policy.maxLifetimeDaysBySeverity[severity])
+        .toBeLessThanOrEqual(MAX_LIFETIME_DAYS_BY_SEVERITY[severity]);
+    }
+  });
+
+  function runPolicyGate(fixturePolicy: object) {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-policy-"));
+    try {
+      for (const dir of ["scripts", ".github", "bin", "home", "tmp"]) mkdirSync(join(root, dir));
+      writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts", "audit-gate.mjs")));
+      writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({ policy: fixturePolicy, entries: [] }));
+      commitAllowlistHistory(root);
+      const prefixOf = (source: string) => join(root, `prefix-${source}`);
+      writeIdentities(root, prefixOf);
+      writeFileSync(join(root, "bin/bun"), "#!/bin/sh\nprintf '{}\\n'\n");
+      writeFileSync(join(root, "bin/npm"), "#!/bin/sh\nprintf '%s\\n' '{\"vulnerabilities\":{}}'\n");
+      chmodSync(join(root, "bin/bun"), 0o755);
+      chmodSync(join(root, "bin/npm"), 0o755);
+      return spawnSync(process.execPath, [join(root, "scripts/audit-gate.mjs"), ...prefixArgs(prefixOf)], {
+        encoding: "utf8",
+        timeout: 10_000,
+        env: {
+          ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`,
+          HOME: join(root, "home"), TMPDIR: join(root, "tmp"), AUDIT_GATE_TODAY: "2026-11-02",
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+        },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("passes the real gate with the committed policy", () => {
+    const res = runPolicyGate(ALLOWLIST.policy);
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("PASS —");
+  }, 12_000);
+
+  it("fails the real gate above a pinned ceiling, naming the severity", () => {
+    const res = runPolicyGate(policy({ critical: 31 }));
+    expect(res.error).toBeUndefined();
+    expect(res.status).not.toBe(0);
+    expect(res.stdout).toContain('["critical"] is 31d, above the 30d ceiling pinned in scripts/audit-gate.mjs');
+    expect(res.stdout).not.toContain("PASS —");
+  }, 12_000);
 });
 
 // ─── Allowlist integrity ─────────────────────────────────────────────────────

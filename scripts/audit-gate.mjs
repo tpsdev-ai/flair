@@ -32,8 +32,10 @@
  *   3. Every allowlist entry must be well-formed: advisory id, package, the
  *      reason it cannot be fixed here, an expiry date, and the condition that
  *      removes it. Missing any field BLOCKS.
- *   4. Lifetime is capped by severity (see the allowlist's `policy` block).
- *      An over-cap entry requires a valid overCapApproval.
+ *   4. Lifetime is capped by severity. The four ceilings are pinned in this file
+ *      (MAX_LIFETIME_DAYS_BY_SEVERITY); the allowlist's `policy` block may set a
+ *      lower cap for a severity, never a higher one. An over-cap entry requires
+ *      a valid overCapApproval.
  *   5. An expired entry BLOCKS. That is the point of the mechanism, not a flaw:
  *      the build stops and a human re-decides.
  *   6. STALENESS — an allowlist entry whose advisory no longer appears BLOCKS
@@ -538,6 +540,67 @@ function loadAllowlist() {
  * ------------------------------------------------------------------ */
 
 const DAY_MS = 86_400_000;
+
+/**
+ * Ceiling (days) for `policy.maxLifetimeDaysBySeverity`. The allowlist may
+ * shorten a severity's cap, never raise it above these values.
+ */
+export const MAX_LIFETIME_DAYS_BY_SEVERITY = Object.freeze({
+  critical: 30,
+  high: 60,
+  moderate: 180,
+  low: 180,
+});
+
+/**
+ * The caps actually enforced, starting from the pinned ceilings. A declared cap
+ * below its ceiling replaces it; a missing, invalid or over-ceiling declaration
+ * is a named problem and leaves the pinned ceiling in force.
+ */
+function lifetimeCapsFromPolicy(allowlist, problems) {
+  const declared = allowlist?.policy?.maxLifetimeDaysBySeverity;
+  const caps = { ...MAX_LIFETIME_DAYS_BY_SEVERITY };
+  if (declared === null || typeof declared !== "object" || Array.isArray(declared)) {
+    problems.push(
+      "policy.maxLifetimeDaysBySeverity must be an object naming critical, high, moderate and low",
+    );
+    return caps;
+  }
+  for (const severity of Object.keys(MAX_LIFETIME_DAYS_BY_SEVERITY)) {
+    const ceiling = MAX_LIFETIME_DAYS_BY_SEVERITY[severity];
+    if (!Object.hasOwn(declared, severity)) {
+      problems.push(
+        `policy.maxLifetimeDaysBySeverity is missing "${severity}"; its pinned ceiling is ${ceiling}d`,
+      );
+      continue;
+    }
+    const value = declared[severity];
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      const shown = typeof value === "number" ? String(value) : JSON.stringify(value);
+      problems.push(
+        `policy.maxLifetimeDaysBySeverity["${severity}"] must be a finite positive number; ` +
+          `got ${shown} (its pinned ceiling is ${ceiling}d)`,
+      );
+    } else if (value > ceiling) {
+      problems.push(
+        `policy.maxLifetimeDaysBySeverity["${severity}"] is ${value}d, above the ${ceiling}d ` +
+          `ceiling pinned in scripts/audit-gate.mjs`,
+      );
+    } else {
+      caps[severity] = value;
+    }
+  }
+  for (const severity of Object.keys(declared)) {
+    if (!Object.hasOwn(MAX_LIFETIME_DAYS_BY_SEVERITY, severity)) {
+      problems.push(
+        `policy.maxLifetimeDaysBySeverity names "${severity}", which has no pinned ceiling; ` +
+          `expected critical, high, moderate or low`,
+      );
+    }
+  }
+  return caps;
+}
+
 /** A real calendar date: the UTC year, month and day round-trip. */
 function isCalendarDate(s) {
   if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
@@ -719,7 +782,7 @@ export function overCapApprovalProblems(entry, today, cap) {
 
 export function validateAllowlist(allowlist, today) {
   const problems = [];
-  const caps = allowlist?.policy?.maxLifetimeDaysBySeverity ?? {};
+  const caps = lifetimeCapsFromPolicy(allowlist, problems);
   const seenKeys = new Map();
   const singleSourceOwner = new Map();
 
@@ -807,8 +870,8 @@ export function validateAllowlist(allowlist, today) {
     const cap = caps[entry.severity];
     if (typeof cap !== "number") {
       problems.push(
-        `${where}: no lifetime cap is configured for severity "${entry.severity}". Add it to ` +
-          `policy.maxLifetimeDaysBySeverity; an entry without a cap cannot be admitted.`,
+        `${where}: no lifetime cap is configured for severity "${entry.severity}" ` +
+          `(expected critical, high, moderate or low); an entry without a pinned ceiling cannot be admitted.`,
       );
     } else if (lifetimeDays > cap || entry.overCapApproval !== undefined) {
       const approvalProblems = overCapApprovalProblems(entry, today, cap);
