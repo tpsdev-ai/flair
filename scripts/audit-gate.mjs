@@ -622,9 +622,9 @@ const ALLOWLIST_HISTORY_PATH = ".github/audit-allowlist.json";
 
 /**
  * Reads only the fixed path from the pinned start and every descendant in HEAD's
- * ancestry; a missing or invalid snapshot refuses the lineage. An introduction
- * contains an id never seen in any parent's ancestry. Its earliest introduction
- * day is retained, comparing ids case-insensitively and dates as UTC days.
+ * ancestry; missing paths, non-JSON blobs or blobs without an `entries` array refuse
+ * the lineage. An introduction contains an id absent from ancestry within the pinned
+ * lineage. Its earliest UTC day is retained; ids compare case-insensitively.
  */
 export function readAllowlistHistory(repoRoot = REPO_ROOT) {
   const allowlistPath = join(repoRoot, ALLOWLIST_HISTORY_PATH);
