@@ -13,6 +13,7 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -20,7 +21,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 
 import {
@@ -89,7 +90,7 @@ function payload() {
   };
 }
 
-/** Snapshot every custody entry except the transient lock file. */
+/** Snapshot custody file contents except the transient lock file. */
 function snapshotCustody(dir: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const name of readdirSync(dir).sort()) {
@@ -202,6 +203,99 @@ function resultOf(stdout: string): Record<string, unknown> {
 }
 
 describe("commit-fence (invariant 7)", () => {
+  it.each(["initialize", "open"] as const)("keeps relative-path custody after chdir (%s)", (operation) => {
+    const initialCwd = process.cwd();
+    const original = join(root, "original");
+    const elsewhere = join(root, "elsewhere");
+    mkdirSync(original, { mode: 0o700 });
+    mkdirSync(elsewhere, { mode: 0o700 });
+    try {
+      process.chdir(original);
+      let state = init({ custodyDir: "custody" });
+      commit(state, 0);
+      if (operation === "open") {
+        const opened = openIntegrityState(options({ custodyDir: "custody", newCustody: false }));
+        expect(opened.ok).toBe(true);
+        if (!opened.ok) return;
+        state = opened.state;
+      }
+      cpSync(join(original, "custody"), join(elsewhere, "custody"), { recursive: true });
+      const otherBefore = snapshotCustody(join(elsewhere, "custody"));
+      expect(Object.values(state.paths).every(isAbsolute)).toBe(true);
+      expect(state.paths.custodyDir).toBe(join(realpathSync(original), "custody"));
+      process.chdir(elsewhere);
+      const result = commitGeneration({ state, expectedGeneration: 1, checkpoint: payload() });
+      expect(result).toMatchObject({ ok: true, status: "committed", generation: 2 });
+      expect(generationNumbers(integrityPaths(join(original, "custody")))).toEqual([1, 2]);
+      expect(snapshotCustody(join(elsewhere, "custody"))).toEqual(otherBefore);
+    } finally {
+      process.chdir(initialCwd);
+    }
+  });
+
+  it.each([
+    ["commit", "afterFsync"],
+    ["tombstone", "afterFsync"],
+    ["commit", "afterRename"],
+    ["tombstone", "afterRename"],
+  ] as const)("reports %s custody drift at %s", (writer, hook) => {
+    const tree = join(root, "tree");
+    const moved = join(root, "tree-original");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    commit(state, 0);
+    const before = snapshotCustody(nested);
+    let swaps = 0;
+    let renames = 0;
+    const swapAncestor = () => {
+      swaps++;
+      renameSync(tree, moved);
+      mkdirSync(tree, { mode: 0o700 });
+      renameSync(join(moved, "custody"), nested);
+    };
+    const testHooks = {
+      afterFsync: () => { if (hook === "afterFsync") swapAncestor(); },
+      afterRename: () => {
+        renames++;
+        if (hook === "afterRename") swapAncestor();
+      },
+    };
+    const result = writer === "commit"
+      ? commitGeneration({ state, expectedGeneration: 1, checkpoint: payload(), testHooks })
+      : tombstoneEnrollment({
+        ...options({ custodyDir: nested, newCustody: false }),
+        expectedSequence: 1,
+        testHooks,
+      });
+    expect(swaps).toBe(1);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe(hook === "afterFsync" ? "commit_failed" : "commit_uncertain");
+    expect(result.reason).toBe(hook === "afterFsync" ? "custody_invalid" : "commit_uncertain");
+    expect(result.detail).toContain(tree);
+    expect(result.remedy).toContain("Re-open custody");
+    expect(result).not.toHaveProperty("committed");
+    expect(renames).toBe(hook === "afterFsync" ? 0 : 1);
+    expect(existsSync(state.paths.uncertainPath)).toBe(hook === "afterRename");
+    expect(existsSync(join(nested, ".custody.lock"))).toBe(false);
+    if (hook === "afterFsync") {
+      expect(readFileSync(state.paths.currentPath, "utf-8")).toBe(before.CURRENT!);
+      expect(readFileSync(state.paths.registryPath, "utf-8")).toBe(before["registry.json"]!);
+      expect(readdirSync(nested).sort()).toEqual(["CURRENT", "custody.key", "generations", "registry.json"]);
+      expect(generationNumbers(state.paths)).toEqual(writer === "commit" ? [1, 2] : [1]);
+    } else {
+      expect(result.remedy).toBe("Re-open custody and verify the generation.");
+      if (writer === "commit") {
+        expect(JSON.parse(readFileSync(state.paths.currentPath, "utf-8")).generation).toBe(2);
+        expect(readFileSync(state.paths.uncertainPath, "utf-8")).toBe("commit:2");
+      } else {
+        expect(JSON.parse(readFileSync(state.paths.registryPath, "utf-8")).entries[0].status).toBe("tombstoned");
+        expect(readFileSync(state.paths.uncertainPath, "utf-8")).toBe("registry:2");
+      }
+    }
+  });
+
   it("rechecks custody when committing a generation", () => {
     const state = init();
     chmodSync(integrityPaths(custodyDir).keyPath, 0o644);
@@ -770,7 +864,7 @@ describe("commit-fence (invariant 7)", () => {
       status: "commit_conflict",
       reason: "commit_conflict",
       detail: `the on-disk generation is 0, expected ${INTEGRITY_MAX_GENERATION}`,
-      remedy: "Resolve the competing writer and rerun.",
+      remedy: "Resolve the generation or sequence mismatch and rerun.",
     });
     expect(readFileSync(paths.registryPath)).toEqual(registryBefore);
     expect(readdirSync(custodyDir).sort()).toEqual(entriesBefore);

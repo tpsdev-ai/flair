@@ -23,9 +23,12 @@
  *     (commit, tombstone, registry write and recovery all serialize on it);
  *   - custody ancestry: the custody directory, every ancestor up to the
  *     filesystem root, and the generations directory are identity-recorded at
- *     open and re-checked under the commit and tombstone lock before the intent
- *     marker or evidence write; a changed, vanished or newly symlinked path
- *     refuses with custody_invalid.
+ *     open and rechecked under the commit and tombstone lock, immediately before
+ *     and after publication rename. Detected drift before rename refuses with
+ *     custody_invalid; detected drift after rename reports commit_uncertain.
+ *     A process that can write to an ancestor is outside the custody trust
+ *     boundary and can still race the rename: chain checks detect a change but
+ *     cannot prevent it. Node cannot bind rename to an open directory descriptor.
  *
  * Callers decide whether to retry on `status`, never on `reason`: generation
  * exhaustion is `status: "commit_failed"` with `reason: "commit_conflict"`, so
@@ -118,7 +121,7 @@ export const INTEGRITY_REASON_REMEDIES: Record<IntegrityReason, string> = {
   clock_invalid: "Repair the server clock or transport and rerun.",
   scan_failed: "Resolve the read failure and rerun.",
   store_over_ceiling: "Resolve store capacity or raise the configured ceiling, then rerun.",
-  commit_conflict: "Resolve the competing writer and rerun.",
+  commit_conflict: "Resolve the generation or sequence mismatch and rerun.",
   commit_uncertain: "Recover the durable generation before another operation, then rerun.",
 };
 
@@ -278,6 +281,7 @@ export interface IntegrityPaths {
 }
 
 export function integrityPaths(custodyDir: string): IntegrityPaths {
+  custodyDir = resolve(custodyDir);
   return {
     custodyDir,
     keyPath: join(custodyDir, INTEGRITY_KEY_FILENAME),
@@ -436,9 +440,7 @@ export function checkCustody(opts: CustodyCheckOptions): CustodyCheck {
   return { ok: true };
 }
 
-/** One recorded path in the custody ancestry. `symbolicLink` records the type
- *  observed at open so a replacement that changes the entry type is reported
- *  even when inode numbers happen to be reused. */
+/** One recorded path in the custody ancestry, including whether it is a symlink. */
 export interface CustodyChainEntry {
   path: string;
   dev: number;
@@ -448,13 +450,13 @@ export interface CustodyChainEntry {
 
 /** The custody directory, its ancestors from the filesystem root down, and the
  *  generations directory. The walk applies config-critical-section's rules: at
- *  most 256 paths, stop at root, refuse when the cap is exhausted. */
+ *  most 256 ancestors including custody, plus the generations directory. */
 function custodyChainPaths(
   custodyDir: string,
   generationsDir: string,
 ): { ok: true; paths: string[] } | { ok: false; detail: string } {
   const upward: string[] = [];
-  let probe = resolve(custodyDir);
+  let probe = custodyDir;
   for (let i = 0; ; i++) {
     if (i >= CUSTODY_CHAIN_MAX) {
       return { ok: false, detail: `ancestor walk reached its iteration cap for ${custodyDir}` };
@@ -465,7 +467,7 @@ function custodyChainPaths(
     probe = parent;
   }
   upward.reverse();
-  upward.push(resolve(generationsDir));
+  upward.push(generationsDir);
   return { ok: true, paths: upward };
 }
 
@@ -891,11 +893,9 @@ export type IntegrityStateResult =
 
 export type CommitStatus = "committed" | "commit_conflict" | "commit_uncertain" | "commit_failed";
 
-/** Decide whether to retry on `status`, never on `reason`. `commit_conflict`
- *  reports a competing writer; `commit_failed` is a refusal that is not a
- *  competing-writer conflict (generation exhaustion is one, and carries
- *  `reason: "commit_conflict"`), and `commit_uncertain` requires recovery. The
- *  reason alone is not a retry signal. */
+/** Decide retry on `status`, never on `reason`: `commit_conflict` reports a
+ *  generation or sequence mismatch. Exhaustion reports `commit_failed` with
+ *  reason `commit_conflict`; `commit_uncertain` requires recovery. */
 export type CommitGenerationResult =
   | { ok: true; status: "committed"; generation: number; attempts: number }
   | {
@@ -1392,16 +1392,42 @@ function parseHold(message: string): { reason: IntegrityReason; detail: string; 
   if ((INTEGRITY_REASONS as readonly string[]).includes(head!) && rest.length > 0) {
     return { reason: head as IntegrityReason, detail: rest.join(":").trim(), recognized: true };
   }
-  // An unrecognized hold line is still a refusal: report its status as
-  // non-retryable rather than letting the conflict reason imply a competing
-  // writer.
+  // An unrecognized hold reports a non-retryable status.
   return { reason: "commit_conflict", detail: message, recognized: false };
 }
 
-/** Only a recognized `commit_conflict` hold is a competing writer a caller may
- *  retry; every other hold maps to `commit_failed`. */
+/** A recognized generation or sequence mismatch maps to `commit_conflict`;
+ *  every other hold maps to `commit_failed`. */
 function holdStatus(parsed: { reason: IntegrityReason; recognized: boolean }): "commit_conflict" | "commit_failed" {
   return parsed.recognized && parsed.reason === "commit_conflict" ? "commit_conflict" : "commit_failed";
+}
+
+type CustodyPublicationFailure = {
+  ok: false;
+  status: "commit_failed" | "commit_uncertain";
+  reason: "custody_invalid" | "commit_uncertain";
+  detail: string;
+  remedy: string;
+};
+
+function custodyPublicationChecks(
+  chain: readonly CustodyChainEntry[],
+  refuse: (failure: CustodyPublicationFailure) => void,
+): Pick<ConfigSectionOptions, "beforeRename" | "afterRename"> {
+  return {
+    beforeRename: () => {
+      const checked = verifyCustodyChain(chain);
+      if (checked.ok) return;
+      refuse({ ok: false, status: "commit_failed", reason: "custody_invalid", detail: checked.detail, remedy: CUSTODY_CHAIN_REMEDY });
+      throw new Error(checked.detail);
+    },
+    afterRename: () => {
+      const checked = verifyCustodyChain(chain);
+      if (checked.ok) return;
+      refuse({ ok: false, status: "commit_uncertain", reason: "commit_uncertain", detail: checked.detail, remedy: "Re-open custody and verify the generation." });
+      throw new Error(checked.detail);
+    },
+  };
 }
 
 /**
@@ -1439,9 +1465,6 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     return { ok: false, status: "commit_failed", reason: "custody_invalid", detail: chainBefore.detail, remedy: CUSTODY_CHAIN_REMEDY };
   }
 
-  // Custody is rechecked at the start of the commit operation too, not only
-  // when the state was opened: a mode or identity drift between the open and
-  // the commit must not stage a generation.
   const custody = checkCustody({
     paths: state.paths,
     serverUid: state.serverUid,
@@ -1519,8 +1542,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
       }
       onDisk = pointerNow.generation;
     }
-    // The generation observed before the scan. This is the fence: a competing
-    // writer that committed in between leaves a different value here.
+    // Compare the on-disk generation with the pre-scan expectation.
     if (onDisk !== opts.expectedGeneration) {
       return holdMessage("commit_conflict", `the on-disk generation is ${onDisk}, expected ${opts.expectedGeneration}`);
     }
@@ -1580,6 +1602,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   try {
     result = withConfigCriticalSection(state.paths.currentPath, decide, {
       stage,
+      ...custodyPublicationChecks(state.custodyChain, (failure) => { refusal = failure; }),
       lockPath: custodyLockPath(state.paths),
       onCommitted: () => clearUncertainMarker(state.paths),
       testHooks: opts.testHooks,
@@ -1594,6 +1617,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     };
   }
 
+  if (refusal) return refusal;
   if (result.status === "written") {
     if (result.cleanupWarning) {
       return {
@@ -1610,7 +1634,6 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   }
 
   if (result.status === "held") {
-    if (refusal) return refusal;
     // The primitive can hold before `decide` when the custody parent no longer
     // resolves; recheck the chain so a replaced ancestor names its path rather
     // than surfacing a generic observe failure.
@@ -1648,7 +1671,7 @@ export interface TombstoneOptions extends IntegrityStateOptions {
 
 export type TombstoneResult =
   | { ok: true; sequence: number }
-  | { ok: false; status: "commit_conflict" | "commit_failed"; reason: IntegrityReason; detail: string; remedy: string };
+  | { ok: false; status: "commit_conflict" | "commit_failed" | "commit_uncertain"; reason: IntegrityReason; detail: string; remedy: string };
 
 /** Tombstone an enrollment under the same custody lock as commit, relying on
  *  the opened handle's supplied identity. A stale sequence expectation holds. */
@@ -1704,6 +1727,7 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
   try {
     result = withConfigCriticalSection(state.paths.registryPath, decide, {
       stage,
+      ...custodyPublicationChecks(state.custodyChain, (failure) => { chainRefusal = failure; }),
       lockPath: custodyLockPath(state.paths),
       onCommitted: () => clearUncertainMarker(state.paths),
       testHooks: opts.testHooks,
@@ -1711,6 +1735,7 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
   } catch (err) {
     return { ok: false, status: "commit_failed", reason: "unavailable", detail: `the tombstone fence failed before replacing the registry: ${msg(err)}`, remedy: INTEGRITY_REASON_REMEDIES.unavailable };
   }
+  if (chainRefusal) return chainRefusal;
   if (result.status === "written" && !result.cleanupWarning) {
     return { ok: true, sequence: nextSequence };
   }
@@ -1718,7 +1743,6 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
     return { ok: false, status: "commit_failed", reason: "commit_uncertain", detail: result.cleanupWarning, remedy: INTEGRITY_REASON_REMEDIES.commit_uncertain };
   }
   if (result.status === "held") {
-    if (chainRefusal) return chainRefusal;
     const chain = verifyCustodyChain(state.custodyChain);
     if (!chain.ok) {
       return { ok: false, status: "commit_failed", reason: "custody_invalid", detail: chain.detail, remedy: CUSTODY_CHAIN_REMEDY };
