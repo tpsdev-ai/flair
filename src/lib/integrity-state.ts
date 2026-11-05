@@ -17,6 +17,8 @@
  *     opened and when a generation is committed;
  *   - an authenticated enrollment registry with a monotonic sequence and
  *     tombstones, plus retained generations;
+ *   - generation numbers bounded on write and in the persisted checkpoint and
+ *     CURRENT records to the twelve-digit filename format the listing accepts;
  *   - generation staging and uncertain-commit recovery under ONE custody lock
  *     (commit, tombstone, registry write and recovery all serialize on it).
  *
@@ -58,6 +60,9 @@ export const INTEGRITY_REGISTRY_FILENAME = "registry.json";
 export const INTEGRITY_CURRENT_FILENAME = "CURRENT";
 export const INTEGRITY_GENERATIONS_DIRNAME = "generations";
 export const INTEGRITY_UNCERTAIN_FILENAME = "UNCERTAIN";
+
+/** The largest generation a twelve-digit filename can carry. */
+export const INTEGRITY_MAX_GENERATION = 999_999_999_999;
 
 function msg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -270,6 +275,11 @@ export function integrityPaths(custodyDir: string): IntegrityPaths {
 
 export function generationPath(generationsDir: string, generation: number): string {
   return join(generationsDir, `${String(generation).padStart(12, "0")}.json`);
+}
+
+function isGenerationNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) &&
+    value >= 1 && value <= INTEGRITY_MAX_GENERATION;
 }
 
 // ── custody ─────────────────────────────────────────────────────────────────
@@ -667,7 +677,7 @@ function validateCheckpointShape(value: unknown): value is IntegrityCheckpointV3
   const c = value as Record<string, unknown>;
   if (c.version !== 3 || c.kind !== "checkpoint" || typeof c.hmac !== "string") return false;
   if (typeof c.enrollmentId !== "string" || c.enrollmentId.length === 0) return false;
-  if (!Number.isSafeInteger(c.generation) || (c.generation as number) < 1) return false;
+  if (!isGenerationNumber(c.generation)) return false;
   if (!Number.isSafeInteger(c.operatorUid)) return false;
   if (typeof c.machineId !== "string" || c.machineId.length === 0) return false;
   if (typeof c.baseline !== "object" || c.baseline === null || Array.isArray(c.baseline)) return false;
@@ -700,7 +710,7 @@ function validateCurrentShape(value: unknown): value is IntegrityCurrentPointer 
   const c = value as Record<string, unknown>;
   return c.version === 3 && c.kind === "current" &&
     typeof c.enrollmentId === "string" && c.enrollmentId.length > 0 &&
-    Number.isSafeInteger(c.generation) && (c.generation as number) >= 1 &&
+    isGenerationNumber(c.generation) &&
     typeof c.hmac === "string";
 }
 
@@ -1288,8 +1298,9 @@ function parseHold(message: string): { reason: IntegrityReason; detail: string }
  */
 export function commitGeneration(opts: CommitGenerationOptions): CommitGenerationResult {
   const { state } = opts;
-  if (!Number.isSafeInteger(opts.expectedGeneration) || opts.expectedGeneration < 0) {
-    return { ok: false, status: "commit_failed", reason: "commit_conflict", detail: "the expected generation is not a non-negative integer", remedy: INTEGRITY_REASON_REMEDIES.commit_conflict };
+  if (!Number.isSafeInteger(opts.expectedGeneration) || opts.expectedGeneration < 0 ||
+      opts.expectedGeneration > INTEGRITY_MAX_GENERATION) {
+    return { ok: false, status: "commit_failed", reason: "commit_conflict", detail: `the expected generation must be a non-negative integer at or below the twelve-digit bound ${INTEGRITY_MAX_GENERATION}`, remedy: "Use the generation from the opened custody state." };
   }
 
   const measuredOperatorUid = currentUid();
@@ -1326,27 +1337,8 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   }
 
   const nextGeneration = opts.expectedGeneration + 1;
-  let checkpoint: IntegrityCheckpointV3;
-  let pointer: IntegrityCurrentPointer;
   let generationBytes: Uint8Array;
-  try {
-    checkpoint = prepareIntegrityRecord<IntegrityCheckpointV3>(() => checkpointPayloadFor(opts, nextGeneration), state.key);
-    pointer = prepareIntegrityRecord<IntegrityCurrentPointer>(() => ({
-      version: INTEGRITY_STATE_VERSION,
-      kind: "current",
-      enrollmentId: state.enrollment.enrollmentId,
-      generation: nextGeneration,
-    }), state.key);
-    generationBytes = jsonBytes(checkpoint);
-  } catch (err) {
-    return {
-      ok: false,
-      status: "commit_failed",
-      reason: "checkpoint_incompatible",
-      detail: `cannot prepare the checkpoint: ${msg(err)}`,
-      remedy: INTEGRITY_REASON_REMEDIES.checkpoint_incompatible,
-    };
-  }
+  let refusal: Extract<CommitGenerationResult, { ok: false }> | undefined;
 
   const decide = (bytes: Uint8Array | null): { write: Uint8Array } | { hold: string } => {
     const marker = readUncertainMarker(state.paths);
@@ -1395,7 +1387,31 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     if (onDisk !== opts.expectedGeneration) {
       return holdMessage("commit_conflict", `the on-disk generation is ${onDisk}, expected ${opts.expectedGeneration}`);
     }
-    return { write: jsonBytes(pointer) };
+    if (onDisk === INTEGRITY_MAX_GENERATION) {
+      refusal = { ok: false, status: "commit_failed", reason: "commit_conflict", detail: "the generation sequence has reached its twelve-digit limit", remedy: "The generation sequence has reached its twelve-digit limit; no further generation can be committed to this custody. Start a new custody in a different custodyDir with initializeIntegrityCustody and newCustody: true." };
+      return holdMessage(refusal.reason, refusal.detail);
+    }
+
+    try {
+      const checkpoint = prepareIntegrityRecord<IntegrityCheckpointV3>(() => checkpointPayloadFor(opts, nextGeneration), state.key);
+      const pointer = prepareIntegrityRecord<IntegrityCurrentPointer>(() => ({
+        version: INTEGRITY_STATE_VERSION,
+        kind: "current",
+        enrollmentId: state.enrollment.enrollmentId,
+        generation: nextGeneration,
+      }), state.key);
+      generationBytes = jsonBytes(checkpoint);
+      return { write: jsonBytes(pointer) };
+    } catch (err) {
+      refusal = {
+        ok: false,
+        status: "commit_failed",
+        reason: "checkpoint_incompatible",
+        detail: `cannot prepare the checkpoint: ${msg(err)}`,
+        remedy: INTEGRITY_REASON_REMEDIES.checkpoint_incompatible,
+      };
+      return holdMessage(refusal.reason, refusal.detail);
+    }
   };
 
   const stage = (): (() => void) => {
@@ -1457,6 +1473,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   }
 
   if (result.status === "held") {
+    if (refusal) return refusal;
     const parsed = parseHold(result.message);
     return {
       ok: false,
@@ -1565,11 +1582,4 @@ export function generationNumbers(paths: IntegrityPaths): number[] {
   return listed.files
     .map((name) => Number.parseInt(basename(name, ".json"), 10))
     .filter((value) => Number.isSafeInteger(value));
-}
-
-export function readCurrentPointer(paths: IntegrityPaths, key: Buffer):
-  { kind: "ok"; pointer: IntegrityCurrentPointer } | { kind: "absent" } | { kind: "error"; reason: IntegrityReason; detail: string } {
-  const read = readSignedJson(paths.currentPath, validateCurrentShape, key, "CURRENT");
-  if (read.kind === "ok") return { kind: "ok", pointer: read.value };
-  return read;
 }
