@@ -233,7 +233,9 @@ describe("defaultIsProcessAlive — probe classification (flair#2866)", () => {
     try {
       const result = acquireMigrationLock({ lockPath });
       expect(result.acquired).toBe(false);
-      if (!result.acquired) expect(result.reason).toContain("MigrationLockProbeError");
+      if (result.acquired) throw new Error("expected refusal");
+      expect(result.kind).toBe("error");
+      expect(result.reason).toContain("MigrationLockProbeError");
     } finally {
       (process as unknown as { kill: unknown }).kill = original;
     }
@@ -286,6 +288,51 @@ describe("acquireMigrationLock — directory mutex (flair#2866)", () => {
     mkdirSync(guardPath(), { mode: 0o700 });
     writeFileSync(join(guardPath(), `owner-${generation}.json`), JSON.stringify(holder));
   }
+
+  it("classifies a mutex owner probe failure as error", () => {
+    const pid = process.pid + 1;
+    writeGuard({ pid, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z", generation });
+    const original = process.kill;
+    (process as unknown as { kill: unknown }).kill = () => {
+      const err = new Error("invalid argument") as NodeJS.ErrnoException;
+      err.code = "EINVAL";
+      throw err;
+    };
+    try {
+      const result = acquireMigrationLock({ lockPath });
+      expect(result.acquired).toBe(false);
+      if (result.acquired) throw new Error("expected refusal");
+      expect(result.kind).toBe("error");
+      expect(result.reason).toContain(`MigrationLockProbeError: refusing to treat holder pid ${pid} as dead: the liveness probe failed with EINVAL.`);
+      expect(readdirSync(guardPath())).toEqual([`owner-${generation}.json`]);
+    } finally {
+      (process as unknown as { kill: unknown }).kill = original;
+    }
+  });
+
+  it("classifies a mutex reclaim unlink failure as error", () => {
+    const pid = process.pid + 1;
+    writeGuard({ pid, hostname: hostname(), startedAt: "2026-01-01T00:00:00.000Z", generation });
+    const owner = join(guardPath(), `owner-${generation}.json`);
+    let probed = false;
+    const result = acquireMigrationLock({
+      lockPath,
+      isProcessAlive: (candidate) => {
+        expect(candidate).toBe(pid);
+        probed = true;
+        unlinkSync(owner);
+        mkdirSync(owner);
+        return false;
+      },
+    });
+    expect(probed).toBe(true);
+    expect(result.acquired).toBe(false);
+    if (result.acquired) throw new Error("expected refusal");
+    expect(result.kind).toBe("error");
+    expect(result.reason).toContain(`MigrationLockMutexError: owner-${generation}.json cannot be removed (`);
+    expect(statSync(owner).isDirectory()).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
+  });
 
   it("leaves the mutex directory empty while the handle is held and after release", () => {
     const result = acquireMigrationLock({ lockPath });

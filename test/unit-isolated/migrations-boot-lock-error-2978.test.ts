@@ -112,6 +112,25 @@ afterEach(() => {
   }
 });
 
+test("a mutex publish failure is classified as error and reported by boot", async () => {
+  mkdirSync(join(dataDir, ".migrations"), { recursive: true, mode: 0o700 });
+  const guard = `${lockPath()}.guard`;
+  rmSync(guard, { recursive: true, force: true });
+  writeFileSync(guard, "not a directory");
+
+  const result = acquireMigrationLock({ lockPath: lockPath() });
+  expect(result.acquired).toBe(false);
+  if (result.acquired) throw new Error("expected refusal");
+  expect(result.kind).toBe("error");
+  expect(result.reason).toContain(`MigrationLockMutexError: the mutex at ${guard} cannot be published (`);
+
+  boot.scheduleMigrationBoot();
+  await waitForBootAttempt();
+
+  expect(bootLog()).toContain("[flair-migrations] migration cycle did not run:");
+  expect(bootLog()).toContain(`lock error: ${result.reason}`);
+});
+
 test("a mutex error is reported as a boot failure naming the lock reason", async () => {
   mkdirSync(join(dataDir, ".migrations"), { recursive: true, mode: 0o700 });
   mkdirSync(`${lockPath()}.guard`, { recursive: true, mode: 0o700 });
