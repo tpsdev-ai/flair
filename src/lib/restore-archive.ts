@@ -29,8 +29,11 @@
  * itself (RESTORE_WRITE_SUPPLIED_FIELDS: Agent copies createdAt and publicKey
  * from the stored row, so a stored row that lacks either refuses the PUT);
  * every present non-null held column must hold the JS value its declared type
- * names. Replace mode deletes an archived Memory or Soul row before writing it
- * back, so a row these named checks refuse is refused here, before the delete.
+ * names. Replace mode attempts to delete each archived Memory row, then each
+ * archived Soul row, before writing it back (a failed Memory DELETE stops the run
+ * before any Soul is deleted; a failed Soul DELETE is recorded and that row's PUT
+ * still runs), so a row these named checks refuse is refused here, before any
+ * delete.
  *
  * Archive diagnostics. `parseRestoreArchive` returns the first problem it
  * finds as one refusal with a JSON Pointer `location`. Decoding and JSON-syntax

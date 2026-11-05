@@ -7,7 +7,8 @@
  * Prove JSON/Response against TypeScript library symbols and globalThis against
  * its intrinsic symbol. A built-in or proven alias may occur only as receiver
  * or callee of a recognised member call or new, the right operand of instanceof,
- * the operand of typeof, or an alias initializer the resolver tracks.
+ * the operand of typeof, an alias initializer the resolver tracks, or a
+ * followed import or export binding.
  * Declaration-kind policy (followed uses obey the rules above):
  * | ts.SyntaxKind | Inventory policy |
  * |---|---|

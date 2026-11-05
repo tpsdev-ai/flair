@@ -2,8 +2,10 @@
  * restore-soul-write-preflight-2953.test.ts — `flair restore --replace`
  * against a REAL Harper and the REAL built CLI (flair#2953).
  *
- * Replace deletes the archived ids before it writes them back, with no
- * rollback snapshot. The cases here seed through the admin ops route or a
+ * Replace attempts to delete the archived ids before it writes them back,
+ * with no rollback snapshot: a failed Memory DELETE stops the run before any
+ * Soul is deleted; a failed Soul DELETE is recorded and that row's PUT still
+ * runs. The cases here seed through the admin ops route or a
  * resource PUT, and cover these refusals: a skill-assignment row whose source
  * is a filesystem path (including one under the server's TMPDIR), a
  * skill-assignment row with a non-boolean optOut, and a Soul row without a
