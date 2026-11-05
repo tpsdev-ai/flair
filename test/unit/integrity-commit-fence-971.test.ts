@@ -332,7 +332,7 @@ describe("commit-fence (invariant 7)", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toBe("commit_conflict");
-    expect(result.remedy).toBe(`Re-open custody and inspect ${path} before retrying: ${result.detail}`);
+    expect(result.remedy).toBe(`Inspect ${path} to establish whether a registry was published; retry initialization if none was published, or open the existing custody if one was published.`);
   });
 
   it("rechecks custody when committing a generation", () => {

@@ -1114,7 +1114,7 @@ function writeInitialRegistry(
   if (result.status === "written") return { ok: false, reason: "commit_uncertain", detail: result.cleanupWarning! };
   if (result.status === "held") {
     const parsed = parseHold(result.message);
-    return { ok: false, reason: parsed.reason, detail: parsed.detail, remedy: holdRemedy(parsed, paths.registryPath, result.changed !== undefined) };
+    return { ok: false, reason: parsed.reason, detail: parsed.detail, remedy: `Inspect ${paths.registryPath} to establish whether a registry was published; retry initialization if none was published, or open the existing custody if one was published.` };
   }
   return { ok: false, reason: "unavailable", detail: result.message };
 }

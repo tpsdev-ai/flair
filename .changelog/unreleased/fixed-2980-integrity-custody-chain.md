@@ -13,7 +13,9 @@
   Generation exhaustion reports `status: "commit_failed"` (its
   reason remains `commit_conflict`); callers decide whether to retry on the
   status, never on the reason.
-  Unrecognised writer holds name the destination to inspect before retrying;
+  Initialization holds name the registry path to inspect, then direct callers to
+  retry initialization if unpublished or open existing custody if published.
+  Unrecognised commit and tombstone holds name the destination to inspect before retrying;
   observation changes report that the destination changed between observations.
   Tombstone cleanup warnings require uncertainty reconciliation and verification
   of the authenticated registry sequence and enrollment tombstone status.
