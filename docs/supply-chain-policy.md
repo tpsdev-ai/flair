@@ -112,7 +112,7 @@ An advisory can have several entries (for example one per install source or depe
 
 The four ceilings are pinned in `scripts/audit-gate.mjs` (`MAX_LIFETIME_DAYS_BY_SEVERITY`); `policy.maxLifetimeDaysBySeverity` may set a lower cap for a severity but cannot raise one. The gate fails when that block omits a severity, names a non-numeric value (a numeric string, `null`, `true` or an array), a non-positive or non-finite number, or a value above the ceiling; a severity outside the four fails closed.
 
-An advisory whose audit source reports no usable severity is treated as `unknown`. `unknown` is not one of the four severities, so it has no lifetime cap: an allowlist entry with severity `unknown` is refused as malformed (`no lifetime cap is configured for severity "unknown"`), and without such an entry the advisory is reported as not allowlisted. Fix it, or wait for the source to classify it.
+Bun maps a missing or null advisory severity to `unknown`; npm first falls back to the package severity and uses `unknown` only if both are missing or null. A blank string stays blank; a non-null, non-string value selected by these fallbacks makes parsing throw. Both fail closed. `unknown` is not one of the four severities, so it has no lifetime cap: an allowlist entry with severity `unknown` is refused as malformed (`no lifetime cap is configured for severity "unknown"`), and without such an entry the advisory is reported as not allowlisted. Fix it, or wait for the source to classify it.
 
 When an entry expires the build fails and a human re-decides. **That is the mechanism working, not a flaw.** Re-dating an entry without re-reading its reason is how this file rots back into the thing it replaced.
 
