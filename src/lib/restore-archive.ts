@@ -27,7 +27,7 @@
  * checked against that table's GraphQL schema (schemas/*.graphql). A `!`
  * column the row does not hold is refused, except a field the write supplies
  * itself (RESTORE_WRITE_SUPPLIED_FIELDS: Agent copies createdAt and publicKey
- * from the stored row, so a stored row that lacks either refuses the PUT);
+ * from the stored row and refuses when no stored row exists);
  * every present non-null held column must hold the JS value its declared type
  * names. Replace mode attempts to delete each archived Memory row, then each
  * archived Soul row, before writing it back (a failed Memory DELETE stops the run
@@ -141,10 +141,9 @@ export const RESTORE_TABLE_FIELDS: Readonly<Record<"Agent" | "Soul" | "Memory", 
 
 /**
  * Required columns the write supplies, so an archived row may omit them:
- * Soul.put and Memory.put assign `createdAt`, and Agent.put carries
- * `createdAt` and `publicKey` from the stored row when it has them. Soul
- * calls `validate()` after assigning `createdAt`; Agent and Memory assign
- * the field before `super.put` (pinned by the same test).
+ * The admission test pins assignment on every path to Soul's validate,
+ * Agent's super.put or Memory's content table PUT through putLocked, plus
+ * Agent's stored-field copies and refusal when no stored row exists.
  */
 export const RESTORE_WRITE_SUPPLIED_FIELDS: Readonly<Record<"Agent" | "Soul" | "Memory", ReadonlySet<string>>> = Object.freeze({
   Agent: new Set(["createdAt", "publicKey"]),

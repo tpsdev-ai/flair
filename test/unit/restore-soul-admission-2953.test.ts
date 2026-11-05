@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
+import { assertRestoreWriteOrder } from "../helpers/restore-write-order.ts";
 import {
   parseRestoreArchive,
   RESTORE_TABLE_FIELDS,
@@ -337,6 +338,99 @@ function schemaColumns(schemaPath: string, table: string): Array<[string, { type
   return schemaColumnsFromText(readFileSync(join(root, schemaPath), "utf8"), table, schemaPath);
 }
 
+describe("write-supplied field path analysis (flair#2953)", () => {
+  const soul = (body: string): string => `class Soul { put(content: any) { ${body} } }`;
+  const checkSoul = (body: string): void => assertRestoreWriteOrder(soul(body), "Soul", new Set(["createdAt"]), "fixture.ts");
+
+  test.each([
+    ["then", "if (flag) {} else { content.createdAt = now; }"],
+    ["else", "if (flag) { content.createdAt = now; }"],
+    ["short-circuit", "flag && (content.createdAt = now);"],
+    ["false", "flag ? content.createdAt = now : null;"],
+  ])("an unassigned %s branch fails naming the field and branch", (arm, body) => {
+    expect(() => checkSoul(`${body} this.validate?.(content);`)).toThrow(`content.createdAt is not assigned before this.validate; ${arm} branch at fixture.ts:1`);
+  });
+
+  test("both assigning branches and an early returning branch pass", () => {
+    expect(() => checkSoul("if (flag) { content.createdAt = first; } else { content.createdAt = second; } this.validate?.(content);")).not.toThrow();
+    expect(() => checkSoul("if (flag) return denied; content.createdAt = now; this.validate?.(content);")).not.toThrow();
+  });
+
+  test("an assignment in another method or callback does not supply the checked path", () => {
+    expect(() => assertRestoreWriteOrder("class Soul { post(content: any) { content.createdAt = now; } put(content: any) { this.validate?.(content); } }", "Soul", new Set(["createdAt"]), "fixture.ts")).toThrow("content.createdAt is not assigned");
+    expect(() => checkSoul("const later = () => { content.createdAt = now; }; this.validate?.(content);")).toThrow("content.createdAt is not assigned");
+    expect(() => checkSoul("const later = { run() { content.createdAt = now; } }; this.validate?.(content);")).toThrow("content.createdAt is not assigned");
+    expect(() => checkSoul("const later = (content: any) => { content.createdAt = now; }; this.validate?.(content);")).toThrow("content.createdAt is not assigned");
+  });
+
+  test("an optional call or element read cannot guarantee its argument assignment", () => {
+    expect(() => checkSoul("maybe?.(content.createdAt = now); this.validate?.(content);")).toThrow("content.createdAt is not assigned");
+    expect(() => checkSoul("maybe?.[content.createdAt = now]; this.validate?.(content);")).toThrow("content.createdAt is not assigned");
+    expect(() => checkSoul("flag ||= (content.createdAt = now); this.validate?.(content);")).toThrow("content.createdAt is not assigned");
+  });
+
+  test("a callback's own branches are checked before its validate call", () => {
+    expect(() => checkSoul("recordVersion({ prepare: () => { if (flag) content.createdAt = now; this.validate?.(content); } });")).toThrow("else branch at fixture.ts:1");
+    expect(() => checkSoul("recordVersion({ prepare: () => { content.createdAt = now; this.validate?.(content); } });")).not.toThrow();
+  });
+
+  test("a deletion or a catch bypassing the assignment leaves the field unassigned", () => {
+    expect(() => checkSoul("content.createdAt = now; delete content.createdAt; this.validate?.(content);")).toThrow("content.createdAt is not assigned");
+    expect(() => checkSoul("try { content.createdAt = mayThrow(); } catch {} this.validate?.(content);")).toThrow("catch branch at fixture.ts:1");
+  });
+
+  test("unhandled control flow and a missing check fail closed", () => {
+    expect(() => checkSoul("while (flag) { content.createdAt = now; } this.validate?.(content);")).toThrow("unsupported write-path statement: WhileStatement");
+    expect(() => checkSoul("content.createdAt = now;")).toThrow("no validation/write call checked");
+    expect(() => checkSoul("content.createdAt = now; content = replacement; this.validate?.(content);")).toThrow("content.createdAt is not assigned");
+  });
+
+  const agent = (copy = "stored.createdAt", guard = 'if (!stored) return { kind: "gone" as const };', mapping = "return requiresExisting();"): string => `class Agent {
+    async put(content: any) {
+      const requiresExisting = () => new Response(JSON.stringify({ error: "agent_put_requires_existing" }), { status: 404 });
+      const outcome = await withOwnedTransaction(ctx, async () => {
+        const current = await resolveStoredRow(this, "Agent", content);
+        const stored = current.row;
+        ${guard}
+        content.createdAt = ${copy};
+        content.publicKey = stored.publicKey;
+        if (bound) return super.put(content);
+        return super.put(id, content);
+      });
+      if (outcome.kind === "gone") ${mapping}
+      return outcome.result;
+    }
+  }`;
+  const checkAgent = (text: string): void => assertRestoreWriteOrder(text, "Agent", new Set(["createdAt", "publicKey"]), "fixture.ts");
+
+  test("Agent copies both stored fields after a missing-row guard on both super.put paths", () => {
+    expect(() => checkAgent(agent())).not.toThrow();
+    expect(() => checkAgent(agent().replace("content.publicKey = stored.publicKey;", "if (flag) content.publicKey = stored.publicKey;"))).toThrow(/content.publicKey is not assigned before put write;.*else branch/);
+  });
+
+  test("Agent literal, unrelated row and shadowed row copies fail", () => {
+    expect(() => checkAgent(agent('"literal"'))).toThrow("content.createdAt must read the stored row's createdAt");
+    expect(() => checkAgent(agent("other.createdAt"))).toThrow("content.createdAt must read the stored row's createdAt");
+    expect(() => checkAgent(agent("stored.createdAt", 'if (!stored) return { kind: "gone" as const }; { const stored = content; content.createdAt = stored.createdAt; }'))).toThrow("content.createdAt must read the stored row's createdAt");
+  });
+
+  test("Agent requires the missing stored row to reach its named refusal", () => {
+    expect(() => checkAgent(agent("stored.createdAt", ""))).toThrow("no missing-stored-row refusal");
+    expect(() => checkAgent(agent("stored.createdAt", undefined, "return outcome.result;"))).toThrow("missing stored row must return gone and map to agent_put_requires_existing");
+    expect(() => checkAgent(agent().replace("agent_put_requires_existing", "other"))).toThrow("missing stored row must return gone and map to agent_put_requires_existing");
+    expect(() => checkAgent(agent().replace('if (outcome.kind === "gone")', 'if (flag) return outcome.result; if (outcome.kind === "gone")'))).toThrow("missing stored row must return gone and map to agent_put_requires_existing");
+    expect(() => checkAgent(agent().replace('if (outcome.kind === "gone")', 'return outcome.result; if (outcome.kind === "gone")'))).toThrow("missing stored row must return gone and map to agent_put_requires_existing");
+  });
+
+  test("Memory follows putLocked and checks assignment before its content table write", () => {
+    const memory = (body: string): string => `class Memory { put(content: any) { return this.putLocked(content); } private putLocked(content: any) { ${body} } }`;
+    const check = (body: string): void => assertRestoreWriteOrder(memory(body), "Memory", new Set(["createdAt"]), "fixture.ts");
+    expect(() => check("content.createdAt = now; return (databases as any).flair.Memory.put(content, ctx);")).not.toThrow();
+    expect(() => check("if (flag) content.createdAt = now; return (databases as any).flair.Memory.put(content, ctx);")).toThrow("content.createdAt is not assigned before put write; else branch");
+    expect(() => check("const result = (databases as any).flair.Memory.put(content, ctx); content.createdAt = now; return result;")).toThrow("content.createdAt is not assigned before put write");
+  });
+});
+
 describe("the restore field table matches the GraphQL schema (flair#2953)", () => {
   const sources = [
     ["Agent", "schemas/agent.graphql"],
@@ -360,13 +454,12 @@ describe("the restore field table matches the GraphQL schema (flair#2953)", () =
       }
     });
 
-    test(`each required ${table} column the write supplies is assigned by the resource${table === "Agent" ? " from the stored row (a row lacking it is refused)" : ""}`, () => {
-      const resource = { Agent: "resources/Agent.ts", Soul: "resources/Soul.ts", Memory: "resources/Memory.ts" }[table];
-      const source = readFileSync(join(root, resource), "utf8");
+    test(`${table} write-supplied fields are assigned on every path to ${table === "Soul" ? "validate" : table === "Agent" ? "super.put, from an existing stored row" : "the content table PUT through putLocked"}`, () => {
+      const resource = `resources/${table}.ts`;
       for (const field of RESTORE_WRITE_SUPPLIED_FIELDS[table]) {
         expect(RESTORE_TABLE_FIELDS[table][field]?.required).toBe(true);
-        expect(new RegExp(`content\\.${field}\\s*=`).test(source)).toBe(true);
       }
+      assertRestoreWriteOrder(readFileSync(join(root, resource), "utf8"), table, RESTORE_WRITE_SUPPLIED_FIELDS[table], resource);
     });
   }
 
