@@ -8,9 +8,9 @@ const commandPath = join(import.meta.dirname, "../../src/commands/restore.ts");
 const commanderPath = join(import.meta.dirname, "../../node_modules/commander/index.js");
 const archive = {
   version: 1,
-  agents: [{ id: "flint" }, { id: "kern" }],
-  souls: [{ id: "flint:soul", agentId: "flint" }, { id: "kern:soul", agentId: "kern" }],
-  memories: [{ id: "m/1?#%", agentId: "flint" }, { id: "m2", agentId: "kern" }],
+  agents: [{ id: "flint", name: "flint" }, { id: "kern", name: "kern" }],
+  souls: [{ id: "flint:soul", agentId: "flint", key: "role", value: "a" }, { id: "kern:soul", agentId: "kern", key: "role", value: "b" }],
+  memories: [{ id: "m/1?#%", agentId: "flint", content: "a note" }, { id: "m2", agentId: "kern", content: "another note" }],
 };
 const memoryPath = "/Memory/m%2F1%3F%23%25";
 type Fault = { method: string; path: string; status?: number; body?: unknown; error?: string; raw?: string };
@@ -41,6 +41,15 @@ async function run(faults: Fault[] = [], backup: unknown = archive, flags: strin
         const fault = faults.find(f => f.path === path && f.method === method);
         if (fault?.error) throw new Error(fault.error);
         if (fault) return new Response(fault.raw ?? JSON.stringify("body" in fault ? fault.body : { error: "fixture failure" }), { status: fault.status ?? 200 });
+        // The replace preflight lists MemoryCandidates before deletion only
+        // when some value did not match a Memory.
+        if (method === "GET" && path === "/Memory") {
+          const agentId = new URL(String(url)).searchParams.get("agentId");
+          return Response.json(archive.memories.filter(row => row.agentId === agentId));
+        }
+        if (method === "GET" && path.startsWith("/AdminMemoryCandidates/")) {
+          return Response.json({ candidates: [], hasMore: false });
+        }
         const [_, name, id] = path.split("/");
         const key = name + "/" + decodeURIComponent(id);
         if (method === "DELETE") rows.delete(key);
@@ -90,7 +99,9 @@ describe("restore confirms archived IDs (#2215)", () => {
     ]);
     refused(result, "flint", "unavailable", "kern:soul", "403", "m2", "500", "m/1?#%", "404");
     expect(result.calls.filter(call => call.method === "PUT")).toHaveLength(6);
-    expect(result.calls.filter(call => call.method === "GET")).toHaveLength(6);
+    // The six per-record verification reads; the replace preflight's listing
+    // reads are not per-record.
+    expect(result.calls.filter(call => call.method === "GET" && /^\/(Agent|Soul|Memory)\/.+/.test(call.path))).toHaveLength(6);
   });
 
   for (const collection of ["agents", "souls", "memories"]) {
@@ -135,7 +146,7 @@ describe("restore confirms archived IDs (#2215)", () => {
     const result = await run([{ method: "DELETE", path: "/Soul/kern%3Asoul", status: 500 }], archive, ["--replace"]);
     expect(result.rows.get("Soul/flint:soul")).toEqual(archive.souls[0]);
     refused(result, "kern:soul", "kern", "DELETE", "500");
-    expect(result.calls.slice(0, 4).map(({ method, path }) => ({ method, path }))).toEqual([
+    expect(result.calls.filter(call => call.method === "DELETE").slice(0, 4).map(({ method, path }) => ({ method, path }))).toEqual([
       { method: "DELETE", path: memoryPath },
       { method: "DELETE", path: "/Memory/m2" },
       { method: "DELETE", path: "/Soul/flint%3Asoul" },
@@ -143,7 +154,9 @@ describe("restore confirms archived IDs (#2215)", () => {
     ]);
     expect(result.calls.filter(call => call.method === "DELETE")).toHaveLength(4);
     expect(result.calls.filter(call => call.method === "PUT")).toHaveLength(6);
-    expect(result.calls.filter(call => call.method === "GET")).toHaveLength(6);
+    // The six per-record verification reads; the replace preflight's listing
+    // reads are not per-record.
+    expect(result.calls.filter(call => call.method === "GET" && /^\/(Agent|Soul|Memory)\/.+/.test(call.path))).toHaveLength(6);
   });
 
   for (const method of ["DELETE", "PUT", "GET"]) {
@@ -171,7 +184,9 @@ describe("restore confirms archived IDs (#2215)", () => {
     const result = await run([{ method: "DELETE", path: memoryPath, status: 404 }], archive, ["--replace"]);
     expect(result.exitCode).toBe(0);
     expect(result.calls.filter(call => call.method === "DELETE")).toHaveLength(4);
-    expect(result.calls.filter(call => call.method === "GET")).toHaveLength(6);
+    // The six per-record verification reads; the replace preflight's listing
+    // reads are not per-record.
+    expect(result.calls.filter(call => call.method === "GET" && /^\/(Agent|Soul|Memory)\/.+/.test(call.path))).toHaveLength(6);
   });
 
   test("dry run sends no requests", async () => {
