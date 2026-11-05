@@ -294,6 +294,68 @@ describe("commit-fence (invariant 7)", () => {
     expect(generationNumbers(integrityPaths(nested))).toEqual([1, 2]);
   });
 
+  it.each([
+    ["commit", "afterRead"],
+    ["commit", "afterPreObserve"],
+    ["tombstone", "afterRead"],
+    ["tombstone", "afterPreObserve"],
+  ] as const)("refuses %s after an ancestor swap at %s", (writer, hook) => {
+    const tree = join(root, "tree");
+    const moved = join(root, "tree-original");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    commit(state, 0);
+    const before = snapshotCustody(nested);
+    const ancestorInode = lstatSync(tree).ino;
+    const custodyInode = lstatSync(nested).ino;
+    let swaps = 0;
+    let reads = 0;
+    let tempCreates = 0;
+    const swapAncestor = () => {
+      swaps++;
+      renameSync(tree, moved);
+      if (hook === "afterRead") {
+        mkdirSync(tree, { mode: 0o700 });
+        renameSync(join(moved, "custody"), nested);
+      } else {
+        symlinkSync(moved, tree);
+      }
+    };
+    const testHooks = {
+      afterPreObserve: () => { if (hook === "afterPreObserve") swapAncestor(); },
+      afterRead: () => {
+        reads++;
+        if (hook === "afterRead") swapAncestor();
+      },
+      afterTempCreate: () => { tempCreates++; },
+    };
+    const result = writer === "commit"
+      ? commitGeneration({ state, expectedGeneration: 1, checkpoint: payload(), testHooks })
+      : tombstoneEnrollment({
+        ...options({ custodyDir: nested, newCustody: false }),
+        expectedSequence: 1,
+        testHooks,
+      });
+
+    expect(swaps).toBe(1);
+    expect(reads).toBe(hook === "afterRead" ? 1 : 0);
+    expect(lstatSync(tree).ino).not.toBe(ancestorInode);
+    expect(lstatSync(nested).ino).toBe(custodyInode);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
+    expect(result.reason).toBe("custody_invalid");
+    expect(result.detail).toContain(tree);
+    expect(result.detail).toContain(hook === "afterRead" ? "identity changed" : "became a symlink");
+    expect(result.remedy).toContain("Re-open custody");
+    expect(tempCreates).toBe(0);
+    expect(snapshotCustody(nested)).toEqual(before);
+    expect(generationNumbers(state.paths)).toEqual([1]);
+    expect(existsSync(state.paths.uncertainPath)).toBe(false);
+    expect(existsSync(join(nested, ".custody.lock"))).toBe(false);
+  });
+
   it("refuses a tombstone when an ancestor becomes a symlink after open", () => {
     const tree = join(root, "tree");
     mkdirSync(tree, { mode: 0o700 });
