@@ -27,8 +27,9 @@
  *     and after publication rename. Detected drift before rename refuses with
  *     custody_invalid; detected drift after rename reports commit_uncertain.
  *     A process that can write to an ancestor is outside the custody trust
- *     boundary and can still race the rename: chain checks detect a change but
- *     cannot prevent it. Node cannot bind rename to an open directory descriptor.
+ *     boundary and can still race the rename. Chain checks detect drift present
+ *     when they run; they do not guarantee detection of an intervening race.
+ *     Node cannot bind rename to an open directory descriptor.
  *
  * Callers decide whether to retry on `status`, never on `reason`: generation
  * exhaustion is `status: "commit_failed"` with `reason: "commit_conflict"`, so
@@ -1413,6 +1414,7 @@ type CustodyPublicationFailure = {
 function custodyPublicationChecks(
   chain: readonly CustodyChainEntry[],
   refuse: (failure: CustodyPublicationFailure) => void,
+  uncertainRemedy: string,
 ): Pick<ConfigSectionOptions, "beforeRename" | "afterRename"> {
   return {
     beforeRename: () => {
@@ -1424,7 +1426,7 @@ function custodyPublicationChecks(
     afterRename: () => {
       const checked = verifyCustodyChain(chain);
       if (checked.ok) return;
-      refuse({ ok: false, status: "commit_uncertain", reason: "commit_uncertain", detail: checked.detail, remedy: "Re-open custody and verify the generation." });
+      refuse({ ok: false, status: "commit_uncertain", reason: "commit_uncertain", detail: checked.detail, remedy: uncertainRemedy });
       throw new Error(checked.detail);
     },
   };
@@ -1602,7 +1604,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   try {
     result = withConfigCriticalSection(state.paths.currentPath, decide, {
       stage,
-      ...custodyPublicationChecks(state.custodyChain, (failure) => { refusal = failure; }),
+      ...custodyPublicationChecks(state.custodyChain, (failure) => { refusal = failure; }, "Re-open custody and verify the generation."),
       lockPath: custodyLockPath(state.paths),
       onCommitted: () => clearUncertainMarker(state.paths),
       testHooks: opts.testHooks,
@@ -1727,7 +1729,7 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
   try {
     result = withConfigCriticalSection(state.paths.registryPath, decide, {
       stage,
-      ...custodyPublicationChecks(state.custodyChain, (failure) => { chainRefusal = failure; }),
+      ...custodyPublicationChecks(state.custodyChain, (failure) => { chainRefusal = failure; }, "Re-open custody, reconcile uncertainty, then verify the authenticated registry sequence and the enrollment's tombstone status."),
       lockPath: custodyLockPath(state.paths),
       onCommitted: () => clearUncertainMarker(state.paths),
       testHooks: opts.testHooks,

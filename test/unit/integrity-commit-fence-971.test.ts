@@ -285,11 +285,12 @@ describe("commit-fence (invariant 7)", () => {
       expect(readdirSync(nested).sort()).toEqual(["CURRENT", "custody.key", "generations", "registry.json"]);
       expect(generationNumbers(state.paths)).toEqual(writer === "commit" ? [1, 2] : [1]);
     } else {
-      expect(result.remedy).toBe("Re-open custody and verify the generation.");
       if (writer === "commit") {
+        expect(result.remedy).toBe("Re-open custody and verify the generation.");
         expect(JSON.parse(readFileSync(state.paths.currentPath, "utf-8")).generation).toBe(2);
         expect(readFileSync(state.paths.uncertainPath, "utf-8")).toBe("commit:2");
       } else {
+        expect(result.remedy).toBe("Re-open custody, reconcile uncertainty, then verify the authenticated registry sequence and the enrollment's tombstone status.");
         expect(JSON.parse(readFileSync(state.paths.registryPath, "utf-8")).entries[0].status).toBe("tombstoned");
         expect(readFileSync(state.paths.uncertainPath, "utf-8")).toBe("registry:2");
       }
