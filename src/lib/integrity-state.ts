@@ -277,7 +277,6 @@ export function generationPath(generationsDir: string, generation: number): stri
   return join(generationsDir, `${String(generation).padStart(12, "0")}.json`);
 }
 
-/** Whether a value can be written as a twelve-digit generation filename. */
 function isGenerationNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) &&
     value >= 1 && value <= INTEGRITY_MAX_GENERATION;
@@ -1300,8 +1299,11 @@ function parseHold(message: string): { reason: IntegrityReason; detail: string }
 export function commitGeneration(opts: CommitGenerationOptions): CommitGenerationResult {
   const { state } = opts;
   if (!Number.isSafeInteger(opts.expectedGeneration) || opts.expectedGeneration < 0 ||
-      opts.expectedGeneration >= INTEGRITY_MAX_GENERATION) {
-    return { ok: false, status: "commit_failed", reason: "commit_conflict", detail: `the expected generation must be an integer below the twelve-digit bound ${INTEGRITY_MAX_GENERATION}`, remedy: INTEGRITY_REASON_REMEDIES.commit_conflict };
+      opts.expectedGeneration > INTEGRITY_MAX_GENERATION) {
+    return { ok: false, status: "commit_failed", reason: "commit_conflict", detail: `the expected generation must be a non-negative integer at or below the twelve-digit bound ${INTEGRITY_MAX_GENERATION}`, remedy: "Use the generation from the opened custody state." };
+  }
+  if (opts.expectedGeneration === INTEGRITY_MAX_GENERATION) {
+    return { ok: false, status: "commit_failed", reason: "commit_conflict", detail: "the generation sequence has reached its twelve-digit limit", remedy: "The generation sequence has reached its twelve-digit limit; no further generation can be committed to this custody. Start a new custody in a different custodyDir with initializeIntegrityCustody and newCustody: true." };
   }
 
   const measuredOperatorUid = currentUid();

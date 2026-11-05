@@ -598,12 +598,34 @@ describe("commit-fence (invariant 7)", () => {
     const currentBefore = readFileSync(paths.currentPath);
     const entriesBefore = readdirSync(custodyDir).sort();
     const refused = commitGeneration({ state: reopened.state, expectedGeneration: INTEGRITY_MAX_GENERATION, checkpoint: payload() });
-    expect(refused).toMatchObject({ ok: false, reason: "commit_conflict" });
+    expect(refused).toMatchObject({
+      ok: false,
+      reason: "commit_conflict",
+      remedy: "The generation sequence has reached its twelve-digit limit; no further generation can be committed to this custody. Start a new custody in a different custodyDir with initializeIntegrityCustody and newCustody: true.",
+    });
     if (!refused.ok) expect(refused.detail).toContain("twelve-digit");
     expect(readFileSync(paths.currentPath)).toEqual(currentBefore);
     expect(readdirSync(custodyDir).sort()).toEqual(entriesBefore);
     expect(existsSync(generationPath(paths.generationsDir, INTEGRITY_MAX_GENERATION + 1))).toBe(false);
     expect(generationNumbers(paths)).toEqual([prior, INTEGRITY_MAX_GENERATION]);
+
+    const fresh = init({ custodyDir: join(root, "new-custody"), newCustody: true });
+    expect(commit(fresh, 0).generation).toBe(1);
+    expect(readFileSync(paths.currentPath)).toEqual(currentBefore);
+  });
+
+  it("refuses an invalid expected generation with a caller remedy", () => {
+    const state = init();
+    for (const expectedGeneration of [NaN, Infinity, -1, 1.5, INTEGRITY_MAX_GENERATION + 1]) {
+      const refused = commitGeneration({ state, expectedGeneration, checkpoint: payload() });
+      expect(refused).toMatchObject({
+        ok: false,
+        reason: "commit_conflict",
+        remedy: "Use the generation from the opened custody state.",
+      });
+    }
+    expect(existsSync(state.paths.currentPath)).toBe(false);
+    expect(generationNumbers(state.paths)).toEqual([]);
   });
 
   it("refuses a non-integer, negative or over-bound generation read from a record", () => {
