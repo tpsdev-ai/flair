@@ -1,1 +1,1 @@
-- **The audit gate pins each severity's maximum allowlist lifetime in code.** The allowlist may lower a cap but no longer raise one, and the gate fails when a policy entry is missing, invalid or above its pinned ceiling (#2973).
+- **The audit gate pins each severity's lifetime ceiling in code.** The policy block may lower a cap but cannot raise one, and the gate fails when a severity is missing, invalid or above its pinned ceiling (#2973).
