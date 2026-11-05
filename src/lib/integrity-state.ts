@@ -1447,7 +1447,7 @@ function custodyPublicationChecks(
  * The pre-scan generation is rechecked inside `decide`; a mismatch returns
  * `commit_conflict` and never writes. The generation and a durable intent
  * marker are staged under the ONE custody lock before CURRENT is replaced.
- * A post-rename directory-fsync warning is `commit_uncertain`, never success.
+ * A warning after publication rename returns `status: "commit_uncertain"`.
  */
 export function commitGeneration(opts: CommitGenerationOptions): CommitGenerationResult {
   const { state } = opts;
@@ -1751,7 +1751,7 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
     return { ok: true, sequence: nextSequence };
   }
   if (result.status === "written" && result.cleanupWarning) {
-    return { ok: false, status: "commit_failed", reason: "commit_uncertain", detail: result.cleanupWarning, remedy: TOMBSTONE_UNCERTAIN_REMEDY };
+    return { ok: false, status: "commit_uncertain", reason: "commit_uncertain", detail: result.cleanupWarning, remedy: TOMBSTONE_UNCERTAIN_REMEDY };
   }
   if (result.status === "held") {
     const chain = verifyCustodyChain(state.custodyChain);

@@ -17,5 +17,6 @@
   preserve partial custody and use a different custodyDir for a fresh start.
   Unrecognised commit and tombstone holds name the destination to inspect before retrying;
   observation changes report that the destination changed between observations.
-  Tombstone cleanup warnings require uncertainty reconciliation and verification
-  of the authenticated registry sequence and enrollment tombstone status.
+  Tombstone cleanup warnings report `status: "commit_uncertain"` and require
+  uncertainty reconciliation and verification of the authenticated registry
+  sequence and enrollment tombstone status.

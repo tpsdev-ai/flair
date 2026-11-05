@@ -800,7 +800,7 @@ describe("commit-fence (invariant 7)", () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.status).toBe("commit_failed");
+    expect(result.status).toBe("commit_uncertain");
     expect(result.reason).toBe("commit_uncertain");
     expect(result.remedy).toBe("Re-open custody, reconcile uncertainty, then verify the authenticated registry sequence and the enrollment's tombstone status.");
     expect(readFileSync(integrityPaths(custodyDir).uncertainPath, "utf-8")).toBe("registry:2");
