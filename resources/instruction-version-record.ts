@@ -620,8 +620,10 @@ export async function recordVersion(
   } catch (err) {
     if (callerTransaction) callerTransaction.abort();
     if (err instanceof RowMutationDenied) return { ok: false, response: err.response };
-    // Rows this append builds are validated before staging, so a Harper
-    // ValidationError here is the caller's row: report it as 400.
+    // Rows this append builds are validated before staging: their caller-derived
+    // fields are coerced to the schema's types where they are assigned, so a
+    // schema failure on one is a server defect. A Harper ValidationError that
+    // reaches here is the caller's row: report it as 400.
     const validation = validationErrorResponse(err);
     if (validation) return { ok: false, response: validation };
     // A head-read, append or commit failure aborts the whole transaction; report

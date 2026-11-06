@@ -13,6 +13,8 @@ import {
 } from "./a2a-stream.js";
 import { adminContext, agentContext } from "./in-process.js";
 import { OrgEventCatchup } from "./OrgEventCatchup.js";
+import { maybeFaultOrgEventRow } from "./org-event-write-fault.js";
+import { ServerRowValidationError, ServerRowValidatorMissingError, validateServerRow } from "./server-row-validation.js";
 
 type JsonRpcRequest = {
   jsonrpc: string;
@@ -220,7 +222,8 @@ function artifactsFromIssue(issue: BeadsIssue): any[] {
 }
 
 async function publishOrgEvent(event: any): Promise<void> {
-  await (databases as any).flair.OrgEvent.put({
+  const table = (databases as any).flair.OrgEvent;
+  const row = {
     id: event.id ?? `a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     authorId: event.authorId ?? "a2a",
     kind: event.kind,
@@ -230,7 +233,12 @@ async function publishOrgEvent(event: any): Promise<void> {
     targetIds: event.targetIds ?? [],
     refId: event.refId ?? null,
     createdAt: event.createdAt ?? new Date().toISOString(),
-  });
+  };
+  // Test-only: the hook may corrupt the exact row about to be staged (inert
+  // unless a fixture installs one).
+  maybeFaultOrgEventRow("a2a", row);
+  validateServerRow(table, row);
+  await table.put(row);
 }
 
 /**
@@ -425,14 +433,24 @@ export class A2AAdapter extends Resource {
         }
 
         const summary = truncate(firstTextPart(message) || "A2A message received", 200);
-        await publishOrgEvent({
-          authorId: agentId,
-          kind: "a2a.message",
-          scope: agentId,
-          summary,
-          detail: JSON.stringify({ message, toAgentId: toAgentId || null }),
-          targetIds,
-        });
+        try {
+          await publishOrgEvent({
+            authorId: agentId,
+            kind: "a2a.message",
+            scope: agentId,
+            summary,
+            detail: JSON.stringify({ message, toAgentId: toAgentId || null }),
+            targetIds,
+          });
+        } catch (err) {
+          if (err instanceof ServerRowValidationError || err instanceof ServerRowValidatorMissingError) {
+            return new Response(
+              JSON.stringify(rpcError(id, -32000, "Server error", { error: "org_event_row_invalid" })),
+              { status: 500, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          throw err;
+        }
 
         return rpcResult(id, {
           type: "message",

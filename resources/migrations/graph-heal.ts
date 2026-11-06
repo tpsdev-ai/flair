@@ -57,6 +57,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { embeddingSpaceVerdict, spaceGuardState } from "../embedding-space-guard.js";
+import { maybeFaultOrgEventRow } from "../org-event-write-fault.js";
+import { validateServerRow } from "../server-row-validation.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export const GRAPH_HEAL_ID = "graph-heal";
@@ -71,6 +73,7 @@ export interface MemoryTableLike {
 
 export interface OrgEventTableLike {
   put(content: unknown): Promise<unknown>;
+  validate?(record: unknown, patch?: boolean): void;
 }
 
 function defaultMemoryTable(): MemoryTableLike {
@@ -205,7 +208,7 @@ async function writeGraphHealEvent(obs: HealObservation, table: OrgEventTableLik
     obs.embeddedVectorCount != null
       ? ` (${obs.embeddedVectorCount} embedded vector${obs.embeddedVectorCount === 1 ? "" : "s"})`
       : "";
-  await table.put({
+  const row = {
     id: `migration-graph-heal-verified-${obs.at}`,
     authorId: "flair-migrations",
     kind: "migration",
@@ -221,7 +224,12 @@ async function writeGraphHealEvent(obs: HealObservation, table: OrgEventTableLik
     }),
     refId: GRAPH_HEAL_ID,
     createdAt: obs.at,
-  });
+  };
+  // Test-only: the hook may corrupt the exact row about to be staged (inert
+  // unless a fixture installs one).
+  maybeFaultOrgEventRow("graph-heal", row);
+  validateServerRow(table, row);
+  await table.put(row);
 }
 
 /**

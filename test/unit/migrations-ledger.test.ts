@@ -22,6 +22,7 @@ import type { LedgerEvent } from "../../resources/migrations/ledger.ts";
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
 const { writeLedgerEvent, buildLedgerDetail } = await import("../../resources/migrations/ledger.ts");
+const { ServerRowValidationError, ServerRowValidatorMissingError } = await import("../../resources/server-row-validation.ts");
 
 const baseEvent: LedgerEvent = {
   migrationId: "embedding-stamp",
@@ -82,7 +83,7 @@ describe("buildLedgerDetail — structural-only content", () => {
 describe("writeLedgerEvent — table interaction", () => {
   it("calls put() exactly once, with authorId/kind/refId/summary/detail/createdAt set", async () => {
     const calls: unknown[] = [];
-    const fakeTable = { put: async (content: unknown) => { calls.push(content); return content; } };
+    const fakeTable = { put: async (content: unknown) => { calls.push(content); return content; }, validate: () => {} };
 
     await writeLedgerEvent(baseEvent, { orgEventTable: fakeTable });
 
@@ -103,7 +104,7 @@ describe("writeLedgerEvent — table interaction", () => {
 
   it("summary mentions rowsRemaining only when nonzero (halted mid-way case)", async () => {
     const calls: unknown[] = [];
-    const fakeTable = { put: async (content: unknown) => { calls.push(content); return content; } };
+    const fakeTable = { put: async (content: unknown) => { calls.push(content); return content; }, validate: () => {} };
 
     await writeLedgerEvent(
       { ...baseEvent, outcome: "halted", rowsProcessed: 5, rowsRemaining: 37, error: "blocked" },
@@ -116,9 +117,41 @@ describe("writeLedgerEvent — table interaction", () => {
 
   it("id is derived from migrationId + endedAt (deterministic, no random component, no memory ids)", async () => {
     const calls: unknown[] = [];
-    const fakeTable = { put: async (content: unknown) => { calls.push(content); return content; } };
+    const fakeTable = { put: async (content: unknown) => { calls.push(content); return content; }, validate: () => {} };
     await writeLedgerEvent(baseEvent, { orgEventTable: fakeTable });
     const written = calls[0] as Record<string, unknown>;
     expect(written.id).toBe(`migration-embedding-stamp-${baseEvent.endedAt}`);
+  });
+});
+
+describe("writeLedgerEvent — server-built row validation (flair#3002)", () => {
+  it("refuses an invalid row before it is staged", async () => {
+    const calls: unknown[] = [];
+    const cause = new Error("schema");
+    const fakeTable = {
+      put: async (content: unknown) => { calls.push(content); return content; },
+      validate: () => { throw cause; },
+    };
+    let thrown: unknown;
+    try {
+      await writeLedgerEvent(baseEvent, { orgEventTable: fakeTable });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(ServerRowValidationError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refuses a table handle that exposes no validator", async () => {
+    const calls: unknown[] = [];
+    const fakeTable = { put: async (content: unknown) => { calls.push(content); return content; } };
+    let thrown: unknown;
+    try {
+      await writeLedgerEvent(baseEvent, { orgEventTable: fakeTable });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(ServerRowValidatorMissingError);
+    expect(calls).toHaveLength(0);
   });
 });

@@ -328,10 +328,11 @@ export interface SkillWriteHooks {
 export const defaultSkillHooks: SkillWriteHooks = {
   createSuccessor: async (successor, shared) => {
     normalizeEmptyEmbedding(successor);
-    // Not pre-validated: this row carries the caller's fields, so a defect in
-    // it — a server-stamped field included — stays a caller error (400) at
-    // commit. Only rows the server builds entirely are pre-validated
-    // (resources/server-row-validation.ts).
+    // Not pre-validated: this row carries the caller's fields without that
+    // coercion, so a defect in it — a server-stamped field included — stays a
+    // caller error (400) at commit. Pre-validation covers the A2A,
+    // agent-key-register and instruction-version writer events and the
+    // migration rows (resources/server-row-validation.ts).
     const result = storageResult(await (databases as any).flair.Memory.put(successor, shared));
     if (result instanceof Response) return result;
     return String(successor.id);
