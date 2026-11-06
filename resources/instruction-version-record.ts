@@ -279,21 +279,11 @@ type HarperValidationErrorCtor = new (errors: unknown[], message?: string) => Er
 let harperValidationErrorCtor: HarperValidationErrorCtor | undefined;
 
 /**
- * Harper's own `ValidationError` constructor, or null when that module is not
- * already loaded here. `harper`'s package exports only "." (harper@5.3.1
- * package.json), so the class is not importable by specifier; resolve its main
- * entry and read the module beside it from the require cache — the same
- * createRequire walk resources/Presence.ts uses for Harper's package.json.
- *
- * Identity is the point: a plain Error that copies the fields is not the
- * validator's error. The cache is the instance that threw — a module is
- * executed at most once per path — so this cannot compare against a second
- * Harper copy. It deliberately does NOT require the module: Harper's
- * hdbError graph reaches dist/globals.js, which assigns
- * `global.transaction = undefined`; in a process that mocks `harper` (the unit
- * lane) requiring it would clear the mock's transaction, so later unwrapped
- * writes fail. A miss reports no match, and the append keeps its own 500
- * rather than claiming a client error.
+ * Read and memoize Harper's cached `ValidationError` constructor. `harper`
+ * exports only ".", so resolve the main entry to locate hdbError.js.
+ * An uncached load can execute globals.js and clear `global.transaction`;
+ * this helper never requires the module. Eviction/reload can leave the memoized
+ * constructor stale. A missing constructor reports no match.
  */
 function harperValidationError(): HarperValidationErrorCtor | null {
   if (harperValidationErrorCtor) return harperValidationErrorCtor;
@@ -313,7 +303,7 @@ function harperValidationError(): HarperValidationErrorCtor | null {
  * Harper's REST responder uses for it (harper@5.3.1 dist/server/REST.js:498).
  * The class is declared at dist/utility/errors/hdbError.js:243; in that
  * version's dist it is constructed only at the two schema-validation sites,
- * dist/resources/Table.js:6461 and dist/resources/defineResource.js:432, both
+ * dist/resources/Table.js:6459 and dist/resources/defineResource.js:432, both
  * with a non-empty issue list. Its constructor sets `name` and `code` to
  * "ValidationError", a 400 `statusCode`, and the `errors` array. The status
  * check refuses any 5xx.
@@ -323,8 +313,7 @@ function validationErrorResponse(err: unknown): Response | null {
   const candidate = err as { name?: unknown; code?: unknown; statusCode?: unknown; errors?: unknown; message?: unknown };
   if (candidate.name !== "ValidationError" || candidate.code !== "ValidationError" || candidate.statusCode !== 400) return null;
   const issues = candidate.errors;
-  // Cheap shape checks first: the class lookup below must not run for an
-  // ordinary error the append answers 500.
+  // Only errors passing the shape checks reach the constructor lookup.
   if (!Array.isArray(issues) || issues.length === 0) return null;
   const wellFormed = issues.every((issue) => {
     if (!issue || typeof issue !== "object") return false;
@@ -623,9 +612,7 @@ export async function recordVersion(
   } catch (err) {
     if (callerTransaction) callerTransaction.abort();
     if (err instanceof RowMutationDenied) return { ok: false, response: err.response };
-    // A schema validation failure is the caller's error: abort the transaction
-    // like any other failure, then report the validator's own 400 and field
-    // message instead of the append's 500.
+    // Report a matching Harper ValidationError as 400.
     const validation = validationErrorResponse(err);
     if (validation) return { ok: false, response: validation };
     // A head-read, append or commit failure aborts the whole transaction; report

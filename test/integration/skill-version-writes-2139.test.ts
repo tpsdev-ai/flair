@@ -362,6 +362,7 @@ describe("flair#2979 — a commit-time Memory validation failure", () => {
     const beforeVersions = await versionsOf(id);
     expect(beforeVersions).toHaveLength(1);
     const beforeEvents = await eventsFor(beforeVersions.map((version) => version.id));
+    const nextVersionId = `skill:${id}:${(BigInt(beforeVersions[0].version) + 1n).toString()}`;
 
     const res = await call(A, "PUT", memPath(id), skillBody(id, "after", { retrievalCount: "not-an-int" }));
     expect(res.status, res.text.slice(0, 300)).toBe(400);
@@ -373,5 +374,15 @@ describe("flair#2979 — a commit-time Memory validation failure", () => {
     expect(await memoryRow(id)).toEqual(beforeRow);
     expect(await versionsOf(id)).toEqual(beforeVersions);
     expect(await eventsFor(beforeVersions.map((version) => version.id))).toEqual(beforeEvents);
+    expect(await eventsFor([nextVersionId]), "the rejected version must leave no event").toEqual([]);
+
+    const updated = await call(A, "PUT", memPath(id), skillBody(id, "after"));
+    expect(updated.status, updated.text.slice(0, 300)).toBeLessThan(300);
+    const afterVersions = await versionsOf(id);
+    expect(afterVersions).toHaveLength(beforeVersions.length + 1);
+    expect(afterVersions[afterVersions.length - 1].id).toBe(nextVersionId);
+    const afterEvents = await eventsFor([nextVersionId]);
+    expect(afterEvents).toHaveLength(1);
+    expect(afterEvents[0].id).toBe(`instruction-change:${nextVersionId}`);
   }, 120_000);
 });
