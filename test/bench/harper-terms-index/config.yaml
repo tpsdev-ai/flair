@@ -1,0 +1,10 @@
+# Isolated Harper application for the flair#2047 spike.
+# Not loaded by Flair's config.yaml. `run.ts` starts Harper with this directory as cwd.
+name: harper-terms-index-spike
+rest: true
+authentication:
+  authorizeLocal: true
+graphqlSchema:
+  files: schemas/*.graphql
+jsResource:
+  files: resources/*.js
