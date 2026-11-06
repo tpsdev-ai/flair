@@ -1,13 +1,16 @@
-// ─── flair#3002 — the other server-built OrgEvent rows answer 5xx ──────────
+// ─── flair#3002 — the A2A and agent-key-register OrgEvent rows answer 5xx ──
 //
 // The A2A message/send event and the agent-key-register event are built on the
-// server: every caller-derived field is a string by the time it is assigned
-// (cleanText, a template, or String()). Each is validated with the OrgEvent
-// table's own validator before staging, so a forced invalid row answers the
-// endpoint's server-error shape and commits nothing.
+// server: their caller-derived scalar fields are strings by the time they are
+// assigned (cleanText, a template, or String()), and the A2A event's
+// targetIds is an array of caller-derived string ids. Each row is validated
+// with the OrgEvent table's own validator before staging, so a forced invalid
+// row never reaches the staging call, answers the endpoint's server-error
+// shape, and commits nothing.
 //
 // Real, HOME-isolated Harper; the invalid rows come from the test-only writer
-// hook (test/fixtures/org-event-write-fault-3002/probe.js).
+// hook and the staging call is observed through a wrapper on the OrgEvent
+// table's put (test/fixtures/org-event-write-fault-3002/probe.js).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
@@ -30,8 +33,19 @@ const mkAgent = (id: string): TestAgent => {
 
 const sfx = Date.now().toString(36);
 const A2A = mkAgent(`fault-mutate-a2a-${sfx}`);
+const A2A_CONTROL = mkAgent(`control-a2a-${sfx}`);
 const KEY = mkAgent(`fault-mutate-agent-key-register-${sfx}`);
+const KEY_CONTROL = mkAgent(`control-key-${sfx}`);
+const NUMERIC_ID = 987_654_321;
 const PENDING_PUBLIC_KEY = "pending";
+
+interface StagedRow {
+  id: string | null;
+  refId: string | null;
+  scope: string | null;
+  summaryType: string;
+  summary: string | null;
+}
 
 let harper: HarperInstance;
 let installDir = "";
@@ -64,6 +78,25 @@ async function ops(operation: Record<string, unknown>): Promise<any> {
   return JSON.parse(text);
 }
 
+async function probe(action: string, extra: Record<string, unknown> = {}): Promise<any> {
+  const res = await fetch(`${harper.httpURL}/OrgEventWriteProbe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: basicAuth() },
+    body: JSON.stringify({ action, ...extra }),
+  });
+  const text = await res.text();
+  expect(res.status, `${action}: ${text.slice(0, 300)}`).toBe(200);
+  return JSON.parse(text);
+}
+
+async function staged(): Promise<StagedRow[]> {
+  return (await probe("staged")).staged;
+}
+
+async function resetStaged(): Promise<void> {
+  await probe("reset");
+}
+
 async function eventsByScope(agentId: string): Promise<any[]> {
   return ops({
     operation: "search_by_value", database: "flair", table: "OrgEvent",
@@ -71,22 +104,22 @@ async function eventsByScope(agentId: string): Promise<any[]> {
   });
 }
 
-async function eventsByRef(agentId: string): Promise<any[]> {
+async function eventsByRef(agentId: string | number): Promise<any[]> {
   return ops({
     operation: "search_by_value", database: "flair", table: "OrgEvent",
-    search_attribute: "refId", search_value: agentId, get_attributes: ["id", "kind"],
+    search_attribute: "refId", search_value: String(agentId), get_attributes: ["id", "kind", "refId"],
   });
 }
 
-async function agentRow(id: string): Promise<any | null> {
-  const rows = await ops({ operation: "search_by_id", database: "flair", table: "Agent", ids: [id], get_attributes: ["*"] });
+async function agentRow(id: string | number): Promise<any | null> {
+  const rows = await ops({ operation: "search_by_id", database: "flair", table: "Agent", ids: [String(id)], get_attributes: ["*"] });
   return rows[0] ?? null;
 }
 
-async function registrationsOf(agentId: string): Promise<any[]> {
+async function registrationsOf(agentId: string | number): Promise<any[]> {
   return ops({
     operation: "search_by_value", database: "flair", table: "AgentKeyRegistration",
-    search_attribute: "agentId", search_value: agentId, get_attributes: ["id"],
+    search_attribute: "agentId", search_value: String(agentId), get_attributes: ["id"],
   });
 }
 
@@ -101,7 +134,10 @@ beforeAll(async () => {
     operation: "upsert", database: "flair", table: "Agent",
     records: [
       { id: A2A.id, name: A2A.id, role: "agent", publicKey: A2A.publicKey, createdAt: now },
+      { id: A2A_CONTROL.id, name: A2A_CONTROL.id, role: "agent", publicKey: A2A_CONTROL.publicKey, createdAt: now },
       { id: KEY.id, name: KEY.id, role: "agent", publicKey: PENDING_PUBLIC_KEY, createdAt: now },
+      { id: KEY_CONTROL.id, name: KEY_CONTROL.id, role: "agent", publicKey: PENDING_PUBLIC_KEY, createdAt: now },
+      { id: String(NUMERIC_ID), name: `numeric-agent-${sfx}`, role: "agent", publicKey: PENDING_PUBLIC_KEY, createdAt: now },
     ],
   });
 }, 240_000);
@@ -112,24 +148,57 @@ afterAll(async () => {
   composed?.cleanup();
 }, HARPER_STOP_BUDGET_MS);
 
+function sendA2A(who: TestAgent, text: string): Promise<Response> {
+  const path = "/a2a";
+  return fetch(harper.httpURL + path, {
+    method: "POST",
+    headers: { Authorization: ed25519(who, "POST", path), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 1, method: "message/send",
+      params: { agentId: who.id, message: { parts: [{ text }] } },
+    }),
+  });
+}
+
 describe("flair#3002 — an invalid server-built OrgEvent row answers 5xx and commits nothing", () => {
-  test("an invalid A2A message event answers 500 and writes no event", async () => {
-    const path = "/a2a";
-    const res = await fetch(harper.httpURL + path, {
-      method: "POST",
-      headers: { Authorization: ed25519(A2A, "POST", path), "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0", id: 1, method: "message/send",
-        params: { agentId: A2A.id, message: { parts: [{ text: "hello" }] } },
-      }),
-    });
+  test("an invalid A2A message event is refused before staging and answers 500", async () => {
+    // Positive control: a valid message reaches staging, so the observer is live.
+    await resetStaged();
+    const control = await sendA2A(A2A_CONTROL, "control message");
+    expect(control.status, await control.text()).toBe(200);
+    const controlRows = (await staged()).filter((row) => row.scope === A2A_CONTROL.id);
+    expect(controlRows, "the valid control row must reach staging").toHaveLength(1);
+    expect(controlRows[0].summaryType).toBe("string");
+
+    // The invalid row is refused by pre-validation, before the staging call.
+    await resetStaged();
+    const res = await sendA2A(A2A, "hello");
     const text = await res.text();
+    expect(
+      (await staged()).filter((row) => row.scope === A2A.id),
+      "the invalid row must not reach staging",
+    ).toHaveLength(0);
     expect(res.status, text.slice(0, 300)).toBe(500);
     expect(JSON.parse(text).error).toBe("org_event_row_invalid");
     expect(await eventsByScope(A2A.id), "no event may survive").toHaveLength(0);
   }, 120_000);
 
-  test("an invalid key-registration event answers 503 and commits nothing", async () => {
+  test("an invalid key-registration event is refused before staging and answers 503", async () => {
+    // Positive control: a valid registration reaches staging.
+    await resetStaged();
+    const controlKey = Buffer.from(nacl.sign.keyPair().publicKey).toString("base64url");
+    const control = await fetch(`${harper.httpURL}/AgentKeyRegister`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: basicAuth() },
+      body: JSON.stringify({ agentId: KEY_CONTROL.id, publicKey: controlKey }),
+    });
+    expect(control.status, await control.text()).toBe(200);
+    const controlRows = (await staged()).filter((row) => row.refId === KEY_CONTROL.id);
+    expect(controlRows, "the valid control row must reach staging").toHaveLength(1);
+    expect(controlRows[0].summaryType).toBe("string");
+
+    // The invalid row is refused by pre-validation, before the staging call.
+    await resetStaged();
     const kp = nacl.sign.keyPair();
     const publicKey = Buffer.from(kp.publicKey).toString("base64url");
     const before = await agentRow(KEY.id);
@@ -139,11 +208,37 @@ describe("flair#3002 — an invalid server-built OrgEvent row answers 5xx and co
       body: JSON.stringify({ agentId: KEY.id, publicKey }),
     });
     const text = await res.text();
+    expect(
+      (await staged()).filter((row) => row.refId === KEY.id),
+      "the invalid row must not reach staging",
+    ).toHaveLength(0);
     expect(res.status, text.slice(0, 300)).toBe(503);
     expect(JSON.parse(text).error).toBe("registration_unavailable");
 
     expect(await agentRow(KEY.id)).toEqual(before);
     expect(await registrationsOf(KEY.id), "no audit row may survive").toHaveLength(0);
     expect(await eventsByRef(KEY.id), "no event may survive").toHaveLength(0);
+  }, 120_000);
+
+  test("a numeric agent id registers with a string refId that a consumer lookup finds", async () => {
+    await resetStaged();
+    const kp = nacl.sign.keyPair();
+    const publicKey = Buffer.from(kp.publicKey).toString("base64url");
+    const res = await fetch(`${harper.httpURL}/AgentKeyRegister`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: basicAuth() },
+      body: JSON.stringify({ agentId: NUMERIC_ID, publicKey }),
+    });
+    const text = await res.text();
+    expect(res.status, text.slice(0, 300)).toBe(200);
+
+    const rows = (await staged()).filter((row) => row.refId === String(NUMERIC_ID));
+    expect(rows, "the numeric id must be staged as its string form").toHaveLength(1);
+    expect(rows[0].refId).toBe(String(NUMERIC_ID));
+    expect(typeof rows[0].refId).toBe("string");
+
+    const found = await eventsByRef(NUMERIC_ID);
+    expect(found, "a consumer lookup by the string form must find the event").toHaveLength(1);
+    expect(found[0].refId).toBe(String(NUMERIC_ID));
   }, 120_000);
 });

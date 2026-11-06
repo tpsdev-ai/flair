@@ -110,11 +110,14 @@ export class AgentKeyRegister extends Resource {
 
     // Validate the body.
     const body = data && typeof data === "object" ? data : {};
-    const agentId = (body as any).agentId;
+    const suppliedAgentId = (body as any).agentId;
     const publicKey = (body as any).publicKey;
-    if (!isValidAgentId(agentId)) {
-      return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, invalidAgentIdMessage(agentId));
+    if (!isValidAgentId(suppliedAgentId)) {
+      return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, invalidAgentIdMessage(suppliedAgentId));
     }
+    // The rule accepts a number; the Agent row's key and the audit row's
+    // agentId are strings, so resolve the id to its string form once.
+    const agentId = String(suppliedAgentId);
     if (!isCanonicalEd25519Base64url(publicKey)) {
       return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, "publicKey must be a canonical base64url encoding of 32 bytes");
     }

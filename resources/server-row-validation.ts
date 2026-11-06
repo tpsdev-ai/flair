@@ -15,12 +15,15 @@
  * accepted row stored byte-identical). A failure is therefore a server defect,
  * not a caller error.
  *
- * The rows validated here carry caller-derived fields, and each of those fields
- * is coerced to the schema's type where it is assigned, so a schema failure on
- * the row is a server defect, not a caller error. A Memory successor or close
- * row carries the caller's fields without that coercion, so it keeps the
- * commit-time path: a defect in one of its fields, a server-stamped field
- * included, answers the caller's 400 rather than 5xx.
+ * The rows validated here are built by the server: the A2A and
+ * agent-key-register events coerce their caller-derived fields to the schema's
+ * types where they are assigned, the instruction-version event is built from
+ * server-stamped values, and the migration-ledger and graph-heal rows come from
+ * migration data. A schema failure on one is therefore a server defect, not a
+ * caller error. A Memory successor or close row carries the caller's fields
+ * without that coercion, so it keeps the commit-time path: a defect in one of
+ * its fields, a server-stamped field included, answers the caller's 400 rather
+ * than 5xx.
  */
 export class ServerRowValidationError extends Error {
   constructor(tableName: string, cause: unknown) {

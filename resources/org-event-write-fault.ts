@@ -1,7 +1,7 @@
 /**
  * org-event-write-fault.ts — the injection point for a per-site fault in the
  * OrgEvent writers that build their row on the server (flair#3002): the A2A
- * message/send event and the agent-key-register event.
+ * message/send event, the agent-key-register event and the graph-heal event.
  *
  * The hook is null unless setOrgEventWriteFaultHook installs one. Nothing
  * under resources/ or src/ calls it; the real-Harper suite installs it from
@@ -10,7 +10,7 @@
  * test fixture can hand the writer a row its table's validator must refuse.
  */
 
-export type OrgEventWriteSite = "a2a" | "agent-key-register";
+export type OrgEventWriteSite = "a2a" | "agent-key-register" | "graph-heal";
 
 export type OrgEventWriteFaultHook = (site: OrgEventWriteSite, row: Record<string, any>) => void;
 

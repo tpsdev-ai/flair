@@ -21,7 +21,7 @@ function sources(dir: string): string[] {
 
 describe("OrgEvent writer fault hook (flair#3002)", () => {
   test("no installed hook leaves the row untouched", () => {
-    for (const site of ["a2a", "agent-key-register"] as const) {
+    for (const site of ["a2a", "agent-key-register", "graph-heal"] as const) {
       const row = { id: "e1", summary: "kept" };
       expect(() => maybeFaultOrgEventRow(site, row)).not.toThrow();
       expect(row).toEqual({ id: "e1", summary: "kept" });
