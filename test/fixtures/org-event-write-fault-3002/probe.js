@@ -11,8 +11,8 @@
 //   - installs the writer hook: scope (A2A) or refId (key-registration target;
 //     authorId is the admin) starting with `fault-mutate-<site>-` gets a
 //     non-string summary, which the table
-//     validator must refuse; the graph-heal action installs the same fault
-//     on demand;
+//     validator must refuse; the graph-heal action activates the installed hook
+//     for that call;
 //   - wraps the OrgEvent table's own `put`, so every row the staging call
 //     receives is appended to <ROOTPATH>/org-event-write-fault-3002/staged.jsonl
 //     before the original put runs. The probe's `staged` action reads that

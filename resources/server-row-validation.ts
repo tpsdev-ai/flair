@@ -18,7 +18,8 @@
  * The rows validated here are built by the server: the A2A and
  * agent-key-register events coerce their caller-derived fields to the schema's
  * types where they are assigned, the instruction-version event is built from
- * server-stamped values, and the migration-ledger and graph-heal rows come from
+ * version fields, with caller-derived values converted or serialized to the
+ * schema's types, and the migration-ledger and graph-heal rows come from
  * migration data. A schema failure on one is therefore a server defect, not a
  * caller error. A Memory successor or close row carries the caller's fields
  * without that coercion, so it keeps the commit-time path: a defect in one of
