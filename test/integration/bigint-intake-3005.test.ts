@@ -3,8 +3,9 @@
  *
  * Harper hands the process a BigInt for a JSON integer beyond
  * Number.MAX_SAFE_INTEGER. Three intakes that previously reached
- * `JSON.stringify` with that value and raised an unhandled error now answer a
- * caller error before any write:
+ * `JSON.stringify` with that value and surfaced as the server's generic error
+ * (A2A's outer catch answered -32000) now answer a caller error before any
+ * write:
  *
  *   - POST /Agent/ with a body `id` — 400 invalid_agent_id with the string
  *     remedy key registration answers since #3003;
@@ -12,7 +13,9 @@
  *   - POST /a2a message/send with a BigInt anywhere in `message` — JSON-RPC
  *     -32602 naming `message`.
  *
- * Each case also asserts that no row, audit row or OrgEvent was written.
+ * Assertions per case: the Agent case checks the Agent row and the
+ * key-registration audit row; the AgentSeed case checks the Agent, Soul and
+ * Memory rows; both check OrgEvent. The A2A case checks the OrgEvent count.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";

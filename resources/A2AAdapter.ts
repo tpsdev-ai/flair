@@ -409,8 +409,8 @@ export class A2AAdapter extends Resource {
         if (refusal) return refusal;
 
         // A BigInt anywhere in the caller's message makes the detail below
-        // unrepresentable; refuse it as a caller error before any table read
-        // or event row, naming the field.
+        // unrepresentable; refuse it as a caller error before the sender
+        // lookup in this handler, naming the field.
         if (containsBigInt(message)) {
           return rpcError(id, -32602, "Invalid params: message contains an integer beyond the safe range; send it as a string", {
             field: "message",

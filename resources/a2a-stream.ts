@@ -55,8 +55,8 @@ export function rpcError(id: JsonRpcId, code: number, message: string, data?: an
 
 /** The JSON-RPC error for a server-built OrgEvent row the writer refused. A
  *  table handle that exposes no validator (the entry point disappeared) is a
- *  distinct code from a row the validator refused, so logs and tests can tell
- *  the two defects apart. */
+ *  distinct code from a row the validator refused, so responses and tests can
+ *  tell the two defects apart. */
 export type OrgEventWriteFailure = "row_invalid" | "validator_missing";
 
 export function orgEventWriteFailure(id: JsonRpcId, failure: OrgEventWriteFailure) {

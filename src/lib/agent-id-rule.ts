@@ -36,13 +36,14 @@ export const AGENT_ID_ERROR = "invalid_agent_id";
 
 /** The remedy for an id Harper delivered as a JSON integer it could not hold
  *  exactly: it arrives here as a BigInt (or, on another intake, as a number
- *  beyond Number.MAX_SAFE_INTEGER). Such a value has no exact decimal string
- *  to echo, so the refusal names the remedy instead. */
+ *  beyond Number.MAX_SAFE_INTEGER). A BigInt cannot be JSON-stringified, and
+ *  an unsafe number has already lost the digits the caller sent, so the
+ *  refusal names the remedy instead. */
 export const AGENT_ID_STRING_REMEDY = "send the agent id as a string";
 
 /** True for an id Harper delivered from a JSON integer that JavaScript cannot
  *  hold exactly. A BigInt is never an agent ID; an unsafe number would lose
- *  precision when compared or stored, so it is refused for the same reason. */
+ *  precision when compared or stored, so isValidAgentId refuses it too. */
 export function isUnsafeAgentIdWireValue(id: unknown): boolean {
   return typeof id === "bigint" || (typeof id === "number" && !Number.isSafeInteger(id));
 }
@@ -55,6 +56,7 @@ export function isUnsafeAgentIdWireValue(id: unknown): boolean {
  */
 export function isValidAgentId(id: unknown): boolean {
   if (typeof id !== "string" && typeof id !== "number") return false;
+  if (typeof id === "number" && !Number.isSafeInteger(id)) return false;
   return AGENT_ID_PATTERN.test(String(id));
 }
 
