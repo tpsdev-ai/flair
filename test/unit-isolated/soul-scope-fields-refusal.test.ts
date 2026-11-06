@@ -19,6 +19,7 @@ let eventStore: Map<string, any>;
 
 const versionPrimaryStore = { tryLock: () => true, unlock: () => {}, resetReadTxn: () => {} };
 const InstructionVersionBase = {
+  validate() {},
   primaryStore: versionPrimaryStore,
   async *search(query: any) {
     const conditions: any[] = query?.conditions ?? [];
@@ -60,6 +61,7 @@ class BaseSoul {
 }
 
 const OrgEventBase = {
+  validate() {},
   async *search() {},
   async create(record: any) {
     if (eventStore.has(record.id)) throw new Error("Record already exists");

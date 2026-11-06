@@ -45,8 +45,6 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"],
   "Memory post/put and FeedMemories scan the merged successor body before calling this writer.");
 add("skill-version-write", ["writer:table.put#1"],
   "Re-applies a version close from a fresh committed read when the queued close did not land (flair#2645).");
-add("skill-version-write", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2"],
-  "Table handles passed to the pre-staging validator (flair#2997); the row writes through them are the classified puts above.");
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#2"],
   "Post-commit close confirmation handle: reads the committed predecessor and successor, and the close retry's `table.put` (above) writes through it (flair#2645).");
 

@@ -19,7 +19,7 @@ const MUTATE_PREFIX = "__flair_fault_mutate__";
 setSkillWriteFaultHook((step, agentId, record) => {
   if (agentId === `${PREFIX}${step}`) throw new Error(`skill-write fault injected at '${step}' (test-only)`);
   if (!record || agentId !== `${MUTATE_PREFIX}${step}`) return;
-  if (step === "successor") record.content = 123;
+  if (step === "successor") record.instanceToken = 123;
   else if (step === "append") record.guarded = "no";
   else if (step === "event") record.summary = 123;
 });

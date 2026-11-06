@@ -2,9 +2,13 @@
 //
 // A caller row that fails Harper's schema validation keeps its 400 (the
 // instruction-version append's validationErrorResponse). Rows the server builds
-// itself — the InstructionVersion record, its OrgEvent, the skill successor —
-// are pre-validated with their own table's validator before staging, so a
-// server defect answers the write's 5xx shape and commits nothing.
+// ENTIRELY — the InstructionVersion record and its OrgEvent — are pre-validated
+// with their own table's validator before staging, so a server defect answers
+// the write's 5xx shape and commits nothing.
+//
+// A Memory successor/close row carries the caller's fields, so it keeps the
+// commit-time path: a defect in one of its fields, a server-stamped field
+// included, answers 400 and commits nothing (the residual case below).
 //
 // Real, HOME-isolated Harper; the invalid server-built rows come from the
 // existing test-only fault hook (test/fixtures/skill-write-fault-2139/probe.js).
@@ -25,7 +29,9 @@ const FAULT_PROBE: ProbeFiles = {
 /** The owner-id prefix the probe hands an invalid row to (see the probe). */
 const MUTATE_PREFIX = "__flair_fault_mutate__";
 /** Server-built row each step corrupts. */
-const STEPS = ["successor", "append", "event"] as const;
+const STEPS = ["append", "event"] as const;
+/** The Memory successor step is exercised as a 400 residual, not a 5xx. */
+const MEMORY_MUTATE_STEP = "successor" as const;
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
 const mkAgent = (id: string): TestAgent => {
@@ -35,8 +41,8 @@ const mkAgent = (id: string): TestAgent => {
 
 const sfx = Date.now().toString(36);
 const A = mkAgent(`rowval-owner-${sfx}`);
-const MUTATE = Object.fromEntries(STEPS.map((s) => [s, mkAgent(`${MUTATE_PREFIX}${s}`)])) as
-  Record<(typeof STEPS)[number], TestAgent>;
+const MUTATE = Object.fromEntries([...STEPS, MEMORY_MUTATE_STEP].map((s) => [s, mkAgent(`${MUTATE_PREFIX}${s}`)])) as
+  Record<(typeof STEPS)[number] | typeof MEMORY_MUTATE_STEP, TestAgent>;
 const now = () => new Date().toISOString();
 
 let harper: HarperInstance;
@@ -128,7 +134,7 @@ beforeAll(async () => {
   assertOwnInstance(harper);
   await ops({
     operation: "upsert", database: "flair", table: "Agent",
-    records: [A, ...STEPS.map((s) => MUTATE[s])].map((a) => ({
+    records: [A, ...STEPS.map((s) => MUTATE[s]), MUTATE[MEMORY_MUTATE_STEP]].map((a) => ({
       id: a.id, name: a.id, role: "agent", publicKey: a.publicKey, createdAt: now(),
     })),
   });
@@ -156,7 +162,7 @@ describe("flair#2997 — the caller's row keeps its 400", () => {
   }, 120_000);
 });
 
-describe("flair#2997 — an invalid server-built row answers 5xx and commits nothing", () => {
+describe("flair#2997 — an invalid InstructionVersion or OrgEvent row answers 5xx and commits nothing", () => {
   for (const step of STEPS) {
     test(`an invalid ${step} row leaves the predecessor, versions and events unchanged`, async () => {
       const agent = MUTATE[step];
@@ -180,6 +186,32 @@ describe("flair#2997 — an invalid server-built row answers 5xx and commits not
       expect(await eventsOf(agent.id), "no event may survive").toHaveLength(0);
     }, 120_000);
   }
+});
+
+describe("flair#2997 — a Memory successor field keeps the caller's 400", () => {
+  test("an invalid server-stamped Memory successor field answers 400 and commits nothing", async () => {
+    const agent = MUTATE[MEMORY_MUTATE_STEP];
+    const id = nextId(`invalid-${MEMORY_MUTATE_STEP}`);
+    await ops({
+      operation: "upsert", database: "flair", table: "Memory",
+      records: [{
+        id, agentId: agent.id, content: "v1", trigger: "t", tags: ["skill"],
+        skillSubjectId: id, durability: "persistent", visibility: "shared", createdAt: now(),
+      }],
+    });
+    const before = await memoryRow(id);
+    const res = await call(agent, "PUT", memPath(id), skillBody(agent, id, "v2", { visibility: "shared" }));
+    expect(res.status, res.text.slice(0, 300)).toBe(400);
+    const body = JSON.parse(res.text);
+    expect(body.code).toBe("ValidationError");
+    expect(body.detail.some((issue: any) => issue.path === "instanceToken"), JSON.stringify(body.detail)).toBe(true);
+
+    const after = await memoryRow(id);
+    expect(after).toEqual(before);
+    expect((await memoryRowsBySubject(id)).map((row: any) => row.id), "no successor may survive").toEqual([id]);
+    expect(await versionsOf(id), "no version row may survive").toHaveLength(0);
+    expect(await eventsOf(agent.id), "no event may survive").toHaveLength(0);
+  }, 120_000);
 });
 
 describe("flair#2997 — a valid write is unchanged", () => {

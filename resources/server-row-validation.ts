@@ -14,6 +14,11 @@
  * pre-validation and the staging path raised identical `errors` arrays and the
  * accepted row stored byte-identical). A failure is therefore a server defect,
  * not a caller error.
+ *
+ * Only rows the server builds ENTIRELY are pre-validated here. A Memory
+ * successor or close row carries the caller's fields, so it keeps the
+ * commit-time path: a defect in one of its fields, a server-stamped field
+ * included, answers the caller's 400 rather than 5xx.
  */
 export class ServerRowValidationError extends Error {
   constructor(tableName: string, cause: unknown) {
@@ -23,24 +28,38 @@ export class ServerRowValidationError extends Error {
 }
 
 /**
+ * The table handle exposes no validator: a Harper change removed the entry
+ * point this check depends on. Distinct from {@link ServerRowValidationError}
+ * (an invalid row) so the reason is visible in the server log and a test can
+ * tell them apart. The write is still refused (fail closed).
+ */
+export class ServerRowValidatorMissingError extends Error {
+  constructor(tableName: string) {
+    super(`the ${tableName} table handle exposes no validator; the write was aborted`);
+    this.name = "ServerRowValidatorMissingError";
+  }
+}
+
+/**
  * Run the table's own `validate(record, patch)` on the exact object about to
  * be staged. `patch` must be the commit's flag (`false` for the full-row
  * creates/puts this helper serves).
  *
  * Throws {@link ServerRowValidationError} when the validator refuses the row
- * or when the handle exposes no validator — never a Harper `ValidationError`,
- * so a caller-row 400 path cannot claim it. The caller's catch aborts the
- * transaction and answers its 5xx shape.
+ * and {@link ServerRowValidatorMissingError} when the handle exposes no
+ * validator — never a Harper `ValidationError`, so a caller-row 400 path cannot
+ * claim it. The caller's catch aborts the transaction and answers its 5xx
+ * shape.
  */
 export function validateServerRow(table: any, record: Record<string, unknown>, patch = false): void {
   const tableName = typeof table?.name === "string" && table.name.length > 0 ? table.name : "unknown";
   const holder = table?.prototype && typeof table.prototype.validate === "function" ? table.prototype : table;
   const validate = holder?.validate;
+  if (typeof validate !== "function") throw new ServerRowValidatorMissingError(tableName);
   try {
-    if (typeof validate !== "function") throw new Error("the table handle exposes no validator");
     validate.call(table, record, patch);
   } catch (err) {
-    console.error(`flair: a server-built ${tableName} row failed its table validator; the write was aborted`, err);
+    console.error("flair: a server-built row failed its table validator; the write was aborted (table %s)", tableName, err);
     throw new ServerRowValidationError(tableName, err);
   }
 }
