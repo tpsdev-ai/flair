@@ -7,9 +7,9 @@
 // resources/ or src/ references it and it is never packed or shipped.
 //
 // It does two things:
-//   - makes the OrgEvent table's own `validate` method unavailable for the
-//     duration of a request (validator-absent) and restores it afterwards
-//     (validator-restore), so validateServerRow finds no validator to call;
+//   - makes the OrgEvent table's own `validate` method unavailable until the
+//     explicit validator-restore action, so validateServerRow finds no
+//     validator to call;
 //   - wraps the OrgEvent table's own `put`, so every row the staging call
 //     receives is appended to <ROOTPATH>/org-event-validator-missing-3005/staged.jsonl
 //     before the original put runs. The `staged` action reads that file, so the

@@ -34,18 +34,20 @@ export const AGENT_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
  *  text but not this code. */
 export const AGENT_ID_ERROR = "invalid_agent_id";
 
-/** The remedy for an id Harper delivered as a JSON integer it could not hold
- *  exactly: it arrives here as a BigInt (or, on another intake, as a number
- *  beyond Number.MAX_SAFE_INTEGER). A BigInt cannot be JSON-stringified, and
- *  an unsafe number has already lost the digits the caller sent, so the
- *  refusal names the remedy instead. */
+/** The remedy for an id that cannot be used as a JSON integer: a BigInt, which
+ *  cannot be JSON-serialized, or an integral number outside the safe-integer
+ *  range, whose value can no longer be trusted to round-trip. */
 export const AGENT_ID_STRING_REMEDY = "send the agent id as a string";
 
-/** True for an id Harper delivered from a JSON integer that JavaScript cannot
- *  hold exactly. A BigInt is never an agent ID; an unsafe number would lose
- *  precision when compared or stored, so isValidAgentId refuses it too. */
+/** True for an id Harper delivered from a JSON integer whose value JavaScript
+ *  cannot trust to round-trip. A BigInt is never an agent ID; an unsafe number
+ *  cannot be trusted when compared or stored, so isValidAgentId refuses it
+ *  too. */
 export function isUnsafeAgentIdWireValue(id: unknown): boolean {
-  return typeof id === "bigint" || (typeof id === "number" && !Number.isSafeInteger(id));
+  return (
+    typeof id === "bigint" ||
+    (typeof id === "number" && Number.isInteger(id) && !Number.isSafeInteger(id))
+  );
 }
 
 /**
@@ -60,9 +62,9 @@ export function isValidAgentId(id: unknown): boolean {
   return AGENT_ID_PATTERN.test(String(id));
 }
 
-/** A human-readable refusal message naming the rule and the offending value.
- *  BigInt-safe: `JSON.stringify` throws on a BigInt, so an unsafe wire value
- *  answers the remedy instead of raising inside the refusal. */
+/** A human-readable refusal: the string remedy for a BigInt or an integral
+ *  number outside the safe-integer range, otherwise the rule and the value
+ *  from `JSON.stringify` (the remedy if it throws). */
 export function invalidAgentIdMessage(id: unknown): string {
   if (isUnsafeAgentIdWireValue(id)) return AGENT_ID_STRING_REMEDY;
   let shown: string | undefined;

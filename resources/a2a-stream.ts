@@ -65,9 +65,10 @@ export function orgEventWriteFailure(id: JsonRpcId, failure: OrgEventWriteFailur
   });
 }
 
-/** Does `value` hold a BigInt anywhere, at any array or object depth?
- *  `JSON.stringify` throws on one, so an intake that must serialize a caller
- *  value asks this first and refuses with a caller error. */
+/** Does a Harper-parsed JSON tree hold a BigInt among its enumerable values,
+ *  at any array or object depth? `JSON.stringify` throws on one, so an intake
+ *  that must serialize a caller value asks this first and refuses with a
+ *  caller error. */
 export function containsBigInt(value: unknown): boolean {
   const pending: unknown[] = [value];
   const seen = new Set<unknown>();

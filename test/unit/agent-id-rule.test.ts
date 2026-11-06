@@ -36,11 +36,21 @@ describe("flair#2359 — isValidAgentId accepts exactly ^[a-zA-Z0-9_-]{1,64}$", 
     }
   });
 
-  it("rejects an unsafe JavaScript number with the string remedy", () => {
-    const rounded = Number("9007199254740993"); // 9007199254740992, already changed
+  it("gives an integral number outside the safe range the string remedy", () => {
+    const rounded = Number("9007199254740993"); // 9007199254740992, not round-trippable
     expect(Number.isSafeInteger(rounded)).toBe(false);
     expect(isValidAgentId(rounded)).toBe(false);
     expect(invalidAgentIdMessage(rounded)).toBe(AGENT_ID_STRING_REMEDY);
+    expect(invalidAgentIdMessage(2 ** 53)).toBe(AGENT_ID_STRING_REMEDY);
+    expect(invalidAgentIdMessage(9007199254740993n)).toBe(AGENT_ID_STRING_REMEDY);
+  });
+
+  it("gives a fractional number the ordinary rule refusal, not the string remedy", () => {
+    expect(isValidAgentId(1.5)).toBe(false);
+    const message = invalidAgentIdMessage(1.5);
+    expect(message).not.toBe(AGENT_ID_STRING_REMEDY);
+    expect(message).toContain(AGENT_ID_RULE);
+    expect(message).toContain("1.5");
   });
 
   it("the exported pattern and rule text agree", () => {

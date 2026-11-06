@@ -2,8 +2,8 @@
 //
 // The A2A message/send handler answers a missing OrgEvent validator with
 // `org_event_validator_missing`, distinct from `org_event_row_invalid`. This
-// test makes the OrgEvent table's own `validate` method unavailable for one
-// request in a real, HOME-isolated Harper
+// test makes the OrgEvent table's own `validate` method unavailable until the
+// explicit restore action in a real, HOME-isolated Harper
 // (test/fixtures/org-event-validator-missing-3005's probe resource), sends an
 // A2A message/send, and asserts the HTTP/JSON-RPC code, `data.error`, and that no event reached staging or the table. The
 // validator is then restored and a control message lands its event, so the

@@ -408,11 +408,11 @@ export class A2AAdapter extends Resource {
         const refusal = actAsRefusal(id, callerAgent, callerIsAdmin, agentId, "send");
         if (refusal) return refusal;
 
-        // A BigInt anywhere in the caller's message makes the detail below
-        // unrepresentable; refuse it as a caller error before the sender
+        // A BigInt among the message's enumerable values cannot be
+        // JSON-serialized; refuse it as a caller error before the sender
         // lookup in this handler, naming the field.
         if (containsBigInt(message)) {
-          return rpcError(id, -32602, "Invalid params: message contains an integer beyond the safe range; send it as a string", {
+          return rpcError(id, -32602, "Invalid params: message contains a BigInt, which cannot be JSON-serialized; send it as a string", {
             field: "message",
           });
         }
