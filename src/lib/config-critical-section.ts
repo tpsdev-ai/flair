@@ -193,6 +193,10 @@ export interface ConfigSectionOptions {
    *  does not land (a throw or a pre-rename failure). Added for the integrity
    *  generation/registry protocol (flair#971); existing sinks leave it unset. */
   stage?: (bytes: Uint8Array, identity: ConfigObservation) => void | (() => void);
+  /** Runs immediately before rename, after the fsync test hook; a throw refuses publication. */
+  beforeRename?: () => void;
+  /** Runs immediately after the rename test hook; a throw becomes a cleanup warning. */
+  afterRename?: () => void;
   /** Runs under the lock after replacement with no cleanup warning.
    *  A throw becomes a cleanup warning. */
   onCommitted?: () => void;
@@ -668,6 +672,8 @@ export function atomicReplace(
   // byte-identical and orphans the temp + lock (cleanup bypassed).
   onAfterFsync?: (tempPath: string) => void,
   onAfterRename?: (targetPath: string) => void,
+  onBeforeRename?: () => void,
+  onPublished?: () => void,
 ): ReplaceResult {
   if (original && !isRegularMode(original.mode)) {
     return { ok: false, reason: `the destination ${targetPath} is not a regular file (mode ${original.mode.toString(8)}); refusing to replace it` };
@@ -724,12 +730,15 @@ export function atomicReplace(
   envBarrier("fsync");
   onAfterFsync?.(tempPath);
 
+  try { onBeforeRename?.(); }
+  catch (err) { return fail(`pre-rename check failed: ${msg(err)}`); }
   try { renameSync(tempPath, targetPath); }
   catch (err) { cleanupTemp(); return { ok: false, reason: `could not rename the staging file into place: ${msg(err)}` }; }
 
   let cleanupWarning: string | null = null;
   try {
     onAfterRename?.(targetPath);
+    onPublished?.();
   } catch (err) {
     cleanupWarning = `the replacement is committed but the post-rename step failed: ${msg(err)}`;
   }
@@ -849,7 +858,7 @@ export function withConfigCriticalSection(
         : null;
       let wr: ReplaceResult;
       try {
-        wr = atomicReplace(targetPath, decision.write, original, opts.testHooks?.afterTempCreate, opts.testHooks?.afterFsync, opts.testHooks?.afterRename);
+        wr = atomicReplace(targetPath, decision.write, original, opts.testHooks?.afterTempCreate, opts.testHooks?.afterFsync, opts.testHooks?.afterRename, opts.beforeRename, opts.afterRename);
       } catch (err) {
         try { stageCleanup?.(); } catch { /* the original failure stands */ }
         throw err;

@@ -5,19 +5,24 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
+  realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import ts from "typescript";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 
 import {
@@ -32,6 +37,7 @@ import {
   openIntegrityState,
   signIntegrityRecord,
   tombstoneEnrollment,
+  verifyIntegrityRecord,
   type IntegrityStateOptions,
 } from "../../src/lib/integrity-state.ts";
 
@@ -84,6 +90,23 @@ function payload() {
       instanceTokens: { "mem-a": "tok-a" },
     },
   };
+}
+
+/** Snapshot custody file contents except the transient lock file. */
+function snapshotCustody(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of readdirSync(dir).sort()) {
+    const full = join(dir, name);
+    if (name === "generations") {
+      for (const generation of readdirSync(full).sort()) {
+        out[`generations/${generation}`] = readFileSync(join(full, generation), "utf-8");
+      }
+      continue;
+    }
+    if (name === ".custody.lock") continue;
+    out[name] = readFileSync(full, "utf-8");
+  }
+  return out;
 }
 
 function commit(state = init(), expectedGeneration = 0) {
@@ -182,6 +205,369 @@ function resultOf(stdout: string): Record<string, unknown> {
 }
 
 describe("commit-fence (invariant 7)", () => {
+  it("records custody device and inode identities as bigint", () => {
+    const state = init();
+    expect(state.custodyChain.length).toBeGreaterThan(0);
+    for (const entry of state.custodyChain) {
+      expect(typeof entry.dev).toBe("bigint");
+      expect(typeof entry.ino).toBe("bigint");
+      const stat = lstatSync(entry.path, { bigint: true });
+      expect(entry.dev).toBe(stat.dev);
+      expect(entry.ino).toBe(stat.ino);
+    }
+    commit(state);
+  });
+
+  it.each(["dev", "ino"] as const)("distinguishes adjacent %s identities at 2^53 in chain and staged checks", (field) => {
+    const source = ts.createSourceFile(modulePath, readFileSync(modulePath, "utf-8"), ts.ScriptTarget.Latest, true);
+    const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) &&
+      ["verifyCustodyChain", "verifyStagedFiles"].includes(node.name?.text ?? ""));
+    expect(declarations).toHaveLength(2);
+    const code = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const identity = { path: "identity", dev: 2n ** 53n, ino: 2n ** 53n, symbolicLink: false };
+    let observed = { ...identity };
+    const checks = new Function("lstatSync", `${code}\nreturn [verifyCustodyChain, verifyStagedFiles];`)(
+      (_path: string, options: unknown) => {
+        expect(options).toEqual({ bigint: true });
+        return { ...observed, isFile: () => true, isSymbolicLink: () => false };
+      },
+    ) as ((entries: typeof identity[]) => { ok: boolean })[];
+    for (const check of checks) expect(check([identity]).ok).toBe(true);
+    observed = { ...identity, [field]: identity[field] + 1n };
+    expect(Number(observed[field])).toBe(Number(identity[field]));
+    expect(observed[field]).not.toBe(identity[field]);
+    for (const check of checks) expect(check([identity]).ok).toBe(false);
+  });
+
+  it.each(["initialize", "open"] as const)("keeps relative-path custody after chdir (%s)", (operation) => {
+    const initialCwd = process.cwd();
+    const original = join(root, "original");
+    const elsewhere = join(root, "elsewhere");
+    mkdirSync(original, { mode: 0o700 });
+    mkdirSync(elsewhere, { mode: 0o700 });
+    try {
+      process.chdir(original);
+      let state = init({ custodyDir: "custody" });
+      commit(state, 0);
+      if (operation === "open") {
+        const opened = openIntegrityState(options({ custodyDir: "custody", newCustody: false }));
+        expect(opened.ok).toBe(true);
+        if (!opened.ok) return;
+        state = opened.state;
+      }
+      cpSync(join(original, "custody"), join(elsewhere, "custody"), { recursive: true });
+      const otherBefore = snapshotCustody(join(elsewhere, "custody"));
+      expect(Object.values(state.paths).every(isAbsolute)).toBe(true);
+      expect(state.paths.custodyDir).toBe(join(realpathSync(original), "custody"));
+      process.chdir(elsewhere);
+      const result = commitGeneration({ state, expectedGeneration: 1, checkpoint: payload() });
+      expect(result).toMatchObject({ ok: true, status: "committed", generation: 2 });
+      expect(generationNumbers(integrityPaths(join(original, "custody")))).toEqual([1, 2]);
+      expect(snapshotCustody(join(elsewhere, "custody"))).toEqual(otherBefore);
+    } finally {
+      process.chdir(initialCwd);
+    }
+  });
+
+  it.each([
+    ["generation", "restored"], ["commit marker", "restored"], ["tombstone marker", "restored"],
+    ["generation", "retained"], ["commit marker", "retained"], ["tombstone marker", "retained"],
+  ] as const)("keeps the prior published generation on %s staging refusal (%s)", (artifact, disposition) => {
+    const state = init();
+    commit(state, 0);
+    const before = snapshotCustody(custodyDir);
+    const directory = artifact === "generation" ? state.paths.generationsDir : custodyDir;
+    const retained = join(root, "retained");
+    let stages = 0;
+    let publications = 0;
+    const divert = () => {
+      stages++;
+      renameSync(directory, retained);
+      cpSync(retained, directory, { recursive: true });
+    };
+    const restore = () => {
+      rmSync(directory, { recursive: true });
+      renameSync(retained, directory);
+    };
+    const testHooks = {
+      beforeStage: () => { if (artifact !== "commit marker") divert(); },
+      beforeUncertainMarkerWrite: () => { if (artifact === "commit marker") divert(); },
+      afterStage: () => { if (disposition === "restored") restore(); },
+      afterRename: () => { publications++; },
+    };
+    const result = artifact === "tombstone marker"
+      ? tombstoneEnrollment({ ...options({ newCustody: false }), expectedSequence: 1, testHooks })
+      : commitGeneration({ state, expectedGeneration: 1, checkpoint: payload(), testHooks });
+    expect(stages).toBe(1);
+    expect(result).toMatchObject({ ok: false, status: "commit_failed", reason: "custody_invalid" });
+    expect(publications).toBe(0);
+    if (disposition === "retained") {
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.detail).toContain("identity changed");
+      restore();
+      if (artifact !== "generation") unlinkSync(join(custodyDir, ".custody.lock"));
+    }
+    expect(readFileSync(state.paths.currentPath, "utf-8")).toBe(before.CURRENT!);
+    expect(readFileSync(state.paths.registryPath, "utf-8")).toBe(before["registry.json"]!);
+    expect(existsSync(state.paths.uncertainPath)).toBe(false);
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    expect(reopened.ok).toBe(true);
+    if (reopened.ok) expect(reopened.state.generation).toBe(1);
+  });
+
+  it.each([
+    ["generation", "missing", "before"], ["generation", "replaced", "before"],
+    ["commit marker", "missing", "before"], ["commit marker", "replaced", "before"],
+    ["tombstone marker", "missing", "before"], ["tombstone marker", "replaced", "before"],
+    ["generation", "missing", "after"], ["generation", "replaced", "after"],
+    ["commit marker", "missing", "after"], ["commit marker", "replaced", "after"],
+    ["tombstone marker", "missing", "after"], ["tombstone marker", "replaced", "after"],
+  ] as const)("checks %s identity when %s %s publication", (artifact, change, phase) => {
+    const state = init();
+    commit(state, 0);
+    const before = snapshotCustody(custodyDir);
+    const path = artifact === "generation" ? generationPath(state.paths.generationsDir, 2) : state.paths.uncertainPath;
+    let publications = 0;
+    const changeFile = () => {
+      const bytes = readFileSync(path);
+      renameSync(path, join(root, "retained-file"));
+      if (change === "replaced") writeFileSync(path, bytes, { mode: 0o600 });
+    };
+    const testHooks = {
+      afterFsync: () => { if (phase === "before") changeFile(); },
+      afterRename: () => {
+        publications++;
+        if (phase === "after") changeFile();
+      },
+    };
+    const result = artifact === "tombstone marker"
+      ? tombstoneEnrollment({ ...options({ newCustody: false }), expectedSequence: 1, testHooks })
+      : commitGeneration({ state, expectedGeneration: 1, checkpoint: payload(), testHooks });
+    expect(result).toMatchObject({
+      ok: false,
+      status: phase === "before" ? "commit_failed" : "commit_uncertain",
+      reason: phase === "before" ? "custody_invalid" : "commit_uncertain",
+    });
+    if (!result.ok) {
+      expect(result.detail).toContain(path);
+      expect(result.remedy).toContain("Re-open custody");
+      if (phase === "after") expect(result.remedy).toBe(artifact === "tombstone marker"
+        ? "Re-open custody to reconcile uncertainty; if an active enrollment remains, verify the generation. If the last enrollment was tombstoned, re-open refusal is expected. Read registry.json, verify its HMAC with verifyIntegrityRecord and custody.key, and check sequence against expectedSequence + 1 and the enrollment's status against tombstoned."
+        : "Re-open custody after restoring valid custody state, then verify the generation.");
+    }
+    if (artifact !== "tombstone marker") {
+      if (phase === "after") expect(result).toMatchObject({ committed: true, generation: 2 });
+      else expect("committed" in result && result.committed).toBeFalsy();
+    }
+    expect(publications).toBe(phase === "before" ? 0 : 1);
+    if (phase === "before") {
+      expect(readFileSync(state.paths.currentPath, "utf-8")).toBe(before.CURRENT!);
+      expect(readFileSync(state.paths.registryPath, "utf-8")).toBe(before["registry.json"]!);
+      expect(existsSync(state.paths.uncertainPath)).toBe(false);
+      const reopened = openIntegrityState(options({ newCustody: false }));
+      expect(reopened.ok).toBe(true);
+      if (reopened.ok) expect(reopened.state.generation).toBe(1);
+    }
+  });
+
+  it.each(["identical", "different"] as const)("verifies a retained generation with %s bytes", (contents) => {
+    const state = init();
+    commit(state, 0);
+    const prepared = commitGeneration({
+      state, expectedGeneration: 1, checkpoint: payload(),
+      testHooks: { beforeUncertainMarkerWrite: () => { throw new Error("marker unavailable"); } },
+    });
+    expect(prepared.ok).toBe(false);
+    const path = generationPath(state.paths.generationsDir, 2);
+    if (contents === "different") writeFileSync(path, "{}", { mode: 0o600 });
+    const result = commitGeneration({
+      state, expectedGeneration: 1, checkpoint: payload(),
+      testHooks: { afterFsync: () => {
+        const bytes = readFileSync(path);
+        renameSync(path, join(root, "retained-generation"));
+        writeFileSync(path, bytes, { mode: 0o600 });
+      } },
+    });
+    expect(result).toMatchObject({ ok: false, status: "commit_failed", reason: "custody_invalid" });
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    expect(reopened.ok).toBe(true);
+    if (reopened.ok) expect(reopened.state.generation).toBe(1);
+  });
+
+  it.each(["commit", "tombstone"] as const)("reports %s marker cleanup absence as uncertain", (writer) => {
+    const state = init();
+    commit(state, 0);
+    let cleanups = 0;
+    const testHooks = { beforeUncertainMarkerClear: () => {
+      cleanups++;
+      unlinkSync(state.paths.uncertainPath);
+    } };
+    const result = writer === "commit"
+      ? commitGeneration({ state, expectedGeneration: 1, checkpoint: payload(), testHooks })
+      : tombstoneEnrollment({ ...options({ newCustody: false }), expectedSequence: 1, testHooks });
+    expect(cleanups).toBe(1);
+    expect(result).toMatchObject({ ok: false, status: "commit_uncertain", reason: "commit_uncertain" });
+    if (!result.ok) expect(result.detail).toContain("ENOENT");
+    expect(existsSync(state.paths.uncertainPath)).toBe(false);
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    if (writer === "commit") {
+      expect(reopened.ok).toBe(true);
+      if (reopened.ok) expect(reopened.state.generation).toBe(2);
+    } else {
+      expect(reopened).toMatchObject({ ok: false, reason: "custody_invalid", detail: "the registry has no active enrollment" });
+      const registry = JSON.parse(readFileSync(state.paths.registryPath, "utf-8"));
+      expect(verifyIntegrityRecord(registry, state.key)).toBe(true);
+      expect(registry.sequence).toBe(2);
+      expect(registry.entries[0].status).toBe("tombstoned");
+    }
+  });
+
+  it.each([
+    ["commit", "afterFsync"],
+    ["tombstone", "afterFsync"],
+    ["commit", "afterRename"],
+    ["tombstone", "afterRename"],
+  ] as const)("reports %s custody drift at %s", (writer, hook) => {
+    const tree = join(root, "tree");
+    const moved = join(root, "tree-original");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    commit(state, 0);
+    const before = snapshotCustody(nested);
+    let swaps = 0;
+    let renames = 0;
+    const swapAncestor = () => {
+      swaps++;
+      renameSync(tree, moved);
+      mkdirSync(tree, { mode: 0o700 });
+      renameSync(join(moved, "custody"), nested);
+    };
+    const testHooks = {
+      afterFsync: () => { if (hook === "afterFsync") swapAncestor(); },
+      afterRename: () => {
+        renames++;
+        if (hook === "afterRename") swapAncestor();
+      },
+    };
+    const result = writer === "commit"
+      ? commitGeneration({ state, expectedGeneration: 1, checkpoint: payload(), testHooks })
+      : tombstoneEnrollment({
+        ...options({ custodyDir: nested, newCustody: false }),
+        expectedSequence: 1,
+        testHooks,
+      });
+    expect(swaps).toBe(1);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe(hook === "afterFsync" ? "commit_failed" : "commit_uncertain");
+    expect(result.reason).toBe(hook === "afterFsync" ? "custody_invalid" : "commit_uncertain");
+    expect(result.detail).toContain(tree);
+    expect(result.remedy).toContain("Re-open custody");
+    if (writer === "commit" && hook === "afterRename") expect(result).toMatchObject({ committed: true, generation: 2 });
+    else expect(result).not.toHaveProperty("committed");
+    expect(renames).toBe(hook === "afterFsync" ? 0 : 1);
+    expect(existsSync(state.paths.uncertainPath)).toBe(hook === "afterRename");
+    expect(existsSync(join(nested, ".custody.lock"))).toBe(false);
+    if (hook === "afterFsync") {
+      expect(readFileSync(state.paths.currentPath, "utf-8")).toBe(before.CURRENT!);
+      expect(readFileSync(state.paths.registryPath, "utf-8")).toBe(before["registry.json"]!);
+      expect(readdirSync(nested).sort()).toEqual(["CURRENT", "custody.key", "generations", "registry.json"]);
+      expect(generationNumbers(state.paths)).toEqual(writer === "commit" ? [1, 2] : [1]);
+    } else {
+      if (writer === "commit") {
+        expect(result.remedy).toBe("Re-open custody after restoring valid custody state, then verify the generation.");
+        expect(JSON.parse(readFileSync(state.paths.currentPath, "utf-8")).generation).toBe(2);
+        expect(readFileSync(state.paths.uncertainPath, "utf-8")).toBe("commit:2");
+      } else {
+        expect(result.remedy).toBe("Re-open custody to reconcile uncertainty; if an active enrollment remains, verify the generation. If the last enrollment was tombstoned, re-open refusal is expected. Read registry.json, verify its HMAC with verifyIntegrityRecord and custody.key, and check sequence against expectedSequence + 1 and the enrollment's status against tombstoned.");
+        expect(JSON.parse(readFileSync(state.paths.registryPath, "utf-8")).entries[0].status).toBe("tombstoned");
+        expect(readFileSync(state.paths.uncertainPath, "utf-8")).toBe("registry:2");
+      }
+    }
+  });
+
+  it.each(["commit", "tombstone"] as const)("reports %s destination type changes between observations", (writer) => {
+    const state = init();
+    commit(state, 0);
+    const path = writer === "commit" ? state.paths.currentPath : state.paths.registryPath;
+    let observations = 0;
+    const testHooks = {
+      afterPreObserve: () => {
+        observations++;
+        unlinkSync(path);
+        mkdirSync(path, { mode: 0o700 });
+      },
+    };
+    const result = writer === "commit"
+      ? commitGeneration({ state, expectedGeneration: 1, checkpoint: payload(), testHooks })
+      : tombstoneEnrollment({ ...options({ newCustody: false }), expectedSequence: 1, testHooks });
+    expect(observations).toBe(1);
+    expect(result).toMatchObject({
+      ok: false,
+      status: "commit_failed",
+      reason: "commit_conflict",
+      remedy: `The destination changed between the writer's observations; inspect ${path} and restore valid custody before retrying.`,
+    });
+    expect(lstatSync(path).isDirectory()).toBe(true);
+    expect(existsSync(state.paths.uncertainPath)).toBe(false);
+    expect(generationNumbers(state.paths)).toEqual([1]);
+  });
+
+  it.each(["unpublished", "published"] as const)("follows the initialization-hold remedy with an %s registry", (publication) => {
+    const paths = integrityPaths(custodyDir);
+    const result = initializeIntegrityCustody(options({
+      beforeRegistryPublication: () => {
+        if (publication === "unpublished") {
+          symlinkSync(join(root, "absent-registry"), paths.registryPath);
+        } else {
+          writeFileSync(paths.registryPath, `${canonicalJson(signIntegrityRecord({
+            version: 3, kind: "registry", sequence: 1,
+            entries: [{
+              enrollmentId: "enr_partial", sequence: 1, createdAt: new Date().toISOString(),
+              operatorUid: OPERATOR_UID, machineId: MACHINE, status: "active",
+            }],
+          }, readFileSync(paths.keyPath)))}\n`, { mode: 0o600 });
+        }
+      },
+    }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe(publication === "unpublished" ? "commit_conflict" : "custody_invalid");
+    expect(result.remedy).toBe(`Inspect ${paths.registryPath} and reconcile partial initialization before proceeding. Initialization cannot resume with an existing custody key, and opening custody requires a committed generation. For a fresh start, preserve this directory and initialize a different custodyDir with newCustody: true.`);
+    const keyBefore = readFileSync(paths.keyPath);
+    expect(existsSync(paths.currentPath)).toBe(false);
+    expect(generationNumbers(paths)).toEqual([]);
+
+    if (publication === "unpublished") {
+      expect(lstatSync(paths.registryPath).isSymbolicLink()).toBe(true);
+      expect(existsSync(paths.registryPath)).toBe(false);
+      unlinkSync(paths.registryPath);
+      const retry = initializeIntegrityCustody(options());
+      expect(retry).toMatchObject({ ok: false, reason: "unavailable" });
+      if (!retry.ok) expect(retry.detail).toContain("EEXIST");
+    } else {
+      expect(lstatSync(paths.registryPath).isFile()).toBe(true);
+      expect(openIntegrityState(options({ newCustody: false }))).toMatchObject({
+        ok: false, reason: "checkpoint_missing", detail: "no CURRENT pointer and no retained generation",
+      });
+    }
+    expect(readFileSync(paths.keyPath)).toEqual(keyBefore);
+    const partialBefore = snapshotCustody(custodyDir);
+    const freshDir = join(root, "fresh-custody");
+    const fresh = init({ custodyDir: freshDir, newCustody: true });
+    expect(commit(fresh, 0).generation).toBe(1);
+    const reopened = openIntegrityState(options({ custodyDir: freshDir, newCustody: false }));
+    expect(reopened.ok).toBe(true);
+    if (reopened.ok) {
+      expect(reopened.state.generation).toBe(1);
+      expect(reopened.state.checkpoint?.baseline).toEqual(payload().baseline);
+    }
+    expect(snapshotCustody(custodyDir)).toEqual(partialBefore);
+  });
+
   it("rechecks custody when committing a generation", () => {
     const state = init();
     chmodSync(integrityPaths(custodyDir).keyPath, 0o644);
@@ -189,6 +575,182 @@ describe("commit-fence (invariant 7)", () => {
     expect(denied.ok).toBe(false);
     if (denied.ok) return;
     expect(denied.reason).toBe("custody_invalid");
+  });
+
+  it("refuses a commit after an ancestor directory is renamed and replaced", () => {
+    const tree = join(root, "tree");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    commit(state, 0);
+    const before = snapshotCustody(nested);
+
+    const moved = join(root, "tree-away");
+    renameSync(tree, moved);
+    mkdirSync(tree, { mode: 0o700 });
+
+    const result = commitGeneration({ state, expectedGeneration: 1, checkpoint: payload() });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
+    expect(result.reason).toBe("custody_invalid");
+    expect(result.detail).toContain(tree);
+    expect(result.detail).toContain("identity changed");
+    expect(result.remedy).toContain("Re-open custody");
+    expect(snapshotCustody(join(moved, "custody"))).toEqual(before);
+    expect(existsSync(join(tree, "custody"))).toBe(false);
+  });
+
+  it("refuses a commit when an ancestor becomes a symlink to a copy", () => {
+    const tree = join(root, "tree");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    commit(state, 0);
+
+    const copy = join(root, "copy");
+    cpSync(tree, copy, { recursive: true });
+    const before = snapshotCustody(join(copy, "custody"));
+    renameSync(tree, join(root, "tree-original"));
+    symlinkSync(copy, tree);
+    expect(readlinkSync(tree)).toBe(copy);
+
+    const result = commitGeneration({ state, expectedGeneration: 1, checkpoint: payload() });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
+    expect(result.reason).toBe("custody_invalid");
+    expect(result.detail).toContain(tree);
+    expect(result.detail).toContain("became a symlink");
+    expect(result.remedy).toContain("Re-open custody");
+    expect(snapshotCustody(join(copy, "custody"))).toEqual(before);
+  });
+
+  it("refuses a commit when an ancestor is removed", () => {
+    const tree = join(root, "tree");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    commit(state, 0);
+
+    const safe = join(root, "safe");
+    cpSync(tree, safe, { recursive: true });
+    const before = snapshotCustody(join(safe, "custody"));
+    rmSync(tree, { recursive: true, force: true });
+
+    const result = commitGeneration({ state, expectedGeneration: 1, checkpoint: payload() });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
+    expect(result.reason).toBe("custody_invalid");
+    expect(result.detail).toContain(tree);
+    expect(result.detail).toContain("disappeared");
+    expect(result.remedy).toContain("Re-open custody");
+    expect(snapshotCustody(join(safe, "custody"))).toEqual(before);
+    expect(existsSync(tree)).toBe(false);
+  });
+
+  it("commits on an unchanged custody chain", () => {
+    const tree = join(root, "tree");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    expect(commit(state, 0).generation).toBe(1);
+    expect(commit(state, 1).generation).toBe(2);
+    expect(generationNumbers(integrityPaths(nested))).toEqual([1, 2]);
+  });
+
+  it.each([
+    ["commit", "afterRead"],
+    ["commit", "afterPreObserve"],
+    ["tombstone", "afterRead"],
+    ["tombstone", "afterPreObserve"],
+  ] as const)("refuses %s after an ancestor swap at %s", (writer, hook) => {
+    const tree = join(root, "tree");
+    const moved = join(root, "tree-original");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    commit(state, 0);
+    const before = snapshotCustody(nested);
+    const ancestorInode = lstatSync(tree).ino;
+    const custodyInode = lstatSync(nested).ino;
+    let swaps = 0;
+    let reads = 0;
+    let tempCreates = 0;
+    const swapAncestor = () => {
+      swaps++;
+      renameSync(tree, moved);
+      if (hook === "afterRead") {
+        mkdirSync(tree, { mode: 0o700 });
+        renameSync(join(moved, "custody"), nested);
+      } else {
+        symlinkSync(moved, tree);
+      }
+    };
+    const testHooks = {
+      afterPreObserve: () => { if (hook === "afterPreObserve") swapAncestor(); },
+      afterRead: () => {
+        reads++;
+        if (hook === "afterRead") swapAncestor();
+      },
+      afterTempCreate: () => { tempCreates++; },
+    };
+    const result = writer === "commit"
+      ? commitGeneration({ state, expectedGeneration: 1, checkpoint: payload(), testHooks })
+      : tombstoneEnrollment({
+        ...options({ custodyDir: nested, newCustody: false }),
+        expectedSequence: 1,
+        testHooks,
+      });
+
+    expect(swaps).toBe(1);
+    expect(reads).toBe(hook === "afterRead" ? 1 : 0);
+    expect(lstatSync(tree).ino).not.toBe(ancestorInode);
+    expect(lstatSync(nested).ino).toBe(custodyInode);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
+    expect(result.reason).toBe("custody_invalid");
+    expect(result.detail).toContain(tree);
+    expect(result.detail).toContain(hook === "afterRead" ? "identity changed" : "became a symlink");
+    expect(result.remedy).toContain("Re-open custody");
+    expect(tempCreates).toBe(0);
+    expect(snapshotCustody(nested)).toEqual(before);
+    expect(generationNumbers(state.paths)).toEqual([1]);
+    expect(existsSync(state.paths.uncertainPath)).toBe(false);
+    expect(existsSync(join(nested, ".custody.lock"))).toBe(false);
+  });
+
+  it("refuses a tombstone when an ancestor becomes a symlink after open", () => {
+    const tree = join(root, "tree");
+    mkdirSync(tree, { mode: 0o700 });
+    const nested = join(tree, "custody");
+    const state = init({ custodyDir: nested });
+    commit(state, 0);
+
+    const copy = join(root, "copy");
+    cpSync(tree, copy, { recursive: true });
+    const before = snapshotCustody(join(copy, "custody"));
+
+    const result = tombstoneEnrollment({
+      ...options({ custodyDir: nested, newCustody: false }),
+      expectedSequence: 1,
+      testHooks: {
+        afterRead: () => {
+          renameSync(tree, join(root, "tree-original"));
+          symlinkSync(copy, tree);
+        },
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
+    expect(result.reason).toBe("custody_invalid");
+    expect(result.detail).toContain(tree);
+    expect(result.detail).toContain("became a symlink");
+    expect(result.remedy).toContain("Re-open custody");
+    expect(snapshotCustody(join(copy, "custody"))).toEqual(before);
   });
 
   it("commits a generation and holds a stale expected generation", () => {
@@ -259,6 +821,47 @@ describe("commit-fence (invariant 7)", () => {
     expect(lstatSync(integrityPaths(custodyDir).uncertainPath, { throwIfNoEntry: false })).toBeUndefined();
   });
 
+  it("refuses reopen after a post-rename warning and restoration of the prior signed CURRENT", () => {
+    const state = init();
+    commit(state, 0);
+    const paths = integrityPaths(custodyDir);
+    const priorCurrent = readFileSync(paths.currentPath);
+    const uncertain = commitGeneration({
+      state,
+      expectedGeneration: 1,
+      checkpoint: payload(),
+      testHooks: { afterRename: () => { throw new Error("injected hook failure before directory fsync"); } },
+    });
+    expect(uncertain).toMatchObject({ ok: false, status: "commit_uncertain", committed: true, generation: 2 });
+    const published = JSON.parse(readFileSync(paths.currentPath, "utf-8"));
+    expect(published.generation).toBe(2);
+    expect(verifyIntegrityRecord(published, state.key)).toBe(true);
+    expect(readFileSync(paths.uncertainPath, "utf-8")).toBe("commit:2");
+
+    const moved = join(root, "custody-original");
+    renameSync(custodyDir, moved);
+    cpSync(moved, custodyDir, { recursive: true });
+    const denied = commitGeneration({ state, expectedGeneration: 2, checkpoint: payload() });
+    expect(denied).toMatchObject({ ok: false, status: "commit_failed", reason: "custody_invalid" });
+    if (denied.ok) return;
+    expect(denied.remedy).toBe("Re-open custody after restoring valid custody paths. If re-open refuses with commit_uncertain because CURRENT now names an older generation than the uncertainty marker, this state cannot establish whether the staged generation was ever published or became durable; reconcile it before retrying (issue #2980). Retry only after re-open succeeds.");
+
+    rmSync(custodyDir, { recursive: true });
+    renameSync(moved, custodyDir);
+    writeFileSync(paths.currentPath, priorCurrent);
+    expect(verifyIntegrityRecord(JSON.parse(priorCurrent.toString("utf-8")), state.key)).toBe(true);
+    const before = snapshotCustody(custodyDir);
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    expect(reopened).toMatchObject({
+      ok: false,
+      reason: "commit_uncertain",
+      detail: "the uncertainty marker names generation 2, but the current generation is 1",
+      remedy: "Recover the durable custody state before another operation, then rerun.",
+    });
+    expect(snapshotCustody(custodyDir)).toEqual(before);
+    expect(readFileSync(paths.uncertainPath, "utf-8")).toBe("commit:2");
+  });
+
   it("retains uncertain intent on a same-handle retry until recovered open", () => {
     const state = init();
     commit(state, 0);
@@ -306,6 +909,7 @@ describe("commit-fence (invariant 7)", () => {
     const result = commitGeneration({ state, expectedGeneration: 0, checkpoint: changed });
     expect(result.ok).toBe(false);
     if (result.ok) return;
+    expect(result.status).toBe("commit_failed");
     expect(result.reason).toBe("custody_invalid");
     expect(existsSync(paths.currentPath)).toBe(false);
     expect(generationNumbers(paths)).toEqual([1]);
@@ -405,6 +1009,20 @@ describe("commit-fence (invariant 7)", () => {
     expect(existsSync(paths.currentPath)).toBe(false);
   });
 
+  it("returns a custody-state remedy when registry recovery finds a stale intent", () => {
+    const state = init();
+    commit(state, 0);
+    expect(tombstoneEnrollment({ ...options({ newCustody: false }), expectedSequence: 1 })).toEqual({ ok: true, sequence: 2 });
+    writeFileSync(state.paths.uncertainPath, "registry:1", { mode: 0o600 });
+    const result = openIntegrityState(options({ newCustody: false }));
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "commit_uncertain",
+      detail: "the uncertainty marker names registry sequence 1, but the registry is at 2",
+      remedy: "Recover the durable custody state before another operation, then rerun.",
+    });
+  });
+
   it("keeps the registry intent marker when the tombstone's pre-fsync hook throws", () => {
     const state = init();
     commit(state, 0);
@@ -415,13 +1033,23 @@ describe("commit-fence (invariant 7)", () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
+    expect(result.status).toBe("commit_uncertain");
     expect(result.reason).toBe("commit_uncertain");
+    expect(result.remedy).toBe("Re-open custody to reconcile uncertainty; if an active enrollment remains, verify the generation. If the last enrollment was tombstoned, re-open refusal is expected. Read registry.json, verify its HMAC with verifyIntegrityRecord and custody.key, and check sequence against expectedSequence + 1 and the enrollment's status against tombstoned.");
     expect(readFileSync(integrityPaths(custodyDir).uncertainPath, "utf-8")).toBe("registry:2");
 
     const opened = openIntegrityState(options({ newCustody: false }));
     expect(opened.ok).toBe(false);
-    if (!opened.ok) expect(opened.reason).toBe("custody_invalid");
+    expect(opened).toMatchObject({
+      ok: false,
+      reason: "custody_invalid",
+      detail: "the registry has no active enrollment",
+    });
     expect(lstatSync(integrityPaths(custodyDir).uncertainPath, { throwIfNoEntry: false })).toBeUndefined();
+    const registry = JSON.parse(readFileSync(state.paths.registryPath, "utf-8"));
+    expect(verifyIntegrityRecord(registry, readFileSync(state.paths.keyPath))).toBe(true);
+    expect(registry.sequence).toBe(2);
+    expect(registry.entries.find((entry: { enrollmentId: string }) => entry.enrollmentId === state.enrollment.enrollmentId)?.status).toBe("tombstoned");
   });
 
   it("orders a tombstone after a commit that holds the one custody lock", async () => {
@@ -573,7 +1201,7 @@ describe("commit-fence (invariant 7)", () => {
       status: "commit_conflict",
       reason: "commit_conflict",
       detail: `the on-disk generation is 0, expected ${INTEGRITY_MAX_GENERATION}`,
-      remedy: "Resolve the competing writer and rerun.",
+      remedy: "Resolve the generation or sequence mismatch and rerun.",
     });
     expect(readFileSync(paths.registryPath)).toEqual(registryBefore);
     expect(readdirSync(custodyDir).sort()).toEqual(entriesBefore);
@@ -621,6 +1249,7 @@ describe("commit-fence (invariant 7)", () => {
     const refused = commitGeneration({ state: reopened.state, expectedGeneration: INTEGRITY_MAX_GENERATION, checkpoint: payload() });
     expect(refused).toMatchObject({
       ok: false,
+      status: "commit_failed",
       reason: "commit_conflict",
       remedy: "The generation sequence has reached its twelve-digit limit; no further generation can be committed to this custody. Start a new custody in a different custodyDir with initializeIntegrityCustody and newCustody: true.",
     });
