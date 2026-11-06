@@ -45,10 +45,25 @@ import { MULTI_WORKER_GUARD_HTTP_NAME } from "./multi-worker-guard.js";
  */
 const OAUTH_COMPONENT_KEY = "@harperfast/oauth";
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
+/**
+ * A plain record in this realm or another. Harper runs this module in a VM,
+ * so `config` can be a host-realm object whose prototype is not this realm's
+ * `Object.prototype`.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  try {
+    if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+    const proto = Object.getPrototypeOf(value);
+    if (proto === null) return true;
+    // `Object.prototype` in any realm: its prototype is null, and it is that
+    // realm's `Object` constructor's prototype. Class instances sit one step
+    // further out and are not records.
+    if (Object.getPrototypeOf(proto) !== null) return false;
+    const ctor = (proto as { constructor?: unknown }).constructor;
+    return typeof ctor === "function" && (ctor as { prototype?: unknown }).prototype === proto;
+  } catch {
+    return false;
+  }
 }
 
 /** `@harperfast/oauth` `expandEnvVar`: whole-token `${NAME}` only. */
@@ -71,16 +86,20 @@ function readOAuthComponent(harperNs: any): ComponentRead {
   } catch {
     return { kind: "unreadable", detail: "config lookup failed" };
   }
-  if (!isPlainObject(hc)) {
+  if (!isRecord(hc)) {
     return { kind: "unreadable", detail: "application config is missing or unreadable" };
   }
   let keyCount = 0;
+  let readableGet = false;
   try {
     keyCount = Object.keys(hc).length;
+    readableGet = typeof hc.get === "function";
   } catch {
     return { kind: "unreadable", detail: "application config is unreadable" };
   }
-  if (keyCount === 0) {
+  // `{}` is unreadable: a missing document can arrive as an empty object.
+  // A get-backed config may have no enumerable keys and still hold the component.
+  if (keyCount === 0 && !readableGet) {
     return { kind: "unreadable", detail: "application config is empty" };
   }
 
@@ -98,7 +117,7 @@ function readOAuthComponent(harperNs: any): ComponentRead {
     }
   }
   if (component == null) return { kind: "absent" };
-  if (!isPlainObject(component)) {
+  if (!isRecord(component)) {
     return { kind: "unreadable", detail: "component entry is not an object" };
   }
   return { kind: "present", component };
@@ -117,7 +136,7 @@ function readEffectiveMcpEnabled(component: Record<string, unknown>): EnabledRea
   if (!Object.prototype.hasOwnProperty.call(component, "mcp") || component.mcp == null) {
     return { kind: "bool", enabled: false, configured: undefined };
   }
-  if (!isPlainObject(component.mcp)) {
+  if (!isRecord(component.mcp)) {
     return { kind: "unreadable", detail: "mcp entry is not an object" };
   }
   if (!Object.prototype.hasOwnProperty.call(component.mcp, "enabled") || component.mcp.enabled === undefined) {

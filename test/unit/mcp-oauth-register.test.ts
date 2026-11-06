@@ -1,6 +1,7 @@
 // MCP OAuth route registration.
 
 import { mock, describe, it, expect, beforeEach } from "bun:test";
+import { runInNewContext } from "node:vm";
 import type * as Harper from "../../node_modules/harper/dist/index.js";
 
 type HarperRegistryMock = {
@@ -273,6 +274,29 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
     expect(httpCalls).toHaveLength(1);
   });
 
+  it("a VM-realm config with a non-enumerable get mounts when effectively enabled", async () => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "true";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    const config = runInNewContext(`
+      const component = { mcp: { enabled: true } };
+      const config = {};
+      Object.defineProperty(config, "get", {
+        enumerable: false,
+        value(key) { return key === "@harperfast/oauth" ? component : undefined; },
+      });
+      config;
+    `);
+    expect(Object.keys(config)).toHaveLength(0);
+    expect(Object.getPrototypeOf(config)).not.toBe(Object.prototype);
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = { app: { config } };
+    const mounted = await registerMcpOAuthRoute(deps);
+    expect(mounted).toBe(true);
+    expect(httpCalls).toHaveLength(1);
+  });
+
   it("literal mcp.enabled true agrees with a legacy env value, so the route mounts", async () => {
     clearEnv();
     process.env.FLAIR_MCP_OAUTH = "1";
@@ -412,6 +436,22 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
       {
         label: "unparseable mcp.enabled",
         harper: { app: { config: { get: () => ({ mcp: { enabled: { bad: true } } }) } } },
+      },
+      {
+        label: "array config",
+        harper: { app: { config: ["not", "a", "record"] } },
+      },
+      {
+        label: "class instance",
+        harper: {
+          app: {
+            config: new (class Config {
+              get(): { mcp: { enabled: boolean } } {
+                return { mcp: { enabled: true } };
+              }
+            })(),
+          },
+        },
       },
     ];
     for (const c of cases) {
