@@ -11,6 +11,7 @@ mock.module("harper", () => ({
     OrgSkillAssignment: empty, Relationship: empty, Presence: empty,
     InstructionVersion: {
       primaryStore: { tryLock: () => true, unlock() {}, resetReadTxn() {} },
+      validate() {},
       async *search(query: any, ctx: any) {
         const matching = ctx.transaction.versions.filter((version: any) =>
           query.conditions.every((condition: any) => version[condition.attribute] === condition.value));
@@ -20,6 +21,7 @@ mock.module("harper", () => ({
       async create(record: any, ctx: any) { ctx.transaction.versions.push(record); },
     },
     OrgEvent: {
+      validate() {},
       async create(record: any, ctx: any) { ctx.transaction.events.push(record); },
       async *search(query: any) {
         for (const event of events) {

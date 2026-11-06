@@ -15,6 +15,7 @@ import { keepsSuppliedVector } from "./memory-supplied-vector.js";
 import { FORBIDDEN } from "./record-type-kit.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
+import { validateServerRow } from "./server-row-validation.js";
 import { supersedesTargetUnreadable } from "./memory-id-guard.js";
 import { grantedCloseRevokedRefusal, sameStoredRow, storedRowChangedRefusal, writeGrantHeld } from "./write-back.js";
 import { isJoinableTransaction, withOwnedTransaction } from "./request-transaction.js";
@@ -328,6 +329,7 @@ export interface SkillWriteHooks {
 export const defaultSkillHooks: SkillWriteHooks = {
   createSuccessor: async (successor, shared) => {
     normalizeEmptyEmbedding(successor);
+    validateServerRow((databases as any).flair.Memory, successor);
     const result = storageResult(await (databases as any).flair.Memory.put(successor, shared));
     if (result instanceof Response) return result;
     return String(successor.id);
@@ -335,6 +337,7 @@ export const defaultSkillHooks: SkillWriteHooks = {
   closePredecessor: async (predecessor, patch, shared) => {
     const closed = { ...predecessor, ...patch };
     normalizeEmptyEmbedding(closed);
+    validateServerRow((databases as any).flair.Memory, closed);
     const result = storageResult(await (databases as any).flair.Memory.put(closed, shared));
     if (result instanceof Response) return result;
   },
@@ -580,6 +583,7 @@ async function confirmSkillCloseInner(args: ConfirmSkillCloseArgs, journal: Writ
         if (denied) return denied;
         const closed = { ...stored, ...closePatch };
         normalizeEmptyEmbedding(closed);
+        validateServerRow(table, closed);
         const result = storageResult(await table.put(closed, c));
         if (result instanceof Response) throw result;
         const revoked = await afterStaged?.(stored, attempt);
@@ -780,7 +784,7 @@ async function runSkillVersionAttempt(args: RunSkillVersionWriteArgs, joined: bo
         const revoked = await afterCloseStaged(writePlan.grantedClose);
         if (revoked) return revoked;
       } else {
-        maybeThrowSkillWriteFault("successor", owner);
+        maybeThrowSkillWriteFault("successor", owner, writePlan.successor);
         const created = await args.hooks.createSuccessor!(writePlan.successor, shared);
         if (created instanceof Response) return storageResult(created);
         if (writePlan.predecessor) {

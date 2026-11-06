@@ -1,0 +1,1 @@
+- **A schema validation failure on a row the server builds is now a server error.** The instruction-version record, its event and the skill successor/close rows are validated with their table's own validator before staging; a failure aborts the write with its existing 5xx response and commits nothing.

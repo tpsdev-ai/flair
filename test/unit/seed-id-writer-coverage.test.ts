@@ -70,6 +70,8 @@ add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
   "SERVER: a table handle (resolveSkillHead searches the live skill head).");
 add("skill-version-write", ["writer:table.put#1", "alias-source:(databases as any).flair?.Memory#2"],
   "GUARDED: retries use the predecessor id checked by the reserved-id decision.");
+add("skill-version-write", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2"],
+  "SERVER: table handles passed to the pre-staging validator (flair#2997); they write no row.");
 
 // ── OPERATOR ──
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
