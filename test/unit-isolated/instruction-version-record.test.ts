@@ -447,7 +447,8 @@ describe("instruction version — guard, collisions and failure injection", () =
 describe("instruction version — validator client errors", () => {
   const issue = { path: "value", code: "type", message: "Value 123 in property value must be a string" };
   // A real Harper ValidationError: harper's package exports only ".", so load
-  // the class its main entry's directory holds, the same way the resource does.
+  // the class from the main entry's directory. This also puts the module in the
+  // require cache the resource reads; the load itself resets `transaction`.
   const harperValidationError = (issues: any[]): Error => {
     const transaction = (globalThis as any).transaction;
     try {

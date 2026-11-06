@@ -276,32 +276,36 @@ function jsonResponse(status: number, body: Record<string, unknown>): Response {
 
 type HarperValidationErrorCtor = new (errors: unknown[], message?: string) => Error;
 
-let harperValidationErrorCtor: HarperValidationErrorCtor | null | undefined;
+let harperValidationErrorCtor: HarperValidationErrorCtor | undefined;
 
 /**
- * Harper's own `ValidationError` constructor, or null when it cannot be
- * loaded. `harper`'s package exports only "." (harper@5.3.1 package.json), so
- * the class is not importable by specifier; resolve its main entry and require
- * the module beside it — the same createRequire walk resources/Presence.ts
- * uses for Harper's package.json. Identity is the point: a plain Error that
- * copies the fields is not the validator's error.
+ * Harper's own `ValidationError` constructor, or null when that module is not
+ * already loaded here. `harper`'s package exports only "." (harper@5.3.1
+ * package.json), so the class is not importable by specifier; resolve its main
+ * entry and read the module beside it from the require cache — the same
+ * createRequire walk resources/Presence.ts uses for Harper's package.json.
  *
- * If the lookup fails, the helper reports no match and the append keeps its
- * own 500 rather than claiming a client error.
+ * Identity is the point: a plain Error that copies the fields is not the
+ * validator's error. The cache is the instance that threw — a module is
+ * executed at most once per path — so this cannot compare against a second
+ * Harper copy. It deliberately does NOT require the module: Harper's
+ * hdbError graph reaches dist/globals.js, which assigns
+ * `global.transaction = undefined`; in a process that mocks `harper` (the unit
+ * lane) requiring it would clear the mock's transaction, so later unwrapped
+ * writes fail. A miss reports no match, and the append keeps its own 500
+ * rather than claiming a client error.
  */
 function harperValidationError(): HarperValidationErrorCtor | null {
-  if (harperValidationErrorCtor !== undefined) return harperValidationErrorCtor;
+  if (harperValidationErrorCtor) return harperValidationErrorCtor;
   try {
     const req = createRequire(import.meta.url);
     const mainPath = req.resolve("harper");
-    const errors = req(join(dirname(mainPath), "utility", "errors", "hdbError.js")) as { ValidationError?: unknown };
-    harperValidationErrorCtor = typeof errors.ValidationError === "function"
-      ? errors.ValidationError as HarperValidationErrorCtor
-      : null;
-  } catch {
-    harperValidationErrorCtor = null;
-  }
-  return harperValidationErrorCtor;
+    const errorPath = join(dirname(mainPath), "utility", "errors", "hdbError.js");
+    const loaded = (req.cache as Record<string, { exports?: { ValidationError?: unknown } } | undefined>)[errorPath];
+    const ctor = loaded?.exports?.ValidationError;
+    if (typeof ctor === "function") harperValidationErrorCtor = ctor as HarperValidationErrorCtor;
+  } catch { /* no class: fail closed below */ }
+  return harperValidationErrorCtor ?? null;
 }
 
 /**
@@ -316,11 +320,11 @@ function harperValidationError(): HarperValidationErrorCtor | null {
  */
 function validationErrorResponse(err: unknown): Response | null {
   if (!err || typeof err !== "object") return null;
-  const ValidationError = harperValidationError();
-  if (!ValidationError || !(err instanceof ValidationError)) return null;
   const candidate = err as { name?: unknown; code?: unknown; statusCode?: unknown; errors?: unknown; message?: unknown };
   if (candidate.name !== "ValidationError" || candidate.code !== "ValidationError" || candidate.statusCode !== 400) return null;
   const issues = candidate.errors;
+  // Cheap shape checks first: the class lookup below must not run for an
+  // ordinary error the append answers 500.
   if (!Array.isArray(issues) || issues.length === 0) return null;
   const wellFormed = issues.every((issue) => {
     if (!issue || typeof issue !== "object") return false;
@@ -328,6 +332,8 @@ function validationErrorResponse(err: unknown): Response | null {
     return typeof fields.path === "string" && typeof fields.code === "string" && typeof fields.message === "string";
   });
   if (!wellFormed) return null;
+  const ValidationError = harperValidationError();
+  if (!ValidationError || !(err instanceof ValidationError)) return null;
   return jsonResponse(400, {
     error: "ValidationError",
     type: "error:ValidationError",
