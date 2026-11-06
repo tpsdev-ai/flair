@@ -60,6 +60,7 @@ const rawVersions = {
 };
 const versionTable = Object.assign(Object.create(rawVersions), {
   primaryStore,
+  validate() {},
   async *search(query: any, ctx?: any) {
     const rows: Row[] = [...(ctx?.transaction?.versions ?? versions).values()];
     rows.sort((a, b) => Number(b.version) - Number(a.version));
@@ -68,6 +69,7 @@ const versionTable = Object.assign(Object.create(rawVersions), {
   async create(row: Row, ctx: any) { ctx.transaction.versions.set(row.id, { ...row }); },
 });
 const memoryTable = {
+  validate() {},
   primaryStore: { getEntry(id: string) { return memories.has(id) ? { value: memories.get(id), version: id === "successor" ? successorVersion : 1 } : null; } },
   async get(id: string, ctx?: any) {
     const rows = ctx?.transaction?.memories ?? memories;
@@ -143,6 +145,7 @@ Object.setPrototypeOf(memoryTable, { get: memoryTable.get, put: memoryTable.put,
 Object.setPrototypeOf(pointerTable, { get: pointerTable.get, put: pointerTable.put, delete: pointerTable.delete });
 (rawVersions as any).put = async (row: Row, ctx: any) => { ctx.transaction.versions.set(row.id, row); };
 const eventTable = {
+  validate() {},
   primaryStore: { getEntry(id: string) { return events.has(id) ? { value: events.get(id), version: 1 } : null; } },
   async *search() {},
   async create(row: Row, ctx: any) { ctx.transaction.events.set(row.id, { ...row }); },

@@ -11,6 +11,7 @@ import { withKeyLock } from "./key-lock.js";
 import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { txnFault, txnPausePoint } from "./txn-pause-point.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
+import { validateServerRow } from "./server-row-validation.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 
 export const INSTRUCTION_VERSION_TABLE = "InstructionVersion";
@@ -81,7 +82,12 @@ export function instructionEventFor(record: Record<string, any>): Record<string,
 async function appendInstructionEvent(record: Record<string, any>, shared: any): Promise<void> {
   const events = (databases as any).flair?.OrgEvent;
   if (!isTableLike(events)) throw new Error("flair: the OrgEvent table is unavailable");
-  await events.create(instructionEventFor(record), shared);
+  const event = instructionEventFor(record);
+  // Test-only: the hook may inspect the exact row about to be staged (inert
+  // unless a fixture installs one).
+  maybeThrowSkillWriteFault("event", record.agentId, event);
+  validateServerRow(events, event);
+  await events.create(event, shared);
 }
 
 /** Server-derived attribution for one version row; never read from a request body. */
@@ -564,6 +570,7 @@ export async function recordVersion(
             expectedVersion: null,
           };
           oldRecord.recordHash = recordDigest(oldRecord);
+          validateServerRow(table, oldRecord);
           await table.create(oldRecord, shared);
           await appendInstructionEvent(oldRecord, shared);
         }
@@ -598,7 +605,8 @@ export async function recordVersion(
         // skill-write-fault.ts). Fires after the Memory-side successor/close
         // writes rode this same transaction, so the append failure aborts them
         // too: no successor, no close, no version.
-        if (input.subjectType === "skill") maybeThrowSkillWriteFault("append", input.agentId);
+        if (input.subjectType === "skill") maybeThrowSkillWriteFault("append", input.agentId, record);
+        validateServerRow(table, record);
         await table.create(record, shared);
         // Test-only: fail after the version row is staged so a test can prove
         // the abort rolls both it and the caller's staged row back. Inert
@@ -612,7 +620,8 @@ export async function recordVersion(
   } catch (err) {
     if (callerTransaction) callerTransaction.abort();
     if (err instanceof RowMutationDenied) return { ok: false, response: err.response };
-    // Report a matching Harper ValidationError as 400.
+    // Rows this append builds are validated before staging, so a Harper
+    // ValidationError here is the caller's row: report it as 400.
     const validation = validationErrorResponse(err);
     if (validation) return { ok: false, response: validation };
     // A head-read, append or commit failure aborts the whole transaction; report

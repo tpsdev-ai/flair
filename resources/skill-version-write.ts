@@ -328,6 +328,10 @@ export interface SkillWriteHooks {
 export const defaultSkillHooks: SkillWriteHooks = {
   createSuccessor: async (successor, shared) => {
     normalizeEmptyEmbedding(successor);
+    // Not pre-validated: this row carries the caller's fields, so a defect in
+    // it — a server-stamped field included — stays a caller error (400) at
+    // commit. Only rows the server builds entirely are pre-validated
+    // (resources/server-row-validation.ts).
     const result = storageResult(await (databases as any).flair.Memory.put(successor, shared));
     if (result instanceof Response) return result;
     return String(successor.id);
@@ -335,6 +339,8 @@ export const defaultSkillHooks: SkillWriteHooks = {
   closePredecessor: async (predecessor, patch, shared) => {
     const closed = { ...predecessor, ...patch };
     normalizeEmptyEmbedding(closed);
+    // Not pre-validated: a close carries the caller's row; its defects stay a
+    // caller error at commit (see the successor note above).
     const result = storageResult(await (databases as any).flair.Memory.put(closed, shared));
     if (result instanceof Response) return result;
   },
@@ -780,7 +786,7 @@ async function runSkillVersionAttempt(args: RunSkillVersionWriteArgs, joined: bo
         const revoked = await afterCloseStaged(writePlan.grantedClose);
         if (revoked) return revoked;
       } else {
-        maybeThrowSkillWriteFault("successor", owner);
+        maybeThrowSkillWriteFault("successor", owner, writePlan.successor);
         const created = await args.hooks.createSuccessor!(writePlan.successor, shared);
         if (created instanceof Response) return storageResult(created);
         if (writePlan.predecessor) {

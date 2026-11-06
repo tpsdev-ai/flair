@@ -1417,7 +1417,7 @@ const UNRESOLVED_SITES = new Map<string, { detail: string; reason: string }>([
   ["resources/record-type-kit.ts:76:3", { detail: "unresolvable refusal body", reason: "FORBIDDEN forwards msg; literal call arguments are checked separately" }],
   ["resources/request-target.ts:75:10", { detail: "unresolvable refusal body", reason: "the HEAD/body conditional uses null and a body identifier; the request-target refusal remains unresolved" }],
   ["resources/skill-provenance.ts:212:10", { detail: "unresolvable refusal body", reason: "the error is result.error from registerSkillAssignment; this response remains unresolved" }],
-  ["resources/instruction-version-record.ts:274:10", { detail: "unresolvable Response status", reason: "jsonResponse forwards its status parameter; its call sites are checked for static statuses" }],
+  ["resources/instruction-version-record.ts:280:10", { detail: "unresolvable Response status", reason: "jsonResponse forwards its status parameter; its call sites are checked for static statuses" }],
   ["resources/record-owner-guard.ts:220:10", { detail: "unresolvable refusal body", reason: "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write" }],
   ["resources/record-owner-guard.ts:231:10", { detail: "unresolvable refusal body", reason: "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write" }],
 ]);
@@ -1445,6 +1445,7 @@ const OPAQUE_FUNCTIONS = new Map<string, string>([
   ["resources/skill-provenance.ts:isNonDurableFilesystemPath", "forwards fsPath into resolve, which the inventory does not resolve"],
   ["resources/skill-provenance.ts:normalizePriority", "forwards p into Object.hasOwn, which the inventory does not resolve"],
   ["resources/instruction-version-record.ts:appendInstructionEvent", "forwards shared into events.create, which the inventory does not resolve"],
+  ["resources/server-row-validation.ts:validateServerRow", "forwards table into validate.call, which the inventory does not resolve"],
   ["resources/instruction-version-record.ts:removeAppendedVersion", "forwards versionRecordId into raw.delete.call, which the inventory does not resolve"],
   ["resources/instruction-version-record.ts:valueDigest", "forwards value into createHash().update, which the inventory does not resolve"],
   ["resources/instruction-version-record.ts:subjectTypeReadable", "forwards subjectType into AUTHORIZED_SUBJECT_TYPES.has, which the inventory does not resolve"],

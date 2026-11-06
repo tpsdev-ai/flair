@@ -37,6 +37,8 @@ function stage(ctx: any, apply: () => void): void {
 
 const InstructionVersionTable = {
   primaryStore,
+  validate() {}, // Harper's table validator surface; these tests stage plain rows
+
   async get(id: string, ctx?: any): Promise<Row | null> {
     return (ctx?.transaction?.versions ?? store).get(id) ?? null;
   },
@@ -66,6 +68,7 @@ const InstructionVersionTable = {
 Object.setPrototypeOf(InstructionVersionTable, { get: InstructionVersionTable.get, delete: InstructionVersionTable.delete });
 
 const OrgEventTable = {
+  validate() {},
   async *search() {},
   async create(record: Row, ctx: any): Promise<void> {
     if (failNextEvent) { failNextEvent = false; throw new Error("event-write-failed"); }
