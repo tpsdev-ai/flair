@@ -4,8 +4,8 @@
  * Harper hands the process a BigInt for a JSON integer beyond
  * Number.MAX_SAFE_INTEGER. Three intakes that previously reached
  * `JSON.stringify` with that value and surfaced as the server's generic error
- * (A2A's outer catch answered -32000) now answer a caller error before any
- * write:
+ * (A2A's outer catch answered -32000) now answer a caller error before their
+ * business-row writes:
  *
  *   - POST /Agent/ with a body `id` — 400 invalid_agent_id with the string
  *     remedy key registration answers since #3003;
