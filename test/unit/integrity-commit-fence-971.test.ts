@@ -821,6 +821,45 @@ describe("commit-fence (invariant 7)", () => {
     expect(lstatSync(integrityPaths(custodyDir).uncertainPath, { throwIfNoEntry: false })).toBeUndefined();
   });
 
+  it("refuses reopen after a post-rename warning and restoration of the prior signed CURRENT", () => {
+    const state = init();
+    commit(state, 0);
+    const paths = integrityPaths(custodyDir);
+    const priorCurrent = readFileSync(paths.currentPath);
+    const uncertain = commitGeneration({
+      state,
+      expectedGeneration: 1,
+      checkpoint: payload(),
+      testHooks: { afterRename: () => { throw new Error("injected hook failure before directory fsync"); } },
+    });
+    expect(uncertain).toMatchObject({ ok: false, status: "commit_uncertain", committed: true, generation: 2 });
+    const published = JSON.parse(readFileSync(paths.currentPath, "utf-8"));
+    expect(published.generation).toBe(2);
+    expect(verifyIntegrityRecord(published, state.key)).toBe(true);
+    expect(readFileSync(paths.uncertainPath, "utf-8")).toBe("commit:2");
+
+    const moved = join(root, "custody-original");
+    renameSync(custodyDir, moved);
+    cpSync(moved, custodyDir, { recursive: true });
+    const denied = commitGeneration({ state, expectedGeneration: 2, checkpoint: payload() });
+    expect(denied).toMatchObject({ ok: false, status: "commit_failed", reason: "custody_invalid" });
+    if (denied.ok) return;
+    expect(denied.remedy).toBe("Re-open custody after restoring valid custody paths. If re-open refuses with commit_uncertain because CURRENT now names an older generation than the uncertainty marker, this state cannot establish whether the staged generation was ever published or became durable; reconcile it before retrying (issue #2980). Retry only after re-open succeeds.");
+
+    writeFileSync(paths.currentPath, priorCurrent);
+    expect(verifyIntegrityRecord(JSON.parse(priorCurrent.toString("utf-8")), state.key)).toBe(true);
+    const before = snapshotCustody(custodyDir);
+    const reopened = openIntegrityState(options({ newCustody: false }));
+    expect(reopened).toMatchObject({
+      ok: false,
+      reason: "commit_uncertain",
+      detail: "the uncertainty marker names generation 2, but the current generation is 1",
+      remedy: "Recover the durable custody state before another operation, then rerun.",
+    });
+    expect(snapshotCustody(custodyDir)).toEqual(before);
+    expect(readFileSync(paths.uncertainPath, "utf-8")).toBe("commit:2");
+  });
+
   it("retains uncertain intent on a same-handle retry until recovered open", () => {
     const state = init();
     commit(state, 0);

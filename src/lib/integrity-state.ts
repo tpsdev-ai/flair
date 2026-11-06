@@ -77,7 +77,7 @@ export const INTEGRITY_MAX_GENERATION = 999_999_999_999;
 const CUSTODY_CHAIN_MAX = 256;
 
 /** The remedy for a custody chain that no longer matches the open handle. */
-const CUSTODY_CHAIN_REMEDY = "Re-open custody after restoring valid custody paths. If re-open refuses with commit_uncertain because the uncertainty marker names a generation ahead of CURRENT, the staged generation was not published and needs reconciliation; this version does not perform it automatically (issue #2980). Retry only after re-open succeeds.";
+const CUSTODY_CHAIN_REMEDY = "Re-open custody after restoring valid custody paths. If re-open refuses with commit_uncertain because CURRENT now names an older generation than the uncertainty marker, this state cannot establish whether the staged generation was ever published or became durable; reconcile it before retrying (issue #2980). Retry only after re-open succeeds.";
 
 function msg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -1623,9 +1623,9 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
       }
       if (!Buffer.from(generationBytes).equals(existing)) {
         // CURRENT still names expectedGeneration (checked in decide), so this
-        // number is unreferenced: an orphan left by an earlier attempt that
-        // staged but did not publish. Replace it. A file another writer put at
-        // a number CURRENT names is outside what this check can see.
+        // number is unreferenced: replace it.
+        // A file another writer put at a number CURRENT names is outside what
+        // this check can see.
         identity = replaceDurable(path, generationBytes, 0o600);
       }
       stagedFiles.push(identity);
