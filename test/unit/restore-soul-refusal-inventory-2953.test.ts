@@ -1394,7 +1394,8 @@ const OUT_OF_SCOPE = new Map<string, string>([
   ["soul_patch_row_changed", "PATCH-only: restore --replace PUTs rows and never PATCHes"],
   ["soul_subject_occupied", "identity-change path: a successful Soul DELETE leaves the replace PUT no stored row, so its identity did not change; after a failed DELETE (recorded, and the PUT still runs) a stored row with a different identity can reach this 409"],
   ["instruction_version_head_mismatch", "compare-and-set: the replace PUT supplies no expectedVersion"],
-  ["instruction_version_append_failed", "the server reports version append failures and catch-all-wrapped schema validation errors under this code (#2979); admission refuses checked schema cases (a present non-null held column of the wrong type or a missing required field the write does not supply) before any delete; unchecked validator refusals and append failures are not predictable here (#2970: server dry run)"],
+  ["instruction_version_append_failed", "the server reports version append failures; admission refuses checked schema cases (a present non-null held column of the wrong type or a missing required field the write does not supply) before any delete; unchecked append failures are not predictable here (#2970: server dry run)"],
+  ["ValidationError", "schema validation failure: the append helper passes Harper's own 400 through, and restore's preflight validates its own rows"],
   ["instruction_version_busy", "commit-time version lock contention, which the preflight cannot predict"],
   ["instruction_version_lock_unavailable", "commit-time version lock availability, which the preflight cannot predict"],
   ["skill_write_requires_verified_identity", "skill-version write authorization; the Soul write path does not call it"],
@@ -1416,7 +1417,7 @@ const UNRESOLVED_SITES = new Map<string, { detail: string; reason: string }>([
   ["resources/record-type-kit.ts:76:3", { detail: "unresolvable refusal body", reason: "FORBIDDEN forwards msg; literal call arguments are checked separately" }],
   ["resources/request-target.ts:75:10", { detail: "unresolvable refusal body", reason: "the HEAD/body conditional uses null and a body identifier; the request-target refusal remains unresolved" }],
   ["resources/skill-provenance.ts:212:10", { detail: "unresolvable refusal body", reason: "the error is result.error from registerSkillAssignment; this response remains unresolved" }],
-  ["resources/instruction-version-record.ts:272:10", { detail: "unresolvable Response status", reason: "jsonResponse forwards its status parameter; its call sites are checked for static statuses" }],
+  ["resources/instruction-version-record.ts:274:10", { detail: "unresolvable Response status", reason: "jsonResponse forwards its status parameter; its call sites are checked for static statuses" }],
   ["resources/record-owner-guard.ts:220:10", { detail: "unresolvable refusal body", reason: "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write" }],
   ["resources/record-owner-guard.ts:231:10", { detail: "unresolvable refusal body", reason: "message interpolates the table name; the owner-scoped write middleware raises it, not the Soul row write" }],
 ]);

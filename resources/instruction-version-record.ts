@@ -2,12 +2,14 @@
  * Transaction helper for single-row Soul resource history (flair#2139 slice 1).
  */
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { databases } from "harper";
 import { authorizeSoulWrite } from "./soul-write-policy.js";
 import { authorizeSkillVersionWrite } from "./skill-write-policy.js";
 import { withKeyLock } from "./key-lock.js";
 import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
-import { txnPausePoint } from "./txn-pause-point.js";
+import { txnFault, txnPausePoint } from "./txn-pause-point.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 
@@ -270,6 +272,65 @@ export function expectedVersionOf(input: RecordVersionInput): string | null {
 
 function jsonResponse(status: number, body: Record<string, unknown>): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+type HarperValidationErrorCtor = new (errors: unknown[], message?: string) => Error;
+
+let harperValidationErrorCtor: HarperValidationErrorCtor | undefined;
+
+/**
+ * Read and memoize Harper's cached `ValidationError` constructor. `harper`
+ * exports only ".", so resolve the main entry to locate hdbError.js.
+ * An uncached load can execute globals.js and clear `global.transaction`;
+ * this helper never requires the module. Eviction/reload can leave the memoized
+ * constructor stale. A missing constructor reports no match.
+ */
+function harperValidationError(): HarperValidationErrorCtor | null {
+  if (harperValidationErrorCtor) return harperValidationErrorCtor;
+  try {
+    const req = createRequire(import.meta.url);
+    const mainPath = req.resolve("harper");
+    const errorPath = join(dirname(mainPath), "utility", "errors", "hdbError.js");
+    const loaded = (req.cache as Record<string, { exports?: { ValidationError?: unknown } } | undefined>)[errorPath];
+    const ctor = loaded?.exports?.ValidationError;
+    if (typeof ctor === "function") harperValidationErrorCtor = ctor as HarperValidationErrorCtor;
+  } catch { /* no class: fail closed below */ }
+  return harperValidationErrorCtor ?? null;
+}
+
+/**
+ * The validator's own client error, rendered with the problem-details fields
+ * Harper's REST responder uses for it (harper@5.3.1 dist/server/REST.js:498).
+ * The class is declared at dist/utility/errors/hdbError.js:243; in that
+ * version's dist it is constructed only at the two schema-validation sites,
+ * dist/resources/Table.js:6459 and dist/resources/defineResource.js:432, both
+ * with a non-empty issue list. Its constructor sets `name` and `code` to
+ * "ValidationError", a 400 `statusCode`, and the `errors` array. The status
+ * check refuses any 5xx.
+ */
+function validationErrorResponse(err: unknown): Response | null {
+  if (!err || typeof err !== "object") return null;
+  const candidate = err as { name?: unknown; code?: unknown; statusCode?: unknown; errors?: unknown; message?: unknown };
+  if (candidate.name !== "ValidationError" || candidate.code !== "ValidationError" || candidate.statusCode !== 400) return null;
+  const issues = candidate.errors;
+  // Only errors passing the shape checks reach the constructor lookup.
+  if (!Array.isArray(issues) || issues.length === 0) return null;
+  const wellFormed = issues.every((issue) => {
+    if (!issue || typeof issue !== "object") return false;
+    const fields = issue as { path?: unknown; code?: unknown; message?: unknown };
+    return typeof fields.path === "string" && typeof fields.code === "string" && typeof fields.message === "string";
+  });
+  if (!wellFormed) return null;
+  const ValidationError = harperValidationError();
+  if (!ValidationError || !(err instanceof ValidationError)) return null;
+  return jsonResponse(400, {
+    error: "ValidationError",
+    type: "error:ValidationError",
+    code: "ValidationError",
+    title: typeof candidate.message === "string" ? candidate.message : "invalid request body",
+    status: 400,
+    detail: issues,
+  });
 }
 
 function staleHeadResponse(expected: string, head: Record<string, any> | null): Response {
@@ -539,6 +600,10 @@ export async function recordVersion(
         // too: no successor, no close, no version.
         if (input.subjectType === "skill") maybeThrowSkillWriteFault("append", input.agentId);
         await table.create(record, shared);
+        // Test-only: fail after the version row is staged so a test can prove
+        // the abort rolls both it and the caller's staged row back. Inert
+        // unless the fault-injection opt-in is armed.
+        if (txnFault("instruction-version-append-fail")) throw new Error("test-only instruction version append failure");
         await appendInstructionEvent(record, shared);
         return { ok: true, result, version: id } as RecordVersionOutcome;
       }),
@@ -547,6 +612,9 @@ export async function recordVersion(
   } catch (err) {
     if (callerTransaction) callerTransaction.abort();
     if (err instanceof RowMutationDenied) return { ok: false, response: err.response };
+    // Report a matching Harper ValidationError as 400.
+    const validation = validationErrorResponse(err);
+    if (validation) return { ok: false, response: validation };
     // A head-read, append or commit failure aborts the whole transaction; report
     // unavailable rather than a success, so no caller reads a missing version as
     // "nothing happened" (fail-closed).

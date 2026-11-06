@@ -345,8 +345,9 @@ describe("non-dry-run flair restore --replace refuses the Soul write rules it co
       id: soulId, agentId: agent, key: "identity", value: 42, durability: "permanent", createdAt: CREATED_AT,
     });
 
-    expect(refused.status, refused.body).toBe(500);
-    expect(refused.body).toContain("instruction_version_append_failed");
+    expect(refused.status, refused.body).toBe(400);
+    expect(refused.body).toContain("ValidationError");
+    expect(refused.body).toContain("value");
     expect(await row("Soul", soulId)).toBeUndefined();
   }, 300_000);
 
