@@ -2,6 +2,8 @@
 //
 import { describe, expect, test, beforeEach } from "bun:test";
 import { mock, spyOn } from "bun:test";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 
 type Row = Record<string, any>;
 const store = new Map<string, Row>();
@@ -444,7 +446,22 @@ describe("instruction version — guard, collisions and failure injection", () =
 
 describe("instruction version — validator client errors", () => {
   const issue = { path: "value", code: "type", message: "Value 123 in property value must be a string" };
-  const validationError = () => Object.assign(new Error(issue.message), {
+  // A real Harper ValidationError: harper's package exports only ".", so load
+  // the class its main entry's directory holds, the same way the resource does.
+  const harperValidationError = (issues: any[]): Error => {
+    const transaction = (globalThis as any).transaction;
+    try {
+      const req = createRequire(import.meta.url);
+      const mainPath = req.resolve("harper");
+      const errors = req(join(dirname(mainPath), "utility", "errors", "hdbError.js")) as {
+        ValidationError: new (issues: any[], message?: string) => Error;
+      };
+      return new errors.ValidationError(issues);
+    } finally {
+      (globalThis as any).transaction = transaction;
+    }
+  };
+  const lookalike = () => Object.assign(new Error(issue.message), {
     name: "ValidationError",
     code: "ValidationError",
     statusCode: 400,
@@ -457,7 +474,7 @@ describe("instruction version — validator client errors", () => {
   });
 
   test("the validator's 400 is passed through with its field message and writes nothing", async () => {
-    const res = await recordVersion(context(), throwing(validationError()) as any, async () => okRow());
+    const res = await recordVersion(context(), throwing(harperValidationError([issue])) as any, async () => okRow());
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.response.status).toBe(400);
@@ -469,6 +486,14 @@ describe("instruction version — validator client errors", () => {
     expect(soulStore.size).toBe(0);
   });
 
+  test("a plain Error with the validator's field shape stays 500", async () => {
+    const res = await recordVersion(context(), throwing(lookalike()) as any, async () => okRow());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.response.status).toBe(500);
+    expect((await res.response.clone().json() as any).error).toBe("instruction_version_append_failed");
+  });
+
   test("an arbitrary error carrying statusCode 400 is not passed through", async () => {
     const res = await recordVersion(context(), throwing(Object.assign(new Error("not a validator"), { statusCode: 400 })) as any, async () => okRow());
     expect(res.ok).toBe(false);
@@ -478,15 +503,15 @@ describe("instruction version — validator client errors", () => {
   });
 
   test("a 5xx named like the validator is not passed through", async () => {
-    const res = await recordVersion(context(), throwing(Object.assign(validationError(), { statusCode: 500 })) as any, async () => okRow());
+    const res = await recordVersion(context(), throwing(Object.assign(harperValidationError([issue]), { statusCode: 500 })) as any, async () => okRow());
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.response.status).toBe(500);
     expect((await res.response.clone().json() as any).error).toBe("instruction_version_append_failed");
   });
 
-  test("a ValidationError shape without structured issues is not passed through", async () => {
-    const res = await recordVersion(context(), throwing(Object.assign(validationError(), { errors: [] })) as any, async () => okRow());
+  test("a ValidationError without structured issues is not passed through", async () => {
+    const res = await recordVersion(context(), throwing(harperValidationError([])) as any, async () => okRow());
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.response.status).toBe(500);

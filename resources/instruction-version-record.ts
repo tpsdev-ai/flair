@@ -2,6 +2,8 @@
  * Transaction helper for single-row Soul resource history (flair#2139 slice 1).
  */
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { databases } from "harper";
 import { authorizeSoulWrite } from "./soul-write-policy.js";
 import { authorizeSkillVersionWrite } from "./skill-write-policy.js";
@@ -272,18 +274,50 @@ function jsonResponse(status: number, body: Record<string, unknown>): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
+type HarperValidationErrorCtor = new (errors: unknown[], message?: string) => Error;
+
+let harperValidationErrorCtor: HarperValidationErrorCtor | null | undefined;
+
+/**
+ * Harper's own `ValidationError` constructor, or null when it cannot be
+ * loaded. `harper`'s package exports only "." (harper@5.3.1 package.json), so
+ * the class is not importable by specifier; resolve its main entry and require
+ * the module beside it — the same createRequire walk resources/Presence.ts
+ * uses for Harper's package.json. Identity is the point: a plain Error that
+ * copies the fields is not the validator's error.
+ *
+ * If the lookup fails, the helper reports no match and the append keeps its
+ * own 500 rather than claiming a client error.
+ */
+function harperValidationError(): HarperValidationErrorCtor | null {
+  if (harperValidationErrorCtor !== undefined) return harperValidationErrorCtor;
+  try {
+    const req = createRequire(import.meta.url);
+    const mainPath = req.resolve("harper");
+    const errors = req(join(dirname(mainPath), "utility", "errors", "hdbError.js")) as { ValidationError?: unknown };
+    harperValidationErrorCtor = typeof errors.ValidationError === "function"
+      ? errors.ValidationError as HarperValidationErrorCtor
+      : null;
+  } catch {
+    harperValidationErrorCtor = null;
+  }
+  return harperValidationErrorCtor;
+}
+
 /**
  * The validator's own client error, rendered with the problem-details fields
  * Harper's REST responder uses for it (harper@5.3.1 dist/server/REST.js:498).
- * Harper's `ValidationError` class (dist/utility/errors/hdbError.js:243) is
- * constructed only at its two schema-validation sites (dist/resources/Table.js:6461
- * and dist/resources/defineResource.js:432). Its constructor sets `name` and
- * `code` to "ValidationError", a 400 `statusCode`, and the `errors` array, and
- * both call sites throw only with a non-empty issue list. No other Harper path
- * constructs a `ValidationError`, and the status check refuses any 5xx.
+ * The class is declared at dist/utility/errors/hdbError.js:243; in that
+ * version's dist it is constructed only at the two schema-validation sites,
+ * dist/resources/Table.js:6461 and dist/resources/defineResource.js:432, both
+ * with a non-empty issue list. Its constructor sets `name` and `code` to
+ * "ValidationError", a 400 `statusCode`, and the `errors` array. The status
+ * check refuses any 5xx.
  */
 function validationErrorResponse(err: unknown): Response | null {
   if (!err || typeof err !== "object") return null;
+  const ValidationError = harperValidationError();
+  if (!ValidationError || !(err instanceof ValidationError)) return null;
   const candidate = err as { name?: unknown; code?: unknown; statusCode?: unknown; errors?: unknown; message?: unknown };
   if (candidate.name !== "ValidationError" || candidate.code !== "ValidationError" || candidate.statusCode !== 400) return null;
   const issues = candidate.errors;
