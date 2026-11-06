@@ -40,7 +40,7 @@ import { CommittedRowChanged, confirmCommittedRow, verifyCommittedFields } from 
 import { txnPausePoint } from "./txn-pause-point.js";
 import { isPrincipalDeactivated } from "../src/lib/principal-status.js";
 import { isForeignAgentHome, isSyncOriginatedAgentRow } from "../src/lib/agent-home-fields.js";
-import { isValidAgentId, invalidAgentIdMessage } from "../src/lib/agent-id-rule.js";
+import { AGENT_ID_STRING_REMEDY, isValidAgentId, invalidAgentIdMessage, isUnsafeAgentIdWireValue } from "../src/lib/agent-id-rule.js";
 import { localInstanceId } from "./instance-identity.js";
 import { maybeFaultOrgEventRow } from "./org-event-write-fault.js";
 import { validateServerRow } from "./server-row-validation.js";
@@ -112,8 +112,8 @@ export class AgentKeyRegister extends Resource {
     const body = data && typeof data === "object" ? data : {};
     const suppliedAgentId = (body as any).agentId;
     const publicKey = (body as any).publicKey;
-    if (typeof suppliedAgentId === "bigint" || (typeof suppliedAgentId === "number" && !Number.isSafeInteger(suppliedAgentId))) {
-      return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, "send the agent id as a string");
+    if (isUnsafeAgentIdWireValue(suppliedAgentId)) {
+      return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, AGENT_ID_STRING_REMEDY);
     }
     if (!isValidAgentId(suppliedAgentId)) {
       return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, invalidAgentIdMessage(suppliedAgentId));

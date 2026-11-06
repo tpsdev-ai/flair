@@ -34,6 +34,19 @@ export const AGENT_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
  *  text but not this code. */
 export const AGENT_ID_ERROR = "invalid_agent_id";
 
+/** The remedy for an id Harper delivered as a JSON integer it could not hold
+ *  exactly: it arrives here as a BigInt (or, on another intake, as a number
+ *  beyond Number.MAX_SAFE_INTEGER). Such a value has no exact decimal string
+ *  to echo, so the refusal names the remedy instead. */
+export const AGENT_ID_STRING_REMEDY = "send the agent id as a string";
+
+/** True for an id Harper delivered from a JSON integer that JavaScript cannot
+ *  hold exactly. A BigInt is never an agent ID; an unsafe number would lose
+ *  precision when compared or stored, so it is refused for the same reason. */
+export function isUnsafeAgentIdWireValue(id: unknown): boolean {
+  return typeof id === "bigint" || (typeof id === "number" && !Number.isSafeInteger(id));
+}
+
 /**
  * Is `id` an agent ID this rule accepts? A non-string, non-number value —
  * including `null` — is never valid. A write path must distinguish an OMITTED
@@ -45,7 +58,16 @@ export function isValidAgentId(id: unknown): boolean {
   return AGENT_ID_PATTERN.test(String(id));
 }
 
-/** A human-readable refusal message naming the rule and the offending value. */
+/** A human-readable refusal message naming the rule and the offending value.
+ *  BigInt-safe: `JSON.stringify` throws on a BigInt, so an unsafe wire value
+ *  answers the remedy instead of raising inside the refusal. */
 export function invalidAgentIdMessage(id: unknown): string {
-  return `invalid agent id ${JSON.stringify(id)}: an agent id must match ${AGENT_ID_RULE} (1-64 characters: A-Z, a-z, 0-9, _ or -)`;
+  if (isUnsafeAgentIdWireValue(id)) return AGENT_ID_STRING_REMEDY;
+  let shown: string | undefined;
+  try {
+    shown = JSON.stringify(id);
+  } catch {
+    return AGENT_ID_STRING_REMEDY;
+  }
+  return `invalid agent id ${shown}: an agent id must match ${AGENT_ID_RULE} (1-64 characters: A-Z, a-z, 0-9, _ or -)`;
 }

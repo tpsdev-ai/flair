@@ -53,6 +53,39 @@ export function rpcError(id: JsonRpcId, code: number, message: string, data?: an
   };
 }
 
+/** The JSON-RPC error for a server-built OrgEvent row the writer refused. A
+ *  table handle that exposes no validator (the entry point disappeared) is a
+ *  distinct code from a row the validator refused, so logs and tests can tell
+ *  the two defects apart. */
+export type OrgEventWriteFailure = "row_invalid" | "validator_missing";
+
+export function orgEventWriteFailure(id: JsonRpcId, failure: OrgEventWriteFailure) {
+  return rpcError(id, -32000, "Server error", {
+    error: failure === "validator_missing" ? "org_event_validator_missing" : "org_event_row_invalid",
+  });
+}
+
+/** Does `value` hold a BigInt anywhere, at any array or object depth?
+ *  `JSON.stringify` throws on one, so an intake that must serialize a caller
+ *  value asks this first and refuses with a caller error. */
+export function containsBigInt(value: unknown): boolean {
+  const pending: unknown[] = [value];
+  const seen = new Set<unknown>();
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (typeof current === "bigint") return true;
+    if (current === null || typeof current !== "object") continue;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    if (Array.isArray(current)) {
+      for (const item of current) pending.push(item);
+    } else {
+      for (const item of Object.values(current as Record<string, unknown>)) pending.push(item);
+    }
+  }
+  return false;
+}
+
 export function cleanText(value: unknown): string {
   return String(value ?? "").trim();
 }
