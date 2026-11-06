@@ -846,6 +846,8 @@ describe("commit-fence (invariant 7)", () => {
     if (denied.ok) return;
     expect(denied.remedy).toBe("Re-open custody after restoring valid custody paths. If re-open refuses with commit_uncertain because CURRENT now names an older generation than the uncertainty marker, this state cannot establish whether the staged generation was ever published or became durable; reconcile it before retrying (issue #2980). Retry only after re-open succeeds.");
 
+    rmSync(custodyDir, { recursive: true });
+    renameSync(moved, custodyDir);
     writeFileSync(paths.currentPath, priorCurrent);
     expect(verifyIntegrityRecord(JSON.parse(priorCurrent.toString("utf-8")), state.key)).toBe(true);
     const before = snapshotCustody(custodyDir);
