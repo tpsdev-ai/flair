@@ -77,7 +77,7 @@ export const INTEGRITY_MAX_GENERATION = 999_999_999_999;
 const CUSTODY_CHAIN_MAX = 256;
 
 /** The remedy for a custody chain that no longer matches the open handle. */
-const CUSTODY_CHAIN_REMEDY = "Re-open custody after restoring valid custody paths, then retry.";
+const CUSTODY_CHAIN_REMEDY = "Re-open custody after restoring valid custody paths. If re-open refuses with commit_uncertain because the uncertainty marker names a generation ahead of CURRENT, the staged generation was not published and needs reconciliation; this version does not perform it automatically (issue #2980). Retry only after re-open succeeds.";
 
 function msg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
