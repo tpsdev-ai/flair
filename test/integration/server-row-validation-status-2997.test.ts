@@ -1,8 +1,9 @@
 // ─── flair#2997 — a schema failure on a server-built row answers 5xx ────────
 //
 // A caller row that fails Harper's schema validation keeps its 400 (the
-// instruction-version append's validationErrorResponse). Rows the server builds
-// ENTIRELY — the InstructionVersion record and its OrgEvent — are pre-validated
+// instruction-version append's validationErrorResponse). Rows whose
+// caller-derived fields are coerced to the schema's types where they are
+// assigned — the InstructionVersion record and its OrgEvent — are pre-validated
 // with their own table's validator before staging, so a server defect answers
 // the write's 5xx shape and commits nothing.
 //
@@ -159,6 +160,27 @@ describe("flair#2997 — the caller's row keeps its 400", () => {
     expect(body.detail.some((issue: any) => issue.path === "value"), JSON.stringify(body.detail)).toBe(true);
     expect(await soulRow(id)).toBeNull();
     expect(await versionsOf(`${A.id}:${key}`)).toHaveLength(0);
+  }, 120_000);
+
+  test("a non-string visibility answers 400 invalid_visibility and commits nothing", async () => {
+    const id = nextId("invalid-visibility");
+    await ops({
+      operation: "upsert", database: "flair", table: "Memory",
+      records: [{
+        id, agentId: A.id, content: "visibility guard", trigger: "when to guard", tags: ["skill"],
+        skillSubjectId: id, durability: "persistent", visibility: "shared", createdAt: now(),
+      }],
+    });
+    const beforeRow = await memoryRow(id);
+    const beforeEvents = await eventsOf(A.id);
+    const res = await call(A, "PUT", memPath(id), skillBody(A, id, "v2", { visibility: 123 }));
+    expect(res.status, res.text.slice(0, 300)).toBe(400);
+    expect(JSON.parse(res.text).error).toBe("invalid_visibility");
+
+    expect(await memoryRow(id)).toEqual(beforeRow);
+    expect((await memoryRowsBySubject(id)).map((row: any) => row.id), "no successor may survive").toEqual([id]);
+    expect(await versionsOf(id), "no version row may survive").toHaveLength(0);
+    expect(await eventsOf(A.id), "no event may survive").toEqual(beforeEvents);
   }, 120_000);
 });
 

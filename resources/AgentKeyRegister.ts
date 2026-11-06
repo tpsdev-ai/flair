@@ -42,6 +42,8 @@ import { isPrincipalDeactivated } from "../src/lib/principal-status.js";
 import { isForeignAgentHome, isSyncOriginatedAgentRow } from "../src/lib/agent-home-fields.js";
 import { isValidAgentId, invalidAgentIdMessage } from "../src/lib/agent-id-rule.js";
 import { localInstanceId } from "./instance-identity.js";
+import { maybeFaultOrgEventRow } from "./org-event-write-fault.js";
+import { validateServerRow } from "./server-row-validation.js";
 import {
   AGENT_KEY_REGISTERED_EVENT,
   AGENT_KEY_NOT_PENDING,
@@ -172,16 +174,21 @@ export class AgentKeyRegister extends Resource {
               keyFingerprint: fingerprint,
               createdAt: now,
             }, c);
-            await events.put({
+            const event = {
               id: `${actorId}-${now}-${registrationId}`,
               authorId: actorId,
               kind: AGENT_KEY_REGISTERED_EVENT,
               summary: `registered a public key for ${agentId}`,
               detail: `key fingerprint ${fingerprint}`,
-              refId: agentId,
+              refId: String(agentId),
               createdAt: now,
               updatedAt: now,
-            }, c);
+            };
+            // Test-only: the hook may corrupt the exact row about to be staged
+            // (inert unless a fixture installs one).
+            maybeFaultOrgEventRow("agent-key-register", event);
+            validateServerRow(events, event);
+            await events.put(event, c);
             // Reject a row difference that persists and is visible at the confirmation read.
             // A write that restores the original values is not detected.
             await confirmCommittedRow(table, agentId, (committed) => {

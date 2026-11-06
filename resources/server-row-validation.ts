@@ -15,8 +15,10 @@
  * accepted row stored byte-identical). A failure is therefore a server defect,
  * not a caller error.
  *
- * Only rows the server builds ENTIRELY are pre-validated here. A Memory
- * successor or close row carries the caller's fields, so it keeps the
+ * The rows validated here carry caller-derived fields, and each of those fields
+ * is coerced to the schema's type where it is assigned, so a schema failure on
+ * the row is a server defect, not a caller error. A Memory successor or close
+ * row carries the caller's fields without that coercion, so it keeps the
  * commit-time path: a defect in one of its fields, a server-stamped field
  * included, answers the caller's 400 rather than 5xx.
  */
