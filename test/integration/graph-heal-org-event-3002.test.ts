@@ -20,7 +20,7 @@ import { getModelId } from "../../resources/embeddings-provider.ts";
 const FAULT_PROBE: ProbeFiles = {
   source: join("test", "fixtures", "org-event-write-fault-3002", "probe.js"),
   target: join("dist", "resources", "zz-org-event-write-fault-3002.js"),
-  out: "org-event-write-fault-3002", // unused: the probe writes no files
+  out: "org-event-write-fault-3002", // unused by the composer; the probe writes staged.jsonl under ROOTPATH
 };
 
 const sfx = Date.now().toString(36);

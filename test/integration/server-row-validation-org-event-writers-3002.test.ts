@@ -5,8 +5,8 @@
 // assigned (cleanText, a template, or String()), and the A2A event's
 // targetIds is an array of caller-derived string ids. Each row is validated
 // with the OrgEvent table's own validator before staging, so a forced invalid
-// row never reaches the staging call, answers the endpoint's server-error
-// shape, and commits nothing.
+// row never reaches the staging call and commits nothing. A2A answers HTTP
+// 500 with a JSON-RPC error; key registration answers 503.
 //
 // Real, HOME-isolated Harper; the invalid rows come from the test-only writer
 // hook and the staging call is observed through a wrapper on the OrgEvent
@@ -22,7 +22,7 @@ import { componentWithReplayProbe, type ProbeComponent, type ProbeFiles } from "
 const FAULT_PROBE: ProbeFiles = {
   source: join("test", "fixtures", "org-event-write-fault-3002", "probe.js"),
   target: join("dist", "resources", "zz-org-event-write-fault-3002.js"),
-  out: "org-event-write-fault-3002", // unused: the probe writes no files
+  out: "org-event-write-fault-3002", // unused by the composer; the probe writes staged.jsonl under ROOTPATH
 };
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
@@ -37,6 +37,7 @@ const A2A_CONTROL = mkAgent(`control-a2a-${sfx}`);
 const KEY = mkAgent(`fault-mutate-agent-key-register-${sfx}`);
 const KEY_CONTROL = mkAgent(`control-key-${sfx}`);
 const NUMERIC_ID = 987_654_321;
+const UNSAFE_ID_WIRE = "9007199254740993";
 const PENDING_PUBLIC_KEY = "pending";
 
 interface StagedRow {
@@ -138,6 +139,7 @@ beforeAll(async () => {
       { id: KEY.id, name: KEY.id, role: "agent", publicKey: PENDING_PUBLIC_KEY, createdAt: now },
       { id: KEY_CONTROL.id, name: KEY_CONTROL.id, role: "agent", publicKey: PENDING_PUBLIC_KEY, createdAt: now },
       { id: String(NUMERIC_ID), name: `numeric-agent-${sfx}`, role: "agent", publicKey: PENDING_PUBLIC_KEY, createdAt: now },
+      { id: UNSAFE_ID_WIRE, name: `unsafe-numeric-agent-${sfx}`, role: "agent", publicKey: PENDING_PUBLIC_KEY, createdAt: now },
     ],
   });
 }, 240_000);
@@ -179,7 +181,11 @@ describe("flair#3002 — an invalid server-built OrgEvent row answers 5xx and co
       "the invalid row must not reach staging",
     ).toHaveLength(0);
     expect(res.status, text.slice(0, 300)).toBe(500);
-    expect(JSON.parse(text).error).toBe("org_event_row_invalid");
+    expect(JSON.parse(text)).toEqual({
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code: -32000, message: "Server error", data: { error: "org_event_row_invalid" } },
+    });
     expect(await eventsByScope(A2A.id), "no event may survive").toHaveLength(0);
   }, 120_000);
 
@@ -218,6 +224,29 @@ describe("flair#3002 — an invalid server-built OrgEvent row answers 5xx and co
     expect(await agentRow(KEY.id)).toEqual(before);
     expect(await registrationsOf(KEY.id), "no audit row may survive").toHaveLength(0);
     expect(await eventsByRef(KEY.id), "no event may survive").toHaveLength(0);
+  }, 120_000);
+
+  test("a JSON integer delivered by Harper as BigInt is refused with a string remedy and writes nothing", async () => {
+    await resetStaged();
+    const publicKey = Buffer.from(nacl.sign.keyPair().publicKey).toString("base64url");
+    const before = await agentRow(UNSAFE_ID_WIRE);
+    expect(before?.publicKey).toBe(PENDING_PUBLIC_KEY);
+    // Harper delivers this JSON integer as a BigInt.
+    const res = await fetch(`${harper.httpURL}/AgentKeyRegister`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: basicAuth() },
+      body: `{"agentId":${UNSAFE_ID_WIRE},"publicKey":${JSON.stringify(publicKey)}}`,
+    });
+    const text = await res.text();
+    expect(res.status, text.slice(0, 300)).toBe(400);
+    expect(JSON.parse(text)).toEqual({
+      error: "registration_request_invalid",
+      message: "send the agent id as a string",
+    });
+    expect(await staged(), "no event may reach staging").toHaveLength(0);
+    expect(await agentRow(UNSAFE_ID_WIRE)).toEqual(before);
+    expect(await registrationsOf(UNSAFE_ID_WIRE), "no audit row may survive").toHaveLength(0);
+    expect(await eventsByRef(UNSAFE_ID_WIRE), "no event may survive").toHaveLength(0);
   }, 120_000);
 
   test("a numeric agent id registers with a string refId that a consumer lookup finds", async () => {

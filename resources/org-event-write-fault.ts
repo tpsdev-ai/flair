@@ -1,6 +1,6 @@
 /**
  * org-event-write-fault.ts — the injection point for a per-site fault in the
- * OrgEvent writers that build their row on the server (flair#3002): the A2A
+ * selected server-built OrgEvent writers (flair#3002): the A2A
  * message/send event, the agent-key-register event and the graph-heal event.
  *
  * The hook is null unless setOrgEventWriteFaultHook installs one. Nothing

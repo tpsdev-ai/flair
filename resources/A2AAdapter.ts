@@ -445,7 +445,7 @@ export class A2AAdapter extends Resource {
         } catch (err) {
           if (err instanceof ServerRowValidationError || err instanceof ServerRowValidatorMissingError) {
             return new Response(
-              JSON.stringify({ error: "org_event_row_invalid", message: "the A2A event row failed its table validator; nothing was written" }),
+              JSON.stringify(rpcError(id, -32000, "Server error", { error: "org_event_row_invalid" })),
               { status: 500, headers: { "Content-Type": "application/json" } },
             );
           }

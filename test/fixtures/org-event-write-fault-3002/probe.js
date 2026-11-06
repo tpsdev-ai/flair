@@ -1,6 +1,6 @@
 // org-event-write-fault-3002 — TEST-ONLY resource for flair#3002's
-// invalid-server-row cases for the OrgEvent writers that build their row on
-// the server (A2A message/send, agent-key-register and graph-heal).
+// invalid-server-row cases for selected server-built OrgEvent writers
+// (A2A message/send, agent-key-register and graph-heal).
 //
 // test/helpers/component-with-replay-probe.ts copies this file into a PRIVATE
 // composed copy of the built component as
@@ -8,8 +8,9 @@
 // src/ references it and it is never packed or shipped.
 //
 // It does two things:
-//   - installs the writer hook: a row whose owning agent id starts with
-//     `fault-mutate-<site>-` gets a non-string summary, which the table
+//   - installs the writer hook: scope (A2A) or refId (key-registration target;
+//     authorId is the admin) starting with `fault-mutate-<site>-` gets a
+//     non-string summary, which the table
 //     validator must refuse; the graph-heal action installs the same fault
 //     on demand;
 //   - wraps the OrgEvent table's own `put`, so every row the staging call

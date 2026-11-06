@@ -112,6 +112,9 @@ export class AgentKeyRegister extends Resource {
     const body = data && typeof data === "object" ? data : {};
     const suppliedAgentId = (body as any).agentId;
     const publicKey = (body as any).publicKey;
+    if (typeof suppliedAgentId === "bigint" || (typeof suppliedAgentId === "number" && !Number.isSafeInteger(suppliedAgentId))) {
+      return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, "send the agent id as a string");
+    }
     if (!isValidAgentId(suppliedAgentId)) {
       return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, invalidAgentIdMessage(suppliedAgentId));
     }
