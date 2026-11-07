@@ -57,6 +57,7 @@ const MUTATING_VERBS = ["bootout", "bootstrap", "kickstart", "load", "unload", "
 //   bootstrap-fail/<l>    make `bootstrap` of label <l> fail with 5: Input/output error
 //   list-no-pid[-<l>]     `list` reports loaded jobs (or just <l>) WITHOUT a PID
 //   loaded/<l>, pid/<l>   what is "loaded" and the pid "launchd" runs for it
+//   exit/<l>, stderr/<l> the job's recorded exit status and stderr
 //   bootout-order         (written) each bootout's label + whether the serving pid was alive
 //   bootout-fail/<l>      `bootout` of <l> fails (5) and the job STAYS loaded
 //   kickstart-fail/<l>    `kickstart` of <l> fails (5)
@@ -78,7 +79,11 @@ case "$verb" in
       gui/*/*)
         l="\${t#gui/*/}"
         if [ -f "$S/print-fail/$l" ]; then echo "Could not print service: 5: Input/output error" >&2; exit 5; fi
-        if [ -f "$S/loaded/$l" ]; then printf '%s = {\\n}\\n' "$t"; exit 0; fi
+        if [ -f "$S/loaded/$l" ]; then
+          printf '%s = {\\n' "$t"
+          if [ -f "$S/exit/$l" ]; then printf '\\tlast exit code = %s\\n' "$(cat "$S/exit/$l")"; else printf '\\tlast exit code = (never exited)\\n'; fi
+          printf '}\\n'; exit 0
+        fi
         printf 'Could not find service "%s" in domain for user gui: %s\\n' "$l" "${UID}" >&2; exit 113 ;;
       gui/*)
         c=0; [ -f "$S/domain-code" ] && c=$(cat "$S/domain-code")
@@ -93,7 +98,8 @@ case "$verb" in
     l="$1"
     if [ -f "$S/loaded/$l" ]; then
       p=""; [ -f "$S/pid/$l" ] && p=$(cat "$S/pid/$l")
-      printf '{\\n\\t"Label" = "%s";\\n\\t"LastExitStatus" = 0;\\n' "$l"
+      printf '{\\n\\t"Label" = "%s";\\n' "$l"
+      if [ -f "$S/exit/$l" ]; then printf '\\t"LastExitStatus" = %s;\\n' "$(cat "$S/exit/$l")"; fi
       if [ ! -f "$S/list-no-pid" ] && [ ! -f "$S/list-no-pid-$l" ] && [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then printf '\\t"PID" = %s;\\n' "$p"; fi
       printf '};\\n'; exit 0
     fi
@@ -117,8 +123,18 @@ case "$verb" in
     if [ -f "$S/stub-no-pidfile" ]; then export STUB_NO_PIDFILE=1; fi
     if [ -f "$S/stub-start-delay" ]; then export STUB_START_DELAY_MS="$(cat "$S/stub-start-delay")"; fi
     if [ -f "$S/stub-pidfile-first" ]; then export STUB_PIDFILE_FIRST=1; fi
-    ROOTPATH="$STUB_ROOT" HTTP_PORT="$STUB_PORT" "$STUB_RUNTIME" "$STUB_HARPER" run . >/dev/null 2>&1 </dev/null &
-    echo $! > "$S/pid/$l"
+    # Return the stub's PID before bootstrap returns; the wrapper waits for its exit.
+    p=$(
+      (
+        ROOTPATH="$STUB_ROOT" HTTP_PORT="$STUB_PORT" "$STUB_RUNTIME" "$STUB_HARPER" run . >/dev/null &
+        p=$!
+        echo "$p"
+        exec >/dev/null
+        wait "$p"
+        printf '%s\\n' "$?" > "$S/exit/$l"
+      ) 2>"$S/stderr/$l" </dev/null &
+    )
+    echo "$p" > "$S/pid/$l"
     exit 0 ;;
   kickstart)
     l="\${1#gui/*/}"
@@ -178,7 +194,7 @@ function setupFixture(port: number): Fixture {
   mkdirSync(shimBin);
   writeFileSync(join(shimBin, "launchctl"), SHIM, { mode: 0o755 });
   const state = join(home, "shim-state");
-  for (const d of ["loaded", "pid", "bootstrap-fail", "bootout-fail", "kickstart-fail", "bootstrap-no-spawn", "print-fail"]) mkdirSync(join(state, d), { recursive: true });
+  for (const d of ["loaded", "pid", "exit", "stderr", "bootstrap-fail", "bootout-fail", "kickstart-fail", "bootstrap-no-spawn", "print-fail"]) mkdirSync(join(state, d), { recursive: true });
 
   // A package tree whose Harper is the stub (see the file header).
   const probe = mkdtempSync(join(tmpdir(), "fl2040p-"));
@@ -480,6 +496,16 @@ function markLoaded(label: string, pid: number | null): void {
   if (pid !== null) writeFileSync(join(fx.state, "pid", label), String(pid));
 }
 
+function jobDiagnosticFile(directory: "exit" | "stderr"): string {
+  try {
+    return readFileSync(join(fx.state, directory, fx.label), "utf-8").trimEnd();
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT"
+      ? "(no record)"
+      : `could not read ${directory}: ${String(err)}`;
+  }
+}
+
 /**
  * flair#2040 CI diagnostics: run a case's assertions; when one fails, print
  * what the driver saw (the whole result, its output tails, the shim's calls,
@@ -502,6 +528,8 @@ async function explainOnFailure(
         `signals:\n${signals()}`,
         `stub starts: ${stubStarts().join(", ")}`,
         `hdb.pid: ${hdbPid()}`,
+        `job last exit code: ${jobDiagnosticFile("exit")}`,
+        `job stderr (last 20 lines):\n${jobDiagnosticFile("stderr").split("\n").slice(-20).join("\n")}`,
       ].join("\n"),
     );
     throw err;
@@ -1549,20 +1577,23 @@ describe("flair#2040 r6 — doctor --fix waits for the job it loaded to START be
     async () => {
       writeFileSync(join(fx.state, "stub-start-delay"), String(SLOW_START_MS));
 
-      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+      const run = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+      const { result } = run;
 
-      expect(result).toMatchObject({ kind: "repaired" }); // whole result printed on failure
-      const managedPid = Number(readFileSync(join(fx.state, "pid", fx.label), "utf-8"));
-      expect(result.detail).toContain(`is running as process ${managedPid}`);
-      expect(hdbPid()).toBe(managedPid);
-      expect(alive(managedPid)).toBe(true);
-      expect(await healthy()).toBe(true);
-      expect(existsSync(fx.plistPath)).toBe(true);
-      expect(existsSync(join(fx.state, "loaded", fx.label))).toBe(true);
-      // Loaded once, never booted out after the load.
-      const verbs = mutatingCalls();
-      expect(verbs.filter((l) => l.startsWith("bootstrap"))).toEqual([`bootstrap ${GUI} ${fx.plistPath}`]);
-      expect(verbs.slice(verbs.indexOf(`kickstart ${GUI}/${fx.label}`)).filter((l) => l.startsWith("bootout"))).toEqual([]);
+      await explainOnFailure(run, async () => {
+        expect(result).toMatchObject({ kind: "repaired" }); // whole result printed on failure
+        const managedPid = Number(readFileSync(join(fx.state, "pid", fx.label), "utf-8"));
+        expect(result.detail).toContain(`is running as process ${managedPid}`);
+        expect(hdbPid()).toBe(managedPid);
+        expect(alive(managedPid)).toBe(true);
+        expect(await healthy()).toBe(true);
+        expect(existsSync(fx.plistPath)).toBe(true);
+        expect(existsSync(join(fx.state, "loaded", fx.label))).toBe(true);
+        // Loaded once, never booted out after the load.
+        const verbs = mutatingCalls();
+        expect(verbs.filter((l) => l.startsWith("bootstrap"))).toEqual([`bootstrap ${GUI} ${fx.plistPath}`]);
+        expect(verbs.slice(verbs.indexOf(`kickstart ${GUI}/${fx.label}`)).filter((l) => l.startsWith("bootout"))).toEqual([]);
+      });
     },
     90_000,
   );
@@ -1574,17 +1605,20 @@ describe("flair#2040 r6 — doctor --fix waits for the job it loaded to START be
       const directPid = await startDirectStub();
       writeFileSync(join(fx.state, "stub-start-delay"), String(SLOW_START_MS));
 
-      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+      const run = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+      const { result } = run;
 
-      expect(result).toMatchObject({ kind: "repaired" }); // whole result printed on failure
-      expect(result.detail).toContain("adopted the direct-spawned instance into launchd");
-      expect(signals()).toContain(`SIGTERM ${directPid}`);
-      const managedPid = Number(readFileSync(join(fx.state, "pid", fx.label), "utf-8"));
-      expect(managedPid).not.toBe(directPid);
-      expect(hdbPid()).toBe(managedPid);
-      expect(await healthy()).toBe(true);
-      // The direct stub and launchd's job only: no direct restart by a restore.
-      expect(stubStarts()).toEqual([directPid, managedPid]);
+      await explainOnFailure(run, async () => {
+        expect(result).toMatchObject({ kind: "repaired" }); // whole result printed on failure
+        expect(result.detail).toContain("adopted the direct-spawned instance into launchd");
+        expect(signals()).toContain(`SIGTERM ${directPid}`);
+        const managedPid = Number(readFileSync(join(fx.state, "pid", fx.label), "utf-8"));
+        expect(managedPid).not.toBe(directPid);
+        expect(hdbPid()).toBe(managedPid);
+        expect(await healthy()).toBe(true);
+        // The direct stub and launchd's job only: no direct restart by a restore.
+        expect(stubStarts()).toEqual([directPid, managedPid]);
+      });
     },
     90_000,
   );
