@@ -118,6 +118,14 @@ describe("flair#2359 — isValidAgentId accepts exactly ^[a-zA-Z0-9_-]{1,64}$", 
     );
   });
 
+  it("reports a revoked Proxy by type in the refusal", () => {
+    const { proxy, revoke } = Proxy.revocable([], {});
+    revoke();
+    expect(invalidAgentIdMessage(proxy)).toBe(
+      `invalid agent id (an object that cannot be serialized): an agent id must match ${AGENT_ID_RULE} (1-64 characters: A-Z, a-z, 0-9, _ or -)`,
+    );
+  });
+
   it("shows a Symbol as String(id), not undefined", () => {
     const id = Symbol("x");
     const message = invalidAgentIdMessage(id);
