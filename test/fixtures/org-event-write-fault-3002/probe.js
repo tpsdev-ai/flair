@@ -13,11 +13,14 @@
 //     non-string summary, which the table
 //     validator must refuse; the graph-heal action activates the installed hook
 //     for that call;
-//   - wraps the OrgEvent table's own `put`, so every row the staging call
-//     receives is appended to <ROOTPATH>/org-event-write-fault-3002/staged.jsonl
-//     before the original put runs. The probe's `staged` action reads that
-//     file, so the test can assert an invalid row never reaches staging.
+//   - wraps the OrgEvent table's own `put`, so every row a staging call receives
+//     is appended to <ROOTPATH>/org-event-write-fault-3002/staged.jsonl before
+//     the original put runs. The probe's `staged` action reads that file
+//     (instance-wide), and a `graph-heal` action also returns the rows staged
+//     inside that one call, so a test can assert on its own call while `staged`
+//     still reads the shared file.
 import { Resource, databases } from "harper";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setOrgEventWriteFaultHook } from "./org-event-write-fault.js";
@@ -29,17 +32,22 @@ const OUT_DIR = ROOT ? join(ROOT, "org-event-write-fault-3002") : null;
 const STAGED = OUT_DIR ? join(OUT_DIR, "staged.jsonl") : null;
 
 let graphHealCorrupt = false;
+/** Collects the rows staged inside the current `graph-heal` call (async-scoped). */
+const callStaged = new AsyncLocalStorage();
 
 function recordStaged(row) {
-  if (!STAGED) return;
-  mkdirSync(OUT_DIR, { recursive: true });
-  appendFileSync(STAGED, JSON.stringify({
+  const entry = {
     id: row?.id ?? null,
     refId: row?.refId ?? null,
     scope: row?.scope ?? null,
     summaryType: typeof row?.summary,
     summary: typeof row?.summary === "string" ? row.summary : null,
-  }) + "\n");
+  };
+  const sink = callStaged.getStore();
+  if (sink) sink.push(entry);
+  if (!STAGED) return;
+  mkdirSync(OUT_DIR, { recursive: true });
+  appendFileSync(STAGED, JSON.stringify(entry) + "\n");
 }
 
 function readStaged() {
@@ -90,9 +98,10 @@ export class OrgEventWriteProbe extends Resource {
     }
     if (action === "graph-heal") {
       graphHealCorrupt = corrupt === true;
+      const rows = [];
       try {
-        const result = await createGraphHealMigration().run(0);
-        return { result, staged: readStaged(), corrupt: graphHealCorrupt };
+        const result = await callStaged.run(rows, () => createGraphHealMigration().run(0));
+        return { result, staged: rows, corrupt: graphHealCorrupt };
       } finally {
         graphHealCorrupt = false;
       }

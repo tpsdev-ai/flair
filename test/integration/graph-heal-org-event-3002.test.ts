@@ -141,10 +141,16 @@ describe("flair#3002 — the graph-heal event writer against the real OrgEvent t
     await resetStaged();
     const before = (await eventsByRef()).length;
     const bad = await graphHeal(true);
-    expect(await staged(), "the invalid row must not reach staging").toHaveLength(0);
     expect(bad.status, bad.text).toBe(200);
+    const callRows = bad.body.staged as Array<{ id: string | null; summaryType: string }>;
+    expect(callRows, "the invalid row must not reach staging").toHaveLength(0);
     // The writer's catch swallows a ledger failure: run() still resolves.
     expect(bad.body.result).toMatchObject({ processed: 0, touchedIds: [] });
+    // The instance-wide observer can also see unrelated rows (the boot
+    // migration cycle writes its own OrgEvents); none of them may be the
+    // invalid (non-string summary) row.
+    const invalid = (await staged()).filter((row) => row.summaryType !== "string");
+    expect(invalid, "the invalid row must not reach staging").toHaveLength(0);
     expect(await eventsByRef(), "no event may be stored").toHaveLength(before);
   }, 150_000);
 });
