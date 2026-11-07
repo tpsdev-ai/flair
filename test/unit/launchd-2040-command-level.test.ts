@@ -81,7 +81,7 @@ case "$verb" in
         if [ -f "$S/print-fail/$l" ]; then echo "Could not print service: 5: Input/output error" >&2; exit 5; fi
         if [ -f "$S/loaded/$l" ]; then
           printf '%s = {\\n' "$t"
-          if [ -f "$S/exit/$l" ]; then printf '\\tlast exit code = %s\\n' "$(cat "$S/exit/$l")"; else printf '\\tlast exit code = (never exited)\\n'; fi
+          if [ -f "$S/exit/$l" ]; then printf '\\tlast exit code = %s\\n' "$(cat "$S/exit/$l")"; else printf '\\tlast exit code = (no exit status recorded)\\n'; fi
           printf '}\\n'; exit 0
         fi
         printf 'Could not find service "%s" in domain for user gui: %s\\n' "$l" "${UID}" >&2; exit 113 ;;
