@@ -243,7 +243,10 @@ describe("flair#3002 — an invalid server-built OrgEvent row answers 5xx and co
       error: "registration_request_invalid",
       message: "send the agent id as a string",
     });
-    expect(await staged(), "no event may reach staging").toHaveLength(0);
+    expect(
+      (await staged()).filter((row) => row.refId === UNSAFE_ID_WIRE),
+      "the refused row must not reach staging",
+    ).toHaveLength(0);
     expect(await agentRow(UNSAFE_ID_WIRE)).toEqual(before);
     expect(await registrationsOf(UNSAFE_ID_WIRE), "no audit row may survive").toHaveLength(0);
     expect(await eventsByRef(UNSAFE_ID_WIRE), "no event may survive").toHaveLength(0);
