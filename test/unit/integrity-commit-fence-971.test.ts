@@ -7,6 +7,7 @@ import {
   chmodSync,
   cpSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -372,28 +373,39 @@ describe("commit-fence (invariant 7)", () => {
     }
   });
 
-  it.each(["identical", "different"] as const)("verifies a retained generation with %s bytes", (contents) => {
+  it.each(["identical", "different"] as const)("publishes a retained generation with %s bytes", (contents) => {
     const state = init();
-    commit(state, 0);
-    const prepared = commitGeneration({
-      state, expectedGeneration: 1, checkpoint: payload(),
-      testHooks: { beforeUncertainMarkerWrite: () => { throw new Error("marker unavailable"); } },
-    });
-    expect(prepared.ok).toBe(false);
-    const path = generationPath(state.paths.generationsDir, 2);
-    if (contents === "different") writeFileSync(path, "{}", { mode: 0o600 });
+    const checkpoint = payload();
+    const expected = signIntegrityRecord({
+      version: 3 as const, kind: "checkpoint" as const, generation: 1,
+      enrollmentId: state.enrollment.enrollmentId,
+      operatorUid: state.operatorUid, machineId: state.machineId,
+      ...checkpoint,
+    }, state.key);
+    const expectedBytes = `${canonicalJson(expected)}\n`;
+    const retainedBytes = contents === "identical" ? expectedBytes : "{}";
+    const path = generationPath(state.paths.generationsDir, 1);
+    const retained = join(root, "retained-generation");
     const result = commitGeneration({
-      state, expectedGeneration: 1, checkpoint: payload(),
-      testHooks: { afterFsync: () => {
-        const bytes = readFileSync(path);
-        renameSync(path, join(root, "retained-generation"));
-        writeFileSync(path, bytes, { mode: 0o600 });
+      state, expectedGeneration: 0, checkpoint,
+      testHooks: { beforeStage: () => {
+        writeFileSync(path, retainedBytes, { mode: 0o600 });
+        linkSync(path, retained);
       } },
     });
-    expect(result).toMatchObject({ ok: false, status: "commit_failed", reason: "custody_invalid" });
+    expect(result).toMatchObject({ ok: true, status: "committed", generation: 1 });
+    expect(readFileSync(path, "utf-8")).toBe(expectedBytes);
     const reopened = openIntegrityState(options({ newCustody: false }));
     expect(reopened.ok).toBe(true);
-    if (reopened.ok) expect(reopened.state.generation).toBe(1);
+    if (reopened.ok) {
+      expect(reopened.state.generation).toBe(1);
+      expect(reopened.state.checkpoint).toEqual(expected);
+    }
+    expect(readFileSync(retained, "utf-8")).toBe(retainedBytes);
+    const publishedIdentity = lstatSync(path, { bigint: true });
+    const retainedIdentity = lstatSync(retained, { bigint: true });
+    expect(publishedIdentity.dev).toBe(retainedIdentity.dev);
+    expect(publishedIdentity.ino === retainedIdentity.ino).toBe(contents === "identical");
   });
 
   it.each(["commit", "tombstone"] as const)("reports %s marker cleanup absence as uncertain", (writer) => {
