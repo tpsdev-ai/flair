@@ -111,6 +111,13 @@ describe("flair#2359 — isValidAgentId accepts exactly ^[a-zA-Z0-9_-]{1,64}$", 
     expect(objectMessage).not.toContain("undefined");
   });
 
+  it("names an array whose toJSON returns undefined as an array", () => {
+    const id = Object.assign([], { toJSON: () => undefined });
+    expect(invalidAgentIdMessage(id)).toBe(
+      "invalid agent id (an array that cannot be serialized): an agent id must match ^[a-zA-Z0-9_-]{1,64}$ (1-64 characters: A-Z, a-z, 0-9, _ or -)",
+    );
+  });
+
   it("shows a Symbol as String(id), not undefined", () => {
     const id = Symbol("x");
     const message = invalidAgentIdMessage(id);

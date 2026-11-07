@@ -66,8 +66,9 @@ export function isValidAgentId(id: unknown): boolean {
  *  remedy alone (no rule). Every other value gets
  *  "invalid agent id <shown>: <rule>", where a Symbol or a non-finite number
  *  or undefined is shown as String(id) and anything else as JSON.stringify(id); after
- *  those branches, a JSON.stringify call that throws or returns undefined
- *  produces "invalid agent id (<type> that cannot be serialized): <rule>"
+ *  those branches, if Array.isArray (for a revoked Proxy) or JSON.stringify
+ *  throws, or JSON.stringify returns undefined, the value is reported by type:
+ *  "invalid agent id (<type> that cannot be serialized): <rule>"
  *  instead. */
 export function invalidAgentIdMessage(id: unknown): string {
   if (isUnsafeAgentIdWireValue(id)) return AGENT_ID_STRING_REMEDY;
@@ -81,7 +82,7 @@ export function invalidAgentIdMessage(id: unknown): string {
       isArray = Array.isArray(id);
       shown = JSON.stringify(id);
     } catch {
-      // JSON.stringify cannot represent this value; report it by type below.
+      // Array.isArray (for a revoked Proxy) or JSON.stringify can throw; report by type below.
     }
   }
   if (shown === undefined) {
