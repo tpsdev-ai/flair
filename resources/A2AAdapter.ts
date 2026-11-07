@@ -5,7 +5,9 @@ import { basename, extname, join } from "node:path";
 import { resolvePublicBaseUrl } from "./a2a-url.js";
 import {
   cleanText,
+  containsBigInt,
   orgEventStream,
+  orgEventWriteFailure,
   rpcError,
   rpcResult,
   type CatchupPageReader,
@@ -406,6 +408,15 @@ export class A2AAdapter extends Resource {
         const refusal = actAsRefusal(id, callerAgent, callerIsAdmin, agentId, "send");
         if (refusal) return refusal;
 
+        // A BigInt among the message's enumerable values cannot be
+        // JSON-serialized; refuse it as a caller error before the sender
+        // lookup in this handler, naming the field.
+        if (containsBigInt(message)) {
+          return rpcError(id, -32602, "Invalid params: message contains a BigInt, which cannot be JSON-serialized; send it as a string", {
+            field: "message",
+          });
+        }
+
         const sender = await (databases as any).flair.Agent.get(agentId).catch(() => null);
         if (!sender) {
           return rpcError(id, -32004, "Agent not found", { agentId });
@@ -443,9 +454,15 @@ export class A2AAdapter extends Resource {
             targetIds,
           });
         } catch (err) {
-          if (err instanceof ServerRowValidationError || err instanceof ServerRowValidatorMissingError) {
+          if (err instanceof ServerRowValidatorMissingError) {
             return new Response(
-              JSON.stringify(rpcError(id, -32000, "Server error", { error: "org_event_row_invalid" })),
+              JSON.stringify(orgEventWriteFailure(id, "validator_missing")),
+              { status: 500, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          if (err instanceof ServerRowValidationError) {
+            return new Response(
+              JSON.stringify(orgEventWriteFailure(id, "row_invalid")),
               { status: 500, headers: { "Content-Type": "application/json" } },
             );
           }

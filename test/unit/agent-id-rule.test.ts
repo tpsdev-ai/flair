@@ -7,6 +7,7 @@ import {
   AGENT_ID_ERROR,
   AGENT_ID_PATTERN,
   AGENT_ID_RULE,
+  AGENT_ID_STRING_REMEDY,
   invalidAgentIdMessage,
   isValidAgentId,
 } from "../../src/lib/agent-id-rule.js";
@@ -33,6 +34,36 @@ describe("flair#2359 — isValidAgentId accepts exactly ^[a-zA-Z0-9_-]{1,64}$", 
     for (const id of [null, undefined, {}, [], true]) {
       expect(isValidAgentId(id), String(id)).toBe(false);
     }
+  });
+
+  it("gives an integral number outside the safe range the string remedy", () => {
+    const rounded = Number("9007199254740993"); // 9007199254740992, not round-trippable
+    expect(Number.isSafeInteger(rounded)).toBe(false);
+    expect(isValidAgentId(rounded)).toBe(false);
+    expect(invalidAgentIdMessage(rounded)).toBe(AGENT_ID_STRING_REMEDY);
+    expect(invalidAgentIdMessage(2 ** 53)).toBe(AGENT_ID_STRING_REMEDY);
+    expect(invalidAgentIdMessage(9007199254740993n)).toBe(AGENT_ID_STRING_REMEDY);
+  });
+
+  it("gives a fractional number the ordinary rule refusal, not the string remedy", () => {
+    expect(isValidAgentId(1.5)).toBe(false);
+    const message = invalidAgentIdMessage(1.5);
+    expect(message).not.toBe(AGENT_ID_STRING_REMEDY);
+    expect(message).toContain(AGENT_ID_RULE);
+    expect(message).toContain("1.5");
+  });
+
+  it("shows a non-finite number as-is, not null", () => {
+    for (const id of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const message = invalidAgentIdMessage(id);
+      expect(isValidAgentId(id), String(id)).toBe(false);
+      expect(message, String(id)).toContain(String(id));
+      expect(message, String(id)).not.toContain("null");
+    }
+  });
+
+  it("shows a JSON value through JSON.stringify", () => {
+    expect(invalidAgentIdMessage("with space")).toContain(JSON.stringify("with space"));
   });
 
   it("the exported pattern and rule text agree", () => {

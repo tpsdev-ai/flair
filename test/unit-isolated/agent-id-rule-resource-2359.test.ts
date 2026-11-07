@@ -97,6 +97,20 @@ describe("flair#2359 — Agent collection POST refuses an id outside the shared 
     expect(agentStore.size).toBe(0);
   });
 
+  it("POST with an unsafe numeric id is refused 400 with the string remedy, storing nothing", async () => {
+    const a = makeAgent(adminCtx);
+    const unsafe = Number("9007199254740993"); // rounds to 9007199254740992
+    expect(Number.isSafeInteger(unsafe)).toBe(false);
+    const res: any = await a.post({ id: unsafe, name: "Unsafe" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "invalid_agent_id",
+      message: "send the agent id as a string",
+    });
+    expect(agentStore.size).toBe(0);
+  });
+
   it("POST with a conforming id still creates the row (the guard is not over-broad)", async () => {
     const a = makeAgent(adminCtx);
     const res: any = await a.post({ id: "good_id-1", name: "Good" });
