@@ -78,6 +78,28 @@ describe("flair#2359 — isValidAgentId accepts exactly ^[a-zA-Z0-9_-]{1,64}$", 
     }
   });
 
+  it("names undefined plainly in the refusal", () => {
+    expect(invalidAgentIdMessage(undefined)).toBe(
+      "invalid agent id undefined: an agent id must match ^[a-zA-Z0-9_-]{1,64}$ (1-64 characters: A-Z, a-z, 0-9, _ or -)",
+    );
+  });
+
+  it("names null plainly in the refusal", () => {
+    expect(invalidAgentIdMessage(null)).toBe(
+      "invalid agent id null: an agent id must match ^[a-zA-Z0-9_-]{1,64}$ (1-64 characters: A-Z, a-z, 0-9, _ or -)",
+    );
+  });
+
+  it("names an unserializable array as an array", () => {
+    const circular: unknown[] = [];
+    circular.push(circular);
+    for (const id of [circular, [1n]]) {
+      expect(invalidAgentIdMessage(id)).toBe(
+        "invalid agent id (an array that cannot be serialized): an agent id must match ^[a-zA-Z0-9_-]{1,64}$ (1-64 characters: A-Z, a-z, 0-9, _ or -)",
+      );
+    }
+  }, 5_000);
+
   it("names a function or a toJSON returning undefined by type, not undefined", () => {
     const func = () => "x";
     const nullingToJSON = { toJSON: () => undefined };
