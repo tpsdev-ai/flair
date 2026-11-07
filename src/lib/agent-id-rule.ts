@@ -63,15 +63,20 @@ export function isValidAgentId(id: unknown): boolean {
 }
 
 /** A human-readable refusal: the string remedy for a BigInt or an integral
- *  number outside the safe-integer range, otherwise the rule and the value
- *  from `JSON.stringify` (the remedy if it throws). */
+ *  number outside the safe-integer range, a non-finite number shown as-is
+ *  (`NaN`, `Infinity`, `-Infinity`), otherwise the rule and the value from
+ *  `JSON.stringify` (the remedy if it throws). */
 export function invalidAgentIdMessage(id: unknown): string {
   if (isUnsafeAgentIdWireValue(id)) return AGENT_ID_STRING_REMEDY;
   let shown: string | undefined;
-  try {
-    shown = JSON.stringify(id);
-  } catch {
-    return AGENT_ID_STRING_REMEDY;
+  if (typeof id === "number" && !Number.isFinite(id)) {
+    shown = String(id);
+  } else {
+    try {
+      shown = JSON.stringify(id);
+    } catch {
+      return AGENT_ID_STRING_REMEDY;
+    }
   }
   return `invalid agent id ${shown}: an agent id must match ${AGENT_ID_RULE} (1-64 characters: A-Z, a-z, 0-9, _ or -)`;
 }

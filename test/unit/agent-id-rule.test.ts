@@ -53,6 +53,19 @@ describe("flair#2359 — isValidAgentId accepts exactly ^[a-zA-Z0-9_-]{1,64}$", 
     expect(message).toContain("1.5");
   });
 
+  it("shows a non-finite number as-is, not null", () => {
+    for (const id of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const message = invalidAgentIdMessage(id);
+      expect(isValidAgentId(id), String(id)).toBe(false);
+      expect(message, String(id)).toContain(String(id));
+      expect(message, String(id)).not.toContain("null");
+    }
+  });
+
+  it("shows a JSON value through JSON.stringify", () => {
+    expect(invalidAgentIdMessage("with space")).toContain(JSON.stringify("with space"));
+  });
+
   it("the exported pattern and rule text agree", () => {
     expect(AGENT_ID_PATTERN.test("agent-1")).toBe(true);
     expect(AGENT_ID_RULE).toBe("^[a-zA-Z0-9_-]{1,64}$");
