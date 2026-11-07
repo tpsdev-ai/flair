@@ -41,9 +41,9 @@ authentication:
     #   true              -> BOTH sides ON — the one working enable value
     #                        (`flair mcp enable` stages exactly this)
     #   false             -> both sides OFF
-    #   1 / yes / on      -> flair /mcp handler ON, component AS OFF ->
-    #                        fail-closed broken-on: every /mcp request 401s,
-    #                        no AS is advertised. Use "true" instead.
+    #   1 / yes / on      -> flair's reader is ON, the component deletes the
+    #                        value (AS stays OFF). The boot guard refuses to
+    #                        mount /mcp and names true.
     #   garbage (maybe)   -> deleted -> component OFF; flair strict -> OFF.
     #                        Inert: no /mcp handler, no data path (flair's own
     #                        discovery documents still serve, by design).
