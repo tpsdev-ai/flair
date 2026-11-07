@@ -62,7 +62,7 @@ describe("flair#2359 — isValidAgentId accepts exactly ^[a-zA-Z0-9_-]{1,64}$", 
     }
   });
 
-  it("reports an unserializable value by type, with no string remedy", () => {
+  it("reports a circular or throwing-toJSON object by type, with no string remedy", () => {
     const circular: { self?: unknown } = {};
     circular.self = circular;
     const throwing = {
@@ -78,7 +78,7 @@ describe("flair#2359 — isValidAgentId accepts exactly ^[a-zA-Z0-9_-]{1,64}$", 
     }
   });
 
-  it("names a value JSON.stringify yields nothing for by type, not undefined", () => {
+  it("names a function or a toJSON returning undefined by type, not undefined", () => {
     const func = () => "x";
     const nullingToJSON = { toJSON: () => undefined };
     const funcMessage = invalidAgentIdMessage(func);
