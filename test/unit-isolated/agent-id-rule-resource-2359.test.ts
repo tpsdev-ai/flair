@@ -145,7 +145,10 @@ describe("flair#2359 — Agent POST distinguishes an omitted id from a supplied 
     const res: any = await a.post({ id: null, name: "NullId" });
     expect(res instanceof Response).toBe(true);
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toBe("invalid_agent_id");
+    expect(await res.json()).toEqual({
+      error: "invalid_agent_id",
+      message: "invalid agent id null: an agent id must match ^[a-zA-Z0-9_-]{1,64}$ (1-64 characters: A-Z, a-z, 0-9, _ or -)",
+    });
     expect(agentStore.size).toBe(0);
   });
 
