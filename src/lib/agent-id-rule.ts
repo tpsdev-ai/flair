@@ -63,7 +63,9 @@ export function isValidAgentId(id: unknown): boolean {
 }
 
 /** A human-readable refusal: the string remedy only for a BigInt or an unsafe
- *  integer; a non-finite number or Symbol shown as-is, an unserializable value by type, plus the rule. */
+ *  integer; a non-finite number or Symbol shown as String(id); a value
+ *  `JSON.stringify` cannot represent (it throws or yields nothing) named by
+ *  type; plus the rule. */
 export function invalidAgentIdMessage(id: unknown): string {
   if (isUnsafeAgentIdWireValue(id)) return AGENT_ID_STRING_REMEDY;
   const rule = `an agent id must match ${AGENT_ID_RULE} (1-64 characters: A-Z, a-z, 0-9, _ or -)`;
@@ -74,9 +76,13 @@ export function invalidAgentIdMessage(id: unknown): string {
     try {
       shown = JSON.stringify(id);
     } catch {
-      const type = typeof id === "object" ? "an object" : `a ${typeof id}`;
-      return `invalid agent id (${type} that cannot be serialized): ${rule}`;
+      // JSON.stringify cannot represent this value; report it by type below.
     }
+  }
+  if (shown === undefined) {
+    const type =
+      id === undefined ? "undefined" : typeof id === "object" ? "an object" : `a ${typeof id}`;
+    return `invalid agent id (${type} that cannot be serialized): ${rule}`;
   }
   return `invalid agent id ${shown}: ${rule}`;
 }

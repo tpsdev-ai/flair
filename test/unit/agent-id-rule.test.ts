@@ -78,6 +78,17 @@ describe("flair#2359 — isValidAgentId accepts exactly ^[a-zA-Z0-9_-]{1,64}$", 
     }
   });
 
+  it("names a value JSON.stringify yields nothing for by type, not undefined", () => {
+    const func = () => "x";
+    const nullingToJSON = { toJSON: () => undefined };
+    const funcMessage = invalidAgentIdMessage(func);
+    expect(funcMessage).toContain("a function that cannot be serialized");
+    expect(funcMessage).not.toContain("undefined");
+    const objectMessage = invalidAgentIdMessage(nullingToJSON);
+    expect(objectMessage).toContain("an object that cannot be serialized");
+    expect(objectMessage).not.toContain("undefined");
+  });
+
   it("shows a Symbol as String(id), not undefined", () => {
     const id = Symbol("x");
     const message = invalidAgentIdMessage(id);

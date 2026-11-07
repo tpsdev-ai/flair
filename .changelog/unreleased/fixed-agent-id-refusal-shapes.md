@@ -1,2 +1,1 @@
-- **Agent-ID refusals describe a Symbol or an unserializable id truthfully.** The string remedy no longer covers a value the message cannot show.
-  The refusal shows a Symbol as `Symbol(x)` and an unserializable value by type; the string remedy is kept for a BigInt or an unsafe integer id.
+- **Agent-ID refusals describe a Symbol or an unserializable id truthfully.** A Symbol and a non-finite number are shown as `String(id)`; a value `JSON.stringify` cannot represent — it throws or yields nothing — is named by type. The string remedy is returned only for a BigInt or an unsafe integer id, never when serialization fails inside the formatter.
