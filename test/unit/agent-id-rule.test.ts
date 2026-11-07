@@ -62,6 +62,41 @@ describe("flair#2359 — isValidAgentId accepts exactly ^[a-zA-Z0-9_-]{1,64}$", 
     }
   });
 
+  it("reports a circular or throwing-toJSON object by type, with no string remedy", () => {
+    const circular: { self?: unknown } = {};
+    circular.self = circular;
+    const throwing = {
+      toJSON() {
+        throw new Error("not serializable");
+      },
+    };
+    for (const id of [circular, throwing]) {
+      const message = invalidAgentIdMessage(id);
+      expect(message).toContain("an object that cannot be serialized");
+      expect(message).toContain(AGENT_ID_RULE);
+      expect(message).not.toContain(AGENT_ID_STRING_REMEDY);
+    }
+  });
+
+  it("names a function or a toJSON returning undefined by type, not undefined", () => {
+    const func = () => "x";
+    const nullingToJSON = { toJSON: () => undefined };
+    const funcMessage = invalidAgentIdMessage(func);
+    expect(funcMessage).toContain("a function that cannot be serialized");
+    expect(funcMessage).not.toContain("undefined");
+    const objectMessage = invalidAgentIdMessage(nullingToJSON);
+    expect(objectMessage).toContain("an object that cannot be serialized");
+    expect(objectMessage).not.toContain("undefined");
+  });
+
+  it("shows a Symbol as String(id), not undefined", () => {
+    const id = Symbol("x");
+    const message = invalidAgentIdMessage(id);
+    expect(isValidAgentId(id)).toBe(false);
+    expect(message).toContain("Symbol(x)");
+    expect(message).not.toContain("undefined");
+  });
+
   it("shows a JSON value through JSON.stringify", () => {
     expect(invalidAgentIdMessage("with space")).toContain(JSON.stringify("with space"));
   });

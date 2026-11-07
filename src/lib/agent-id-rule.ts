@@ -62,21 +62,30 @@ export function isValidAgentId(id: unknown): boolean {
   return AGENT_ID_PATTERN.test(String(id));
 }
 
-/** A human-readable refusal: the string remedy for a BigInt or an integral
- *  number outside the safe-integer range, a non-finite number shown as-is
- *  (`NaN`, `Infinity`, `-Infinity`), otherwise the rule and the value from
- *  `JSON.stringify` (the remedy if it throws). */
+/** A human-readable refusal. A BigInt or an unsafe integer gets the string
+ *  remedy alone (no rule). Every other value gets
+ *  "invalid agent id <shown>: <rule>", where a Symbol or a non-finite number
+ *  is shown as String(id) and anything else as JSON.stringify(id); after
+ *  those branches, a JSON.stringify call that throws or returns undefined
+ *  produces "invalid agent id (<type> that cannot be serialized): <rule>"
+ *  instead. */
 export function invalidAgentIdMessage(id: unknown): string {
   if (isUnsafeAgentIdWireValue(id)) return AGENT_ID_STRING_REMEDY;
+  const rule = `an agent id must match ${AGENT_ID_RULE} (1-64 characters: A-Z, a-z, 0-9, _ or -)`;
   let shown: string | undefined;
-  if (typeof id === "number" && !Number.isFinite(id)) {
+  if (typeof id === "symbol" || (typeof id === "number" && !Number.isFinite(id))) {
     shown = String(id);
   } else {
     try {
       shown = JSON.stringify(id);
     } catch {
-      return AGENT_ID_STRING_REMEDY;
+      // JSON.stringify cannot represent this value; report it by type below.
     }
   }
-  return `invalid agent id ${shown}: an agent id must match ${AGENT_ID_RULE} (1-64 characters: A-Z, a-z, 0-9, _ or -)`;
+  if (shown === undefined) {
+    const type =
+      id === undefined ? "undefined" : typeof id === "object" ? "an object" : `a ${typeof id}`;
+    return `invalid agent id (${type} that cannot be serialized): ${rule}`;
+  }
+  return `invalid agent id ${shown}: ${rule}`;
 }
