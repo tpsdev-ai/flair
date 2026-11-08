@@ -48,8 +48,8 @@ add("Memory", [
   "writer:super.patch#1",
   "writer:(databases as any).flair.Memory.delete#1",
 ], "GUARDED: Memory.post/put/patch/delete call the decision on the URL and body ids first (the put _reindex branch included).");
-add("Memory", ["alias-source:(databases as any).flair.Memory#12"],
-  "SERVER: a read-only table handle for the reindex post-commit confirmation (flair#2478 slice 3c); it writes no row.");
+add("Memory", ["alias-source:(databases as any).flair.Memory#12", "alias-source:(databases as any)?.flair?.Memory#2"],
+  "SERVER: read-only table handles for the reindex post-commit confirmation (flair#2478 slice 3c) and skillWriteLockPlan's pre-lock lineage reads (flair#2950); they write no row.");
 add("Memory", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
   "GUARDED: closeSupersededRecord and stageGrantedClose close `supersedes`, which validateAndAuthorizeSupersedes ran through the decision before the new row was written.");
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:writeBackCommittedRow#1"],
