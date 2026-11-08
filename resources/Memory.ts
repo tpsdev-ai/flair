@@ -18,6 +18,7 @@ import { scanFields, isStrictMode } from "./content-safety.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
+import { isOpenLiveRow } from "../src/lib/open-live-row.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { validateHostSource } from "./host-source.js";
 import {
@@ -335,10 +336,24 @@ function deleteLockIds(resource: unknown, id: unknown): string[] {
  *  the head the writer resolves under the locks is not one of the held ids. */
 const SKILL_DELETE_HEAD_ATTEMPTS = 3;
 
-/** Attempts of a skill create/update to re-resolve its live head and acquire the
- *  per-id Memory locks with the new head included (flair#2950). */
+/** Attempts of a skill create/update to acquire the per-id Memory locks with
+ *  every id its plan names, re-resolving after each acquisition (flair#2950). */
 const SKILL_WRITE_HEAD_LOCK_ATTEMPTS = 3;
-const SKILL_HEAD_MOVED = Symbol("skill-head-moved");
+
+/** The ids a skill write's caller must add to its lock set before it retries.
+ *  Returned by the writer and consumed by put()/post() on the next acquisition;
+ *  it is never a write result. `headOf` asks the caller to resolve and hold the
+ *  live head of a closed addressed version before the instruction lock. */
+class SkillLockExtension {
+  constructor(readonly ids: readonly string[], readonly headOf: { subjectId: string | null; addressedId: string } | null = null) {}
+}
+function skillLockExtension(value: unknown): readonly string[] | null {
+  return value instanceof SkillLockExtension ? value.ids : null;
+}
+function skillThen(value: unknown): (() => Promise<any>) | null {
+  const then = value && typeof value === "object" ? (value as any).skillThen : null;
+  return typeof then === "function" ? then : null;
+}
 
 /** The ids a DELETE holds, and whether the skill writer found the head it
  *  closes outside them (flair#2478). */
@@ -1513,54 +1528,6 @@ function defaultVisibilityForDurability(durability: unknown): "private" | "share
  * body value is not trusted at any point.
  */
 
-/** The ids a skill create/update must hold and the lineage it resolves them
- *  from, discovered before the verb's lock (flair#2950). The writer re-reads
- *  and validates under the lock; this plan only selects the lock set. `null`
- *  means the write is not a skill write. A failed discovery read on a write
- *  the body does not tag as a skill returns `null`, so the ordinary verb
- *  refuses on its own authoritative read; a body-tagged skill write still
- *  plans from the ids it names, and the writer's read refuses a failure. */
-interface SkillWriteLockPlan {
-  readonly ids: readonly string[];
-  readonly subjectId: string;
-  readonly addressedId: string | null;
-  readonly explicitSuccessor: boolean;
-  readonly successorId: string;
-}
-
-async function skillWriteLockPlan(resource: any, content: any): Promise<SkillWriteLockPlan | null> {
-  // An admin `_reindex` re-PUT is not a skill version write; its own branch
-  // refuses protected skill fields (flair#2139).
-  if (content?._reindex === true) return null;
-  const table = (databases as any)?.flair?.Memory;
-  if (!table || typeof table.get !== "function") return null;
-  const targetId = content?.id ?? resource?.getId?.();
-  let storedRow: Record<string, any> | null = null;
-  let predecessor: Record<string, any> | null = null;
-  try {
-    if (targetId != null) storedRow = await table.get(String(targetId));
-    if (content?.supersedes != null) predecessor = await table.get(String(content.supersedes));
-  } catch {
-    if (!isSkillWrite(content)) return null;
-    storedRow = null;
-    predecessor = null;
-  }
-  if (!isSkillWrite(content) && !rowIsSkill(storedRow) && !rowIsSkill(predecessor)) return null;
-  const inPlaceId = [targetId, resource?.getId?.()].find((id) => isReservedSeedId("Memory", id));
-  const explicitSuccessor = !!predecessor && (!storedRow || content?.supersedes !== storedRow.supersedes);
-  const successorId = inPlaceId
-    ? String(inPlaceId)
-    : explicitSuccessor || !storedRow
-      ? String(targetId ?? `${content?.agentId}-${randomUUID()}`)
-      : `${content?.agentId}-${randomUUID()}`;
-  const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: storedRow, predecessor });
-  const addressedId = storedRow ? String(storedRow.id) : predecessor ? String(predecessor.id) : null;
-  const ids = [successorId, targetId, content?.supersedes, addressedId, predecessor ? String(predecessor.id) : null]
-    .filter((id): id is string => typeof id === "string" || typeof id === "number")
-    .map(String);
-  return { ids, subjectId, addressedId, explicitSuccessor, successorId };
-}
-
 /**
  * flair#2139 S2 — write a skill create/update atomically through the
  * transactional writer.
@@ -1588,19 +1555,20 @@ async function writeSkillCreateOrUpdate(
      *  row also holds the fields it carries over from its predecessor, and
      *  those are not reported. */
     staged?: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null; row?: Record<string, any>; joined?: boolean };
-    /** The per-id Memory locks and plan the calling verb already holds
-     *  (flair#2950); the writer re-checks the plan against its committed read. */
-    held?: { ids: readonly string[]; addressedId: string | null; explicitSuccessor: boolean; successorId: string };
+    /** The ids the calling verb holds under the per-id Memory write lock
+     *  (flair#2950). The writer plans its write set from its committed read
+     *  and asks the verb for any id it does not hold. */
+    held?: { ids: readonly string[] };
   },
 ): Promise<any> {
   const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer, inPlaceId, reembedding, requestedPayload } = args;
   const now = new Date().toISOString();
   const explicitSuccessor = !!explicitPredecessor && (!storedRow || content.supersedes !== storedRow.supersedes);
-  let successorId = args.held?.successorId ?? (inPlaceId
+  let successorId = inPlaceId
     ? inPlaceId
     : explicitSuccessor || !storedRow
       ? String(content.id ?? `${content.agentId}-${randomUUID()}`)
-      : `${content.agentId}-${randomUUID()}`);
+      : `${content.agentId}-${randomUUID()}`;
   const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: storedRow, predecessor: explicitPredecessor });
   // flair#2139 S2 — the reservation covers the whole logical lineage: a write
   // whose subject is the seed's requires the operator source, not only one that
@@ -1614,19 +1582,19 @@ async function writeSkillCreateOrUpdate(
   let successorBasis: any = null;
   // flair#2950: a skill create/update writes Memory rows too — its successor,
   // the row it addresses and the row it closes — so the verb takes the same
-  // per-id Memory write lock as the feed path. The caller resolves the live
-  // head before the acquisition and includes its id; under the lock this
-  // writer resolves it again and reports a head outside the held ids, so the
-  // verb can re-plan with the new head.
-  const runSkillWrite = (heldIds: ReadonlySet<string>, headMoved: { value: boolean }) => runSkillVersionWrite({
+  // per-id Memory write lock as the feed path. Under the lock this writer
+  // resolves the live head; a head outside the held set is reported so the
+  // verb can re-plan with it.
+  const runSkillWrite = (heldIds: ReadonlySet<string>, headMoved: { id: string | null }) => runSkillVersionWrite({
     ctx,
     joinCallerTransaction: method === "post",
     subjectId,
     agentId: String(content.agentId),
+    deferConfirmation: true,
     head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
     plan: async (head, shared, attempt) => {
       if (head && !heldIds.has(String(head.id))) {
-        headMoved.value = true;
+        headMoved.id = String(head.id);
         return skillWriteConflict("skill_head_moved");
       }
       // A superseding plan from a joined attempt is planned again, owned
@@ -1713,45 +1681,37 @@ async function writeSkillCreateOrUpdate(
       },
     },
   });
-  let outcome: Awaited<ReturnType<typeof runSkillVersionWrite>>;
-  if (args.held) {
-    if (args.held.addressedId !== addressedId || args.held.explicitSuccessor !== explicitSuccessor) {
-      return SKILL_HEAD_MOVED;
-    }
-    const heldIds = new Set(args.held.ids.map(String));
-    for (const id of [successorId, addressedId, explicitPredecessor ? String(explicitPredecessor.id) : null]) {
-      if (id && !heldIds.has(id)) return SKILL_HEAD_MOVED;
-    }
-    const headMoved = { value: false };
-    outcome = await runSkillWrite(heldIds, headMoved);
-    if (headMoved.value) return SKILL_HEAD_MOVED;
-  } else {
-    const baseLockIds = [successorId, addressedId, explicitPredecessor ? String(explicitPredecessor.id) : null]
-      .filter((id): id is string => typeof id === "string" && id.length > 0);
-    if (!addressedId && !explicitPredecessor && !inPlaceId && content.id == null) {
-      // A pure create under a fresh server-allocated id writes no row another
-      // writer can name, so it takes no per-id lock (the design's create case).
-      outcome = await runSkillWrite(new Set(), { value: false });
-    } else {
-    let lockedOutcome: Awaited<ReturnType<typeof runSkillVersionWrite>> | undefined;
-    for (let lockAttempt = 0; lockAttempt < SKILL_WRITE_HEAD_LOCK_ATTEMPTS; lockAttempt++) {
-      const preHead = await resolveSkillHead(subjectId, addressedId, {});
-      const resolvedPause = txnPausePoint("skill-head-resolved");
-      if (resolvedPause) await resolvedPause;
-      const attemptIds = preHead && !baseLockIds.includes(String(preHead.id))
-        ? [...baseLockIds, String(preHead.id)]
-        : [...baseLockIds];
-      const headMoved = { value: false };
-      const locked = await withMemoryWriteLock(memoryWriteLockStore(), attemptIds, () => runSkillWrite(new Set(attemptIds), headMoved), { phase: "memory-skill-write" });
-      if (locked.kind !== "done") return memoryLockRefusal(locked, memoryLockCallerIdFor(ctx))!;
-      if (headMoved.value) continue;
-      lockedOutcome = locked.value;
-      break;
-    }
-    if (!lockedOutcome) return skillWriteConflict("skill_head_moved");
-    outcome = lockedOutcome;
-    }
+  // The plan's rows: the stored row this write addresses, and the live head
+  // when the addressed version is closed. The verb holds the addressed id
+  // before its read; a head only a read can name is returned for the next
+  // acquisition. The writer's head check adds the explicit predecessor it
+  // validates and closes, so both are held before the write. A server-allocated
+  // successor names no stored row until this write creates it, so it is not
+  // held. A pure create under a fresh server-allocated id writes no row another
+  // writer can name, so it takes no per-id lock (the design's create case).
+  // Under the locks the head is resolved again; a head outside the held set is
+  // refused, so a moved or vanished head is never written through.
+  const heldIds = new Set((args.held?.ids ?? []).map(String));
+  const pureCreate = !addressedId && !explicitPredecessor && !inPlaceId && content.id == null;
+  if (!pureCreate) {
+    // A server-allocated successor id is not required: it names no stored row
+    // until this write creates it. A stored row this write addresses is.
+    const rows = storedRow ? [String(storedRow.id)] : [];
+    const missing = rows.filter((id) => id.length > 0 && !heldIds.has(id));
+    if (missing.length > 0) return new SkillLockExtension(missing);
   }
+  // The addressed version (or an explicit predecessor) is closed, so the row
+  // this write closes is the subject's live head. Only a head read names it;
+  // return that read to the verb so the head is held before the instruction
+  // lock, not after it.
+  const addressedClosed = (storedRow && !isOpenLiveRow(storedRow)) ||
+    (!storedRow && explicitPredecessor && !isOpenLiveRow(explicitPredecessor));
+  if (addressedClosed && addressedId) {
+    return new SkillLockExtension([], { subjectId, addressedId });
+  }
+  const headMoved: { id: string | null } = { id: null };
+  const outcome = await runSkillWrite(heldIds, headMoved);
+  if (headMoved.id) return new SkillLockExtension([headMoved.id]);
   if (!outcome.ok) return outcome.response;
   if (captured.closed) noteMemoryDelete(String(captured.closed.id));
   if (captured.row) {
@@ -1766,6 +1726,7 @@ async function writeSkillCreateOrUpdate(
     id: successorId,
     written: captured.row !== null,
     visibility: skillVersionVisibility(captured.row ?? unchangedHead),
+    confirm: "confirm" in outcome ? outcome.confirm : undefined,
   };
 }
 
@@ -2495,46 +2456,39 @@ export class Memory extends (databases as any).flair.Memory {
     // flair#2858: release an ordinary superseding POST's predecessor lock
     // before processing its queued citations.
     const afterRelease: Array<() => Promise<void>> = [];
-    const plan = await skillWriteLockPlan(this, content);
-    if (plan) {
-      // flair#2950: a skill POST holds every id it writes or closes. The plan
-      // generates the successor id for a server-allocated create, so the
-      // writer writes the id the verb locked.
-      for (let attempt = 0; attempt < SKILL_WRITE_HEAD_LOCK_ATTEMPTS; attempt++) {
-        const current = await skillWriteLockPlan(this, content) ?? plan;
-        const preHead = await resolveSkillHead(current.subjectId, current.addressedId, {});
-        const lockIds = preHead && !current.ids.includes(String(preHead.id))
-          ? [...current.ids, String(preHead.id)]
-          : [...current.ids];
-        const outcome = await withMemoryWriteLock(
-          memoryWriteLockStore(), lockIds,
-          (held) => this.postLocked(content, context, true, afterRelease, { ids: memoryWriteLockTokenIds(held), addressedId: current.addressedId, explicitSuccessor: current.explicitSuccessor, successorId: current.successorId }),
-          { phase: "memory-skill-write" });
-        if (outcome.kind !== "done") return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
-        if (outcome.value === SKILL_HEAD_MOVED) continue;
-        for (const step of afterRelease) await step();
-        return outcome.value;
-      }
-      return skillWriteConflict("skill_head_moved");
-    }
     const ids = postLockIds(this, content);
     if (ids.length === 0) {
-      const result = await this.postLocked(content, context, false, afterRelease);
+      const result = await this.postLocked(content, context, false, afterRelease, { ids: [] });
       for (const step of afterRelease) await step();
       return result;
     }
-    const outcome = await withMemoryWriteLock(
-      memoryWriteLockStore(), ids, () => this.postLocked(content, context, true, afterRelease), { phase: "post" });
-    if (outcome.kind !== "done") return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
-    for (const step of afterRelease) await step();
-    return outcome.value;
+    // One acquisition per attempt, as put(): a skill write returns any id its
+    // plan adds and the next attempt holds it before the authoritative read
+    // (flair#2950). A nested acquisition is never taken.
+    let lockIds = ids;
+    for (let attempt = 0; attempt < SKILL_WRITE_HEAD_LOCK_ATTEMPTS; attempt++) {
+      const outcome = await withMemoryWriteLock(
+        memoryWriteLockStore(), lockIds,
+        (held) => this.postLocked(content, context, true, afterRelease, { ids: memoryWriteLockTokenIds(held) }),
+        { phase: attempt === 0 ? "post" : "memory-skill-write" });
+      if (outcome.kind !== "done") return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
+      const extend = skillLockExtension(outcome.value);
+      if (extend) {
+        lockIds = await this.skillLockIds(lockIds, outcome.value);
+        continue;
+      }
+      for (const step of afterRelease) await step();
+      const then = skillThen(outcome.value);
+      return then ? await then() : outcome.value;
+    }
+    return skillWriteConflict("skill_head_moved");
   }
 
   /** `locked`: the POST holds the per-id lock, so its provider calls take the
    *  bounded path putLocked's take (MEMORY_LOCKED_PROVIDER_TIMEOUT_MS): a call
    *  still pending at the bound, or answering after it, is refused once the
    *  event loop runs again; a provider that never yields it can prevent that. */
-  private async postLocked(content: any, context: any, locked: boolean, afterRelease: Array<() => Promise<void>>, held?: { ids: readonly string[]; addressedId: string | null; explicitSuccessor: boolean; successorId: string }) {
+  private async postLocked(content: any, context: any, locked: boolean, afterRelease: Array<() => Promise<void>>, held?: { ids: readonly string[] }) {
     // flair#2612: a POST body that is not a single JSON object — an array, null,
     // a string or a number — is refused here with a named 400 before any write
     // path runs. Without it, an array reaches Harper's collection create, which
@@ -2910,25 +2864,35 @@ export class Memory extends (databases as any).flair.Memory {
         ctx, auth, content, storedRow: postStored, explicitPredecessor: preparedSkill.predecessor, method: "post", pointer,
         inPlaceId: reservedId != null ? String(reservedId) : null, staged: skillStaged, held,
       });
-      if (skillResult === SKILL_HEAD_MOVED) return SKILL_HEAD_MOVED;
+      if (skillResult instanceof SkillLockExtension) return skillResult;
       if (skillResult instanceof Response) return skillWriteResponse(skillResult, redactedValues, skillStaged.text);
-      // Verify after the commit when this write owned it, as a skill POST
-      // that supersedes a version does (flair#2645).
-      if (skillStaged.joined !== true) {
-        await pausePostVerification(true);
-        const skillVerified = await verifyWrittenRow(
-          (databases as any).flair.Memory,
-          skillStaged.row,
-          skillResult.id,
-          { expectedToken: skillStaged.row?.instanceToken },
-          [...POSTCOMMIT_VERIFY_FIELDS, "summary", "trigger", "metadata", "tags"],
-        );
-        if (skillVerified.unknown || skillVerified.mismatch) {
-          return skillVerified.unknown ? writeOutcomeUnknownFor(skillResult.id) : skillWriteConflict("skill_target_changed");
+      const finish = async (): Promise<any> => {
+        // The write has committed; the pre-confirmation work runs after this
+        // verb's Memory lock releases (flair#2645).
+        if (skillResult?.confirm) {
+          const denial = await skillResult.confirm();
+          if (denial) return denial;
         }
-      }
-      await markDerivedSourcesReflected(content);
-      return skillWriteResponse(skillResult, redactedValues, skillStaged.text);
+        // Verify after the commit when this write owned it, as a skill POST
+        // that supersedes a version does (flair#2645).
+        if (skillStaged.joined !== true) {
+          await pausePostVerification(true);
+          const skillVerified = await verifyWrittenRow(
+            (databases as any).flair.Memory,
+            skillStaged.row,
+            skillResult.id,
+            { expectedToken: skillStaged.row?.instanceToken },
+            [...POSTCOMMIT_VERIFY_FIELDS, "summary", "trigger", "metadata", "tags"],
+          );
+          if (skillVerified.unknown || skillVerified.mismatch) {
+            return skillVerified.unknown ? writeOutcomeUnknownFor(skillResult.id) : skillWriteConflict("skill_target_changed");
+          }
+        }
+        await markDerivedSourcesReflected(content);
+        return skillWriteResponse(skillResult, redactedValues, skillStaged.text);
+      };
+      if (skillResult?.confirm) return { skillThen: finish };
+      return await finish();
     }
     // flair#2467: the post-redaction text fields this write stages, for the response.
     let postStaged: StoredMemoryText = {};
@@ -3429,52 +3393,78 @@ export class Memory extends (databases as any).flair.Memory {
     // Citation-on-write, queued by putLocked, runs after this lock is released:
     // it tries each cited id's lock, and the target id's lock is not held then.
     const afterRelease: Array<() => Promise<void>> = [];
-    const plan = await skillWriteLockPlan(this, content);
-    if (plan) return this.putSkillLocked(content, query, afterRelease, plan);
-    const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async () => {
-      const result = await this.putLocked(content, query, afterRelease);
-      // Test-only: the verb body has returned and the lock is still held. A body
-      // that owned its transaction has committed it; a composed put that joined
-      // another transaction has not.
-      const committed = txnPausePoint("memory-put-committed");
-      if (committed) await committed;
+    // One acquisition of the ids this verb can name before its authoritative
+    // read. A skill write that names an id it does not hold returns it from
+    // putLocked, and putSkillLocked re-acquires with it (flair#2950).
+    const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async (held) => {
+      const result = await this.putLocked(content, query, afterRelease, undefined, { ids: memoryWriteLockTokenIds(held) });
+      await this.afterPutBody();
       return result;
     }, { phase: "put" });
     if (outcome.kind !== "done") return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
-    for (const step of afterRelease) await step();
-    return outcome.value;
+    const extend = skillLockExtension(outcome.value);
+    if (extend) return this.putSkillLocked(content, query, afterRelease, await this.skillLockIds(ids, outcome.value));
+    await this.drainAfterRelease(afterRelease);
+    const then = skillThen(outcome.value);
+    return then ? await then() : outcome.value;
   }
 
-  /** The skill PUT: hold every id the write names or closes, re-planning when
-   *  the live head moved (flair#2950). */
-  private async putSkillLocked(content: any, query: any, afterRelease: Array<() => Promise<void>>, initial: SkillWriteLockPlan): Promise<any> {
+  /** A skill PUT that needs an id it did not hold retries under one acquisition
+   *  of the extended set, re-reading and re-resolving the head (flair#2950). */
+  private async putSkillLocked(content: any, query: any, afterRelease: Array<() => Promise<void>>, initialIds: readonly string[]): Promise<any> {
+    let lockIds = initialIds;
     for (let attempt = 0; attempt < SKILL_WRITE_HEAD_LOCK_ATTEMPTS; attempt++) {
-      const current = await skillWriteLockPlan(this, content) ?? initial;
-      const preHead = await resolveSkillHead(current.subjectId, current.addressedId, {});
-      const lockIds = preHead && !current.ids.includes(String(preHead.id))
-        ? [...current.ids, String(preHead.id)]
-        : [...current.ids];
       const outcome = await withMemoryWriteLock(memoryWriteLockStore(), lockIds, async (held) => {
-        const result = await this.putLocked(content, query, afterRelease, undefined, {
-          ids: memoryWriteLockTokenIds(held), addressedId: current.addressedId,
-          explicitSuccessor: current.explicitSuccessor, successorId: current.successorId,
-        });
-        // Test-only: the verb body has returned and the lock is still held. A
-        // body that owned its transaction has committed it; a composed put
-        // that joined another transaction has not.
-        const committed = txnPausePoint("memory-put-committed");
-        if (committed) await committed;
+        const result = await this.putLocked(content, query, afterRelease, undefined, { ids: memoryWriteLockTokenIds(held) });
+        await this.afterPutBody();
         return result;
       }, { phase: "memory-skill-write" });
       if (outcome.kind !== "done") return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
-      if (outcome.value === SKILL_HEAD_MOVED) continue;
-      for (const step of afterRelease) await step();
-      return outcome.value;
+      const extend = skillLockExtension(outcome.value);
+      if (extend) {
+        lockIds = await this.skillLockIds(lockIds, outcome.value);
+        continue;
+      }
+      await this.drainAfterRelease(afterRelease);
+      const then = skillThen(outcome.value);
+      return then ? await then() : outcome.value;
     }
     return skillWriteConflict("skill_head_moved");
   }
 
-  private async putLocked(content: any, query: any, afterRelease: Array<() => Promise<void>>, entry?: unknown, held?: { ids: readonly string[]; addressedId: string | null; explicitSuccessor: boolean; successorId: string }) {
+  /** The next acquisition's id set: the ids this attempt held plus any the
+   *  skill writer returned, and the live head when the writer asked for it
+   *  (flair#2950). A failed head discovery adds no id; the writer's own read
+   *  under the lock still decides. */
+  private async skillLockIds(lockIds: readonly string[], value: unknown): Promise<string[]> {
+    const ids = [...lockIds];
+    if (value instanceof SkillLockExtension) {
+      ids.push(...value.ids);
+      if (value.headOf) {
+        try {
+          const head = await resolveSkillHead(value.headOf.subjectId, value.headOf.addressedId, {});
+          if (head) ids.push(String(head.id));
+        } catch {
+          /* the writer reports the read's own failure under the lock */
+        }
+      }
+    }
+    return [...new Set(ids)];
+  }
+
+  /** Test-only: the verb body has returned and the lock is still held. A body
+   *  that owned its transaction has committed it; a composed put that joined
+   *  another transaction has not. */
+  private async afterPutBody(): Promise<void> {
+    const committed = txnPausePoint("memory-put-committed");
+    if (committed) await committed;
+  }
+
+  private async drainAfterRelease(afterRelease: Array<() => Promise<void>>): Promise<void> {
+    for (const step of afterRelease) await step();
+  }
+
+  private async putLocked(content: any, query: any, afterRelease: Array<() => Promise<void>>, entry?: unknown, held?: { ids: readonly string[] }) {
     // flair#2478 part 3a: a checked write (putMemoryWithLock) joins its locked
     // transaction; the ordinary verb passes no entry.
     const locked = takeCheckedEntry(entry);
@@ -4010,7 +4000,18 @@ export class Memory extends (databases as any).flair.Memory {
             reembedding, requestedPayload: redactedValues > 0 ? undefined : requestedPayload,
             inPlaceId: reservedId != null ? String(reservedId) : null, staged: skillStaged, held,
           });
-          if (skillResult === SKILL_HEAD_MOVED) return SKILL_HEAD_MOVED;
+          if (skillResult instanceof SkillLockExtension) return skillResult;
+          if (skillResult?.confirm) {
+            // The write has committed; run the pre-confirmation work after this
+            // verb's Memory lock releases, so a later same-subject write can run.
+            return {
+              skillThen: async () => {
+                const denial = await skillResult.confirm();
+                if (denial) return denial;
+                return skillWriteResponse(skillResult, redactedValues, skillStaged.text);
+              },
+            };
+          }
           return { skill: skillWriteResponse(skillResult, redactedValues, skillStaged.text) };
         }
         // flair#2441: this put is over the row read as `preExisting` (which
@@ -4066,8 +4067,9 @@ export class Memory extends (databases as any).flair.Memory {
       if (refusal) return refusal;
       throw err;
     }
-    // A skill PUT whose head moved asks the verb to re-plan its lock set.
-    if (putResult === SKILL_HEAD_MOVED) return SKILL_HEAD_MOVED;
+    // A skill PUT that needs ids it did not hold asks the verb for them.
+    if (putResult instanceof SkillLockExtension) return putResult;
+    if (putResult && typeof (putResult as any).skillThen === "function") return putResult;
     // A skill PUT answers from its own write (no ordinary-row post-commit step).
     if (putResult && (putResult as any).skill !== undefined) return (putResult as any).skill;
     // flair#2561: a refusal this path built is returned as built; a

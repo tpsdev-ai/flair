@@ -368,6 +368,10 @@ export interface RunSkillVersionWriteArgs {
   /** Resolve the live head under the lock. */
   head: (shared: any) => Promise<Record<string, any> | null>;
   hooks: SkillWriteHooks;
+  /** Return the pre-confirmation work instead of running it, so a verb can drop
+   *  its Memory locks first (flair#2645): the write has committed, and a later
+   *  same-subject write must be able to run before this one confirms. */
+  deferConfirmation?: boolean;
 }
 
 /**
@@ -677,12 +681,18 @@ async function confirmSkillUpdate(args: {
   });
 }
 
+/** A skill write's outcome. `confirm` is the pre-confirmation work a caller may
+ *  run after its Memory lock releases (flair#2645). */
+export type SkillWriteOutcome =
+  | { ok: true; result: any; version: string; confirm?: () => Promise<Response | null> }
+  | { ok: false; response: Response };
+
 /**
  * Run one skill version write atomically. The append helper owns the lock, the
  * version row; this function performs the Memory-side
  * successor/close/pointer writes inside that same transaction.
  */
-export async function runSkillVersionWrite(args: RunSkillVersionWriteArgs): Promise<RecordVersionOutcome> {
+export async function runSkillVersionWrite(args: RunSkillVersionWriteArgs): Promise<SkillWriteOutcome> {
   // A raw table `create` inside the write (the InstructionVersion append, or
   // the successor upsert) can set Harper's `createdResource` flag on the
   // request context, which would surface as HTTP 201. The path a skill write
@@ -690,14 +700,27 @@ export async function runSkillVersionWrite(args: RunSkillVersionWriteArgs): Prom
   const restoreCreated = captureCreatedFlag(args.ctx);
   try {
     const journal = new WriteJournal();
-    return await journal.run(async () => {
-      const result = await runSkillVersionWriteInner(args);
-      if (!result.ok && !journal.compensationAttempted && journal.entries.some((entry) => entry.applied)) {
+    const result: SkillWriteOutcome = await journal.run(async (): Promise<SkillWriteOutcome> => {
+      const r = await runSkillVersionWriteInner(args);
+      if (!r.ok && !journal.compensationAttempted && journal.entries.some((entry) => entry.applied)) {
         const failure = await compensateUnlandedSkillUpdate({ ctx: args.ctx, journal });
         if (failure) return { ok: false, response: failure };
       }
-      return result;
+      return r;
     });
+    if (result.ok && result.confirm) {
+      const confirm = result.confirm;
+      return {
+        ...result,
+        confirm: async () => {
+          const denial = await confirm();
+          if (!denial) return null;
+          const failure = await compensateUnlandedSkillUpdate({ ctx: args.ctx, journal });
+          return failure ?? denial;
+        },
+      };
+    }
+    return result;
   } finally {
     restoreCreated();
   }
@@ -724,7 +747,7 @@ function supersedesPredecessor(plan: SkillWritePlan): plan is SkillSuccessorPlan
 /** A joined attempt's signal that its plan needs a commit this write owns. */
 const OWNED_COMMIT_REQUIRED = Symbol("skill-version-write.owned-commit-required");
 
-async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promise<RecordVersionOutcome> {
+async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promise<SkillWriteOutcome> {
   const joined = args.joinCallerTransaction === true && isJoinableTransaction(args.ctx);
   const first = await runSkillVersionAttempt(args, joined);
   if (first !== OWNED_COMMIT_REQUIRED) return first;
@@ -813,24 +836,28 @@ async function runSkillVersionAttempt(args: RunSkillVersionWriteArgs, joined: bo
   if (!outcome.ok || plan === null) return outcome;
   const writePlan = plan as SkillWritePlan;
   if (!supersedesPredecessor(writePlan)) return outcome;
-  // Test-only: inert unless armed. Pauses between the committed write and the
-  // confirmation read, so a later update of the same subject can complete.
-  const confirmPause = txnPausePoint("skill-update-confirm");
-  if (confirmPause) await confirmPause;
-  const authorize = args.hooks.authorizeClose ?? (async () => skillUpdateUnconfirmedFailure());
-  // flair#2645: the owned transaction has committed, but its success is not
-  // proof that the queued close was applied. Confirm against the committed
-  // store before answering success.
-  const confirmation = await confirmSkillUpdate({
-    ctx: args.ctx,
-    subjectId: args.subjectId,
-    predecessor: writePlan.predecessor,
-    closePatch: writePlan.closePatch,
-    successor: writePlan.successor,
-    grantedClose: writePlan.grantedClose,
-    authorize,
-    appendedVersionId: outcome.version || null,
-  });
+  const confirm = async (): Promise<Response | null> => {
+    // Test-only: inert unless armed. Pauses between the committed write and the
+    // confirmation read, so a later update of the same subject can complete.
+    const confirmPause = txnPausePoint("skill-update-confirm");
+    if (confirmPause) await confirmPause;
+    const authorize = args.hooks.authorizeClose ?? (async () => skillUpdateUnconfirmedFailure());
+    // flair#2645: the owned transaction has committed, but its success is not
+    // proof that the queued close was applied. Confirm against the committed
+    // store before answering success.
+    return await confirmSkillUpdate({
+      ctx: args.ctx,
+      subjectId: args.subjectId,
+      predecessor: writePlan.predecessor,
+      closePatch: writePlan.closePatch,
+      successor: writePlan.successor,
+      grantedClose: writePlan.grantedClose,
+      authorize,
+      appendedVersionId: outcome.version || null,
+    });
+  };
+  if (args.deferConfirmation) return { ...outcome, confirm } as SkillWriteOutcome;
+  const confirmation = await confirm();
   if (confirmation) return { ok: false, response: confirmation };
   return outcome;
 }

@@ -1,7 +1,9 @@
 - **The `Memory` skill-version create/update writes take the per-memory write lock (flair#2950).**
 
-  A skill `PUT`/`POST` create or update takes the same sorted per-id lock set as
-  a skill-tagged `POST /FeedMemories` write: the successor id, the addressed id,
-  the predecessor and the live head it would close. The live head is resolved
-  before the acquisition and resolved again under the locks; a head outside the
-  held set releases and retries with the new head.
+  A skill `PUT`/`POST` create or update that names an id or addresses a stored
+  row locks the row it addresses and the live head it would close, in the same
+  sorted per-id set as a skill-tagged `POST /FeedMemories` write. The writer
+  resolves the live head under the locks and re-acquires with it when it is
+  outside the held set. Its pre-confirmation work runs after the Memory lock
+  releases, so a later same-subject write can still complete and be confirmed in
+  order.
