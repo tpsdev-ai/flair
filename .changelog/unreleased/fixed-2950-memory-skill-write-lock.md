@@ -8,3 +8,9 @@
   resolves the live head under the locks. A fresh skill `POST` with a
   server-allocated id takes no per-id lock. Its pre-confirmation work runs after
   the Memory lock releases.
+
+  > **Heads-up:** two responses callers may now see. A `PUT`, or a `POST` that
+  > names an id, whose body cannot be structured-cloned is refused with
+  > `400 memory_body_uncloneable` (any memory write, not only skills). A Memory
+  > skill create or update returns `409 skill_head_moved` when the live head keeps
+  > moving across its lock attempts, as skill-tagged `POST /FeedMemories` already does.
