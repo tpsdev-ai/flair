@@ -73,8 +73,8 @@
  *    repair also when its committed
  *    update's confirmation read fails or does not show the update, while the
  *    other automatic writers do not set it for their own unconfirmed write,
- *    which they report or log. A marker names only an id the attempt wrote
- *    (`attemptedWriteIds`), not every id its acquisition held.
+ *    which they report or log. A marker names only an id the attempt attempted
+ *    to write (`attemptedWriteIds`), not every id its acquisition held.
  *    A POST that takes the lock checks the ids it locks; a POST that takes
  *    none, and the writers that take no per-id lock, do not check the marker.
  *

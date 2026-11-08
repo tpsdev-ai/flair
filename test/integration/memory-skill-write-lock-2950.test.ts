@@ -70,6 +70,51 @@ async function holdSkill(start: () => Promise<Response>): Promise<{ release: () 
   };
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Commit a newer full record to the skill row through the operations API
+ *  (lock-bypassing), keeping every identity field, so the staged close loses. */
+async function commitNewerSkill(id: string, content: string): Promise<void> {
+  const current = await h.readRow(id);
+  expect(current, "the skill row is missing before the competing write").not.toBeNull();
+  await h.ops({
+    operation: "put", database: "flair", table: "Memory",
+    records: [{ ...current, content, updatedAt: new Date().toISOString() }],
+  });
+  expect((await h.readRow(id))?.content, "the competing write is not visible while the write is paused").toBe(content);
+}
+
+async function versionsOf(subjectId: string): Promise<any[]> {
+  const rows = await h.ops({
+    operation: "search_by_value", database: "flair", table: "InstructionVersion",
+    search_attribute: "subjectId", search_value: subjectId, get_attributes: ["*"],
+  });
+  return (rows as any[]).sort((a, b) => Number(a.version) - Number(b.version));
+}
+
+async function liveHeadsOf(subjectId: string): Promise<string[]> {
+  const rows = await h.ops({
+    operation: "search_by_value", database: "flair", table: "Memory",
+    search_attribute: "skillSubjectId", search_value: subjectId, get_attributes: ["*"],
+  });
+  return (rows as any[])
+    .filter((row) => row.archived !== true && !(typeof row.validTo === "string" && row.validTo.length > 0))
+    .map((row) => String(row.id));
+}
+
+/** Hold `id`'s Memory write lock from a real writer: a skill-row PATCH pauses
+ *  inside the per-id lock at `memory-patch-entry`, before its skill refusal.
+ *  The returned function releases it and settles the (refused) request. */
+async function holdPredecessorLock(id: string): Promise<() => Promise<Response>> {
+  h.arm("memory-patch-entry");
+  const pending = h.signed(owner, "PATCH", memPath(id), { content: "holder" });
+  await h.assertPaused("memory-patch-entry");
+  return async () => {
+    await h.release("memory-patch-entry");
+    return pending;
+  };
+}
+
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
   home = mkdtempSync(join(tmpdir(), "flair-2950-home-"));
@@ -106,7 +151,7 @@ afterAll(async () => {
   component?.cleanup();
 }, HARPER_STOP_BUDGET_MS);
 
-describe("flair#2950 — Memory skill writes hold the ids they write (real Harper)", () => {
+describe("flair#2950 — Memory skill writes hold the existing addressed and head ids they lock (real Harper)", () => {
   it("a skill PUT create waits on a held id and refuses memory_busy without writing", async () => {
     const id = "msw-put-create-held";
     const held = await holdSkill(() => h.signed(owner, "POST", "/Memory", skillBody(id, "holder skill create")));
@@ -178,6 +223,67 @@ describe("flair#2950 — Memory skill writes hold the ids they write (real Harpe
     expect(await h.readRow(id), "the refused skill delete closed the row").toEqual(before);
     expect(h.writesBy(id, "delete"), "the refused skill delete reached the table").toHaveLength(writesBefore);
     await held.release();
+  }, 180_000);
+});
+
+describe("flair#2950 — a deferred confirmation retry and its compensation take the predecessor's Memory lock (real Harper)", () => {
+  it("a confirmation retry does not re-apply the close while another writer holds the predecessor id", async () => {
+    const id = "msw-confirm-retry-held";
+    const successorId = "msw-confirm-retry-held-successor";
+    await seedSkill(id);
+    h.arm("skill-close-staged");
+    h.arm("skill-update-confirm");
+    const pending = h.signed(owner, "PUT", memPath(successorId), skillBody(successorId, "v2", owner, { supersedes: id }));
+    await h.assertPaused("skill-close-staged");
+    // The staged close loses to this newer full write; confirmation must re-apply it.
+    await commitNewerSkill(id, "competitor-before-confirmation");
+    await h.release("skill-close-staged");
+    await h.assertPaused("skill-update-confirm");
+    const releaseHolder = await holdPredecessorLock(id);
+    await h.release("skill-update-confirm");
+    await sleep(600);
+    const held = await h.readRow(id);
+    expect(typeof held?.validTo === "string" ? held.validTo : null,
+      "the confirmation retry closed the row while another writer held its id").toBeNull();
+    expect(held?.content).toBe("competitor-before-confirmation");
+    const holder = await releaseHolder();
+    expect(holder.status, (await holder.clone().text()).slice(0, 300)).toBeGreaterThanOrEqual(400);
+    const res = await pending;
+    const text = await res.clone().text();
+    expect(res.status, text.slice(0, 300)).toBe(200);
+    const closed = await h.readRow(id);
+    expect(typeof closed?.validTo, `the close did not land after the holder released: ${JSON.stringify(closed)}`).toBe("string");
+    expect(await liveHeadsOf(id)).toEqual([successorId]);
+  }, 180_000);
+
+  it("a compensation undo does not write while another writer holds the predecessor id", async () => {
+    const id = "msw-compensation-held";
+    const successorId = "msw-compensation-held-successor";
+    await seedSkill(id);
+    h.arm("skill-close-staged");
+    h.arm("skill-update-confirm");
+    const pending = h.signed(owner, "PUT", memPath(successorId), skillBody(successorId, "v2", owner, { supersedes: id }));
+    await h.assertPaused("skill-close-staged");
+    await commitNewerSkill(id, "competitor-before-compensation");
+    await h.release("skill-close-staged");
+    await h.assertPaused("skill-update-confirm");
+    const releaseHolder = await holdPredecessorLock(id);
+    await h.release("skill-update-confirm");
+    // The retry's lock budget expires first; the compensation then waits on the
+    // same id. Hold past the first budget and release inside the second.
+    await sleep(3_000);
+    expect(await h.readRow(successorId), "the undo wrote while the predecessor id was held").not.toBeNull();
+    expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create", "update"]);
+    const holder = await releaseHolder();
+    expect(holder.status, (await holder.clone().text()).slice(0, 300)).toBeGreaterThanOrEqual(400);
+    const res = await pending;
+    const text = await res.clone().text();
+    expect(res.status, text.slice(0, 300)).toBe(500);
+    expect((await res.clone().json()).error).toBe("skill_update_unconfirmed");
+    expect(await h.readRow(successorId), "the undo did not complete after the holder released").toBeNull();
+    expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create"]);
+    expect((await h.readRow(id))?.validTo ?? null).toBeNull();
+    expect(await liveHeadsOf(id)).toEqual([id]);
   }, 180_000);
 });
 

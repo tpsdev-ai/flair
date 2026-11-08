@@ -280,6 +280,7 @@ export class FeedMemories extends Resource {
             ctx,
             subjectId,
             agentId,
+            heldMemoryIds: attemptIds,
             head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
             plan: async (head, shared) => {
               if (head && !heldIds.has(String(head.id))) {

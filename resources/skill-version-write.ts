@@ -1,5 +1,6 @@
 import { WriteJournal, currentWriteJournal } from "./write-journal.js";
 import { withKeyLock } from "./key-lock.js";
+import { withMemoryWriteLock } from "./memory-write-lock.js";
 import { normalizeEmptyEmbedding } from "./memory-embedding-value.js";
 /** Skill writes share the ["flair-instruction-version", "skill"] lock. */
 import { databases } from "harper";
@@ -372,6 +373,10 @@ export interface RunSkillVersionWriteArgs {
    *  its Memory locks first (flair#2645): the write has committed, and a later
    *  same-subject write must be able to run before this one confirms. */
   deferConfirmation?: boolean;
+  /** The Memory ids the calling verb still holds under its per-id lock, or none
+   *  when it takes none. The writer's confirmation and compensation acquire
+   *  only the Memory ids this set does not already cover (flair#2950). */
+  heldMemoryIds?: readonly string[];
 }
 
 /**
@@ -410,6 +415,30 @@ export async function afterCloseStaged(
 /** Attempts at re-applying a skill update's close whose committed write did not land (flair#2645). */
 const SKILL_UPDATE_CLOSE_ATTEMPTS = 3;
 
+/** No caller-held Memory ids: the confirmation runs after the write's locks released. */
+const NO_HELD_IDS: ReadonlySet<string> = new Set();
+
+/**
+ * Run `fn` holding the per-id Memory write lock for every id in `ids` that
+ * `held` does not already cover, in the helper's sorted order. A deferred
+ * confirmation or a compensation write runs after the write verb released its
+ * locks, so it takes them again here (flair#2950); inside a caller's lock the
+ * ids it already holds are skipped, never re-acquired.
+ * Returns `locked: false` when a missing id's lock could not be taken.
+ */
+async function withSkillMemoryLocks<T>(
+  ids: readonly string[],
+  held: ReadonlySet<string>,
+  fn: () => Promise<T>,
+): Promise<{ locked: true; value: T } | { locked: false }> {
+  const missing = [...new Set(ids.map((id) => String(id)))].filter((id) => !held.has(id)).sort();
+  if (missing.length === 0) return { locked: true, value: await fn() };
+  const outcome = await withMemoryWriteLock((databases as any)?.flair?.Memory?.primaryStore, missing, fn, {
+    phase: "skill-version-write",
+  });
+  return outcome.kind === "done" ? { locked: true, value: outcome.value } : { locked: false };
+}
+
 /** The named 500 when the skill update cannot be confirmed. */
 function skillUpdateUnconfirmedFailure(): Response {
   return Response.json({
@@ -442,18 +471,26 @@ function skillUpdateCompensationFailure(message: string): Response {
 async function compensateUnlandedSkillUpdate(args: {
   ctx: any;
   journal: WriteJournal;
+  /** The Memory ids the caller still holds: its own lock acquisition. */
+  held?: ReadonlySet<string>;
 }): Promise<Response | null> {
   args.journal.compensationAttempted = true;
   try {
     const table = (databases as any).flair?.InstructionVersion;
-    const result = await withKeyLock(table?.primaryStore, ["flair-instruction-version", "skill"], async () => {
-      const appended = [...args.journal.entries].reverse().find((entry) => entry.after?.subjectType === "skill");
-      if (appended) {
-        const head = await readHead(SKILL_SUBJECT_TYPE, appended.after.subjectId, {});
-        if (head && String(head.id) !== String(appended.after.id)) return false;
-      }
-      return args.journal.undo(args.ctx, withOwnedTransaction);
-    }, 200, 10);
+    // Memory id locks before the instruction-version lock (the global order),
+    // so the undo's Memory writes are serialized with the other per-id-locked
+    // writers of those ids, not just the version append (flair#2950).
+    const locked = await withSkillMemoryLocks(args.journal.memoryWriteIds(), args.held ?? NO_HELD_IDS, async () =>
+      withKeyLock(table?.primaryStore, ["flair-instruction-version", "skill"], async () => {
+        const appended = [...args.journal.entries].reverse().find((entry) => entry.after?.subjectType === "skill");
+        if (appended) {
+          const head = await readHead(SKILL_SUBJECT_TYPE, appended.after.subjectId, {});
+          if (head && String(head.id) !== String(appended.after.id)) return false;
+        }
+        return args.journal.undo(args.ctx, withOwnedTransaction);
+      }, 200, 10));
+    if (!locked.locked) throw new Error("the Memory write lock could not be acquired for the skill write's undo");
+    const result = locked.value;
     if (result.kind === "done" && result.value) return null;
   } catch (err) {
     console.error("skill-version-write: update undo could not be confirmed", err);
@@ -533,6 +570,9 @@ export interface ConfirmSkillCloseArgs {
   unconfirmed: () => Response;
   /** Attempts at re-applying the close. Default 3. */
   attempts?: number;
+  /** The Memory ids the caller still holds while confirming; none after the
+   *  write verb released its lock (flair#2950). */
+  held?: ReadonlySet<string>;
 }
 
 /**
@@ -550,7 +590,7 @@ export async function confirmSkillClose(args: ConfirmSkillCloseArgs): Promise<Re
   return journal.run(async () => {
     const result = await confirmSkillCloseInner(args, journal);
     if (result && !journal.compensationAttempted && journal.entries.some((entry) => entry.applied)) {
-      return (await compensateUnlandedSkillUpdate({ ctx: args.ctx, journal })) ?? result;
+      return (await compensateUnlandedSkillUpdate({ ctx: args.ctx, journal, held: args.held })) ?? result;
     }
     return result;
   });
@@ -558,7 +598,7 @@ export async function confirmSkillClose(args: ConfirmSkillCloseArgs): Promise<Re
 
 async function confirmSkillCloseInner(args: ConfirmSkillCloseArgs, journal: WriteJournal): Promise<Response | null> {
   const { ctx, table, expected, closePatch, authorize, afterStaged, confirmEffect, refusal, unconfirmed } = args;
-  const compensate = () => compensateUnlandedSkillUpdate({ ctx, journal });
+  const compensate = () => compensateUnlandedSkillUpdate({ ctx, journal, held: args.held });
   const attempts = args.attempts ?? SKILL_UPDATE_CLOSE_ATTEMPTS;
   const id = String(expected.id);
   for (let attempt = 1; ; attempt++) {
@@ -583,20 +623,26 @@ async function confirmSkillCloseInner(args: ConfirmSkillCloseArgs, journal: Writ
     if (attempt > attempts) break;
     let applied: "staged" | Response;
     try {
-      applied = await withOwnedTransaction(ctx, async (c) => {
-        const stored = await table.get(id, c);
-        if (!stored) return "staged";
-        if (!sameStoredRow(stored, expected)) return storedRowChangedRefusal("Memory");
-        const denied = await authorize(stored, c);
-        if (denied) return denied;
-        const closed = { ...stored, ...closePatch };
-        normalizeEmptyEmbedding(closed);
-        const result = storageResult(await table.put(closed, c));
-        if (result instanceof Response) throw result;
-        const revoked = await afterStaged?.(stored, attempt);
-        if (revoked) throw revoked;
-        return "staged";
-      });
+      // A retry re-applies the close in a new transaction after the verb's
+      // Memory lock released: hold the row's id lock across the read, the write
+      // and its commit (flair#2950).
+      const locked = await withSkillMemoryLocks([id], args.held ?? NO_HELD_IDS, () =>
+        withOwnedTransaction(ctx, async (c) => {
+          const stored = await table.get(id, c);
+          if (!stored) return "staged";
+          if (!sameStoredRow(stored, expected)) return storedRowChangedRefusal("Memory");
+          const denied = await authorize(stored, c);
+          if (denied) return denied;
+          const closed = { ...stored, ...closePatch };
+          normalizeEmptyEmbedding(closed);
+          const result = storageResult(await table.put(closed, c));
+          if (result instanceof Response) throw result;
+          const revoked = await afterStaged?.(stored, attempt);
+          if (revoked) throw revoked;
+          return "staged";
+        }));
+      if (!locked.locked) return unconfirmed();
+      applied = locked.value;
     } catch (err) {
       if (err instanceof Response) applied = err;
       else return unconfirmed();
@@ -620,6 +666,7 @@ async function confirmSkillUpdate(args: {
   authorize: (row: Record<string, any>, shared: any) => Promise<Response | null>;
   /** The version record this request appended (null when it wrote no version). */
   appendedVersionId: string | null;
+  held?: ReadonlySet<string>;
 }): Promise<Response | null> {
   const { ctx, subjectId, predecessor, closePatch, successor, grantedClose, authorize } = args;
   const table = (databases as any).flair?.Memory;
@@ -678,6 +725,7 @@ async function confirmSkillUpdate(args: {
     missing: () => storedRowChangedRefusal("Memory"),
     refusal: () => skillUpdateNotClosedRefusal(SKILL_UPDATE_CLOSE_ATTEMPTS),
     unconfirmed: skillUpdateUnconfirmedFailure,
+    held: args.held,
   });
 }
 
@@ -698,12 +746,13 @@ export async function runSkillVersionWrite(args: RunSkillVersionWriteArgs): Prom
   // request context, which would surface as HTTP 201. The path a skill write
   // replaces returned 200, so restore the flag's prior value on the way out.
   const restoreCreated = captureCreatedFlag(args.ctx);
+  const held = new Set((args.heldMemoryIds ?? []).map((id) => String(id)));
   try {
     const journal = new WriteJournal();
     const result: SkillWriteOutcome = await journal.run(async (): Promise<SkillWriteOutcome> => {
       const r = await runSkillVersionWriteInner(args);
       if (!r.ok && !journal.compensationAttempted && journal.entries.some((entry) => entry.applied)) {
-        const failure = await compensateUnlandedSkillUpdate({ ctx: args.ctx, journal });
+        const failure = await compensateUnlandedSkillUpdate({ ctx: args.ctx, journal, held });
         if (failure) return { ok: false, response: failure };
       }
       return r;
@@ -715,6 +764,7 @@ export async function runSkillVersionWrite(args: RunSkillVersionWriteArgs): Prom
         confirm: async () => {
           const denial = await confirm();
           if (!denial) return null;
+          // The caller released the write's Memory locks before this ran.
           const failure = await compensateUnlandedSkillUpdate({ ctx: args.ctx, journal });
           return failure ?? denial;
         },
@@ -839,9 +889,13 @@ async function runSkillVersionAttempt(args: RunSkillVersionWriteArgs, joined: bo
   const confirm = async (): Promise<Response | null> => {
     // Test-only: inert unless armed. Pauses between the committed write and the
     // confirmation read, so a later update of the same subject can complete.
+    // The pause stays outside the confirmation's lock acquisition.
     const confirmPause = txnPausePoint("skill-update-confirm");
     if (confirmPause) await confirmPause;
     const authorize = args.hooks.authorizeClose ?? (async () => skillUpdateUnconfirmedFailure());
+    // A deferred confirmation runs after the verb released its Memory locks; an
+    // inline one runs under the locks the caller still holds (flair#2950).
+    const held = args.deferConfirmation ? NO_HELD_IDS : new Set((args.heldMemoryIds ?? []).map(String));
     // flair#2645: the owned transaction has committed, but its success is not
     // proof that the queued close was applied. Confirm against the committed
     // store before answering success.
@@ -853,6 +907,7 @@ async function runSkillVersionAttempt(args: RunSkillVersionWriteArgs, joined: bo
       successor: writePlan.successor,
       grantedClose: writePlan.grantedClose,
       authorize,
+      held,
       appendedVersionId: outcome.version || null,
     });
   };

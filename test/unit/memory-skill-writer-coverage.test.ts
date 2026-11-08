@@ -34,6 +34,7 @@ const add = (file: string, sites: string[], reason: string) => {
 
 // ── GATED skill-writer sinks (run SkillScan + forced durability) ──
 add("write-journal", ["alias-source:(databases as any).flair.Memory#1"], "Identifies successor undo pause points.");
+add("write-journal", ["alias-source:(databases as any)?.flair?.Memory#1"], "Read-only primaryStore handle for the compensation write lock (flair#2950). No write through this handle.");
 add("write-journal", ["writer:this.transactions.delete#1", "writer:this.staged.delete#1"], "In-memory journal bookkeeping.");
 
 add("MemoryArchive", ["writer:Memory.put#1"], "Guarded by Memory.put().");
@@ -142,6 +143,8 @@ add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"],
 // ── Table aliases ──
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read-only alias (resolveSkillHead searches the live skill head).");
+add("skill-version-write", ["alias-source:(databases as any)?.flair?.Memory#1"],
+  "Read-only primaryStore handle for the confirmation and compensation write locks (flair#2950). No write through this handle.");
 add("AdminMemory", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only admin alias.");
 add("Federation", ["alias-source:(databases as any).flair.Memory#1"],

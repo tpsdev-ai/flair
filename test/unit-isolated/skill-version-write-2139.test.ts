@@ -1,5 +1,6 @@
 // Mocked transactions exercise rollback under the subject-type lock.
 import { describe, expect, test, beforeEach, mock } from "bun:test";
+import { memoryLockDouble } from "../helpers/memory-lock-double.ts";
 
 type Row = Record<string, any>;
 const store = new Map<string, Row>();       // InstructionVersion rows
@@ -51,6 +52,7 @@ const OrgEventTable = {
 
 const MemoryTable = {
   validate() {},
+  primaryStore: memoryLockDouble(),
   async put(row: Row, ctx?: any) {
     (ctx?.transaction?.memories ?? memoryStore).set(row.id, { ...row });
     return row;

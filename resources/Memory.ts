@@ -1587,7 +1587,8 @@ async function writeSkillCreateOrUpdate(
     staged?: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null; row?: Record<string, any>; joined?: boolean };
     /** The ids the calling verb holds under the per-id Memory write lock
      *  (flair#2950). The writer plans its write set from its committed read
-     *  and asks the verb for any id it does not hold. */
+     *  and asks the verb for an existing addressed or live-head id it must
+     *  lock. */
     held?: { ids: readonly string[] };
   },
 ): Promise<any> {
@@ -1622,6 +1623,7 @@ async function writeSkillCreateOrUpdate(
     subjectId,
     agentId: String(content.agentId),
     deferConfirmation: true,
+    heldMemoryIds: [...heldIds],
     head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
     plan: async (head, shared, attempt) => {
       if (head && !heldIds.has(String(head.id))) {
@@ -1928,6 +1930,7 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
     ctx,
     subjectId,
     agentId: String(record.agentId),
+    heldMemoryIds: headLock?.ids,
     head: (shared) => resolveSkillHead(subjectId, String(record.id), shared),
     plan: async (head, shared) => {
       // flair#2478: the head this delete closes must be an id the DELETE holds.
