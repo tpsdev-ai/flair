@@ -373,9 +373,8 @@ export interface RunSkillVersionWriteArgs {
    *  its Memory locks first (flair#2645): the write has committed, and a later
    *  same-subject write must be able to run before this one confirms. */
   deferConfirmation?: boolean;
-  /** The Memory ids the calling verb still holds under its per-id lock, or none
-   *  when it takes none. The writer's confirmation and compensation acquire
-   *  only the Memory ids this set does not already cover (flair#2950). */
+  /** The caller-held Memory ids that inline confirmation and compensation
+   *  skip; deferred work treats no original ids as held (flair#2950). */
   heldMemoryIds?: readonly string[];
 }
 
@@ -415,15 +414,13 @@ export async function afterCloseStaged(
 /** Attempts at re-applying a skill update's close whose committed write did not land (flair#2645). */
 const SKILL_UPDATE_CLOSE_ATTEMPTS = 3;
 
-/** No caller-held Memory ids: the confirmation runs after the write's locks released. */
+/** No caller-held Memory ids. */
 const NO_HELD_IDS: ReadonlySet<string> = new Set();
 
 /**
- * Run `fn` holding the per-id Memory write lock for every id in `ids` that
- * `held` does not already cover, in the helper's sorted order. A deferred
- * confirmation or a compensation write runs after the write verb released its
- * locks, so it takes them again here (flair#2950); inside a caller's lock the
- * ids it already holds are skipped, never re-acquired.
+ * Acquire missing Memory ids in sorted order. Inline compensation skips
+ * caller-held ids; deferred confirmation and compensation reacquire after
+ * release (flair#2950).
  * Returns `locked: false` when a missing id's lock could not be taken.
  */
 async function withSkillMemoryLocks<T>(
@@ -623,9 +620,7 @@ async function confirmSkillCloseInner(args: ConfirmSkillCloseArgs, journal: Writ
     if (attempt > attempts) break;
     let applied: "staged" | Response;
     try {
-      // A retry re-applies the close in a new transaction after the verb's
-      // Memory lock released: hold the row's id lock across the read, the write
-      // and its commit (flair#2950).
+      // Hold the row's id across the retry's fresh transaction (flair#2950).
       const locked = await withSkillMemoryLocks([id], args.held ?? NO_HELD_IDS, () =>
         withOwnedTransaction(ctx, async (c) => {
           const stored = await table.get(id, c);

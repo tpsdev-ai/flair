@@ -350,21 +350,12 @@ class SkillLockExtension {
   constructor(readonly ids: readonly string[]) {}
 }
 
-/** A retry re-runs the verb body the request carried. The verb's own steps
- *  rewrite that body in place (an empty embedding and `usedMemoryIds` are
- *  deleted, an id is filled from the URL, text is redacted), and a single pass
- *  (main's order) never sees that body twice (flair#2950). The verb refuses a
- *  body it cannot clone before the first attempt, so this never falls back to
- *  the object an attempt already rewrote. */
+/** Clone object bodies for lock retries (flair#2950). */
 function replayWriteBody(content: any): any {
   return content === null || typeof content !== "object" ? content : structuredClone(content);
 }
 
-/** A skill write replays its body for each lock attempt, so a body that cannot
- *  be cloned is refused before the first attempt; the retry would otherwise
- *  reuse the object the first attempt rewrote. The 400 matches the other
- *  write-body shape refusal (`body_must_be_object`): the body is the request's
- *  and nothing has been written. */
+/** Check object bodies before PUT and named-id POST lock attempts. */
 function uncloneableWriteBodyResponse(content: any): Response | null {
   if (content === null || typeof content !== "object") return null;
   try {
@@ -2483,9 +2474,9 @@ export class Memory extends (databases as any).flair.Memory {
     return joined;
   }
 
-  /** Unless it is submitted with the skill tag, a POST that names an id (URL
-   *  or body) or a `supersedes` reference takes the per-id lock for those ids,
-   *  the reference under its canonical id, and holds it across the handler's
+  /** A POST that names an id (URL or body) or a `supersedes` reference takes
+   *  the per-id lock for those ids, the reference under its canonical id, and
+   *  holds it across the handler's
    *  read, decision and write and the predecessor's close (flair#2478 slice 1
    *  part 2). Its non-skill row writes join an open request transaction, which
    *  commits after the lock is released; a superseding skill write owns its
@@ -2505,9 +2496,8 @@ export class Memory extends (databases as any).flair.Memory {
       for (const step of afterRelease) await step();
       return result;
     }
-    // One acquisition per attempt, as put(): a skill write returns any id its
-    // plan adds and the next attempt holds it before the authoritative read
-    // (flair#2950). A nested acquisition is never taken.
+    // The initial write plan returns missing ids for a new acquisition before
+    // the next attempt's authoritative read (flair#2950).
     const uncloneable = uncloneableWriteBodyResponse(content);
     if (uncloneable) return uncloneable;
     const pristine = replayWriteBody(content);
