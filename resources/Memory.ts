@@ -337,15 +337,27 @@ function deleteLockIds(resource: unknown, id: unknown): string[] {
 const SKILL_DELETE_HEAD_ATTEMPTS = 3;
 
 /** Attempts of a skill create/update to acquire the per-id Memory locks with
- *  every id its plan names, re-resolving after each acquisition (flair#2950). */
+ *  the stored row and live head its read names, re-resolving after each
+ *  acquisition (flair#2950). */
 const SKILL_WRITE_HEAD_LOCK_ATTEMPTS = 3;
 
 /** The ids a skill write's caller must add to its lock set before it retries.
  *  Returned by the writer and consumed by put()/post() on the next acquisition;
- *  it is never a write result. `headOf` asks the caller to resolve and hold the
- *  live head of a closed addressed version before the instruction lock. */
+ *  it is never a write result. */
 class SkillLockExtension {
-  constructor(readonly ids: readonly string[], readonly headOf: { subjectId: string | null; addressedId: string } | null = null) {}
+  constructor(readonly ids: readonly string[]) {}
+}
+
+/** A retry re-runs the verb body the request carried. The field guards and
+ *  skill preparation write carried fields into the body they are given, and a
+ *  single pass (main's order) never sees that body twice (flair#2950). */
+function replayWriteBody(content: any): any {
+  if (content === null || typeof content !== "object") return content;
+  try {
+    return structuredClone(content);
+  } catch {
+    return content;
+  }
 }
 function skillLockExtension(value: unknown): readonly string[] | null {
   return value instanceof SkillLockExtension ? value.ids : null;
@@ -1707,7 +1719,16 @@ async function writeSkillCreateOrUpdate(
   const addressedClosed = (storedRow && !isOpenLiveRow(storedRow)) ||
     (!storedRow && explicitPredecessor && !isOpenLiveRow(explicitPredecessor));
   if (addressedClosed && addressedId) {
-    return new SkillLockExtension([], { subjectId, addressedId });
+    // The head this write closes is named only by a read. A head the attempt
+    // does not hold is returned for the next acquisition; when there is none
+    // (a deleted head), the plan below refuses with main's 409.
+    let head: Record<string, any> | null = null;
+    try {
+      head = await resolveSkillHead(subjectId, addressedId, {});
+    } catch {
+      /* the plan's read under the locks decides */
+    }
+    if (head && !heldIds.has(String(head.id))) return new SkillLockExtension([String(head.id)]);
   }
   const headMoved: { id: string | null } = { id: null };
   const outcome = await runSkillWrite(heldIds, headMoved);
@@ -2465,16 +2486,18 @@ export class Memory extends (databases as any).flair.Memory {
     // One acquisition per attempt, as put(): a skill write returns any id its
     // plan adds and the next attempt holds it before the authoritative read
     // (flair#2950). A nested acquisition is never taken.
+    const pristine = replayWriteBody(content);
     let lockIds = ids;
     for (let attempt = 0; attempt < SKILL_WRITE_HEAD_LOCK_ATTEMPTS; attempt++) {
+      const body = attempt === 0 ? content : replayWriteBody(pristine);
       const outcome = await withMemoryWriteLock(
         memoryWriteLockStore(), lockIds,
-        (held) => this.postLocked(content, context, true, afterRelease, { ids: memoryWriteLockTokenIds(held) }),
+        (held) => this.postLocked(body, context, true, afterRelease, { ids: memoryWriteLockTokenIds(held) }),
         { phase: attempt === 0 ? "post" : "memory-skill-write" });
       if (outcome.kind !== "done") return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
       const extend = skillLockExtension(outcome.value);
       if (extend) {
-        lockIds = await this.skillLockIds(lockIds, outcome.value);
+        lockIds = this.skillLockIds(lockIds, outcome.value);
         continue;
       }
       for (const step of afterRelease) await step();
@@ -3396,6 +3419,7 @@ export class Memory extends (databases as any).flair.Memory {
     // One acquisition of the ids this verb can name before its authoritative
     // read. A skill write that names an id it does not hold returns it from
     // putLocked, and putSkillLocked re-acquires with it (flair#2950).
+    const pristine = replayWriteBody(content);
     const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async (held) => {
       const result = await this.putLocked(content, query, afterRelease, undefined, { ids: memoryWriteLockTokenIds(held) });
       await this.afterPutBody();
@@ -3403,7 +3427,7 @@ export class Memory extends (databases as any).flair.Memory {
     }, { phase: "put" });
     if (outcome.kind !== "done") return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
     const extend = skillLockExtension(outcome.value);
-    if (extend) return this.putSkillLocked(content, query, afterRelease, await this.skillLockIds(ids, outcome.value));
+    if (extend) return this.putSkillLocked(pristine, query, afterRelease, this.skillLockIds(ids, outcome.value));
     await this.drainAfterRelease(afterRelease);
     const then = skillThen(outcome.value);
     return then ? await then() : outcome.value;
@@ -3412,17 +3436,19 @@ export class Memory extends (databases as any).flair.Memory {
   /** A skill PUT that needs an id it did not hold retries under one acquisition
    *  of the extended set, re-reading and re-resolving the head (flair#2950). */
   private async putSkillLocked(content: any, query: any, afterRelease: Array<() => Promise<void>>, initialIds: readonly string[]): Promise<any> {
+    const pristine = replayWriteBody(content);
     let lockIds = initialIds;
     for (let attempt = 0; attempt < SKILL_WRITE_HEAD_LOCK_ATTEMPTS; attempt++) {
+      const body = replayWriteBody(pristine);
       const outcome = await withMemoryWriteLock(memoryWriteLockStore(), lockIds, async (held) => {
-        const result = await this.putLocked(content, query, afterRelease, undefined, { ids: memoryWriteLockTokenIds(held) });
+        const result = await this.putLocked(body, query, afterRelease, undefined, { ids: memoryWriteLockTokenIds(held) });
         await this.afterPutBody();
         return result;
       }, { phase: "memory-skill-write" });
       if (outcome.kind !== "done") return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
       const extend = skillLockExtension(outcome.value);
       if (extend) {
-        lockIds = await this.skillLockIds(lockIds, outcome.value);
+        lockIds = this.skillLockIds(lockIds, outcome.value);
         continue;
       }
       await this.drainAfterRelease(afterRelease);
@@ -3433,22 +3459,10 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   /** The next acquisition's id set: the ids this attempt held plus any the
-   *  skill writer returned, and the live head when the writer asked for it
-   *  (flair#2950). A failed head discovery adds no id; the writer's own read
-   *  under the lock still decides. */
-  private async skillLockIds(lockIds: readonly string[], value: unknown): Promise<string[]> {
+   *  skill writer returned (flair#2950). */
+  private skillLockIds(lockIds: readonly string[], value: unknown): string[] {
     const ids = [...lockIds];
-    if (value instanceof SkillLockExtension) {
-      ids.push(...value.ids);
-      if (value.headOf) {
-        try {
-          const head = await resolveSkillHead(value.headOf.subjectId, value.headOf.addressedId, {});
-          if (head) ids.push(String(head.id));
-        } catch {
-          /* the writer reports the read's own failure under the lock */
-        }
-      }
-    }
+    if (value instanceof SkillLockExtension) ids.push(...value.ids);
     return [...new Set(ids)];
   }
 
