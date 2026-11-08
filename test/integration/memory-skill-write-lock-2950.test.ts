@@ -1,19 +1,20 @@
 /**
  * memory-skill-write-lock-2950.test.ts — flair#2950, real Harper.
  *
- * The Memory.ts skill-version writes take the same per-id Memory write lock
- * as the feed path: a held id makes a skill PUT create, a skill PUT update, a
- * skill POST update, a stale-id skill PUT (which closes a different live
- * head) and a skill DELETE wait for the holder's budget and refuse
- * `503 memory_busy` without writing. A held id is created by an ordinary feed
- * write paused at `feed-ingest-staged`, so the lock is real and the holder is
- * released by this test, never by a sleep.
+ * The Memory.ts skill-version writes that name or address a stored id take the
+ * same per-id Memory write lock as the feed path: a held id makes a skill PUT
+ * create, a skill PUT update, a skill POST update, a stale-id skill PUT (which
+ * closes a different live head) and a skill DELETE wait for the holder's budget
+ * and refuse `503 memory_busy` without writing. The holder is a Memory skill
+ * write paused at `memory-post-skill-staged`, so the lock is real and the
+ * holder is released by this test, never by a sleep.
  *
  * The feed path's head-disappears window is pinned too: a skill feed write
- * resolves the live head at `skill-head-resolved`, the test closes or deletes
- * that head before the write acquires its locks, and the write fails closed
- * (`409 skill_target_changed`). The first-version branch uses the same window
- * with the target row created and closed by the test.
+ * resolves the live head at `skill-head-resolved`, the test closes that head
+ * before the write acquires its locks, and the write is refused
+ * `409 skill_target_changed`; when the test deletes the head of a
+ * first-version create, the write resolves no head, creates the subject and
+ * answers 200.
  *
  * Throwaway HOME + data dir, ephemeral ports, and the repo's traced component.
  */

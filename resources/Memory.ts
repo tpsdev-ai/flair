@@ -336,9 +336,11 @@ function deleteLockIds(resource: unknown, id: unknown): string[] {
  *  the head the writer resolves under the locks is not one of the held ids. */
 const SKILL_DELETE_HEAD_ATTEMPTS = 3;
 
-/** Attempts of a skill create/update to acquire the per-id Memory locks with
- *  the stored row and live head its read names, re-resolving after each
- *  acquisition (flair#2950). */
+/** Bounds the retry loop that re-acquires the per-id Memory locks with the
+ *  stored row and live head its read names, re-resolving after each
+ *  acquisition (flair#2950). put() acquires once before it and hands the body
+ *  to putSkillLocked, so a PUT makes up to one acquisition more than this;
+ *  post() runs this loop from its first attempt. */
 const SKILL_WRITE_HEAD_LOCK_ATTEMPTS = 3;
 
 /** The ids a skill write's caller must add to its lock set before it retries.
@@ -348,15 +350,31 @@ class SkillLockExtension {
   constructor(readonly ids: readonly string[]) {}
 }
 
-/** A retry re-runs the verb body the request carried. The field guards and
- *  skill preparation write carried fields into the body they are given, and a
- *  single pass (main's order) never sees that body twice (flair#2950). */
+/** A retry re-runs the verb body the request carried. The verb's own steps
+ *  rewrite that body in place (an empty embedding and `usedMemoryIds` are
+ *  deleted, an id is filled from the URL, text is redacted), and a single pass
+ *  (main's order) never sees that body twice (flair#2950). The verb refuses a
+ *  body it cannot clone before the first attempt, so this never falls back to
+ *  the object an attempt already rewrote. */
 function replayWriteBody(content: any): any {
-  if (content === null || typeof content !== "object") return content;
+  return content === null || typeof content !== "object" ? content : structuredClone(content);
+}
+
+/** A skill write replays its body for each lock attempt, so a body that cannot
+ *  be cloned is refused before the first attempt; the retry would otherwise
+ *  reuse the object the first attempt rewrote. The 400 matches the other
+ *  write-body shape refusal (`body_must_be_object`): the body is the request's
+ *  and nothing has been written. */
+function uncloneableWriteBodyResponse(content: any): Response | null {
+  if (content === null || typeof content !== "object") return null;
   try {
-    return structuredClone(content);
+    structuredClone(content);
+    return null;
   } catch {
-    return content;
+    return Response.json({
+      error: "memory_body_uncloneable",
+      message: "the write body must be clonable for a lock retry; it carries a value that is not",
+    }, { status: 400 });
   }
 }
 function skillLockExtension(value: unknown): readonly string[] | null {
@@ -1594,7 +1612,8 @@ async function writeSkillCreateOrUpdate(
   let successorBasis: any = null;
   // flair#2950: a skill create/update writes Memory rows too — its successor,
   // the row it addresses and the row it closes — so the verb takes the same
-  // per-id Memory write lock as the feed path. Under the lock this writer
+  // per-id Memory write lock as the feed path. A fresh skill POST with a
+  // server-allocated id takes no per-id lock. Under the lock this writer
   // resolves the live head; a head outside the held set is reported so the
   // verb can re-plan with it.
   const runSkillWrite = (heldIds: ReadonlySet<string>, headMoved: { id: string | null }) => runSkillVersionWrite({
@@ -2486,6 +2505,8 @@ export class Memory extends (databases as any).flair.Memory {
     // One acquisition per attempt, as put(): a skill write returns any id its
     // plan adds and the next attempt holds it before the authoritative read
     // (flair#2950). A nested acquisition is never taken.
+    const uncloneable = uncloneableWriteBodyResponse(content);
+    if (uncloneable) return uncloneable;
     const pristine = replayWriteBody(content);
     let lockIds = ids;
     for (let attempt = 0; attempt < SKILL_WRITE_HEAD_LOCK_ATTEMPTS; attempt++) {
@@ -3419,6 +3440,8 @@ export class Memory extends (databases as any).flair.Memory {
     // One acquisition of the ids this verb can name before its authoritative
     // read. A skill write that names an id it does not hold returns it from
     // putLocked, and putSkillLocked re-acquires with it (flair#2950).
+    const uncloneable = uncloneableWriteBodyResponse(content);
+    if (uncloneable) return uncloneable;
     const pristine = replayWriteBody(content);
     const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async (held) => {
       const result = await this.putLocked(content, query, afterRelease, undefined, { ids: memoryWriteLockTokenIds(held) });

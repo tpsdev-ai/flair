@@ -21,8 +21,8 @@
  * (resources/MemoryReindex.ts) (slice 3c); and basement/restore of a
  * non-skill row (resources/MemoryArchive.ts, through the checked write below)
  * (slice 1 part 3a); and the Memory skill-version create/update writes
- * (flair#2950), while an ordinary POST create under a fresh server-allocated
- * id takes no id lock. The other Memory writers convert in later parts.
+ * (flair#2950); a fresh skill POST with a server-allocated id takes no per-id
+ * lock. The other Memory writers convert in later parts.
  *
  * A writer that must make its read, decision and write on one committed basis
  * runs under one key per ID of `Memory.primaryStore`'s lock: `["memory", fullStoredId]`.
