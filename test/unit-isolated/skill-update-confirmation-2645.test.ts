@@ -1,4 +1,5 @@
 import { journalMap } from "../helpers/journal-map.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double.ts";
 import { beforeEach, expect, mock, spyOn, test } from "bun:test";
 
 type Row = Record<string, any>;
@@ -70,7 +71,9 @@ const versionTable = Object.assign(Object.create(rawVersions), {
 });
 const memoryTable = {
   validate() {},
-  primaryStore: { getEntry(id: string) { return memories.has(id) ? { value: memories.get(id), version: id === "successor" ? successorVersion : 1 } : null; } },
+  primaryStore: Object.assign(memoryLockDouble(), {
+    getEntry(id: string) { return memories.has(id) ? { value: memories.get(id), version: id === "successor" ? successorVersion : 1 } : null; },
+  }),
   async get(id: string, ctx?: any) {
     const rows = ctx?.transaction?.memories ?? memories;
     if (id === "successor" && !ctx?.transaction && supersedeOnSuccessorConfirmation) {
