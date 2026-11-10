@@ -101,8 +101,8 @@ Harper publishes it. UNSUBSCRIBE is not guarded: it only ends a subscription
 the session already holds. CONNECT is Harper's own authentication.
 
 Over MQTT 5, a refused SUBSCRIBE gets SUBACK reason code `0x87` (not
-authorized) for a verified non-admin agent and `0x80` for a caller without a
-valid credential whose session Harper admits (Harper may instead refuse that
+authorized) for a verified non-admin agent and for a caller without a login
+whose session Harper admits (Harper may instead refuse that
 caller at CONNECT). A refused PUBLISH is answered only when it asks for an
 acknowledgment: at QoS 1 (PUBACK) or QoS 2 (PUBREC) it gets the same codes, and
 a verified non-admin agent's also carries the refusal as a reason string unless
