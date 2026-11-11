@@ -2025,9 +2025,9 @@ describe("pinned lifetime ceilings", () => {
 describe("the as-of date the committed allowlist is checked against (flair#3026)", () => {
   const now = Date.parse("2026-11-11T12:00:00Z");
 
-  it("is the latest added date while every added date is in the past", () => {
-    const asOf = allowlistAsOf([{ added: "2026-10-01" }, { added: "2026-11-09" }], now);
-    expect(asOf.toISOString().slice(0, 10)).toBe("2026-11-09");
+  it("is the latest added date (never earlier than 2026-11-02) while every added date is in the past", () => {
+    expect(allowlistAsOf([{ added: "2026-10-01" }, { added: "2026-11-09" }], now).toISOString().slice(0, 10)).toBe("2026-11-09");
+    expect(allowlistAsOf([{ added: "2026-10-01" }], now).toISOString().slice(0, 10)).toBe("2026-11-02");
   });
 
   it("is capped at the real date, so a future added date is still reported", () => {
@@ -2040,8 +2040,13 @@ describe("the as-of date the committed allowlist is checked against (flair#3026)
   });
 
   it("skips an unparseable added date, which the schema check then reports", () => {
-    const asOf = allowlistAsOf([{ added: "2026-11-09" }, { added: "not-a-date" }], now);
-    expect(asOf.toISOString().slice(0, 10)).toBe("2026-11-09");
+    expect(allowlistAsOf([{ added: "2026-11-09" }, { added: "not-a-date" }], now).toISOString().slice(0, 10)).toBe("2026-11-09");
+    expect(allowlistAsOf([{ added: "not-a-date" }], now).toISOString().slice(0, 10)).toBe("2026-11-02");
+    const bad = structuredClone(ALLOWLIST);
+    bad.entries[0].added = "not-a-date";
+    expect(validateAllowlist(bad, allowlistAsOf(bad.entries, now)).join("\n")).toContain(
+      `"added" must be a real calendar date (YYYY-MM-DD)`,
+    );
   });
 });
 
