@@ -29,12 +29,15 @@ const ALLOWLIST = JSON.parse(
   readFileSync(join(REPO_ROOT, ".github", "audit-allowlist.json"), "utf8"),
 );
 // The committed allowlist is checked as of the latest date any entry was added (never earlier than
-// 2026-11-02, the date these checks were pinned to): deterministic, and never before a real entry's own
-// `added`, which a fixed date becomes as soon as an entry is added after it (flair#3026). Expiry against the
-// real date stays the audit gate's job in CI.
-const ALLOWLIST_AS_OF = new Date(
-  Math.max(Date.parse("2026-11-02"), ...ALLOWLIST.entries.map((e: { added: string }) => Date.parse(e.added))),
-);
+// 2026-11-02, the date these checks were pinned to), capped at the real date: deterministic while every
+// `added` is in the past, and an `added` after today still fails "added is after today" (flair#3026).
+// Unparseable `added` values are skipped here and reported by the schema check. Expiry against the real
+// date stays the audit gate's job in CI.
+function allowlistAsOf(entries: Array<{ added: string }>, now: number): Date {
+  const added = entries.map((e) => Date.parse(e.added)).filter(Number.isFinite);
+  return new Date(Math.min(now, Math.max(Date.parse("2026-11-02"), ...added)));
+}
+const ALLOWLIST_AS_OF = allowlistAsOf(ALLOWLIST.entries, Date.now());
 const TEST_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8");
 /**
  * The six consumer-install inputs: the flag, the allowlist source, the package
@@ -2018,6 +2021,29 @@ describe("pinned lifetime ceilings", () => {
 });
 
 // ─── Allowlist integrity ─────────────────────────────────────────────────────
+
+describe("the as-of date the committed allowlist is checked against (flair#3026)", () => {
+  const now = Date.parse("2026-11-11T12:00:00Z");
+
+  it("is the latest added date while every added date is in the past", () => {
+    const asOf = allowlistAsOf([{ added: "2026-10-01" }, { added: "2026-11-09" }], now);
+    expect(asOf.toISOString().slice(0, 10)).toBe("2026-11-09");
+  });
+
+  it("is capped at the real date, so a future added date is still reported", () => {
+    const entries = [{ added: "2026-11-09" }, { added: "2026-11-12" }];
+    expect(allowlistAsOf(entries, now).getTime()).toBe(now);
+    const future = structuredClone(ALLOWLIST);
+    future.entries[0].added = "2026-11-12";
+    const problems = validateAllowlist(future, allowlistAsOf(future.entries, now)).join("\n");
+    expect(problems).toContain(`"added" (2026-11-12) is after today (2026-11-11)`);
+  });
+
+  it("skips an unparseable added date, which the schema check then reports", () => {
+    const asOf = allowlistAsOf([{ added: "2026-11-09" }, { added: "not-a-date" }], now);
+    expect(asOf.toISOString().slice(0, 10)).toBe("2026-11-09");
+  });
+});
 
 describe("the committed allowlist", () => {
   it("passes its own schema validation", () => {
