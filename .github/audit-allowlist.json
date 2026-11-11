@@ -1069,7 +1069,7 @@
       "reason": "harper's npm-shrinkwrap pins node-forge 1.4.0 in its installed tree: harper 5.3.1, the version flair pins (package.json:69), places it at node_modules/harper/node_modules/node-forge in an npm install of flair, and npm honours that pin over root overrides. flair's own lockfile resolves the fixed release (the root override node-forge 1.4.3, inside harper's declared ^1.3.1, resolves 1.4.3 in bun.lock). harper 5.3.5, npm's latest harper on 2026-11-01, ships no npm-shrinkwrap.json, but its bundled tree carries the same node-forge 1.4.0. flair does not import node-forge. Fixed in 1.4.3.",
       "added": "2026-11-11",
       "expires": "2026-11-29",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves node-forge >=1.4.1, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. harper 5.3.1 pins, and harper 5.3.5 bundles, node-forge 1.4.0."
+      "removeWhen": "flair moves to a harper release whose installed tree resolves node-forge >=1.4.3, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. harper 5.3.1 pins, and harper 5.3.5 bundles, node-forge 1.4.0."
     },
     {
       "ghsa": "GHSA-6cv4-p8m7-4r25",
@@ -1084,7 +1084,7 @@
       "reason": "harper's npm-shrinkwrap pins node-forge 1.4.0 in its installed tree: harper 5.3.1, the version flair pins (package.json:69), places it at node_modules/harper/node_modules/node-forge in an npm install of flair, and npm honours that pin over root overrides. flair's own lockfile resolves the fixed release (the root override node-forge 1.4.3, inside harper's declared ^1.3.1, resolves 1.4.3 in bun.lock). harper 5.3.5, npm's latest harper on 2026-11-01, ships no npm-shrinkwrap.json, but its bundled tree carries the same node-forge 1.4.0. flair does not import node-forge. Fixed in 1.4.3.",
       "added": "2026-11-11",
       "expires": "2026-11-29",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves node-forge >=1.4.1, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. harper 5.3.1 pins, and harper 5.3.5 bundles, node-forge 1.4.0."
+      "removeWhen": "flair moves to a harper release whose installed tree resolves node-forge >=1.4.3, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. harper 5.3.1 pins, and harper 5.3.5 bundles, node-forge 1.4.0."
     },
     {
       "ghsa": "GHSA-j8rw-jp99-435v",
@@ -1099,7 +1099,7 @@
       "reason": "harper's npm-shrinkwrap pins node-forge 1.4.0 in its installed tree: harper 5.3.1, the version flair pins (package.json:69), places it at node_modules/harper/node_modules/node-forge in an npm install of flair, and npm honours that pin over root overrides. flair's own lockfile resolves the fixed release (the root override node-forge 1.4.3, inside harper's declared ^1.3.1, resolves 1.4.3 in bun.lock). harper 5.3.5, npm's latest harper on 2026-11-01, ships no npm-shrinkwrap.json, but its bundled tree carries the same node-forge 1.4.0. flair does not import node-forge. Fixed in 1.4.3.",
       "added": "2026-11-11",
       "expires": "2026-11-29",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves node-forge >=1.4.1, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. harper 5.3.1 pins, and harper 5.3.5 bundles, node-forge 1.4.0."
+      "removeWhen": "flair moves to a harper release whose installed tree resolves node-forge >=1.4.3, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. harper 5.3.1 pins, and harper 5.3.5 bundles, node-forge 1.4.0."
     },
     {
       "ghsa": "GHSA-h46v-rmh6-fq4f",
@@ -1129,7 +1129,7 @@
       "reason": "harper's npm-shrinkwrap pins node-forge 1.4.0 in its installed tree: harper 5.3.1, the version flair pins (package.json:69), places it at node_modules/harper/node_modules/node-forge in an npm install of flair, and npm honours that pin over root overrides. flair's own lockfile resolves the fixed release (the root override node-forge 1.4.3, inside harper's declared ^1.3.1, resolves 1.4.3 in bun.lock). harper 5.3.5, npm's latest harper on 2026-11-01, ships no npm-shrinkwrap.json, but its bundled tree carries the same node-forge 1.4.0. flair does not import node-forge. Fixed in 1.4.3.",
       "added": "2026-11-11",
       "expires": "2026-11-29",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves node-forge >=1.4.1, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. harper 5.3.1 pins, and harper 5.3.5 bundles, node-forge 1.4.0."
+      "removeWhen": "flair moves to a harper release whose installed tree resolves node-forge >=1.4.3, whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper. harper 5.3.1 pins, and harper 5.3.5 bundles, node-forge 1.4.0."
     },
     {
       "ghsa": "GHSA-9wg5-mj3p-v49q",
