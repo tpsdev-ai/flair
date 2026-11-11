@@ -105,7 +105,7 @@
     "handlebars": "4.7.10",
     "simple-git": "4.0.2",
     "@simple-git/argv-parser": "2.0.1",
-    "node-forge": "1.4.2",
+    "node-forge": "1.4.3",
     "systeminformation": "5.33.16",
     "@hono/node-server": "2.1.5"
   },
