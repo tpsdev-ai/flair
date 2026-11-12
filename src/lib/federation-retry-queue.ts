@@ -18,7 +18,7 @@
  * ordinary cursor; concurrent sender runs for one peer are not serialized — a
  * separate issue).
  */
-import { retryEntryKey, retryRowProblem } from "./federation-retry-row.js";
+import { isRetryResolution, retryEntryKey, retryRowProblem, type RetryRowProblem } from "./federation-retry-row.js";
 
 /**
  * The global retryable names the sender recognizes. Mirrors the
@@ -65,6 +65,13 @@ export const RETRY_ROW_FIELDS = [
 ] as const;
 
 /**
+ * The fields a terminal outcome sets (terminalRetryRow) that a pending row
+ * leaves null. The operations-API `upsert` merges into the stored row, so the
+ * pending-row builders below write each of them as null.
+ */
+export const RETRY_TERMINAL_FIELDS = ["resolution", "completedAt", "bound"] as const;
+
+/**
  * Wait before offering a pending row again, by the number of attempts it has
  * reserved. The first re-offer is immediate (the lock or change that refused
  * it may already be gone); later ones back off. The last entry repeats.
@@ -105,16 +112,56 @@ export function retryOfferProblem(row: RetryQueueRow, table = "Memory"): RetryOf
   // The reader and the transition call a pending row carrying an outcome
   // malformed; the sender selects rows from the same table, so it applies
   // that shared rule rather than deciding on its own fields alone.
-  const sharedProblem = retryRowProblem(
-    row as Record<string, unknown>,
-    (value) => typeof value === "string" && MEMORY_PENDING_REASONS.has(value),
-  );
-  if (sharedProblem === "outcome_mismatch") return "outcome_mismatch";
-  if (sharedProblem === "id_mismatch") return "id_mismatch";
-  if (sharedProblem === "unknown_state") return "wrong_state";
+  const malformed = retryRowMalformedness(row as Record<string, unknown>);
+  if (malformed !== null) {
+    switch (malformed.problem) {
+      case "outcome_mismatch": return "outcome_mismatch";
+      case "id_mismatch": return "id_mismatch";
+      case "unknown_state": return "wrong_state";
+      case "unknown_reason": return "unknown_reason";
+    }
+  }
   // `retry_unknown` is legitimate here and is not a SkipReason, so the sender
   // keeps its own stricter pending-reason list.
   if (typeof row.lastReason !== "string" || !MEMORY_PENDING_REASONS.has(row.lastReason)) return "unknown_reason";
+  return null;
+}
+
+/** A stored row that breaks a sender convention, and the field that breaks it. */
+export interface RetryRowMalformedness {
+  problem: RetryRowProblem;
+  field: string;
+}
+
+/**
+ * Why a stored row breaks a sender convention and which field breaks it, or
+ * null when it keeps them. Unlike {@link retryOfferProblem} this does not
+ * require state `pending`: an outcome write reads the stored row in whatever
+ * state it is.
+ *
+ * The rules are the ones the sender already uses: `retryRowProblem`
+ * (src/lib/federation-retry-row.ts) with the sender's pending-reason list, and
+ * `retryRowConfirmation` for the terminal fields a pending row must leave
+ * null (flair#2882).
+ */
+export function retryRowMalformedness(row: Record<string, unknown>): RetryRowMalformedness | null {
+  const isKnownReason = (value: unknown) => typeof value === "string" && MEMORY_PENDING_REASONS.has(value);
+  const problem = retryRowProblem(row, isKnownReason);
+  if (problem === "id_mismatch") return { problem, field: "id" };
+  if (problem === "unknown_state") return { problem, field: "state" };
+  if (problem === "unknown_reason") return { problem, field: "lastReason" };
+  if (row.state === "pending") {
+    // The sender's pending rows always carry a reason it recognizes.
+    if (!isKnownReason(row.lastReason)) return { problem: "unknown_reason", field: "lastReason" };
+    // The read-back's terminal-field rule applies to every stored pending row,
+    // whether or not retryRowProblem also names an outcome: it does not check
+    // completedAt.
+    const field = retryRowConfirmation({}, row);
+    if (field !== null) return { problem: "outcome_mismatch", field };
+  }
+  if (problem === "outcome_mismatch") {
+    return { problem, field: !isRetryResolution(row.resolution) ? "resolution" : "bound" };
+  }
   return null;
 }
 
@@ -172,6 +219,7 @@ export function retryRowForRefusal(input: RefusalRowInput): Record<string, unkno
     createdAt: prior?.createdAt ?? input.nowIso,
     updatedAt: input.nowIso,
   };
+  for (const field of RETRY_TERMINAL_FIELDS) row[field] = null;
   return row;
 }
 
@@ -198,6 +246,7 @@ export function retryRowForAttempt(row: RetryQueueRow, nowIso: string): Record<s
     updatedAt: nowIso,
   };
   if (typeof row.lastReason === "string") out.lastReason = row.lastReason;
+  for (const field of RETRY_TERMINAL_FIELDS) out[field] = null;
   return out;
 }
 
@@ -223,7 +272,9 @@ const CONFIRM_FIELDS = [
  * The first of `id`, `peerId`, `table`, `recordId`, `state`, `attempts`,
  * `lastReason`, `lastAttemptAt`, `firstRefusedAt`, `createdAt`, `resolution`,
  * `completedAt`, `updatedAt` and `bound` (CONFIRM_FIELDS, in that order) that
- * the written record carries and the stored row does not echo; `row` when the
+ * the written record carries and the stored row does not echo; then, for a
+ * stored row in state `pending`, the first of RETRY_TERMINAL_FIELDS it holds a
+ * non-null value for, whether or not the record names it; `row` when the
  * stored row is null; otherwise null. A read-back that only agrees on `state`
  * and `lastReason` can hide an attempt that was never incremented.
  */
@@ -234,6 +285,11 @@ export function retryRowConfirmation(record: Record<string, unknown>, stored: Re
     const expected = record[field] ?? null;
     const actual = stored[field] ?? null;
     if (actual !== expected) return field;
+  }
+  if (stored.state === "pending") {
+    for (const field of RETRY_TERMINAL_FIELDS) {
+      if ((stored[field] ?? null) !== null) return field;
+    }
   }
   return null;
 }

@@ -30,12 +30,17 @@ const OTHER_JOB = "doclint";
 const ADAPTER_RUN_LINES = [
   'echo "test-unit matrix result: ${{ needs.test-unit.result }}"',
   'echo "test-darwin-gated result: ${{ needs.test-darwin-gated.result }}"',
+  'echo "custody-denial-root result: ${{ needs.custody-denial-root.result }}"',
   'if [ "${{ needs.test-unit.result }}" != "success" ]; then',
   'echo "::error::One or more Unit Tests Node-version legs did not succeed"',
   "exit 1",
   "fi",
   'if [ "${{ needs.test-darwin-gated.result }}" != "success" ]; then',
   'echo "::error::Darwin-gated unit tests did not succeed (flair#1012)"',
+  "exit 1",
+  "fi",
+  'if [ "${{ needs.custody-denial-root.result }}" != "success" ]; then',
+  'echo "::error::Custody denial (root) did not succeed (flair#971)"',
   "exit 1",
   "fi",
 ];

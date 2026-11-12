@@ -81,6 +81,8 @@ async function restore(bytes: Uint8Array, sidecar: Sidecar, flags: readonly stri
       writeFileSync(${JSON.stringify(callsPath)}, JSON.stringify(calls));
       if (method === "PUT") rows.set(path, JSON.parse(options.body));
       if (method === "DELETE") rows.delete(path);
+      if (method === "GET" && path === "/Memory") return Response.json([]);
+      if (method === "GET" && path.startsWith("/AdminMemoryCandidates/")) return Response.json({ candidates: [], hasMore: false });
       if (method !== "GET") return new Response(null, { status: 204 });
       return rows.has(path) ? Response.json(rows.get(path)) : new Response(null, { status: 404 });
     };

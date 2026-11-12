@@ -10,11 +10,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, jest } from "bun:test";
-import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, mkdtempSync } from "node:fs";
+import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, mkdtempSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { applySnapshot, CANDIDATE_LIST_LIMIT, CANDIDATE_LIST_MAX_PAGES, type ApiCall } from "../src/rem/restore.ts";
 import { ApiHttpError } from "../src/lib/auth-resolve.ts";
+import { SOUL_SCOPE_FIELDS_REFUSAL } from "../src/lib/soul-scope-fields.ts";
 import { buildOpsSearch } from "../src/commands/rem.ts";
 import { createSnapshot } from "../src/rem/snapshot.ts";
 import { create as tarCreate, extract as tarExtract } from "tar";
@@ -269,6 +270,82 @@ describe("applySnapshot — missing snapshot", () => {
     expect(r.status).toBe("failed");
     expect(r.errors[0]).toContain("does not exist");
   });
+});
+
+describe("applySnapshot — a refused Soul row", () => {
+  it("reports the row id and refusal from a simulated ApiHttpError", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const inner = statefulApi({ souls: [{ id: "current-soul", agentId: "test-agent" }] });
+    const soulId = snapshotSoul.id;
+    const api: ApiCall = async (method, path, body) => {
+      if (method === "PUT" && path === `/Soul/${encodeURIComponent(soulId)}`) {
+        throw ApiHttpError.fromResponse(403, JSON.stringify({ error: SOUL_SCOPE_FIELDS_REFUSAL }));
+      }
+      return inner.api(method, path, body);
+    };
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("failed");
+    expect(r.errors).toContain(`put-soul ${soulId}: HTTP 403: ${SOUL_SCOPE_FIELDS_REFUSAL}`);
+    expect(r.restored.souls).toBe(0);
+  });
+});
+
+describe("applySnapshot — an unreadable live listing", () => {
+  /**
+   * A 2xx listing whose shape is neither an array nor `{results}`/`{items}`.
+   * asArray would read it as an empty table; the pre-restore snapshot would
+   * miss every live row and the scope preflight would see no live Souls, so
+   * the DELETE and PUT loops must not run (flair#2931).
+   */
+  async function restoreWithListing(table: "Memory" | "Soul", malformed: unknown) {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = recordingApi({
+      "GET:/Memory": () => (table === "Memory" ? malformed : []),
+      "GET:/Soul": () => (table === "Soul" ? malformed : []),
+    });
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: join(testRoot, "pre-restore-snapshots"),
+      tmpRootOverride: testRoot,
+    });
+    const writes = calls.filter((c) => c.method === "DELETE" || c.method === "PUT");
+    const preRestoreRoot = join(testRoot, "pre-restore-snapshots");
+    const snapshots = existsSync(preRestoreRoot) ? readdirSync(preRestoreRoot) : [];
+    return { r, writes, snapshots };
+  }
+
+  for (const table of ["Memory", "Soul"] as const) {
+    it(`refuses a malformed ${table} listing before the snapshot and before any delete or put`, async () => {
+      const { r, writes, snapshots } = await restoreWithListing(table, { data: [], total: 0 });
+
+      expect(r.status).toBe("failed");
+      expect(r.errors.some((e) => e.includes("live-listing-unreadable"))).toBe(true);
+      expect(r.errors.length).toBe(1);
+      expect(r.errors[0]).toContain(`GET /${table}?agentId=test-agent`);
+      expect(r.errors[0]).toContain('"results"');
+      expect(r.errors[0]).toContain('"items"');
+      expect(r.errors[0]).toContain("check the API response");
+      expect(r.preRestoreSnapshotPath).toBeUndefined();
+      expect(snapshots).toEqual([]);
+      expect(writes).toEqual([]);
+      expect(r.deleted.memories).toBe(0);
+      expect(r.deleted.souls).toBe(0);
+      expect(r.restored.memories).toBe(0);
+      expect(r.restored.souls).toBe(0);
+    });
+  }
 });
 
 describe("applySnapshot — real restore", () => {

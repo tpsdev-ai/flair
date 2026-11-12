@@ -64,6 +64,7 @@ class BaseMemory {
   /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
    *  double injects one (test/helpers/memory-lock-double.ts). */
   static primaryStore = memoryLockDouble();
+  static validate() {}
   async post(content: any) {
     const id = content.id ?? `mock-${++idCounter}`;
     content.id = id;
@@ -207,6 +208,7 @@ const { computeContentHash } = await import("../../resources/memory-feed-lib.ts"
 const { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryText, suppliedMemoryTextFields, suppliedSkillTextFields, suppliedStoredTextFields } = await import("../../resources/memory-redaction.ts");
 const { WRITE_RESPONSE_WITHHELD, WRITE_RESPONSE_WITHHELD_MESSAGE, buildFromAllowlist, feedResponseFields, REDACTION_RULES, storageResult, suppliedMemoryFields, writeResultResponse } = await import("../../resources/memory-write-response.ts");
 const { SEED_SKILL_ROW_ID } = await import("../../resources/seed-ids.ts");
+const { resetMemoryWriteOutcomeUnknownForTest } = await import("../../resources/memory-write-lock.ts");
 const { redactSecrets, redactSecretsWithCount } = await import("../../packages/flair-mcp/src/secret-redaction.ts");
 
 function makeMemory(ctxRequest: any) {
@@ -222,6 +224,11 @@ beforeEach(() => {
   idCounter = 0;
   embedInputs = [];
   agentStore.clear();
+  // These cases reuse feed ids across the status loop; a withheld-result case
+  // leaves the id outcome-unknown in the production marker (flair#2857).
+  resetMemoryWriteOutcomeUnknownForTest("feed-new");
+  resetMemoryWriteOutcomeUnknownForTest("feed-repair");
+  resetMemoryWriteOutcomeUnknownForTest("changed-feed");
 });
 
 // Credential-shaped values the shared redactor recognizes.

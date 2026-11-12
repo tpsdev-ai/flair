@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 
 import { dirname, resolve } from "node:path";
 import * as render from "../render.js";
-import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, resolveAdminPassFromSources, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP, ADMIN_PASS_FLAG, ADMIN_PASS_HELP, ApiRequestOutcomeUnknown, apiErrorRawBody, boundErrorText, resolveRemRequestDeadlineMs, DEFAULT_REM_REQUEST_DEADLINE_MS } from "../lib/auth-resolve.js";
+import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, addAdminPassOptions, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_HELP, ApiRequestOutcomeUnknown, apiErrorRawBody, boundErrorText, resolveRemRequestDeadlineMs, DEFAULT_REM_REQUEST_DEADLINE_MS } from "../lib/auth-resolve.js";
 import type { OpsSearch } from "../rem/runner.js";
 import {
   validatePromoteOpts,
@@ -49,7 +49,6 @@ export type { SourceMemoryFetch, PromotedTagsDecision } from "../rem/promote-pol
 export type RemCli = {
   api: (...args: any[]) => Promise<any>;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
-  applyAdminPassFile: (opts: { adminPass?: string; adminPassFile?: string }) => void;
   addSharedCredentialOptions: (cmd: Command) => Command;
   readPortFromConfig: () => number | null;
   resolveHttpPort: (opts: { port?: string | number; dataDir?: string }, mode?: "address" | "create") => number;
@@ -116,9 +115,6 @@ function api(...args: any[]): Promise<any> {
 }
 function resolveOpsPort(opts: { opsPort?: string | number; port?: string | number }): number {
   return cli.resolveOpsPort(opts);
-}
-function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
-  cli.applyAdminPassFile(opts);
 }
 function addSharedCredentialOptions(cmd: Command): Command {
   return cli.addSharedCredentialOptions(cmd);
@@ -842,12 +838,14 @@ export function register(program: Command): void {
   // populating. Per spec § 5: candidates are NEVER auto-promoted; this command
   // is the operator's review surface.
 
-  rem
-    .command("candidates")
-    .description("List staged memory candidates from the FLAIR-NIGHTLY-REM cycle (pending review)")
-    .option("--port <port>", "Harper HTTP port")
-    .option("--ops-port <port>", "Harper operations API port")
-    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+  addAdminPassOptions(
+    rem
+      .command("candidates")
+      .description("List staged memory candidates from the FLAIR-NIGHTLY-REM cycle (pending review)")
+      .option("--port <port>", "Harper HTTP port")
+      .option("--ops-port <port>", "Harper operations API port"),
+    "Admin password (or set FLAIR_ADMIN_PASS)",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--agent <id>", "Agent ID (or FLAIR_AGENT_ID env)")
     .option("--status <s>", "Filter by status: pending | promoted | rejected (default: pending)")
@@ -1259,13 +1257,28 @@ export function register(program: Command): void {
       }
     });
 
-  remNightly
-    .command("run-once")
-    .description("Run one nightly cycle now (snapshot + log). Same code path the scheduler will use.")
-    .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
-    .option("--ops-port <port>", "Harper operations API port")
-    .option(ADMIN_PASS_FLAG, ADMIN_PASS_HELP)
-    .option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP)
+  addAdminPassOptions(
+    remNightly
+      .command("run-once")
+      .description("Run one nightly cycle now (snapshot + log). Same code path the scheduler will use.")
+      .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
+      .option("--ops-port <port>", "Harper operations API port"),
+    ADMIN_PASS_HELP,
+    {
+      onAdminPassRefusal: (err, actionCommand) => {
+        const refused = actionCommand.opts() as { adminPassFile?: string };
+        const message = (err as Error).message;
+        console.error(`Error: ${message}`);
+        if (refused.adminPassFile !== undefined) {
+          const remedy = err instanceof AdminPassSourceError
+            ? ""
+            : ` Provide an owner-only (chmod 600), non-empty admin password file${refused.adminPassFile === "" ? " via --admin-pass-file <path>" : ` at ${refused.adminPassFile}`}, then re-run \`flair rem nightly run-once\`.`;
+          console.error(`Dedup:      NOT RUN — ${message}${remedy}`);
+        }
+        process.exit(1);
+      },
+    },
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--dry-run", "Log the row but skip the snapshot write")
     .action(async (opts: any) => {
@@ -1278,27 +1291,11 @@ export function register(program: Command): void {
       // The runner is agent-authed and cannot reach the ops port itself. When
       // admin credentials are available, inject ops-API and admin-authed REST
       // helpers so the pending-candidate count and the admin-gated dedup step
-      // can run. A file named with --admin-pass-file is read through the ONE
-      // shared resolver before any cycle work; when it is unavailable the run
-      // fails at startup with NOT RUN rather than issuing an agent-authed call
-      // that an agent key cannot authorize.
-      let adminPass = "";
-      try {
-        adminPass = resolveAdminPassFromSources({
-          adminPassFile: opts.adminPassFile,
-          adminPass: opts.adminPass,
-          envPass: process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD,
-        });
-      } catch (err: any) {
-        console.error(`Error: ${err.message}`);
-        if (opts.adminPassFile !== undefined) {
-          const remedy = err instanceof AdminPassSourceError
-            ? ""
-            : ` Provide an owner-only (chmod 600), non-empty admin password file${opts.adminPassFile === "" ? " via --admin-pass-file <path>" : ` at ${opts.adminPassFile}`}, then re-run \`flair rem nightly run-once\`.`;
-          console.error(`Dedup:      NOT RUN — ${err.message}${remedy}`);
-        }
-        process.exit(1);
-      }
+      // can run. An explicit file or flag is applied by the pair's preAction
+      // hook before any cycle work. A refused FILE is reported as `Dedup: NOT
+      // RUN` rather than issuing an agent-authed call that an agent key cannot
+      // authorize.
+      const adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
       // Every agent-scoped call is signed by the selected agent and nothing
       // else: the identity is pinned here (never FLAIR_AGENT_ID), and
       // signedOnly refuses FLAIR_TOKEN / FLAIR_ADMIN_PASS / the local
@@ -1511,7 +1508,6 @@ export function register(program: Command): void {
       // --apply path: live replay via src/rem/restore.ts
       if (opts.apply) {
         const { applySnapshot, formatUnknownState } = await import("../rem/restore.js");
-        applyAdminPassFile(opts);
         let restoreTarget: RestoreTarget;
         try {
           restoreTarget = resolveRestoreTarget({
@@ -1528,7 +1524,7 @@ export function register(program: Command): void {
         // local admin-password file as best-effort (an unusable file leaves
         // it without an admin credential), while --apply requires creds (Soul
         // rewrite) and fails loudly. A bad --admin-pass-file given explicitly
-        // is refused earlier, by applyAdminPassFile, dry run or not.
+        // is refused earlier, by the option pair's preAction hook, dry run or not.
         let adminPass: string | undefined;
         try {
           adminPass = resolveLocalAdminPass(opts.adminPass, !isLocalBase(restoreTarget.baseUrl));

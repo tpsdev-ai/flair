@@ -41,6 +41,15 @@
 // an entry that no longer offends FAILS. New exception keys FAIL. There is
 // no skip flag and no whole-file skip.
 //
+// A RE-KEY IS NOT AN ADDED EXCEPTION (flair#2854). An added key is paired
+// ONE-TO-ONE with a removed baseline key of identical file, fingerprint, kind
+// and occurrence, and reported as RE-KEYED without failing, ONLY when the
+// scanned working-tree file is byte-identical to its blob at the trusted base
+// ref. Pairing consumes both keys. Only
+// `spawn-no-timeout` is re-keyable: a case-level kind's scope names the case
+// that owns the defect, and a fix in one case must never cover a regression in
+// another, so those keys keep strict identity.
+//
 // SCOPE — EVERY SPAWN FAMILY THIS REPO USES (flair#1825). The node
 // `child_process` family (spawn / spawnSync / exec / execFile / fork and their
 // Sync forms) — bare, or via a NAMED ALIAS import — AND `Bun.spawn` /
@@ -241,19 +250,38 @@ function lineNumberAt(src, index) {
  * text-based walks and swallows the closing paren of the call or case around
  * it. Each `JsxText` node is masked from `pos` to `end`, replacing every
  * character except the four in `LINE_BREAK_CHARS` with a space, so lengths and
- * line/column positions stay aligned. A JSX attribute's string value is a
- * TypeScript string literal, which the literal masker already blanks.
+ * line/column positions stay aligned. A JSX attribute's string value is blanked
+ * the same way (its quotes are kept, so the masked source still parses) in
+ * either quote style: JSX attribute strings have no escape sequences, so the
+ * text walks must not read a trailing backslash as escaping the closing quote
+ * (flair#2854). The value's range is TypeScript's `StringLiteral`, so its quote
+ * style is the parser's, not a scan's.
  */
 export function maskJsxText(src, fileName = UNNAMED_SOURCE) {
   if (!isJsxFileName(fileName)) return src;
   const sf = parseSourceFile(src, fileName);
   const out = src.split("");
   let masked = false;
+  const blank = (from, to) => {
+    for (let j = from; j < to && j < src.length; j++) if (!LINE_BREAK_CHARS.has(src[j])) out[j] = " ";
+  };
   const visit = (node) => {
     if (node.kind === ts.SyntaxKind.JsxText) {
       masked = true;
-      for (let j = node.pos; j < node.end && j < src.length; j++) {
-        if (!LINE_BREAK_CHARS.has(src[j])) out[j] = " ";
+      blank(node.pos, node.end);
+      return;
+    }
+    // A JSX attribute string has no escape sequences: its value ends at the next
+    // matching quote, so a trailing backslash is part of the value (flair#2854).
+    // The value is a StringLiteral in the AST in either quote style; blank its
+    // interior so the text-based walks never read that backslash as an escaping
+    // backslash. The quotes stay, so the masked source still parses as JSX.
+    if (node.kind === ts.SyntaxKind.StringLiteral && node.parent && node.parent.kind === ts.SyntaxKind.JsxAttribute) {
+      const start = node.getStart(sf);
+      const quote = src[start];
+      if ((quote === '"' || quote === "'") && src[node.end - 1] === quote && node.end - 1 > start + 1) {
+        masked = true;
+        blank(start + 1, node.end - 1);
       }
       return;
     }
@@ -732,10 +760,11 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
     if (!args) continue;
     const argvText = BUN_ARGV_ARG_INDICES.map((i) => textAt(args.spans[i])).join(" ");
     const optText = textAt(resolveOptSpan(args.spans[BUN_OPTIONS_ARG_INDEX]));
+    const callStart = m.index + (m[1]?.length ?? 0);
     const call = {
       fn,
-      index: m.index,
-      line: lineOf(m.index),
+      index: callStart,
+      line: lineOf(callStart),
       text: `${argvText} ; ${optText}`,
       isCliEntry: textNamesCliEntry(argvText, ids),
     };
@@ -752,10 +781,11 @@ export function findSpawnCalls(source, fileName = UNNAMED_SOURCE) {
     if (!args) continue;
     const argvText = (ARGV_ARG_INDICES.get(fn) ?? [0, 1]).map((i) => textAt(args.spans[i])).join(" ");
     const optText = textAt(resolveOptSpan(args.spans[OPTIONS_ARG_INDEX.get(fn)]));
+    const callStart = m.index + (m[1]?.length ?? 0);
     const call = {
       fn: raw,
-      index: m.index,
-      line: lineOf(m.index),
+      index: callStart,
+      line: lineOf(callStart),
       text: `${argvText} ; ${optText}`,
       isCliEntry: textNamesCliEntry(argvText, ids),
     };
@@ -801,8 +831,25 @@ function bodyBraceFrom(src, from) {
 }
 
 /** File-local function/arrow bodies `{ name, start, end }` (for scope attribution). */
-export function functionBodies(source) {
+export function functionBodies(source, fileName = UNNAMED_SOURCE) {
   const src = maskComments(source);
+  // Parse the source itself (the walks read the comment-masked copy): masking
+  // comments is a text walk, and re-parsing its output can trip on a nested
+  // template literal. Indices are shared, so the AST and `src` line up.
+  const sf = parseSourceFile(source, fileName);
+  const arrowFunctions = [];
+  const collectArrows = (node) => {
+    if (
+      node.kind === ts.SyntaxKind.ArrowFunction &&
+      node.parent &&
+      ts.isVariableDeclaration(node.parent) &&
+      ts.isIdentifier(node.parent.name)
+    ) {
+      arrowFunctions.push({ name: node.parent.name.text, node });
+    }
+    ts.forEachChild(node, collectArrows);
+  };
+  collectArrows(sf);
   const bodies = [];
   for (const m of src.matchAll(/(?:^|[\n\r\u2028\u2029])\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
     const open = src.indexOf("(", m.index);
@@ -830,33 +877,39 @@ export function functionBodies(source) {
   for (const m of src.matchAll(
     /(?:^|[\n\r\u2028\u2029])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/g,
   )) {
-    const arrowEnd = m.index + m[0].length;
-    const bodyOpen = bodyBraceFrom(src, arrowEnd);
-    if (bodyOpen !== -1 && src.slice(arrowEnd, bodyOpen).trim() === "") {
-      const bodyClose = matchBrace(src, bodyOpen);
-      if (bodyClose === -1) continue;
-      bodies.push({ name: m[1], start: bodyOpen, end: bodyClose });
-    } else {
-      const lineEnd = indexOfLineBreak(src, arrowEnd);
-      bodies.push({ name: m[1], start: arrowEnd, end: lineEnd === -1 ? src.length : lineEnd });
-    }
+    // The body's real extent is the AST's: an expression body may continue
+    // past the `=>`'s line (a spawn on the next line, or a parenthesized body
+    // spanning lines), and a line break is not its end (flair#2842).
+    const arrow = arrowFunctions.find(
+      (a) => a.name === m[1] && a.node.getStart(sf) >= m.index && a.node.getStart(sf) < m.index + m[0].length,
+    );
+    if (!arrow) continue;
+    const body = arrow.node.body;
+    // A block body keeps the brace-to-brace range (the closing brace is
+    // excluded, as the text walks expect); an expression body ends after its
+    // last token (flair#2842).
+    bodies.push({
+      name: m[1],
+      start: body.getStart(sf),
+      end: ts.isBlock(body) ? body.getEnd() - 1 : body.getEnd(),
+    });
   }
   return bodies;
 }
 
 /** File-local functions whose body contains a CLI-entry spawn, transitively. */
-export function localHelpersThatSpawn(source, calls) {
+export function localHelpersThatSpawn(source, calls, fileName = UNNAMED_SOURCE) {
   const src = maskComments(source);
   const spawnIdx = calls.filter((c) => c.isCliEntry).map((c) => c.index);
   const helpers = new Set();
   if (spawnIdx.length === 0) return helpers;
-  const bodies = functionBodies(source);
+  const bodies = functionBodies(source, fileName);
   let added = true;
   while (added) {
     added = false;
     for (const body of bodies) {
       const text = src.slice(body.start, body.end);
-      const direct = spawnIdx.some((i) => i > body.start && i < body.end);
+      const direct = spawnIdx.some((i) => i >= body.start && i < body.end);
       const via = [...helpers].some((h) => identifierCalled(text, h));
       if ((direct || via) && !helpers.has(body.name)) {
         helpers.add(body.name);
@@ -903,7 +956,7 @@ export function sumWaitsMs(body, calls, open, close, extraBodies = []) {
   let sum = 0;
   for (const c of calls) {
     if (!c.timeoutMs) continue;
-    const inside = (c.index > open && c.index < close) || extraBodies.some((b) => c.index > b.start && c.index < b.end);
+    const inside = (c.index > open && c.index < close) || extraBodies.some((b) => c.index >= b.start && c.index < b.end);
     if (inside) sum += c.timeoutMs;
   }
   for (const m of body.matchAll(/AbortSignal\.timeout\s*\(\s*([^\s)]+)/g)) {
@@ -1049,12 +1102,12 @@ export function findCases(source, calls, helpers, bodies = []) {
     const waitsText = caseBody + "\n" + reach.map((b) => src.slice(b.start, b.end)).join("\n");
     // The CLI-entry calls this case reaches (directly, or through a helper).
     const reached = calls.filter(
-      (c) => c.isCliEntry && ((c.index > open && c.index < args.close) || reach.some((b) => c.index > b.start && c.index < b.end)),
+      (c) => c.isCliEntry && ((c.index > open && c.index < args.close) || reach.some((b) => c.index >= b.start && c.index < b.end)),
     );
     const budgetText = args.spans[2]?.text ?? "";
     cases.push({
       fn: m[2],
-      line: lineNumberAt(src, m.index),
+      line: lineNumberAt(src, m.index + (m[1]?.length ?? 0)),
       name: (args.spans[0]?.text.trim() ?? "").replace(/^["'`]|["'`]$/g, ""),
       argCount: args.spans.length,
       reachesSpawn: reaches,
@@ -1101,7 +1154,7 @@ export function offenderKey(o) {
 function scopeOf(index, bodies, cases) {
   let best = null;
   for (const b of bodies) {
-    if (index > b.start && index < b.end && (!best || b.start >= best.start)) best = b;
+    if (index >= b.start && index < b.end && (!best || b.start >= best.start)) best = b;
   }
   if (best) return best.name;
   let bestCase = null;
@@ -1118,8 +1171,8 @@ export function analyzeTestFile(source, fileName = UNNAMED_SOURCE) {
   // js/mjs/cjs); the mask keeps length and line breaks, so every index still
   // points at the original character.
   const jsxSafe = maskJsxText(source, fileName);
-  const helpers = localHelpersThatSpawn(jsxSafe, calls);
-  const bodies = functionBodies(jsxSafe);
+  const helpers = localHelpersThatSpawn(jsxSafe, calls, fileName);
+  const bodies = functionBodies(jsxSafe, fileName);
   const cases = findCases(jsxSafe, calls, helpers, bodies);
   for (const call of calls) call.scope = scopeOf(call.index, bodies, cases);
   return { calls, ids, helpers, cases, bodies };
@@ -1335,10 +1388,72 @@ export function readPrBaseline(root) {
   return JSON.parse(readFileSync(join(root, BASELINE_REL), "utf8"));
 }
 
+/** True only when `file` in the PR working tree is byte-identical to its blob at `baseSha`.
+ *
+ * FAIL CLOSED: a missing blob, an unreadable blob or an unreadable file answers
+ * false, so the addition stays ADDED-EX.
+ */
+function fileByteIdenticalAtBase(root, baseSha, file, cache) {
+  if (cache.has(file)) return cache.get(file);
+  const res = spawnSync("git", ["-C", root, "show", `${baseSha}:${file}`], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "resolve a trusted git ref with literal revision syntax" }, encoding: "buffer" });
+  let same = false;
+  if (res.status === 0 && Buffer.isBuffer(res.stdout)) {
+    try {
+      same = readFileSync(join(root, file)).equals(res.stdout);
+    } catch {
+      same = false;
+    }
+  }
+  cache.set(file, same);
+  return same;
+}
+
 /** Entries with exception keys absent from the trusted base. */
 export function addedExceptions(baseEntries, prEntries) {
   const baseKeys = new Set(baseEntries.map(offenderKey));
   return prEntries.filter((e) => !baseKeys.has(offenderKey(e)));
+}
+
+function rekeyIdentity(e) {
+  return [e.file, e.fingerprint, e.kind, String(e.occurrence ?? 0)].join(" | ");
+}
+
+/**
+ * Split the PR's added exception keys into re-keys and ADDED-EX
+ * (flair#2854).
+ *
+ * An added key is a re-key when it pairs one-to-one with a REMOVED baseline key
+ * (in the base, absent from the PR) of identical file, fingerprint, kind and
+ * occurrence, AND the scanned working-tree file is byte-identical to its blob
+ * at the trusted base ref. Only `spawn-no-timeout` qualifies, because its scope is
+ * derived attribution; the case-level kinds keep strict identity. Pairing
+ * consumes both keys, so two added keys against one removed key are one re-key
+ * and one addition, never two re-keys. `fileUnchanged` must answer true only
+ * for a file it has verified unchanged; an unreadable or missing blob answers
+ * false, so the addition stays ADDED-EX.
+ */
+export function classifyAddedExceptions(baseEntries, prEntries, fileUnchanged = () => false) {
+  const baseKeys = new Set(baseEntries.map(offenderKey));
+  const prKeys = new Set(prEntries.map(offenderKey));
+  const addedEntries = prEntries.filter((e) => !baseKeys.has(offenderKey(e)));
+  const removedEntries = baseEntries.filter((e) => !prKeys.has(offenderKey(e)));
+  const pool = new Map();
+  for (const e of removedEntries) {
+    if (e.kind !== "spawn-no-timeout") continue;
+    const id = rekeyIdentity(e);
+    const list = pool.get(id);
+    if (list) list.push(e);
+    else pool.set(id, [e]);
+  }
+  const added = [];
+  const rekeyed = [];
+  for (const e of addedEntries) {
+    const eligible = e.kind === "spawn-no-timeout" && fileUnchanged(e.file);
+    const list = eligible ? pool.get(rekeyIdentity(e)) : undefined;
+    if (list && list.length > 0) rekeyed.push({ from: list.shift(), to: e });
+    else added.push(e);
+  }
+  return { added, rekeyed };
 }
 
 /**
@@ -1373,8 +1488,12 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seed
   // dead code (a follow-up removes it — first slice of #1921).
   let anchored = false;
   let added;
+  let rekeyed = [];
   if (basePresent) {
-    added = addedExceptions(baseEntries, prEntries);
+    const fileCache = new Map();
+    ({ added, rekeyed } = classifyAddedExceptions(baseEntries, prEntries, (file) =>
+      fileByteIdenticalAtBase(root, baseSha, file, fileCache),
+    ));
   } else {
     let anchorSha;
     try {
@@ -1409,6 +1528,7 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seed
     baseEntries: baseEntries ?? [],
     errors,
     added,
+    rekeyed,
     ...diff,
     ok: errors.length === 0 && diff.ok && added.length === 0,
   };
@@ -1435,7 +1555,7 @@ if (isMain) {
     process.stderr.write(`check-cli-spawn-budgets: ${err.message}\n`);
     process.exit(1);
   }
-  const { files, spawnOffenders, caseOffenders, baseRef, baseSha, basePresent, defaulted, seedAccepted, allowEntries, errors, added, newOffenders, staleEntries, ok } = result;
+  const { files, spawnOffenders, caseOffenders, baseRef, baseSha, basePresent, defaulted, seedAccepted, allowEntries, errors, added, rekeyed, newOffenders, staleEntries, ok } = result;
   if (seedAccepted) {
     // Say EXACTLY what the predicate guarantees: the base is named by its own sha
     // and DESCENDS from the anchor — it does not "resolve to" it, and a descendant
@@ -1462,12 +1582,17 @@ if (isMain) {
   for (const o of staleEntries) {
     process.stdout.write(`  STALE    ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}\n`);
   }
+  for (const r of rekeyed) {
+    process.stdout.write(
+      `  RE-KEYED ${r.to.file}  ${r.from.scope} -> ${r.to.scope}  ${r.to.kind}  ${r.to.fingerprint.slice(0, 50)}\n`,
+    );
+  }
   for (const o of added) {
     process.stdout.write(`  ADDED-EX ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}  (new exception key)\n`);
   }
   process.stdout.write(
     `check-cli-spawn-budgets: ${spawnOffenders.length} spawn(s) with no timeout, ${caseOffenders.length} case(s) offending, ` +
-      `${allowEntries.length} allowed at ${baseRef} — ${newOffenders.length} new, ${staleEntries.length} stale, ${added.length} added-exception.\n`,
+      `${allowEntries.length} allowed at ${baseRef} — ${newOffenders.length} new, ${staleEntries.length} stale, ${added.length} added-exception, ${rekeyed.length} re-keyed.\n`,
   );
   process.exit(ok ? 0 : 1);
 }

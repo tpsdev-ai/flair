@@ -14,7 +14,6 @@ import * as render from "../render.js";
 
 export type BackupCli = {
   addSharedCredentialOptions: (...args: any[]) => any;
-  applyAdminPassFile: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
   resolveOpsTarget: (opts: { opsTarget?: string }) => string | undefined;
@@ -30,10 +29,6 @@ export function bindCli(fns: BackupCli): void {
 
 function addSharedCredentialOptions(...args: any[]): any {
   return cli.addSharedCredentialOptions(...args);
-}
-
-function applyAdminPassFile(...args: any[]): any {
-  return cli.applyAdminPassFile(...args);
 }
 
 function resolveHttpPort(...args: any[]): any {
@@ -65,7 +60,6 @@ addSharedCredentialOptions(
     .option("--url <url>", "Flair base URL (overrides --port)"),
 ).action(async (opts: any) => {
     const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
-    applyAdminPassFile(opts);
     // Env is a second-class fallback after the explicit flags (same order
     // backup used before the shared helper). FLAIR_ADMIN_PASS is still
     // accepted so existing scripts keep working.

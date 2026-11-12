@@ -1,10 +1,10 @@
 /**
  * migrations-visibility-backfill.test.ts —
  * resources/migrations/visibility-backfill.ts. Exercises detect/
- * countPending/run against an in-memory fake Memory table (no real Harper
- * needed — the write path here is a direct table.put(), unlike
- * embedding-stamp's HTTP loopback, so there is no separate mechanism left
- * to fake). Proves: the durability -> visibility derivation table
+ * countPending/run against an in-memory fake Memory table and a write-back
+ * (no real Harper needed). The fake write-back applies an `update` plan
+ * through the fake table's incremental `update`; the staged-table tests use
+ * the real helper. Proves: the durability -> visibility derivation table
  * (including every absent/garbage durability -> "private"), that an
  * existing visibility value is NEVER overwritten (including a garbage
  * third value), idempotency, and the exact query-condition shape.

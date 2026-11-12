@@ -30,6 +30,7 @@ import { shouldRegisterSyntheticMigration } from "./synthetic-test-migration.js"
 import type { MigrationRegistry } from "./registry.js";
 import { UNCONFIRMED_IDS_LIMIT, BatchOutcomeError, type Migration, type RiskClass, type SourceTable } from "./types.js";
 import { join } from "node:path";
+import { txnPausePoint } from "../txn-pause-point.js";
 
 /**
  * Test-only batch-throttle override, mirroring space.ts's
@@ -126,10 +127,15 @@ function resolveDeps(deps: RunnerDeps): ResolvedDeps {
  * `/HealthDetail` (progress.ts's state-file status, cleared on the next
  * successful write).
  */
-function recordMigrationStateEntry(path: string, id: string, entry: MigrationStateEntry): void {
+async function recordMigrationStateEntry(
+  path: string,
+  id: string,
+  entry: MigrationStateEntry,
+  lock: Extract<AcquireResult, { acquired: true }>,
+): Promise<void> {
   noteStateWriteAttempt(path);
   try {
-    writeMigrationStateEntry(path, id, entry);
+    await writeMigrationStateEntry(path, id, entry, lock);
     noteStateWriteSuccess();
   } catch (err) {
     const message = (err as Error)?.message ?? String(err);
@@ -191,7 +197,9 @@ export async function runMigrationCycle(rawDeps: RunnerDeps): Promise<CycleResul
     return { ran: false, reason: `lock error: ${(err as Error)?.message ?? String(err)}` };
   }
   if (!lock.acquired) {
-    return { ran: false, reason: `single-flight: ${lock.reason}` };
+    return lock.kind === "held"
+      ? { ran: false, reason: `single-flight: ${lock.reason}` }
+      : { ran: false, reason: `lock error: ${lock.reason}` };
   }
 
   try {
@@ -208,6 +216,13 @@ export async function runMigrationCycle(rawDeps: RunnerDeps): Promise<CycleResul
 }
 
 async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, { acquired: true }>): Promise<CycleResult> {
+  // Test-only hold (flair#2876): this cycle has taken the lock and has not yet
+  // read the state file, so a test can observe the progress row boot seeding
+  // produced. Inert unless the fault-injection opt-in and an arm file in the
+  // test pause dir are present.
+  const pause = txnPausePoint("migration-cycle-start");
+  if (pause) await pause;
+
   const state = readMigrationState(deps.statePath);
   const candidates: Migration[] = [];
   /** The re-verified unconfirmed record per migration, carried into its run. */
@@ -250,7 +265,7 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
         ...unconfirmedProgress(survived),
       });
       if (entry && record && recordChanged) {
-        recordMigrationStateEntry(deps.statePath, migration.id, withUnconfirmedRecord(entry, record));
+        await recordMigrationStateEntry(deps.statePath, migration.id, withUnconfirmedRecord(entry, record), lock);
       }
       continue;
     }
@@ -289,7 +304,7 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
           ...unconfirmedProgress(survived),
         });
         if (entry && recordChanged) {
-          recordMigrationStateEntry(deps.statePath, migration.id, withUnconfirmedRecord(entry, survived));
+          await recordMigrationStateEntry(deps.statePath, migration.id, withUnconfirmedRecord(entry, survived), lock);
         }
         continue;
       }
@@ -297,13 +312,13 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
       if (entry && record) {
         // The record's count reached zero and no work is pending: the record
         // can now say this migration completed.
-        recordMigrationStateEntry(deps.statePath, migration.id, {
+        await recordMigrationStateEntry(deps.statePath, migration.id, {
           completedAtVersion: deps.runningVersion,
           completedAt: deps.now().toISOString(),
           lastOutcome: "success",
           rowsProcessed: entry.rowsProcessed ?? 0,
           rowsRemaining: 0,
-        });
+        }, lock);
       }
       continue;
     }
@@ -401,6 +416,7 @@ async function haltMigration(
     rowsRemaining: number;
     hashEnvelopeMatch: boolean | null;
     state: ReturnType<typeof readMigrationState>;
+    lock: Extract<AcquireResult, { acquired: true }>;
     unconfirmed?: UnconfirmedRecord;
   },
 ): Promise<void> {
@@ -438,13 +454,13 @@ async function haltMigration(
   // on lastOutcome === "success", so a halted migration is retried on every
   // subsequent boot until it clears, never permanently stuck. A failed write
   // is logged + surfaced (flair#1800), still best-effort.
-  recordMigrationStateEntry(deps.statePath, migration.id, {
+  await recordMigrationStateEntry(deps.statePath, migration.id, {
     lastOutcome: "halted",
     reason,
     rowsProcessed: rowsDone,
     rowsRemaining,
     ...unconfirmedState(ctx.unconfirmed),
-  });
+  }, ctx.lock);
 }
 
 /** Unconfirmed row ids plus the count they belong to. A state entry the runner
@@ -494,8 +510,8 @@ function stateFromOutcome(entry: MigrationStateEntry | undefined): MigrationProg
  * answers `at-target` (the row needs no further write from this migration) or
  * `no-row`.
  *
- * Conservative by construction: a `pending` verdict keeps the id, a read that
- * throws keeps it (unknown never clears a record), and a record whose count is
+ * Any other re-check answer keeps the id (one that is not `pending` is logged),
+ * and a read that throws keeps it in this re-check. A record whose count is
  * larger than its id list keeps the unlisted remainder as a count with no ids —
  * those rows were never named, so no read can clear them.
  */
@@ -509,7 +525,13 @@ async function reverifyUnconfirmed(
   const kept: string[] = [];
   for (const id of recorded.ids) {
     try {
-      if ((await migration.checkUnconfirmed(id)) === "pending") kept.push(id);
+      const verdict: unknown = await migration.checkUnconfirmed(id);
+      if (verdict === "at-target" || verdict === "no-row") continue;
+      if (verdict !== "pending") {
+        const answer = typeof verdict === "string" ? `string (length ${verdict.length})` : typeof verdict;
+        console.warn("[flair-migrations] %s: checkUnconfirmed(%s) answered %s; re-check kept id", migration.id, id, answer);
+      }
+      kept.push(id);
     } catch {
       kept.push(id);
     }
@@ -556,6 +578,7 @@ async function runOneMigration(
   } catch (err) {
     await haltMigration(migration, `countPending() threw: ${(err as Error)?.message ?? String(err)}`, {
       deps,
+      lock,
       startedAt,
       rowsDone: 0,
       rowsRemaining: 0,
@@ -586,6 +609,7 @@ async function runOneMigration(
     // ── Ladder step 5: no safe path → halt-don't-brick ──
     await haltMigration(migration, `blocked on disk: ${space.reason}`, {
       deps,
+      lock,
       startedAt,
       rowsDone: 0,
       rowsRemaining: initialRemaining,
@@ -624,7 +648,7 @@ async function runOneMigration(
       await haltMigration(
         migration,
         `snapshot failed (${(snapErr as Error)?.message ?? String(snapErr)}) and the content-only export fallback also failed (${(expErr as Error)?.message ?? String(expErr)})`,
-        { deps, startedAt, rowsDone: 0, rowsRemaining: initialRemaining, hashEnvelopeMatch: null, state, unconfirmed: carried ?? undefined },
+        { deps, lock, startedAt, rowsDone: 0, rowsRemaining: initialRemaining, hashEnvelopeMatch: null, state, unconfirmed: carried ?? undefined },
       );
       return false; // halted before any write
     }
@@ -683,6 +707,7 @@ async function runOneMigration(
     }
     await haltMigration(migration, `run() threw mid-batch: ${(err as Error)?.message ?? String(err)}`, {
       deps,
+      lock,
       startedAt,
       rowsDone,
       rowsRemaining: Math.max(0, initialRemaining - rowsDone),
@@ -704,6 +729,7 @@ async function runOneMigration(
   } catch (err) {
     await haltMigration(migration, `post-batch countPending() threw: ${(err as Error)?.message ?? String(err)}`, {
       deps,
+      lock,
       startedAt,
       rowsDone,
       rowsRemaining: 0,
@@ -766,6 +792,7 @@ async function runOneMigration(
       gateOk = false;
       await haltMigration(migration, `post-hash computation failed: ${(err as Error)?.message ?? String(err)}`, {
         deps,
+        lock,
         startedAt,
         rowsDone,
         rowsRemaining: finalRemaining,
@@ -808,6 +835,7 @@ async function runOneMigration(
     if (hashEnvelopeMatch === false) reasonParts.push("hash envelope mismatch");
     await haltMigration(migration, `completion gate failed: ${reasonParts.join(", ")}`, {
       deps,
+      lock,
       startedAt,
       rowsDone,
       rowsRemaining: finalRemaining,
@@ -843,14 +871,14 @@ async function runOneMigration(
   // /HealthDetail. Worst case this migration's detect() runs (cheaply) again
   // next boot — and /HealthDetail still says "completed" while state.json
   // never got the entry. That failure must be visible, not swallowed.
-  recordMigrationStateEntry(deps.statePath, migration.id, {
+  await recordMigrationStateEntry(deps.statePath, migration.id, {
     completedAtVersion: deps.runningVersion,
     completedAt: endedAt,
     lastOutcome: "success",
     rowsProcessed: rowsDone,
     rowsRemaining: 0,
     ...unconfirmedState(unconfirmedRecord()),
-  });
+  }, lock);
 
   pruneMigrationSnapshots(deps.snapshotRoot);
   // State stays "completed" when the gate passes, even with a non-empty

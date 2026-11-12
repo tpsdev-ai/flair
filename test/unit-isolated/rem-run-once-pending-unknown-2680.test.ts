@@ -69,7 +69,7 @@ test("flair rem nightly run-once prints a failed pending-candidate count as unkn
       if (path === "/MemoryDedupStats") return { clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "fixture" };
       throw new Error("unexpected route " + path);
     },
-    resolveOpsPort: () => OPS_PORT, applyAdminPassFile: () => {}, addSharedCredentialOptions: (command) => command,
+    resolveOpsPort: () => OPS_PORT, addSharedCredentialOptions: (command) => command,
     readPortFromConfig: () => null, resolveHttpPort: () => 1, resolveOpsUrlFromTarget: () => { throw new Error("unused"); }, resolveAgentHomeTarget: () => ({ httpPort: 1, opsPort: 1 }), INSTANCE_TARGET_REMEDY: "", humanBytes: String, relativeTime: String,
     DEFAULT_PORT: 1, pkgVersion: "fixture",
   });
@@ -129,7 +129,7 @@ test("a healthy flair rem nightly run-once dry run without an admin credential p
       if (method === "GET") return [];
       return { archived: 0, expired: 0 };
     },
-    resolveOpsPort: () => OPS_PORT, applyAdminPassFile: () => {}, addSharedCredentialOptions: (command) => command,
+    resolveOpsPort: () => OPS_PORT, addSharedCredentialOptions: (command) => command,
     readPortFromConfig: () => null, resolveHttpPort: () => 1, resolveOpsUrlFromTarget: () => { throw new Error("unused"); }, resolveAgentHomeTarget: () => ({ httpPort: 1, opsPort: 1 }), INSTANCE_TARGET_REMEDY: "", humanBytes: String, relativeTime: String,
     DEFAULT_PORT: 1, pkgVersion: "fixture",
   });

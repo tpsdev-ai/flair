@@ -23,6 +23,7 @@
  * Cross-agent restore is a 1.1+ feature.
  */
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
 import { ApiHttpError, ApiRequestOutcomeUnknown, apiErrorRawBody } from "../lib/auth-resolve.js";
 import { readFileSync, existsSync, rmSync, mkdtempSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
@@ -217,8 +218,46 @@ function asArray(raw: unknown): any[] {
   return [];
 }
 
+/**
+ * A live table listing for the pre-restore snapshot. Unlike `asArray`, which
+ * reads an unrecognised shape as an empty table, this refuses: an unreadable
+ * listing would look empty, so the pre-restore snapshot would miss the live
+ * rows, the scope preflight would see no live Souls, and the DELETE and PUT
+ * loops would run over a table this run never read (flair#2931).
+ */
+export function requireLiveListing(raw: unknown, table: "Memory" | "Soul", agentId: string): any[] {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    if (Array.isArray(obj.results)) return obj.results as any[];
+    if (Array.isArray(obj.items)) return obj.items as any[];
+  }
+  throw new Error(
+    `live-listing-unreadable: GET /${table}?agentId=${agentId} returned a response that is not a list `
+      + `(expected a JSON array, or an object with a "results" or "items" array); `
+      + "refusing to restore until the live listing can be read — check the API response and that the agent id is correct.",
+  );
+}
+
 function soulWrite(opts: RestoreOpts): ApiCall {
   return opts.soulApiCall ?? opts.apiCall;
+}
+
+/**
+ * Ids of Soul rows a whole-row replay would send that supply a non-empty
+ * `scopeTag` or `tags` array. The server refuses each such write (flair#1540),
+ * so a restore that deletes before writing one can leave a live row absent and
+ * a rollback to the pre-restore snapshot refused (flair#2931). Rows the DELETE
+ * and PUT loops skip (no usable id) are not written or deleted, so they are not
+ * checked here.
+ */
+function refusedSoulReplayIds(rows: readonly any[]): string[] {
+  const ids: string[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || Array.isArray(row) || !row.id) continue;
+    if (suppliesSoulScopeFields(row)) ids.push(String(row.id));
+  }
+  return [...new Set(ids)];
 }
 
 function isCandidateRoute404(err: unknown): boolean {
@@ -245,8 +284,13 @@ function incompleteListing(agentId: string, state: string, remedy = ""): Error {
  * listing. A `hasMore: true` page with no candidates (the cursor cannot move),
  * an id listed twice, or more than {@link CANDIDATE_LIST_MAX_PAGES} pages is
  * refused.
+ *
+ * Exported for `flair restore --replace`, which lists the agent of each
+ * archived Soul row it will write a non-empty value for before any delete, so
+ * it can compare that agent's live candidate claims with the values it is
+ * about to write.
  */
-async function listAgentCandidates(apiCall: ApiCall, agentId: string): Promise<Array<{ id: string }>> {
+export async function listAgentCandidates(apiCall: ApiCall, agentId: string): Promise<Array<{ id: string }>> {
   const listed: Array<{ id: string }> = [];
   const seen = new Set<string>();
   let after: string | undefined;
@@ -331,6 +375,8 @@ function parseJsonlSafe(text: string): any[] {
  *   3. Verify metadata.agentId matches opts.agentId (prevents accidental
  *      cross-agent restore — the file might have been hand-copied).
  *   4. Create a pre-restore snapshot of current state (skip in dry-run).
+ *   4b. Refuse before any delete when a snapshot Soul row or a live Soul row
+ *       captured in the pre-restore snapshot supplies scope fields (flair#2931).
  *   5. Fetch + delete current memories/souls/candidates for the agent (skip in dry-run).
  *   6. PUT snapshot souls, then memories (skip in dry-run).
  *   7. Return counts.
@@ -448,8 +494,16 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   let currentMem: any[];
   let currentSouls: any[];
   try {
-    currentMem = asArray(await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`));
-    currentSouls = asArray(await opts.apiCall("GET", `/Soul?agentId=${encodeURIComponent(opts.agentId)}`));
+    currentMem = requireLiveListing(
+      await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`),
+      "Memory",
+      opts.agentId,
+    );
+    currentSouls = requireLiveListing(
+      await opts.apiCall("GET", `/Soul?agentId=${encodeURIComponent(opts.agentId)}`),
+      "Soul",
+      opts.agentId,
+    );
 
     const preRestore = await createSnapshot({
       agentId: opts.agentId,
@@ -464,6 +518,40 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     result.preRestoreSnapshotPath = preRestore.path;
   } catch (err: any) {
     errors.push(`pre-restore-snapshot: ${err?.message ?? String(err)}`);
+    result.status = "failed";
+    rmSync(tmp, { recursive: true, force: true });
+    return result;
+  }
+
+  // 4b. Scope-field preflight (flair#2931), before any DELETE: refuse when a
+  // snapshot Soul row this run would PUT, or a live Soul row captured in the
+  // pre-restore snapshot, supplies a non-empty `scopeTag` or `tags` array.
+  // The server refuses that write, so the replay cannot restore the row. When
+  // the row is live, deleting it first also makes the pre-restore rollback
+  // refuse it. Merge mode does not exist here; this restore always replaces
+  // the agent's rows.
+  const snapshotRefusedSouls = new Set(refusedSoulReplayIds(souls));
+  const liveRefusedSouls = new Set(refusedSoulReplayIds(currentSouls));
+  const refusedSouls = [...new Set([...snapshotRefusedSouls, ...liveRefusedSouls])];
+  if (refusedSouls.length > 0) {
+    for (const id of refusedSouls) {
+      const inSnapshot = snapshotRefusedSouls.has(id);
+      const inLive = liveRefusedSouls.has(id);
+      const source = inSnapshot && inLive
+        ? "in the snapshot row and the live row"
+        : inSnapshot ? "in the snapshot row" : "in the live row";
+      const remedies: string[] = [];
+      if (inSnapshot) remedies.push("Restore from a different snapshot, or edit that row in the snapshot file, then re-run.");
+      if (inLive) {
+        remedies.push(inSnapshot
+          ? "Clear tags/scopeTag on the live row (PATCH) or delete it, then re-run."
+          : "Clear tags/scopeTag on that row (PATCH) or delete it, then re-run.");
+      }
+      errors.push(
+        `soul-scope-preflight: Soul ${id} supplies a non-empty scopeTag or tags array ${source}, `
+          + `which the Soul scope-field rule refuses; no target rows were deleted or written. ${remedies.join(" ")}`,
+      );
+    }
     result.status = "failed";
     rmSync(tmp, { recursive: true, force: true });
     return result;

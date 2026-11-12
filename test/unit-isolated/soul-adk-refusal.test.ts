@@ -1,6 +1,14 @@
 /**
- * Scripted PUT /Soul with an ADK-sourced claim must not land. Isolated so
- * the harper mock does not collide with memory-soul-read-gate.test.ts.
+ * Soul content refusals after the vendor-tag bridge was removed (flair#1540).
+ *
+ * The bridge refused a request carrying an `adk:` scope tag and a value that
+ * exactly matched an `adk:`-tagged MemoryCandidate claim or Memory content row
+ * for the target agent. The generic checks refuse those cases and more: a
+ * request that supplies any non-empty `scopeTag` or `tags` array, a non-empty
+ * value that exactly matches any MemoryCandidate claim or Memory content for
+ * the target agent (no tag required), and a PATCH whose merged row retains or
+ * adds a non-empty `scopeTag` or non-empty `tags` array.
+ * Isolated so the harper mock does not collide with the other Soul suites.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
 
@@ -9,14 +17,17 @@ delete (process.env as any).FLAIR_PUBLIC;
 
 let soulStore: Map<string, any>;
 let candidateStore: any[];
-let memoryStore: any[];
+let memoryStore: Map<string, any>;
+let agentStore: Map<string, any>;
 let versionStore: Map<string, any>;
 let eventStore: Map<string, any>;
-let lookupFails = false;
+let failTable: string | null = null;
+let missingTable: string | null = null;
 let getBehavior: "ok" | "throw" | "empty" = "ok";
 
 const versionPrimaryStore = { tryLock: () => true, unlock: () => {}, resetReadTxn: () => {} };
 const InstructionVersionBase = {
+  validate() {},
   primaryStore: versionPrimaryStore,
   async *search(query: any) {
     const conditions: any[] = query?.conditions ?? [];
@@ -66,6 +77,7 @@ class BaseSoul {
 // flair#2139 3b: the instruction-version writer appends one OrgEvent row in the
 // same transaction; the write aborts when the table is missing (D2).
 const OrgEventBase = {
+  validate() {},
   async *search() {},
   async create(record: any) {
     if (eventStore.has(record.id)) throw new Error("Record already exists");
@@ -73,50 +85,89 @@ const OrgEventBase = {
   },
 };
 
-function search(rows: any[]) {
+function search(table: string, rows: Iterable<any>) {
   return {
     async *[Symbol.asyncIterator]() {
-      if (lookupFails) throw new Error("provenance unavailable");
+      if (failTable === table) throw new Error("provenance unavailable");
       for (const row of rows) yield row;
     },
   };
 }
 
+const candidateTable = { search: () => search("MemoryCandidate", candidateStore) };
+const memoryTable = {
+  search: () => search("Memory", memoryStore.values()),
+  get: async (id: string) => memoryStore.get(id) ?? null,
+  put: async (record: any) => { memoryStore.set(record.id, { ...record }); return record; },
+};
+const agentTable = {
+  get: async (id: string) => agentStore.get(id) ?? null,
+  put: async (record: any) => { agentStore.set(record.id, { ...record }); return record; },
+};
+
+const flairTables: any = {
+  Soul: BaseSoul,
+  Memory: memoryTable,
+  Agent: agentTable,
+  Instance: { search: () => search("Instance", []) },
+  InstructionVersion: InstructionVersionBase,
+  OrgEvent: OrgEventBase,
+};
+Object.defineProperty(flairTables, "MemoryCandidate", {
+  configurable: true,
+  get: () => (missingTable === "MemoryCandidate" ? undefined : candidateTable),
+});
+Object.defineProperty(flairTables, "Memory", {
+  configurable: true,
+  get: () => (missingTable === "Memory" ? undefined : memoryTable),
+});
+
 mock.module("harper", () => ({
   server: { http: () => {}, getUser: async () => null },
   Resource: class {},
-  databases: {
-    flair: {
-      Soul: BaseSoul,
-      MemoryCandidate: { search: () => search(candidateStore) },
-      Memory: { search: () => search(memoryStore) },
-      Instance: { search: () => search([]) },
-      InstructionVersion: InstructionVersionBase,
-      OrgEvent: OrgEventBase,
-    },
-  },
+  databases: { flair: flairTables },
 }));
 
 const { Soul } = await import("../../resources/Soul.ts");
+const { AgentSeed } = await import("../../resources/AgentSeed.ts");
 const { soulWriteSource } = await import("../../resources/soul-write-policy.ts");
-const ADK_SOUL_REFUSAL = "adk_sourced_claim_cannot_be_written_to_soul";
+const { SOUL_SCOPE_FIELDS_REFUSAL } = await import("../../src/lib/soul-scope-fields.ts");
 const LEARNED_SOUL_REFUSAL = "soul_value_is_learned_content";
 
-function makeSoul(id?: string) {
+const OPERATOR = () => ({ request: { tpsAgent: "shared-app", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified-by-middleware" }) } });
+const INTERNAL = () => ({ request: {}, __flairInternal: true });
+type Source = "operator" | "internal";
+
+function contextFor(source: Source) {
+  return source === "operator" ? OPERATOR() : INTERNAL();
+}
+
+function makeSoul(source: Source, id?: string) {
   const r: any = new (Soul as any)();
   if (id) r.id = id;
-  r.getContext = () => ({ request: { tpsAgent: "shared-app", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified-by-middleware" }) } });
+  r.getContext = () => contextFor(source);
   return r;
 }
+
+function makeSeed(source: Source) {
+  const r: any = new (AgentSeed as any)();
+  r.getContext = () => contextFor(source);
+  return r;
+}
+
+const ROW_ID = "shared-app:pref";
+const STORED = { id: ROW_ID, agentId: "shared-app", key: "pref", value: "Be concise." };
 
 beforeEach(() => {
   soulStore = new Map();
   versionStore = new Map();
   eventStore = new Map();
   candidateStore = [];
-  memoryStore = [];
+  memoryStore = new Map();
+  agentStore = new Map();
   getBehavior = "ok";
-  lookupFails = false;
+  failTable = null;
+  missingTable = null;
   (globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
     const context = ctx && typeof ctx === "object" ? ctx : {};
     if (context.transaction && context.transaction.open === 1) return cb(context.transaction);
@@ -132,107 +183,154 @@ beforeEach(() => {
   };
 });
 
-describe("Soul.put refuses ADK-sourced claims", () => {
-  test("PUT of an ADK candidate claim is 403 and writes nothing", async () => {
-    candidateStore.push({ agentId: "shared-app", claim: "alice likes tea", scopeTag: "adk:app:alice" });
-    const res = await makeSoul().put({
-      id: "shared-app-pref",
-      agentId: "shared-app",
-      key: "pref",
-      value: "alice likes tea",
-    });
-    expect(res instanceof Response).toBe(true);
-    expect((res as Response).status).toBe(403);
-    expect(await (res as Response).json()).toEqual({ error: ADK_SOUL_REFUSAL });
-    expect(soulStore.size).toBe(0);
-  });
+describe("a Soul request that supplies a non-empty scopeTag or tags array is refused by name", () => {
+  const SCOPE_BODIES = [
+    ["an adk scopeTag", { scopeTag: "adk:app:alice" }],
+    ["an adk tags entry", { tags: ["ADK:app:alice"] }],
+  ] as const;
 
-  test("PUT of a body that only carries an adk: tag is 403", async () => {
-    const res = await makeSoul().put({
-      id: "shared-app-pref",
-      agentId: "shared-app",
-      key: "pref",
-      value: "brand new operator-looking text",
-      tags: ["ADK:app:alice"],
-    });
-    expect(res instanceof Response).toBe(true);
-    expect((res as Response).status).toBe(403);
-    expect(await (res as Response).json()).toEqual({ error: ADK_SOUL_REFUSAL });
-    expect(soulStore.size).toBe(0);
-  });
+  for (const source of ["operator", "internal"] as const) {
+    for (const method of ["post", "put", "patch"] as const) {
+      for (const [label, scope] of SCOPE_BODIES) {
+        test(`${source} ${method.toUpperCase()} carrying ${label} is 403 soul_scope_fields_not_writable and writes nothing`, async () => {
+          soulStore.set(ROW_ID, { ...STORED });
+          const body = method === "patch"
+            ? { value: "replacement", ...scope }
+            : { id: ROW_ID, agentId: "shared-app", key: "pref", value: "replacement", ...scope };
+          const res: any = await makeSoul(source, ROW_ID)[method](body);
+          expect(res instanceof Response).toBe(true);
+          expect(res.status).toBe(403);
+          expect(await res.json()).toEqual({ error: SOUL_SCOPE_FIELDS_REFUSAL });
+          expect(soulStore.get(ROW_ID)).toEqual(STORED);
+          expect(versionStore.size).toBe(0);
+        });
+      }
+    }
+  }
+});
 
-  test("PUT of an ordinary Soul value still lands", async () => {
-    const res: any = await makeSoul().put({
-      id: "shared-app-role",
-      agentId: "shared-app",
-      key: "role",
-      value: "Be the team's memory.",
-    });
+describe("a PATCH whose merged row carries a non-empty scopeTag or tags array is refused", () => {
+  const STORED_SCOPES = [
+    ["an adk tags entry", { tags: ["adk:app:alice"] }],
+    ["a non-adk tags entry", { tags: ["team-alpha"] }],
+    ["an adk scopeTag", { scopeTag: "adk:app:alice" }],
+  ] as const;
+
+  for (const source of ["operator", "internal"] as const) {
+    for (const [label, scope] of STORED_SCOPES) {
+      test(`${source} PATCH of a stored row carrying ${label} is 403 soul_scope_fields_not_writable and writes nothing`, async () => {
+        const stored = { ...STORED, ...scope };
+        soulStore.set(ROW_ID, stored);
+        const res: any = await makeSoul(source, ROW_ID).patch({ value: "replacement" });
+        expect(res instanceof Response).toBe(true);
+        expect(res.status).toBe(403);
+        expect(await res.json()).toEqual({ error: SOUL_SCOPE_FIELDS_REFUSAL });
+        expect(soulStore.get(ROW_ID)).toEqual(stored);
+        expect(versionStore.size).toBe(0);
+      });
+    }
+  }
+
+  test("an untagged stored row still patches", async () => {
+    soulStore.set(ROW_ID, { ...STORED });
+    const res: any = await makeSoul("operator", ROW_ID).patch({ value: "replacement" });
     expect(res).not.toBeInstanceOf(Response);
-    expect(soulStore.get("shared-app-role").value).toBe("Be the team's memory.");
+    expect(soulStore.get(ROW_ID).value).toBe("replacement");
   });
 });
 
-describe("Soul.patch refuses ADK-sourced claims", () => {
-  test("PATCH of an ADK candidate claim is 403 and writes nothing", async () => {
-    soulStore.set("shared-app-pref", {
-      id: "shared-app-pref",
-      agentId: "shared-app",
-      key: "pref",
-      value: "Be concise.",
-    });
-    candidateStore.push({ agentId: "shared-app", claim: "alice likes tea", scopeTag: "adk:app:alice" });
-    const res = await makeSoul("shared-app-pref").patch({ value: "alice likes tea" });
-    expect(res instanceof Response).toBe(true);
-    expect((res as Response).status).toBe(403);
-    expect(await (res as Response).json()).toEqual({ error: ADK_SOUL_REFUSAL });
-    expect(soulStore.get("shared-app-pref").value).toBe("Be concise.");
-  });
+describe("stored ADK-tagged content is refused by the generic learned-content check", () => {
+  const TABLES = [
+    ["MemoryCandidate", "claim"],
+    ["Memory", "content"],
+  ] as const;
 
-  test("PATCH of an ordinary Soul value still lands", async () => {
-    soulStore.set("shared-app-role", {
-      id: "shared-app-role",
-      agentId: "shared-app",
-      key: "role",
-      value: "old",
-    });
-    const res: any = await makeSoul("shared-app-role").patch({ value: "Be the team's memory." });
-    expect(res).not.toBeInstanceOf(Response);
-    expect(soulStore.get("shared-app-role").value).toBe("Be the team's memory.");
-  });
+  for (const source of ["operator", "internal"] as const) {
+    for (const [table, field] of TABLES) {
+      for (const method of ["post", "put", "patch"] as const) {
+        test(`${source} ${method.toUpperCase()} of a value stored in ${table} with an adk: tag is 403 soul_value_is_learned_content and writes nothing`, async () => {
+          const value = `learned ${source} ${method} ${table}`;
+          if (table === "MemoryCandidate") {
+            candidateStore.push({ id: "cand", agentId: "shared-app", [field]: value, scopeTag: "adk:app:alice" });
+          } else {
+            memoryStore.set("mem", { id: "mem", agentId: "shared-app", [field]: value, tags: ["adk:app:alice"] });
+          }
+          soulStore.set(ROW_ID, { ...STORED });
+          const body = method === "patch"
+            ? { value }
+            : { id: ROW_ID, agentId: "shared-app", key: "pref", value };
+          const res: any = await makeSoul(source, ROW_ID)[method](body);
+          expect(res instanceof Response).toBe(true);
+          expect(res.status).toBe(403);
+          expect(await res.json()).toEqual({ error: LEARNED_SOUL_REFUSAL });
+          expect(soulStore.get(ROW_ID)).toEqual(STORED);
+          expect(versionStore.size).toBe(0);
+        });
+      }
+    }
+  }
+});
 
-  test("a failed stored-state read cannot authorize a PATCH — refused (500), never read as 'no stored state'", async () => {
-    soulStore.set("shared-app-pref", {
-      id: "shared-app-pref",
-      agentId: "shared-app",
-      key: "pref",
-      value: "Be concise.",
-    });
-    getBehavior = "throw";
-    const soul = makeSoul("shared-app-pref");
-    const res: any = await soul.patch({ value: "alice likes tea" });
-    expect(res instanceof Response).toBe(true);
-    expect((res as Response).status).toBe(500);
-    expect((await (res as Response).json()).error).toBe("stored_row_lookup_failed");
-    expect(soulStore.get("shared-app-pref").value).toBe("Be concise.");
-  });
+describe("AgentSeed refuses stored learned content before writing", () => {
+  const TABLES = [
+    ["MemoryCandidate", "claim"],
+    ["Memory", "content"],
+  ] as const;
 
-  test("an empty stored-state read cannot authorize a PATCH", async () => {
-    soulStore.set("shared-app-pref", {
-      id: "shared-app-pref",
-      agentId: "shared-app",
-      key: "pref",
-      value: "Be concise.",
-    });
-    getBehavior = "empty";
-    const res = await makeSoul("shared-app-pref").patch({ value: "alice likes tea" });
-    expect(res instanceof Response).toBe(true);
-    expect((res as Response).status).toBe(403);
-    expect(await (res as Response).json()).toEqual({ error: "soul_stored_state_unavailable" });
-    expect(soulStore.get("shared-app-pref").value).toBe("Be concise.");
+  for (const source of ["operator", "internal"] as const) {
+    for (const [table, field] of TABLES) {
+      test(`${source} seed with a soulTemplate value stored in ${table} is 403 soul_value_is_learned_content and writes nothing`, async () => {
+        const value = `seed learned ${source} ${table}`;
+        if (table === "MemoryCandidate") {
+          candidateStore.push({ id: "cand", agentId: "seed-app", [field]: value, scopeTag: "adk:app:alice" });
+        } else {
+          memoryStore.set("mem", { id: "mem", agentId: "seed-app", [field]: value, tags: ["adk:app:alice"] });
+        }
+        const res: any = await makeSeed(source).post({ agentId: "seed-app", soulTemplate: { role: value } });
+        expect(res instanceof Response).toBe(true);
+        expect(res.status).toBe(403);
+        expect(await res.json()).toEqual({ error: LEARNED_SOUL_REFUSAL });
+        expect(agentStore.has("seed-app")).toBe(false);
+        expect([...soulStore.keys()].some((key) => key.startsWith("seed-app:"))).toBe(false);
+        expect([...memoryStore.values()].some((row) => row.source === "seed")).toBe(false);
+      });
+    }
+  }
+
+  test("an ordinary soulTemplate still seeds", async () => {
+    const res: any = await makeSeed("operator").post({ agentId: "plain-seed", soulTemplate: { role: "Operator-authored role" } });
+    expect(res instanceof Response).toBe(false);
+    expect(agentStore.get("plain-seed")).toBeTruthy();
+    expect(soulStore.get("plain-seed:role").value).toBe("Operator-authored role");
   });
 });
 
+describe("unavailable provenance refuses without writing", () => {
+  const TABLES = ["MemoryCandidate", "Memory"] as const;
+
+  for (const table of TABLES) {
+    for (const mode of ["failed-read", "missing-table"] as const) {
+      test(`a ${mode} of ${table} aborts post, put and patch and writes nothing`, async () => {
+        for (const method of ["post", "put", "patch"] as const) {
+          soulStore.set(ROW_ID, { ...STORED });
+          if (mode === "failed-read") failTable = table;
+          else missingTable = table;
+          const body = method === "patch"
+            ? { value: "replacement" }
+            : { id: ROW_ID, agentId: "shared-app", key: "pref", value: "replacement" };
+          const write = makeSoul("operator", ROW_ID)[method](body);
+          if (method === "patch") {
+            const res: any = await write;
+            expect(res.status).toBe(500);
+          } else {
+            await expect(write).rejects.toThrow();
+          }
+          expect(soulStore.get(ROW_ID)).toEqual(STORED);
+        }
+      });
+    }
+  }
+});
 
 describe("soulWriteSource is Flair-derived from the credential", () => {
   const adminAgent = { kind: "agent" as const, agentId: "admin", isAdmin: true };
@@ -266,7 +364,7 @@ describe("Soul source allowlist", () => {
       for (const method of ["post", "put", "patch", "delete"]) {
         const original = { id: "soul", agentId: "shared-app", value: "original" };
         soulStore.set("soul", original);
-        const soul = makeSoul("soul");
+        const soul = makeSoul("operator", "soul");
         soul.getContext = () => context;
         const result = await soul[method](method === "delete" ? "soul" : {
           id: "soul", agentId: "shared-app", value: "forged", sourceClass: "operator", __flairInternal: true,
@@ -282,8 +380,7 @@ describe("Soul source allowlist", () => {
     for (const source of ["operator", "internal"]) {
       for (const method of ["post", "put", "patch"]) {
         soulStore.set("soul", { id: "soul", agentId: "shared-app", value: "old" });
-        const soul = makeSoul("soul");
-        if (source === "internal") soul.getContext = () => ({ request: {}, __flairInternal: true });
+        const soul = makeSoul(source as Source, "soul");
         const result = await soul[method]({ id: "soul", agentId: "shared-app", value: "authored", provenance: "forged" });
         expect(result).not.toBeInstanceOf(Response);
         const stamp = JSON.parse(soulStore.get("soul").provenance);
@@ -297,35 +394,38 @@ describe("Soul source allowlist", () => {
 
   test("untagged learned content for the target owner is refused even with claimed operator provenance", async () => {
     for (const rows of [candidateStore, memoryStore]) {
-      rows.push({ agentId: "shared-app", claim: "learned", content: "learned", provenance: '{"verified":{"sourceClass":"operator"}}' });
+      const add = (row: any) => {
+        if (Array.isArray(rows)) rows.push(row);
+        else rows.set("row", row);
+      };
+      add({ agentId: "shared-app", claim: "learned", content: "learned", provenance: '{"verified":{"sourceClass":"operator"}}' });
       for (const method of ["post", "put", "patch"]) {
         soulStore.set("soul", { id: "soul", agentId: "shared-app", value: "original" });
-        const result = await makeSoul("soul")[method]({ id: "soul", agentId: "shared-app", value: "learned" });
+        const result = await makeSoul("operator", "soul")[method]({ id: "soul", agentId: "shared-app", value: "learned" });
         expect(result.status).toBe(403);
         expect(await result.json()).toEqual({ error: LEARNED_SOUL_REFUSAL });
         expect(soulStore.get("soul").value).toBe("original");
       }
-      rows.length = 0;
+      if (Array.isArray(rows)) rows.length = 0;
+      else rows.clear();
     }
   });
 });
 
-
 test("failed learned-content lookup aborts all content writes", async () => {
-  lookupFails = true;
+  failTable = "MemoryCandidate";
   for (const method of ["post", "put", "patch"]) {
     soulStore.set("soul", { id: "soul", agentId: "shared-app", value: "original" });
-    const write = makeSoul("soul")[method]({ id: "soul", agentId: "shared-app", value: "replacement" });
+    const write = makeSoul("operator", "soul")[method]({ id: "soul", agentId: "shared-app", value: "replacement" });
     if (method === "patch") expect((await write).status).toBe(500);
     else await expect(write).rejects.toThrow("provenance unavailable");
     expect(soulStore.get("soul").value).toBe("original");
   }
 });
 
-
 test("another agent cannot poison an operator edit by copying its text", async () => {
-  memoryStore.push({ agentId: "other-agent", content: "Operator-authored role" });
-  const result = await makeSoul().put({ id: "soul", agentId: "shared-app", value: "Operator-authored role" });
+  memoryStore.set("other", { agentId: "other-agent", content: "Operator-authored role" });
+  const result = await makeSoul("operator").put({ id: "soul", agentId: "shared-app", value: "Operator-authored role" });
   expect(result).not.toBeInstanceOf(Response);
   expect(soulStore.get("soul").value).toBe("Operator-authored role");
 });

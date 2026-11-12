@@ -261,7 +261,7 @@ reports that pending-approval state as configured but delivery not verified.
 Some clients have no session-start hook Flair can write. Wiring the MCP
 server is necessary but not sufficient — the model still has to choose to
 call `bootstrap`. Add a short instruction block to the file that client
-already loads (`AGENTS.md`, `GEMINI.md`, or the equivalent):
+already loads (`AGENTS.md`, `GEMINI.md`, or the equivalent): <!-- docs-freshness-allow: names files in the reader's project -->
 
 ```markdown
 ## Flair memory
@@ -351,7 +351,7 @@ The MCP server has no client-side flags beyond these env vars; everything else (
 
 ## What about pi?
 
-pi has no MCP client support, so Flair ships a **native pi extension** instead: [`@tpsdev-ai/pi-flair`](../packages/pi-flair/README.md). Same backend. With an ordinary signed identity, writes are owned by that agent. Reads follow each resource's policy: Memory uses owner/visibility scope with an additional current-authority check for retained closed skills, while Credential records are owner-only for non-admin callers. Zero MCP in the path.
+Flair ships a **native pi extension**: [`@tpsdev-ai/pi-flair`](https://github.com/tpsdev-ai/flair/blob/main/packages/pi-flair/README.md). Same backend. With an ordinary signed identity, writes are owned by that agent. Reads follow each resource's policy: Memory uses owner/visibility scope with an additional current-authority check for retained closed skills, while Credential records are owner-only for non-admin callers. Zero MCP in the path.
 
 Wiring is a `packages` entry in pi's own settings (`~/.pi/agent/settings.json`), not an `mcpServers` block:
 

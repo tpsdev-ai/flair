@@ -2,6 +2,8 @@
 //
 import { describe, expect, test, beforeEach } from "bun:test";
 import { mock, spyOn } from "bun:test";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 
 type Row = Record<string, any>;
 const store = new Map<string, Row>();
@@ -35,6 +37,8 @@ function stage(ctx: any, apply: () => void): void {
 
 const InstructionVersionTable = {
   primaryStore,
+  validate() {}, // Harper's table validator surface; these tests stage plain rows
+
   async get(id: string, ctx?: any): Promise<Row | null> {
     return (ctx?.transaction?.versions ?? store).get(id) ?? null;
   },
@@ -64,6 +68,7 @@ const InstructionVersionTable = {
 Object.setPrototypeOf(InstructionVersionTable, { get: InstructionVersionTable.get, delete: InstructionVersionTable.delete });
 
 const OrgEventTable = {
+  validate() {},
   async *search() {},
   async create(record: Row, ctx: any): Promise<void> {
     if (failNextEvent) { failNextEvent = false; throw new Error("event-write-failed"); }
@@ -441,6 +446,82 @@ describe("instruction version — guard, collisions and failure injection", () =
   });
 });
 
+
+describe("instruction version — validator client errors", () => {
+  const issue = { path: "value", code: "type", message: "Value 123 in property value must be a string" };
+  // A real Harper ValidationError: harper's package exports only ".", so load
+  // the class from the main entry's directory. This also puts the module in the
+  // require cache the resource reads; an uncached load can reset `transaction`.
+  const harperValidationError = (issues: any[]): Error => {
+    const transaction = (globalThis as any).transaction;
+    try {
+      const req = createRequire(import.meta.url);
+      const mainPath = req.resolve("harper");
+      const errors = req(join(dirname(mainPath), "utility", "errors", "hdbError.js")) as {
+        ValidationError: new (issues: any[], message?: string) => Error;
+      };
+      return new errors.ValidationError(issues);
+    } finally {
+      (globalThis as any).transaction = transaction;
+    }
+  };
+  const lookalike = () => Object.assign(new Error(issue.message), {
+    name: "ValidationError",
+    code: "ValidationError",
+    statusCode: 400,
+    errors: [issue],
+    detail: [issue],
+  });
+  const throwing = (err: unknown) => ({
+    subjectType: "soul" as const,
+    prepare: async () => { throw err; },
+  });
+
+  test("the validator's 400 is passed through with its field message and writes nothing", async () => {
+    const res = await recordVersion(context(), throwing(harperValidationError([issue])) as any, async () => okRow());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.response.status).toBe(400);
+    const body = await res.response.clone().json() as any;
+    expect(body.code).toBe("ValidationError");
+    expect(body.title).toContain("value");
+    expect(body.detail).toEqual([issue]);
+    expect(store.size).toBe(0);
+    expect(soulStore.size).toBe(0);
+  });
+
+  test("a plain Error with the validator's field shape stays 500", async () => {
+    const res = await recordVersion(context(), throwing(lookalike()) as any, async () => okRow());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.response.status).toBe(500);
+    expect((await res.response.clone().json() as any).error).toBe("instruction_version_append_failed");
+  });
+
+  test("an arbitrary error carrying statusCode 400 is not passed through", async () => {
+    const res = await recordVersion(context(), throwing(Object.assign(new Error("not a validator"), { statusCode: 400 })) as any, async () => okRow());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.response.status).toBe(500);
+    expect((await res.response.clone().json() as any).error).toBe("instruction_version_append_failed");
+  });
+
+  test("a 5xx named like the validator is not passed through", async () => {
+    const res = await recordVersion(context(), throwing(Object.assign(harperValidationError([issue]), { statusCode: 500 })) as any, async () => okRow());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.response.status).toBe(500);
+    expect((await res.response.clone().json() as any).error).toBe("instruction_version_append_failed");
+  });
+
+  test("a ValidationError without structured issues is not passed through", async () => {
+    const res = await recordVersion(context(), throwing(harperValidationError([])) as any, async () => okRow());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.response.status).toBe(500);
+    expect((await res.response.clone().json() as any).error).toBe("instruction_version_append_failed");
+  });
+});
 
 describe("Soul resource version snapshots", () => {
   test("collection and unbound deletes are refused without changing rows or history", async () => {

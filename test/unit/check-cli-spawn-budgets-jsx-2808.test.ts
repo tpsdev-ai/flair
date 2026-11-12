@@ -282,3 +282,76 @@ describe("the comment masker and the line walks keep CR, U+2028 and U+2029 (flai
     });
   }
 });
+
+// A JSX attribute string has no escapes: its value ends at the next matching
+// quote, so a trailing backslash belongs to the value (flair#2854). Read with a
+// JavaScript string's escape rules, that backslash escapes the closing quote and
+// the walk loses the case around it.
+const BACKSLASH_ATTRIBUTE_FIXTURE = `import { test, expect } from "bun:test";
+
+test("jsx attribute ends in a backslash", () => {
+  const el = <p title="one\\">plain</p>;
+  Bun.spawn(["bun", "src/cli.ts"], {});
+  expect(el).toBeDefined();
+});
+`;
+
+// The same value in single quotes: JSX accepts either quote, so the masker
+// takes the quote character from the `StringLiteral` node rather than assuming
+// a double quote (flair#2854).
+const SINGLE_QUOTED_ATTRIBUTE_FIXTURE = `import { test, expect } from "bun:test";
+
+test("jsx attribute is single-quoted and ends in a backslash", () => {
+  const el = <p title='one\\'>plain</p>;
+  Bun.spawn(["bun", "src/cli.ts"], { timeout: 1000 });
+  expect(el).toBeDefined();
+});
+`;
+
+// The same case with an ordinary attribute value.
+const ORDINARY_ATTRIBUTE_FIXTURE = `import { test, expect } from "bun:test";
+
+test("jsx attribute is ordinary", () => {
+  const el = <p title="one">plain</p>;
+  Bun.spawn(["bun", "src/cli.ts"], {});
+  expect(el).toBeDefined();
+});
+`;
+
+describe("a JSX attribute string is skipped in either quote style (flair#2854)", () => {
+  it("keeps the case around a single-quoted backslash-ended attribute", () => {
+    const { spawnOffenders, caseOffenders } = scanFixture("jsx-attribute-backslash-single.test.tsx", SINGLE_QUOTED_ATTRIBUTE_FIXTURE);
+    expect(spawnOffenders).toEqual([]);
+    expect(caseOffenders.map((o) => [o.kind, o.scope])).toEqual([
+      ["case-no-budget", "jsx attribute is single-quoted and ends in a backslash"],
+    ]);
+  });
+
+  for (const ext of ["tsx", "js"] as const) {
+    it(`keeps the case around a backslash-ended attribute (.${ext})`, () => {
+      const { spawnOffenders, caseOffenders } = scanFixture(`jsx-attribute-backslash.test.${ext}`, BACKSLASH_ATTRIBUTE_FIXTURE);
+      expect(spawnOffenders.map((o) => o.kind)).toEqual(["spawn-no-timeout"]);
+      expect(caseOffenders.map((o) => [o.kind, o.scope])).toEqual([["case-no-budget", "jsx attribute ends in a backslash"]]);
+    });
+
+    it(`still keeps the case around an ordinary attribute (.${ext})`, () => {
+      const { caseOffenders } = scanFixture(`jsx-attribute-ordinary.test.${ext}`, ORDINARY_ATTRIBUTE_FIXTURE);
+      expect(caseOffenders.map((o) => [o.kind, o.scope])).toEqual([["case-no-budget", "jsx attribute is ordinary"]]);
+    });
+  }
+
+  it("blanks the attribute value but keeps its quotes and the source length", () => {
+    const src = 'const el = <p title="one\\">plain</p>;\n';
+    const masked = maskJsxText(src, "fixture.tsx");
+    expect(masked.length).toBe(src.length);
+    expect(masked).not.toContain("\\");
+    expect(masked).toContain('title="');
+    expect(masked).toContain('">');
+    const single = "const el = <p title='one\\\\'>plain</p>;\n";
+    const maskedSingle = maskJsxText(single, "fixture.tsx");
+    expect(maskedSingle.length).toBe(single.length);
+    expect(maskedSingle).not.toContain("\\");
+    expect(maskedSingle).toContain("title='");
+    expect(maskedSingle).toContain("'>");
+  });
+});

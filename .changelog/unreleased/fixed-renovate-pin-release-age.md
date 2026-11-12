@@ -1,0 +1,1 @@
+- **The shared Renovate preset uses `rangeStrategy: "replace"`.** This preserves declared ranges; a `pin` update is exempt from `minimumReleaseAge` (flair#2871).

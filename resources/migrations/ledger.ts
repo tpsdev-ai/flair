@@ -18,6 +18,7 @@
  * server-internal writes with no HTTP caller behind them.
  */
 import { databases } from "harper";
+import { validateServerRow } from "../server-row-validation.js";
 
 export type LedgerOutcome = "success" | "halted" | "failed";
 export type LedgerInitiator = "auto" | "operator";
@@ -40,7 +41,7 @@ export interface LedgerEvent {
 }
 
 export interface LedgerDeps {
-  orgEventTable?: { put(content: unknown): Promise<unknown> };
+  orgEventTable?: { put(content: unknown): Promise<unknown>; validate?(record: unknown, patch?: boolean): void };
 }
 
 function defaultOrgEventTable() {
@@ -69,7 +70,7 @@ export async function writeLedgerEvent(evt: LedgerEvent, deps: LedgerDeps = {}):
   const table = deps.orgEventTable ?? defaultOrgEventTable();
   const id = `migration-${evt.migrationId}-${evt.endedAt}`;
   const remainingNote = evt.rowsRemaining > 0 ? `, ${evt.rowsRemaining} remaining` : "";
-  await table.put({
+  const row = {
     id,
     authorId: "flair-migrations",
     kind: "migration",
@@ -78,5 +79,7 @@ export async function writeLedgerEvent(evt: LedgerEvent, deps: LedgerDeps = {}):
     detail: buildLedgerDetail(evt),
     refId: evt.migrationId,
     createdAt: evt.endedAt,
-  });
+  };
+  validateServerRow(table, row);
+  await table.put(row);
 }

@@ -24,7 +24,7 @@ const commandPath = join(import.meta.dirname, "../../src/commands/backup-approva
 const commanderPath = join(import.meta.dirname, "../../node_modules/commander/index.js");
 
 const ARCHIVE = Buffer.from(JSON.stringify({
-  version: 1, agents: [{ id: "flint" }], souls: [],
+  version: 1, agents: [{ id: "flint", name: "flint" }], souls: [],
   memories: [{ id: "m1", agentId: "flint", content: "legacy note", promotionStatus: "approved", promotedAt: "2026-01-01T00:00:00.000Z", promotedBy: "kern" }],
 }));
 const SHA = createHash("sha256").update(ARCHIVE).digest("hex");
@@ -60,7 +60,6 @@ async function cli(args: string[], options: { home?: string; ops?: OpsReply } = 
     };
     bindCli({
       addSharedCredentialOptions(command) { return command.option("--admin-pass <pass>").option("--admin-pass-file <path>").option("--admin-user <user>"); },
-      applyAdminPassFile() {},
       resolveHttpPort() { return 19926; },
       resolveOpsPort() { return 19925; },
     });

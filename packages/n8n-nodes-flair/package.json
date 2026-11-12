@@ -54,7 +54,7 @@
   "peerDependencies": {
     "n8n-workflow": "*",
     "@langchain/core": ">=0.3.0 <2",
-    "@langchain/classic": "*"
+    "@langchain/classic": ">=1.0.0 <2"
   },
   "devDependencies": {
     "n8n-workflow": "1.119.0",

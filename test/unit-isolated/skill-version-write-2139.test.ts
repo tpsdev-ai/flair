@@ -1,5 +1,6 @@
 // Mocked transactions exercise rollback under the subject-type lock.
 import { describe, expect, test, beforeEach, mock } from "bun:test";
+import { memoryLockDouble } from "../helpers/memory-lock-double.ts";
 
 type Row = Record<string, any>;
 const store = new Map<string, Row>();       // InstructionVersion rows
@@ -18,6 +19,8 @@ const primaryStore = {
 
 const InstructionVersionTable = {
   primaryStore,
+  validate() {},
+
   async *search(query: any, ctx?: any): AsyncGenerator<Row> {
     if (hideHead) return;
     const conds: any[] = query?.conditions ?? [];
@@ -35,6 +38,7 @@ const InstructionVersionTable = {
 };
 
 const OrgEventTable = {
+  validate() {},
   async *search() {},
   async create(record: Row, ctx: any): Promise<void> {
     const rows = ctx?.transaction?.events ?? eventStore;
@@ -47,6 +51,8 @@ const OrgEventTable = {
 };
 
 const MemoryTable = {
+  validate() {},
+  primaryStore: memoryLockDouble(),
   async put(row: Row, ctx?: any) {
     (ctx?.transaction?.memories ?? memoryStore).set(row.id, { ...row });
     return row;

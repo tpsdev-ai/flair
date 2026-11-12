@@ -1,3 +1,4 @@
+import { pinFixtureHistory, readFixtureHistory } from "../helpers/audit-history.ts";
 import { describe, it, expect } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -7,6 +8,9 @@ import { tmpdir } from "node:os";
 import {
   isVulnerable,
   validateAllowlist,
+  MAX_LIFETIME_DAYS_BY_SEVERITY,
+  lifetimeCapsFromPolicy,
+  overCapReportLines,
   flattenAdvisories,
   flattenNpmAdvisories,
   parseNpmAuditOutput,
@@ -14,6 +18,9 @@ import {
   npmAuditReportRefusal,
   bunAuditReportRefusal,
   registryUrlFor,
+  overCapApprovalProblems,
+  readAllowlistHistory,
+  validateAllowlistHistory,
   vendorPinnedNodeProblems,
 } from "../../scripts/audit-gate.mjs";
 
@@ -21,6 +28,16 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
 const ALLOWLIST = JSON.parse(
   readFileSync(join(REPO_ROOT, ".github", "audit-allowlist.json"), "utf8"),
 );
+// The committed allowlist is checked as of the latest date any entry was added (never earlier than
+// 2026-11-02, the date these checks were pinned to), capped at the real date: deterministic while every
+// `added` is in the past, and an `added` after today still fails "added is after today" (flair#3026).
+// Unparseable `added` values are skipped here and reported by the schema check. Expiry against the real
+// date stays the audit gate's job in CI.
+function allowlistAsOf(entries: Array<{ added: string }>, now: number): Date {
+  const added = entries.map((e) => Date.parse(e.added)).filter(Number.isFinite);
+  return new Date(Math.min(now, Math.max(Date.parse("2026-11-02"), ...added)));
+}
+const ALLOWLIST_AS_OF = allowlistAsOf(ALLOWLIST.entries, Date.now());
 const TEST_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8");
 /**
  * The seven consumer-install inputs: the flag, the allowlist source, the package
@@ -109,6 +126,33 @@ const prefixArgs = (prefixOf: (source: string) => string) =>
   CONSUMER_INPUTS.flatMap((input) => [input.flag, prefixOf(input.source)]);
 
 /**
+ * Commits a fixture's allowlist so the gate can read the history its cumulative
+ * lifetime check depends on.
+ */
+function commitAllowlistHistory(root: string, date?: string) {
+  const snapshots = JSON.parse(readFileSync(join(root, ".github/audit-allowlist.json"), "utf8"));
+  const addedDays = snapshots.entries.map((entry: { added?: string }) => entry.added)
+    .filter((day: unknown): day is string => typeof day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(day));
+  date ??= `${addedDays.sort().at(-1) ?? "2026-01-01"}T12:00:00Z`;
+  mkdirSync(join(root, "tmp"), { recursive: true });
+  const env = {
+    ...process.env,
+    TMPDIR: join(root, "tmp"),
+    GIT_AUTHOR_NAME: "fixture",
+    GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+    GIT_COMMITTER_NAME: "fixture",
+    GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+    GIT_AUTHOR_DATE: date,
+    GIT_COMMITTER_DATE: date,
+  };
+  for (const args of [["init", "-q"], ["add", ".github/audit-allowlist.json"], ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "fixture allowlist"]]) {
+    const res = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", env, timeout: 20_000 });
+    if (res.status !== 0) throw new Error(`fixture git ${args[0]} failed (${res.status}): ${res.stderr}`);
+  }
+  pinFixtureHistory(root);
+}
+
+/**
  * These tests exist because the audit step's original defect was not a wrong
  * threshold — it was that the step could not fail at all, so no run of it was
  * ever evidence of anything. Each assertion below is a way the gate must be
@@ -143,6 +187,20 @@ describe("the audit step must remain able to fail", () => {
 
   it("no longer runs the bare `bun audit` whose exit code was discarded", () => {
     expect(auditDirectives).not.toMatch(/run:\s*bun audit/);
+  });
+
+  it("invokes the gate with every consumer-install prefix flag", () => {
+    // The gate invocation is one shell command continued with backslashes.
+    const lines = auditDirectives.split("\n");
+    const start = lines.findIndex((l) => l.includes("audit-gate.mjs"));
+    expect(start).toBeGreaterThanOrEqual(0);
+    let end = start;
+    while (end < lines.length - 1 && lines[end]!.trimEnd().endsWith("\\")) end++;
+    const invocation = lines.slice(start, end + 1).join("\n");
+    for (const input of CONSUMER_INPUTS) {
+      expect(invocation).toMatch(new RegExp(`(?:^|\\s)${input.flag} "\\$[A-Z0-9_]+"`));
+    }
+    expect(invocation.match(/--[a-z0-9-]*npm-install-prefix/g)?.length).toBe(CONSUMER_INPUTS.length);
   });
 
   it("still carries the reasoning that explains why it is blocking", () => {
@@ -223,6 +281,7 @@ describe("the four added consumer-install inputs, stand-in tools (flair#2757)", 
       writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({
         policy: ALLOWLIST.policy, entries: opts.entries ?? [],
       }));
+      commitAllowlistHistory(root);
       const prefixes: Record<string, string> = Object.fromEntries(
         CONSUMER_INPUTS.map(({ source }) => [source, join(root, `prefix-${source}`)]),
       );
@@ -510,6 +569,41 @@ describe("the four added consumer-install inputs, stand-in tools (flair#2757)", 
       expect(res.stdout).not.toContain("PASS —");
     }, 12_000);
 
+    it("prints the single-chain consumer diagnostics byte for byte", () => {
+      // Captured at 49f24987, before an advisory could carry several entries.
+      const golden = {
+        "outside": {
+          "status": 1,
+          "lines": [
+            "::error::audit-gate: GHSA-0000-0000-2757 (hono): node \"node_modules/other/node_modules/hono\" is outside the dependency chain @tpsdev-ai/flair-mcp -> @modelcontextprotocol/sdk -> hono (resolved node node_modules/hono).",
+            "    - GHSA-0000-0000-2757 (hono): node \"node_modules/other/node_modules/hono\" is outside the dependency chain @tpsdev-ai/flair-mcp -> @modelcontextprotocol/sdk -> hono (resolved node node_modules/hono)."
+          ]
+        },
+        "wrongRoot": {
+          "status": 1,
+          "lines": [
+            "::error::audit-gate: GHSA-0000-0000-2757 (hono): cannot verify @tpsdev-ai/flair-mcp dependency chain: invalid @tpsdev-ai/flair-mcp dependency chain.",
+            "    - GHSA-0000-0000-2757 (hono): cannot verify @tpsdev-ai/flair-mcp dependency chain: invalid @tpsdev-ai/flair-mcp dependency chain."
+          ]
+        }
+      };
+      const diag = (out: string) => out.split("\n").filter((l) => l.startsWith("::error::") || l.startsWith("    - "));
+      const outside = runGate({
+        reports: { "npm-install-mcp": report(["node_modules/hono", "node_modules/other/node_modules/hono"]) },
+        entries: [vendorEntry()],
+        setup: installChain,
+      });
+      const wrongRoot = runGate({
+        reports: { "npm-install-mcp": report() },
+        entries: [vendorEntry("@tpsdev-ai/pi-flair -> @modelcontextprotocol/sdk -> hono")],
+        setup: installChain,
+      });
+      expect({
+        outside: { status: outside.status, lines: diag(outside.stdout) },
+        wrongRoot: { status: wrongRoot.status, lines: diag(wrongRoot.stdout) },
+      }).toEqual(golden);
+    }, 24_000);
+
     it("blocks a chain that does not start at the observed package", () => {
       const res = runGate({
         reports: { "npm-install-mcp": report() },
@@ -637,9 +731,10 @@ describe("vendor-pinned npm-install nodes", () => {
       writeFileSync(join(tree, harperNode, "package.json"), JSON.stringify({ version: installedVersion }));
       writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts/audit-gate.mjs")));
       writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({
-        policy: { maxLifetimeDaysBySeverity: { moderate: 180 } },
+        policy: ALLOWLIST.policy,
         entries: [adk ? {
           ...ALLOWLIST.entries.find((entry: { package: string }) => entry.package === "uuid"),
+          added: "2026-09-03",
         } : {
           ghsa: "GHSA-w2qp-rph6-63g4",
           package: "fastify",
@@ -654,6 +749,7 @@ describe("vendor-pinned npm-install nodes", () => {
           removeWhen: "harper's shrinkwrap resolves fastify >=5.12.1",
         }],
       }));
+      commitAllowlistHistory(root);
       writeFileSync(join(root, "bin/bun"), "#!/bin/sh\nprintf '{}\\n'\n");
       const chain = ["@tpsdev-ai/adk-flair", "@google/adk", "@google-cloud/vertexai", "google-auth-library", "gaxios", "uuid"];
       let parent = tree;
@@ -758,6 +854,60 @@ esac
     expect(res.stdout).toContain("outside the dependency chain");
   }, 12_000);
 
+  // The single-chain ADK diagnostics, byte for byte, as the gate printed them
+  // before an advisory could carry several entries (captured at 49f24987).
+  const SINGLE_CHAIN_ADK_GOLDEN: Record<string, { status: number; lines: string[] }> = {
+    "outside": {
+      "status": 1,
+      "lines": [
+        "::error::audit-gate: GHSA-w5hq-g745-h8pq (uuid): node \"node_modules/other/node_modules/uuid\" is outside the dependency chain @tpsdev-ai/adk-flair -> @google/adk -> @google-cloud/vertexai -> google-auth-library -> gaxios -> uuid (resolved node node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid).",
+        "    - GHSA-w5hq-g745-h8pq (uuid): node \"node_modules/other/node_modules/uuid\" is outside the dependency chain @tpsdev-ai/adk-flair -> @google/adk -> @google-cloud/vertexai -> google-auth-library -> gaxios -> uuid (resolved node node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid)."
+      ]
+    },
+    "additional": {
+      "status": 1,
+      "lines": [
+        "::error::audit-gate: GHSA-w5hq-g745-h8pq (uuid): node \"node_modules/uuid\" is outside the dependency chain @tpsdev-ai/adk-flair -> @google/adk -> @google-cloud/vertexai -> google-auth-library -> gaxios -> uuid (resolved node node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid).",
+        "    - GHSA-w5hq-g745-h8pq (uuid): node \"node_modules/uuid\" is outside the dependency chain @tpsdev-ai/adk-flair -> @google/adk -> @google-cloud/vertexai -> google-auth-library -> gaxios -> uuid (resolved node node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid)."
+      ]
+    },
+    "missing": {
+      "status": 1,
+      "lines": [
+        "::error::audit-gate: GHSA-w5hq-g745-h8pq (uuid): cannot verify @tpsdev-ai/adk-flair node \"node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid\" version: missing or invalid installed version.",
+        "    - GHSA-w5hq-g745-h8pq (uuid): cannot verify @tpsdev-ai/adk-flair node \"node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid\" version: missing or invalid installed version."
+      ]
+    },
+    "different": {
+      "status": 1,
+      "lines": [
+        "::error::audit-gate: GHSA-w5hq-g745-h8pq (uuid): cannot verify @tpsdev-ai/adk-flair node \"node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid\" version: installed version 9.0.2 differs from allowlist version 9.0.1.",
+        "    - GHSA-w5hq-g745-h8pq (uuid): cannot verify @tpsdev-ai/adk-flair node \"node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid\" version: installed version 9.0.2 differs from allowlist version 9.0.1."
+      ]
+    },
+    "conflicting": {
+      "status": 1,
+      "lines": [
+        "::error::audit-gate: GHSA-w5hq-g745-h8pq (uuid): cannot verify @tpsdev-ai/adk-flair node \"node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid\" version: audit version \"9.0.2\" conflicts with installed version 9.0.1.",
+        "    - GHSA-w5hq-g745-h8pq (uuid): cannot verify @tpsdev-ai/adk-flair node \"node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid\" version: audit version \"9.0.2\" conflicts with installed version 9.0.1."
+      ]
+    }
+  };
+
+  for (const [name, nodes, versions] of [
+    ["outside", ["node_modules/other/node_modules/uuid"], {}],
+    ["additional", [adkUuidNode, "node_modules/uuid"], {}],
+    ["missing", [adkUuidNode], { installed: null }],
+    ["different", [adkUuidNode], { installed: "9.0.2" }],
+    ["conflicting", [adkUuidNode], { installed: "9.0.1", reported: "9.0.2" }],
+  ] as const) {
+    it(`prints the single-chain ADK diagnostics byte for byte: ${name}`, () => {
+      const { res } = runFixtureGate([...nodes], "5.11.3", true, versions as { installed?: string | null; reported?: string });
+      const lines = res.stdout.split("\n").filter((l) => l.startsWith("::error::") || l.startsWith("    - "));
+      expect({ status: res.status, lines }).toEqual(SINGLE_CHAIN_ADK_GOLDEN[name]!);
+    }, 12_000);
+  }
+
   it("passes the gate for a harper-only node", () => {
     const { res, wrote } = runFixtureGate([harperNode]);
     expect(res.error).toBeUndefined();
@@ -796,11 +946,1114 @@ esac
   }, 12_000);
 });
 
+// ─── Several entries for one advisory: per source, per location ──────────────
+
+describe("several allowlist entries for one advisory, per source and per location", () => {
+  const UUID = "GHSA-w5hq-g745-h8pq";
+  const GLOB = "GHSA-3g3m-2fjr-6pw4";
+  const MINIMATCH = "GHSA-g3hv-75wg-m249";
+  const VERTEXAI = ["@tpsdev-ai/adk-flair", "@google/adk", "@google-cloud/vertexai", "google-auth-library", "gaxios", "uuid"].join(" -> ");
+  const GTOKEN = ["@tpsdev-ai/adk-flair", "@google/adk", "@google-cloud/vertexai", "google-auth-library", "gtoken", "gaxios", "uuid"].join(" -> ");
+  const ADK_GLOB = ["@tpsdev-ai/adk-flair", "@google/adk", "@google-cloud/aiplatform", "google-gax", "rimraf", "glob"].join(" -> ");
+  const VERTEXAI_NODE = "node_modules/@google-cloud/vertexai/node_modules/uuid";
+  const GTOKEN_NODE = "node_modules/gtoken/node_modules/uuid";
+  const RANGES: Record<string, string> = { uuid: "<11.1.1", glob: ">=9.0.0 <=14.0.1", minimatch: "<11.0.1" };
+  const GHSAS: Record<string, string> = { uuid: UUID, glob: GLOB, minimatch: MINIMATCH };
+
+  const entry = (ghsa: string, pkg: string, cls: string, sources: string[], introducedBy: string, extra: Record<string, unknown> = {}) => ({
+    ghsa, package: pkg, severity: "moderate", class: cls, sources, approvedBy: "fixture", introducedBy,
+    reason: "Fixture entry.", added: "2026-09-30", expires: "2026-10-14", removeWhen: "the fixture tree resolves a patched copy",
+    ...extra,
+  });
+  const uuidEntry = (introducedBy: string, extra: Record<string, unknown> = {}) =>
+    entry(UUID, "uuid", "vendor-pinned", ["npm-install-adk"], introducedBy, { version: "9.0.1", ...extra });
+  const TWO_UUID = [uuidEntry(VERTEXAI), uuidEntry(GTOKEN)];
+
+  /** A bun report listing `pkgs`, in `bun audit --json`'s shape. */
+  const bunReport = (pkgs: string[]) => Object.fromEntries(pkgs.map((pkg) => [pkg, [{
+    id: 1, url: `https://github.com/advisories/${GHSAS[pkg]}`, title: `Fixture ${pkg} advisory`, severity: "moderate",
+    vulnerable_versions: RANGES[pkg],
+  }]]));
+  /** An npm report listing each package at its nodes, in `npm audit --json`'s shape. */
+  const npmReport = (nodesByPkg: Record<string, string[]>) => ({
+    vulnerabilities: Object.fromEntries(Object.entries(nodesByPkg).map(([pkg, nodes]) => [pkg, { nodes, via: [{
+      url: `https://github.com/advisories/${GHSAS[pkg]}`, title: `Fixture ${pkg} advisory`, severity: "moderate", range: RANGES[pkg],
+    }] }])),
+  });
+
+  /** Writes package.json for each `[node, manifest]` row under `prefix`. */
+  const writeTree = (prefix: string, rows: [string, Record<string, unknown>][]) => {
+    for (const [node, manifest] of rows) {
+      mkdirSync(join(prefix, node), { recursive: true });
+      writeFileSync(join(prefix, node, "package.json"), JSON.stringify(manifest));
+    }
+  };
+  const pkg = (name: string, version: string, deps: string[] = []) =>
+    ({ name, version, dependencies: Object.fromEntries(deps.map((d) => [d, "*"])) });
+
+  /**
+   * The real gate in a fixture repo with stand-in tools. The ADK prefix holds
+   * @google/adk's two uuid 9.0.1 copies (under @google-cloud/vertexai and under
+   * gtoken), a uuid 11.1.1 at the top that no report names, and the
+   * aiplatform -> google-gax -> rimraf -> glob 10.5.0 -> minimatch 9.0.9 path.
+   * The root prefix holds harper's shrinkwrap-pinned glob 13.0.6 and minimatch
+   * 10.2.4. `bun` prints `bun`; `npm` prints `npm[source]` in that source's
+   * prefix and an empty report elsewhere.
+   */
+  function runMulti(opts: { entries: object[]; bun?: object; npm?: Record<string, object>; today?: string; history?: "full" | "none" | "unreadable" }) {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-multi-"));
+    try {
+      for (const dir of ["scripts", ".github", "bin", "home", "tmp"]) mkdirSync(join(root, dir));
+      writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts/audit-gate.mjs")));
+      writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({ policy: ALLOWLIST.policy, entries: opts.entries }));
+      if (opts.history !== "none") commitAllowlistHistory(root);
+      if (opts.history === "unreadable") {
+        rmSync(join(root, ".github/audit-allowlist.json"));
+        symlinkSync(join(root, ".github/missing.json"), join(root, ".github/audit-allowlist.json"));
+      }
+      const prefixes: Record<string, string> = Object.fromEntries(
+        CONSUMER_INPUTS.map(({ source }) => [source, join(root, `prefix-${source}`)]),
+      );
+      writeIdentities(root, (source) => prefixes[source]!);
+      const adk = prefixes["npm-install-adk"]!;
+      writeTree(adk, [
+        ["node_modules/@google/adk", pkg("@google/adk", "2.4.0", ["@google-cloud/vertexai", "@google-cloud/aiplatform", "@a2a-js/sdk"])],
+        ["node_modules/@google-cloud/vertexai", pkg("@google-cloud/vertexai", "1.12.0", ["google-auth-library"])],
+        ["node_modules/@google-cloud/vertexai/node_modules/google-auth-library", pkg("google-auth-library", "9.15.1", ["gaxios", "gtoken"])],
+        ["node_modules/@google-cloud/vertexai/node_modules/gaxios", pkg("gaxios", "6.7.1", ["uuid"])],
+        ["node_modules/@google-cloud/vertexai/node_modules/uuid", pkg("uuid", "9.0.1")],
+        ["node_modules/gtoken", pkg("gtoken", "7.1.0", ["gaxios"])],
+        ["node_modules/gtoken/node_modules/gaxios", pkg("gaxios", "6.7.1", ["uuid"])],
+        ["node_modules/gtoken/node_modules/uuid", pkg("uuid", "9.0.1")],
+        ["node_modules/@a2a-js/sdk", pkg("@a2a-js/sdk", "0.3.14", ["uuid"])],
+        ["node_modules/uuid", pkg("uuid", "11.1.1")],
+        ["node_modules/@google-cloud/aiplatform", pkg("@google-cloud/aiplatform", "6.11.0", ["google-gax"])],
+        ["node_modules/google-gax", pkg("google-gax", "5.0.8", ["rimraf"])],
+        ["node_modules/rimraf", pkg("rimraf", "5.0.10", ["glob"])],
+        ["node_modules/glob", pkg("glob", "10.5.0", ["minimatch"])],
+        ["node_modules/minimatch", pkg("minimatch", "9.0.9")],
+      ]);
+      const adkInput = CONSUMER_INPUTS.find((input) => input.source === "npm-install-adk")!;
+      declareDependencies(root, adkInput, adk, { "@google/adk": "*" });
+      const rootPrefix = prefixes["npm-install"]!;
+      writeTree(rootPrefix, [
+        ["node_modules/harper/node_modules/glob", { name: "glob", version: "13.0.6" }],
+        ["node_modules/harper/node_modules/minimatch", { name: "minimatch", version: "10.2.4" }],
+      ]);
+      writeFileSync(join(rootPrefix, "node_modules/harper/npm-shrinkwrap.json"), JSON.stringify({
+        packages: { "node_modules/glob": { version: "13.0.6" }, "node_modules/minimatch": { version: "10.2.4" } },
+      }));
+      const empty = JSON.stringify({ vulnerabilities: {} });
+      const cases = Object.entries(opts.npm ?? {})
+        .map(([source, body]) => `  */prefix-${source}) printf '%s\\n' '${JSON.stringify(body)}' ;;\n`)
+        .join("");
+      writeFileSync(join(root, "bin/npm"), `#!/bin/sh\ncase "$PWD" in\n${cases}  *) printf '%s\\n' '${empty}' ;;\nesac\n`);
+      writeFileSync(join(root, "bin/bun"), `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(opts.bun ?? {})}'\n`);
+      chmodSync(join(root, "bin/npm"), 0o755);
+      chmodSync(join(root, "bin/bun"), 0o755);
+      writeFileSync(join(root, "offline.mjs"), "globalThis.fetch = async () => { throw new Error('fixture offline'); };\n");
+      return spawnSync(
+        process.execPath,
+        ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), ...prefixArgs((source) => prefixes[source]!)],
+        {
+          encoding: "utf8",
+          timeout: 10_000,
+          env: {
+            ...process.env,
+            PATH: `${join(root, "bin")}:${process.env.PATH}`,
+            HOME: join(root, "home"),
+            TMPDIR: join(root, "tmp"),
+            AUDIT_GATE_TODAY: opts.today ?? "2026-10-01",
+          },
+        },
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+  const uuidAt = (...nodes: string[]) => ({ "npm-install-adk": npmReport({ uuid: nodes }) });
+  const expectPass = (res: ReturnType<typeof runMulti>) => {
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("PASS —");
+  };
+  const expectBlocked = (res: ReturnType<typeof runMulti>, ...lines: string[]) => {
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(1);
+    for (const line of lines) expect(res.stdout).toContain(line);
+    expect(res.stdout).not.toContain("PASS —");
+  };
+
+  it("two_adk_uuid_chains_pass: one entry per uuid copy covers both ADK nodes", () => {
+    const res = runMulti({ entries: TWO_UUID, npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE) });
+    expectPass(res);
+    expect(res.stdout).toContain("advisories reported: 1 (1 moderate)");
+    expect(res.stdout).toContain("allowlisted (justified + dated):  1");
+  }, 12_000);
+
+  it("extra_uncovered_uuid_node: a third reported uuid copy is covered by no entry", () => {
+    const res = runMulti({ entries: TWO_UUID, npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE, "node_modules/uuid") });
+    expectBlocked(res, `${UUID} (uuid): node "node_modules/uuid" in npm-install-adk is covered by no allowlist entry`);
+  }, 12_000);
+
+  it("refuses an empty ADK chain beside a valid sibling before matching", () => {
+    const res = runMulti({ entries: [uuidEntry(VERTEXAI), uuidEntry("")], npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE) });
+    expectBlocked(res, 'missing required field "introducedBy"');
+    expect(res.stdout).not.toContain("allowlisted (justified + dated)");
+  }, 12_000);
+
+  for (const [name, introducedBy, refusal] of [
+    ["prefix-only", "@tpsdev-ai/adk-flair -> @google/adk", "invalid @tpsdev-ai/adk-flair dependency chain"],
+    ["broken-edge", "@tpsdev-ai/adk-flair -> @google/adk -> gtoken -> gaxios -> uuid", "@google/adk does not depend on gtoken"],
+    ["wrong-copy", "@tpsdev-ai/adk-flair -> @google/adk -> @a2a-js/sdk -> uuid", "is STALE — it covers no reported advisory location"],
+  ] as const) {
+    it(`refuses the ${name} ADK chain beside a valid sibling, and leaves the gtoken copy uncovered`, () => {
+      const res = runMulti({ entries: [uuidEntry(VERTEXAI), uuidEntry(introducedBy)], npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE) });
+      expectBlocked(res, refusal, `node "${GTOKEN_NODE}" in npm-install-adk is covered by no allowlist entry`);
+    }, 12_000);
+  }
+
+  it("stale_chain_with_live_sibling: an entry whose node is not reported is stale though its sibling covers the GHSA", () => {
+    const res = runMulti({ entries: TWO_UUID, npm: uuidAt(VERTEXAI_NODE) });
+    expectBlocked(res, `allowlist entry[1] (${UUID} / uuid, sources [npm-install-adk], via ${GTOKEN}) is STALE`);
+    expect(res.stdout).not.toContain("NOT allowlisted");
+  }, 12_000);
+
+  it("reports a non-array sources value beside a sibling entry instead of crashing", () => {
+    // The gate stops before matching, so no later diagnostic names this entry.
+    const res = runMulti({
+      entries: [uuidEntry(VERTEXAI), uuidEntry(GTOKEN, { sources: "npm-install-adk" })],
+      npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE),
+    });
+    expectBlocked(res, `entry[1] (${UUID} / uuid): "sources" must be a non-empty array`);
+    expect(res.stderr).not.toContain("audit-gate crashed");
+    expect(res.stdout).not.toContain("allowlisted (justified + dated)");
+  }, 12_000);
+
+  it("refuses a required field that is not a string, and does not admit the advisory", () => {
+    // String({}) is "[object Object]", so a presence check alone let an object
+    // through, and the bun admission path never reads introducedBy.
+    const objectChain = entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob", { introducedBy: {} });
+    expect(validateAllowlist({ policy: ALLOWLIST.policy, entries: [objectChain] }, new Date("2026-10-01")).join("\n"))
+      .toContain('"introducedBy" must be a string (found object)');
+    const res = runMulti({ entries: [objectChain], bun: bunReport(["glob"]) });
+    expectBlocked(res, '"introducedBy" must be a string (found object)');
+    expect(res.stdout).not.toContain("allowlisted (justified + dated)");
+  }, 12_000);
+
+  it("refuses an array-valued class before matching", () => {
+    // The gate stops before matching, so this entry is never counted as allowlisted.
+    const arrayClass = entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob", { class: ["remediation-available"] });
+    const res = runMulti({ entries: [arrayClass], bun: bunReport(["glob"]) });
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(1);
+    expect(res.stdout).toContain('"class" must be a string (found an array)');
+    expect(res.stderr).not.toContain("audit-gate crashed");
+    expect(res.stdout).not.toContain("allowlisted (justified + dated)");
+  }, 12_000);
+
+  it("refuses vendor-pinned on the bun source and accepts remediation-available there", () => {
+    const vendor = entry(GLOB, "glob", "vendor-pinned", ["bun"], "harper -> @fastify/static -> glob");
+    expect(validateAllowlist({ policy: ALLOWLIST.policy, entries: [vendor] }, new Date("2026-10-01")).join("\n"))
+      .toContain('class "vendor-pinned" cannot cover source "bun"');
+    expectBlocked(runMulti({ entries: [vendor], bun: bunReport(["glob"]) }), 'class "vendor-pinned" cannot cover source "bun"');
+    const remediation = entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob");
+    expect(validateAllowlist({ policy: ALLOWLIST.policy, entries: [remediation] }, new Date("2026-10-01"))).toEqual([]);
+    expectPass(runMulti({ entries: [remediation], bun: bunReport(["glob"]) }));
+  }, 24_000);
+
+  const ACROSS = [
+    entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob"),
+    entry(GLOB, "glob", "vendor-pinned", ["npm-install"], "harper -> @fastify/static -> glob", { removeWhen: "harper's shrinkwrap resolves a patched glob" }),
+    entry(GLOB, "glob", "vendor-pinned", ["npm-install-adk"], ADK_GLOB, { version: "10.5.0" }),
+    entry(MINIMATCH, "minimatch", "remediation-available", ["bun"], "harper -> @fastify/static -> glob -> minimatch"),
+    entry(MINIMATCH, "minimatch", "vendor-pinned", ["npm-install"], "harper -> @fastify/static -> glob -> minimatch", { removeWhen: "harper's shrinkwrap resolves a patched minimatch" }),
+    entry(MINIMATCH, "minimatch", "vendor-pinned", ["npm-install-adk"], `${ADK_GLOB} -> minimatch`, { version: "9.0.9" }),
+  ];
+  const ACROSS_REPORTS = {
+    bun: bunReport(["glob", "minimatch"]),
+    npm: {
+      "npm-install": npmReport({ glob: ["node_modules/harper/node_modules/glob"], minimatch: ["node_modules/harper/node_modules/minimatch"] }),
+      "npm-install-adk": npmReport({ glob: ["node_modules/glob"], minimatch: ["node_modules/minimatch"] }),
+    },
+  };
+
+  it("glob_and_minimatch_across_sources_pass: bun remediation-available, npm-install and npm-install-adk vendor-pinned", () => {
+    const res = runMulti({ entries: ACROSS, ...ACROSS_REPORTS });
+    expectPass(res);
+    expect(res.stdout).toContain("advisories reported: 6 (6 moderate)");
+    expect(res.stdout).toContain("allowlisted (justified + dated):  6");
+  }, 12_000);
+
+  it("same_ghsa_different_classes_per_source: one advisory, a different true class in each source", () => {
+    expectPass(runMulti({
+      entries: ACROSS.slice(0, 2),
+      bun: bunReport(["glob"]),
+      npm: { "npm-install": npmReport({ glob: ["node_modules/harper/node_modules/glob"] }) },
+    }));
+  }, 12_000);
+
+  it("blocks the npm-install glob copy when only its bun sibling is listed", () => {
+    const res = runMulti({ entries: [ACROSS[0]!, ACROSS[2]!], ...ACROSS_REPORTS, npm: { "npm-install": ACROSS_REPORTS.npm["npm-install"] } });
+    expectBlocked(res, `MODERATE ${GLOB} in glob (>=9.0.0 <=14.0.1) is NOT allowlisted in source [npm-install]`);
+  }, 12_000);
+
+  it("duplicate_coverage_fails: two entries naming bun for one advisory and package", () => {
+    const twice = [
+      entry(GLOB, "glob", "remediation-available", ["bun"], "harper -> @fastify/static -> glob"),
+      entry(GLOB, "glob", "remediation-available", ["bun"], "@tpsdev-ai/pi-flair -> @earendil-works/pi-coding-agent -> glob"),
+    ];
+    const problems = validateAllowlist({ policy: ALLOWLIST.policy, entries: twice }, new Date("2026-10-01")).join("\n");
+    expect(problems).toContain("duplicate coverage — entry[0]");
+    expect(problems).toContain("and entry[1]");
+    expect(problems).toContain('both cover GHSA-3g3m-2fjr-6pw4 (glob) in source "bun"');
+    expectBlocked(runMulti({ entries: twice, bun: bunReport(["glob"]) }), "duplicate coverage");
+  }, 12_000);
+
+  it("duplicate_coverage_fails: two ADK entries whose chains resolve to the same node", () => {
+    const res = runMulti({
+      entries: [uuidEntry(VERTEXAI), uuidEntry(VERTEXAI, { sources: ["npm-install-adk", "npm-install-mcp"] }), uuidEntry(GTOKEN)],
+      npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE),
+    });
+    expectBlocked(res, `duplicate coverage — entry[0]`, `all resolve to node "${VERTEXAI_NODE}" in npm-install-adk`);
+  }, 12_000);
+
+  it("still refuses an exact duplicate of one entry", () => {
+    const problems = validateAllowlist({ policy: ALLOWLIST.policy, entries: [uuidEntry(VERTEXAI), uuidEntry(VERTEXAI)] }, new Date("2026-10-01"));
+    expect(problems.join("\n")).toContain("duplicate entry for GHSA-w5hq-g745-h8pq (entry[0] has the same package, sources and introducedBy)");
+  });
+
+  it("expired_or_unapproved_sibling: an expired sibling blocks while the other entry is valid", () => {
+    const res = runMulti({ entries: [uuidEntry(VERTEXAI), uuidEntry(GTOKEN, { expires: "2026-10-01" })], npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE) });
+    expectBlocked(res, `allowlist entry[1] (${UUID} / uuid, sources [npm-install-adk], via ${GTOKEN}) (moderate) EXPIRED on 2026-10-01`);
+    expect(res.stdout).not.toContain(`entry[0] (${UUID} / uuid, sources [npm-install-adk], via ${VERTEXAI}) (moderate) EXPIRED`);
+  }, 12_000);
+
+  it("expired_or_unapproved_sibling: an unapproved sibling blocks while the other entry is valid", () => {
+    const unapproved: Record<string, unknown> = uuidEntry(GTOKEN);
+    delete unapproved.approvedBy;
+    const res = runMulti({ entries: [uuidEntry(VERTEXAI), unapproved], npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE) });
+    expectBlocked(res, 'entry[1] (GHSA-w5hq-g745-h8pq / uuid): missing required field "approvedBy"');
+  }, 12_000);
+
+  it("treats an entry as live the day before its expiry and expired on the day itself", () => {
+    const entries = [uuidEntry(VERTEXAI, { expires: "2026-10-02" }), uuidEntry(GTOKEN, { expires: "2026-10-02" })];
+    expectPass(runMulti({ entries, npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE), today: "2026-10-01" }));
+    expectBlocked(
+      runMulti({ entries, npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE), today: "2026-10-02" }),
+      `allowlist entry[0] (${UUID} / uuid, sources [npm-install-adk], via ${VERTEXAI}) (moderate) EXPIRED on 2026-10-02`,
+      `allowlist entry[1] (${UUID} / uuid, sources [npm-install-adk], via ${GTOKEN}) (moderate) EXPIRED on 2026-10-02`,
+    );
+  }, 24_000);
+
+  it("rejects a nonexistent added date before advisory matching with real Git history", () => {
+    const res = runMulti({ entries: [uuidEntry(VERTEXAI, { added: "2026-02-30" })], npm: uuidAt(VERTEXAI_NODE) });
+    expectBlocked(res, '"added" must be a real calendar date (YYYY-MM-DD)');
+    expect(res.stdout).toContain("no advisory was matched against it");
+    expect(res.stdout).not.toContain("NOT allowlisted");
+  }, 12_000);
+
+  it("prints an over-cap entry without --explain", () => {
+    const entries = [uuidEntry(VERTEXAI, {
+      added: "2025-01-01",
+      expires: "2026-10-01",
+      overCapApproval: {
+        approvedBy: "fixture-approver",
+        reason: "Fixture approval reason.",
+        approvedOn: "2026-09-01",
+        expires: "2026-10-01",
+      },
+    })];
+    const res = runMulti({ entries, npm: uuidAt(VERTEXAI_NODE), today: "2026-09-02" });
+    expectPass(res);
+    expect(res.stdout).toContain(
+      "OVER-CAP: GHSA-w5hq-g745-h8pq uuid — cumulative 638d lifetime, 180d moderate cap, " +
+        "approval recorded for fixture-approver until 2026-10-01: Fixture approval reason.",
+    );
+  }, 12_000);
+
+  it("fails closed before matching when the allowlist has no readable history", () => {
+    const res = runMulti({
+      entries: [uuidEntry(VERTEXAI)],
+      npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE),
+      history: "none",
+    });
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain("FAILED TO READ ALLOWLIST HISTORY");
+    expect(res.stdout).not.toContain("NOT allowlisted");
+  }, 12_000);
+
+  it("fails closed before matching when the allowlist file cannot be read", () => {
+    const res = runMulti({
+      entries: [uuidEntry(VERTEXAI)],
+      npm: uuidAt(VERTEXAI_NODE, GTOKEN_NODE),
+      history: "unreadable",
+    });
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain("cannot read");
+    expect(res.stdout).not.toContain("NOT allowlisted");
+  }, 12_000);
+});
+
+// ─── Cumulative lifetime and over-cap approval (#2897) ──────
+
+describe("cumulative allowlist lifetime (#2897)", () => {
+  const GHSA = "GHSA-aaaa-bbbb-cccc";
+  const NEW_GHSA = "GHSA-dddd-eeee-ffff";
+  const policy = ALLOWLIST.policy;
+  const entry = (extra: Record<string, unknown> = {}) => ({
+    ghsa: GHSA,
+    package: "pkg-a",
+    severity: "high",
+    class: "remediation-available",
+    sources: ["bun"],
+    approvedBy: "fixture",
+    introducedBy: "fixture -> pkg-a",
+    reason: "Fixture entry.",
+    added: "2026-09-01",
+    expires: "2026-10-01",
+    removeWhen: "the fixture resolves a patched copy",
+    ...extra,
+  });
+
+  /** Runs one git command in a fixture repo with a fixed commit date. */
+  function gitAt(root: string, date: string, args: string[]) {
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "fixture",
+      GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+      GIT_COMMITTER_NAME: "fixture",
+      GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+      GIT_AUTHOR_DATE: date,
+      GIT_COMMITTER_DATE: date,
+    };
+    const res = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", env, timeout: 20_000 });
+    if (res.status !== 0) throw new Error(`fixture git ${args[0]} failed (${res.status}): ${res.stderr || res.stdout || res.error?.message}`);
+    return res.stdout;
+  }
+
+  /** A real repository with commits of the supplied allowlist snapshots. */
+  function historyRepo(commits: { date: string; entries: object[]; raw?: string }[]) {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-history-"));
+    mkdirSync(join(root, ".github"), { recursive: true });
+    gitAt(root, commits[0]!.date, ["init", "-q"]);
+    commits.forEach((commit, i) => {
+      writeFileSync(join(root, ".github/audit-allowlist.json"), commit.raw ?? JSON.stringify({ policy, entries: commit.entries }));
+      gitAt(root, commit.date, ["add", ".github/audit-allowlist.json"]);
+      gitAt(root, commit.date, ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "--allow-empty", "-q", "-m", `fixture ${i}`]);
+    });
+    pinFixtureHistory(root);
+    return root;
+  }
+
+  for (const date of ["2026-02-30", "2026-04-31", "2025-02-29", "2026-13-01"]) {
+    for (const field of ["added", "expires"]) {
+      it(`rejects nonexistent ${field} ${date} with a calendar-date problem`, () => {
+        expect(validateAllowlist({ policy, entries: [entry({ [field]: date })] }, new Date("2026-09-21")).join("\n"))
+          .toContain(`"${field}" must be a real calendar date (YYYY-MM-DD)`);
+      });
+    }
+    for (const field of ["approvedOn", "expires"]) {
+      it(`rejects nonexistent overCapApproval.${field} ${date} with a calendar-date problem`, () => {
+        const candidate = entry({
+          overCapApproval: { approvedBy: "fixture", reason: "Fixture approval.", approvedOn: "2026-09-01", expires: "2026-10-01", [field]: date },
+        });
+        expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-09-21")).join("\n"))
+          .toContain(`"overCapApproval.${field}" must be a real calendar date (YYYY-MM-DD)`);
+      });
+    }
+    it(`rejects nonexistent first history day ${date} with a calendar-date problem`, () => {
+      const firstDays = new Map([[GHSA.toUpperCase(), date]]);
+      expect(validateAllowlistHistory({ entries: [entry()] }, firstDays, new Date("2026-09-21")).join("\n"))
+        .toContain("first history day must be a real calendar date (YYYY-MM-DD)");
+    });
+    it(`rejects nonexistent AUDIT_GATE_TODAY ${date} before reading inputs`, () => {
+      const res = spawnSync(process.execPath, [join(REPO_ROOT, "scripts/audit-gate.mjs")], {
+        encoding: "utf8", env: { ...process.env, AUDIT_GATE_TODAY: date }, timeout: 12_000,
+      });
+      expect(res.status).toBe(2);
+      expect(res.stderr).toContain("AUDIT_GATE_TODAY must be a real calendar date (YYYY-MM-DD)");
+      expect(res.stderr).not.toContain("missing --npm-install-prefix");
+    });
+  }
+
+  for (const [date, nextDay] of [["2024-02-29", "2024-03-01"], ["2026-09-01", "2026-09-02"]]) {
+    it(`accepts calendar date ${date} in entries, approvals and history`, () => {
+      const candidate = entry({
+        added: date, expires: nextDay,
+        overCapApproval: { approvedBy: "fixture", reason: "Fixture approval.", approvedOn: date, expires: nextDay },
+      });
+      expect(validateAllowlist({ policy, entries: [candidate] }, new Date(date!))).toEqual([]);
+      expect(validateAllowlistHistory({ entries: [candidate] }, new Map([[GHSA.toUpperCase(), date]]), new Date(date!))).toEqual([]);
+    });
+  }
+
+  it("rejects a nonexistent added date that normalizes to a shorter lifetime than the Git history", () => {
+    const root = historyRepo([{ date: "2026-03-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      const firstDays = readFixtureHistory(root);
+      const firstDay = firstDays.get(GHSA.toUpperCase());
+      expect(firstDay).toBe("2026-03-01");
+      const candidate = entry({ added: "2026-02-30", expires: "2026-05-01" });
+      expect((Date.parse(candidate.expires) - Date.parse(candidate.added)) / 86_400_000).toBe(60);
+      expect((Date.parse(candidate.expires) - Date.parse(firstDay!)) / 86_400_000).toBe(61);
+      expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-03-01")).join("\n"))
+        .toContain('"added" must be a real calendar date (YYYY-MM-DD)');
+      expect(validateAllowlistHistory({ entries: [candidate] }, firstDays, new Date("2026-03-01")).join("\n"))
+        .toContain('"added" must be a real calendar date (YYYY-MM-DD)');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a non-canonical GHSA even when history used that casing", () => {
+    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA.toUpperCase() }] }]);
+    try {
+      expect(validateAllowlist({ policy, entries: [entry({ ghsa: GHSA.toUpperCase() })] }, new Date("2026-09-21")).join("\n"))
+        .toContain('"ghsa" must use canonical casing');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("finds a canonical GHSA whose first history commit used different casing", () => {
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA.toUpperCase() }] },
+      { date: "2026-09-20T12:00:00Z", entries: [{ ghsa: GHSA }] },
+    ]);
+    try {
+      const firstDays = readFixtureHistory(root);
+      expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
+      expect(validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21"))).not.toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a renewal after a split-line ghsa field is normalized", () => {
+    const original = entry({ added: "2026-09-01", expires: "2026-10-01" });
+    const renewed = entry({ added: "2026-09-20", expires: "2026-11-15" });
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [original], raw: JSON.stringify({ policy, entries: [original] }).replace('"ghsa":', '"ghsa":\n') },
+      { date: "2026-09-20T12:00:00Z", entries: [original] },
+      { date: "2026-09-21T12:00:00Z", entries: [renewed] },
+    ]);
+    try {
+      const firstDays = readFixtureHistory(root);
+      expect(validateAllowlist({ policy, entries: [renewed] }, new Date("2026-09-21"))).toEqual([]);
+      const problems = validateAllowlistHistory({ policy, entries: [renewed] }, firstDays, new Date("2026-09-21"));
+      expect(problems.join("\n")).toContain("first day this advisory appears in parsed allowlist history (2026-09-01)");
+      expect(problems.join("\n")).toContain("lifetime cap:");
+      expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
+      expect(validateAllowlist({ policy, entries: [{ ...renewed, added: firstDays.get(GHSA.toUpperCase()) }] }, new Date("2026-09-21")).join("\n"))
+        .toContain('lifetime 75d exceeds the 60d cap');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("names an invalid JSON snapshot even when later history is valid", () => {
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [], raw: '{"entries":[' },
+      { date: "2026-09-20T12:00:00Z", entries: [entry()] },
+    ]);
+    try {
+      const sha = gitAt(root, "2026-09-21T12:00:00Z", ["rev-parse", "HEAD~1"]).trim();
+      expect(() => readFixtureHistory(root)).toThrow(`cannot parse allowlist snapshot ${sha}:.github/audit-allowlist.json`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /** Writes a snapshot and commits it at the supplied committer date. */
+  function commitPath(root: string, date: string, path: string, value: object, message: string) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), JSON.stringify(value));
+    gitAt(root, date, ["add", "-A", "."]);
+    gitAt(root, date, ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", message]);
+  }
+
+  for (const operation of ["rename", "delete"] as const) {
+    it(`refuses a ${operation} after the pinned start even when the fixed path is restored`, () => {
+      const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [entry()] }]);
+      try {
+        if (operation === "rename") gitAt(root, "2026-09-05T12:00:00Z", ["mv", ".github/audit-allowlist.json", ".github/old-allowlist.json"]);
+        else rmSync(join(root, ".github/audit-allowlist.json"));
+        gitAt(root, "2026-09-05T12:00:00Z", ["add", "-A", "."]);
+        gitAt(root, "2026-09-05T12:00:00Z", ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", operation]);
+        const missing = gitAt(root, "2026-09-05T12:00:00Z", ["rev-parse", "HEAD"]).trim();
+        commitPath(root, "2026-09-10T12:00:00Z", ".github/audit-allowlist.json", { entries: [entry()] }, "restore");
+        expect(() => readFixtureHistory(root)).toThrow(`allowlist lineage cannot be established: missing .github/audit-allowlist.json at ${missing}`);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("reads an escaped advisory id from the pinned snapshot", () => {
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [], raw: JSON.stringify({ entries: [entry()] }).replace("GHSA", "\\u0047HSA") },
+      { date: "2026-09-20T12:00:00Z", entries: [entry()] },
+    ]);
+    try {
+      expect(readFixtureHistory(root).get(GHSA.toUpperCase())).toBe("2026-09-01");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a pinned start outside HEAD ancestry", () => {
+    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [entry()] }]);
+    try {
+      const start = gitAt(root, "2026-09-01T12:00:00Z", ["rev-parse", "HEAD"]).trim();
+      gitAt(root, "2026-09-02T12:00:00Z", ["checkout", "--orphan", "unrelated"]);
+      gitAt(root, "2026-09-02T12:00:00Z", ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "unrelated root"]);
+      expect(() => readFixtureHistory(root)).toThrow(`allowlist lineage cannot be established: pinned start ${start} is not an ancestor of HEAD`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores snapshots outside the pinned start's descendants", () => {
+    const root = historyRepo([
+      { date: "2026-08-01T12:00:00Z", entries: [], raw: "invalid JSON" },
+      { date: "2026-09-01T12:00:00Z", entries: [entry()] },
+    ]);
+    try {
+      pinFixtureHistory(root, gitAt(root, "2026-09-01T12:00:00Z", ["rev-parse", "HEAD"]).trim());
+      expect(readFixtureHistory(root).get(GHSA.toUpperCase())).toBe("2026-09-01");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  for (const first of ["2026-09-10", "2030-01-01"]) {
+    it(`keeps first introduction ${first} through removal and an earlier-dated reintroduction`, () => {
+      const root = historyRepo([
+        { date: `${first}T12:00:00Z`, entries: [entry()] },
+        { date: "2026-09-15T12:00:00Z", entries: [] },
+        { date: "2026-08-01T12:00:00Z", entries: [entry()] },
+      ]);
+      try {
+        const days = readFixtureHistory(root);
+        expect(days.get(GHSA.toUpperCase())).toBe(first);
+        if (first === "2030-01-01") {
+          expect(validateAllowlistHistory({ entries: [entry()] }, days, new Date("2026-09-21")).join("\n"))
+            .toContain("first history day (2030-01-01) is after today (2026-09-21)");
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("reads first appearance from a side-branch commit merged later", () => {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-merge-"));
+    try {
+      gitAt(root, "2026-09-01T12:00:00Z", ["init", "-q", "-b", "main"]);
+      commitPath(root, "2026-09-01T12:00:00Z", ".github/audit-allowlist.json",
+        { policy, entries: [] }, "base");
+      pinFixtureHistory(root);
+      gitAt(root, "2026-09-02T12:00:00Z", ["checkout", "-q", "-b", "side"]);
+      commitPath(root, "2026-09-05T12:00:00Z", ".github/audit-allowlist.json",
+        { policy, entries: [entry({ ghsa: NEW_GHSA, added: "2026-09-05" })] }, "side adds the advisory");
+      gitAt(root, "2026-09-10T12:00:00Z", ["checkout", "-q", "main"]);
+      writeFileSync(join(root, "README.md"), "fixture\n");
+      gitAt(root, "2026-09-10T12:00:00Z", ["add", "README.md"]);
+      gitAt(root, "2026-09-10T12:00:00Z", ["-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-q", "-m", "main moves on"]);
+      gitAt(root, "2026-09-15T12:00:00Z", ["merge", "--no-ff", "-q", "-m", "merge side", "side"]);
+      expect(readFixtureHistory(root).get(NEW_GHSA.toUpperCase())).toBe("2026-09-05");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an introduction day when a descendant has an earlier committer date", () => {
+    const root = historyRepo([
+      { date: "2026-09-10T12:00:00Z", entries: [entry()] },
+      { date: "2026-08-01T12:00:00Z", entries: [entry()] },
+    ]);
+    try {
+      expect(readFixtureHistory(root).get(GHSA.toUpperCase())).toBe("2026-09-10");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a future-dated first history commit", () => {
+    const root = historyRepo([{ date: "2030-01-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      expect(validateAllowlistHistory({ entries: [entry({ added: "2026-09-01" })] }, readFixtureHistory(root), new Date("2026-09-21")).join("\n"))
+        .toContain("first history day (2030-01-01) is after today (2026-09-21)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a future added date with existing history", () => {
+    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      const history = readFixtureHistory(root);
+      expect(history.get(GHSA.toUpperCase())).toBe("2026-09-01");
+      const candidate = entry({ added: "2026-09-22", expires: "2026-10-01" });
+      expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-09-21")).join("\n"))
+        .toContain('"added" (2026-09-22) is after today (2026-09-21)');
+      expect(validateAllowlistHistory({ entries: [candidate] }, history, new Date("2026-09-21")).join("\n"))
+        .toContain('"added" (2026-09-22) is after today (2026-09-21)');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a future approvedOn in a history-backed entry", () => {
+    const root = historyRepo([{ date: "2026-08-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      const candidate = entry({
+        added: "2026-07-01",
+        expires: "2026-09-20",
+        overCapApproval: {
+          approvedBy: "fixture-approver",
+          reason: "Fixture approval reason.",
+          approvedOn: "2026-08-03",
+          expires: "2026-09-25",
+        },
+      });
+      expect(readFixtureHistory(root).get(GHSA.toUpperCase())).toBe("2026-08-01");
+      expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-08-02")).join("\n"))
+        .toContain('"overCapApproval.approvedOn" (2026-08-03) is after today (2026-08-02)');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a future approvedOn even when the entry is within its cap", () => {
+    const root = historyRepo([{ date: "2026-08-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      const candidate = entry({
+        added: "2026-08-01",
+        expires: "2026-09-01",
+        overCapApproval: {
+          approvedBy: "fixture-approver",
+          reason: "Fixture approval reason.",
+          approvedOn: "2026-08-03",
+          expires: "2026-09-25",
+        },
+      });
+      expect(readFixtureHistory(root).get(GHSA.toUpperCase())).toBe("2026-08-01");
+      expect(validateAllowlist({ policy, entries: [candidate] }, new Date("2026-08-02")).join("\n"))
+        .toContain('"overCapApproval.approvedOn" (2026-08-03) is after today (2026-08-02)');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a renewal that moves added later", () => {
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] },
+      { date: "2026-09-20T12:00:00Z", entries: [{ ghsa: GHSA }] },
+    ]);
+    try {
+      const firstDays = readFixtureHistory(root);
+      expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
+      expect(
+        validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21")).join("\n"),
+      ).toContain(
+        '"added" (2026-09-20) is later than the first day this advisory appears in parsed allowlist history (2026-09-01)',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a re-key to another source and chain", () => {
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] },
+      { date: "2026-09-20T12:00:00Z", entries: [{ ghsa: GHSA, package: "pkg-b", sources: ["npm-install"] }] },
+    ]);
+    try {
+      const firstDays = readFixtureHistory(root);
+      expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
+      expect(
+        validateAllowlistHistory(
+          { entries: [entry({ package: "pkg-b", sources: ["npm-install"], added: "2026-09-20" })] },
+          firstDays,
+          new Date("2026-09-21"),
+        ).join("\n"),
+      ).toContain("is later than the first day this advisory appears in parsed allowlist history (2026-09-01)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a delete-then-re-add", () => {
+    const root = historyRepo([
+      { date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] },
+      { date: "2026-09-10T12:00:00Z", entries: [] },
+      { date: "2026-09-20T12:00:00Z", entries: [{ ghsa: GHSA }] },
+    ]);
+    try {
+      const firstDays = readFixtureHistory(root);
+      expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
+      expect(
+        validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21")).join("\n"),
+      ).toContain("first day this advisory appears in parsed allowlist history (2026-09-01)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts an added date moved earlier", () => {
+    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      expect(validateAllowlistHistory({ entries: [entry({ added: "2026-08-15" })] }, readFixtureHistory(root), new Date("2026-09-21"))).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a new id on or before today and rejects one added later", () => {
+    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    try {
+      const firstDays = readFixtureHistory(root);
+      expect(firstDays.has(NEW_GHSA.toUpperCase())).toBe(false);
+      expect(
+        validateAllowlistHistory({ entries: [entry({ ghsa: NEW_GHSA, added: "2026-09-15" })] }, firstDays, new Date("2026-09-15")),
+      ).toEqual([]);
+      expect(
+        validateAllowlistHistory({ entries: [entry({ ghsa: NEW_GHSA, added: "2026-09-16" })] }, firstDays, new Date("2026-09-15")).join("\n"),
+      ).toContain("today (2026-09-15), and no parsed snapshot contained this advisory id");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a shallow history", () => {
+    const root = historyRepo([{ date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA }] }]);
+    const shallow = mkdtempSync(join(tmpdir(), "flair-audit-shallow-"));
+    try {
+      const clone = spawnSync("git", ["clone", "-q", "--depth", "1", `file://${root}`, shallow], {
+        encoding: "utf8",
+        timeout: 20_000,
+      });
+      expect(clone.status).toBe(0);
+      expect(() => readAllowlistHistory(shallow)).toThrow(/allowlist lineage cannot be established: .*shallow clone/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(shallow, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an unreadable allowlist history", () => {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-unreadable-"));
+    try {
+      mkdirSync(join(root, ".github"), { recursive: true });
+      symlinkSync(join(root, ".github/missing.json"), join(root, ".github/audit-allowlist.json"));
+      expect(() => readAllowlistHistory(root)).toThrow(/cannot read/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a failed git call", () => {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-nogit-"));
+    try {
+      mkdirSync(join(root, ".github"), { recursive: true });
+      writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({ policy, entries: [] }));
+      expect(() => readAllowlistHistory(root)).toThrow(/git rev-parse failed/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  const TODAY = new Date("2026-08-02");
+  const validApproval = {
+    approvedBy: "fixture-approver",
+    reason: "Fixture approval reason.",
+    approvedOn: "2026-08-01",
+    expires: "2026-09-25",
+  };
+  const overCapEntry = (extra: Record<string, unknown> = {}) =>
+    entry({ added: "2026-07-01", expires: "2026-09-20", ...extra });
+  const problems = (entryValue: object) =>
+    validateAllowlist({ policy, entries: [entryValue] }, TODAY).join("\n");
+
+  it("rejects an over-cap entry with no overCapApproval", () => {
+    expect(problems(overCapEntry())).toContain("lifetime 81d exceeds the 60d cap");
+    expect(problems(overCapEntry())).toContain("no overCapApproval is present");
+  });
+
+  it("accepts an over-cap entry with a valid overCapApproval", () => {
+    expect(problems(overCapEntry({ overCapApproval: validApproval }))).toBe("");
+  });
+
+  it("rejects an approval missing a member or carrying a blank reason", () => {
+    const missing = { ...validApproval } as Record<string, unknown>;
+    delete missing.reason;
+    expect(problems(overCapEntry({ overCapApproval: missing }))).toContain('"overCapApproval.reason" is required');
+    expect(problems(overCapEntry({ overCapApproval: { ...validApproval, approvedBy: "  " } }))).toContain(
+      '"overCapApproval.approvedBy" is required and must be non-blank',
+    );
+  });
+
+  it("rejects an approval with an unreal calendar date", () => {
+    expect(problems(overCapEntry({ overCapApproval: { ...validApproval, approvedOn: "2026-02-30" } }))).toContain(
+      '"overCapApproval.approvedOn" must be a real calendar date',
+    );
+  });
+
+  it("rejects an expired approval", () => {
+    expect(
+      problems(
+        overCapEntry({
+          added: "2026-05-01",
+          expires: "2026-07-01",
+          overCapApproval: { ...validApproval, approvedOn: "2026-06-01", expires: "2026-07-01" },
+        }),
+      ),
+    ).toContain("the over-cap approval EXPIRED on 2026-07-01");
+  });
+
+  it("rejects an entry that outlives its approval", () => {
+    expect(
+      problems(
+        overCapEntry({
+          overCapApproval: { ...validApproval, expires: "2026-09-10" },
+        }),
+      ),
+    ).toContain("the entry expires 2026-09-20, after the approval's expiry 2026-09-10");
+  });
+
+  it("rejects an approval longer than the severity cap", () => {
+    expect(
+      problems(
+        overCapEntry({
+          expires: "2026-09-01",
+          overCapApproval: { ...validApproval, approvedOn: "2026-06-01", expires: "2026-09-10" },
+        }),
+      ),
+    ).toContain("the approval lasts 101d, beyond the 60d cap");
+  });
+
+  it("rejects an approval dated after today", () => {
+    expect(
+      problems(overCapEntry({ overCapApproval: { ...validApproval, approvedOn: "2026-09-01" } })),
+    ).toContain('"overCapApproval.approvedOn" (2026-09-01) is after today (2026-08-02)');
+  });
+
+  it("rejects an unknown severity or a missing cap instead of skipping the cap check", () => {
+    expect(problems(overCapEntry({ severity: "severe" }))).toContain('no lifetime cap is configured for severity "severe"');
+    expect(validateAllowlist({ policy: { maxLifetimeDaysBySeverity: {} }, entries: [entry()] }, TODAY).join("\n")).toContain(
+      'policy.maxLifetimeDaysBySeverity is missing "critical"',
+    );
+  });
+});
+
+// ─── Pinned lifetime ceilings (#2973) ────────────────────────────────────────
+
+describe("pinned lifetime ceilings", () => {
+  const TODAY = new Date("2026-11-02");
+  const SEVERITIES = ["critical", "high", "moderate", "low"] as const;
+  const policy = (overrides: Record<string, unknown> = {}) => ({
+    maxLifetimeDaysBySeverity: {
+      critical: 30, high: 60, moderate: 180, low: 180, ...overrides,
+    },
+  });
+  const problems = (allowlist: object) => validateAllowlist(allowlist, TODAY).join("\n");
+  const entryAt = (severity: string, days: number) => ({
+    ghsa: "GHSA-aaaa-bbbb-cccc",
+    package: "pkg-a",
+    severity,
+    class: "remediation-available",
+    sources: ["bun"],
+    approvedBy: "reviewer-a",
+    introducedBy: "pkg-a -> pkg-b",
+    reason: "Fixture entry for the pinned ceiling tests.",
+    added: "2026-01-01",
+    expires: new Date(Date.parse("2026-01-01T00:00:00Z") + days * 86_400_000).toISOString().slice(0, 10),
+    removeWhen: "the fixture resolves a patched copy",
+  });
+
+  for (const severity of SEVERITIES) {
+    const ceiling = MAX_LIFETIME_DAYS_BY_SEVERITY[severity];
+
+    it(`accepts a policy block declaring ${severity} at its ${ceiling}d pinned ceiling`, () => {
+      expect(problems({ policy: policy(), entries: [] })).toBe("");
+    });
+
+    it(`accepts an entry at ${severity}'s ${ceiling}d ceiling`, () => {
+      expect(problems({ policy: policy(), entries: [entryAt(severity, ceiling)] })).toBe("");
+    });
+
+    it(`rejects an entry one day over ${severity}'s ${ceiling}d ceiling`, () => {
+      expect(problems({ policy: policy(), entries: [entryAt(severity, ceiling + 1)] })).toContain(
+        `lifetime ${ceiling + 1}d exceeds the ${ceiling}d cap for severity "${severity}"`,
+      );
+    });
+
+    it(`accepts ${severity} below its ${ceiling}d pinned ceiling`, () => {
+      expect(problems({ policy: policy({ [severity]: ceiling - 1 }), entries: [] })).toBe("");
+    });
+
+    it(`rejects ${severity} above its ${ceiling}d pinned ceiling`, () => {
+      expect(problems({ policy: policy({ [severity]: ceiling + 1 }), entries: [] })).toContain(
+        `is ${ceiling + 1}d, above the ${ceiling}d ceiling pinned in scripts/audit-gate.mjs`,
+      );
+    });
+
+    it(`enforces a below-ceiling cap on ${severity} entries`, () => {
+      expect(problems({ policy: policy({ [severity]: ceiling - 1 }), entries: [entryAt(severity, ceiling)] }))
+        .toContain(`lifetime ${ceiling}d exceeds the ${ceiling - 1}d cap for severity "${severity}"`);
+    });
+
+    it(`rejects a policy block that omits ${severity}`, () => {
+      const partial = policy();
+      delete (partial.maxLifetimeDaysBySeverity as Record<string, unknown>)[severity];
+      expect(problems({ policy: partial, entries: [] })).toContain(
+        `is missing "${severity}"; its pinned ceiling is ${ceiling}d`,
+      );
+    });
+  }
+
+  for (const [value, label] of [
+    ["30", "a numeric string"], [null, "null"], [0, "zero"], [-1, "a negative number"],
+    [Number.NaN, "NaN"], [Number.POSITIVE_INFINITY, "Infinity"], ["NaN", "the string NaN"],
+    ["Infinity", "the string Infinity"],
+  ] as const) {
+    it(`rejects ${label} as a severity cap`, () => {
+      expect(problems({ policy: policy({ critical: value }), entries: [] })).toContain(
+        'policy.maxLifetimeDaysBySeverity["critical"] must be a finite positive number',
+      );
+    });
+  }
+
+  it("names the derived cap in the over-cap report when the policy declares a lower one", () => {
+    const declared = policy({ high: 30 });
+    const caps = lifetimeCapsFromPolicy({ policy: declared }, []);
+    expect(caps.high).toBe(30);
+    const entry = {
+      ...entryAt("high", 40),
+      overCapApproval: {
+        approvedBy: "fixture-approver",
+        reason: "Fixture approval reason.",
+        approvedOn: "2026-11-01",
+        expires: "2026-11-30",
+      },
+    };
+    const lines = overCapReportLines({ policy: declared, entries: [entry] }, caps);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("30d high cap");
+  });
+
+  it("reports against the caps it is given, not the raw policy block", () => {
+    const declared = policy({ high: 180 });
+    const policyProblems: string[] = [];
+    const caps = lifetimeCapsFromPolicy({ policy: declared }, policyProblems);
+    expect(policyProblems.join("\n")).toContain("above the 60d ceiling");
+    expect(caps.high).toBe(60);
+    const entry = {
+      ...entryAt("high", 90),
+      overCapApproval: {
+        approvedBy: "fixture-approver",
+        reason: "Fixture approval reason.",
+        approvedOn: "2026-11-01",
+        expires: "2026-11-30",
+      },
+    };
+    const lines = overCapReportLines({ policy: declared, entries: [entry] }, caps);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("60d high cap");
+  });
+
+  it("rejects a severity outside the four instead of accepting a new cap", () => {
+    expect(problems({ policy: policy({ unknown: 365 }), entries: [] })).toContain(
+      'names "unknown", which has no pinned ceiling',
+    );
+  });
+
+  it("keeps the committed allowlist at or below every pinned ceiling", () => {
+    expect(validateAllowlist(ALLOWLIST, ALLOWLIST_AS_OF).join("\n")).toBe("");
+    for (const severity of SEVERITIES) {
+      expect(ALLOWLIST.policy.maxLifetimeDaysBySeverity[severity])
+        .toBeLessThanOrEqual(MAX_LIFETIME_DAYS_BY_SEVERITY[severity]);
+    }
+  });
+
+  function runPolicyGate(fixturePolicy: object) {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-policy-"));
+    try {
+      for (const dir of ["scripts", ".github", "bin", "home", "tmp"]) mkdirSync(join(root, dir));
+      writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts", "audit-gate.mjs")));
+      writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({ policy: fixturePolicy, entries: [] }));
+      commitAllowlistHistory(root);
+      const prefixOf = (source: string) => join(root, `prefix-${source}`);
+      writeIdentities(root, prefixOf);
+      writeFileSync(join(root, "bin/bun"), "#!/bin/sh\nprintf '{}\\n'\n");
+      writeFileSync(join(root, "bin/npm"), "#!/bin/sh\nprintf '%s\\n' '{\"vulnerabilities\":{}}'\n");
+      chmodSync(join(root, "bin/bun"), 0o755);
+      chmodSync(join(root, "bin/npm"), 0o755);
+      return spawnSync(process.execPath, [join(root, "scripts/audit-gate.mjs"), ...prefixArgs(prefixOf)], {
+        encoding: "utf8",
+        timeout: 10_000,
+        env: {
+          ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`,
+          HOME: join(root, "home"), TMPDIR: join(root, "tmp"), AUDIT_GATE_TODAY: "2026-11-02",
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+        },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("passes the real gate with the committed policy", () => {
+    const res = runPolicyGate(ALLOWLIST.policy);
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("PASS —");
+  }, 12_000);
+
+  it("fails the real gate above a pinned ceiling, naming the severity", () => {
+    const res = runPolicyGate(policy({ critical: 31 }));
+    expect(res.error).toBeUndefined();
+    expect(res.status).not.toBe(0);
+    expect(res.stdout).toContain('["critical"] is 31d, above the 30d ceiling pinned in scripts/audit-gate.mjs');
+    expect(res.stdout).not.toContain("PASS —");
+  }, 12_000);
+});
+
 // ─── Allowlist integrity ─────────────────────────────────────────────────────
+
+describe("the as-of date the committed allowlist is checked against (flair#3026)", () => {
+  const now = Date.parse("2026-11-11T12:00:00Z");
+
+  it("is the latest added date (never earlier than 2026-11-02) while every added date is in the past", () => {
+    expect(allowlistAsOf([{ added: "2026-10-01" }, { added: "2026-11-09" }], now).toISOString().slice(0, 10)).toBe("2026-11-09");
+    expect(allowlistAsOf([{ added: "2026-10-01" }], now).toISOString().slice(0, 10)).toBe("2026-11-02");
+  });
+
+  it("is capped at the real date, so a future added date is still reported", () => {
+    const entries = [{ added: "2026-11-09" }, { added: "2026-11-12" }];
+    expect(allowlistAsOf(entries, now).getTime()).toBe(now);
+    const future = structuredClone(ALLOWLIST);
+    future.entries[0].added = "2026-11-12";
+    const problems = validateAllowlist(future, allowlistAsOf(future.entries, now)).join("\n");
+    expect(problems).toContain(`"added" (2026-11-12) is after today (2026-11-11)`);
+  });
+
+  it("skips an unparseable added date, which the schema check then reports", () => {
+    expect(allowlistAsOf([{ added: "2026-11-09" }, { added: "not-a-date" }], now).toISOString().slice(0, 10)).toBe("2026-11-09");
+    expect(allowlistAsOf([{ added: "not-a-date" }], now).toISOString().slice(0, 10)).toBe("2026-11-02");
+    const bad = structuredClone(ALLOWLIST);
+    bad.entries[0].added = "not-a-date";
+    expect(validateAllowlist(bad, allowlistAsOf(bad.entries, now)).join("\n")).toContain(
+      `"added" must be a real calendar date (YYYY-MM-DD)`,
+    );
+  });
+});
 
 describe("the committed allowlist", () => {
   it("passes its own schema validation", () => {
-    expect(validateAllowlist(ALLOWLIST, new Date("2026-07-27"))).toEqual([]);
+    expect(validateAllowlist(ALLOWLIST, ALLOWLIST_AS_OF)).toEqual([]);
   });
 
   it("gives every entry a reason, an expiry and a removal condition", () => {
@@ -811,14 +2064,17 @@ describe("the committed allowlist", () => {
     }
   });
 
-  it("caps how long an exception may live, by severity", () => {
+  it("caps how long an exception may live, by severity, allowing only a valid over-cap approval", () => {
     // An unexpirable exception is how the original defect survived.
     const caps = ALLOWLIST.policy.maxLifetimeDaysBySeverity;
     expect(caps.critical).toBeLessThanOrEqual(30);
     for (const e of ALLOWLIST.entries) {
       const days = (Date.parse(e.expires) - Date.parse(e.added)) / 86_400_000;
-      expect(days).toBeLessThanOrEqual(caps[e.severity]);
+      const cap = caps[e.severity];
+      expect(typeof cap).toBe("number");
       expect(days).toBeGreaterThan(0);
+      if (days > cap) expect(overCapApprovalProblems(e, ALLOWLIST_AS_OF, cap)).toEqual([]);
+      else expect(days).toBeLessThanOrEqual(cap);
     }
   });
 
@@ -827,14 +2083,14 @@ describe("the committed allowlist", () => {
     bad.entries[0].severity = "critical";
     bad.entries[0].added = "2026-07-27";
     bad.entries[0].expires = "2027-07-27";
-    const problems = validateAllowlist(bad, new Date("2026-07-27"));
+    const problems = validateAllowlist(bad, ALLOWLIST_AS_OF);
     expect(problems.join("\n")).toContain("exceeds the 30d cap");
   });
 
   it("rejects an entry missing its justification", () => {
     const bad = structuredClone(ALLOWLIST);
     delete bad.entries[0].reason;
-    expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain(
+    expect(validateAllowlist(bad, ALLOWLIST_AS_OF).join("\n")).toContain(
       'missing required field "reason"',
     );
   });
@@ -842,7 +2098,7 @@ describe("the committed allowlist", () => {
   it("rejects an entry missing its removal condition", () => {
     const bad = structuredClone(ALLOWLIST);
     delete bad.entries[0].removeWhen;
-    expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain(
+    expect(validateAllowlist(bad, ALLOWLIST_AS_OF).join("\n")).toContain(
       'missing required field "removeWhen"',
     );
   });
@@ -850,7 +2106,7 @@ describe("the committed allowlist", () => {
   it("rejects a hand-waved removal condition", () => {
     const bad = structuredClone(ALLOWLIST);
     bad.entries[0].removeWhen = "later";
-    expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain(
+    expect(validateAllowlist(bad, ALLOWLIST_AS_OF).join("\n")).toContain(
       "must state the concrete condition",
     );
   });
@@ -858,27 +2114,33 @@ describe("the committed allowlist", () => {
   it("rejects a duplicate advisory id", () => {
     const bad = structuredClone(ALLOWLIST);
     bad.entries.push(structuredClone(bad.entries[0]));
-    expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain("duplicate entry");
+    expect(validateAllowlist(bad, ALLOWLIST_AS_OF).join("\n")).toContain("duplicate entry");
   });
 
   it("rejects an unknown exception class", () => {
     const bad = structuredClone(ALLOWLIST);
     bad.entries[0].class = "because-i-said-so";
-    expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain("unknown class");
+    expect(validateAllowlist(bad, ALLOWLIST_AS_OF).join("\n")).toContain("unknown class");
   });
 
   it("accepts the ADK consumer observation as a source and rejects an unknown one (flair#2398)", () => {
     const ok = structuredClone(ALLOWLIST);
     ok.entries[0].sources = ["npm-install-adk"];
-    expect(validateAllowlist(ok, new Date("2026-07-27"))).toEqual([]);
+    expect(validateAllowlist(ok, ALLOWLIST_AS_OF)).toEqual([]);
     const bad = structuredClone(ALLOWLIST);
     bad.entries[0].sources = ["somewhere-else"];
-    expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain("unknown source");
+    expect(validateAllowlist(bad, ALLOWLIST_AS_OF).join("\n")).toContain("unknown source");
   });
 
-  it("carries the ADK consumer-install observation (uuid, flair#2398)", () => {
+  it("carries the ADK consumer-install observation (uuid, glob and minimatch; flair#2398)", () => {
     const adk = ALLOWLIST.entries.filter((e) => e.sources.includes("npm-install-adk"));
-    expect(adk.map((e) => e.ghsa)).toEqual(["GHSA-w5hq-g745-h8pq"]);
+    // uuid has one entry per copy (the vertexai and gtoken chains).
+    expect(adk.map((e) => e.ghsa).sort()).toEqual([
+      "GHSA-3g3m-2fjr-6pw4",
+      "GHSA-g3hv-75wg-m249",
+      "GHSA-w5hq-g745-h8pq",
+      "GHSA-w5hq-g745-h8pq",
+    ]);
   });
 
   it("marks harper-pinned npm advisories as npm-install-only (NOT-REPORTED-BY-BUN)", () => {
@@ -1236,6 +2498,7 @@ describe("the gate fails closed on a refused stage answer, stand-in tools (flair
         join(root, ".github/audit-allowlist.json"),
         JSON.stringify({ policy: ALLOWLIST.policy, entries: [] }),
       );
+      commitAllowlistHistory(root);
       writeFileSync(join(root, "bin/bun"), `#!/bin/sh\nprintf '%s\\n' '${bunOut}'\n`);
       writeFileSync(join(root, "bin/npm"), `#!/bin/sh\nprintf '%s\\n' '${npmOut}'\n`);
       chmodSync(join(root, "bin/bun"), 0o755);

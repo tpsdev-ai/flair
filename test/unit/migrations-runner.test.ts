@@ -11,12 +11,13 @@ import { describe, it, expect, beforeEach, afterEach, mock, spyOn } from "bun:te
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { format } from "node:util";
 
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
 const { runMigrationCycle } = await import("../../resources/migrations/runner.ts");
 const { MigrationRegistry } = await import("../../resources/migrations/registry.ts");
-const { readMigrationState, writeMigrationStateEntry, defaultStatePath } = await import("../../resources/migrations/state.ts");
+const { readMigrationState, defaultStatePath } = await import("../../resources/migrations/state.ts");
 const { listMigrationProgress, _resetProgressForTests, getCycleStatus } = await import("../../resources/migrations/progress.ts");
 const { getMigrationStatusSnapshot } = await import("../../resources/migrations/status.ts");
 const { _resetInProcessLockForTests } = await import("../../resources/migrations/lock.ts");
@@ -25,6 +26,7 @@ const { createEmbeddingStampMigration } = await import("../../resources/migratio
 const { BatchOutcomeError } = await import("../../resources/migrations/types.ts");
 
 import type { Migration, RunBatchResult } from "../../resources/migrations/types.ts";
+import { seedMigrationStateEntry } from "../helpers/migration-state.ts";
 
 // ─── fake table infra ───────────────────────────────────────────────────────
 
@@ -281,7 +283,7 @@ describe("runMigrationCycle — derived-only happy path (count+marker gate, no h
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -499,7 +501,7 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
   it("a no-pending cycle keeps the count, the ids and the halted status", async () => {
     const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", stamp: "not-yet" }]);
     const relationship = makeStore([]);
-    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-record", {
+    await seedMigrationStateEntry(defaultStatePath(dataDir), "fake-record", {
       lastOutcome: "halted",
       reason: "completion gate failed: rowsRemaining=0, hash envelope mismatch",
       rowsProcessed: 1,
@@ -534,7 +536,7 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
   it("clears an id once a later cycle reads the row at the target, then reports completed", async () => {
     const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", stamp: "not-yet" }]);
     const relationship = makeStore([]);
-    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-clears", {
+    await seedMigrationStateEntry(defaultStatePath(dataDir), "fake-clears", {
       lastOutcome: "halted",
       reason: "completion gate failed: rowsRemaining=0",
       rowsProcessed: 1,
@@ -568,10 +570,10 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
     expect(state["fake-clears"].unconfirmedIds).toBeUndefined();
   });
 
-  it("a failed re-read keeps the id: unknown evidence never clears the record", async () => {
+  it("a failed re-read keeps the id during re-check", async () => {
     const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", stamp: "not-yet" }]);
     const relationship = makeStore([]);
-    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-unknown", {
+    await seedMigrationStateEntry(defaultStatePath(dataDir), "fake-unknown", {
       lastOutcome: "halted",
       reason: "completion gate failed: rowsRemaining=0",
       rowsProcessed: 1,
@@ -600,13 +602,99 @@ describe("runMigrationCycle — a state-file unconfirmed record on a no-pending 
     expect(progress?.rowsUnconfirmed).toBe(1);
     expect(progress?.unconfirmedIds).toEqual(["m2"]);
   });
+
+  async function recheckWithAnswer(answer: unknown): Promise<{ warnings: string[]; output: string }> {
+    const memory = makeStore([{ id: "m2", content: "a", agentId: "a1", createdAt: "2026-01-01T00:00:00.000Z", stamp: "not-yet" }]);
+    const relationship = makeStore([]);
+    await seedMigrationStateEntry(defaultStatePath(dataDir), "fake-unrecognized", {
+      lastOutcome: "halted",
+      reason: "completion gate failed: rowsRemaining=0",
+      rowsProcessed: 1,
+      rowsRemaining: 0,
+      rowsUnconfirmed: 1,
+      unconfirmedIds: ["m2"],
+    });
+    const calls = { detect: 0 };
+    const migration = {
+      ...makeTargetMigration("fake-unrecognized", memory, calls),
+      async checkUnconfirmed() {
+        return answer as "pending";
+      },
+    } satisfies Migration;
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    const otherLogs = (["log", "info", "error", "debug"] as const).map((method) => spyOn(console, method).mockImplementation(() => {}));
+    let warnings: string[];
+    let output: string;
+    try {
+      await runMigrationCycle({
+        registry: buildRegistryWith(migration),
+        getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+        dataDir,
+        runningVersion: "0.1.0",
+        sleep: fastSleep,
+      });
+      expect(warn.mock.calls).toHaveLength(1);
+      expect(warn.mock.calls[0]?.[0]).toBe("[flair-migrations] %s: checkUnconfirmed(%s) answered %s; re-check kept id");
+      warnings = warn.mock.calls.map((c) => format(...c));
+      output = [warn, ...otherLogs].flatMap((log) => log.mock.calls.map((c) => format(...c))).join("\n");
+    } finally {
+      warn.mockRestore();
+      for (const log of otherLogs) log.mockRestore();
+    }
+
+    const progress = listMigrationProgress().find((p) => p.id === "fake-unrecognized");
+    expect(progress?.state).toBe("halted");
+    expect(progress?.rowsUnconfirmed).toBe(1);
+    expect(progress?.unconfirmedIds).toEqual(["m2"]);
+    const state = readMigrationState(defaultStatePath(dataDir));
+    expect(state["fake-unrecognized"].unconfirmedIds).toEqual(["m2"]);
+    return { warnings, output };
+  }
+
+  it("logs a string's type and length without its content and keeps the id (flair#2881)", async () => {
+    const answer = "private-content-sentinel";
+    const { warnings, output } = await recheckWithAnswer(answer);
+    expect(output).not.toContain(answer);
+    expect(warnings).toEqual([
+      `[flair-migrations] fake-unrecognized: checkUnconfirmed(m2) answered string (length ${answer.length}); re-check kept id`,
+    ]);
+  });
+
+  it("logs an object's type without its content and keeps the id (flair#2881)", async () => {
+    const { warnings, output } = await recheckWithAnswer({ content: "private-content-sentinel" });
+    expect(output).not.toContain("private-content-sentinel");
+    expect(warnings).toEqual([expect.stringContaining(" object")]);
+  });
+
+  it("logs a circular object's type and keeps the id (flair#2881)", async () => {
+    const answer: Record<string, unknown> = {};
+    answer.self = answer;
+    const { warnings } = await recheckWithAnswer(answer);
+    expect(warnings).toEqual([expect.stringContaining(" object")]);
+  });
+
+  it.each(["a".repeat(10_000), "\n".repeat(100)])("logs only the type and length for a long or newline-heavy string and keeps the id (flair#2881)", async (answer) => {
+    const { warnings, output } = await recheckWithAnswer(answer);
+    expect(output).not.toContain(answer);
+    expect(warnings).toEqual([
+      `[flair-migrations] fake-unrecognized: checkUnconfirmed(m2) answered string (length ${answer.length}); re-check kept id`,
+    ]);
+  });
+
+  it.each([null, undefined, 42, true, 42n, Symbol("private-content-sentinel"), () => "private-content-sentinel"])("logs typeof for another unrecognized answer and keeps the id (flair#2881)", async (answer) => {
+    const { warnings, output } = await recheckWithAnswer(answer);
+    expect(output).not.toContain("private-content-sentinel");
+    expect(warnings).toEqual([
+      `[flair-migrations] fake-unrecognized: checkUnconfirmed(m2) answered ${typeof answer}; re-check kept id`,
+    ]);
+  });
 });
 
 describe("runMigrationCycle — a recorded unconfirmed row survives a countPending throw and a detect() throw (flair#2840)", () => {
   it("keeps the record in progress, the status snapshot and the state file when countPending throws", async () => {
     const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
     const relationship = makeStore([]);
-    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-preflight-record", {
+    await seedMigrationStateEntry(defaultStatePath(dataDir), "fake-preflight-record", {
       lastOutcome: "halted",
       reason: "completion gate failed: rowsRemaining=0",
       rowsProcessed: 1,
@@ -658,7 +746,7 @@ describe("runMigrationCycle — a recorded unconfirmed row survives a countPendi
   it("keeps the record in progress when detect() throws", async () => {
     const memory = makeStore([{ id: "m9", content: "a", agentId: "a1" }]);
     const relationship = makeStore([]);
-    writeMigrationStateEntry(defaultStatePath(dataDir), "fake-detect-record", {
+    await seedMigrationStateEntry(defaultStatePath(dataDir), "fake-detect-record", {
       lastOutcome: "halted",
       reason: "completion gate failed: rowsRemaining=0",
       rowsProcessed: 1,
@@ -715,7 +803,7 @@ describe("runMigrationCycle — schema-additive happy path (count+full-envelope 
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -751,7 +839,7 @@ describe("runMigrationCycle — schema-additive happy path (count+full-envelope 
       dataDir,
       runningVersion: "0.1.0",
       sleep: meddlingSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true); // the CYCLE completed; the individual migration halted
@@ -792,7 +880,7 @@ describe("runMigrationCycle — shared envelope re-baselines after an earlier mi
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -845,7 +933,7 @@ describe("runMigrationCycle — shared envelope re-baselines after an earlier mi
       dataDir,
       runningVersion: "0.1.0",
       sleep: meddlingSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -872,7 +960,7 @@ describe("runMigrationCycle — content-transform (count+old-row-envelope+new-ro
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -899,7 +987,7 @@ describe("runMigrationCycle — content-transform (count+old-row-envelope+new-ro
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -942,7 +1030,7 @@ describe("runMigrationCycle — pre-flight space ladder", () => {
       runningVersion: "0.1.0",
       sleep: fastSleep,
       spaceProbe: { getFreeBytes: () => 0, getTotalBytes: () => 1_000_000 },
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1014,7 +1102,7 @@ describe("runMigrationCycle — snapshot + content-export fallback both failing 
       sleep: fastSleep,
       snapshotRoot,
       exportRoot,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1048,7 +1136,7 @@ describe("runMigrationCycle — completion gate: row count still nonzero", () =>
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1105,7 +1193,7 @@ describe("runMigrationCycle — flair#807 completion-gate safety net (migration.
         dataDir,
         runningVersion: "0.1.0",
         sleep: fastSleep,
-        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
       });
 
       expect(result.ran).toBe(true);
@@ -1140,7 +1228,7 @@ describe("runMigrationCycle — flair#807 completion-gate safety net (migration.
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1165,7 +1253,7 @@ describe("runMigrationCycle — flair#807 completion-gate safety net (migration.
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1195,7 +1283,7 @@ describe("runMigrationCycle — flair#807 completion-gate safety net (migration.
         dataDir,
         runningVersion: "0.1.0",
         sleep: fastSleep,
-        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
       });
 
       expect(result.ran).toBe(true);
@@ -1230,7 +1318,7 @@ describe("runMigrationCycle — flair#807 completion-gate safety net (migration.
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1273,7 +1361,7 @@ describe("runMigrationCycle — flair#807 completion-gate safety net (migration.
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1553,7 +1641,7 @@ describe("runMigrationCycle — a failed state-file write is logged and surfaced
         runningVersion: "0.1.0",
         sleep: fastSleep,
         statePath: failedStatePath,
-        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
       });
 
       // (b) the DATA outcome is unchanged — the migration still completes.

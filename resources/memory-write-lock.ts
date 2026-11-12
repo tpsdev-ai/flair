@@ -13,25 +13,26 @@
  * archive/expiry action (resources/MemoryMaintenance.ts) and the usage-count
  * writer (resources/usage-recording.ts) (slice 3b part 1); the ordinary
  * (non-skill) feed write-back and the feed dedup repair
- * (resources/MemoryFeed.ts) and both `lastReflected` stamps
+ * (resources/MemoryFeed.ts), skill-tagged `POST /FeedMemories` writes
+ * and both `lastReflected` stamps
  * (resources/Memory.ts's derivedFrom sources and resources/MemoryReflect.ts's
  * gathered sources) (slice 3b part 2); and the federation merge of an
  * incoming Memory row (resources/Federation.ts) and the batch reindex writer
  * (resources/MemoryReindex.ts) (slice 3c); and basement/restore of a
  * non-skill row (resources/MemoryArchive.ts, through the checked write below)
- * (slice 1 part 3a). The other Memory writers convert in later parts.
+ * (slice 1 part 3a); and the Memory skill-version create/update writes
+ * (flair#2950); a fresh skill POST with a server-allocated id takes no per-id
+ * lock. The other Memory writers convert in later parts.
  *
  * A writer that must make its read, decision and write on one committed basis
  * runs under one key per ID of `Memory.primaryStore`'s lock: `["memory", fullStoredId]`.
  * Within one Harper process the lock is per key and shared by its threads
  * (resources/key-lock.ts). A caller opens and settles its owned transaction
- * inside the callback, so the key is held across the commit. Two PUT paths can
- * join a transaction they do not own, which then commits after the put returns
- * and so after the key is released: a put composed into its caller's
- * transaction (manual promotion, via withComposedWriteTransaction in
- * resources/request-transaction.ts), and the admin `_reindex` re-PUT when the
- * request carries an open transaction, which it joins as it did before the lock
- * (with none open, it owns its transaction and commits before the release).
+ * inside the callback, so the key is held across the commit. A put composed
+ * into its caller's transaction (manual promotion, via
+ * withComposedWriteTransaction in resources/request-transaction.ts) joins a
+ * transaction it does not own, which then commits after the put returns and so
+ * after the key is released.
  *
  * A same-id writer that finds the key held waits and retries within its budget
  * ({@link MEMORY_LOCK_ATTEMPTS} attempts with a {@link MEMORY_LOCK_WAIT_MS} ms
@@ -42,10 +43,10 @@
  * below, even while the key is held). A writer that then opens a new owned
  * transaction (the ordinary PUT and PATCH) reads the row as stored at that
  * moment: the holder's committed row when the holder owned its transaction (a
- * composed or `_reindex` holder that joined another transaction may release
- * before that transaction commits). A composed or `_reindex` writer that joins
- * an already-open request transaction reads from that transaction's snapshot
- * instead, which can predate the acquisition. Otherwise it is refused:
+ * composed holder that joined another transaction may release before that
+ * transaction commits). A composed writer that joins an already-open request
+ * transaction reads from that transaction's snapshot instead, which can
+ * predate the acquisition. Otherwise it is refused:
  *
  *  - `503 memory_busy` — the key stayed held for the whole budget. Nothing was
  *    written, so the request can be sent again unchanged. The body carries the
@@ -65,9 +66,15 @@
  *    PUT/PATCH check the addressed id; DELETE also checks the resolved skill
  *    head. An automatic writer that takes the lock through
  *    {@link withMemoryWriteLockOnce} writes nothing to a marked id; the feed
- *    dedup repair records the marker when its committed update's confirmation
- *    read fails or does not show the update, and the other automatic writers
- *    do not set it for their own unconfirmed write, which they report or log.
+ *    write-back and the feed dedup repair record the marker when storage
+ *    withholds their write result, the skill-tagged feed write when storage
+ *    withholds its write result, its rollback could not be confirmed or its
+ *    refusal body has no readable error code, and the dedup
+ *    repair also when its committed
+ *    update's confirmation read fails or does not show the update, while the
+ *    other automatic writers do not set it for their own unconfirmed write,
+ *    which they report or log. A marker names only an id the attempt attempted
+ *    to write (`attemptedWriteIds`), not every id its acquisition held.
  *    A POST that takes the lock checks the ids it locks; a POST that takes
  *    none, and the writers that take no per-id lock, do not check the marker.
  *
@@ -557,4 +564,12 @@ export function memoryLockUnavailableResponse(): Response {
     }),
     { status: 503, headers: { "content-type": "application/json" } },
   );
+}
+
+/** Map a lock outcome to its refusal `Response`, or `null` when the verb ran. */
+export function memoryLockRefusal(outcome: MemoryLockOutcome<unknown>, callerId: string): Response | null {
+  if (outcome.kind === "busy") return memoryBusyResponse(callerId);
+  if (outcome.kind === "unknown") return writeOutcomeUnknownResponse();
+  if (outcome.kind === "unavailable") return memoryLockUnavailableResponse();
+  return null;
 }

@@ -59,6 +59,7 @@ describe("flair#936 — a deliberate elevated call is distinguishable from a for
   it("the advisory names the hazard AND the remedy", () => {
     // An error must enable a response: say what happened and what to do next.
     expect(INTERNAL_BY_OMISSION_WARNING).toContain("[flair-auth]");
+    expect(INTERNAL_BY_OMISSION_WARNING).toContain("without the deliberate-call marker");
     expect(INTERNAL_BY_OMISSION_WARNING).toContain("UNFILTERED");
     expect(INTERNAL_BY_OMISSION_WARNING).toContain("the admin-only gate (allowAdmin) refuses it");
     expect(INTERNAL_BY_OMISSION_WARNING).toContain("agentContext");
