@@ -60,7 +60,7 @@ const GHSA = "GHSA-0000-0000-0001";
 const BULK_REQUEST = "POST /-/npm/v1/security/advisories/bulk";
 const PASS_MARKER = "PASS —";
 /**
- * The six consumer-install inputs: the flag, the allowlist source, the package
+ * The seven consumer-install inputs: the flag, the allowlist source, the package
  * the flag's prefix must hold, and the workspace directory the job packs it
  * from.
  */
@@ -71,6 +71,7 @@ const CONSUMER_INPUTS = [
   { flag: "--openclaw-npm-install-prefix", source: "npm-install-openclaw", pkg: "@tpsdev-ai/openclaw-flair", dir: "packages/openclaw-flair" },
   { flag: "--pi-npm-install-prefix", source: "npm-install-pi", pkg: "@tpsdev-ai/pi-flair", dir: "packages/pi-flair" },
   { flag: "--n8n-npm-install-prefix", source: "npm-install-n8n", pkg: "@tpsdev-ai/n8n-nodes-flair", dir: "packages/n8n-nodes-flair" },
+  { flag: "--bench-npm-install-prefix", source: "npm-install-bench", pkg: "@tpsdev-ai/flair-bench", dir: "packages/flair-bench" },
 ];
 /** The version of every fixture workspace manifest, and so of every packed fixture package. */
 const FIXTURE_VERSION = "1.0.0";
@@ -504,10 +505,11 @@ describe("audit gate with the real bun and npm against a local registry (flair#2
       expect(run.timedOut).toBe(false);
       expect(run.status).toBe(1);
       expect(run.stderr).not.toContain("FAILED TO RUN");
-      // bun's report and the npm report of each of the six fixture prefixes
+      // bun's report and the npm report of each of the seven fixture prefixes
       // (each holds the fixture dependency) see the same advisory, so the gate
-      // counts seven (flair#2398 added the ADK input, flair#2757 four more).
-      expect(run.stdout).toContain("advisories reported: 7 (7 high)");
+      // counts eight (flair#2398 added the ADK input, flair#2757 four more,
+      // flair#2817 the flair-bench input).
+      expect(run.stdout).toContain("advisories reported: 8 (8 high)");
       expect(run.stdout).toContain(`HIGH ${GHSA} in ${DEP} (<1.0.1) is NOT allowlisted`);
       expect(run.stdout).not.toContain(PASS_MARKER);
       expect(bunRequests).toContain(BULK_REQUEST);
@@ -726,6 +728,7 @@ describe("prefix identity against real npm installs (flair#2757)", () => {
   const ROOT = "@tpsdev-ai/flair";
   const MCP = "@tpsdev-ai/flair-mcp";
   const PI = "@tpsdev-ai/pi-flair";
+  const BENCH = "@tpsdev-ai/flair-bench";
   /** Keys of the two extra installs below. */
   const DEV_MCP = "dev-only MCP";
   const BARE_ROOT = "dependency-free root";
@@ -812,6 +815,22 @@ describe("prefix identity against real npm installs (flair#2757)", () => {
     expect(c.bunRequests).toEqual([]);
     expect(c.npmRequests).toEqual([]);
   }
+
+  it(
+    "exits 2 naming both flags when flair-bench and another package's prefixes are exchanged",
+    async () => {
+      const c = await identityCase((real, input) =>
+        input.pkg === BENCH ? real[MCP]! : input.pkg === MCP ? real[BENCH]! : own(real, input));
+      expectRefusedBeforeAudits(
+        c,
+        `--bench-npm-install-prefix ${c.real[MCP]} is not an npm install of the packed ${BENCH}@${FIXTURE_VERSION}`,
+        `found direct dependencies ${MCP}`,
+        `--mcp-npm-install-prefix ${c.real[BENCH]} is not an npm install of the packed ${MCP}@${FIXTURE_VERSION}`,
+        `found direct dependencies ${BENCH}`,
+      );
+    },
+    CASE_BUDGET_MS,
+  );
 
   it(
     "passes when each flag names a real npm install of its own package",
