@@ -28,6 +28,16 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
 const ALLOWLIST = JSON.parse(
   readFileSync(join(REPO_ROOT, ".github", "audit-allowlist.json"), "utf8"),
 );
+// The committed allowlist is checked as of the latest date any entry was added (never earlier than
+// 2026-11-02, the date these checks were pinned to), capped at the real date: deterministic while every
+// `added` is in the past, and an `added` after today still fails "added is after today" (flair#3026).
+// Unparseable `added` values are skipped here and reported by the schema check. Expiry against the real
+// date stays the audit gate's job in CI.
+function allowlistAsOf(entries: Array<{ added: string }>, now: number): Date {
+  const added = entries.map((e) => Date.parse(e.added)).filter(Number.isFinite);
+  return new Date(Math.min(now, Math.max(Date.parse("2026-11-02"), ...added)));
+}
+const ALLOWLIST_AS_OF = allowlistAsOf(ALLOWLIST.entries, Date.now());
 const TEST_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8");
 /**
  * The six consumer-install inputs: the flag, the allowlist source, the package
@@ -1960,7 +1970,7 @@ describe("pinned lifetime ceilings", () => {
   });
 
   it("keeps the committed allowlist at or below every pinned ceiling", () => {
-    expect(problems(ALLOWLIST)).toBe("");
+    expect(validateAllowlist(ALLOWLIST, ALLOWLIST_AS_OF).join("\n")).toBe("");
     for (const severity of SEVERITIES) {
       expect(ALLOWLIST.policy.maxLifetimeDaysBySeverity[severity])
         .toBeLessThanOrEqual(MAX_LIFETIME_DAYS_BY_SEVERITY[severity]);
@@ -2012,9 +2022,37 @@ describe("pinned lifetime ceilings", () => {
 
 // ─── Allowlist integrity ─────────────────────────────────────────────────────
 
+describe("the as-of date the committed allowlist is checked against (flair#3026)", () => {
+  const now = Date.parse("2026-11-11T12:00:00Z");
+
+  it("is the latest added date (never earlier than 2026-11-02) while every added date is in the past", () => {
+    expect(allowlistAsOf([{ added: "2026-10-01" }, { added: "2026-11-09" }], now).toISOString().slice(0, 10)).toBe("2026-11-09");
+    expect(allowlistAsOf([{ added: "2026-10-01" }], now).toISOString().slice(0, 10)).toBe("2026-11-02");
+  });
+
+  it("is capped at the real date, so a future added date is still reported", () => {
+    const entries = [{ added: "2026-11-09" }, { added: "2026-11-12" }];
+    expect(allowlistAsOf(entries, now).getTime()).toBe(now);
+    const future = structuredClone(ALLOWLIST);
+    future.entries[0].added = "2026-11-12";
+    const problems = validateAllowlist(future, allowlistAsOf(future.entries, now)).join("\n");
+    expect(problems).toContain(`"added" (2026-11-12) is after today (2026-11-11)`);
+  });
+
+  it("skips an unparseable added date, which the schema check then reports", () => {
+    expect(allowlistAsOf([{ added: "2026-11-09" }, { added: "not-a-date" }], now).toISOString().slice(0, 10)).toBe("2026-11-09");
+    expect(allowlistAsOf([{ added: "not-a-date" }], now).toISOString().slice(0, 10)).toBe("2026-11-02");
+    const bad = structuredClone(ALLOWLIST);
+    bad.entries[0].added = "not-a-date";
+    expect(validateAllowlist(bad, allowlistAsOf(bad.entries, now)).join("\n")).toContain(
+      `"added" must be a real calendar date (YYYY-MM-DD)`,
+    );
+  });
+});
+
 describe("the committed allowlist", () => {
   it("passes its own schema validation", () => {
-    expect(validateAllowlist(ALLOWLIST, new Date("2026-11-02"))).toEqual([]);
+    expect(validateAllowlist(ALLOWLIST, ALLOWLIST_AS_OF)).toEqual([]);
   });
 
   it("gives every entry a reason, an expiry and a removal condition", () => {
@@ -2034,7 +2072,7 @@ describe("the committed allowlist", () => {
       const cap = caps[e.severity];
       expect(typeof cap).toBe("number");
       expect(days).toBeGreaterThan(0);
-      if (days > cap) expect(overCapApprovalProblems(e, new Date("2026-11-02"), cap)).toEqual([]);
+      if (days > cap) expect(overCapApprovalProblems(e, ALLOWLIST_AS_OF, cap)).toEqual([]);
       else expect(days).toBeLessThanOrEqual(cap);
     }
   });
@@ -2044,14 +2082,14 @@ describe("the committed allowlist", () => {
     bad.entries[0].severity = "critical";
     bad.entries[0].added = "2026-07-27";
     bad.entries[0].expires = "2027-07-27";
-    const problems = validateAllowlist(bad, new Date("2026-11-02"));
+    const problems = validateAllowlist(bad, ALLOWLIST_AS_OF);
     expect(problems.join("\n")).toContain("exceeds the 30d cap");
   });
 
   it("rejects an entry missing its justification", () => {
     const bad = structuredClone(ALLOWLIST);
     delete bad.entries[0].reason;
-    expect(validateAllowlist(bad, new Date("2026-11-02")).join("\n")).toContain(
+    expect(validateAllowlist(bad, ALLOWLIST_AS_OF).join("\n")).toContain(
       'missing required field "reason"',
     );
   });
@@ -2059,7 +2097,7 @@ describe("the committed allowlist", () => {
   it("rejects an entry missing its removal condition", () => {
     const bad = structuredClone(ALLOWLIST);
     delete bad.entries[0].removeWhen;
-    expect(validateAllowlist(bad, new Date("2026-11-02")).join("\n")).toContain(
+    expect(validateAllowlist(bad, ALLOWLIST_AS_OF).join("\n")).toContain(
       'missing required field "removeWhen"',
     );
   });
@@ -2067,7 +2105,7 @@ describe("the committed allowlist", () => {
   it("rejects a hand-waved removal condition", () => {
     const bad = structuredClone(ALLOWLIST);
     bad.entries[0].removeWhen = "later";
-    expect(validateAllowlist(bad, new Date("2026-11-02")).join("\n")).toContain(
+    expect(validateAllowlist(bad, ALLOWLIST_AS_OF).join("\n")).toContain(
       "must state the concrete condition",
     );
   });
@@ -2075,22 +2113,22 @@ describe("the committed allowlist", () => {
   it("rejects a duplicate advisory id", () => {
     const bad = structuredClone(ALLOWLIST);
     bad.entries.push(structuredClone(bad.entries[0]));
-    expect(validateAllowlist(bad, new Date("2026-11-02")).join("\n")).toContain("duplicate entry");
+    expect(validateAllowlist(bad, ALLOWLIST_AS_OF).join("\n")).toContain("duplicate entry");
   });
 
   it("rejects an unknown exception class", () => {
     const bad = structuredClone(ALLOWLIST);
     bad.entries[0].class = "because-i-said-so";
-    expect(validateAllowlist(bad, new Date("2026-11-02")).join("\n")).toContain("unknown class");
+    expect(validateAllowlist(bad, ALLOWLIST_AS_OF).join("\n")).toContain("unknown class");
   });
 
   it("accepts the ADK consumer observation as a source and rejects an unknown one (flair#2398)", () => {
     const ok = structuredClone(ALLOWLIST);
     ok.entries[0].sources = ["npm-install-adk"];
-    expect(validateAllowlist(ok, new Date("2026-11-02"))).toEqual([]);
+    expect(validateAllowlist(ok, ALLOWLIST_AS_OF)).toEqual([]);
     const bad = structuredClone(ALLOWLIST);
     bad.entries[0].sources = ["somewhere-else"];
-    expect(validateAllowlist(bad, new Date("2026-11-02")).join("\n")).toContain("unknown source");
+    expect(validateAllowlist(bad, ALLOWLIST_AS_OF).join("\n")).toContain("unknown source");
   });
 
   it("carries the ADK consumer-install observation (uuid, glob and minimatch; flair#2398)", () => {

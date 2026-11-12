@@ -39,7 +39,7 @@ const PINNED_BUN = /\n  audit:\n[\s\S]*?bun-version: "([^"]+)"/.exec(TEST_YML)?.
 
 /**
  * The day the fixture gate runs as "today": after the committed uuid entries'
- * `added` (2026-10-09) and before their `expires` (2026-11-15).
+ * `added` (2026-10-09) and before their `expires` (2026-11-29).
  */
 const FIXTURE_TODAY = "2026-10-10";
 /** Ports production Flair listens on; a fixture server must never hold one. */
