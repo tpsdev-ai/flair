@@ -27,7 +27,7 @@ import { checkMcpRateLimit } from "./rate-limit.js";
 import { MULTI_WORKER_GUARD_HTTP_NAME } from "./multi-worker-guard.js";
 
 /**
- * Boot guard (flair#1021, flair#1322). Runs only when `FLAIR_MCP_OAUTH` is on.
+ * Boot guard (flair#1021, flair#1322), after the flag and degraded-start checks.
  *
  * The `@harperfast/oauth` component must be declared, and its effective
  * `mcp.enabled` must be true. Effective means the component's own read:
@@ -130,29 +130,32 @@ type EnabledRead =
 /**
  * The component's effective `mcp.enabled` after `coerceConfigBoolean`.
  * Omitted, null, or a deleted non-boolean string is the disabled default.
- * A value that is not a boolean or a string cannot be read that way.
  */
 function readEffectiveMcpEnabled(component: Record<string, unknown>): EnabledRead {
-  if (!Object.prototype.hasOwnProperty.call(component, "mcp") || component.mcp == null) {
-    return { kind: "bool", enabled: false, configured: undefined };
+  try {
+    if (!Object.prototype.hasOwnProperty.call(component, "mcp") || component.mcp == null) {
+      return { kind: "bool", enabled: false, configured: undefined };
+    }
+    if (!isRecord(component.mcp)) {
+      return { kind: "unreadable", detail: "mcp entry is not an object" };
+    }
+    if (!Object.prototype.hasOwnProperty.call(component.mcp, "enabled") || component.mcp.enabled === undefined) {
+      return { kind: "bool", enabled: false, configured: undefined };
+    }
+    const configured = component.mcp.enabled;
+    if (configured === null) return { kind: "bool", enabled: false, configured };
+    const expanded = expandWholeTokenEnv(configured);
+    if (typeof expanded === "boolean") return { kind: "bool", enabled: expanded, configured };
+    if (typeof expanded === "string") {
+      const v = expanded.trim().toLowerCase();
+      if (v === "true") return { kind: "bool", enabled: true, configured };
+      if (v === "false") return { kind: "bool", enabled: false, configured };
+      return { kind: "bool", enabled: false, configured };
+    }
+    return { kind: "unreadable", detail: "mcp.enabled is not a boolean or string" };
+  } catch {
+    return { kind: "unreadable", detail: "mcp config lookup failed" };
   }
-  if (!isRecord(component.mcp)) {
-    return { kind: "unreadable", detail: "mcp entry is not an object" };
-  }
-  if (!Object.prototype.hasOwnProperty.call(component.mcp, "enabled") || component.mcp.enabled === undefined) {
-    return { kind: "bool", enabled: false, configured: undefined };
-  }
-  const configured = component.mcp.enabled;
-  if (configured === null) return { kind: "bool", enabled: false, configured };
-  const expanded = expandWholeTokenEnv(configured);
-  if (typeof expanded === "boolean") return { kind: "bool", enabled: expanded, configured };
-  if (typeof expanded === "string") {
-    const v = expanded.trim().toLowerCase();
-    if (v === "true") return { kind: "bool", enabled: true, configured };
-    if (v === "false") return { kind: "bool", enabled: false, configured };
-    return { kind: "bool", enabled: false, configured };
-  }
-  return { kind: "unreadable", detail: "mcp.enabled is not a boolean or string" };
 }
 
 function unreadableConfigError(detail: string): Error {
@@ -339,8 +342,7 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
       mounted: false,
       status: "Not enabled",
       // "true" not "1": this reader accepts 1/true/yes/on, but the component
-      // accepts only "true"/"false". The boot guard refuses to mount /mcp
-      // when those disagree. This reason names the value that enables both.
+      // accepts only "true"/"false". This reason names the value both accept.
       reason: "Set FLAIR_MCP_OAUTH=true (and an issuer) to serve MCP over HTTP.",
     });
   }
@@ -359,8 +361,7 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
   }
 
   // Boot guard (flair#1021, flair#1322): the component must be declared and its
-  // effective mcp.enabled must be true. A legacy 1/yes/on leaves the component
-  // off; the guard throws instead of mounting /mcp.
+  // effective mcp.enabled must be true.
   if (!deps.skipComponentGuard) {
     assertHarperOAuthComponentDeclared(deps.harper);
   }

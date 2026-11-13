@@ -157,12 +157,10 @@ registered identities.
    credentials.
 
 2. **Set the env:**
-   - `FLAIR_MCP_OAUTH=true` — the value both readers accept. It turns on
-     `/mcp` and the component authorization server. An instance enabled before
-     0.46 may still have `FLAIR_MCP_OAUTH=1`. When `mcp.enabled` is
-     `${FLAIR_MCP_OAUTH}`, boot refuses to mount `/mcp` until that variable
-     is `true`.
-   - `FLAIR_MCP_ISSUER=https://your-public-origin` (or `FLAIR_PUBLIC_URL`).
+   - `FLAIR_MCP_OAUTH=true` — the value both readers accept; the authorization
+     server also needs the issuer and provider credentials. An instance enabled
+     before 0.46 may still have `FLAIR_MCP_OAUTH=1`.
+   - `FLAIR_MCP_ISSUER=https://your-public-origin`.
    - `OAUTH_GITHUB_CLIENT_ID`, `OAUTH_GITHUB_CLIENT_SECRET` and
      `OAUTH_GITHUB_REDIRECT_URI=https://your-public-origin/oauth` — staged by
      `flair mcp enable` using `--issuer` (default: `--instance`).

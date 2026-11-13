@@ -243,8 +243,7 @@ describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () =
       idpClientSecret: "client-secret-value",
     });
     // "true" EXACTLY (flair#1152): the component's coerceConfigBoolean
-    // accepts only "true"/"false" and DELETES anything else. Staging "1"
-    // leaves the component AS off, and the boot guard refuses to mount /mcp.
+    // accepts only "true"/"false" and DELETES anything else.
     expect(bundle.FLAIR_MCP_OAUTH).toBe("true");
     expect(bundle.FLAIR_MCP_ISSUER).toBe(ISSUER);
     expect(bundle.FLAIR_MCP_SIGNING_KEY_PEM).toBeUndefined();

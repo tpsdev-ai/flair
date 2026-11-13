@@ -38,12 +38,10 @@ authentication:
     #
     # Failure modes (oauth 2.5.0):
     #   unset             -> placeholder deleted -> both sides OFF, clean boot
-    #   true              -> BOTH sides ON — the one working enable value
-    #                        (`flair mcp enable` stages exactly this)
+    #   true              -> both flag readers accept this value
     #   false             -> both sides OFF
     #   1 / yes / on      -> flair's reader is ON, the component deletes the
-    #                        value (AS stays OFF). The boot guard refuses to
-    #                        mount /mcp and names true.
+    #                        value (AS stays OFF); /mcp is not mounted.
     #   garbage (maybe)   -> deleted -> component OFF; flair strict -> OFF.
     #                        Inert: no /mcp handler, no data path (flair's own
     #                        discovery documents still serve, by design).

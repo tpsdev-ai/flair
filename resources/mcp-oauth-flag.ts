@@ -36,11 +36,9 @@
  * component's coerceConfigBoolean takes ONLY "true"/"false" and DELETES any
  * other string (unresolved placeholder, "1", "yes", garbage) so its disabled
  * default applies; this function takes 1/true/yes/on. Consequences:
- *   - "true" is the ONE value that enables both sides (`flair mcp enable`
- *     stages exactly that).
+ *   - "true" is accepted by both readers.
  *   - "1"/"yes"/"on" make this reader true while the component deletes the
- *     value and stays off. The boot guard then refuses to mount /mcp and
- *     names true.
+ *     value and stays off; /mcp is not mounted.
  *   - garbage (e.g. "maybe") disables BOTH: the component deletes it, this
  *     stays false, no /mcp handler exists — no data path (flair's own
  *     discovery documents still serve whenever this flag is off, by design).
