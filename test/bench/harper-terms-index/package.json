@@ -1,0 +1,6 @@
+{
+  "name": "harper-terms-index-spike",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Isolated Harper app for the flair#2047 BM25 indexed-terms spike. Not part of the Flair product."
+}
