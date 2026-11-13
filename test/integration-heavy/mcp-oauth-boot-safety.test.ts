@@ -724,7 +724,17 @@ describe("flair#1322 public URL without MCP issuer", () => {
     });
     instances.push(harper);
     expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
-    expect((await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) })).status).toBe(404);
+    // Flair's own routes keep serving: the guard refuses only the /mcp mount.
+    expect((await fetch(`${harper.httpURL}/Health`, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
+    // @harperfast/oauth itself fails to load on the unresolved issuer, and Harper then
+    // answers every path nothing else claims with that load error (an error resource at
+    // "/", as in the mutation-prove case above). Flair does not mount /mcp, so /mcp is
+    // one of those paths: 500 carrying the component's cause, never Flair's 401-only route.
+    const mcpRes = await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) });
+    expect(mcpRes.status).toBe(500);
+    const mcpBody = await mcpRes.text();
+    expect(mcpBody).toContain("Could not load component '@harperfast/oauth'");
+    expect(mcpBody).toContain("${FLAIR_MCP_ISSUER}");
     if (!harper.external) {
       const log = harper.getLog?.() ?? "";
       expect(log).toContain("Set FLAIR_MCP_ISSUER to an absolute http(s) origin");
