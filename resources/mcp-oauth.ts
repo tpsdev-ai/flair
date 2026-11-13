@@ -172,7 +172,8 @@ function componentAbsentError(): Error {
   return new Error(
     "FLAIR_MCP_OAUTH is enabled but the @harperfast/oauth component is not declared in config.yaml. " +
       "The authorization server cannot start without it — discovery, authorize, token, and JWKS endpoints will all 404.\n" +
-      "Restore this entry:\n" +
+      'Restore the complete "@harperfast/oauth" entry from the config.yaml that ships with this Flair version. ' +
+      "This is a PARTIAL declaration of that entry; it leaves out the providers block:\n" +
       "\n" +
       '  "@harperfast/oauth":\n' +
       '    package: "@harperfast/oauth"\n' +
@@ -180,6 +181,9 @@ function componentAbsentError(): Error {
       "      enabled: ${FLAIR_MCP_OAUTH}\n" +
       "      issuer: ${FLAIR_MCP_ISSUER}\n" +
       "\n" +
+      "This alone does not start the authorization server: the component also needs at least one provider " +
+      "with its client ID, client secret and redirect URI set (the shipped entry configures github through " +
+      "OAUTH_GITHUB_CLIENT_ID, OAUTH_GITHUB_CLIENT_SECRET and OAUTH_GITHUB_REDIRECT_URI). " +
       "Then set FLAIR_MCP_OAUTH=true and set FLAIR_MCP_ISSUER to this instance's public origin.",
   );
 }
