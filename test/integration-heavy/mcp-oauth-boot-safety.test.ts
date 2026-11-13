@@ -706,3 +706,29 @@ describe("flair#1322 legacy FLAIR_MCP_OAUTH=1: boot guard refuses to mount /mcp"
     120_000,
   );
 });
+
+
+describe("flair#1322 public URL without MCP issuer", () => {
+  test("shipped config keeps the process up and leaves /mcp unmounted", async () => {
+    const workDir = makeWorkDirWithShippedConfig("flair-missing-mcp-issuer-");
+    const harper = await startHarper({
+      cwd: workDir,
+      harperBinDir: REPO_ROOT,
+      serverEnv: mcpServerEnv({
+        FLAIR_MCP_OAUTH: "true",
+        FLAIR_PUBLIC_URL: "https://test.example.com",
+        OAUTH_GITHUB_CLIENT_ID: "test-client-id",
+        OAUTH_GITHUB_CLIENT_SECRET: "test-client-secret",
+        OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
+      }),
+    });
+    instances.push(harper);
+    expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
+    expect((await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) })).status).toBe(404);
+    if (!harper.external) {
+      const log = harper.getLog?.() ?? "";
+      expect(log).toContain("Set FLAIR_MCP_ISSUER to an absolute http(s) origin");
+      expect(log).not.toContain("[mcp-oauth] /mcp mounted");
+    }
+  }, 120_000);
+});

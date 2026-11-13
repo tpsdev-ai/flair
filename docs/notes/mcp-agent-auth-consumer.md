@@ -84,8 +84,7 @@ cache (e.g. after an unexpected 401).
 CLI: `flair mcp token --agent-id <id>` now performs the real mint by
 default; `--dry-run` restores the old sign-and-print behavior.
 `--client-id`/`--token-endpoint`/`--resource` default to this instance's own
-oauth surface (derived from `FLAIR_MCP_ISSUER` / `FLAIR_PUBLIC_URL`,
-matching `resources/mcp-oauth-flag.ts`) but are fully overridable — an
+oauth surface (derived from `FLAIR_MCP_ISSUER` / `FLAIR_PUBLIC_URL`) but are fully overridable — an
 agent can authenticate to a **different** Harper MCP server; identity is
 portable.
 
@@ -93,9 +92,7 @@ portable.
 
 `buildTokenRequestForm` carries an optional `resource` field, pass-through
 only (it never invents a value). The CLI supplies the default:
-`${FLAIR_MCP_ISSUER}/mcp`, the same canonical resource identifier
-`resources/mcp-oauth-flag.ts`'s `mcpResource()` uses for this instance's own
-`/mcp` audience binding — exact-match, fail-closed on the AS side. The
+`${FLAIR_MCP_ISSUER}/mcp` (falling back to `FLAIR_PUBLIC_URL`). The
 `resource` is part of the token-cache key: a token minted for one resource
 never serves another.
 
@@ -104,7 +101,7 @@ never serves another.
 Each agent's Client ID Metadata Document is **served**, not just generated:
 `GET /MCPClientMetadata/{agentId}` (public, unauthenticated — mirrors
 `AgentCard.ts`'s A2A-card posture). `client_id` = that URL itself (derived
-from `mcpIssuer()`, same env vars as above); `jwks` = the agent's existing
+from `FLAIR_MCP_ISSUER` / `FLAIR_PUBLIC_URL`); `jwks` = the agent's existing
 `Agent.publicKey` re-expressed as a JWK OKP.
 
 Why served rather than exported for external hosting: Flair already
@@ -216,9 +213,7 @@ in-process proof, not measured; everything else above is measured.
 Whoever owns the AS-side `@harperfast/oauth` config for a given Harper
 instance MUST add this Flair instance's `MCPClientMetadata` host to
 `clientIdMetadataDocuments.allowedHosts`. That host is derived from
-`FLAIR_MCP_ISSUER` (or `FLAIR_PUBLIC_URL` as fallback) — the same env var
-`mcpIssuer()` in `resources/mcp-oauth-flag.ts` and `defaultMcpClientId()` in
-`src/mcp-client-assertion.ts` both read. If the allowlist isn't updated,
+`FLAIR_MCP_ISSUER` (or `FLAIR_PUBLIC_URL` as fallback). If the allowlist isn't updated,
 `/mcp` client_credentials auth for this agent fails closed (by design; the
 e2e proves the "Unknown client" rejection live). This is an operational
 step, not a code change; flag it explicitly when coordinating a rollout.

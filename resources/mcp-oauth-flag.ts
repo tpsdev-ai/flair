@@ -60,12 +60,10 @@ export function mcpOAuthEnabled(): boolean {
  * the client-controlled Host header) is the audience-confusion defense called
  * out in the plugin's production checklist.
  *
- * Configurable via `FLAIR_MCP_ISSUER` (fall back to `FLAIR_PUBLIC_URL`, which the
- * XAA token path already uses as the canonical public base). No hardcoded
- * default — an operator turning the flag on MUST set the public origin.
+ * Configured via `FLAIR_MCP_ISSUER`.
  */
 export function mcpIssuer(): string | undefined {
-  const raw = (process.env.FLAIR_MCP_ISSUER ?? process.env.FLAIR_PUBLIC_URL ?? "").trim();
+  const raw = (process.env.FLAIR_MCP_ISSUER ?? "").trim();
   return raw || undefined;
 }
 

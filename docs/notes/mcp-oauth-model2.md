@@ -160,7 +160,7 @@ registered identities.
    - `FLAIR_MCP_OAUTH=true` — the value both readers accept; the authorization
      server also needs the issuer and provider credentials. An instance enabled
      before 0.46 may still have `FLAIR_MCP_OAUTH=1`.
-   - `FLAIR_MCP_ISSUER=https://your-public-origin`.
+   - `FLAIR_MCP_ISSUER=https://your-public-origin` — a bare HTTP(S) origin.
    - `OAUTH_GITHUB_CLIENT_ID`, `OAUTH_GITHUB_CLIENT_SECRET` and
      `OAUTH_GITHUB_REDIRECT_URI=https://your-public-origin/oauth` — staged by
      `flair mcp enable` using `--issuer` (default: `--instance`).

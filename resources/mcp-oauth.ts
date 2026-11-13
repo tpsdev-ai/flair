@@ -131,7 +131,7 @@ type EnabledRead =
  * The component's effective `mcp.enabled` after `coerceConfigBoolean`.
  * Omitted, null, or a deleted non-boolean string is the disabled default.
  */
-function readEffectiveMcpEnabled(component: Record<string, unknown>): EnabledRead {
+export function readEffectiveMcpEnabled(component: Record<string, unknown>): EnabledRead {
   try {
     if (!Object.prototype.hasOwnProperty.call(component, "mcp") || component.mcp == null) {
       return { kind: "bool", enabled: false, configured: undefined };
@@ -188,14 +188,52 @@ function componentAbsentError(): Error {
   );
 }
 
+function boundedConfigValue(value: string): string {
+  return JSON.stringify(value.length > 64 ? `${value.slice(0, 64)}…` : value);
+}
+
 function disagreementError(rawEnv: string, configured: unknown): Error {
   const base =
-    `FLAIR_MCP_OAUTH is ${JSON.stringify(rawEnv)}, which Flair treats as enabled, ` +
+    `FLAIR_MCP_OAUTH is ${boundedConfigValue(rawEnv)}, which Flair treats as enabled, ` +
     "but the @harperfast/oauth component's effective mcp.enabled is not true. " +
     "The value both readers accept is true.";
   const isEnvRef = typeof configured === "string" && configured.trim() === "${FLAIR_MCP_OAUTH}";
   const remedy = isEnvRef ? "Set FLAIR_MCP_OAUTH=true." : "Set mcp.enabled to true.";
   return new Error(`${base} ${remedy}`);
+}
+
+function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
+  let issuer: unknown;
+  try {
+    issuer = expandWholeTokenEnv((component.mcp as Record<string, unknown>).issuer);
+  } catch {
+    throw new Error(
+      "mcp.issuer could not be read. Set FLAIR_MCP_ISSUER to an absolute http(s) origin " +
+      "and set mcp.issuer to ${FLAIR_MCP_ISSUER}. Refusing to mount /mcp.",
+    );
+  }
+  let validOrigin = false;
+  try {
+    const parsedIssuer = new URL(issuer as string);
+    const pathWithoutTrailingSlash = parsedIssuer.pathname.replace(/\/+$/, "");
+    validOrigin =
+      (parsedIssuer.protocol === "http:" || parsedIssuer.protocol === "https:") &&
+      pathWithoutTrailingSlash === "" &&
+      parsedIssuer.search === "" &&
+      parsedIssuer.hash === "" &&
+      parsedIssuer.username === "" &&
+      parsedIssuer.password === "";
+  } catch {
+    validOrigin = false;
+  }
+  if (!validOrigin) {
+    const detail = typeof issuer === "string" ? ` (got: ${boundedConfigValue(issuer)})` : "";
+    throw new Error(
+      "The @harperfast/oauth component's mcp.issuer must be an absolute http(s) origin" + detail +
+      ". Refusing to mount /mcp. Set FLAIR_MCP_ISSUER to an absolute http(s) origin " +
+      "without a path, query, fragment or userinfo, and set mcp.issuer to ${FLAIR_MCP_ISSUER}.",
+    );
+  }
 }
 
 export function assertHarperOAuthComponentDeclared(harperNs?: any) {
@@ -208,6 +246,7 @@ export function assertHarperOAuthComponentDeclared(harperNs?: any) {
   if (!enabled.enabled) {
     throw disagreementError((process.env.FLAIR_MCP_OAUTH ?? "").trim(), enabled.configured);
   }
+  assertEffectiveMcpIssuer(read.component);
 }
 // NOTE: mcpHandler is intentionally NOT statically imported here — it's resolved
 // lazily (deps.mcpHandler ?? dynamic import) inside registerMcpOAuthRoute, same
@@ -377,13 +416,13 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
     // is the clearer signal). Log and bail — the operator must set FLAIR_MCP_ISSUER.
     console.error(
       "[mcp-oauth] FLAIR_MCP_OAUTH is on but no issuer configured " +
-        "(set FLAIR_MCP_ISSUER or FLAIR_PUBLIC_URL) — /mcp NOT mounted.",
+        "(set FLAIR_MCP_ISSUER) — /mcp NOT mounted.",
     );
     return decide({
       mounted: false,
       status: "Not mounted",
       reason:
-        "FLAIR_MCP_OAUTH is on but no issuer is configured — set FLAIR_MCP_ISSUER (or FLAIR_PUBLIC_URL).",
+        "FLAIR_MCP_OAUTH is on but no issuer is configured — set FLAIR_MCP_ISSUER.",
     });
   }
 
