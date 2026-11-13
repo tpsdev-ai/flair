@@ -1,6 +1,6 @@
 // MCP OAuth route registration.
 
-import { mock, describe, it, expect, beforeEach } from "bun:test";
+import { mock, describe, it, expect, beforeEach, spyOn } from "bun:test";
 import { expandEnvVarsDeep, normalizeMcpSecurityConfig } from "../../node_modules/@harperfast/oauth/dist/lib/config.js";
 import { runInNewContext } from "node:vm";
 import type * as Harper from "../../node_modules/harper/dist/index.js";
@@ -303,20 +303,79 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
     expect(httpCalls).toHaveLength(0);
   });
 
-  it("bounds and JSON-escapes an invalid issuer in the refusal", async () => {
+  it("names the issuer variable and failed rule without disclosing its value", async () => {
     process.env.FLAIR_MCP_OAUTH = "true";
-    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com/\n" + "x".repeat(100);
+    const canary = "canary-7f3a9c";
+    const value = `https://${canary}.example/path?k=${canary}`;
+    const previous = process.env.SOME_CANARY_VAR;
+    process.env.SOME_CANARY_VAR = value;
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper({ mcp: { enabled: true, issuer: "${SOME_CANARY_VAR}" } });
+    try {
+      const error = await registerMcpOAuthRoute(deps).then(() => null, error => error);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).not.toContain(canary);
+      expect(error.message).not.toContain(value);
+      expect(error.message).toContain("SOME_CANARY_VAR");
+      expect(error.message).toContain("has a path");
+      const logged = JSON.stringify(errors.mock.calls);
+      expect(logged).not.toContain(canary);
+      expect(logged).not.toContain(value);
+      expect(httpCalls).toHaveLength(0);
+    } finally {
+      errors.mockRestore();
+      if (previous === undefined) delete process.env.SOME_CANARY_VAR;
+      else process.env.SOME_CANARY_VAR = previous;
+    }
+  });
+
+  it.each([
+    { issuer: "canary-relative", rule: "not absolute" },
+    { issuer: "ftp://canary.example", rule: "not http/https" },
+    { issuer: "https://canary.example/path", rule: "has a path" },
+    { issuer: "https://canary.example?k=secret", rule: "has a query/hash" },
+    { issuer: "https://canary.example#secret", rule: "has a query/hash" },
+    { issuer: "https://secret@canary.example", rule: "has userinfo" },
+  ])("names the failed rule $rule for a literal issuer", async ({ issuer, rule }) => {
+    process.env.FLAIR_MCP_OAUTH = "true";
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper({ mcp: { enabled: true, issuer } });
+    const error = await registerMcpOAuthRoute(deps).then(() => null, error => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain(`(${rule})`);
+    expect(error.message).not.toContain(issuer);
+    expect(httpCalls).toHaveLength(0);
+  });
+
+  it("names an unset issuer variable", async () => {
+    delete process.env.FLAIR_MCP_ISSUER;
+    process.env.FLAIR_MCP_OAUTH = "true";
     const deps = makeDeps();
     delete (deps as any).skipComponentGuard;
     (deps as any).harper = mockHarper({ mcp: { enabled: true, issuer: "${FLAIR_MCP_ISSUER}" } });
+    await expect(registerMcpOAuthRoute(deps)).rejects.toThrow('environment variable "FLAIR_MCP_ISSUER" is unset');
+    expect(httpCalls).toHaveLength(0);
+  });
+
+  it("flag disagreement does not echo a config-chosen variable's value", async () => {
+    process.env.FLAIR_MCP_OAUTH = "true";
+    const previous = process.env.SOME_CANARY_VAR;
+    process.env.SOME_CANARY_VAR = "canary-enabled-7f3a9c";
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper({ mcp: { enabled: "${SOME_CANARY_VAR}" } });
     try {
-      await registerMcpOAuthRoute(deps);
-      throw new Error("expected issuer refusal");
-    } catch (error) {
-      const message = (error as Error).message;
-      expect(message).toContain(JSON.stringify(process.env.FLAIR_MCP_ISSUER.slice(0, 64) + "…"));
-      expect(message).not.toContain("\n");
+      const error = await registerMcpOAuthRoute(deps).then(() => null, error => error);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toContain('FLAIR_MCP_OAUTH is "true"');
+      expect(error.message).not.toContain(process.env.SOME_CANARY_VAR!);
       expect(httpCalls).toHaveLength(0);
+    } finally {
+      if (previous === undefined) delete process.env.SOME_CANARY_VAR;
+      else process.env.SOME_CANARY_VAR = previous;
     }
   });
 

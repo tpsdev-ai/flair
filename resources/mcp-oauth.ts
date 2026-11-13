@@ -203,37 +203,39 @@ function disagreementError(rawEnv: string, configured: unknown): Error {
 }
 
 function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
+  let configured: unknown;
   let issuer: unknown;
   try {
-    issuer = expandWholeTokenEnv((component.mcp as Record<string, unknown>).issuer);
+    configured = (component.mcp as Record<string, unknown>).issuer;
+    issuer = expandWholeTokenEnv(configured);
   } catch {
     throw new Error(
       "mcp.issuer could not be read. Set FLAIR_MCP_ISSUER to an absolute http(s) origin " +
       "and set mcp.issuer to ${FLAIR_MCP_ISSUER}. Refusing to mount /mcp.",
     );
   }
-  let validOrigin = false;
+  let failedRule = "not absolute";
   try {
     const parsedIssuer = new URL(issuer as string);
     const pathWithoutTrailingSlash = parsedIssuer.pathname.replace(/\/+$/, "");
-    validOrigin =
-      (parsedIssuer.protocol === "http:" || parsedIssuer.protocol === "https:") &&
-      pathWithoutTrailingSlash === "" &&
-      parsedIssuer.search === "" &&
-      parsedIssuer.hash === "" &&
-      parsedIssuer.username === "" &&
-      parsedIssuer.password === "";
+    if (parsedIssuer.protocol !== "http:" && parsedIssuer.protocol !== "https:") failedRule = "not http/https";
+    else if (pathWithoutTrailingSlash !== "") failedRule = "has a path";
+    else if (parsedIssuer.search !== "" || parsedIssuer.hash !== "") failedRule = "has a query/hash";
+    else if (parsedIssuer.username !== "" || parsedIssuer.password !== "") failedRule = "has userinfo";
+    else return;
   } catch {
-    validOrigin = false;
+    failedRule = "not absolute";
   }
-  if (!validOrigin) {
-    const detail = typeof issuer === "string" ? ` (got: ${boundedConfigValue(issuer)})` : "";
-    throw new Error(
-      "The @harperfast/oauth component's mcp.issuer must be an absolute http(s) origin" + detail +
-      ". Refusing to mount /mcp. Set FLAIR_MCP_ISSUER to an absolute http(s) origin " +
-      "without a path, query, fragment or userinfo, and set mcp.issuer to ${FLAIR_MCP_ISSUER}.",
-    );
-  }
+  const envName = typeof configured === "string" && configured.startsWith("${") && configured.endsWith("}")
+    ? configured.slice(2, -1) : undefined;
+  const detail = envName === undefined ? ` (${failedRule})`
+    : process.env[envName] === undefined ? ` (environment variable ${JSON.stringify(envName)} is unset)`
+    : ` (environment variable ${JSON.stringify(envName)} value fails the rule: ${failedRule})`;
+  throw new Error(
+    "The @harperfast/oauth component's mcp.issuer must be an absolute http(s) origin" + detail +
+    ". Refusing to mount /mcp. Set FLAIR_MCP_ISSUER to an absolute http(s) origin " +
+    "without a path, query, fragment or userinfo, and set mcp.issuer to ${FLAIR_MCP_ISSUER}.",
+  );
 }
 
 export function assertHarperOAuthComponentDeclared(harperNs?: any) {
