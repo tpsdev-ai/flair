@@ -1,0 +1,1 @@
+- **flair-bench's node-llama-cpp 3.22.3 requires simple-git ^4.0.2, so a consumer install no longer resolves the vulnerable versions (GHSA-v5rq-49vh-5v5c, GHSA-x6jw-m9v5-85vh, GHSA-g4wm-2vf7-vfgr, GHSA-858h-whjf-mvg5).**

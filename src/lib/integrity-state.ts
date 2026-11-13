@@ -20,7 +20,14 @@
  *   - generation numbers bounded on write and in the persisted checkpoint and
  *     CURRENT records to the twelve-digit filename format the listing accepts;
  *   - generation staging and uncertain-commit recovery under ONE custody lock
- *     (commit, tombstone, registry write and recovery all serialize on it).
+ *     (commit, tombstone, registry write and recovery all serialize on it);
+ *
+ * | Operation | Recorded identities and comparisons | Before publication rename | After publication rename |
+ * | --- | --- | --- | --- |
+ * | COMMIT | At open: `lstat` dev/ino and symlink state of custody, ancestors through root, and generations directory (`src/lib/integrity-state.ts:1197`). At stage: `fstat` dev/ino of generation file and UNCERTAIN (`src/lib/integrity-state.ts:1611`, `src/lib/integrity-state.ts:1639`). Around rename: re-`lstat` the chain; if it matches, compare staged regular-file dev/ino (`src/lib/integrity-state.ts:1447`, `src/lib/integrity-state.ts:1454`). | Mismatch: `status: "commit_failed"`, `reason: "custody_invalid"`; CURRENT is not replaced (`src/lib/integrity-state.ts:1447`). | Mismatch: `status: "commit_uncertain"`, `reason: "commit_uncertain"`, `committed: true`, published generation (`src/lib/integrity-state.ts:1454`, `src/lib/integrity-state.ts:1666`). |
+ * | TOMBSTONE | Same directory-chain recording and comparison; stages and compares only UNCERTAIN, not a generation file (`src/lib/integrity-state.ts:1773`, `src/lib/integrity-state.ts:1781`). | Mismatch: `status: "commit_failed"`, `reason: "custody_invalid"`; registry.json is not replaced (`src/lib/integrity-state.ts:1447`). | Mismatch: `status: "commit_uncertain"`, `reason: "commit_uncertain"` (`src/lib/integrity-state.ts:1454`, `src/lib/integrity-state.ts:1792`). |
+ * | INITIALIZATION | No custody chain is recorded before the initial publication. | `writeInitialRegistry` makes no chain comparison around its rename. | The post-write custody check validates the files and permissions at the current path; it does not bind that path to the directory used for key creation (deferred to #2980). |
+ * | Shared writer (COMMIT/TOMBSTONE): publication staging file | No file identity recorded or compared; only the custody directory chain is rechecked around this file's rename (`src/lib/config-critical-section.ts:733`, `src/lib/config-critical-section.ts:740`). | Replacement of this file inside an unchanged directory before rename is not detected; deferred to #2980. | Chain mismatch returns the operation's post-rename result above (`src/lib/integrity-state.ts:1454`). Recorded identities are dev+ino and inherit filesystem inode reuse. The checks detect drift present when they run and cannot guarantee detection of changes between checks or after the post-rename check (which runs before directory fsync and marker cleanup). |
  *
  * The custody key and state live in the caller-supplied custody directory.
  * Modes alone cannot prove a server cannot reach them. The enrollment registry
@@ -30,6 +37,7 @@
  */
 import {
   closeSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -38,12 +46,13 @@ import {
   readdirSync,
   renameSync,
   unlinkSync,
+  type BigIntStats,
   type Stats,
 } from "node:fs";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { hostname } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import {
   assertSupportedLocalFilesystem,
@@ -64,9 +73,17 @@ export const INTEGRITY_UNCERTAIN_FILENAME = "UNCERTAIN";
 /** The largest generation a twelve-digit filename can carry. */
 export const INTEGRITY_MAX_GENERATION = 999_999_999_999;
 
+/** The same root-stopping ancestor-walk bound config-critical-section uses. */
+const CUSTODY_CHAIN_MAX = 256;
+
+/** The remedy for a custody chain that no longer matches the open handle. */
+const CUSTODY_CHAIN_REMEDY = "Re-open custody after restoring valid custody paths. If re-open refuses with commit_uncertain because CURRENT now names an older generation than the uncertainty marker, this state cannot establish whether the staged generation was ever published or became durable; reconcile it before retrying (issue #2980). Retry only after re-open succeeds.";
+
 function msg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+const TOMBSTONE_UNCERTAIN_REMEDY = "Re-open custody to reconcile uncertainty; if an active enrollment remains, verify the generation. If the last enrollment was tombstoned, re-open refusal is expected. Read registry.json, verify its HMAC with verifyIntegrityRecord and custody.key, and check sequence against expectedSequence + 1 and the enrollment's status against tombstoned.";
 
 const UNCERTAIN_COMMIT_PREFIX = "commit:";
 const UNCERTAIN_REGISTRY_PREFIX = "registry:";
@@ -103,8 +120,8 @@ export const INTEGRITY_REASON_REMEDIES: Record<IntegrityReason, string> = {
   clock_invalid: "Repair the server clock or transport and rerun.",
   scan_failed: "Resolve the read failure and rerun.",
   store_over_ceiling: "Resolve store capacity or raise the configured ceiling, then rerun.",
-  commit_conflict: "Resolve the competing writer and rerun.",
-  commit_uncertain: "Recover the durable generation before another operation, then rerun.",
+  commit_conflict: "Resolve the generation or sequence mismatch and rerun.",
+  commit_uncertain: "Recover the durable custody state before another operation, then rerun.",
 };
 
 // ── record shapes ───────────────────────────────────────────────────────────
@@ -263,6 +280,7 @@ export interface IntegrityPaths {
 }
 
 export function integrityPaths(custodyDir: string): IntegrityPaths {
+  custodyDir = resolve(custodyDir);
   return {
     custodyDir,
     keyPath: join(custodyDir, INTEGRITY_KEY_FILENAME),
@@ -421,6 +439,84 @@ export function checkCustody(opts: CustodyCheckOptions): CustodyCheck {
   return { ok: true };
 }
 
+/** One recorded path in the custody ancestry, including whether it is a symlink. */
+export interface CustodyChainEntry {
+  path: string;
+  dev: bigint;
+  ino: bigint;
+  symbolicLink: boolean;
+}
+
+/** The custody directory, its ancestors from the filesystem root down, and the
+ *  generations directory. The walk applies config-critical-section's rules: at
+ *  most 256 ancestors including custody, plus the generations directory. */
+function custodyChainPaths(
+  custodyDir: string,
+  generationsDir: string,
+): { ok: true; paths: string[] } | { ok: false; detail: string } {
+  const upward: string[] = [];
+  let probe = custodyDir;
+  for (let i = 0; ; i++) {
+    if (i >= CUSTODY_CHAIN_MAX) {
+      return { ok: false, detail: `ancestor walk reached its iteration cap for ${custodyDir}` };
+    }
+    upward.push(probe);
+    const parent = dirname(probe);
+    if (parent === probe) break;
+    probe = parent;
+  }
+  upward.reverse();
+  upward.push(generationsDir);
+  return { ok: true, paths: upward };
+}
+
+/** Record the identity of every custody-chain path with lstat, never following
+ *  a final symlink. */
+function recordCustodyChain(
+  paths: IntegrityPaths,
+): { ok: true; entries: CustodyChainEntry[] } | { ok: false; detail: string } {
+  const chain = custodyChainPaths(paths.custodyDir, paths.generationsDir);
+  if (!chain.ok) return chain;
+  const entries: CustodyChainEntry[] = [];
+  for (const path of chain.paths) {
+    let st: BigIntStats;
+    try {
+      st = lstatSync(path, { bigint: true });
+    } catch (err) {
+      return { ok: false, detail: `cannot record the identity of ${path}: ${msg(err)}` };
+    }
+    entries.push({ path, dev: st.dev, ino: st.ino, symbolicLink: st.isSymbolicLink() });
+  }
+  return { ok: true, entries };
+}
+
+/** Re-lstat the recorded chain and name the first path that no longer matches. */
+function verifyCustodyChain(
+  entries: readonly CustodyChainEntry[],
+): { ok: true } | { ok: false; detail: string } {
+  for (const entry of entries) {
+    let st: BigIntStats;
+    try {
+      st = lstatSync(entry.path, { bigint: true });
+    } catch (err) {
+      const detail = (err as NodeJS.ErrnoException).code === "ENOENT"
+        ? `${entry.path} disappeared after custody was opened`
+        : `cannot re-stat ${entry.path}: ${msg(err)}`;
+      return { ok: false, detail };
+    }
+    if (st.isSymbolicLink() && !entry.symbolicLink) {
+      return { ok: false, detail: `${entry.path} became a symlink after custody was opened` };
+    }
+    if (!st.isSymbolicLink() && entry.symbolicLink) {
+      return { ok: false, detail: `${entry.path} is no longer the symlink recorded at open` };
+    }
+    if (st.dev !== entry.dev || st.ino !== entry.ino) {
+      return { ok: false, detail: `${entry.path} identity changed after custody was opened` };
+    }
+  }
+  return { ok: true };
+}
+
 /** Read the machine identity: the platform, the hostname, and the platform's
  *  machine-id when that file is readable. A hostname can be shared or changed,
  *  so this value is only as identifying as the hostname when no machine-id is
@@ -467,36 +563,46 @@ function fsyncDir(path: string): void {
   }
 }
 
+type StagedFileIdentity = { path: string; dev: bigint; ino: bigint };
+
 /** Create a new file durably (`wx`, explicit mode, full write, fsync). Never
  *  replaces an existing path. */
-function writeNewDurable(path: string, bytes: Uint8Array, mode: number, onCreated?: () => void): void {
+function writeNewDurable(path: string, bytes: Uint8Array, mode: number, onCreated?: () => void): StagedFileIdentity {
   const fd = openSync(path, "wx", mode);
+  let identity: StagedFileIdentity;
   try {
     onCreated?.();
     writeAllSync(fd, Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
     fsyncSync(fd);
+    const { dev, ino } = fstatSync(fd, { bigint: true });
+    identity = { path, dev, ino };
   } finally {
     try { closeSync(fd); } catch { /* already closed */ }
   }
   fsyncDir(dirname(path));
+  return identity;
 }
 
 /** Replace a generation file atomically. The caller only reaches this for a
  *  number CURRENT does not name (the commit decision verified CURRENT names
  *  expectedGeneration and this writes expectedGeneration + 1); the function
  *  itself does not check that, so it cannot detect another writer. */
-function replaceDurable(path: string, bytes: Uint8Array, mode: number): void {
+function replaceDurable(path: string, bytes: Uint8Array, mode: number): StagedFileIdentity {
   const temp = `${path}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
+  let identity: StagedFileIdentity;
   try {
     const fd = openSync(temp, "wx", mode);
     try {
       writeAllSync(fd, Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
       fsyncSync(fd);
+      const { dev, ino } = fstatSync(fd, { bigint: true });
+      identity = { path, dev, ino };
     } finally {
       try { closeSync(fd); } catch { /* already closed */ }
     }
     renameSync(temp, path);
     fsyncDir(dirname(path));
+    return identity;
   } catch (err) {
     try { unlinkSync(temp); } catch { /* nothing to remove */ }
     throw err;
@@ -562,11 +668,11 @@ function hasGenerationHistory(paths: IntegrityPaths): HistoryCheck {
 /** Write the durable intent marker BEFORE publication. A failure here must
  *  refuse the publication. `beforeWrite` is the test seam that injects such a
  *  failure after the commit decision succeeded. */
-function writeUncertainMarker(paths: IntegrityPaths, value: string, beforeWrite?: () => void): void {
+function writeUncertainMarker(paths: IntegrityPaths, value: string, beforeWrite?: () => void): StagedFileIdentity {
   beforeWrite?.();
   let created = false;
   try {
-    writeNewDurable(paths.uncertainPath, Buffer.from(value, "utf-8"), 0o600, () => { created = true; });
+    return writeNewDurable(paths.uncertainPath, Buffer.from(value, "utf-8"), 0o600, () => { created = true; });
   } catch (err) {
     if (created) {
       try { clearUncertainMarker(paths); } catch { }
@@ -575,16 +681,9 @@ function writeUncertainMarker(paths: IntegrityPaths, value: string, beforeWrite?
   }
 }
 
-/** Remove the marker after durable completion (or after a publication that
- *  did not land). Throws unless the marker is already absent; callers decide
- *  whether a failure is fatal. */
+/** Remove this operation's marker; removal and directory fsync failures throw. */
 function clearUncertainMarker(paths: IntegrityPaths): void {
-  try {
-    unlinkSync(paths.uncertainPath);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw err;
-  }
+  unlinkSync(paths.uncertainPath);
   fsyncDir(paths.custodyDir);
 }
 
@@ -773,6 +872,9 @@ function readSignedJson<T>(
 
 export interface IntegrityStateHandle {
   paths: IntegrityPaths;
+  /** Identity of the custody directory, its ancestors and the generations
+   *  directory recorded when this handle was opened. */
+  custodyChain: CustodyChainEntry[];
   key: Buffer;
   registry: IntegrityRegistry;
   enrollment: IntegrityEnrollmentEntry;
@@ -793,6 +895,9 @@ export type IntegrityStateResult =
 
 export type CommitStatus = "committed" | "commit_conflict" | "commit_uncertain" | "commit_failed";
 
+/** Decide retry on `status`, never on `reason`: `commit_conflict` reports a
+ *  generation or sequence mismatch. Exhaustion reports `commit_failed` with
+ *  reason `commit_conflict`; `commit_uncertain` requires recovery. */
 export type CommitGenerationResult =
   | { ok: true; status: "committed"; generation: number; attempts: number }
   | {
@@ -801,8 +906,7 @@ export type CommitGenerationResult =
       reason: IntegrityReason;
       detail: string;
       remedy: string;
-      /** True when CURRENT was replaced even though the result is not success
-       *  (a post-rename durability warning). */
+      /** True when CURRENT was replaced even though the result is not success. */
       committed?: boolean;
       generation?: number;
     };
@@ -821,6 +925,13 @@ export interface IntegrityStateOptions {
   beforeRegistryPublication?: () => void;
 }
 
+type IntegrityTestHooks = NonNullable<ConfigSectionOptions["testHooks"]> & {
+  beforeStage?: () => void;
+  afterStage?: () => void;
+  beforeUncertainMarkerWrite?: () => void;
+  beforeUncertainMarkerClear?: () => void;
+};
+
 export interface CommitGenerationOptions {
   state: IntegrityStateHandle;
   /** Generation observed before the scan. A mismatch holds the write. */
@@ -829,13 +940,11 @@ export interface CommitGenerationOptions {
   /** TEST-ONLY barriers. The shared critical-section hooks are passed through;
    *  `beforeUncertainMarkerWrite` fires after the decision succeeded and before
    *  the intent marker is created. */
-  testHooks?: NonNullable<ConfigSectionOptions["testHooks"]> & {
-    beforeUncertainMarkerWrite?: () => void;
-  };
+  testHooks?: IntegrityTestHooks;
 }
 
-function fail(reason: IntegrityReason, detail: string): IntegrityStateResult {
-  return { ok: false, reason, detail, remedy: INTEGRITY_REASON_REMEDIES[reason] };
+function fail(reason: IntegrityReason, detail: string, remedy = INTEGRITY_REASON_REMEDIES[reason]): IntegrityStateResult {
+  return { ok: false, reason, detail, remedy };
 }
 
 function resolveServerUid(opts: IntegrityStateOptions): { ok: true; uid: number; source: string } | { ok: false; detail: string } {
@@ -997,7 +1106,7 @@ function createInitialRegistry(key: Buffer, operatorUid: number, machineId: stri
 function writeInitialRegistry(
   paths: IntegrityPaths,
   registry: IntegrityRegistry,
-): { ok: true; registry: IntegrityRegistry } | { ok: false; reason: IntegrityReason; detail: string } {
+): { ok: true; registry: IntegrityRegistry } | { ok: false; reason: IntegrityReason; detail: string; remedy?: string } {
   const result = withConfigCriticalSection(paths.registryPath, (bytes) => {
     if (bytes !== null) {
       return { hold: "custody_invalid: the registry already exists; refusing to re-initialize it" };
@@ -1008,7 +1117,7 @@ function writeInitialRegistry(
   if (result.status === "written") return { ok: false, reason: "commit_uncertain", detail: result.cleanupWarning! };
   if (result.status === "held") {
     const parsed = parseHold(result.message);
-    return { ok: false, reason: parsed.reason, detail: parsed.detail };
+    return { ok: false, reason: parsed.reason, detail: parsed.detail, remedy: `Inspect ${paths.registryPath} and reconcile partial initialization before proceeding. Initialization cannot resume with an existing custody key, and opening custody requires a committed generation. For a fresh start, preserve this directory and initialize a different custodyDir with newCustody: true.` };
   }
   return { ok: false, reason: "unavailable", detail: result.message };
 }
@@ -1085,10 +1194,14 @@ function openWithRegistry(
   if (!reconciled.ok) return fail(reconciled.reason, reconciled.detail);
   if (reconciled.recovered) recovered = true;
 
+  const chain = recordCustodyChain(paths);
+  if (!chain.ok) return fail("custody_invalid", chain.detail);
+
   return {
     ok: true,
     state: {
       paths,
+      custodyChain: chain.entries,
       key,
       registry,
       enrollment,
@@ -1186,7 +1299,7 @@ export function initializeIntegrityCustody(opts: IntegrityStateOptions): Integri
   if (!key.ok) return fail(key.reason, key.detail);
   opts.beforeRegistryPublication?.();
   const written = writeInitialRegistry(paths, initialRegistry);
-  if (!written.ok) return fail(written.reason, written.detail);
+  if (!written.ok) return fail(written.reason, written.detail, written.remedy);
   const registry = written.registry;
 
   const custody = checkCustody({
@@ -1280,12 +1393,72 @@ function holdMessage(reason: IntegrityReason, detail: string): { hold: string } 
   return { hold: `${reason}: ${detail}` };
 }
 
-function parseHold(message: string): { reason: IntegrityReason; detail: string } {
+function parseHold(message: string): { reason: IntegrityReason; detail: string; recognized: boolean } {
   const [head, ...rest] = message.split(":");
   if ((INTEGRITY_REASONS as readonly string[]).includes(head!) && rest.length > 0) {
-    return { reason: head as IntegrityReason, detail: rest.join(":").trim() };
+    return { reason: head as IntegrityReason, detail: rest.join(":").trim(), recognized: true };
   }
-  return { reason: "commit_conflict", detail: message };
+  return { reason: "commit_conflict", detail: message, recognized: false };
+}
+
+/** For commit and tombstone holds, a recognized `commit_conflict` reason maps
+ *  to `commit_conflict`; other holds map to `commit_failed`. The caller overrides
+ *  generation exhaustion with an explicit `commit_failed` refusal. */
+function holdStatus(parsed: { reason: IntegrityReason; recognized: boolean }): "commit_conflict" | "commit_failed" {
+  return parsed.recognized && parsed.reason === "commit_conflict" ? "commit_conflict" : "commit_failed";
+}
+
+function holdRemedy(parsed: ReturnType<typeof parseHold>, path: string, changed: boolean): string {
+  if (parsed.recognized) return INTEGRITY_REASON_REMEDIES[parsed.reason];
+  return changed
+    ? `The destination changed between the writer's observations; inspect ${path} and restore valid custody before retrying.`
+    : `Inspect ${path} and restore valid custody before retrying: ${parsed.detail}`;
+}
+
+type CustodyPublicationFailure = {
+  ok: false;
+  status: "commit_failed" | "commit_uncertain";
+  reason: "custody_invalid" | "commit_uncertain";
+  detail: string;
+  remedy: string;
+};
+
+function verifyStagedFiles(files: readonly StagedFileIdentity[]): { ok: true } | { ok: false; detail: string } {
+  for (const file of files) {
+    try {
+      const entry = lstatSync(file.path, { bigint: true });
+      if (!entry.isFile() || entry.dev !== file.dev || entry.ino !== file.ino) {
+        return { ok: false, detail: `staged file identity changed: ${file.path}` };
+      }
+    } catch (err) {
+      return { ok: false, detail: `cannot verify staged file ${file.path}: ${msg(err)}` };
+    }
+  }
+  return { ok: true };
+}
+
+function custodyPublicationChecks(
+  chain: readonly CustodyChainEntry[],
+  stagedFiles: readonly StagedFileIdentity[],
+  refuse: (failure: CustodyPublicationFailure) => void,
+  uncertainRemedy: string,
+): Pick<ConfigSectionOptions, "beforeRename" | "afterRename"> {
+  return {
+    beforeRename: () => {
+      const chainCheck = verifyCustodyChain(chain);
+      const checked = chainCheck.ok ? verifyStagedFiles(stagedFiles) : chainCheck;
+      if (checked.ok) return;
+      refuse({ ok: false, status: "commit_failed", reason: "custody_invalid", detail: checked.detail, remedy: CUSTODY_CHAIN_REMEDY });
+      throw new Error(checked.detail);
+    },
+    afterRename: () => {
+      const chainCheck = verifyCustodyChain(chain);
+      const checked = chainCheck.ok ? verifyStagedFiles(stagedFiles) : chainCheck;
+      if (checked.ok) return;
+      refuse({ ok: false, status: "commit_uncertain", reason: "commit_uncertain", detail: checked.detail, remedy: uncertainRemedy });
+      throw new Error(checked.detail);
+    },
+  };
 }
 
 /**
@@ -1294,7 +1467,7 @@ function parseHold(message: string): { reason: IntegrityReason; detail: string }
  * The pre-scan generation is rechecked inside `decide`; a mismatch returns
  * `commit_conflict` and never writes. The generation and a durable intent
  * marker are staged under the ONE custody lock before CURRENT is replaced.
- * A post-rename directory-fsync warning is `commit_uncertain`, never success.
+ * A warning after publication rename returns `status: "commit_uncertain"`.
  */
 export function commitGeneration(opts: CommitGenerationOptions): CommitGenerationResult {
   const { state } = opts;
@@ -1315,9 +1488,14 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     return { ok: false, status: "commit_failed", reason: "custody_invalid", detail: "the machine identity differs from the opened handle", remedy: INTEGRITY_REASON_REMEDIES.custody_invalid };
   }
 
-  // Custody is rechecked at the start of the commit operation too, not only
-  // when the state was opened: a mode or identity drift between the open and
-  // the commit must not stage a generation.
+  // The ancestry is checked before the custody predicate because the predicate
+  // reports a vanished custody directory as checkpoint_missing; the caller
+  // needs the path that moved. The same check runs again under the lock.
+  const chainBefore = verifyCustodyChain(state.custodyChain);
+  if (!chainBefore.ok) {
+    return { ok: false, status: "commit_failed", reason: "custody_invalid", detail: chainBefore.detail, remedy: CUSTODY_CHAIN_REMEDY };
+  }
+
   const custody = checkCustody({
     paths: state.paths,
     serverUid: state.serverUid,
@@ -1341,6 +1519,18 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   let refusal: Extract<CommitGenerationResult, { ok: false }> | undefined;
 
   const decide = (bytes: Uint8Array | null): { write: Uint8Array } | { hold: string } => {
+    // Recheck custody under the lock.
+    const chain = verifyCustodyChain(state.custodyChain);
+    if (!chain.ok) {
+      refusal = {
+        ok: false,
+        status: "commit_failed",
+        reason: "custody_invalid",
+        detail: chain.detail,
+        remedy: CUSTODY_CHAIN_REMEDY,
+      };
+      return holdMessage(refusal.reason, refusal.detail);
+    }
     const marker = readUncertainMarker(state.paths);
     if (marker.kind === "error") return holdMessage("unavailable", marker.detail);
     if (marker.kind === "value") return holdMessage("commit_uncertain", "publication requires uncertainty reconciliation");
@@ -1382,8 +1572,7 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
       }
       onDisk = pointerNow.generation;
     }
-    // The generation observed before the scan. This is the fence: a competing
-    // writer that committed in between leaves a different value here.
+    // Compare the on-disk generation with the pre-scan expectation.
     if (onDisk !== opts.expectedGeneration) {
       return holdMessage("commit_conflict", `the on-disk generation is ${onDisk}, expected ${opts.expectedGeneration}`);
     }
@@ -1414,20 +1603,32 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     }
   };
 
+  const stagedFiles: StagedFileIdentity[] = [];
   const stage = (): (() => void) => {
+    opts.testHooks?.beforeStage?.();
     const path = generationPath(state.paths.generationsDir, nextGeneration);
     try {
-      writeNewDurable(path, generationBytes, 0o600);
+      stagedFiles.push(writeNewDurable(path, generationBytes, 0o600));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      const existing = readFileSync(path);
+      const fd = openSync(path, "r");
+      let existing: Buffer;
+      let identity: StagedFileIdentity;
+      try {
+        existing = readFileSync(fd);
+        const { dev, ino } = fstatSync(fd, { bigint: true });
+        identity = { path, dev, ino };
+      } finally {
+        closeSync(fd);
+      }
       if (!Buffer.from(generationBytes).equals(existing)) {
         // CURRENT still names expectedGeneration (checked in decide), so this
-        // number is unreferenced: an orphan left by an earlier attempt that
-        // staged but did not publish. Replace it. A file another writer put at
-        // a number CURRENT names is outside what this check can see.
-        replaceDurable(path, generationBytes, 0o600);
+        // number is unreferenced: replace it.
+        // A file another writer put at a number CURRENT names is outside what
+        // this check can see.
+        identity = replaceDurable(path, generationBytes, 0o600);
       }
+      stagedFiles.push(identity);
     }
     // Durable intent marker BEFORE publication. A failure of the target
     // replacement's directory fsync reports commit_uncertain with marker
@@ -1435,7 +1636,8 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     // clear that unlinks the marker but fails to fsync the custody directory
     // also reports commit_uncertain, with the marker already gone. Failure
     // here refuses the publication.
-    writeUncertainMarker(state.paths, `${UNCERTAIN_COMMIT_PREFIX}${nextGeneration}`, opts.testHooks?.beforeUncertainMarkerWrite);
+    stagedFiles.push(writeUncertainMarker(state.paths, `${UNCERTAIN_COMMIT_PREFIX}${nextGeneration}`, opts.testHooks?.beforeUncertainMarkerWrite));
+    opts.testHooks?.afterStage?.();
     return () => { try { clearUncertainMarker(state.paths); } catch { } };
   };
 
@@ -1443,8 +1645,12 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   try {
     result = withConfigCriticalSection(state.paths.currentPath, decide, {
       stage,
+      ...custodyPublicationChecks(state.custodyChain, stagedFiles, (failure) => { refusal = failure; }, "Re-open custody after restoring valid custody state, then verify the generation."),
       lockPath: custodyLockPath(state.paths),
-      onCommitted: () => clearUncertainMarker(state.paths),
+      onCommitted: () => {
+        opts.testHooks?.beforeUncertainMarkerClear?.();
+        clearUncertainMarker(state.paths);
+      },
       testHooks: opts.testHooks,
     });
   } catch (err) {
@@ -1457,6 +1663,9 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
     };
   }
 
+  if (refusal) return result.status === "written"
+    ? { ...refusal, committed: true, generation: nextGeneration }
+    : refusal;
   if (result.status === "written") {
     if (result.cleanupWarning) {
       return {
@@ -1473,14 +1682,20 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
   }
 
   if (result.status === "held") {
-    if (refusal) return refusal;
+    // The primitive can hold before `decide` when the custody parent no longer
+    // resolves; recheck the chain so a replaced ancestor names its path rather
+    // than surfacing a generic observe failure.
+    const chain = verifyCustodyChain(state.custodyChain);
+    if (!chain.ok) {
+      return { ok: false, status: "commit_failed", reason: "custody_invalid", detail: chain.detail, remedy: CUSTODY_CHAIN_REMEDY };
+    }
     const parsed = parseHold(result.message);
     return {
       ok: false,
-      status: "commit_conflict",
+      status: holdStatus(parsed),
       reason: parsed.reason,
       detail: parsed.detail,
-      remedy: INTEGRITY_REASON_REMEDIES[parsed.reason],
+      remedy: holdRemedy(parsed, state.paths.currentPath, result.changed !== undefined),
     };
   }
 
@@ -1498,13 +1713,13 @@ export function commitGeneration(opts: CommitGenerationOptions): CommitGeneratio
 
 export interface TombstoneOptions extends IntegrityStateOptions {
   expectedSequence: number;
-  /** TEST-ONLY barriers, from the shared critical section. */
-  testHooks?: ConfigSectionOptions["testHooks"];
+  /** TEST-ONLY barriers. */
+  testHooks?: IntegrityTestHooks;
 }
 
 export type TombstoneResult =
   | { ok: true; sequence: number }
-  | { ok: false; status: "commit_conflict" | "commit_failed"; reason: IntegrityReason; detail: string; remedy: string };
+  | { ok: false; status: "commit_conflict" | "commit_failed" | "commit_uncertain"; reason: IntegrityReason; detail: string; remedy: string };
 
 /** Tombstone an enrollment under the same custody lock as commit, relying on
  *  the opened handle's supplied identity. A stale sequence expectation holds. */
@@ -1514,7 +1729,14 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
   const state = opened.state;
   const enrollmentId = opts.enrollmentId ?? state.enrollment.enrollmentId;
   let nextSequence = 0;
+  let chainRefusal: Extract<TombstoneResult, { ok: false }> | undefined;
   const decide = (bytes: Uint8Array | null): { write: Uint8Array } | { hold: string } => {
+    // Recheck the same ancestry as commit before the registry intent marker.
+    const chain = verifyCustodyChain(state.custodyChain);
+    if (!chain.ok) {
+      chainRefusal = { ok: false, status: "commit_failed", reason: "custody_invalid", detail: chain.detail, remedy: CUSTODY_CHAIN_REMEDY };
+      return holdMessage(chainRefusal.reason, chainRefusal.detail);
+    }
     const marker = readUncertainMarker(state.paths);
     if (marker.kind === "error") return holdMessage("unavailable", marker.detail);
     if (marker.kind === "value") return holdMessage("commit_uncertain", "publication requires uncertainty reconciliation");
@@ -1545,30 +1767,42 @@ export function tombstoneEnrollment(opts: TombstoneOptions): TombstoneResult {
     }), state.key);
     return { write: jsonBytes(updated) };
   };
+  const stagedFiles: StagedFileIdentity[] = [];
   const stage = (): (() => void) => {
-    writeUncertainMarker(state.paths, `${UNCERTAIN_REGISTRY_PREFIX}${nextSequence}`);
+    opts.testHooks?.beforeStage?.();
+    stagedFiles.push(writeUncertainMarker(state.paths, `${UNCERTAIN_REGISTRY_PREFIX}${nextSequence}`, opts.testHooks?.beforeUncertainMarkerWrite));
+    opts.testHooks?.afterStage?.();
     return () => { try { clearUncertainMarker(state.paths); } catch { } };
   };
   let result: ConfigSectionResult;
   try {
     result = withConfigCriticalSection(state.paths.registryPath, decide, {
       stage,
+      ...custodyPublicationChecks(state.custodyChain, stagedFiles, (failure) => { chainRefusal = failure; }, TOMBSTONE_UNCERTAIN_REMEDY),
       lockPath: custodyLockPath(state.paths),
-      onCommitted: () => clearUncertainMarker(state.paths),
+      onCommitted: () => {
+        opts.testHooks?.beforeUncertainMarkerClear?.();
+        clearUncertainMarker(state.paths);
+      },
       testHooks: opts.testHooks,
     });
   } catch (err) {
     return { ok: false, status: "commit_failed", reason: "unavailable", detail: `the tombstone fence failed before replacing the registry: ${msg(err)}`, remedy: INTEGRITY_REASON_REMEDIES.unavailable };
   }
+  if (chainRefusal) return chainRefusal;
   if (result.status === "written" && !result.cleanupWarning) {
     return { ok: true, sequence: nextSequence };
   }
   if (result.status === "written" && result.cleanupWarning) {
-    return { ok: false, status: "commit_failed", reason: "commit_uncertain", detail: result.cleanupWarning, remedy: INTEGRITY_REASON_REMEDIES.commit_uncertain };
+    return { ok: false, status: "commit_uncertain", reason: "commit_uncertain", detail: result.cleanupWarning, remedy: TOMBSTONE_UNCERTAIN_REMEDY };
   }
   if (result.status === "held") {
+    const chain = verifyCustodyChain(state.custodyChain);
+    if (!chain.ok) {
+      return { ok: false, status: "commit_failed", reason: "custody_invalid", detail: chain.detail, remedy: CUSTODY_CHAIN_REMEDY };
+    }
     const parsed = parseHold(result.message);
-    return { ok: false, status: "commit_conflict", reason: parsed.reason, detail: parsed.detail, remedy: INTEGRITY_REASON_REMEDIES[parsed.reason] };
+    return { ok: false, status: holdStatus(parsed), reason: parsed.reason, detail: parsed.detail, remedy: holdRemedy(parsed, state.paths.registryPath, result.changed !== undefined) };
   }
   return { ok: false, status: "commit_failed", reason: "unavailable", detail: result.message || String(result.cleanupWarning), remedy: INTEGRITY_REASON_REMEDIES.unavailable };
 }

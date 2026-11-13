@@ -64,6 +64,7 @@ class BaseMemory {
   /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
    *  double injects one (test/helpers/memory-lock-double.ts). */
   static primaryStore = memoryLockDouble();
+  static validate() {}
   async post(content: any) {
     const id = content.id ?? `mock-${++idCounter}`;
     content.id = id;
