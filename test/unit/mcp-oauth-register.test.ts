@@ -369,6 +369,21 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
     },
   );
 
+  it.each(["https://flair.example.com\n", " https://flair.example.com", "\thttps://flair.example.com"])(
+    "refuses issuer padding %j",
+    async (issuer) => {
+      process.env.FLAIR_MCP_OAUTH = "true";
+      const deps = makeDeps();
+      delete (deps as any).skipComponentGuard;
+      (deps as any).harper = mockHarper({ mcp: { enabled: true, issuer } });
+      const error = await registerMcpOAuthRoute(deps).then(() => null, (error) => error);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toContain("(has leading or trailing whitespace)");
+      expect(error.message).not.toContain("flair.example.com");
+      expect(httpCalls).toHaveLength(0);
+    },
+  );
+
   it.each(["https://flair.example.com", "https://flair.example.com/"]
     .flatMap(issuer => [false, true].map(envRef => ({ issuer, envRef }))))(
     "mounts a plain issuer origin: $issuer (env reference: $envRef)", async ({ issuer, envRef }) => {

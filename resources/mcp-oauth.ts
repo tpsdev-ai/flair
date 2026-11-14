@@ -215,7 +215,16 @@ function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
     );
   }
   let failedRule = "not absolute";
-  try {
+  // new URL() strips leading and trailing C0 controls and spaces, then the
+  // component concatenates the raw issuer (`https://host\n/oauth/mcp/token`).
+  // @harperfast/oauth 2.9.0 dist/index.js validates with new URL() and
+  // dist/lib/mcp/wellKnown.js resolveIssuer() only strips trailing slashes.
+  const stripped = typeof issuer === "string"
+    ? issuer.replace(/^[\u0000-\u001F ]+|[\u0000-\u001F ]+$/g, "")
+    : issuer;
+  if (typeof issuer === "string" && issuer !== stripped) {
+    failedRule = "has leading or trailing whitespace";
+  } else try {
     const parsedIssuer = new URL(issuer as string);
     const pathWithoutTrailingSlash = parsedIssuer.pathname.replace(/\/+$/, "");
     if (parsedIssuer.protocol !== "http:" && parsedIssuer.protocol !== "https:") failedRule = "not http/https";
