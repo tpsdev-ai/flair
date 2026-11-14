@@ -369,8 +369,16 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
     },
   );
 
-  it.each(["https://flair.example.com\n", " https://flair.example.com", "\thttps://flair.example.com"])(
-    "refuses issuer padding %j",
+  it.each([
+    "https://flair.example.com\n",
+    " https://flair.example.com",
+    "\thttps://flair.example.com",
+    "https://flair.exa\tmple.com",
+    "https://flair\n.example.com",
+    "https://fl\rair.example.com",
+    "https://flair.example.com\r\n",
+  ])(
+    "refuses issuer whitespace or controls %j",
     async (issuer) => {
       process.env.FLAIR_MCP_OAUTH = "true";
       const deps = makeDeps();
@@ -378,11 +386,25 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
       (deps as any).harper = mockHarper({ mcp: { enabled: true, issuer } });
       const error = await registerMcpOAuthRoute(deps).then(() => null, (error) => error);
       expect(error).toBeInstanceOf(Error);
-      expect(error.message).toContain("(has leading or trailing whitespace)");
+      expect(error.message).toContain("(has whitespace or control characters)");
       expect(error.message).not.toContain("flair.example.com");
       expect(httpCalls).toHaveLength(0);
     },
   );
+
+  it("refuses a padded FLAIR_MCP_ISSUER env reference", async () => {
+    process.env.FLAIR_MCP_OAUTH = "true";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com\n";
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper({ mcp: { enabled: true, issuer: "${FLAIR_MCP_ISSUER}" } });
+    const error = await registerMcpOAuthRoute(deps).then(() => null, (error) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain("has whitespace or control characters");
+    expect(error.message).toContain('environment variable "FLAIR_MCP_ISSUER"');
+    expect(error.message).not.toContain("flair.example.com");
+    expect(httpCalls).toHaveLength(0);
+  });
 
   it.each(["https://flair.example.com", "https://flair.example.com/"]
     .flatMap(issuer => [false, true].map(envRef => ({ issuer, envRef }))))(

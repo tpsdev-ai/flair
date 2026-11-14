@@ -215,15 +215,10 @@ function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
     );
   }
   let failedRule = "not absolute";
-  // new URL() strips leading and trailing C0 controls and spaces, then the
-  // component concatenates the raw issuer (`https://host\n/oauth/mcp/token`).
-  // @harperfast/oauth 2.9.0 dist/index.js validates with new URL() and
-  // dist/lib/mcp/wellKnown.js resolveIssuer() only strips trailing slashes.
-  const stripped = typeof issuer === "string"
-    ? issuer.replace(/^[\u0000-\u001F ]+|[\u0000-\u001F ]+$/g, "")
-    : issuer;
-  if (typeof issuer === "string" && issuer !== stripped) {
-    failedRule = "has leading or trailing whitespace";
+  // WHATWG URL removes U+0000–U+0020 anywhere, including tab, LF, and CR.
+  // @harperfast/oauth 2.9.0 then concatenates the raw issuer.
+  if (typeof issuer === "string" && /[\u0000-\u0020\u007F]/.test(issuer)) {
+    failedRule = "has whitespace or control characters";
   } else try {
     const parsedIssuer = new URL(issuer as string);
     const pathWithoutTrailingSlash = parsedIssuer.pathname.replace(/\/+$/, "");
