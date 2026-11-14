@@ -370,6 +370,39 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
   );
 
   it.each([
+    "https://flair.example.com\\",
+    "https:/flair.example.com",
+    "https://flair.example.com/%2e",
+    "https://flair.example.com/./",
+    "https://FLAIR.EXAMPLE.COM",
+    "https://flair.example.com:443",
+    "https://@flair.example.com",
+    "https://flair.example.com:",
+  ].flatMap(issuer => [false, true].map(envRef => ({ issuer, envRef }))))(
+    "refuses a non-canonical issuer: $issuer (env reference: $envRef)", async ({ issuer, envRef }) => {
+      process.env.FLAIR_MCP_OAUTH = "true";
+      process.env.FLAIR_MCP_ISSUER = issuer;
+      const errors = spyOn(console, "error").mockImplementation(() => {});
+      const deps = makeDeps();
+      delete (deps as any).skipComponentGuard;
+      (deps as any).harper = mockHarper({ mcp: {
+        enabled: true, issuer: envRef ? "${FLAIR_MCP_ISSUER}" : issuer,
+      } });
+      try {
+        const error = await registerMcpOAuthRoute(deps).then(() => null, error => error);
+        expect(error).toBeInstanceOf(Error);
+        expect(error.message).toContain("not in canonical origin form");
+        expect(error.message).not.toContain(issuer);
+        if (envRef) expect(error.message).toContain('environment variable "FLAIR_MCP_ISSUER"');
+        expect(errors.mock.calls.map(args => args.map(String).join(" ")).join("\n")).not.toContain(issuer);
+        expect(httpCalls).toHaveLength(0);
+      } finally {
+        errors.mockRestore();
+      }
+    },
+  );
+
+  it.each([
     "https://flair.example.com\n",
     " https://flair.example.com",
     "\thttps://flair.example.com",
@@ -422,7 +455,7 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
     expect(httpCalls).toHaveLength(0);
   });
 
-  it.each(["https://flair.example.com", "https://flair.example.com/"]
+  it.each(["https://flair.example.com", "https://flair.example.com/", "http://127.0.0.1:9926"]
     .flatMap(issuer => [false, true].map(envRef => ({ issuer, envRef }))))(
     "mounts a plain issuer origin: $issuer (env reference: $envRef)", async ({ issuer, envRef }) => {
       process.env.FLAIR_MCP_OAUTH = "true";
@@ -444,6 +477,18 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
     delete (deps as any).skipComponentGuard;
     (deps as any).harper = mockHarper({ mcp: { enabled: true, issuer: "${FLAIR_MCP_ISSUER}" } });
     await expect(registerMcpOAuthRoute(deps)).rejects.toThrow('environment variable "FLAIR_MCP_ISSUER" is unset');
+    expect(httpCalls).toHaveLength(0);
+  });
+
+  it("a padded enabled env reference names mcp.enabled as the remedy", async () => {
+    process.env.FLAIR_MCP_OAUTH = "true";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper({ mcp: {
+      enabled: " ${FLAIR_MCP_OAUTH} ", issuer: "${FLAIR_MCP_ISSUER}",
+    } });
+    await expect(registerMcpOAuthRoute(deps)).rejects.toThrow("Set mcp.enabled to true.");
     expect(httpCalls).toHaveLength(0);
   });
 

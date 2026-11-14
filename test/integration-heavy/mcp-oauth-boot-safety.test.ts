@@ -744,14 +744,17 @@ describe("flair#1322 public URL without MCP issuer", () => {
 });
 
 describe("flair#1322 padded FLAIR_MCP_ISSUER", () => {
-  test("shipped config stays up and does not mount /mcp", async () => {
+  test.each([
+    { issuer: "https://test.example.com\n", rule: "has whitespace or control characters" },
+    { issuer: "https://test.example.com\\", rule: "not in canonical origin form" },
+  ])("shipped config stays up and does not mount /mcp ($rule)", async ({ issuer, rule }) => {
     const workDir = makeWorkDirWithShippedConfig("flair-padded-mcp-issuer-");
     const harper = await startHarper({
       cwd: workDir,
       harperBinDir: REPO_ROOT,
       serverEnv: mcpServerEnv({
         FLAIR_MCP_OAUTH: "true",
-        FLAIR_MCP_ISSUER: "https://test.example.com\n",
+        FLAIR_MCP_ISSUER: issuer,
         OAUTH_GITHUB_CLIENT_ID: "test-client-id",
         OAUTH_GITHUB_CLIENT_SECRET: "test-client-secret",
         OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
@@ -764,7 +767,7 @@ describe("flair#1322 padded FLAIR_MCP_ISSUER", () => {
     expect(mcpRes.status).not.toBe(401);
     if (!harper.external) {
       const log = harper.getLog?.() ?? "";
-      expect(log).toContain("has whitespace or control characters");
+      expect(log).toContain(rule);
       expect(log).not.toContain("[mcp-oauth] /mcp mounted");
     }
   }, 120_000);

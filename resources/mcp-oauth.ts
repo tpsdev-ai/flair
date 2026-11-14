@@ -197,7 +197,7 @@ function disagreementError(rawEnv: string, configured: unknown): Error {
     `FLAIR_MCP_OAUTH is ${boundedConfigValue(rawEnv)}, which Flair treats as enabled, ` +
     "but the @harperfast/oauth component's effective mcp.enabled is not true. " +
     "The value both readers accept is true.";
-  const isEnvRef = typeof configured === "string" && configured.trim() === "${FLAIR_MCP_OAUTH}";
+  const isEnvRef = configured === "${FLAIR_MCP_OAUTH}";
   const remedy = isEnvRef ? "Set FLAIR_MCP_OAUTH=true." : "Set mcp.enabled to true.";
   return new Error(`${base} ${remedy}`);
 }
@@ -215,8 +215,9 @@ function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
     );
   }
   let failedRule = "not absolute";
-  // new URL() accepts a one-element array (it stringifies) and removes
-  // U+0000–U+0020 anywhere. The component then concatenates the raw issuer.
+  // new URL() removes ASCII tab, LF and CR anywhere and trims C0 controls
+  // and spaces at the ends; other embedded C0 controls or spaces in a host throw.
+  // Refuse whitespace and controls anyway: the component keeps the raw issuer.
   if (typeof issuer !== "string") {
     failedRule = "not a string";
   } else if (/[\u0000-\u0020\u007F]/.test(issuer)) {
@@ -232,6 +233,7 @@ function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
     else if (parsedIssuer.search !== "" || parsedIssuer.hash !== "" ||
       (typeof issuer === "string" && /[?#]/.test(issuer))) failedRule = "has a query/hash";
     else if (parsedIssuer.username !== "" || parsedIssuer.password !== "") failedRule = "has userinfo";
+    else if (issuer.replace(/\/+$/, "") !== parsedIssuer.origin) failedRule = "not in canonical origin form";
     else return;
   } catch {
     failedRule = "not absolute";
@@ -244,7 +246,8 @@ function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
   throw new Error(
     "The @harperfast/oauth component's mcp.issuer must be an absolute http(s) origin" + detail +
     ". Refusing to mount /mcp. Set FLAIR_MCP_ISSUER to an absolute http(s) origin " +
-    "without a path, query, fragment or userinfo, and set mcp.issuer to ${FLAIR_MCP_ISSUER}.",
+    "without a path, query, fragment or userinfo, written as scheme://host[:port] with a lowercase host, " +
+    "no default port, and at most a trailing slash, and set mcp.issuer to ${FLAIR_MCP_ISSUER}.",
   );
 }
 
