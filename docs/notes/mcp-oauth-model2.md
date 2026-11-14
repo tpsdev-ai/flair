@@ -157,7 +157,9 @@ registered identities.
    credentials.
 
 2. **Set the env:**
-   - `FLAIR_MCP_OAUTH=true` — the value both readers accept; the authorization
+   - `FLAIR_MCP_OAUTH=true` — the recommended value, which both readers accept
+     (the component trims it and ignores case, but `1`, `yes` and `on` leave it
+     disabled); the authorization
      server also needs the issuer and provider credentials. An instance enabled
      before 0.46 may still have `FLAIR_MCP_OAUTH=1`.
    - `FLAIR_MCP_ISSUER=https://your-public-origin` — a bare HTTP(S) origin.

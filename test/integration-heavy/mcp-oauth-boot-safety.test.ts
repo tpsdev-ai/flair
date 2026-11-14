@@ -40,8 +40,9 @@
  *   3. MUTATION-PROVE (literal true): mcp.enabled: true + env unset -> boots
  *      DEGRADED. Proves test 2's clean-boot assertions CAN fire.
  *   4. GARBAGE VALUE (flair#1152 residual): FLAIR_MCP_OAUTH=maybe. Measured
- *      on oauth 2.5.0 the component's coerceConfigBoolean accepts ONLY
- *      "true"/"false" and DELETES anything else — so garbage disables the
+ *      on oauth 2.5.0: the component's coerceConfigBoolean maps only
+ *      true/false strings (trimmed, any case in 2.9.0) to a boolean and
+ *      normalizeBooleanField deletes anything else — so garbage disables the
  *      component too, and flair's strict mcpOAuthEnabled() stays false: BOTH
  *      sides off, no /mcp handler, no data path. (The AS-metadata 200 in that
  *      state is flair's OWN discovery document — oauth-discovery.ts serves it
@@ -53,9 +54,9 @@
  *      mounts, the component's github provider initializes, the COMPONENT's
  *      AS metadata advertises CIMD, and the RFC 9728
  *      metadata carries the DERIVED `<issuer>/mcp` resource (flair#1180 — no
- *      composite literal). "true" is the ONE value both readers accept:
- *      flair's flag takes 1/true/yes/on but the component deletes anything
- *      but "true"/"false". FLAIR_MCP_OAUTH=1 with the shipped env reference
+ *      composite literal). "true" is the recommended value both readers
+ *      accept: flair's flag takes 1/true/yes/on but the component deletes
+ *      anything but a true/false string (trimmed, any case). FLAIR_MCP_OAUTH=1 with the shipped env reference
  *      makes the boot guard refuse to mount /mcp (flair#1322).
  *   6. LEGACY "1" (flair#1285 / flair#1322): FLAIR_MCP_OAUTH=1 with the shipped
  *      env reference. The boot guard refuses: the process stays up, /mcp is

@@ -40,8 +40,8 @@ import { MULTI_WORKER_GUARD_HTTP_NAME } from "./multi-worker-guard.js";
  * A config read that throws, or that returns an empty or unreadable body,
  * refuses. That result is not a missing component and it is not success.
  *
- * When the two readers disagree, the error names `true` (the value both
- * accept) and the remedy. It does not hardcode an issuer URL.
+ * When the two readers disagree, the error names `true` (the recommended
+ * setting, which both accept) and the remedy. It does not hardcode an issuer URL.
  */
 const OAUTH_COMPONENT_KEY = "@harperfast/oauth";
 
@@ -196,7 +196,7 @@ function disagreementError(rawEnv: string, configured: unknown): Error {
   const base =
     `FLAIR_MCP_OAUTH is ${boundedConfigValue(rawEnv)}, which Flair treats as enabled, ` +
     "but the @harperfast/oauth component's effective mcp.enabled is not true. " +
-    "The value both readers accept is true.";
+    "Use true, the recommended value; both readers accept it.";
   const isEnvRef = configured === "${FLAIR_MCP_OAUTH}";
   const remedy = isEnvRef ? "Set FLAIR_MCP_OAUTH=true." : "Set mcp.enabled to true.";
   return new Error(`${base} ${remedy}`);
@@ -400,7 +400,8 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
       mounted: false,
       status: "Not enabled",
       // "true" not "1": this reader accepts 1/true/yes/on, but the component
-      // accepts only "true"/"false". This reason names the value both accept.
+      // maps only true/false strings (trimmed, any case) to a boolean, so
+      // 1/yes/on leave it disabled. This reason names true, which both accept.
       reason: "Set FLAIR_MCP_OAUTH=true (and an issuer) to serve MCP over HTTP.",
     });
   }

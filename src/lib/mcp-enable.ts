@@ -1023,11 +1023,11 @@ export function buildSecretsBundle(params: SecretsBundleParams): Record<string, 
     throw new IdpRedirectOriginError(envPrefix);
   }
   return {
-    // "true" is the ONLY value both readers of this flag accept (flair#1152,
-    // measured against oauth 2.5.0): flair's strict mcpOAuthEnabled() takes
-    // 1/true/yes/on, but the component's coerceConfigBoolean takes ONLY
-    // "true"/"false" and DELETES anything else (disabled default applies).
-    // Keep the value both readers accept.
+    // "true" is the recommended value both readers of this flag accept
+    // (flair#1152): flair's strict mcpOAuthEnabled() takes 1/true/yes/on, but
+    // the component's coerceConfigBoolean maps only true/false strings
+    // (trimmed, any case) to a boolean and returns undefined otherwise, and
+    // normalizeBooleanField then deletes the field (disabled default applies).
     FLAIR_MCP_OAUTH: "true",
     FLAIR_MCP_ISSUER: params.issuer.replace(/\/+$/, ""),
     [`${envPrefix}_CLIENT_ID`]: params.idpClientId,
