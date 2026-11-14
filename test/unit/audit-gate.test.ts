@@ -1416,6 +1416,17 @@ describe("cumulative allowlist lifetime (#2897)", () => {
     }
   });
 
+  it("requires the full GHSA id shape in allowlist entries (#2993)", () => {
+    for (const badGhsa of ["GHSA-a", "GHSA-aaaa-bbbb", "GHSA-aaaaa-bbbb-cccc"]) {
+      const problems = validateAllowlist(
+        { policy, entries: [entry({ ghsa: badGhsa })] },
+        new Date("2026-09-21"),
+      ).join("\n");
+      expect(problems).toContain('"ghsa" must be a GHSA id');
+    }
+    expect(validateAllowlist(ALLOWLIST, ALLOWLIST_AS_OF)).toEqual([]);
+  });
+
   it("finds a canonical GHSA whose first history commit used different casing", () => {
     const root = historyRepo([
       { date: "2026-09-01T12:00:00Z", entries: [{ ghsa: GHSA.toUpperCase() }] },

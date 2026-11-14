@@ -97,7 +97,7 @@ Both mechanisms independently forced a pass (`|| echo` made the shell exit 0, so
 
 | field | meaning |
 |---|---|
-| `ghsa` | the published advisory id |
+| `ghsa` | the published advisory id in full GHSA shape (three hyphen-separated four-character groups from GitHub's advisory id alphabet) in canonical casing |
 | `package`, `severity` | re-verified against `bun audit` on every run; drift fails the gate |
 | `class` | `no-patch-published`, `vendor-pinned`, or `remediation-available` |
 | `introducedBy` | the dependency edge that pulls it in |
