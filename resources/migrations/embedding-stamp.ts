@@ -267,8 +267,8 @@ function resolveAdminAuthHeader(): string | null {
  * reverse-proxied origin and is deliberately ignored here, matching
  * `a2a-url.localBaseUrl` ("never the public/proxy URL"): two self-call
  * resolvers, both pinned to loopback. The public-facing resolvers (e.g.
- * oauth-discovery, AdminInstance, XAA; also a2a-url.resolvePublicBaseUrl and
- * the MCP issuer resolvers) honour `FLAIR_PUBLIC_URL` precisely because their
+ * oauth-discovery, AdminInstance, XAA and a2a-url.resolvePublicBaseUrl)
+ * honour `FLAIR_PUBLIC_URL` precisely because their
  * output is meant to be reachable off-box; this one's output is not. That list
  * is illustrative, not exhaustive — the deciding question is whether the URL
  * leaves the box, not a roster of call sites.

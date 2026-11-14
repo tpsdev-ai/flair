@@ -53,11 +53,6 @@ export function oauthPublicBaseUrl(): string {
 /**
  * The RFC 8707 resource identifier of flair's MCP surface: `<base>/mcp`.
  *
- * Matches `mcpResource()` in resources/mcp-oauth-flag.ts by construction —
- * that is the URI `withMCPAuth` audience-binds tokens to when the Model-2
- * surface is enabled, so the protected-resource document must name the same
- * string or a client would audience-bind its token to something `/mcp` rejects.
- *
  * It names `/mcp` even when `FLAIR_MCP_OAUTH` is off and `/mcp` therefore
  * 404s. That is a coherent state, not a lie: RFC 9728 metadata describes how a
  * resource WOULD be authorized; a client that discovers the authorization

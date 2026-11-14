@@ -36,11 +36,9 @@
  * component's coerceConfigBoolean takes ONLY "true"/"false" and DELETES any
  * other string (unresolved placeholder, "1", "yes", garbage) so its disabled
  * default applies; this function takes 1/true/yes/on. Consequences:
- *   - "true" is the ONE value that enables both sides (`flair mcp enable`
- *     stages exactly that).
- *   - "1"/"yes"/"on" turn flair's /mcp handler ON while the component AS
- *     stays OFF — fail-closed broken-on (every request 401s, no AS
- *     advertised).
+ *   - "true" is accepted by both readers.
+ *   - "1"/"yes"/"on" make this reader true while the component deletes the
+ *     value and stays off; /mcp is not mounted.
  *   - garbage (e.g. "maybe") disables BOTH: the component deletes it, this
  *     stays false, no /mcp handler exists — no data path (flair's own
  *     discovery documents still serve whenever this flag is off, by design).
@@ -62,12 +60,10 @@ export function mcpOAuthEnabled(): boolean {
  * the client-controlled Host header) is the audience-confusion defense called
  * out in the plugin's production checklist.
  *
- * Configurable via `FLAIR_MCP_ISSUER` (fall back to `FLAIR_PUBLIC_URL`, which the
- * XAA token path already uses as the canonical public base). No hardcoded
- * default — an operator turning the flag on MUST set the public origin.
+ * Configured via `FLAIR_MCP_ISSUER`.
  */
 export function mcpIssuer(): string | undefined {
-  const raw = (process.env.FLAIR_MCP_ISSUER ?? process.env.FLAIR_PUBLIC_URL ?? "").trim();
+  const raw = (process.env.FLAIR_MCP_ISSUER ?? "").trim();
   return raw || undefined;
 }
 

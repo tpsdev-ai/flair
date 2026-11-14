@@ -27,46 +27,241 @@ import { checkMcpRateLimit } from "./rate-limit.js";
 import { MULTI_WORKER_GUARD_HTTP_NAME } from "./multi-worker-guard.js";
 
 /**
- * Boot guard (flair#1021): when FLAIR_MCP_OAUTH is on, the @harperfast/oauth
- * component MUST be declared in config.yaml. Without it the authorization
- * server's routes never mount — discovery, authorize, token, JWKS all 404.
- * The /mcp route would still register, but every request fails closed against
- * a non-existent auth server. This guard fails loudly so the operator sees the
- * error at boot instead of a silently broken deployment.
+ * Boot guard (flair#1021, flair#1322), after the flag and degraded-start checks.
  *
- * The error names the actor (the operator who set the flag), the state
- * (component absent from config.yaml), and the remedy (add the declaration).
- * It does NOT suggest a concrete issuer — the issuer is derived at runtime
- * from FLAIR_MCP_ISSUER / FLAIR_PUBLIC_URL and must not be hardcoded.
+ * The `@harperfast/oauth` component must be declared, and its effective
+ * `mcp.enabled` must be true. Effective means the component's own read:
+ * whole-token `${VAR}` expansion, then `true`/`false` only. Any other string
+ * (`1`, `yes`, `on`, an unresolved placeholder, garbage) is deleted and the
+ * disabled default applies. Key presence is not that state — the block ships
+ * in config.yaml, so a pre-0.46 `FLAIR_MCP_OAUTH=1` used to mount `/mcp` while
+ * the authorization server stayed off.
+ *
+ * A config read that throws, or that returns an empty or unreadable body,
+ * refuses. That result is not a missing component and it is not success.
+ *
+ * When the two readers disagree, the error names `true` (the recommended
+ * setting, which both accept) and the remedy. It does not hardcode an issuer URL.
  */
-export function assertHarperOAuthComponentDeclared(harperNs?: any) {
-  // Harper exposes parsed config via its runtime namespace. We check for the
-  // @harperfast/oauth key; absence means the component's routes were never
-  // registered.
-  const h = harperNs ?? harper;
-  const hc = h.app?.config ?? h.config;
-  const component = hc?.get?.("@harperfast/oauth") ?? hc?.["@harperfast/oauth"];
-  if (!component) {
-    throw new Error(
-      "FLAIR_MCP_OAUTH is enabled but the @harperfast/oauth component is not declared in config.yaml. " +
-      "The authorization server cannot start without it — discovery, authorize, token, and JWKS endpoints will all 404, " +
-      "and /mcp will reject every request.\n" +
-      "Add this entry to your config.yaml:\n" +
+const OAUTH_COMPONENT_KEY = "@harperfast/oauth";
+
+/**
+ * A plain record in this realm or another. Harper runs this module in a VM,
+ * so `config` can be a host-realm object whose prototype is not this realm's
+ * `Object.prototype`.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  try {
+    if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+    const proto = Object.getPrototypeOf(value);
+    if (proto === null) return true;
+    // `Object.prototype` in any realm: its prototype is null, and it is that
+    // realm's `Object` constructor's prototype. Class instances sit one step
+    // further out and are not records.
+    if (Object.getPrototypeOf(proto) !== null) return false;
+    const ctor = (proto as { constructor?: unknown }).constructor;
+    return typeof ctor === "function" && (ctor as { prototype?: unknown }).prototype === proto;
+  } catch {
+    return false;
+  }
+}
+
+/** `@harperfast/oauth` `expandEnvVar`: whole-token `${NAME}` only. */
+function expandWholeTokenEnv(value: unknown): unknown {
+  if (typeof value !== "string" || !value.startsWith("${") || !value.endsWith("}")) return value;
+  const envValue = process.env[value.slice(2, -1)];
+  return envValue !== undefined ? envValue : value;
+}
+
+type ComponentRead =
+  | { kind: "absent" }
+  | { kind: "present"; component: Record<string, unknown> }
+  | { kind: "unreadable"; detail: string };
+
+function readOAuthComponent(harperNs: any): ComponentRead {
+  let hc: any;
+  try {
+    const h = harperNs ?? harper;
+    hc = h?.app?.config ?? h?.config;
+  } catch {
+    return { kind: "unreadable", detail: "config lookup failed" };
+  }
+  if (!isRecord(hc)) {
+    return { kind: "unreadable", detail: "application config is missing or unreadable" };
+  }
+  let keyCount = 0;
+  let readableGet = false;
+  try {
+    keyCount = Object.keys(hc).length;
+    readableGet = typeof hc.get === "function";
+  } catch {
+    return { kind: "unreadable", detail: "application config is unreadable" };
+  }
+  // `{}` is unreadable: a missing document can arrive as an empty object.
+  // A get-backed config may have no enumerable keys and still hold the component.
+  if (keyCount === 0 && !readableGet) {
+    return { kind: "unreadable", detail: "application config is empty" };
+  }
+
+  let component: unknown;
+  try {
+    if (typeof hc.get === "function") component = hc.get(OAUTH_COMPONENT_KEY);
+  } catch {
+    return { kind: "unreadable", detail: "config lookup failed" };
+  }
+  if (component == null) {
+    try {
+      component = hc[OAUTH_COMPONENT_KEY];
+    } catch {
+      return { kind: "unreadable", detail: "config lookup failed" };
+    }
+  }
+  if (component == null) return { kind: "absent" };
+  if (!isRecord(component)) {
+    return { kind: "unreadable", detail: "component entry is not an object" };
+  }
+  return { kind: "present", component };
+}
+
+type EnabledRead =
+  | { kind: "bool"; enabled: boolean; configured: unknown }
+  | { kind: "unreadable"; detail: string };
+
+/**
+ * The component's effective `mcp.enabled` after `coerceConfigBoolean`.
+ * Omitted, null, or a deleted non-boolean string is the disabled default.
+ */
+export function readEffectiveMcpEnabled(component: Record<string, unknown>): EnabledRead {
+  try {
+    if (!Object.prototype.hasOwnProperty.call(component, "mcp") || component.mcp == null) {
+      return { kind: "bool", enabled: false, configured: undefined };
+    }
+    if (!isRecord(component.mcp)) {
+      return { kind: "unreadable", detail: "mcp entry is not an object" };
+    }
+    if (!Object.prototype.hasOwnProperty.call(component.mcp, "enabled") || component.mcp.enabled === undefined) {
+      return { kind: "bool", enabled: false, configured: undefined };
+    }
+    const configured = component.mcp.enabled;
+    if (configured === null) return { kind: "bool", enabled: false, configured };
+    const expanded = expandWholeTokenEnv(configured);
+    if (typeof expanded === "boolean") return { kind: "bool", enabled: expanded, configured };
+    if (typeof expanded === "string") {
+      const v = expanded.trim().toLowerCase();
+      if (v === "true") return { kind: "bool", enabled: true, configured };
+      if (v === "false") return { kind: "bool", enabled: false, configured };
+      return { kind: "bool", enabled: false, configured };
+    }
+    return { kind: "unreadable", detail: "mcp.enabled is not a boolean or string" };
+  } catch {
+    return { kind: "unreadable", detail: "mcp config lookup failed" };
+  }
+}
+
+function unreadableConfigError(detail: string): Error {
+  return new Error(
+    "FLAIR_MCP_OAUTH is enabled but the @harperfast/oauth configuration could not be read (" +
+      detail +
+      "). Refusing to mount /mcp. " +
+      'Remedy: make config.yaml\'s "@harperfast/oauth" entry a readable object, ' +
+      "with mcp.enabled set to true or to ${FLAIR_MCP_OAUTH}, and set FLAIR_MCP_OAUTH=true.",
+  );
+}
+
+function componentAbsentError(): Error {
+  return new Error(
+    "FLAIR_MCP_OAUTH is enabled but the @harperfast/oauth component is not declared in config.yaml. " +
+      "The authorization server cannot start without it — discovery, authorize, token, and JWKS endpoints will all 404.\n" +
+      'Restore the complete "@harperfast/oauth" entry from the config.yaml that ships with this Flair version. ' +
+      "This is a PARTIAL declaration of that entry; it leaves out the providers block:\n" +
       "\n" +
       '  "@harperfast/oauth":\n' +
-      "    providers:\n" +
-      '      default:\n' +
-      '        authorizationEndpoint: "/OAuthAuthorize"\n' +
-      '        tokenEndpoint: "/OAuthToken"\n' +
-      '        revocationEndpoint: "/OAuthRevoke"\n' +
-      '        registrationEndpoint: "/OAuthRegister"\n' +
-      '        jwksUri: "/.well-known/jwks.json"\n' +
-      '        discoveryEndpoint: "/.well-known/oauth-authorization-server"\n' +
+      '    package: "@harperfast/oauth"\n' +
+      "    mcp:\n" +
+      "      enabled: ${FLAIR_MCP_OAUTH}\n" +
+      "      issuer: ${FLAIR_MCP_ISSUER}\n" +
       "\n" +
-      "Then set FLAIR_MCP_ISSUER (or FLAIR_PUBLIC_URL) to your instance's public origin " +
-      "and add the corresponding mcp.* block to the component config.",
+      "This alone does not start the authorization server: the component also needs at least one provider " +
+      "with its client ID, client secret and redirect URI set (the shipped entry configures github through " +
+      "OAUTH_GITHUB_CLIENT_ID, OAUTH_GITHUB_CLIENT_SECRET and OAUTH_GITHUB_REDIRECT_URI). " +
+      "Then set FLAIR_MCP_OAUTH=true and set FLAIR_MCP_ISSUER to this instance's public origin.",
+  );
+}
+
+function boundedConfigValue(value: string): string {
+  return JSON.stringify(value.length > 64 ? `${value.slice(0, 64)}…` : value);
+}
+
+function disagreementError(rawEnv: string, configured: unknown): Error {
+  const base =
+    `FLAIR_MCP_OAUTH is ${boundedConfigValue(rawEnv)}, which Flair treats as enabled, ` +
+    "but the @harperfast/oauth component's effective mcp.enabled is not true. " +
+    "Use true, the recommended value; both readers accept it.";
+  const isEnvRef = configured === "${FLAIR_MCP_OAUTH}";
+  const remedy = isEnvRef ? "Set FLAIR_MCP_OAUTH=true." : "Set mcp.enabled to true.";
+  return new Error(`${base} ${remedy}`);
+}
+
+function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
+  let configured: unknown;
+  let issuer: unknown;
+  try {
+    configured = (component.mcp as Record<string, unknown>).issuer;
+    issuer = expandWholeTokenEnv(configured);
+  } catch {
+    throw new Error(
+      "mcp.issuer could not be read. Set FLAIR_MCP_ISSUER to an absolute http(s) origin " +
+      "and set mcp.issuer to ${FLAIR_MCP_ISSUER}. Refusing to mount /mcp.",
     );
   }
+  let failedRule = "not absolute";
+  // new URL() removes ASCII tab, LF and CR anywhere and trims C0 controls
+  // and spaces at the ends; other embedded C0 controls or spaces in a host throw.
+  // Refuse whitespace and controls anyway: the component keeps the raw issuer.
+  if (typeof issuer !== "string") {
+    failedRule = "not a string";
+  } else if (/[\u0000-\u0020\u007F]/.test(issuer)) {
+    failedRule = "has whitespace or control characters";
+  } else try {
+    const parsedIssuer = new URL(issuer as string);
+    const pathWithoutTrailingSlash = parsedIssuer.pathname.replace(/\/+$/, "");
+    if (parsedIssuer.protocol !== "http:" && parsedIssuer.protocol !== "https:") failedRule = "not http/https";
+    else if (pathWithoutTrailingSlash !== "") failedRule = "has a path";
+    // Stricter than @harperfast/oauth 2.9.0 on purpose: an empty `?` or `#` leaves
+    // URL.search/hash empty, so the component accepts it, then prefixes every endpoint
+    // with the raw value (`https://host?/oauth/mcp/token`). Refuse any raw delimiter.
+    else if (parsedIssuer.search !== "" || parsedIssuer.hash !== "" ||
+      (typeof issuer === "string" && /[?#]/.test(issuer))) failedRule = "has a query/hash";
+    else if (parsedIssuer.username !== "" || parsedIssuer.password !== "") failedRule = "has userinfo";
+    else if (issuer.replace(/\/+$/, "") !== parsedIssuer.origin) failedRule = "not in canonical origin form";
+    else return;
+  } catch {
+    failedRule = "not absolute";
+  }
+  const envName = typeof configured === "string" && configured.startsWith("${") && configured.endsWith("}")
+    ? configured.slice(2, -1) : undefined;
+  const detail = envName === undefined ? ` (${failedRule})`
+    : process.env[envName] === undefined ? ` (environment variable ${JSON.stringify(envName)} is unset)`
+    : ` (environment variable ${JSON.stringify(envName)} value fails the rule: ${failedRule})`;
+  throw new Error(
+    "The @harperfast/oauth component's mcp.issuer must be an absolute http(s) origin" + detail +
+    ". Refusing to mount /mcp. Set FLAIR_MCP_ISSUER to an absolute http(s) origin " +
+    "without a path, query, fragment or userinfo, written as scheme://host[:port] with a lowercase host, " +
+    "no default port, and at most a trailing slash, and set mcp.issuer to ${FLAIR_MCP_ISSUER}.",
+  );
+}
+
+export function assertHarperOAuthComponentDeclared(harperNs?: any) {
+  if (!mcpOAuthEnabled()) return;
+  const read = readOAuthComponent(harperNs);
+  if (read.kind === "unreadable") throw unreadableConfigError(read.detail);
+  if (read.kind === "absent") throw componentAbsentError();
+  const enabled = readEffectiveMcpEnabled(read.component);
+  if (enabled.kind === "unreadable") throw unreadableConfigError(enabled.detail);
+  if (!enabled.enabled) {
+    throw disagreementError((process.env.FLAIR_MCP_OAUTH ?? "").trim(), enabled.configured);
+  }
+  assertEffectiveMcpIssuer(read.component);
 }
 // NOTE: mcpHandler is intentionally NOT statically imported here — it's resolved
 // lazily (deps.mcpHandler ?? dynamic import) inside registerMcpOAuthRoute, same
@@ -204,11 +399,9 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
     return decide({
       mounted: false,
       status: "Not enabled",
-      // "true" not "1": flair's flag accepts either, but the component's
-      // config-side read of the same var (config.yaml `mcp.enabled:
-      // ${FLAIR_MCP_OAUTH}`, flair#1152) accepts ONLY "true"/"false" — with
-      // "1" the /mcp route registers and every request 401s against a
-      // component that never mounted its AS.
+      // "true" not "1": this reader accepts 1/true/yes/on, but the component
+      // maps only true/false strings (trimmed, any case) to a boolean, so
+      // 1/yes/on leave it disabled. This reason names true, which both accept.
       reason: "Set FLAIR_MCP_OAUTH=true (and an issuer) to serve MCP over HTTP.",
     });
   }
@@ -226,10 +419,8 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
     });
   }
 
-  // Boot guard (flair#1021): fail loudly if the operator enabled the flag but
-  // the @harperfast/oauth component is absent from config.yaml. Without it the
-  // authorization server's routes never mount — discovery, authorize, token,
-  // JWKS all 404 — and the /mcp guard has nothing to validate against.
+  // Boot guard (flair#1021, flair#1322): the component must be declared and its
+  // effective mcp.enabled must be true.
   if (!deps.skipComponentGuard) {
     assertHarperOAuthComponentDeclared(deps.harper);
   }
@@ -241,13 +432,13 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
     // is the clearer signal). Log and bail — the operator must set FLAIR_MCP_ISSUER.
     console.error(
       "[mcp-oauth] FLAIR_MCP_OAUTH is on but no issuer configured " +
-        "(set FLAIR_MCP_ISSUER or FLAIR_PUBLIC_URL) — /mcp NOT mounted.",
+        "(set FLAIR_MCP_ISSUER) — /mcp NOT mounted.",
     );
     return decide({
       mounted: false,
       status: "Not mounted",
       reason:
-        "FLAIR_MCP_OAUTH is on but no issuer is configured — set FLAIR_MCP_ISSUER (or FLAIR_PUBLIC_URL).",
+        "FLAIR_MCP_OAUTH is on but no issuer is configured — set FLAIR_MCP_ISSUER.",
     });
   }
 

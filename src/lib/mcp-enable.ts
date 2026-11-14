@@ -511,10 +511,9 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
         // the component's coerceConfigBoolean accepts ONLY "true"/"false" and
         // DELETES any other string (unresolved placeholder, "1", "yes",
         // garbage) so its disabled default applies; flair's mcpOAuthEnabled()
-        // (resources/mcp-oauth-flag.ts) accepts 1/true/yes/on. So "true" is
-        // the one value that enables BOTH; "1"/"yes"/"on" flip flair's /mcp
-        // handler on while the component AS stays off (fail-closed broken-on:
-        // all 401, no AS advertised); garbage/unset disable both. On oauth
+        // (resources/mcp-oauth-flag.ts) accepts 1/true/yes/on. Both readers
+        // accept "true". "1"/"yes"/"on" leave the component AS off; /mcp is
+        // not mounted. Garbage and an unset variable disable both. On oauth
         // <2.5.0 there is NO normalization and an unresolved placeholder is a
         // truthy string (fail-open) — which is why the resolved-version
         // assertion in mcp-oauth-boot-safety.test.ts exists. If component
@@ -1024,13 +1023,11 @@ export function buildSecretsBundle(params: SecretsBundleParams): Record<string, 
     throw new IdpRedirectOriginError(envPrefix);
   }
   return {
-    // "true" is the ONLY value both readers of this flag accept (flair#1152,
-    // measured against oauth 2.5.0): flair's strict mcpOAuthEnabled() takes
-    // 1/true/yes/on, but the component's coerceConfigBoolean takes ONLY
-    // "true"/"false" and DELETES anything else (disabled default applies).
-    // Staging "1" here would flip flair's /mcp handler ON while the
-    // component's AS stays OFF — fail-closed but broken-on (every request
-    // 401s, no AS is advertised). Keep this "true".
+    // "true" is the recommended value both readers of this flag accept
+    // (flair#1152): flair's strict mcpOAuthEnabled() takes 1/true/yes/on, but
+    // the component's coerceConfigBoolean maps only true/false strings
+    // (trimmed, any case) to a boolean and returns undefined otherwise, and
+    // normalizeBooleanField then deletes the field (disabled default applies).
     FLAIR_MCP_OAUTH: "true",
     FLAIR_MCP_ISSUER: params.issuer.replace(/\/+$/, ""),
     [`${envPrefix}_CLIENT_ID`]: params.idpClientId,

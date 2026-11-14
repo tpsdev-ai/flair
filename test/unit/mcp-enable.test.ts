@@ -242,10 +242,9 @@ describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () =
       idpClientId: "client-id-value",
       idpClientSecret: "client-secret-value",
     });
-    // "true" EXACTLY (flair#1152): the component's coerceConfigBoolean
-    // accepts only "true"/"false" and DELETES anything else — staging "1"
-    // (flair-truthy, component-deleted) yields a guarded /mcp with NO
-    // authorization server behind it.
+    // "true" (flair#1152): the component's coerceConfigBoolean maps only
+    // true/false strings (trimmed, any case) to a boolean; normalizeBooleanField
+    // deletes an unrecognized value, so 1/yes/on would leave it disabled.
     expect(bundle.FLAIR_MCP_OAUTH).toBe("true");
     expect(bundle.FLAIR_MCP_ISSUER).toBe(ISSUER);
     expect(bundle.FLAIR_MCP_SIGNING_KEY_PEM).toBeUndefined();
