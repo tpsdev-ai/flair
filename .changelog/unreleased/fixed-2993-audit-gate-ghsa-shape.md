@@ -1,0 +1,1 @@
+- **The audit gate validates the full GHSA id shape in allowlist entries.** The validator requires the full GHSA id shape (three hyphen-separated groups of four characters in canonical casing, e.g. `GHSA-xxxx-xxxx-xxxx`), rejecting incomplete or malformed advisory ids while admitting valid ones (#2993).
