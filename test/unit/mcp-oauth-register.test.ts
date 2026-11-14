@@ -350,6 +350,40 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
     expect(httpCalls).toHaveLength(0);
   });
 
+  it.each(["https://flair.example.com?", "https://flair.example.com#", "https://flair.example.com/?"]
+    .flatMap(issuer => [false, true].map(envRef => ({ issuer, envRef }))))(
+    "refuses empty issuer delimiters: $issuer (env reference: $envRef)", async ({ issuer, envRef }) => {
+      process.env.FLAIR_MCP_OAUTH = "true";
+      process.env.FLAIR_MCP_ISSUER = issuer;
+      const deps = makeDeps();
+      delete (deps as any).skipComponentGuard;
+      (deps as any).harper = mockHarper({ mcp: {
+        enabled: true, issuer: envRef ? "${FLAIR_MCP_ISSUER}" : issuer,
+      } });
+      const error = await registerMcpOAuthRoute(deps).then(() => null, error => error);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toContain("has a query/hash");
+      expect(error.message).not.toContain(issuer);
+      if (envRef) expect(error.message).toContain('environment variable "FLAIR_MCP_ISSUER"');
+      expect(httpCalls).toHaveLength(0);
+    },
+  );
+
+  it.each(["https://flair.example.com", "https://flair.example.com/"]
+    .flatMap(issuer => [false, true].map(envRef => ({ issuer, envRef }))))(
+    "mounts a plain issuer origin: $issuer (env reference: $envRef)", async ({ issuer, envRef }) => {
+      process.env.FLAIR_MCP_OAUTH = "true";
+      process.env.FLAIR_MCP_ISSUER = issuer;
+      const deps = makeDeps();
+      delete (deps as any).skipComponentGuard;
+      (deps as any).harper = mockHarper({ mcp: {
+        enabled: true, issuer: envRef ? "${FLAIR_MCP_ISSUER}" : issuer,
+      } });
+      expect(await registerMcpOAuthRoute(deps)).toBe(true);
+      expect(httpCalls).toHaveLength(1);
+    },
+  );
+
   it("names an unset issuer variable", async () => {
     delete process.env.FLAIR_MCP_ISSUER;
     process.env.FLAIR_MCP_OAUTH = "true";

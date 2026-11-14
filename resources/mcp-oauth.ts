@@ -220,7 +220,11 @@ function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
     const pathWithoutTrailingSlash = parsedIssuer.pathname.replace(/\/+$/, "");
     if (parsedIssuer.protocol !== "http:" && parsedIssuer.protocol !== "https:") failedRule = "not http/https";
     else if (pathWithoutTrailingSlash !== "") failedRule = "has a path";
-    else if (parsedIssuer.search !== "" || parsedIssuer.hash !== "") failedRule = "has a query/hash";
+    // Stricter than @harperfast/oauth 2.9.0 on purpose: an empty `?` or `#` leaves
+    // URL.search/hash empty, so the component accepts it, then prefixes every endpoint
+    // with the raw value (`https://host?/oauth/mcp/token`). Refuse any raw delimiter.
+    else if (parsedIssuer.search !== "" || parsedIssuer.hash !== "" ||
+      (typeof issuer === "string" && /[?#]/.test(issuer))) failedRule = "has a query/hash";
     else if (parsedIssuer.username !== "" || parsedIssuer.password !== "") failedRule = "has userinfo";
     else return;
   } catch {
