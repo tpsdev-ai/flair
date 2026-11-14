@@ -392,6 +392,22 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
     },
   );
 
+  it.each([
+    { label: "array", issuer: ["https://flair.example.com"], hidden: "flair.example.com" },
+    { label: "number", issuer: 20992, hidden: "20992" },
+    { label: "object", issuer: { href: "https://flair.example.com" }, hidden: "flair.example.com" },
+  ])("refuses a non-string issuer ($label)", async ({ issuer, hidden }) => {
+    process.env.FLAIR_MCP_OAUTH = "true";
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper({ mcp: { enabled: true, issuer } });
+    const error = await registerMcpOAuthRoute(deps).then(() => null, (error) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain("(not a string)");
+    expect(error.message).not.toContain(hidden);
+    expect(httpCalls).toHaveLength(0);
+  });
+
   it("refuses a padded FLAIR_MCP_ISSUER env reference", async () => {
     process.env.FLAIR_MCP_OAUTH = "true";
     process.env.FLAIR_MCP_ISSUER = "https://flair.example.com\n";

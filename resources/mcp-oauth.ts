@@ -215,9 +215,11 @@ function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
     );
   }
   let failedRule = "not absolute";
-  // WHATWG URL removes U+0000–U+0020 anywhere, including tab, LF, and CR.
-  // @harperfast/oauth 2.9.0 then concatenates the raw issuer.
-  if (typeof issuer === "string" && /[\u0000-\u0020\u007F]/.test(issuer)) {
+  // new URL() accepts a one-element array (it stringifies) and removes
+  // U+0000–U+0020 anywhere. The component then concatenates the raw issuer.
+  if (typeof issuer !== "string") {
+    failedRule = "not a string";
+  } else if (/[\u0000-\u0020\u007F]/.test(issuer)) {
     failedRule = "has whitespace or control characters";
   } else try {
     const parsedIssuer = new URL(issuer as string);
