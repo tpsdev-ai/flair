@@ -500,7 +500,7 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
     }
   });
 
-  it.each(["mcp", "enabled"])("throwing %s getter refuses with a named config remedy", async (field) => {
+  it.each(["mcp", "enabled", "issuer"])("throwing %s getter refuses with a named config remedy", async (field) => {
     process.env.FLAIR_MCP_OAUTH = "true";
     process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
     const component = { mcp: { enabled: true, issuer: "${FLAIR_MCP_ISSUER}" } };
@@ -511,7 +511,9 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
     delete (deps as any).skipComponentGuard;
     (deps as any).harper = mockHarper(component);
     await expect(registerMcpOAuthRoute(deps)).rejects.toThrow(
-      /configuration could not be read.*Remedy: make config\.yaml.*set FLAIR_MCP_OAUTH=true/,
+      field === "issuer"
+        ? /mcp\.issuer could not be read/
+        : /configuration could not be read.*Remedy: make config\.yaml.*set FLAIR_MCP_OAUTH=true/,
     );
     expect(httpCalls).toHaveLength(0);
   });
