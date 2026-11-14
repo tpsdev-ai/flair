@@ -60,11 +60,11 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@sinclair/typebox": "0.34.48",
+    "@sinclair/typebox": "0.34.52",
     "@tpsdev-ai/flair-client": "0.62.0"
   },
   "devDependencies": {
-    "openclaw-supported": "npm:openclaw@2026.9.6",
+    "openclaw-supported": "npm:openclaw@2026.11.1",
     "typescript": "5.9.3"
   }
 }
