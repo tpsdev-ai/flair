@@ -30,12 +30,14 @@
  * Read from `FLAIR_MCP_OAUTH` — truthy values: "1", "true", "yes", "on"
  * (case-insensitive). Anything else (incl. unset / empty) → OFF.
  *
- * ASYMMETRY (load-bearing, flair#1152, measured on oauth 2.5.0): config.yaml's
- * `mcp.enabled: ${FLAIR_MCP_OAUTH}` hands the SAME env var to
+ * ASYMMETRY (load-bearing, flair#1152, measured on @harperfast/oauth 2.9.0):
+ * config.yaml's `mcp.enabled: ${FLAIR_MCP_OAUTH}` hands the SAME env var to
  * @harperfast/oauth, but the two readers accept DIFFERENT vocabularies. The
- * component's coerceConfigBoolean takes ONLY "true"/"false" and DELETES any
- * other string (unresolved placeholder, "1", "yes", garbage) so its disabled
- * default applies; this function takes 1/true/yes/on. Consequences:
+ * component's coerceConfigBoolean trims and lowercases, mapping "true"/"false"
+ * to a boolean, and normalizeBooleanField deletes strings it cannot coerce
+ * (unresolved placeholder, "1", "yes", garbage), so its disabled default
+ * applies (dist/lib/config.js); this function takes 1/true/yes/on.
+ * Consequences:
  *   - "true" is accepted by both readers.
  *   - "1"/"yes"/"on" make this reader true while the component deletes the
  *     value and stays off; /mcp is not mounted.

@@ -507,10 +507,12 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
       },
       mcp: {
         // flair#1152: whole-token env reference — same flag flair's in-process
-        // route gates on. ASYMMETRY (load-bearing, measured on oauth 2.5.0):
-        // the component's coerceConfigBoolean accepts ONLY "true"/"false" and
-        // DELETES any other string (unresolved placeholder, "1", "yes",
-        // garbage) so its disabled default applies; flair's mcpOAuthEnabled()
+        // route gates on. ASYMMETRY (load-bearing, measured on
+        // @harperfast/oauth 2.9.0): the component's coerceConfigBoolean trims
+        // and lowercases, mapping "true"/"false" to a boolean, and
+        // normalizeBooleanField deletes strings it cannot coerce (unresolved
+        // placeholder, "1", "yes", garbage), so its disabled default applies
+        // (dist/lib/config.js); flair's mcpOAuthEnabled()
         // (resources/mcp-oauth-flag.ts) accepts 1/true/yes/on. Both readers
         // accept "true". "1"/"yes"/"on" leave the component AS off; /mcp is
         // not mounted. Garbage and an unset variable disable both. On oauth
