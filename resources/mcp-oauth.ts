@@ -17,7 +17,7 @@
  */
 
 import * as harper from "harper";
-import { mcpOAuthEnabled, mcpAuthConfig } from "./mcp-oauth-flag.js";
+import { mcpOAuthEnabled, mcpAuthConfig, mcpIssuer } from "./mcp-oauth-flag.js";
 // flair#2270: run the degraded-start guard BEFORE the @harperfast/oauth
 // component resolves its config. Imported for its module-load side effect (this
 // module is itself loaded during jsResource boot, ahead of the component);
@@ -234,7 +234,15 @@ function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
       (typeof issuer === "string" && /[?#]/.test(issuer))) failedRule = "has a query/hash";
     else if (parsedIssuer.username !== "" || parsedIssuer.password !== "") failedRule = "has userinfo";
     else if (issuer.replace(/\/+$/, "") !== parsedIssuer.origin) failedRule = "not in canonical origin form";
-    else return;
+    // flair#3032: the authorization server mints tokens for THIS value, while
+    // withMCPAuth verifies them against mcpIssuer(). A literal that disagrees
+    // with FLAIR_MCP_ISSUER mounts /mcp with tokens that cannot verify there.
+    else {
+      const envIssuer = mcpIssuer();
+      if (envIssuer !== undefined && issuer.replace(/\/+$/, "") !== envIssuer.replace(/\/+$/, "")) {
+        failedRule = "differs from FLAIR_MCP_ISSUER";
+      } else return;
+    }
   } catch {
     failedRule = "not absolute";
   }
@@ -243,6 +251,14 @@ function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
   const detail = envName === undefined ? ` (${failedRule})`
     : process.env[envName] === undefined ? ` (environment variable ${JSON.stringify(envName)} is unset)`
     : ` (environment variable ${JSON.stringify(envName)} value fails the rule: ${failedRule})`;
+  if (failedRule === "differs from FLAIR_MCP_ISSUER") {
+    throw new Error(
+      "The @harperfast/oauth component's mcp.issuer is a valid absolute http(s) origin" + detail +
+      ", but withMCPAuth verifies tokens against FLAIR_MCP_ISSUER, so the tokens the component mints cannot verify here. " +
+      "Refusing to mount /mcp. Set FLAIR_MCP_ISSUER and mcp.issuer to the same public origin, " +
+      "or set mcp.issuer to ${FLAIR_MCP_ISSUER}.",
+    );
+  }
   throw new Error(
     "The @harperfast/oauth component's mcp.issuer must be an absolute http(s) origin" + detail +
     ". Refusing to mount /mcp. Set FLAIR_MCP_ISSUER to an absolute http(s) origin " +
