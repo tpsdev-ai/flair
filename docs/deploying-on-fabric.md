@@ -37,7 +37,7 @@ flair deploy --fabric-org <org> --fabric-cluster <cluster>
 
 Target defaults to `https://<cluster>.<org>.harperfabric.com`; override with `--target`.
 
-`flair deploy --target https://<host>:9926 --operations-endpoint https://<host>:9925 --application-endpoint https://<host>:9926` sends `deploy_component` to port 9925 and probes the application on port 9926. When those URLs differ, the admin Basic credentials are sent to the operations endpoint for `deploy_component` and to the application endpoint for `/Health`, `/HealthDetail`, and the fleet sweep.
+`flair deploy --target https://<host>:9926 --operations-endpoint https://<host>:9925 --application-endpoint https://<host>:9926` sends `deploy_component` to port 9925 and probes the application on port 9926. When those URLs differ, the admin Basic credentials are sent to the operations endpoint for `deploy_component` and to the application endpoint for `/Health`, `/HealthDetail`, and the fleet sweep. <!-- docs-freshness-allow: Fabric application port 9926 and ops port 9925 -->
 
 Credentials go via the environment, not argv, so they stay out of `ps`. Use
 `--fabric-password-file <path>` (mode `0600`) when scripting; inline flags leak to history.
