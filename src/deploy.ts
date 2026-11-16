@@ -796,6 +796,8 @@ export interface VerifyDeployOptions {
   timeoutMs?: number;
   pollIntervalMs?: number;
   settleStreak?: number;
+  /** True when the caller passed --application-endpoint. */
+  applicationEndpointNamed?: boolean;
   fetchImpl?: typeof fetch;
   onProgress?: (msg: string) => void;
 }
@@ -829,11 +831,13 @@ async function pollUntilSettled(
   }
 }
 
-function verificationRefusal(detail: string): Error {
-  return new Error(
-    `deploy verification: ${detail}. Pass --application-endpoint <application-url> and re-run verification against the application endpoint.`,
-  );
+function verificationRefusal(detail: string, remedy: string): Error {
+  return new Error(`deploy verification: ${detail}. ${remedy}`);
 }
+
+const RESOURCE_JSON_OR_401 = "Retry when that URL returns 200 with a JSON body, or 401.";
+const NAME_APPLICATION_ENDPOINT =
+  "Pass --application-endpoint <application-url> and re-run verification against the application endpoint.";
 
 type ProbeBody =
   | { kind: "json"; value: unknown }
@@ -859,9 +863,9 @@ async function verifyResourcesServing(
   baseUrl: string,
   resources: string[],
   fetchImpl: typeof fetch,
+  applicationEndpointNamed: boolean,
 ): Promise<void> {
   const base = baseUrl.replace(/\/+$/, "");
-  const http404: string[] = [];
   for (const name of resources) {
     const path = `${base}/${name}`;
     let res: Response;
@@ -869,36 +873,42 @@ async function verifyResourcesServing(
       res = await fetchImpl(path, { method: "GET", signal: AbortSignal.timeout(10_000) });
     } catch (err: any) {
       // A failed probe is not evidence the resource is present or absent.
-      throw verificationRefusal(`the request to ${path} failed (${err?.message ?? err})`);
+      throw verificationRefusal(
+        `the request to ${path} failed (${err?.message ?? err})`,
+        `Retry the request to ${path}.`,
+      );
     }
     // 401: the auth gate answered, so the route is mounted. The status is the evidence.
     if (res.status === 401) continue;
-    if (res.status === 404) {
-      http404.push(path);
-      continue;
+    if (res.status !== 200) {
+      // 404 on an unnamed URL can be the operations endpoint. Any other status,
+      // including 403 and 5xx, is a failed probe.
+      const remedy = res.status === 404 && !applicationEndpointNamed
+        ? NAME_APPLICATION_ENDPOINT
+        : RESOURCE_JSON_OR_401;
+      throw verificationRefusal(`GET ${path} returned ${res.status}`, remedy);
     }
-    // Any other non-200 status is a completed response from that URL. That was
-    // the pre-existing serving signal for every status except 404.
-    if (res.status !== 200) continue;
     const body = await readProbeBody(res);
     if (body.kind === "empty") {
-      throw verificationRefusal(`GET ${path} returned 200 with an empty body`);
+      throw verificationRefusal(
+        `GET ${path} returned 200 with an empty body`,
+        `Retry when GET ${path} returns a JSON body.`,
+      );
     }
     if (body.kind === "unreadable") {
-      throw verificationRefusal(`GET ${path} returned 200 and ${body.detail}`);
+      throw verificationRefusal(`GET ${path} returned 200 and ${body.detail}`, `Retry when GET ${path} returns a JSON body.`);
     }
     if (Array.isArray(body.value)) {
       for (let i = 0; i < body.value.length; i++) {
         const row = body.value[i];
         if (row === null || typeof row !== "object" || Array.isArray(row)) {
-          throw verificationRefusal(`GET ${path} returned 200 with a row list whose entry ${i} is not an object`);
+          throw verificationRefusal(
+            `GET ${path} returned 200 with a row list whose entry ${i} is not an object`,
+            "Retry when each entry in that row list is a JSON object.",
+          );
         }
       }
     }
-  }
-  if (http404.length) {
-    // HTTP 404 is the status that came back. It does not establish why.
-    throw verificationRefusal(`GET ${http404.join(", ")} returned 404`);
   }
 }
 
@@ -1237,11 +1247,12 @@ export async function verifyDeployServing(o: VerifyDeployOptions): Promise<void>
     settleStreak = VERIFY_SETTLE_STREAK,
     fetchImpl = fetch,
     onProgress,
+    applicationEndpointNamed = false,
   } = o;
   onProgress?.(`probing ${baseUrl} for application routes...`);
   await pollUntilSettled(baseUrl, timeoutMs, pollIntervalMs, settleStreak, fetchImpl, onProgress);
   onProgress?.(`settled — checking ${resources.map((r) => `/${r}`).join(", ")}...`);
-  await verifyResourcesServing(baseUrl, resources, fetchImpl);
+  await verifyResourcesServing(baseUrl, resources, fetchImpl, applicationEndpointNamed);
   onProgress?.(`application routes responded for ${resources.length} resource(s)`);
 }
 
@@ -1470,6 +1481,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
       timeoutMs: opts.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
       pollIntervalMs: opts.verifyPollIntervalMs,
       settleStreak: opts.verifySettleStreak,
+      applicationEndpointNamed: explicitEndpoint(opts.applicationEndpoint) !== undefined,
       onProgress: opts.onProgress,
     });
 

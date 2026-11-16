@@ -7,12 +7,13 @@
  * application probes, and the application mock rejects deploy_component.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { deploy, REQUIRED_PACKAGE_FILES, verifyDeployServing, type DeployOptions } from "../../src/deploy.ts";
 import { DEFAULT_HARPER_PIN, fabricUpgrade, type FabricUpgradeDeps } from "../../src/fabric-upgrade.ts";
-import { buildFabricUpgradeOptions } from "../../src/commands/upgrade.ts";
+import { buildFabricUpgradeOptions, upgradeEndpointFlagsWithoutTarget } from "../../src/commands/upgrade.ts";
 import { resolveEffectiveOpsUrl } from "../../src/cli.ts";
 
 const FAST = { verifyPollIntervalMs: 1, verifySettleStreak: 1, verifyTimeoutMs: 2000 };
@@ -222,7 +223,8 @@ describe("flair#930 resource probe fails closed", () => {
       throw new Error("empty body was accepted");
     }, (e: Error) => e);
     expect(err.message).toContain("empty body");
-    expect(err.message).toContain("--application-endpoint");
+    expect(err.message).toContain("JSON body");
+    expect(err.message).not.toContain("--application-endpoint");
     expect(err.message).not.toMatch(/\babsent\b|\bok\b|not found|wrong package root/);
   });
 
@@ -245,6 +247,15 @@ describe("flair#930 resource probe fails closed", () => {
       return new Response("[]", { status: 200 });
     }) as unknown as typeof fetch;
     await expect(verifyDeployServing({ ...probe, fetchImpl })).rejects.toThrow(/request to https:\/\/app\.example\/Memory failed/);
+  });
+
+  test("a 503 is refused", async () => {
+    const err = await verifyDeployServing({ ...probe, fetchImpl: fetchStatus(503, "unavailable") }).then(() => {
+      throw new Error("503 was accepted");
+    }, (e: Error) => e);
+    expect(err.message).toContain("GET https://app.example/Memory returned 503");
+    expect(err.message).not.toContain("--application-endpoint");
+    expect(err.message).not.toMatch(/\babsent\b|\bok\b|not found|wrong package root/);
   });
 
   test("401 and a JSON array still count as the route responding", async () => {
@@ -359,6 +370,79 @@ describe("flair#930 version probe fails closed before deploy", () => {
     } finally {
       server.stop(true);
     }
+  }, 60_000);
+
+  test("a /Health failure after deploy_component names the sent deploy and exits nonzero", async () => {
+    let healthReads = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        healthReads++;
+        if (healthReads === 1) return new Response(JSON.stringify({ version: "1.2.3" }), { status: 200 });
+        return new Response("", { status: 500 });
+      },
+    });
+    const work = mkdtempSync(join(tmpdir(), "flair-930-after-"));
+    const scratch = mkdtempSync(join(tmpdir(), "flair-930-after-tmp-"));
+    roots.push(work, scratch);
+    const url = `http://127.0.0.1:${server.port}`;
+    try {
+      const proc = Bun.spawn(["bun", FIXTURE], {
+        cwd: work,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, PROBE_URL: url, WORK_DIR: work, TMPDIR: scratch, HOME: work },
+      });
+      const kill = setTimeout(() => proc.kill(), 20_000);
+      const [stdout, stderr, status] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      clearTimeout(kill);
+      const output = `${stdout}${stderr}`;
+      expect(status, output).not.toBe(0);
+      expect(stderr).toContain(`deploy_component was sent to ${url}`);
+      expect(stderr).toContain("The running version is unverified: HTTP 500");
+      expect(stderr).toContain(`Check GET ${url}/Health`);
+      expect(stderr).not.toContain("This command stops");
+      expect(output).not.toMatch(/UPGRADE_COMPLETE|Fabric now reports|upgrade complete|verified serving|already up to date|check complete/);
+      expect(readDeployMarks(work)).toBe(1);
+    } finally {
+      server.stop(true);
+    }
+  }, 60_000);
+});
+
+function readDeployMarks(work: string): number {
+  const path = join(work, "deploy");
+  if (!existsSync(path)) return 0;
+  return readFileSync(path, "utf8").split("\n").filter((line) => line === "written").length;
+}
+
+describe("flair#930 upgrade flags require --target", () => {
+  test("the flags without --target are refused", () => {
+    expect(upgradeEndpointFlagsWithoutTarget({ operationsEndpoint: "https://ops.example:9925" }))
+      .toBe("flair upgrade: --operations-endpoint and --application-endpoint require --target.");
+    expect(upgradeEndpointFlagsWithoutTarget({ applicationEndpoint: "https://app.example:9926" }))
+      .toBe("flair upgrade: --operations-endpoint and --application-endpoint require --target.");
+    expect(upgradeEndpointFlagsWithoutTarget({ target: "https://app.example", operationsEndpoint: "https://ops.example:9925" })).toBeNull();
+  });
+
+  test("flair upgrade exits nonzero when an endpoint flag is set without --target", () => {
+    const cli = join(import.meta.dir, "..", "..", "src", "cli.ts");
+    const work = mkdtempSync(join(tmpdir(), "flair-930-notarget-"));
+    roots.push(work);
+    const result = spawnSync("bun", [cli, "upgrade", "--operations-endpoint", "https://ops.example:9925"], {
+      cwd: work,
+      encoding: "utf8",
+      timeout: 20_000,
+      env: { ...process.env, HOME: work },
+    });
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(result.status, output).not.toBe(0);
+    expect(output).toContain("require --target");
+    expect(output).not.toMatch(/UPGRADE_COMPLETE|upgrade complete|Checking for updates/);
   }, 60_000);
 });
 

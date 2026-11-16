@@ -206,6 +206,8 @@ export interface FabricUpgradeDeps {
     project: string;
     fabricUser?: string;
     fabricPassword?: string;
+    /** True when the caller passed --application-endpoint. */
+    applicationEndpointNamed?: boolean;
   }) => Promise<string | null>;
   /** The real deploy() — reused, never reimplemented. */
   deploy: (opts: DeployOptions) => Promise<DeployResult>;
@@ -338,13 +340,26 @@ function defaultNpmInstall(dir: string): void {
   }
 }
 
-function versionProbeError(healthUrl: string, why: string): Error {
-  return new Error(
-    `Could not read the deployed Flair version from ${healthUrl}: ${why}. ` +
-      `This command stops. ` +
-      `Retry when GET ${healthUrl} returns JSON with a string version, flairVersion, or flair.version. ` +
-      `Pass --application-endpoint <application-url> to probe the application endpoint.`,
-  );
+export class VersionProbeError extends Error {
+  constructor(
+    readonly healthUrl: string,
+    readonly why: string,
+  ) {
+    super(
+      `Could not read the deployed Flair version from ${healthUrl}: ${why}. ` +
+        `This command stops. ` +
+        `Retry when GET ${healthUrl} returns JSON with a string version, flairVersion, or flair.version.`,
+    );
+    this.name = "VersionProbeError";
+  }
+}
+
+function versionProbeError(healthUrl: string, why: string, applicationEndpointNamed: boolean): VersionProbeError {
+  const err = new VersionProbeError(healthUrl, why);
+  if (!applicationEndpointNamed) {
+    err.message += " Pass --application-endpoint <application-url> when that URL is not the application endpoint.";
+  }
+  return err;
 }
 
 /**
@@ -357,6 +372,7 @@ export async function readDeployedFlairVersion(opts: {
   project: string;
   fabricUser?: string;
   fabricPassword?: string;
+  applicationEndpointNamed?: boolean;
 }): Promise<string> {
   const base = opts.url.replace(/\/$/, "");
   const healthUrl = `${base}/Health`;
@@ -372,26 +388,26 @@ export async function readDeployedFlairVersion(opts: {
       signal: AbortSignal.timeout(10_000),
     });
   } catch (err: any) {
-    throw versionProbeError(healthUrl, `the request failed (${err?.message ?? err})`);
+    throw versionProbeError(healthUrl, `the request failed (${err?.message ?? err})`, opts.applicationEndpointNamed === true);
   }
-  if (!res.ok) throw versionProbeError(healthUrl, `HTTP ${res.status}`);
+  if (!res.ok) throw versionProbeError(healthUrl, `HTTP ${res.status}`, opts.applicationEndpointNamed === true);
   let text: string;
   try {
     text = await res.text();
   } catch (err: any) {
-    throw versionProbeError(healthUrl, `the body could not be read (${err?.message ?? err})`);
+    throw versionProbeError(healthUrl, `the body could not be read (${err?.message ?? err})`, opts.applicationEndpointNamed === true);
   }
-  if (text.trim() === "") throw versionProbeError(healthUrl, "the body was empty");
+  if (text.trim() === "") throw versionProbeError(healthUrl, "the body was empty", opts.applicationEndpointNamed === true);
   let body: any;
   try {
     body = JSON.parse(text);
   } catch {
-    throw versionProbeError(healthUrl, "the body was not JSON");
+    throw versionProbeError(healthUrl, "the body was not JSON", opts.applicationEndpointNamed === true);
   }
   // Shapes the application has shipped: { version }, { flairVersion }, { flair: { version } }.
   const v = body?.version ?? body?.flairVersion ?? body?.flair?.version ?? null;
   if (typeof v !== "string" || v.trim() === "") {
-    throw versionProbeError(healthUrl, "the JSON has no string version, flairVersion, or flair.version");
+    throw versionProbeError(healthUrl, "the JSON has no string version, flairVersion, or flair.version", opts.applicationEndpointNamed === true);
   }
   return v;
 }
@@ -490,6 +506,7 @@ export async function planFabricUpgrade(
   const currentVersion = await deps.fetchDeployedVersion({
     url: applicationUrlOf(opts),
     project,
+    applicationEndpointNamed: explicitEndpoint(opts.applicationEndpoint) !== undefined,
     fabricUser: opts.fabricUser,
     fabricPassword: opts.fabricPassword,
   });
@@ -601,13 +618,26 @@ export async function fabricUpgrade(
     });
 
     // Step 4: read the deployed version from the application endpoint.
-    // A failed, empty, or unreadable probe throws; it is not treated as success.
-    const verifiedVersion = await deps.fetchDeployedVersion({
-      url: applicationUrl,
-      project: plan.project,
-      fabricUser: opts.fabricUser,
-      fabricPassword: opts.fabricPassword,
-    });
+    // deploy_component has already been sent. A failed probe is unverified,
+    // not a claim that the deploy did not happen.
+    let verifiedVersion: string | null;
+    try {
+      verifiedVersion = await deps.fetchDeployedVersion({
+        url: applicationUrl,
+        project: plan.project,
+        fabricUser: opts.fabricUser,
+        fabricPassword: opts.fabricPassword,
+        applicationEndpointNamed: explicitEndpoint(opts.applicationEndpoint) !== undefined,
+      });
+    } catch (err) {
+      const why = err instanceof VersionProbeError ? err.why : (err instanceof Error ? err.message : String(err));
+      const healthUrl = err instanceof VersionProbeError
+        ? err.healthUrl
+        : `${applicationUrl.replace(/\/$/, "")}/Health`;
+      throw new Error(
+        `deploy_component was sent to ${safeUrl(operationsUrl)}. The running version is unverified: ${why}. Check GET ${healthUrl}.`,
+      );
+    }
     if (verifiedVersion) {
       const ok = semverGte(verifiedVersion, plan.targetVersion);
       log(

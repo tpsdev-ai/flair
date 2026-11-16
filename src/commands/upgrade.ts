@@ -243,6 +243,19 @@ function fabricUpgradeOpsUrl(
   return resolveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget });
 }
 
+/** Refusal when the endpoint flags are set without --target. Null when the command may continue. */
+export function upgradeEndpointFlagsWithoutTarget(opts: {
+  target?: string;
+  operationsEndpoint?: string;
+  applicationEndpoint?: string;
+}): string | null {
+  if (typeof opts.target === "string" && opts.target.trim() !== "") return null;
+  if (explicitEndpoint(opts.operationsEndpoint) || explicitEndpoint(opts.applicationEndpoint)) {
+    return "flair upgrade: --operations-endpoint and --application-endpoint require --target.";
+  }
+  return null;
+}
+
 export function buildFabricUpgradeOptions(
   opts: any,
   creds: { fabricUser?: string; fabricPassword?: string },
@@ -1005,6 +1018,12 @@ program
   .option("--no-convergence-check", "For --target: skip the post-replication-error convergence poll and fail on harper's error verbatim (default: poll — Harper replicates asynchronously, so its error is a snapshot, not a verdict; flair#878)")
   .option("--convergence-timeout <ms>", "For --target: how long to wait for peer replication to converge before reporting a replication failure (default: 180000)")
   .action(async (opts) => {
+    const endpointFlags = upgradeEndpointFlagsWithoutTarget(opts);
+    if (endpointFlags) {
+      console.error(endpointFlags);
+      process.exit(1);
+    }
+
     // ── Fabric-upgrade branch ───────────────────────────────────────────────
     if (opts.target) {
       // Every URL the Fabric upgrade takes is checked before anything is
