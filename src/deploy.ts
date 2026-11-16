@@ -28,7 +28,7 @@ import { FABRIC_NPM_INSTALL_COMMAND } from "./fabric-npm-install.js";
 import { discriminateMcpOAuthDiscovery, reportMcpOAuthDiscovery } from "./lib/mcp-enable.js";
 import { mcpOAuthEnabledFromComponentEnv } from "./lib/mcp-oauth-env.js";
 import { applyMqttOffConfiguration, assertSafeUrl, completeMqttOff, sharedWorkerRestartInstruction } from "./mqtt-off-deploy.js";
-import { resolveOpsUrlFromTarget } from "./lib/ops-url.js";
+import { explicitEndpoint, resolveDeploymentOpsUrl } from "./lib/ops-url.js";
 
 export interface DeployOptions {
   fabricOrg?: string;
@@ -119,10 +119,20 @@ export interface DeployOptions {
   // The target's operations API URL for the requests deploy() itself sends
   // there (the MQTT-off configuration, restart and read-back). `flair deploy` and
   // `flair upgrade --target` pass what every remote command resolves
-  // (--ops-target / FLAIR_OPS_TARGET, else derived from the target); when
-  // absent it is derived from the target URL (resolveOpsUrlFromTarget: :9925
-  // for a Fabric URL, port-1 otherwise).
+  // (--ops-target / FLAIR_OPS_TARGET, else the operations endpoint below, else
+  // derived from the target); when absent it is derived from the target URL
+  // (resolveOpsUrlFromTarget: :9925 for a Fabric URL, port-1 otherwise), unless
+  // `operationsEndpoint` is set, in which case that URL is used.
   opsUrl?: string;
+  // Explicit operations endpoint for `deploy_component` (harper's `target=`).
+  // Unset: the single target URL, which is the pre-existing default.
+  operationsEndpoint?: string;
+  // Explicit application endpoint for migration, discovery, and verification.
+  // Unset: the single target URL, which is the pre-existing default.
+  applicationEndpoint?: string;
+  // Test knobs for verifyDeployServing. Not CLI flags.
+  verifyPollIntervalMs?: number;
+  verifySettleStreak?: number;
   // Injectable fetch for those requests. Tests supply a fake; real runs use
   // the global fetch.
   operationsFetch?: typeof fetch;
@@ -819,36 +829,76 @@ async function pollUntilSettled(
   }
 }
 
+function verificationRefusal(detail: string): Error {
+  return new Error(
+    `deploy verification: ${detail}. Pass --application-endpoint <application-url> and re-run verification against the application endpoint.`,
+  );
+}
+
+type ProbeBody =
+  | { kind: "json"; value: unknown }
+  | { kind: "empty" }
+  | { kind: "unreadable"; detail: string };
+
+async function readProbeBody(res: Response): Promise<ProbeBody> {
+  let text: string;
+  try {
+    text = await res.text();
+  } catch (err: any) {
+    return { kind: "unreadable", detail: `the body could not be read (${err?.message ?? err})` };
+  }
+  if (text.trim() === "") return { kind: "empty" };
+  try {
+    return { kind: "json", value: JSON.parse(text) };
+  } catch {
+    return { kind: "unreadable", detail: "the body was not JSON" };
+  }
+}
+
 async function verifyResourcesServing(
   baseUrl: string,
   resources: string[],
   fetchImpl: typeof fetch,
 ): Promise<void> {
   const base = baseUrl.replace(/\/+$/, "");
-  const notServing: string[] = [];
+  const http404: string[] = [];
   for (const name of resources) {
     const path = `${base}/${name}`;
-    let status: number;
+    let res: Response;
     try {
-      const res = await fetchImpl(path, { method: "GET", signal: AbortSignal.timeout(10_000) });
-      status = res.status;
+      res = await fetchImpl(path, { method: "GET", signal: AbortSignal.timeout(10_000) });
     } catch (err: any) {
-      throw new Error(
-        `deploy verification: request to ${path} failed even after the endpoint settled: ${err?.message ?? err}`,
-      );
+      // A failed probe is not evidence the resource is present or absent.
+      throw verificationRefusal(`the request to ${path} failed (${err?.message ?? err})`);
     }
-    // 404 = the resource genuinely isn't being served (this is the incident:
-    // harper reported "Successfully deployed" while the component was empty).
-    // 401 = auth-gated, which means the resource IS being served correctly.
-    // 200 = served + accessible. Both count as pass.
-    if (status === 404) notServing.push(name);
+    // 401: the auth gate answered, so the route is mounted. The status is the evidence.
+    if (res.status === 401) continue;
+    if (res.status === 404) {
+      http404.push(path);
+      continue;
+    }
+    // Any other non-200 status is a completed response from that URL. That was
+    // the pre-existing serving signal for every status except 404.
+    if (res.status !== 200) continue;
+    const body = await readProbeBody(res);
+    if (body.kind === "empty") {
+      throw verificationRefusal(`GET ${path} returned 200 with an empty body`);
+    }
+    if (body.kind === "unreadable") {
+      throw verificationRefusal(`GET ${path} returned 200 and ${body.detail}`);
+    }
+    if (Array.isArray(body.value)) {
+      for (let i = 0; i < body.value.length; i++) {
+        const row = body.value[i];
+        if (row === null || typeof row !== "object" || Array.isArray(row)) {
+          throw verificationRefusal(`GET ${path} returned 200 with a row list whose entry ${i} is not an object`);
+        }
+      }
+    }
   }
-  if (notServing.length) {
-    const list = notServing.map((n) => `/${n}`).join(", ");
-    throw new Error(
-      `deploy reported success but ${list} return${notServing.length === 1 ? "s" : ""} 404 — ` +
-        `component is not serving; likely deployed the wrong package root`,
-    );
+  if (http404.length) {
+    // HTTP 404 is the status that came back. It does not establish why.
+    throw verificationRefusal(`GET ${http404.join(", ")} returned 404`);
   }
 }
 
@@ -976,10 +1026,10 @@ function isUnpublishedEntry(root: string, src: string, allowed: Set<string>): bo
 /**
  * Resolve the value `FLAIR_PUBLIC_URL` should carry for this deploy, or null.
  *
- * The deploy already knows this: `url` is the target it hands to harper AND the
- * base URL it verifies the served API against immediately afterwards. A loopback
- * target yields null — baking `http://127.0.0.1:...` into a shipped `.env` is
- * precisely the misconfiguration flair#1000 is about, so it is never generated.
+ * `url` is the application endpoint verification probes (the single target
+ * URL when no application endpoint was set). A loopback URL yields null —
+ * baking `http://127.0.0.1:...` into a shipped `.env` is the misconfiguration
+ * flair#1000 is about, so it is never generated.
  *
  * Anything that is not an absolute http(s) URL also yields null. `--target` is
  * operator-supplied and reaches here before harper has had a chance to reject it,
@@ -1174,12 +1224,10 @@ export async function verifyPublicIssuer(o: VerifyPublicIssuerOptions): Promise<
   return { checked: false, issuer: null, detail: last.detail };
 }
 
-// The tool must not be able to lie. harper's deploy CLI can print
-// "Successfully deployed" for an empty component — the only way to know the
-// deploy actually worked is to curl the served API and check it isn't 404.
-// This polls the served base URL (443, NOT the :9925 ops API deploy talks
-// to) until it settles after harper's post-deploy restart, then asserts the
-// derived resource(s) respond non-404.
+// harper's deploy CLI can print "Successfully deployed" for a component whose
+// application routes then return 404. This polls the application endpoint
+// until it answers, then checks each resource. The application endpoint is
+// the single target URL unless `applicationEndpoint` is set.
 export async function verifyDeployServing(o: VerifyDeployOptions): Promise<void> {
   const {
     baseUrl,
@@ -1190,11 +1238,11 @@ export async function verifyDeployServing(o: VerifyDeployOptions): Promise<void>
     fetchImpl = fetch,
     onProgress,
   } = o;
-  onProgress?.(`verifying ${baseUrl} is actually serving (not just reported deployed)...`);
+  onProgress?.(`probing ${baseUrl} for application routes...`);
   await pollUntilSettled(baseUrl, timeoutMs, pollIntervalMs, settleStreak, fetchImpl, onProgress);
   onProgress?.(`settled — checking ${resources.map((r) => `/${r}`).join(", ")}...`);
   await verifyResourcesServing(baseUrl, resources, fetchImpl);
-  onProgress?.(`served API verified non-404 for ${resources.length} resource(s)`);
+  onProgress?.(`application routes responded for ${resources.length} resource(s)`);
 }
 
 /**
@@ -1272,15 +1320,22 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   const version = opts.version ?? pkg.version;
   const project = opts.project ?? "flair";
   const url = buildTargetUrl(opts);
+  // `operationsUrl` is where deploy_component and the convergence polls go.
+  // `applicationUrl` is where migration, discovery, and verification go.
+  // With neither explicit endpoint set, both are `url` — the single-target default.
+  const operationsUrl = explicitEndpoint(opts.operationsEndpoint) ?? url;
+  const applicationUrl = explicitEndpoint(opts.applicationEndpoint) ?? url;
   // Every URL the channel uses is http or https with a host, and scheme, host,
   // port and path only: anything else is refused before anything is sent or
   // printed (src/mqtt-off-deploy.ts assertSafeUrl).
   assertSafeUrl(url, "deploy target URL");
-  const opsUrl = opts.opsUrl ?? resolveOpsUrlFromTarget(url);
+  assertSafeUrl(operationsUrl, "operations endpoint");
+  assertSafeUrl(applicationUrl, "application endpoint");
+  const opsUrl = opts.opsUrl ?? resolveDeploymentOpsUrl(url, { operationsEndpoint: opts.operationsEndpoint });
   assertSafeUrl(opsUrl, "operations API URL");
 
   if (opts.dryRun) {
-    return { url, project, version, packageRoot, dryRun: true };
+    return { url: applicationUrl, project, version, packageRoot, dryRun: true };
   }
 
   if (opts.fabricToken && !(opts.fabricUser && opts.fabricPassword)) {
@@ -1292,7 +1347,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   }
 
   const harperBin = resolveHarperBin(packageRoot);
-  const args = buildHarperDeployArgs(opts, url, project);
+  const args = buildHarperDeployArgs(opts, operationsUrl, project);
 
   // MQTT off on the target's configuration before anything is deployed
   // (src/mqtt-off-deploy.ts, step 1); read back after the deploy's restart below.
@@ -1326,7 +1381,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
 
   // flair#1005 item 2: supply FLAIR_PUBLIC_URL to the component being deployed.
   // `deployRoot` is packageRoot itself whenever there is nothing to add.
-  const publicUrl = resolveDeployPublicUrl(url);
+  const publicUrl = resolveDeployPublicUrl(applicationUrl);
   const staged = stageDeployRoot(packageRoot, publicUrl);
   for (const notice of staged.plan.notices) {
     console.warn(`⚠ flair deploy: ${notice}`);
@@ -1357,7 +1412,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
       staged.dir,
       childEnv,
       opts,
-      url,
+      operationsUrl,
       project,
     ));
   } finally {
@@ -1410,9 +1465,11 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
       ? opts.verifyResources
       : deriveVerifyResources(packageRoot);
     await verifyDeployServing({
-      baseUrl: url,
+      baseUrl: applicationUrl,
       resources,
       timeoutMs: opts.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
+      pollIntervalMs: opts.verifyPollIntervalMs,
+      settleStreak: opts.verifySettleStreak,
       onProgress: opts.onProgress,
     });
 
@@ -1422,7 +1479,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     // Same --no-verify escape hatch; needs Basic admin (token-only skips).
     if (opts.fabricUser && opts.fabricPassword) {
       await verifyStampMigrationConverged({
-        baseUrl: url,
+        baseUrl: applicationUrl,
         fabricUser: opts.fabricUser,
         fabricPassword: opts.fabricPassword,
         timeoutMs: opts.verifyTimeoutMs ?? DEFAULT_STAMP_VERIFY_TIMEOUT_MS,
@@ -1437,7 +1494,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     // Only meaningful for a target that is not loopback: a local Harper SHOULD
     // advertise loopback, and asserting otherwise there would be wrong.
     if (publicUrl) {
-      const issuerCheck = await verifyPublicIssuer({ baseUrl: url, onProgress: opts.onProgress });
+      const issuerCheck = await verifyPublicIssuer({ baseUrl: applicationUrl, onProgress: opts.onProgress });
       if (issuerCheck.checked) {
         opts.onProgress?.(`discovery advertises ${issuerCheck.issuer}`);
       } else {
@@ -1454,7 +1511,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     // the target's OAuth discovery advertise the expected MCP token endpoint?
     // See verifyDeployedMcpDiscovery.
     await verifyDeployedMcpDiscovery({
-      url,
+      url: applicationUrl,
       mcpOAuthConfigured,
       knownIssuers: deployedKnownIssuers,
       stagedEnvReadError,
@@ -1463,7 +1520,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   }
 
   return {
-    url,
+    url: applicationUrl,
     project,
     version,
     packageRoot,

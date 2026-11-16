@@ -10,6 +10,29 @@ export const DEFAULT_OPS_PORT = 19925;
 /** The operations API port of a Harper Fabric cluster. */
 export const FABRIC_OPS_PORT = 9925;
 
+/** A non-blank endpoint string, or undefined when the option was not set. */
+export function explicitEndpoint(value: string | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+/**
+ * Operations API URL for the MQTT-off calls deploy() sends.
+ * An explicit ops URL wins, then an explicit operations endpoint, then
+ * derivation from the single target URL.
+ */
+export function resolveDeploymentOpsUrl(
+  targetUrl: string,
+  opts: { opsUrl?: string; operationsEndpoint?: string },
+): string {
+  const ops = explicitEndpoint(opts.opsUrl);
+  if (ops) return ops.replace(/\/$/, "");
+  const operations = explicitEndpoint(opts.operationsEndpoint);
+  if (operations) return operations.replace(/\/$/, "");
+  return resolveOpsUrlFromTarget(targetUrl);
+}
+
 /** Derive the ops API URL from a Flair base URL.
  *  https with effective port 443 (no explicit port, or explicit :443): returns
  *    <host>:9925 (FABRIC_OPS_PORT) — the Fabric managed case where port-1/:442

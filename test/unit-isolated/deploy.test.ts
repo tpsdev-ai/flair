@@ -371,7 +371,7 @@ describe("flair deploy: verifyDeployServing (served-API verification)", () => {
         fetchImpl,
         ...FAST,
       }),
-    ).rejects.toThrow(/deploy reported success but \/Memory returns 404 — component is not serving/);
+    ).rejects.toThrow(/GET https:\/\/cluster\.org\.harperfabric\.com\/Memory returned 404/);
   });
 
   test("401 (auth-gated) and 200 both count as serving — no throw", async () => {
@@ -380,7 +380,8 @@ describe("flair deploy: verifyDeployServing (served-API verification)", () => {
       call++;
       // First call is the settle probe against baseUrl; alternate 401/200
       // for the resource checks to prove both are accepted.
-      return new Response("", { status: call % 2 === 0 ? 401 : 200 });
+      const status = call % 2 === 0 ? 401 : 200;
+      return new Response(status === 200 ? "[]" : "", { status });
     }) as unknown as typeof fetch;
 
     await expect(
@@ -398,7 +399,7 @@ describe("flair deploy: verifyDeployServing (served-API verification)", () => {
     const fetchImpl = (async () => {
       call++;
       if (call <= 2) throw new Error("connect ECONNREFUSED (simulated post-restart flap)");
-      return new Response("", { status: 200 });
+      return new Response("[]", { status: 200 });
     }) as unknown as typeof fetch;
 
     await expect(

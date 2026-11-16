@@ -33,6 +33,7 @@ import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { createRegistryNoticePrinter, fetchDeclaredDependencies, fetchLatestVersion } from "./lib/npm-registry.js";
 import type { DeployOptions, DeployResult } from "./deploy.js";
+import { explicitEndpoint } from "./lib/ops-url.js";
 import { assertSafeUrl, safeUrl } from "./mqtt-off-deploy.js";
 
 /**
@@ -195,8 +196,10 @@ export interface FabricUpgradeDeps {
    */
   npmInstall: (dir: string) => void;
   /**
-   * Query the live Fabric for the version of the deployed `project` component.
-   * Returns null when it can't be determined (older Fabric, network, etc.).
+   * Query the application endpoint for the version of the deployed `project`
+   * component. The default implementation throws when the probe fails, the
+   * body is empty or unreadable, or the JSON has no version string. An
+   * injected implementation may return null.
    */
   fetchDeployedVersion: (opts: {
     url: string;
@@ -226,6 +229,10 @@ export interface FabricUpgradeOptions {
   verify?: boolean;
   /** The target's operations API URL for deploy()'s MQTT-off configuration, restart and read-back (DeployOptions.opsUrl). */
   opsUrl?: string;
+  /** Operations endpoint for deploy_component. Unset: `target`. */
+  operationsEndpoint?: string;
+  /** Application endpoint for migration, discovery, verification, and the version probe. Unset: `target`. */
+  applicationEndpoint?: string;
   /**
    * flair#878: these were reachable from `flair deploy` but NOT from
    * `flair upgrade --target` — this module built its deploy() options by hand
@@ -331,44 +338,70 @@ function defaultNpmInstall(dir: string): void {
   }
 }
 
+function versionProbeError(healthUrl: string, why: string): Error {
+  return new Error(
+    `Could not read the deployed Flair version from ${healthUrl}: ${why}. ` +
+      `This command stops. ` +
+      `Retry when GET ${healthUrl} returns JSON with a string version, flairVersion, or flair.version. ` +
+      `Pass --application-endpoint <application-url> to probe the application endpoint.`,
+  );
+}
+
 /**
- * Query the Fabric for the deployed Flair component version. Best-effort: the
- * public REST surface exposes `/Health`, which echoes the running Flair version
- * in newer builds; if the shape isn't recognized we return null (verification
- * downgrades to a soft notice, never a hard failure).
+ * Read the running Flair version from the application endpoint's `/Health`.
+ * A failed request, an empty or unreadable body, or JSON with no version
+ * string throws. It does not return null for any of those.
  */
-async function defaultFetchDeployedVersion(opts: {
+export async function readDeployedFlairVersion(opts: {
   url: string;
   project: string;
   fabricUser?: string;
   fabricPassword?: string;
-}): Promise<string | null> {
+}): Promise<string> {
   const base = opts.url.replace(/\/$/, "");
+  const healthUrl = `${base}/Health`;
   const headers: Record<string, string> = {};
   if (opts.fabricUser && opts.fabricPassword) {
     const auth = Buffer.from(`${opts.fabricUser}:${opts.fabricPassword}`).toString("base64");
     headers.Authorization = `Basic ${auth}`;
   }
+  let res: Response;
   try {
-    const res = await fetch(`${base}/Health`, {
+    res = await fetch(healthUrl, {
       headers,
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) return null;
-    const text = await res.text();
-    let body: any;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      return null;
-    }
-    // Tolerate a few shapes: { version }, { flair: { version } }, { flairVersion }.
-    const v =
-      body?.version ?? body?.flairVersion ?? body?.flair?.version ?? null;
-    return typeof v === "string" ? v : null;
-  } catch {
-    return null;
+  } catch (err: any) {
+    throw versionProbeError(healthUrl, `the request failed (${err?.message ?? err})`);
   }
+  if (!res.ok) throw versionProbeError(healthUrl, `HTTP ${res.status}`);
+  let text: string;
+  try {
+    text = await res.text();
+  } catch (err: any) {
+    throw versionProbeError(healthUrl, `the body could not be read (${err?.message ?? err})`);
+  }
+  if (text.trim() === "") throw versionProbeError(healthUrl, "the body was empty");
+  let body: any;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw versionProbeError(healthUrl, "the body was not JSON");
+  }
+  // Shapes the application has shipped: { version }, { flairVersion }, { flair: { version } }.
+  const v = body?.version ?? body?.flairVersion ?? body?.flair?.version ?? null;
+  if (typeof v !== "string" || v.trim() === "") {
+    throw versionProbeError(healthUrl, "the JSON has no string version, flairVersion, or flair.version");
+  }
+  return v;
+}
+
+function applicationUrlOf(opts: { target: string; applicationEndpoint?: string }): string {
+  return explicitEndpoint(opts.applicationEndpoint) ?? opts.target;
+}
+
+function operationsUrlOf(opts: { target: string; operationsEndpoint?: string }): string {
+  return explicitEndpoint(opts.operationsEndpoint) ?? opts.target;
 }
 
 /**
@@ -431,7 +464,7 @@ function defaultDeps(): FabricUpgradeDeps {
     fetchLatestFlairVersion: defaultFetchLatestFlairVersion,
     fetchDeclaredHarperVersion: defaultFetchDeclaredHarperVersion,
     npmInstall: defaultNpmInstall,
-    fetchDeployedVersion: defaultFetchDeployedVersion,
+    fetchDeployedVersion: readDeployedFlairVersion,
     deploy: async (opts) => {
       const { deploy } = await import("./deploy.js");
       return deploy(opts);
@@ -455,7 +488,7 @@ export async function planFabricUpgrade(
   const declaredHarper = await deps.fetchDeclaredHarperVersion(targetVersion);
   const harper = resolveHarperPin(declaredHarper, opts.harperVersion);
   const currentVersion = await deps.fetchDeployedVersion({
-    url: opts.target,
+    url: applicationUrlOf(opts),
     project,
     fabricUser: opts.fabricUser,
     fabricPassword: opts.fabricPassword,
@@ -489,6 +522,10 @@ export async function fabricUpgrade(
   // scheme, host, port and path only; anything else is refused before
   // anything is fetched or printed.
   assertSafeUrl(opts.target, "deploy target URL");
+  const operationsUrl = operationsUrlOf(opts);
+  const applicationUrl = applicationUrlOf(opts);
+  assertSafeUrl(operationsUrl, "operations endpoint");
+  assertSafeUrl(applicationUrl, "application endpoint");
   if (opts.opsUrl !== undefined) assertSafeUrl(opts.opsUrl, "operations API URL");
 
   // Step 1 + diff.
@@ -538,9 +575,11 @@ export async function fabricUpgrade(
     const packageRoot = resolveStagedFlairRoot(stagingDir);
 
     // Step 3: REUSE deploy() — do not reimplement packaging/spawn.
-    log(`Deploying ${plan.project} ${plan.targetVersion} to ${safeUrl(plan.target)} ...`);
+    log(`Deploying ${plan.project} ${plan.targetVersion} to ${safeUrl(operationsUrl)} ...`);
     const result = await deps.deploy({
       target: opts.target,
+      operationsEndpoint: explicitEndpoint(opts.operationsEndpoint),
+      applicationEndpoint: explicitEndpoint(opts.applicationEndpoint),
       project: plan.project,
       version: plan.targetVersion,
       fabricUser: opts.fabricUser,
@@ -561,18 +600,14 @@ export async function fabricUpgrade(
       onProgress: (m: string) => log(`  ${m}`),
     });
 
-    // Step 4: verify the deployed version (best-effort).
-    let verifiedVersion: string | null = null;
-    try {
-      verifiedVersion = await deps.fetchDeployedVersion({
-        url: opts.target,
-        project: plan.project,
-        fabricUser: opts.fabricUser,
-        fabricPassword: opts.fabricPassword,
-      });
-    } catch {
-      verifiedVersion = null;
-    }
+    // Step 4: read the deployed version from the application endpoint.
+    // A failed, empty, or unreadable probe throws; it is not treated as success.
+    const verifiedVersion = await deps.fetchDeployedVersion({
+      url: applicationUrl,
+      project: plan.project,
+      fabricUser: opts.fabricUser,
+      fabricPassword: opts.fabricPassword,
+    });
     if (verifiedVersion) {
       const ok = semverGte(verifiedVersion, plan.targetVersion);
       log(
@@ -582,7 +617,7 @@ export async function fabricUpgrade(
       );
     } else {
       log(
-        `✓ Deployed ${result.version} (Fabric did not report a version to verify against)`,
+        `Deployed ${result.version}. No version string was returned to verify against.`,
       );
     }
 

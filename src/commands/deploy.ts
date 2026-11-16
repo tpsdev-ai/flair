@@ -8,6 +8,7 @@
  */
 import { Command } from "commander";
 import { buildTargetUrl as buildDeployUrl, deploy as deployToFabric, validateOptions as validateDeployOptions } from "../deploy.js";
+import { explicitEndpoint, resolveDeploymentOpsUrl } from "../lib/ops-url.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
 import { readCheckpointFile, verifyCheckpoint } from "../memory-id-checkpoint.js";
 import { deployUrlRefusal, safeUrl } from "../mqtt-off-deploy.js";
@@ -56,6 +57,13 @@ export function printDeployNextSteps(url: string): void {
   console.log(`     flair agent add my-agent --target ${shellSingleQuote(safeUrl(url))} --admin-pass-file /path/to/admin-password`);
 }
 
+/** MQTT-off URL: explicit ops target, else the operations endpoint, else derived from the target. */
+function deploymentOpsUrl(target: string, opts: { opsTarget?: string; operationsEndpoint?: string }): string | undefined {
+  const explicit = explicitEndpoint(opts.opsTarget) || explicitEndpoint(process.env.FLAIR_OPS_TARGET);
+  if (explicit) return cli.resolveEffectiveOpsUrl({ target, opsTarget: opts.opsTarget });
+  return resolveDeploymentOpsUrl(target, { operationsEndpoint: opts.operationsEndpoint });
+}
+
 export function register(program: Command): void {
 // ─── flair deploy ─────────────────────────────────────────────────────────────
 
@@ -77,6 +85,8 @@ program
   .option("--fabric-password-file <path>", "Read the Fabric admin password from a file (chmod 600)")
   .option("--fabric-token <token>", "OAuth bearer token (env: FABRIC_TOKEN) — reserved for future Fabric bearer support")
   .option("--target <url>", "Override the Fabric URL template (https://<cluster>.<org>.harperfabric.com)")
+  .option("--operations-endpoint <url>", "Operations endpoint for deploy_component (default: the target URL)")
+  .option("--application-endpoint <url>", "Application endpoint for migration, discovery, and verification (default: the target URL)")
   .option("--project <name>", "Component name in Fabric", "flair")
   .option("--pkg-version <semver>", "Override version label (default: installed package version)")
   .option("--no-replicated", "Disable cluster-wide replication (default: replicated=true)")
@@ -114,6 +124,8 @@ program
       const refusal = deployUrlRefusal([
         [earlyTarget, "deploy target URL (--target)"],
         [opts.opsTarget || process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
+        [opts.operationsEndpoint, "operations endpoint (--operations-endpoint)"],
+        [opts.applicationEndpoint, "application endpoint (--application-endpoint)"],
       ]);
       if (refusal) {
         console.error(red(refusal));
@@ -169,18 +181,21 @@ program
     for (const w of credWarnings) console.error(dim(w));
 
     const url = buildDeployUrl(deployOpts);
-    console.log(`${green("→")} Deploying ${deployOpts.project} to ${safeUrl(url)}`);
+    const operationsUrl = explicitEndpoint(opts.operationsEndpoint) ?? url;
+    console.log(`${green("→")} Deploying ${deployOpts.project} to ${safeUrl(operationsUrl)}`);
     if (deployOpts.dryRun) console.log(dim("  (dry-run: skipping API call)"));
 
     try {
       const result = await deployToFabric({
         ...deployOpts,
-        // The target's operations API, resolved as for every remote command
-        // (--ops-target / FLAIR_OPS_TARGET, else derived from the target).
-        opsUrl: cli.resolveEffectiveOpsUrl({ target: url, opsTarget: opts.opsTarget }),
+        // MQTT-off uses --ops-target / FLAIR_OPS_TARGET when set, otherwise the
+        // operations endpoint, otherwise the URL derived from the target.
+        opsUrl: deploymentOpsUrl(url, opts),
+        operationsEndpoint: explicitEndpoint(opts.operationsEndpoint),
+        applicationEndpoint: explicitEndpoint(opts.applicationEndpoint),
       });
       if (result.dryRun) {
-        console.log(`${green("✓")} dry-run OK: ${result.project} ${result.version} ready to deploy to ${safeUrl(result.url)}`);
+        console.log(`${green("✓")} dry-run OK: ${result.project} ${result.version} ready to deploy to ${safeUrl(operationsUrl)}`);
         console.log(dim(`  package root: ${result.packageRoot}`));
         return;
       }
@@ -203,7 +218,7 @@ program
           const data = await verifyCheckpoint({
             checkpoint: read.checkpoint,
             target: result.url,
-            opsTarget: cli.resolveEffectiveOpsUrl({ target: result.url, opsTarget: opts.opsTarget }),
+            opsTarget: deploymentOpsUrl(url, opts),
             user: deployOpts.fabricUser,
             password: deployOpts.fabricPassword,
           });
@@ -252,9 +267,6 @@ program
       const hint = err.message?.toLowerCase();
       if (hint?.includes("401") || hint?.includes("unauthoriz")) {
         console.error(dim("  hint: check Fabric Studio → Cluster Settings → Admin for the admin password"));
-      }
-      if (hint?.includes("component is not serving")) {
-        console.error(dim("  hint: harper reported success but the served API disagrees — check the Fabric Studio component logs for the real deploy error, then retry"));
       }
       if (hint?.includes("did not settle")) {
         console.error(dim("  hint: Harper may still be restarting — check Fabric Studio, or retry with a longer --verify-timeout"));

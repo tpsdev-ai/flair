@@ -86,14 +86,11 @@ flair agent add mybot --target "$FLAIR_URL" --ops-target <ops-url>
 OAuth metadata and A2A discovery advertise `FLAIR_PUBLIC_URL`; with it unset, every
 URL a client is handed points at loopback and no remote client can authorize.
 
-`flair deploy` ships it. The deploy already knows the URL — it is the target it
-verifies the served API against immediately afterwards — so it writes
-`FLAIR_PUBLIC_URL=<target>` into a `.env` in the component payload, and then checks
-`GET <target>/OAuthMetadata` really does advertise a non-loopback issuer. That check
-fails the deploy if it does not.
+`flair deploy` sets `FLAIR_PUBLIC_URL` from the application endpoint when that
+URL is not loopback. `/OAuthMetadata` advertising a loopback issuer fails the deploy.
 
-To advertise something other than the deploy target — a CDN, a reverse proxy, a
-vanity domain — put your own `.env` in the package root:
+To advertise a different URL — a CDN, a reverse proxy, a vanity domain — put
+your own `.env` in the package root:
 
 ```
 FLAIR_PUBLIC_URL=https://flair.example.com
