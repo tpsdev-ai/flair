@@ -14,6 +14,7 @@ import { spawnSync } from "node:child_process";
 import { deploy, REQUIRED_PACKAGE_FILES, verifyDeployServing, type DeployOptions } from "../../src/deploy.ts";
 import { DEFAULT_HARPER_PIN, fabricUpgrade, type FabricUpgradeDeps } from "../../src/fabric-upgrade.ts";
 import { buildFabricUpgradeOptions, upgradeEndpointFlagsWithoutTarget } from "../../src/commands/upgrade.ts";
+import { applicationProbeUrl, endpointFlagsWithoutExplicitTarget } from "../../src/lib/ops-url.ts";
 import { resolveEffectiveOpsUrl } from "../../src/cli.ts";
 
 const FAST = { verifyPollIntervalMs: 1, verifySettleStreak: 1, verifyTimeoutMs: 2000 };
@@ -76,11 +77,11 @@ function appBody(url: URL): Response {
   }
   if (url.pathname === "/OAuthMetadata") return json({ issuer: url.origin });
   if (url.pathname === "/Memory") return json([]);
-  if (url.pathname === "/Health") return json({ version: "9.9.9-test" });
+  if (url.pathname === "/Health") return json({ ok: true, version: "9.9.9-test", searchReady: true, buildCommit: null });
   return json({});
 }
 
-type Role = "both" | "ops" | "app";
+type Role = "both" | "ops" | "app" | "auth";
 
 function startMock(role: Role): { url: string; hits: string[]; stop: () => void } {
   const hits: string[] = [];
@@ -100,8 +101,9 @@ function startMock(role: Role): { url: string; hits: string[]; stop: () => void 
       hits.push(req.method === "POST" ? `POST ${operation || url.pathname}` : `GET ${url.pathname}`);
       if (req.method === "POST") {
         if (operation === "deploy_component" && role !== "app") return json({ ok: true });
-        return new Response("deploy refused", { status: 404 });
+        return new Response("deploy refused", { status: role === "auth" ? 401 : 404 });
       }
+      if (role === "auth") return new Response("unauthorized", { status: 401 });
       const appRoute =
         url.pathname === "/Memory" ||
         url.pathname === "/Health" ||
@@ -139,7 +141,7 @@ function plantDeps(over: Partial<FabricUpgradeDeps> = {}): FabricUpgradeDeps {
       mkdirSync(flairDir, { recursive: true });
       writeFileSync(join(flairDir, "package.json"), JSON.stringify({ name: "@tpsdev-ai/flair", version: "0.14.0", files: ["dist"] }));
     },
-    fetchDeployedVersion: async () => "0.13.0",
+    fetchDeployedVersion: async () => "0.14.0",
     deploy: async (opts) => ({
       url: opts.target ?? "",
       project: opts.project ?? "flair",
@@ -258,14 +260,19 @@ describe("flair#930 resource probe fails closed", () => {
     expect(err.message).not.toMatch(/\babsent\b|\bok\b|not found|wrong package root/);
   });
 
-  test("401 and a JSON array still count as the route responding", async () => {
+  test("a 401 does not count as the route responding", async () => {
     let call = 0;
     const fetchImpl = (async () => {
       call++;
       if (call === 1) return new Response("[]", { status: 200 });
       return new Response("", { status: 401 });
     }) as unknown as typeof fetch;
-    await expect(verifyDeployServing({ ...probe, resources: ["Memory"], fetchImpl })).resolves.toBeUndefined();
+    const err = await verifyDeployServing({ ...probe, resources: ["Memory"], fetchImpl }).then(() => {
+      throw new Error("401 was accepted");
+    }, (e: Error) => e);
+    expect(err.message).toContain("GET https://app.example/Memory returned 401");
+    expect(err.message).toContain("auth gate");
+    expect(err.message).not.toMatch(/wrong package root|\babsent\b|not found/);
   });
 });
 
@@ -316,6 +323,23 @@ describe("flair#930 version probe fails closed before deploy", () => {
     expect(result.message).toContain("not JSON");
     expect(result.calls.deploy).toBe(0);
     expect(result.calls.npm).toBe(0);
+  });
+
+  test("JSON with only a version string is not a Flair /Health body", async () => {
+    const result = await probe(() => new Response(JSON.stringify({ version: "1.2.3" }), { status: 200, headers: { "content-type": "application/json" } }));
+    expect(result.message).toContain("not a Flair /Health body");
+    expect(result.calls.deploy).toBe(0);
+    expect(result.calls.npm).toBe(0);
+    expect(result.calls.logs.join("\n")).not.toMatch(SUCCESS_TEXT);
+  });
+
+  test("a non-semver version is refused before deploy", async () => {
+    const result = await probe(() => new Response(JSON.stringify({
+      ok: true, version: "unknown", searchReady: true, buildCommit: null,
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    expect(result.message).toContain("not a semver");
+    expect(result.calls.deploy).toBe(0);
+    expect(result.calls.logs.join("\n")).not.toMatch(SUCCESS_TEXT);
   });
 
   test("a failed /Health request writes nothing", async () => {
@@ -378,7 +402,9 @@ describe("flair#930 version probe fails closed before deploy", () => {
       port: 0,
       fetch() {
         healthReads++;
-        if (healthReads === 1) return new Response(JSON.stringify({ version: "1.2.3" }), { status: 200 });
+        if (healthReads === 1) {
+          return new Response(JSON.stringify({ ok: true, version: "1.2.3", searchReady: true, buildCommit: null }), { status: 200 });
+        }
         return new Response("", { status: 500 });
       },
     });
@@ -427,7 +453,26 @@ describe("flair#930 upgrade flags require --target", () => {
     expect(upgradeEndpointFlagsWithoutTarget({ applicationEndpoint: "https://app.example:9926" }))
       .toBe("flair upgrade: --operations-endpoint and --application-endpoint require --target.");
     expect(upgradeEndpointFlagsWithoutTarget({ target: "https://app.example", operationsEndpoint: "https://ops.example:9925" })).toBeNull();
+    expect(endpointFlagsWithoutExplicitTarget("flair deploy", { operationsEndpoint: "https://ops.example:9925" }))
+      .toBe("flair deploy: --operations-endpoint and --application-endpoint require --target.");
+    expect(endpointFlagsWithoutExplicitTarget("flair deploy", { target: "https://app.example", applicationEndpoint: "https://app.example:9926" })).toBeNull();
   });
+
+  test("flair deploy exits nonzero when an endpoint flag is set without --target", () => {
+    const cli = join(import.meta.dir, "..", "..", "src", "cli.ts");
+    const work = mkdtempSync(join(tmpdir(), "flair-930-deploy-notarget-"));
+    roots.push(work);
+    const result = spawnSync("bun", [cli, "deploy", "--operations-endpoint", "https://ops.example:9925"], {
+      cwd: work,
+      encoding: "utf8",
+      timeout: 20_000,
+      env: { ...process.env, HOME: work },
+    });
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(result.status, output).not.toBe(0);
+    expect(output).toContain("flair deploy: --operations-endpoint and --application-endpoint require --target.");
+    expect(output).not.toMatch(/Successfully deployed|verified serving/);
+  }, 60_000);
 
   test("flair upgrade exits nonzero when an endpoint flag is set without --target", () => {
     const cli = join(import.meta.dir, "..", "..", "src", "cli.ts");
@@ -453,16 +498,16 @@ describe("flair#930 upgrade wiring", () => {
     const logs: string[] = [];
     await fabricUpgrade(
       {
-        target: "https://single.example",
-        operationsEndpoint: "https://ops.example:9925",
-        applicationEndpoint: "https://app.example:9926",
+        target: "https://cluster.example",
+        operationsEndpoint: "https://cluster.example:9925",
+        applicationEndpoint: "https://cluster.example:9926",
         fabricUser: "admin",
         fabricPassword: "pw",
       },
       plantDeps({
         fetchDeployedVersion: async (o) => {
           seen.push(o.url);
-          return "0.13.0";
+          return seen.length === 1 ? "0.13.0" : "0.14.0";
         },
         deploy: async (opts) => {
           deploys.push(opts);
@@ -471,11 +516,11 @@ describe("flair#930 upgrade wiring", () => {
         log: (m) => logs.push(m),
       }),
     );
-    expect(seen).toEqual(["https://app.example:9926", "https://app.example:9926"]);
-    expect(deploys[0].target).toBe("https://single.example");
-    expect(deploys[0].operationsEndpoint).toBe("https://ops.example:9925");
-    expect(deploys[0].applicationEndpoint).toBe("https://app.example:9926");
-    expect(logs.join("\n")).toContain("Deploying flair 0.14.0 to https://ops.example:9925");
+    expect(seen).toEqual(["https://cluster.example:9926", "https://cluster.example:9926"]);
+    expect(deploys[0].target).toBe("https://cluster.example");
+    expect(deploys[0].operationsEndpoint).toBe("https://cluster.example:9925");
+    expect(deploys[0].applicationEndpoint).toBe("https://cluster.example:9926");
+    expect(logs.join("\n")).toContain("Deploying flair 0.14.0 to https://cluster.example:9925");
   });
 
   test("fabricUpgrade without the new options keeps the single target for the version probe and deploy()", async () => {
@@ -486,7 +531,7 @@ describe("flair#930 upgrade wiring", () => {
       plantDeps({
         fetchDeployedVersion: async (o) => {
           seen.push(o.url);
-          return "0.13.0";
+          return seen.length === 1 ? "0.13.0" : "0.14.0";
         },
         deploy: async (opts) => {
           deploys.push(opts);
@@ -528,6 +573,18 @@ describe("flair#930 upgrade wiring", () => {
       );
       expect(opsWins.opsUrl).toBe("https://mqtt.example:9925");
 
+      process.env.FLAIR_OPS_TARGET = "https://env-ops.example:9925";
+      const envWins = buildFabricUpgradeOptions(
+        {
+          target: "https://app.example:9926",
+          operationsEndpoint: "https://ops.example:9925",
+        },
+        { fabricUser: "admin", fabricPassword: "pw" },
+        resolveEffectiveOpsUrl,
+      );
+      expect(envWins.opsUrl).toBe("https://env-ops.example:9925");
+      delete process.env.FLAIR_OPS_TARGET;
+
       const single = buildFabricUpgradeOptions(
         { target: "https://app.example" },
         { fabricUser: "admin", fabricPassword: "pw" },
@@ -540,5 +597,206 @@ describe("flair#930 upgrade wiring", () => {
       if (prior === undefined) delete process.env.FLAIR_OPS_TARGET;
       else process.env.FLAIR_OPS_TARGET = prior;
     }
+  });
+});
+
+function flairHealth(version: string): Response {
+  return new Response(JSON.stringify({ ok: true, version, searchReady: true, buildCommit: null }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+describe("flair#930 unverified version after deploy", () => {
+  async function afterDeploy(second: () => Response): Promise<{ message: string; deploys: number }> {
+    let reads = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        reads++;
+        return reads === 1 ? flairHealth("1.0.0") : second();
+      },
+    });
+    let deploys = 0;
+    const { fetchDeployedVersion: _drop, ...deps } = plantDeps({
+      deploy: async (opts) => {
+        deploys++;
+        return { url: opts.target ?? "", project: "flair", version: "0.14.0", packageRoot: "", dryRun: false };
+      },
+    });
+    try {
+      const err = await fabricUpgrade(
+        { target: `http://127.0.0.1:${server.port}`, fabricUser: "admin", fabricPassword: "pw" },
+        deps,
+      ).then(() => {
+        throw new Error("unverified version was treated as success");
+      }, (e: Error) => e);
+      return { message: err.message, deploys };
+    } finally {
+      server.stop(true);
+    }
+  }
+
+  test("a non-semver version after deploy_component is unverified", async () => {
+    const result = await afterDeploy(() => new Response(JSON.stringify({
+      ok: true, version: "unknown", searchReady: true, buildCommit: null,
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    expect(result.deploys).toBe(1);
+    expect(result.message).toContain("deploy_component was sent");
+    expect(result.message).toContain("The running version is unverified");
+    expect(result.message).toContain("not a semver");
+    expect(result.message).not.toContain("This command stops");
+    expect(result.message).not.toContain("may still be restarting");
+  });
+
+  test("a version older than the one deployed is unverified", async () => {
+    const result = await afterDeploy(() => flairHealth("0.0.1"));
+    expect(result.deploys).toBe(1);
+    expect(result.message).toContain("deploy_component was sent");
+    expect(result.message).toContain("reported 0.0.1, which is older than 0.14.0");
+    expect(result.message).not.toContain("may still be restarting");
+  });
+});
+
+describe("flair#930 credentials stay on the operations host", () => {
+  test("different hosts are refused before any deploy", async () => {
+    let deploys = 0;
+    const err = await fabricUpgrade(
+      {
+        target: "https://app.example:9926",
+        operationsEndpoint: "https://ops.example:9925",
+        applicationEndpoint: "https://app.example:9926",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+      },
+      plantDeps({
+        deploy: async () => {
+          deploys++;
+          return { url: "", project: "flair", version: "0.14.0", packageRoot: "", dryRun: false };
+        },
+      }),
+    ).then(() => {
+      throw new Error("different hosts were accepted");
+    }, (e: Error) => e);
+    expect(deploys).toBe(0);
+    expect(err.message).toContain("the application endpoint host app.example is not the operations endpoint host ops.example");
+    expect(err.message).toContain("Refusing to send admin credentials to both hosts");
+  });
+
+  test("flair deploy refuses different hosts before a dry run returns", async () => {
+    await expect(deploy(deployOpts({
+      target: "https://app.example:9926",
+      operationsEndpoint: "https://ops.example:9925",
+      dryRun: true,
+    }))).rejects.toThrow(/application endpoint host app\.example is not the operations endpoint host ops\.example/);
+  });
+});
+
+describe("flair#930 a 401 from the wrong endpoint", () => {
+  test("401 on application routes is refused and does not claim a wrong package root", async () => {
+    const mock = startMock("auth");
+    try {
+      const err = await deploy(deployOpts({ target: mock.url })).then(() => {
+        throw new Error("401 was accepted");
+      }, (e: Error) => e);
+      expect(err.message).toContain(`GET ${mock.url}/Memory returned 401`);
+      expect(err.message).toContain("auth gate");
+      expect(err.message).not.toMatch(/wrong package root|component is not serving|\babsent\b/);
+      expect(mock.hits).toContain("POST deploy_component");
+      expect(mock.hits).toContain("GET /Memory");
+    } finally {
+      mock.stop();
+    }
+  });
+});
+
+describe("flair#930 routing matrix", () => {
+  test("operations-only: deploy_component uses the operations endpoint and probes stay on the target", async () => {
+    const ops = startMock("ops");
+    const app = startMock("app");
+    try {
+      const result = await deploy(deployOpts({ target: app.url, operationsEndpoint: ops.url }));
+      expect(result.url).toBe(app.url);
+      expect(ops.hits).toContain("POST deploy_component");
+      expect(app.hits).not.toContain("POST deploy_component");
+      expect(app.hits).toContain("GET /Memory");
+      expect(ops.hits).not.toContain("GET /Memory");
+    } finally {
+      ops.stop();
+      app.stop();
+    }
+  });
+
+  test("application-only: probes use the application endpoint and deploy_component stays on the target", async () => {
+    const ops = startMock("ops");
+    const app = startMock("app");
+    try {
+      const result = await deploy(deployOpts({ target: ops.url, applicationEndpoint: app.url }));
+      expect(result.url).toBe(app.url);
+      expect(ops.hits).toContain("POST deploy_component");
+      expect(app.hits).not.toContain("POST deploy_component");
+      expect(app.hits).toContain("GET /Memory");
+      expect(ops.hits).not.toContain("GET /Memory");
+    } finally {
+      ops.stop();
+      app.stop();
+    }
+  });
+
+  test("the fleet probe URL is the application endpoint", () => {
+    expect(applicationProbeUrl("https://cluster.example:9926", "https://cluster.example:9925")).toBe("https://cluster.example:9926");
+    expect(applicationProbeUrl("  ", "https://cluster.example:9926")).toBe("https://cluster.example:9926");
+  });
+
+  test("MQTT configuration is sent to the operations endpoint", async () => {
+    const seen: string[] = [];
+    const err = await deploy(deployOpts({
+      target: "https://cluster.example:9926",
+      operationsEndpoint: "https://cluster.example:9925",
+      keepMqttConfig: false,
+      verify: false,
+      operationsFetch: (async (input: string | URL | Request) => {
+        seen.push(String(input));
+        return new Response("no", { status: 500 });
+      }) as typeof fetch,
+    })).then(() => {
+      throw new Error("MQTT refusal was treated as success");
+    }, (e: Error) => e);
+    expect(seen.some((url) => url.includes("https://cluster.example:9925"))).toBe(true);
+    expect(seen.some((url) => url.includes(":9926"))).toBe(false);
+    expect(err.message).toContain("cluster.example:9925");
+  });
+
+  test("convergence polls the operations endpoint", async () => {
+    const root = packageRoot();
+    writeFileSync(
+      join(root, "node_modules", "harper", "dist", "bin", "harper.js"),
+      'console.log("Component \'flair\' was deployed on the origin node but failed to replicate to 1 of 1 peer node(s): peer.cluster.example (Error: Connection closed 1006)."); process.exit(1);\n',
+    );
+    const seen: string[] = [];
+    let clock = 0;
+    const err = await deploy(deployOpts({
+      target: "https://cluster.example:9926",
+      operationsEndpoint: "https://cluster.example:9925",
+      applicationEndpoint: "https://cluster.example:9926",
+      packageRoot: root,
+      verify: false,
+      deployRetries: 0,
+      convergenceTimeoutMs: 1,
+      convergencePollIntervalMs: 1000,
+      convergenceDeps: {
+        getComponents: async (url: string) => {
+          seen.push(url);
+          return [];
+        },
+        resolveHostAddresses: async () => [],
+        sleep: async () => {},
+        now: () => ++clock,
+      },
+    })).then(() => {
+      throw new Error("replication failure was treated as success");
+    }, (e: Error) => e);
+    expect(seen[0]).toBe("https://cluster.example:9925");
+    expect(err.message).not.toContain("cluster.example:9926");
   });
 });

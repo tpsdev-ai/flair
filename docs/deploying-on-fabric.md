@@ -118,17 +118,16 @@ Three things worth knowing about that file:
 
 ---
 
-## Ports: the derivation trap
+## Ports
 
-Locally, Flair serves data on `19926` and the ops API on `19925`. The CLI derives
-**ops = data − 1** everywhere.
+Locally, Flair serves data on `19926` and the ops API on `19925`. For an explicit
+port other than 443, the CLI derives ops = data − 1.
 
-A managed endpoint is HTTPS on 443 with no port, so derivation produces **`:442`** —
-where nothing answers:
+HTTPS with no port, or with port 443, derives the Fabric operations port 9925. <!-- docs-freshness-allow: Fabric ops API port -->
 
 ```bash
-# --target https://<cluster>.<org>.harperfabric.com   → ops derived as :442  ✗
-# --target https://<fabric-node>:19926/<instance>     → ops derived as :19925 ✓
+# --target https://<cluster>.<org>.harperfabric.com   → ops derived as :9925 <!-- docs-freshness-allow: Fabric ops API -->
+# --target https://<fabric-node>:19926/<instance>     → ops derived as :19925
 ```
 
 **Fabric's ops API runs on the same hostname at port 9925** <!-- docs-freshness-allow: Fabric ops API port, not legacy data port --> (the deploy/upgrade path already targets this port). For a managed `*.harperfabric.com` instance:

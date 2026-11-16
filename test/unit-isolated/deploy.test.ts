@@ -374,24 +374,23 @@ describe("flair deploy: verifyDeployServing (served-API verification)", () => {
     ).rejects.toThrow(/GET https:\/\/cluster\.org\.harperfabric\.com\/Memory returned 404/);
   });
 
-  test("401 (auth-gated) and 200 both count as serving — no throw", async () => {
+  test("401 does not count as serving", async () => {
     let call = 0;
     const fetchImpl = (async () => {
       call++;
-      // First call is the settle probe against baseUrl; alternate 401/200
-      // for the resource checks to prove both are accepted.
-      const status = call % 2 === 0 ? 401 : 200;
+      // First call is the settle probe against baseUrl. The resource check is 401.
+      const status = call === 1 ? 200 : 401;
       return new Response(status === 200 ? "[]" : "", { status });
     }) as unknown as typeof fetch;
 
     await expect(
       verifyDeployServing({
         baseUrl: "https://cluster.org.harperfabric.com",
-        resources: ["Memory", "Agent"],
+        resources: ["Memory"],
         fetchImpl,
         ...FAST,
       }),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(/GET https:\/\/cluster\.org\.harperfabric\.com\/Memory returned 401/);
   });
 
   test("connection-flap (network failure, then reachable) retries the settle probe then passes", async () => {

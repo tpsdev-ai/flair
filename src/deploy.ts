@@ -28,7 +28,7 @@ import { FABRIC_NPM_INSTALL_COMMAND } from "./fabric-npm-install.js";
 import { discriminateMcpOAuthDiscovery, reportMcpOAuthDiscovery } from "./lib/mcp-enable.js";
 import { mcpOAuthEnabledFromComponentEnv } from "./lib/mcp-oauth-env.js";
 import { applyMqttOffConfiguration, assertSafeUrl, completeMqttOff, sharedWorkerRestartInstruction } from "./mqtt-off-deploy.js";
-import { explicitEndpoint, resolveDeploymentOpsUrl } from "./lib/ops-url.js";
+import { endpointHostRefusal, explicitEndpoint, resolveDeploymentOpsUrl } from "./lib/ops-url.js";
 
 export interface DeployOptions {
   fabricOrg?: string;
@@ -835,7 +835,7 @@ function verificationRefusal(detail: string, remedy: string): Error {
   return new Error(`deploy verification: ${detail}. ${remedy}`);
 }
 
-const RESOURCE_JSON_OR_401 = "Retry when that URL returns 200 with a JSON body, or 401.";
+const RESOURCE_JSON = "Retry when that URL returns 200 with a JSON body.";
 const NAME_APPLICATION_ENDPOINT =
   "Pass --application-endpoint <application-url> and re-run verification against the application endpoint.";
 
@@ -878,14 +878,19 @@ async function verifyResourcesServing(
         `Retry the request to ${path}.`,
       );
     }
-    // 401: the auth gate answered, so the route is mounted. The status is the evidence.
-    if (res.status === 401) continue;
+    // 401 is an auth gate. It does not show that this route exists, so it does not pass.
+    if (res.status === 401) {
+      const remedy = applicationEndpointNamed
+        ? RESOURCE_JSON
+        : `That status is an auth gate, not evidence the route exists. ${NAME_APPLICATION_ENDPOINT}`;
+      throw verificationRefusal(`GET ${path} returned 401`, remedy);
+    }
     if (res.status !== 200) {
       // 404 on an unnamed URL can be the operations endpoint. Any other status,
       // including 403 and 5xx, is a failed probe.
       const remedy = res.status === 404 && !applicationEndpointNamed
         ? NAME_APPLICATION_ENDPOINT
-        : RESOURCE_JSON_OR_401;
+        : RESOURCE_JSON;
       throw verificationRefusal(`GET ${path} returned ${res.status}`, remedy);
     }
     const body = await readProbeBody(res);
@@ -1344,6 +1349,8 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   assertSafeUrl(applicationUrl, "application endpoint");
   const opsUrl = opts.opsUrl ?? resolveDeploymentOpsUrl(url, { operationsEndpoint: opts.operationsEndpoint });
   assertSafeUrl(opsUrl, "operations API URL");
+  const hostRefusal = endpointHostRefusal("flair deploy", operationsUrl, applicationUrl);
+  if (hostRefusal) throw new Error(hostRefusal);
 
   if (opts.dryRun) {
     return { url: applicationUrl, project, version, packageRoot, dryRun: true };

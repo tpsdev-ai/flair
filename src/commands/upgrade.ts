@@ -10,7 +10,7 @@ import { Command } from "commander";
 import { detectWiredFlairMcp } from "../doctor-client.js";
 import { UPGRADE_SNAPSHOT_ROOT, fetchDeclaredHarperVersion, readInstalledHarperVersion } from "../engine-version.js";
 import { fabricUpgrade, type FabricUpgradeOptions } from "../fabric-upgrade.js";
-import { explicitEndpoint } from "../lib/ops-url.js";
+import { applicationProbeUrl, endpointFlagsWithoutExplicitTarget, explicitEndpoint } from "../lib/ops-url.js";
 import { deployUrlRefusal, safeUrl } from "../mqtt-off-deploy.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
 import { resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
@@ -249,11 +249,7 @@ export function upgradeEndpointFlagsWithoutTarget(opts: {
   operationsEndpoint?: string;
   applicationEndpoint?: string;
 }): string | null {
-  if (typeof opts.target === "string" && opts.target.trim() !== "") return null;
-  if (explicitEndpoint(opts.operationsEndpoint) || explicitEndpoint(opts.applicationEndpoint)) {
-    return "flair upgrade: --operations-endpoint and --application-endpoint require --target.";
-  }
-  return null;
+  return endpointFlagsWithoutExplicitTarget("flair upgrade", opts);
 }
 
 export function buildFabricUpgradeOptions(
@@ -393,7 +389,7 @@ async function runFabricUpgrade(opts: any): Promise<void> {
     } else {
       console.log(`\n${green("→")} Fleet verify`);
       const sweep = await sweepFleet({
-        target: explicitEndpoint(opts.applicationEndpoint) ?? upgradeOpts.target,
+        target: applicationProbeUrl(opts.applicationEndpoint, upgradeOpts.target),
         fabricUser: fabricUser as string,
         fabricPassword: fabricPassword as string,
         expectVersion: result.plan.targetVersion,

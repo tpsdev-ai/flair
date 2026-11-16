@@ -8,7 +8,7 @@
  */
 import { Command } from "commander";
 import { buildTargetUrl as buildDeployUrl, deploy as deployToFabric, validateOptions as validateDeployOptions } from "../deploy.js";
-import { explicitEndpoint, resolveDeploymentOpsUrl } from "../lib/ops-url.js";
+import { endpointFlagsWithoutExplicitTarget, explicitEndpoint, resolveDeploymentOpsUrl } from "../lib/ops-url.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
 import { readCheckpointFile, verifyCheckpoint } from "../memory-id-checkpoint.js";
 import { deployUrlRefusal, safeUrl } from "../mqtt-off-deploy.js";
@@ -107,6 +107,12 @@ program
   .option("--convergence-timeout <ms>", "How long to wait for peer replication to converge before reporting a replication failure (default: 180000)")
   .option("--no-fleet-verify", "Skip the automatic post-deploy fleet convergence sweep (default: sweep runs — see flair#636)")
   .action(async (opts) => {
+    const endpointFlags = endpointFlagsWithoutExplicitTarget("flair deploy", opts);
+    if (endpointFlags) {
+      console.error(endpointFlags);
+      process.exit(1);
+    }
+
     const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
     const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
     const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;

@@ -18,6 +18,46 @@ export function explicitEndpoint(value: string | undefined): string | undefined 
 }
 
 /**
+ * Refusal when `--operations-endpoint` or `--application-endpoint` is set and
+ * `--target` is blank. Null when the command may continue. Both `flair deploy`
+ * and `flair upgrade` use this; a URL built from org and cluster is not `--target`.
+ */
+export function endpointFlagsWithoutExplicitTarget(
+  command: string,
+  opts: { target?: string; operationsEndpoint?: string; applicationEndpoint?: string },
+): string | null {
+  if (typeof opts.target === "string" && opts.target.trim() !== "") return null;
+  if (explicitEndpoint(opts.operationsEndpoint) || explicitEndpoint(opts.applicationEndpoint)) {
+    return `${command}: --operations-endpoint and --application-endpoint require --target.`;
+  }
+  return null;
+}
+
+/**
+ * Refusal when the application URL's hostname is not the operations URL's
+ * hostname. Ports may differ. Null when the hostnames match or either URL
+ * cannot be parsed. Admin credentials for version, migration, and fleet reads
+ * go to the application URL, so a different host is refused before those reads.
+ */
+export function endpointHostRefusal(command: string, operationsUrl: string, applicationUrl: string): string | null {
+  let opsHost: string;
+  let appHost: string;
+  try {
+    opsHost = new URL(operationsUrl).hostname.toLowerCase();
+    appHost = new URL(applicationUrl).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (opsHost === appHost) return null;
+  return `${command}: the application endpoint host ${appHost} is not the operations endpoint host ${opsHost}. Refusing to send admin credentials to both hosts.`;
+}
+
+/** URL of a fleet sweep: the application endpoint when set, otherwise the fallback (the single target). */
+export function applicationProbeUrl(applicationEndpoint: string | undefined, fallback: string): string {
+  return explicitEndpoint(applicationEndpoint) ?? fallback;
+}
+
+/**
  * Operations API URL for the MQTT-off calls deploy() sends.
  * An explicit ops URL wins, then an explicit operations endpoint, then
  * derivation from the single target URL.

@@ -33,7 +33,7 @@ import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { createRegistryNoticePrinter, fetchDeclaredDependencies, fetchLatestVersion } from "./lib/npm-registry.js";
 import type { DeployOptions, DeployResult } from "./deploy.js";
-import { explicitEndpoint } from "./lib/ops-url.js";
+import { endpointHostRefusal, explicitEndpoint } from "./lib/ops-url.js";
 import { assertSafeUrl, safeUrl } from "./mqtt-off-deploy.js";
 
 /**
@@ -198,8 +198,9 @@ export interface FabricUpgradeDeps {
   /**
    * Query the application endpoint for the version of the deployed `project`
    * component. The default implementation throws when the probe fails, the
-   * body is empty or unreadable, or the JSON has no version string. An
-   * injected implementation may return null.
+   * body is empty or unreadable, the JSON is not a Flair `/Health` body, or
+   * the version is not a semver. An injected implementation may return null;
+   * after `deploy_component`, null is an unverified version.
    */
   fetchDeployedVersion: (opts: {
     url: string;
@@ -348,7 +349,7 @@ export class VersionProbeError extends Error {
     super(
       `Could not read the deployed Flair version from ${healthUrl}: ${why}. ` +
         `This command stops. ` +
-        `Retry when GET ${healthUrl} returns JSON with a string version, flairVersion, or flair.version.`,
+        `Retry when GET ${healthUrl} returns a Flair /Health body whose version is a semver.`,
     );
     this.name = "VersionProbeError";
   }
@@ -364,8 +365,10 @@ function versionProbeError(healthUrl: string, why: string, applicationEndpointNa
 
 /**
  * Read the running Flair version from the application endpoint's `/Health`.
- * A failed request, an empty or unreadable body, or JSON with no version
- * string throws. It does not return null for any of those.
+ * A failed request, an empty or unreadable body, JSON that is not a Flair
+ * `/Health` body (`ok`, `searchReady`, `buildCommit`, and a semver `version`,
+ * `flairVersion`, or `flair.version`), or a version that is not a semver
+ * throws. It does not return null for any of those.
  */
 export async function readDeployedFlairVersion(opts: {
   url: string;
@@ -404,12 +407,38 @@ export async function readDeployedFlairVersion(opts: {
   } catch {
     throw versionProbeError(healthUrl, "the body was not JSON", opts.applicationEndpointNamed === true);
   }
-  // Shapes the application has shipped: { version }, { flairVersion }, { flair: { version } }.
-  const v = body?.version ?? body?.flairVersion ?? body?.flair?.version ?? null;
-  if (typeof v !== "string" || v.trim() === "") {
-    throw versionProbeError(healthUrl, "the JSON has no string version, flairVersion, or flair.version", opts.applicationEndpointNamed === true);
+  const version = healthVersionString(body);
+  if (typeof version === "string" && version.trim() !== "" && parseSemverCore(version) === null) {
+    throw versionProbeError(healthUrl, "the version string is not a semver", opts.applicationEndpointNamed === true);
   }
-  return v;
+  if (!flairHealthBody(body, version)) {
+    throw versionProbeError(healthUrl, "the JSON is not a Flair /Health body", opts.applicationEndpointNamed === true);
+  }
+  return version as string;
+}
+
+/** `version`, `flairVersion`, or `flair.version` when that field is a string. */
+function healthVersionString(body: unknown): string | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const doc = body as Record<string, unknown>;
+  const direct = doc.version ?? doc.flairVersion;
+  if (typeof direct === "string") return direct;
+  const nested = doc.flair;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    const nestedVersion = (nested as Record<string, unknown>).version;
+    if (typeof nestedVersion === "string") return nestedVersion;
+  }
+  return null;
+}
+
+/** Public `/Health` shape: boolean `ok`, boolean `searchReady`, `buildCommit` string or null, and a semver version. */
+function flairHealthBody(body: unknown, version: string | null): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  if (typeof version !== "string" || parseSemverCore(version) === null) return false;
+  const doc = body as Record<string, unknown>;
+  if (typeof doc.ok !== "boolean" || typeof doc.searchReady !== "boolean") return false;
+  if (!Object.prototype.hasOwnProperty.call(doc, "buildCommit")) return false;
+  return doc.buildCommit === null || typeof doc.buildCommit === "string";
 }
 
 function applicationUrlOf(opts: { target: string; applicationEndpoint?: string }): string {
@@ -544,6 +573,8 @@ export async function fabricUpgrade(
   assertSafeUrl(operationsUrl, "operations endpoint");
   assertSafeUrl(applicationUrl, "application endpoint");
   if (opts.opsUrl !== undefined) assertSafeUrl(opts.opsUrl, "operations API URL");
+  const hostRefusal = endpointHostRefusal("flair upgrade", operationsUrl, applicationUrl);
+  if (hostRefusal) throw new Error(hostRefusal);
 
   // Step 1 + diff.
   const plan = await planFabricUpgrade(opts, deps);
@@ -638,18 +669,20 @@ export async function fabricUpgrade(
         `deploy_component was sent to ${safeUrl(operationsUrl)}. The running version is unverified: ${why}. Check GET ${healthUrl}.`,
       );
     }
-    if (verifiedVersion) {
-      const ok = semverGte(verifiedVersion, plan.targetVersion);
-      log(
-        ok
-          ? `✓ Fabric now reports Flair ${verifiedVersion}`
-          : `⚠ Fabric reports ${verifiedVersion} (expected ${plan.targetVersion}) — may still be restarting`,
-      );
-    } else {
-      log(
-        `Deployed ${result.version}. No version string was returned to verify against.`,
+    const healthUrl = `${applicationUrl.replace(/\/$/, "")}/Health`;
+    const unverified = !verifiedVersion
+      ? "no version string was returned"
+      : parseSemverCore(verifiedVersion) === null
+        ? "the version string is not a semver"
+        : semverGte(verifiedVersion, plan.targetVersion)
+          ? null
+          : `reported ${verifiedVersion}, which is older than ${plan.targetVersion}`;
+    if (unverified) {
+      throw new Error(
+        `deploy_component was sent to ${safeUrl(operationsUrl)}. The running version is unverified: ${unverified}. Check GET ${healthUrl}.`,
       );
     }
+    log(`✓ Fabric now reports Flair ${verifiedVersion}`);
 
     return {
       plan,
