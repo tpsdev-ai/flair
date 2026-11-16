@@ -16,8 +16,11 @@
   one deployed after one re-read reports that the deploy was sent and the
   running version is unverified.
 
-  A resource probe sends the admin Basic credential, requests one row
-  (`limit=1`), and accepts a 200 whose JSON row list, when present, contains
-  only objects. A body over 1048576 bytes is refused. Any other HTTP status,
-  including 401, is reported. Without that credential, resource verification
-  does not run.
+  A resource probe sends the admin Basic credential, requests one row with
+  Harper's `limit(1)`, and accepts a 200 whose JSON row list, when present,
+  contains only objects. A body over 1048576 bytes is refused. Any other HTTP
+  status, including 401, is reported. Without that credential, resource
+  verification does not run. `flair upgrade --target --no-restart` stages the
+  deploy and does not fail because the running version is still the previous
+  one. After a restarting deploy, a prerelease does not count as the stable
+  version that was deployed.

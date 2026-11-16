@@ -65,19 +65,24 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+function routePath(pathname: string): string {
+  return pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+}
+
 function appBody(url: URL): Response {
-  if (url.pathname === "/HealthDetail") {
+  const path = routePath(url.pathname);
+  if (path === "/HealthDetail") {
     return json({
       memories: { modelCounts: { "nomic-embed-text-v1.5-Q4_K_M+searchprefix": 599 } },
       migrations: { cyclePhase: "done", migrations: [{ id: "embedding-stamp", state: "completed", rowsRemaining: 0 }] },
     });
   }
-  if (url.pathname === "/.well-known/oauth-authorization-server") {
+  if (path === "/.well-known/oauth-authorization-server") {
     return json({ issuer: url.origin, token_endpoint: `${url.origin}/oauth/mcp/token` });
   }
-  if (url.pathname === "/OAuthMetadata") return json({ issuer: url.origin });
-  if (url.pathname === "/Memory") return json([]);
-  if (url.pathname === "/Health") return json({ ok: true, version: "9.9.9-test", searchReady: true, buildCommit: null });
+  if (path === "/OAuthMetadata") return json({ issuer: url.origin });
+  if (path === "/Memory") return json([]);
+  if (path === "/Health") return json({ ok: true, version: "9.9.9-test", searchReady: true, buildCommit: null });
   return json({});
 }
 
@@ -99,22 +104,23 @@ function startMock(role: Role): { url: string; hits: string[]; stop: () => void 
           operation = "";
         }
       }
-      hits.push(req.method === "POST" ? `POST ${operation || url.pathname}` : `GET ${url.pathname}`);
+      const path = routePath(url.pathname);
+      hits.push(req.method === "POST" ? `POST ${operation || path}` : `GET ${path}`);
       if (req.method === "POST") {
         if (operation === "deploy_component" && role !== "app") return json({ ok: true });
         return new Response("deploy refused", { status: role === "auth" ? 401 : 404 });
       }
       if (role === "auth") return new Response("unauthorized", { status: 401 });
-      if (role === "gated" && url.pathname === "/Memory") {
+      if (role === "gated" && path === "/Memory") {
         if (req.headers.get("authorization") !== BASIC) return new Response("unauthorized", { status: 401 });
         return json([]);
       }
       const appRoute =
-        url.pathname === "/Memory" ||
-        url.pathname === "/Health" ||
-        url.pathname === "/HealthDetail" ||
-        url.pathname === "/OAuthMetadata" ||
-        url.pathname.startsWith("/.well-known/");
+        path === "/Memory" ||
+        path === "/Health" ||
+        path === "/HealthDetail" ||
+        path === "/OAuthMetadata" ||
+        path.startsWith("/.well-known/");
       if (role === "ops" && appRoute) return new Response("app route refused", { status: 404 });
       return appBody(url);
     },
@@ -204,7 +210,7 @@ describe("flair#930 endpoints", () => {
       const err = await deploy(deployOpts({ target: mock.url })).then(() => {
         throw new Error("expected the 404 probe to fail");
       }, (e: Error) => e);
-      expect(err.message).toContain(`GET ${mock.url}/Memory?limit=1 returned 404`);
+      expect(err.message).toContain(`GET ${mock.url}/Memory/?limit(1) returned 404`);
       expect(err.message).toContain("--application-endpoint");
       expect(err.message).not.toMatch(/wrong package root|component is not serving|\babsent\b|not found/);
     } finally {
@@ -219,7 +225,7 @@ describe("flair#930 resource probe fails closed", () => {
 
   function fetchStatus(status: number, body: string): typeof fetch {
     return (async (input: string | URL | Request) => {
-      const path = new URL(String(input)).pathname;
+      const path = new URL(String(input)).pathname.replace(/\/+$/, "");
       if (path.endsWith("/Memory")) return new Response(body, { status });
       return new Response("[]", { status: 200 });
     }) as unknown as typeof fetch;
@@ -249,40 +255,42 @@ describe("flair#930 resource probe fails closed", () => {
 
   test("a failed request is refused", async () => {
     const fetchImpl = (async (input: string | URL | Request) => {
-      const path = new URL(String(input)).pathname;
+      const path = new URL(String(input)).pathname.replace(/\/+$/, "");
       if (path.endsWith("/Memory")) throw new Error("connect ECONNREFUSED");
       return new Response("[]", { status: 200 });
     }) as unknown as typeof fetch;
-    await expect(verifyDeployServing({ ...probe, fetchImpl })).rejects.toThrow(/request to https:\/\/app\.example\/Memory\?limit=1 failed/);
+    await expect(verifyDeployServing({ ...probe, fetchImpl })).rejects.toThrow(/request to https:\/\/app\.example\/Memory\/\?limit\(1\) failed/);
   });
 
   test("a 503 is refused", async () => {
     const err = await verifyDeployServing({ ...probe, fetchImpl: fetchStatus(503, "unavailable") }).then(() => {
       throw new Error("503 was accepted");
     }, (e: Error) => e);
-    expect(err.message).toContain("GET https://app.example/Memory?limit=1 returned 503");
+    expect(err.message).toContain("GET https://app.example/Memory/?limit(1) returned 503");
     expect(err.message).not.toContain("--application-endpoint");
     expect(err.message).not.toMatch(/\babsent\b|\bok\b|not found|wrong package root/);
   });
 
-  test("resource probes request one row", async () => {
+  test("resource probes request Harper limit(1) and refuse any other query", async () => {
     let seen = "";
     const fetchImpl = (async (input: string | URL | Request) => {
-      const url = String(input);
-      if (new URL(url).pathname.endsWith("/Memory")) {
-        seen = url;
-        return new Response("[]", { status: 200 });
-      }
-      return new Response("ok", { status: 200 });
+      const url = new URL(String(input));
+      const path = url.pathname.replace(/\/+$/, "");
+      if (!path.endsWith("/Memory")) return new Response("ok", { status: 200 });
+      seen = url.href;
+      if (url.search !== "?limit(1)" && url.search !== "?limit(0,1)") return new Response("bad query", { status: 400 });
+      return new Response("[]", { status: 200 });
     }) as unknown as typeof fetch;
     await verifyDeployServing({ ...probe, fetchImpl, fabricUser: "admin", fabricPassword: "pw" });
-    expect(new URL(seen).search).toBe("?limit=1");
+    const parsed = new URL(seen);
+    expect(parsed.pathname).toBe("/Memory/");
+    expect(parsed.search).toBe("?limit(1)");
   });
 
   test("a 200 body over the probe cap is refused", async () => {
     const chunk = new Uint8Array(64 * 1024);
     const fetchImpl = (async (input: string | URL | Request) => {
-      if (!new URL(String(input)).pathname.endsWith("/Memory")) return new Response("ok", { status: 200 });
+      if (!new URL(String(input)).pathname.replace(/\/+$/, "").endsWith("/Memory")) return new Response("ok", { status: 200 });
       let sent = 0;
       const stream = new ReadableStream<Uint8Array>({
         pull(controller) {
@@ -313,7 +321,7 @@ describe("flair#930 resource probe fails closed", () => {
     const err = await verifyDeployServing({ ...probe, resources: ["Memory"], fetchImpl }).then(() => {
       throw new Error("401 was accepted");
     }, (e: Error) => e);
-    expect(err.message).toContain("GET https://app.example/Memory?limit=1 returned 401");
+    expect(err.message).toContain("GET https://app.example/Memory/?limit(1) returned 401");
     expect(err.message).toContain("auth gate");
     expect(err.message).not.toMatch(/wrong package root|\babsent\b|not found/);
   });
@@ -730,6 +738,56 @@ describe("flair#930 unverified version after deploy", () => {
       server.stop(true);
     }
   });
+
+  test("--no-restart reports the deploy as staged when the running version is still older", async () => {
+    let reads = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        reads++;
+        return flairHealth("0.0.1");
+      },
+    });
+    const logs: string[] = [];
+    let deploys = 0;
+    const { fetchDeployedVersion: _drop, ...deps } = plantDeps({
+      deploy: async () => {
+        deploys++;
+        return { url: "", project: "flair", version: "0.14.0", packageRoot: "", dryRun: false };
+      },
+      log: (m) => logs.push(m),
+    });
+    try {
+      const result = await fabricUpgrade(
+        { target: `http://127.0.0.1:${server.port}`, fabricUser: "admin", fabricPassword: "pw", restart: false },
+        deps,
+      );
+      expect(deploys).toBe(1);
+      expect(reads).toBe(1);
+      expect(result.deployed).toBe(true);
+      expect(result.verifiedVersion).toBeNull();
+      expect(logs.join("\n")).toContain("The running version changes at the next restart");
+      expect(logs.join("\n")).not.toContain("unverified");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a prerelease does not pass the post-deploy version check", async () => {
+    let n = 0;
+    const err = await fabricUpgrade(
+      { target: "https://cluster.example", fabricUser: "admin", fabricPassword: "pw" },
+      plantDeps({
+        fetchDeployedVersion: async () => (++n === 1 ? "0.1.0" : "0.14.0-rc.1"),
+        deploy: async () => ({ url: "", project: "flair", version: "0.14.0", packageRoot: "", dryRun: false }),
+      }),
+    ).then(() => {
+      throw new Error("prerelease was treated as the deployed version");
+    }, (e: Error) => e);
+    expect(n).toBe(2);
+    expect(err.message).toContain("deploy_component was sent");
+    expect(err.message).toContain("not a stable semver");
+  });
 });
 
 describe("flair#930 credentials stay on the operations host", () => {
@@ -843,7 +901,7 @@ describe("flair#930 a 401 from the wrong endpoint", () => {
       const err = await deploy(deployOpts({ target: mock.url })).then(() => {
         throw new Error("401 was accepted");
       }, (e: Error) => e);
-      expect(err.message).toContain(`GET ${mock.url}/Memory?limit=1 returned 401`);
+      expect(err.message).toContain(`GET ${mock.url}/Memory/?limit(1) returned 401`);
       expect(err.message).toContain("auth gate");
       expect(err.message).not.toMatch(/wrong package root|component is not serving|\babsent\b/);
       expect(mock.hits).toContain("POST deploy_component");

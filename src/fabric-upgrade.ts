@@ -81,6 +81,11 @@ export function parseSemverCore(v: string): [number, number, number] | null {
   return [nums[0], nums[1], nums[2]];
 }
 
+/** A release triple and nothing else. A prerelease, build metadata, or a fourth component is not one. */
+function isStableRelease(v: string): boolean {
+  return /^\d+\.\d+\.\d+$/.test(v.trim());
+}
+
 /** True when `a` >= `b` by numeric major.minor.patch (pre-release ignored). */
 export function semverGte(a: string, b: string): boolean {
   const pa = parseSemverCore(a);
@@ -432,6 +437,9 @@ export async function readDeployedFlairVersion(opts: {
   if (typeof version === "string" && version.trim() !== "" && parseSemverCore(version) === null) {
     throw versionProbeError(healthUrl, "the version string is not a semver", named, healthShape);
   }
+  if (typeof version === "string" && version.trim() !== "" && !isStableRelease(version)) {
+    throw versionProbeError(healthUrl, "the version string is not a stable semver", named, healthShape);
+  }
   if (healthShape === "pre-deploy") {
     if (!preDeployHealthBody(body, version)) {
       throw versionProbeError(healthUrl, "the JSON has no boolean ok and semver version", named, healthShape);
@@ -459,14 +467,14 @@ function healthVersionString(body: unknown): string | null {
 /** Before deploy: boolean `ok` and a semver version. Older `/Health` bodies have `ok` and no `searchReady` or `buildCommit`. */
 function preDeployHealthBody(body: unknown, version: string | null): boolean {
   if (!body || typeof body !== "object" || Array.isArray(body)) return false;
-  if (typeof version !== "string" || parseSemverCore(version) === null) return false;
+  if (typeof version !== "string" || !isStableRelease(version)) return false;
   return typeof (body as Record<string, unknown>).ok === "boolean";
 }
 
 /** After deploy: boolean `ok`, boolean `searchReady`, `buildCommit` string or null, and a semver version. */
 function flairHealthBody(body: unknown, version: string | null): boolean {
   if (!body || typeof body !== "object" || Array.isArray(body)) return false;
-  if (typeof version !== "string" || parseSemverCore(version) === null) return false;
+  if (typeof version !== "string" || !isStableRelease(version)) return false;
   const doc = body as Record<string, unknown>;
   if (typeof doc.ok !== "boolean" || typeof doc.searchReady !== "boolean") return false;
   if (!Object.prototype.hasOwnProperty.call(doc, "buildCommit")) return false;
@@ -681,6 +689,20 @@ export async function fabricUpgrade(
       onProgress: (m: string) => log(`  ${m}`),
     });
 
+    // --no-restart stages the component and leaves the running process on its
+    // current version. That older version is expected, so it is not a failed check.
+    if (opts.restart === false) {
+      log(`Deploy staged at ${safeUrl(operationsUrl)}. The running version changes at the next restart.`);
+      return {
+        plan,
+        deployed: true,
+        verifiedVersion: null,
+        stagingDir,
+        replicationWarning: result.replicationWarning,
+        convergedAfterReplicationError: result.convergedAfterReplicationError,
+      };
+    }
+
     // Step 4: read the deployed version from the application endpoint.
     // deploy_component has already been sent. A failed probe is unverified,
     // not a claim that the deploy did not happen.
@@ -726,11 +748,15 @@ export async function fabricUpgrade(
     }
     const unverified = !verifiedVersion
       ? "no version string was returned"
-      : parseSemverCore(verifiedVersion) === null
-        ? "the version string is not a semver"
-        : semverGte(verifiedVersion, plan.targetVersion)
-          ? null
-          : `reported ${verifiedVersion}, which is older than ${plan.targetVersion}`;
+      : verifiedVersion.trim() === plan.targetVersion.trim()
+        ? null
+        : parseSemverCore(verifiedVersion) === null
+          ? "the version string is not a semver"
+          : !isStableRelease(verifiedVersion)
+            ? "the version string is not a stable semver"
+            : semverGte(verifiedVersion, plan.targetVersion)
+              ? null
+              : `reported ${verifiedVersion}, which is older than ${plan.targetVersion}`;
     if (unverified) {
       throw new Error(
         `deploy_component was sent to ${safeUrl(operationsUrl)}. The running version is unverified: ${unverified}. Check GET ${healthUrl}.`,

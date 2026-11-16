@@ -893,23 +893,18 @@ async function readBoundedText(res: Response, maxBytes: number): Promise<string>
   }
   const chunks: Uint8Array[] = [];
   let received = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value || value.byteLength === 0) continue;
-      received += value.byteLength;
-      if (received > maxBytes) {
-        await reader.cancel();
-        const err = new Error(`the body exceeded ${maxBytes} bytes`);
-        err.name = "ProbeBodyTooLarge";
-        throw err;
-      }
-      chunks.push(value);
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value || value.byteLength === 0) continue;
+    received += value.byteLength;
+    if (received > maxBytes) {
+      await reader.cancel();
+      const err = new Error(`the body exceeded ${maxBytes} bytes`);
+      err.name = "ProbeBodyTooLarge";
+      throw err;
     }
-  } catch (err: any) {
-    if (err?.name === "ProbeBodyTooLarge") throw err;
-    throw err;
+    chunks.push(value);
   }
   const bytes = new Uint8Array(received);
   let offset = 0;
@@ -934,7 +929,8 @@ async function verifyResourcesServing(
     headers.Authorization = `Basic ${Buffer.from(`${fabricUser}:${fabricPassword}`).toString("base64")}`;
   }
   for (const name of resources) {
-    const path = `${base}/${name}?limit=${RESOURCE_PROBE_LIMIT}`;
+    // Harper's collection query is limit(end), not a limit= attribute condition.
+    const path = `${base}/${name}/?limit(${RESOURCE_PROBE_LIMIT})`;
     let res: Response;
     try {
       res = await fetchImpl(path, { method: "GET", headers, signal: AbortSignal.timeout(10_000) });

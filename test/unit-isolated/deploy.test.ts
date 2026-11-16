@@ -360,7 +360,7 @@ describe("flair deploy: verifyDeployServing (served-API verification)", () => {
 
   test("404 on the resource fails loudly with a clear message (the incident: empty deploy, harper said success)", async () => {
     const fetchImpl = (async (url: any) => {
-      const path = new URL(String(url)).pathname;
+      const path = new URL(String(url)).pathname.replace(/\/+$/, "");
       return new Response("", { status: path.endsWith("/Memory") ? 404 : 200 });
     }) as unknown as typeof fetch;
 
@@ -371,7 +371,7 @@ describe("flair deploy: verifyDeployServing (served-API verification)", () => {
         fetchImpl,
         ...FAST,
       }),
-    ).rejects.toThrow(/GET https:\/\/cluster\.org\.harperfabric\.com\/Memory\?limit=1 returned 404/);
+    ).rejects.toThrow(/GET https:\/\/cluster\.org\.harperfabric\.com\/Memory\/\?limit\(1\) returned 404/);
   });
 
   test("401 does not count as serving", async () => {
@@ -390,7 +390,7 @@ describe("flair deploy: verifyDeployServing (served-API verification)", () => {
         fetchImpl,
         ...FAST,
       }),
-    ).rejects.toThrow(/GET https:\/\/cluster\.org\.harperfabric\.com\/Memory\?limit=1 returned 401/);
+    ).rejects.toThrow(/GET https:\/\/cluster\.org\.harperfabric\.com\/Memory\/\?limit\(1\) returned 401/);
   });
 
   test("connection-flap (network failure, then reachable) retries the settle probe then passes", async () => {
