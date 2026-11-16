@@ -204,7 +204,7 @@ describe("flair#930 endpoints", () => {
       const err = await deploy(deployOpts({ target: mock.url })).then(() => {
         throw new Error("expected the 404 probe to fail");
       }, (e: Error) => e);
-      expect(err.message).toContain(`GET ${mock.url}/Memory returned 404`);
+      expect(err.message).toContain(`GET ${mock.url}/Memory?limit=1 returned 404`);
       expect(err.message).toContain("--application-endpoint");
       expect(err.message).not.toMatch(/wrong package root|component is not serving|\babsent\b|not found/);
     } finally {
@@ -219,8 +219,8 @@ describe("flair#930 resource probe fails closed", () => {
 
   function fetchStatus(status: number, body: string): typeof fetch {
     return (async (input: string | URL | Request) => {
-      const u = String(input);
-      if (u.endsWith("/Memory")) return new Response(body, { status });
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/Memory")) return new Response(body, { status });
       return new Response("[]", { status: 200 });
     }) as unknown as typeof fetch;
   }
@@ -249,20 +249,58 @@ describe("flair#930 resource probe fails closed", () => {
 
   test("a failed request is refused", async () => {
     const fetchImpl = (async (input: string | URL | Request) => {
-      const u = String(input);
-      if (u.endsWith("/Memory")) throw new Error("connect ECONNREFUSED");
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/Memory")) throw new Error("connect ECONNREFUSED");
       return new Response("[]", { status: 200 });
     }) as unknown as typeof fetch;
-    await expect(verifyDeployServing({ ...probe, fetchImpl })).rejects.toThrow(/request to https:\/\/app\.example\/Memory failed/);
+    await expect(verifyDeployServing({ ...probe, fetchImpl })).rejects.toThrow(/request to https:\/\/app\.example\/Memory\?limit=1 failed/);
   });
 
   test("a 503 is refused", async () => {
     const err = await verifyDeployServing({ ...probe, fetchImpl: fetchStatus(503, "unavailable") }).then(() => {
       throw new Error("503 was accepted");
     }, (e: Error) => e);
-    expect(err.message).toContain("GET https://app.example/Memory returned 503");
+    expect(err.message).toContain("GET https://app.example/Memory?limit=1 returned 503");
     expect(err.message).not.toContain("--application-endpoint");
     expect(err.message).not.toMatch(/\babsent\b|\bok\b|not found|wrong package root/);
+  });
+
+  test("resource probes request one row", async () => {
+    let seen = "";
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (new URL(url).pathname.endsWith("/Memory")) {
+        seen = url;
+        return new Response("[]", { status: 200 });
+      }
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+    await verifyDeployServing({ ...probe, fetchImpl, fabricUser: "admin", fabricPassword: "pw" });
+    expect(new URL(seen).search).toBe("?limit=1");
+  });
+
+  test("a 200 body over the probe cap is refused", async () => {
+    const chunk = new Uint8Array(64 * 1024);
+    const fetchImpl = (async (input: string | URL | Request) => {
+      if (!new URL(String(input)).pathname.endsWith("/Memory")) return new Response("ok", { status: 200 });
+      let sent = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent > 1_048_576) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(chunk);
+          sent += chunk.byteLength;
+        },
+      });
+      return new Response(stream, { status: 200 });
+    }) as unknown as typeof fetch;
+    const err = await verifyDeployServing({ ...probe, fetchImpl, fabricUser: "admin", fabricPassword: "pw" }).then(() => {
+      throw new Error("oversized body was accepted");
+    }, (e: Error) => e);
+    expect(err.message).toContain("exceeded 1048576 bytes");
+    expect(err.message).not.toMatch(/verified serving|wrong package root/);
   });
 
   test("a 401 does not count as the route responding", async () => {
@@ -275,7 +313,7 @@ describe("flair#930 resource probe fails closed", () => {
     const err = await verifyDeployServing({ ...probe, resources: ["Memory"], fetchImpl }).then(() => {
       throw new Error("401 was accepted");
     }, (e: Error) => e);
-    expect(err.message).toContain("GET https://app.example/Memory returned 401");
+    expect(err.message).toContain("GET https://app.example/Memory?limit=1 returned 401");
     expect(err.message).toContain("auth gate");
     expect(err.message).not.toMatch(/wrong package root|\babsent\b|not found/);
   });
@@ -805,7 +843,7 @@ describe("flair#930 a 401 from the wrong endpoint", () => {
       const err = await deploy(deployOpts({ target: mock.url })).then(() => {
         throw new Error("401 was accepted");
       }, (e: Error) => e);
-      expect(err.message).toContain(`GET ${mock.url}/Memory returned 401`);
+      expect(err.message).toContain(`GET ${mock.url}/Memory?limit=1 returned 401`);
       expect(err.message).toContain("auth gate");
       expect(err.message).not.toMatch(/wrong package root|component is not serving|\babsent\b/);
       expect(mock.hits).toContain("POST deploy_component");

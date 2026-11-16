@@ -858,11 +858,18 @@ type ProbeBody =
   | { kind: "empty" }
   | { kind: "unreadable"; detail: string };
 
+/** Collection probes ask Harper for one row. A server that ignores it cannot make the probe read the table. */
+const RESOURCE_PROBE_LIMIT = 1;
+const RESOURCE_PROBE_BODY_BYTES = 1_048_576;
+
 async function readProbeBody(res: Response): Promise<ProbeBody> {
   let text: string;
   try {
-    text = await res.text();
+    text = await readBoundedText(res, RESOURCE_PROBE_BODY_BYTES);
   } catch (err: any) {
+    if (err?.name === "ProbeBodyTooLarge") {
+      return { kind: "unreadable", detail: `the body exceeded ${RESOURCE_PROBE_BODY_BYTES} bytes` };
+    }
     return { kind: "unreadable", detail: `the body could not be read (${err?.message ?? err})` };
   }
   if (text.trim() === "") return { kind: "empty" };
@@ -871,6 +878,46 @@ async function readProbeBody(res: Response): Promise<ProbeBody> {
   } catch {
     return { kind: "unreadable", detail: "the body was not JSON" };
   }
+}
+
+async function readBoundedText(res: Response, maxBytes: number): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) {
+    const text = await res.text();
+    if (new TextEncoder().encode(text).byteLength > maxBytes) {
+      const err = new Error(`the body exceeded ${maxBytes} bytes`);
+      err.name = "ProbeBodyTooLarge";
+      throw err;
+    }
+    return text;
+  }
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      received += value.byteLength;
+      if (received > maxBytes) {
+        await reader.cancel();
+        const err = new Error(`the body exceeded ${maxBytes} bytes`);
+        err.name = "ProbeBodyTooLarge";
+        throw err;
+      }
+      chunks.push(value);
+    }
+  } catch (err: any) {
+    if (err?.name === "ProbeBodyTooLarge") throw err;
+    throw err;
+  }
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 async function verifyResourcesServing(
@@ -887,7 +934,7 @@ async function verifyResourcesServing(
     headers.Authorization = `Basic ${Buffer.from(`${fabricUser}:${fabricPassword}`).toString("base64")}`;
   }
   for (const name of resources) {
-    const path = `${base}/${name}`;
+    const path = `${base}/${name}?limit=${RESOURCE_PROBE_LIMIT}`;
     let res: Response;
     try {
       res = await fetchImpl(path, { method: "GET", headers, signal: AbortSignal.timeout(10_000) });
