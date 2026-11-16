@@ -42,6 +42,8 @@ import { assertSafeUrl, safeUrl } from "./mqtt-off-deploy.js";
  * in 5.1.13). Anything below this MUST be overridden before a Fabric deploy.
  */
 export const MIN_HARPER_VERSION = "5.1.13";
+/** One wait before a second post-deploy /Health read when the first semver is older than the deploy. */
+const POST_DEPLOY_VERSION_REREAD_MS = 250;
 
 /**
  * Version we pin Harper to when an override is needed and `--harper-version`
@@ -198,9 +200,10 @@ export interface FabricUpgradeDeps {
   /**
    * Query the application endpoint for the version of the deployed `project`
    * component. The default implementation throws when the probe fails, the
-   * body is empty or unreadable, the JSON is not a Flair `/Health` body, or
-   * the version is not a semver. An injected implementation may return null;
-   * after `deploy_component`, null is an unverified version.
+   * body is empty or unreadable, or the version is not a semver. Before
+   * deploy the body needs boolean `ok` and a semver. After deploy it needs
+   * the strict Flair `/Health` body. An injected implementation may return
+   * null; after `deploy_component`, null is an unverified version.
    */
   fetchDeployedVersion: (opts: {
     url: string;
@@ -209,6 +212,8 @@ export interface FabricUpgradeDeps {
     fabricPassword?: string;
     /** True when the caller passed --application-endpoint. */
     applicationEndpointNamed?: boolean;
+    /** Pre-deploy accepts ok plus a semver. Post-deploy requires the strict body. */
+    healthShape?: "pre-deploy" | "post-deploy";
   }) => Promise<string | null>;
   /** The real deploy() — reused, never reimplemented. */
   deploy: (opts: DeployOptions) => Promise<DeployResult>;
@@ -349,14 +354,25 @@ export class VersionProbeError extends Error {
     super(
       `Could not read the deployed Flair version from ${healthUrl}: ${why}. ` +
         `This command stops. ` +
-        `Retry when GET ${healthUrl} returns a Flair /Health body whose version is a semver.`,
+        `Retry when GET ${healthUrl} returns JSON with a boolean status field and a semver version.`,
     );
     this.name = "VersionProbeError";
   }
 }
 
-function versionProbeError(healthUrl: string, why: string, applicationEndpointNamed: boolean): VersionProbeError {
+function versionProbeError(
+  healthUrl: string,
+  why: string,
+  applicationEndpointNamed: boolean,
+  healthShape: "pre-deploy" | "post-deploy",
+): VersionProbeError {
   const err = new VersionProbeError(healthUrl, why);
+  if (healthShape === "post-deploy") {
+    err.message = err.message.replace(
+      "JSON with a boolean status field and a semver version.",
+      "a Flair /Health body whose version is a semver.",
+    );
+  }
   if (!applicationEndpointNamed) {
     err.message += " Pass --application-endpoint <application-url> when that URL is not the application endpoint.";
   }
@@ -365,10 +381,11 @@ function versionProbeError(healthUrl: string, why: string, applicationEndpointNa
 
 /**
  * Read the running Flair version from the application endpoint's `/Health`.
- * A failed request, an empty or unreadable body, JSON that is not a Flair
- * `/Health` body (`ok`, `searchReady`, `buildCommit`, and a semver `version`,
- * `flairVersion`, or `flair.version`), or a version that is not a semver
- * throws. It does not return null for any of those.
+ * A failed request, an empty or unreadable body, or a version that is not a
+ * semver throws. Before deploy, the body needs boolean `ok` and a semver
+ * `version`, `flairVersion`, or `flair.version`. After deploy, it needs the
+ * strict Flair body (`ok`, `searchReady`, `buildCommit`, and that semver).
+ * It does not return null for any of those.
  */
 export async function readDeployedFlairVersion(opts: {
   url: string;
@@ -376,9 +393,12 @@ export async function readDeployedFlairVersion(opts: {
   fabricUser?: string;
   fabricPassword?: string;
   applicationEndpointNamed?: boolean;
+  /** Pre-deploy accepts ok plus a semver. Post-deploy requires the strict body. Defaults to post-deploy. */
+  healthShape?: "pre-deploy" | "post-deploy";
 }): Promise<string> {
   const base = opts.url.replace(/\/$/, "");
   const healthUrl = `${base}/Health`;
+  const healthShape = opts.healthShape ?? "post-deploy";
   const headers: Record<string, string> = {};
   if (opts.fabricUser && opts.fabricPassword) {
     const auth = Buffer.from(`${opts.fabricUser}:${opts.fabricPassword}`).toString("base64");
@@ -391,28 +411,33 @@ export async function readDeployedFlairVersion(opts: {
       signal: AbortSignal.timeout(10_000),
     });
   } catch (err: any) {
-    throw versionProbeError(healthUrl, `the request failed (${err?.message ?? err})`, opts.applicationEndpointNamed === true);
+    throw versionProbeError(healthUrl, `the request failed (${err?.message ?? err})`, opts.applicationEndpointNamed === true, healthShape);
   }
-  if (!res.ok) throw versionProbeError(healthUrl, `HTTP ${res.status}`, opts.applicationEndpointNamed === true);
+  if (!res.ok) throw versionProbeError(healthUrl, `HTTP ${res.status}`, opts.applicationEndpointNamed === true, healthShape);
   let text: string;
   try {
     text = await res.text();
   } catch (err: any) {
-    throw versionProbeError(healthUrl, `the body could not be read (${err?.message ?? err})`, opts.applicationEndpointNamed === true);
+    throw versionProbeError(healthUrl, `the body could not be read (${err?.message ?? err})`, opts.applicationEndpointNamed === true, healthShape);
   }
-  if (text.trim() === "") throw versionProbeError(healthUrl, "the body was empty", opts.applicationEndpointNamed === true);
+  if (text.trim() === "") throw versionProbeError(healthUrl, "the body was empty", opts.applicationEndpointNamed === true, healthShape);
   let body: any;
   try {
     body = JSON.parse(text);
   } catch {
-    throw versionProbeError(healthUrl, "the body was not JSON", opts.applicationEndpointNamed === true);
+    throw versionProbeError(healthUrl, "the body was not JSON", opts.applicationEndpointNamed === true, healthShape);
   }
   const version = healthVersionString(body);
+  const named = opts.applicationEndpointNamed === true;
   if (typeof version === "string" && version.trim() !== "" && parseSemverCore(version) === null) {
-    throw versionProbeError(healthUrl, "the version string is not a semver", opts.applicationEndpointNamed === true);
+    throw versionProbeError(healthUrl, "the version string is not a semver", named, healthShape);
   }
-  if (!flairHealthBody(body, version)) {
-    throw versionProbeError(healthUrl, "the JSON is not a Flair /Health body", opts.applicationEndpointNamed === true);
+  if (healthShape === "pre-deploy") {
+    if (!preDeployHealthBody(body, version)) {
+      throw versionProbeError(healthUrl, "the JSON has no boolean ok and semver version", named, healthShape);
+    }
+  } else if (!flairHealthBody(body, version)) {
+    throw versionProbeError(healthUrl, "the JSON is not a Flair /Health body", named, healthShape);
   }
   return version as string;
 }
@@ -431,7 +456,14 @@ function healthVersionString(body: unknown): string | null {
   return null;
 }
 
-/** Public `/Health` shape: boolean `ok`, boolean `searchReady`, `buildCommit` string or null, and a semver version. */
+/** Before deploy: boolean `ok` and a semver version. Older `/Health` bodies have `ok` and no `searchReady` or `buildCommit`. */
+function preDeployHealthBody(body: unknown, version: string | null): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  if (typeof version !== "string" || parseSemverCore(version) === null) return false;
+  return typeof (body as Record<string, unknown>).ok === "boolean";
+}
+
+/** After deploy: boolean `ok`, boolean `searchReady`, `buildCommit` string or null, and a semver version. */
 function flairHealthBody(body: unknown, version: string | null): boolean {
   if (!body || typeof body !== "object" || Array.isArray(body)) return false;
   if (typeof version !== "string" || parseSemverCore(version) === null) return false;
@@ -538,6 +570,7 @@ export async function planFabricUpgrade(
     applicationEndpointNamed: explicitEndpoint(opts.applicationEndpoint) !== undefined,
     fabricUser: opts.fabricUser,
     fabricPassword: opts.fabricPassword,
+    healthShape: "pre-deploy",
   });
   const upToDate =
     currentVersion != null &&
@@ -659,6 +692,7 @@ export async function fabricUpgrade(
         fabricUser: opts.fabricUser,
         fabricPassword: opts.fabricPassword,
         applicationEndpointNamed: explicitEndpoint(opts.applicationEndpoint) !== undefined,
+        healthShape: "post-deploy",
       });
     } catch (err) {
       const why = err instanceof VersionProbeError ? err.why : (err instanceof Error ? err.message : String(err));
@@ -670,6 +704,26 @@ export async function fabricUpgrade(
       );
     }
     const healthUrl = `${applicationUrl.replace(/\/$/, "")}/Health`;
+    // A restarting node can briefly serve the previous build. Read once more
+    // before treating an older semver as unverified.
+    if (verifiedVersion && parseSemverCore(verifiedVersion) !== null && !semverGte(verifiedVersion, plan.targetVersion)) {
+      await new Promise((resolve) => setTimeout(resolve, POST_DEPLOY_VERSION_REREAD_MS));
+      try {
+        verifiedVersion = await deps.fetchDeployedVersion({
+          url: applicationUrl,
+          project: plan.project,
+          fabricUser: opts.fabricUser,
+          fabricPassword: opts.fabricPassword,
+          applicationEndpointNamed: explicitEndpoint(opts.applicationEndpoint) !== undefined,
+          healthShape: "post-deploy",
+        });
+      } catch (err) {
+        const why = err instanceof VersionProbeError ? err.why : (err instanceof Error ? err.message : String(err));
+        throw new Error(
+          `deploy_component was sent to ${safeUrl(operationsUrl)}. The running version is unverified: ${why}. Check GET ${healthUrl}.`,
+        );
+      }
+    }
     const unverified = !verifiedVersion
       ? "no version string was returned"
       : parseSemverCore(verifiedVersion) === null

@@ -798,8 +798,22 @@ export interface VerifyDeployOptions {
   settleStreak?: number;
   /** True when the caller passed --application-endpoint. */
   applicationEndpointNamed?: boolean;
+  /** Admin Basic credential. Resource probes send it. Without it, verification does not run. */
+  fabricUser?: string;
+  fabricPassword?: string;
   fetchImpl?: typeof fetch;
   onProgress?: (msg: string) => void;
+}
+
+/**
+ * Notice when resource verification cannot send the admin Basic credential.
+ * Null when both halves of the credential are present and the probes may run.
+ * A token-only deploy has nothing to send: the probes do not run, and that is
+ * neither a pass nor a failed route read.
+ */
+export function resourceVerificationSkip(fabricUser?: string, fabricPassword?: string): string | null {
+  if (fabricUser && fabricPassword) return null;
+  return "resource verification did not run: no admin Basic credentials were available, so the application routes were not read.";
 }
 
 async function pollUntilSettled(
@@ -864,13 +878,19 @@ async function verifyResourcesServing(
   resources: string[],
   fetchImpl: typeof fetch,
   applicationEndpointNamed: boolean,
+  fabricUser?: string,
+  fabricPassword?: string,
 ): Promise<void> {
   const base = baseUrl.replace(/\/+$/, "");
+  const headers: Record<string, string> = {};
+  if (fabricUser && fabricPassword) {
+    headers.Authorization = `Basic ${Buffer.from(`${fabricUser}:${fabricPassword}`).toString("base64")}`;
+  }
   for (const name of resources) {
     const path = `${base}/${name}`;
     let res: Response;
     try {
-      res = await fetchImpl(path, { method: "GET", signal: AbortSignal.timeout(10_000) });
+      res = await fetchImpl(path, { method: "GET", headers, signal: AbortSignal.timeout(10_000) });
     } catch (err: any) {
       // A failed probe is not evidence the resource is present or absent.
       throw verificationRefusal(
@@ -878,11 +898,15 @@ async function verifyResourcesServing(
         `Retry the request to ${path}.`,
       );
     }
-    // 401 is an auth gate. It does not show that this route exists, so it does not pass.
+    // 401 is an auth gate. It does not show that this route exists, so it does not pass,
+    // including when the admin Basic credential was sent and refused.
     if (res.status === 401) {
-      const remedy = applicationEndpointNamed
-        ? RESOURCE_JSON
-        : `That status is an auth gate, not evidence the route exists. ${NAME_APPLICATION_ENDPOINT}`;
+      const sent = Boolean(fabricUser && fabricPassword);
+      const credentialNote = sent ? "The admin Basic credential was sent. " : "";
+      const routeNote = "That status is an auth gate, not evidence the route exists. ";
+      const remedy = !applicationEndpointNamed
+        ? `${credentialNote}${routeNote}${NAME_APPLICATION_ENDPOINT}`
+        : `${credentialNote}${routeNote}${RESOURCE_JSON}`;
       throw verificationRefusal(`GET ${path} returned 401`, remedy);
     }
     if (res.status !== 200) {
@@ -1257,7 +1281,7 @@ export async function verifyDeployServing(o: VerifyDeployOptions): Promise<void>
   onProgress?.(`probing ${baseUrl} for application routes...`);
   await pollUntilSettled(baseUrl, timeoutMs, pollIntervalMs, settleStreak, fetchImpl, onProgress);
   onProgress?.(`settled — checking ${resources.map((r) => `/${r}`).join(", ")}...`);
-  await verifyResourcesServing(baseUrl, resources, fetchImpl, applicationEndpointNamed);
+  await verifyResourcesServing(baseUrl, resources, fetchImpl, applicationEndpointNamed, o.fabricUser, o.fabricPassword);
   onProgress?.(`application routes responded for ${resources.length} resource(s)`);
 }
 
@@ -1360,7 +1384,8 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     throw new Error(
       "Bearer token auth (--fabric-token) is not yet supported — " +
         "Harper's deploy_component CLI path only accepts Basic auth today. " +
-        "Pass --fabric-user + --fabric-password instead.",
+        "Pass --fabric-user + --fabric-password instead. " +
+        resourceVerificationSkip(opts.fabricUser, opts.fabricPassword),
     );
   }
 
@@ -1482,15 +1507,25 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     const resources = opts.verifyResources?.length
       ? opts.verifyResources
       : deriveVerifyResources(packageRoot);
-    await verifyDeployServing({
-      baseUrl: applicationUrl,
-      resources,
-      timeoutMs: opts.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
-      pollIntervalMs: opts.verifyPollIntervalMs,
-      settleStreak: opts.verifySettleStreak,
-      applicationEndpointNamed: explicitEndpoint(opts.applicationEndpoint) !== undefined,
-      onProgress: opts.onProgress,
-    });
+    const verificationSkip = resourceVerificationSkip(opts.fabricUser, opts.fabricPassword);
+    if (verificationSkip) {
+      // No admin Basic credential to send. An anonymous GET of a table resource
+      // is 401 on Fabric, which is not a failed route and not a pass.
+      console.warn(`⚠ flair deploy: ${verificationSkip}`);
+      opts.onProgress?.(verificationSkip);
+    } else {
+      await verifyDeployServing({
+        baseUrl: applicationUrl,
+        resources,
+        timeoutMs: opts.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
+        pollIntervalMs: opts.verifyPollIntervalMs,
+        settleStreak: opts.verifySettleStreak,
+        applicationEndpointNamed: explicitEndpoint(opts.applicationEndpoint) !== undefined,
+        fabricUser: opts.fabricUser,
+        fabricPassword: opts.fabricPassword,
+        onProgress: opts.onProgress,
+      });
+    }
 
     // flair#1073: route verify proves the component is serving. It does not
     // prove embedding-stamp re-embedded pre-flip rows. `upgrade --target`

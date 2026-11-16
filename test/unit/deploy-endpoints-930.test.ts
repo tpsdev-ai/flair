@@ -11,8 +11,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { deploy, REQUIRED_PACKAGE_FILES, verifyDeployServing, type DeployOptions } from "../../src/deploy.ts";
-import { DEFAULT_HARPER_PIN, fabricUpgrade, type FabricUpgradeDeps } from "../../src/fabric-upgrade.ts";
+import { deploy, REQUIRED_PACKAGE_FILES, resourceVerificationSkip, verifyDeployServing, type DeployOptions } from "../../src/deploy.ts";
+import { DEFAULT_HARPER_PIN, fabricUpgrade, readDeployedFlairVersion, type FabricUpgradeDeps } from "../../src/fabric-upgrade.ts";
 import { buildFabricUpgradeOptions, upgradeEndpointFlagsWithoutTarget } from "../../src/commands/upgrade.ts";
 import { applicationProbeUrl, endpointFlagsWithoutExplicitTarget } from "../../src/lib/ops-url.ts";
 import { resolveEffectiveOpsUrl } from "../../src/cli.ts";
@@ -81,7 +81,8 @@ function appBody(url: URL): Response {
   return json({});
 }
 
-type Role = "both" | "ops" | "app" | "auth";
+type Role = "both" | "ops" | "app" | "auth" | "gated";
+const BASIC = `Basic ${Buffer.from("admin:pw").toString("base64")}`;
 
 function startMock(role: Role): { url: string; hits: string[]; stop: () => void } {
   const hits: string[] = [];
@@ -104,6 +105,10 @@ function startMock(role: Role): { url: string; hits: string[]; stop: () => void 
         return new Response("deploy refused", { status: role === "auth" ? 401 : 404 });
       }
       if (role === "auth") return new Response("unauthorized", { status: 401 });
+      if (role === "gated" && url.pathname === "/Memory") {
+        if (req.headers.get("authorization") !== BASIC) return new Response("unauthorized", { status: 401 });
+        return json([]);
+      }
       const appRoute =
         url.pathname === "/Memory" ||
         url.pathname === "/Health" ||
@@ -325,9 +330,9 @@ describe("flair#930 version probe fails closed before deploy", () => {
     expect(result.calls.npm).toBe(0);
   });
 
-  test("JSON with only a version string is not a Flair /Health body", async () => {
+  test("JSON with only a version string has no boolean ok", async () => {
     const result = await probe(() => new Response(JSON.stringify({ version: "1.2.3" }), { status: 200, headers: { "content-type": "application/json" } }));
-    expect(result.message).toContain("not a Flair /Health body");
+    expect(result.message).toContain("no boolean ok");
     expect(result.calls.deploy).toBe(0);
     expect(result.calls.npm).toBe(0);
     expect(result.calls.logs.join("\n")).not.toMatch(SUCCESS_TEXT);
@@ -656,6 +661,37 @@ describe("flair#930 unverified version after deploy", () => {
     expect(result.message).toContain("reported 0.0.1, which is older than 0.14.0");
     expect(result.message).not.toContain("may still be restarting");
   });
+
+  test("one re-read accepts a version that catches up", async () => {
+    let reads = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        reads++;
+        if (reads === 1) return flairHealth("1.0.0");
+        if (reads === 2) return flairHealth("0.0.1");
+        return flairHealth("0.14.0");
+      },
+    });
+    let deploys = 0;
+    const { fetchDeployedVersion: _drop, ...deps } = plantDeps({
+      deploy: async (opts) => {
+        deploys++;
+        return { url: opts.target ?? "", project: "flair", version: "0.14.0", packageRoot: "", dryRun: false };
+      },
+    });
+    try {
+      const result = await fabricUpgrade(
+        { target: `http://127.0.0.1:${server.port}`, fabricUser: "admin", fabricPassword: "pw" },
+        deps,
+      );
+      expect(deploys).toBe(1);
+      expect(reads).toBe(3);
+      expect(result.verifiedVersion).toBe("0.14.0");
+    } finally {
+      server.stop(true);
+    }
+  });
 });
 
 describe("flair#930 credentials stay on the operations host", () => {
@@ -689,6 +725,76 @@ describe("flair#930 credentials stay on the operations host", () => {
       operationsEndpoint: "https://ops.example:9925",
       dryRun: true,
     }))).rejects.toThrow(/application endpoint host app\.example is not the operations endpoint host ops\.example/);
+  });
+});
+
+describe("flair#930 credentialed resource probes", () => {
+  test("anonymous 401 and a credentialed JSON row list passes", async () => {
+    const mock = startMock("gated");
+    try {
+      const result = await deploy(deployOpts({ target: mock.url }));
+      expect(result.url).toBe(mock.url);
+      expect(mock.hits).toContain("GET /Memory");
+    } finally {
+      mock.stop();
+    }
+  });
+
+  test("without Basic credentials, resource verification does not run", () => {
+    expect(resourceVerificationSkip(undefined, undefined)).toContain("resource verification did not run");
+    expect(resourceVerificationSkip("admin", "pw")).toBeNull();
+  });
+
+  test("token-only names that resource verification did not run and does not report a 401", async () => {
+    const err = await deploy(deployOpts({
+      target: "https://cluster.example:9926",
+      fabricUser: undefined,
+      fabricPassword: undefined,
+      fabricToken: "tok",
+      verify: true,
+    })).then(() => {
+      throw new Error("token-only was a pass");
+    }, (e: Error) => e);
+    expect(err.message).toContain("not yet supported");
+    expect(err.message).toContain("resource verification did not run");
+    expect(err.message).not.toContain("returned 401");
+  });
+});
+
+describe("flair#930 /Health shape", () => {
+  test("a pre-#1326 body passes the pre-deploy read and fails the strict post-deploy read", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response(JSON.stringify({ ok: true, version: "0.20.1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const url = `http://127.0.0.1:${server.port}`;
+    try {
+      const pre = await readDeployedFlairVersion({
+        url,
+        project: "flair",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+        healthShape: "pre-deploy",
+      });
+      expect(pre).toBe("0.20.1");
+      const err = await readDeployedFlairVersion({
+        url,
+        project: "flair",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+        healthShape: "post-deploy",
+      }).then(() => {
+        throw new Error("strict read accepted an old body");
+      }, (e: Error) => e);
+      expect(err.message).toContain("not a Flair /Health body");
+    } finally {
+      server.stop(true);
+    }
   });
 });
 

@@ -8,11 +8,15 @@
   is not the operations host.
 
   On `flair upgrade --target`, a `/Health` read that fails, is empty or
-  unreadable, is not a Flair health body, or has a version that is not a
-  semver stops the command before deploy. `flair deploy` does not do that
-  preflight read. After `deploy_component`, a missing version, a version that
-  is not a semver, or a version older than the one deployed reports that the
-  deploy was sent and the running version is unverified.
+  unreadable, has no boolean `ok`, or has a version that is not a semver
+  stops the command before deploy. `flair deploy` does not do that preflight
+  read. After `deploy_component`, the read requires a Flair health body
+  (`ok`, `searchReady`, `buildCommit`, and a semver). A missing version, a
+  version that is not a semver, or a version that is still older than the
+  one deployed after one re-read reports that the deploy was sent and the
+  running version is unverified.
 
-  A resource probe accepts a 200 whose JSON row list, when present, contains
-  only objects, and reports any other HTTP status, including 401.
+  A resource probe sends the admin Basic credential and accepts a 200 whose
+  JSON row list, when present, contains only objects. Any other HTTP status,
+  including 401, is reported. Without that credential, resource verification
+  does not run.
