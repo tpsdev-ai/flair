@@ -45,7 +45,7 @@
     "@node-llama-cpp/win-x64": "3.22.3"
   },
   "devDependencies": {
-    "@types/node": "24.11.0",
+    "@types/node": "24.19.2",
     "typescript": "5.9.3"
   },
   "license": "Apache-2.0",
