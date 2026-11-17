@@ -106,20 +106,11 @@ async function memoryRow(id: string): Promise<any | null> {
   return rows[0] ?? null;
 }
 
-/**
- * Reads a Memory row after the asynchronous background embedder has finished
- * stamping it (`embedding`, `embeddedContentHash`, `updatedAt`), so comparisons
- * against an unchanged predecessor row are deterministic (flair#3035).
- */
-async function settledMemoryRow(id: string, timeoutMs = 15_000): Promise<any | null> {
-  const deadline = Date.now() + timeoutMs;
-  let row = await memoryRow(id);
-  while (Date.now() < deadline) {
-    if (row?.embeddedContentHash) return row;
-    await new Promise((r) => setTimeout(r, 50));
-    row = await memoryRow(id);
-  }
-  return row;
+// The embedding-stamp migration writes these on its own schedule (30 s, 2 min and 10 min after boot).
+function withoutEmbedderFields(row: any) {
+  if (!row) return row;
+  const { embedding, embeddedContentHash, updatedAt, ...rest } = row;
+  return rest;
 }
 
 async function memoryRowsBySubject(subjectId: string): Promise<any[]> {
@@ -187,13 +178,13 @@ describe("flair#2997 — the caller's row keeps its 400", () => {
         skillSubjectId: id, durability: "persistent", visibility: "shared", createdAt: now(),
       }],
     });
-    const beforeRow = await settledMemoryRow(id);
+    const beforeRow = await memoryRow(id);
     const beforeEvents = await eventsOf(A.id);
     const res = await call(A, "PUT", memPath(id), skillBody(A, id, "v2", { visibility: 123 }));
     expect(res.status, res.text.slice(0, 300)).toBe(400);
     expect(JSON.parse(res.text).error).toBe("invalid_visibility");
 
-    expect(await memoryRow(id)).toEqual(beforeRow);
+    expect(withoutEmbedderFields(await memoryRow(id))).toEqual(withoutEmbedderFields(beforeRow));
     expect((await memoryRowsBySubject(id)).map((row: any) => row.id), "no successor may survive").toEqual([id]);
     expect(await versionsOf(id), "no version row may survive").toHaveLength(0);
     expect(await eventsOf(A.id), "no event may survive").toEqual(beforeEvents);
@@ -212,13 +203,13 @@ describe("flair#2997 — an invalid InstructionVersion or OrgEvent row answers 5
           skillSubjectId: id, durability: "persistent", visibility: "shared", createdAt: now(),
         }],
       });
-      const before = await settledMemoryRow(id);
+      const before = await memoryRow(id);
       const res = await call(agent, "PUT", memPath(id), skillBody(agent, id, "v2", { visibility: "shared" }));
       expect(res.status, res.text.slice(0, 300)).toBe(500);
       expect(JSON.parse(res.text).error).toBe("instruction_version_append_failed");
 
       const after = await memoryRow(id);
-      expect(after).toEqual(before);
+      expect(withoutEmbedderFields(after)).toEqual(withoutEmbedderFields(before));
       expect((await memoryRowsBySubject(id)).map((row: any) => row.id), "no successor may survive").toEqual([id]);
       expect(await versionsOf(id), "no version row may survive").toHaveLength(0);
       expect(await eventsOf(agent.id), "no event may survive").toHaveLength(0);
@@ -237,7 +228,7 @@ describe("flair#2997 — a Memory successor field keeps the caller's 400", () =>
         skillSubjectId: id, durability: "persistent", visibility: "shared", createdAt: now(),
       }],
     });
-    const before = await settledMemoryRow(id);
+    const before = await memoryRow(id);
     const res = await call(agent, "PUT", memPath(id), skillBody(agent, id, "v2", { visibility: "shared" }));
     expect(res.status, res.text.slice(0, 300)).toBe(400);
     const body = JSON.parse(res.text);
@@ -245,7 +236,7 @@ describe("flair#2997 — a Memory successor field keeps the caller's 400", () =>
     expect(body.detail.some((issue: any) => issue.path === "instanceToken"), JSON.stringify(body.detail)).toBe(true);
 
     const after = await memoryRow(id);
-    expect(after).toEqual(before);
+    expect(withoutEmbedderFields(after)).toEqual(withoutEmbedderFields(before));
     expect((await memoryRowsBySubject(id)).map((row: any) => row.id), "no successor may survive").toEqual([id]);
     expect(await versionsOf(id), "no version row may survive").toHaveLength(0);
     expect(await eventsOf(agent.id), "no event may survive").toHaveLength(0);
