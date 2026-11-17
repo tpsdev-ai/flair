@@ -5,10 +5,13 @@ name: Post-publish canary — install + boot a published version
 # for ~1.5 h until a human moved the tag by hand. Nothing between publish and
 # announce installed the published artifact the way a user does and booted it.
 #
-# This is that last line. It is dispatched by whoever approved the staged package
-# on npmjs.com, immediately after the approval (npm exposes no approval webhook,
-# and polling a human action in CI is waste). `release-publish.yml` stages with
-# `--tag staged`, so between approval and promote the version is public but NOT
+# On the normal staged-release path, npm approval makes the packages public.
+# The poll checks public tarballs matching the certified package-set digest.
+# `release-promote.yml` calls this definition at the caller's tag; its workspace
+# selects the pinned main commit before any repository script runs (defence in depth: the boundary
+# is the tag rulesets plus the release-promote environment, see
+# docs/releasing.md). A maintainer can still dispatch it by hand. `release-publish.yml` stages with
+# `--tag staged`, so on the normal staged-release path the approved version is public but NOT
 # `latest` — the window this canary uses.
 #
 # It runs on a clean ubuntu-latest AND macos-latest, credential-less: no npm
@@ -21,7 +24,7 @@ name: Post-publish canary — install + boot a published version
 #     must install the bytes it was dispatched for.
 #   - The published tarball's sha256 must equal the `expected_sha256` recorded
 #     for the staged tarball. A mismatch is a stop (npm versions are immutable, so
-#     a matching sha is what makes the later promote race-free). npm exposes no
+#     the comparison binds the measured tarball to that input). npm provides no
 #     sha256 directly — `dist.shasum` is SHA-1 — so
 #     `scripts/ci/registry-tarball-sha256.mjs` downloads the tarball and hashes it.
 #     flair#1781: EVERY lockstep package is hashed (each promote line binds its
@@ -50,18 +53,21 @@ name: Post-publish canary — install + boot a published version
 #
 # WHAT IT EMITS
 #   PASS prints the complete, package-set-digest-bound promote block — one
-#   `npm dist-tag add` per lockstep package (all or none; `@tpsdev-ai/flair`
-#   LAST). FAIL prints one `npm deprecate` line per package. The human's job is
-#   approve-on-npmjs, then paste the block — a stale PASS, a re-cut version, a
-#   different package set, or a paste-from-FAIL aborts at the digest preflight
-#   before `latest` can move. A SemVer prerelease is never promoted, so a
-#   prerelease PASS prints a note and NO promote block.
+#   `npm dist-tag add` per lockstep package (sequential, stopping at the first
+#   failure with RESTORE lines; npm has no atomic move; `@tpsdev-ai/flair` LAST).
+#   Failed tree selection or a malformed `package_set_digest` prints no deprecate lines.
+#   Deprecate lines do not establish that package measurement completed.
+#   On the default automated path `release-promote.yml` runs the block
+#   itself after a PASS. On the normal staged-release manual path, a human approves
+#   on npmjs, then pastes the block. Its digest preflight refuses a changed package set before
+#   `latest` can move. FAIL prints no promote block. A SemVer prerelease PASS
+#   prints a note and no promote block.
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Published version to canary, exact (e.g. 0.54.2). Must be 2FA-approved and public."
+        description: "Public version to canary, exact (e.g. 0.54.2)."
         required: true
         type: string
       expected_sha256:
@@ -70,6 +76,28 @@ on:
         type: string
       package_set_digest:
         description: "the package-set digest printed by the release run's pack summary (64 hex); the canary re-derives the SAME digest from the tarballs it verified and requires equality before any verdict (A1c of #1671)."
+        required: true
+        type: string
+  # flair#1928 slice 2: the privileged `release-promote.yml` calls THIS workflow
+  # (`workflow_call`), so there is ONE canary definition,
+  # not a second copy embedded in the promote job. It takes the manual dispatch's
+  # three inputs plus `trusted_sha`; the canary is credential-less either way.
+  workflow_call:
+    inputs:
+      version:
+        description: "Public version to canary, exact (e.g. 0.54.2)."
+        required: true
+        type: string
+      expected_sha256:
+        description: "sha256 of the published @tpsdev-ai/flair@<version> tarball (64 hex); the canary downloads and verifies it."
+        required: true
+        type: string
+      package_set_digest:
+        description: "the certified package-set digest (64 hex); the canary re-derives the SAME digest from the tarballs it verified and requires equality before any verdict."
+        required: true
+        type: string
+      trusted_sha:
+        description: "the origin/main commit (40 hex) the caller pinned; the canary moves its workspace to it before any repository script runs, so no repository script runs from the caller's tag checkout (this definition itself resolves at the tag)."
         required: true
         type: string
 
@@ -96,6 +124,54 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
+          # Full history: a release-promote call moves this workspace to a pinned
+          # origin/main commit (next step) and checks its ancestry.
+          fetch-depth: 0
+
+      - name: Select the executed tree (a release-promote call runs trusted main's scripts, never the tag's)
+        # flair#1928 slice 2. A manual dispatch runs its dispatch ref's tree, as
+        # before. A call (GitHub reports the CALLER's workflow in
+        # `github.workflow_ref`) must pass `trusted_sha`, an origin/main commit;
+        # this step moves the workspace to exactly that commit BEFORE any
+        # repository script runs. After it SUCCEEDS, every repository script,
+        # helper and data file the steps below read is trusted main's. If it
+        # fails, the workspace may still be the caller's tag checkout, so every
+        # later step that runs a repository script is gated on this step's
+        # outcome and an inline step emits the FAIL verdict instead. (The canary
+        # still runs the PUBLISHED Flair and plugin packages it installs: that is
+        # what it tests.)
+        id: select
+        env:
+          TRUSTED_SHA: ${{ inputs.trusted_sha }}
+          RUN_WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TRUSTED_SHA}" ]; then
+            case "$RUN_WORKFLOW_REF" in
+              */.github/workflows/canary.yml@*)
+                echo "  manual dispatch: running the dispatch ref's tree $(git rev-parse HEAD)"
+                exit 0 ;;
+            esac
+            echo "::error::canary: called from '${RUN_WORKFLOW_REF}' without a trusted_sha; refusing to run the caller's tree."
+            exit 1
+          fi
+          if ! [[ "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::canary: trusted_sha '${TRUSTED_SHA}' is not a 40-hex commit sha; refusing to run."
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$TRUSTED_SHA" origin/main; then
+            echo "::error::canary: trusted_sha ${TRUSTED_SHA} is not on origin/main; refusing to run its scripts."
+            exit 1
+          fi
+          git checkout --quiet --detach "$TRUSTED_SHA"
+          # The workspace must now BE that commit: no tracked change, and no
+          # untracked or ignored file left over from the caller's checkout.
+          if [ "$(git rev-parse HEAD)" != "$TRUSTED_SHA" ] || [ -n "$(git status --porcelain --untracked-files=all --ignored)" ]; then
+            echo "::error::canary: the workspace is not exactly ${TRUSTED_SHA}; refusing to run."
+            exit 1
+          fi
+          echo "  release-promote call: running trusted origin/main ${TRUSTED_SHA}"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -115,6 +191,7 @@ jobs:
 
       - name: Verify the published tarballs' sha256 (all lockstep packages)
         id: sha
+        if: steps.select.outcome == 'success'
         env:
           VERSION: ${{ inputs.version }}
           EXPECTED: ${{ inputs.expected_sha256 }}
@@ -138,7 +215,7 @@ jobs:
           while read -r pkg; do
             [ -n "$pkg" ] || continue
             if ! sha="$(node scripts/ci/registry-tarball-sha256.mjs "$VERSION" "$pkg" 2>> canary-logs/sha256.err)"; then
-              echo "::error::could not hash ${pkg}@${VERSION} — is it approved and public? (unmeasurable is FAIL)"
+              echo "::error::could not hash ${pkg}@${VERSION} — public tarball is not measurable (unmeasurable is FAIL)"
               missing=1
               continue
             fi
@@ -151,7 +228,7 @@ jobs:
                  # change the re-derived digest, and the line-count check below counts
                  # lines, not values. `expected_count` is 0 only if the derivation failed.
             if ! [[ "$sha" =~ ^[0-9a-f]{64}$ ]]; then
-              echo "::error::could not hash ${pkg}@${VERSION} — is it approved and public? (unmeasurable is FAIL)"
+              echo "::error::could not hash ${pkg}@${VERSION} — public tarball is not measurable (unmeasurable is FAIL)"
               missing=1
               continue
             fi
@@ -202,6 +279,7 @@ jobs:
 
       - name: Install from the registry and run the four install-tree assertions
         id: install
+        if: steps.select.outcome == 'success'
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -229,6 +307,7 @@ jobs:
 
       - name: Boot the installed instance on the product path
         id: boot
+        if: steps.select.outcome == 'success'
         run: |
           set -uo pipefail
           mkdir -p canary-logs
@@ -265,7 +344,9 @@ jobs:
         # Run after a failed boot so the step can emit its own distinct line
         # instead of being skipped (a skip looks like a second unexplained red
         # at verdict time). Cancelled jobs do not run.
-        if: success() || failure()
+        # Never after a failed tree selection: then this would run the caller's
+        # tag checkout.
+        if: (success() || failure()) && steps.select.outcome == 'success'
         env:
           VERSION: ${{ inputs.version }}
           BOOT_OUTCOME: ${{ steps.boot.outcome }}
@@ -330,6 +411,7 @@ jobs:
         # converges the set, so a pre-existing skew is reported, not blocked;
         # an unmeasurable check is named too, never silently green.
         id: skew
+        if: steps.select.outcome == 'success'
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -355,12 +437,7 @@ jobs:
           exit 0
 
       - name: Canary verdict — emit the promote or deprecate command
-        # Runs whether or not the checks passed; the job itself still fails on a
-        # red step (no continue-on-error anywhere). This step exists so the
-        # PASS/FAIL line — with the sha256-bound promote command, or the
-        # deprecate command — is the last thing both the log and the run summary
-        # show.
-        if: always()
+        if: always() && steps.select.outcome == 'success'
         env:
           VERSION: ${{ inputs.version }}
           EXPECTED: ${{ inputs.expected_sha256 }}
@@ -397,6 +474,25 @@ jobs:
             scripts/ci/canary-verdict.sh fail "$VERSION" "$RUN_URL" --os "$OS_NAME" | tee canary-logs/verdict.txt
           fi
           cat canary-logs/verdict.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Canary verdict — FAIL, the tree selection did not succeed (no repository script)
+        # The workspace may still be the caller's tag checkout, so this verdict is
+        # INLINE: it runs no repository script and prints no deprecate lines.
+        if: always() && steps.select.outcome != 'success'
+        env:
+          VERSION: ${{ inputs.version }}
+          OS_NAME: ${{ matrix.os }}
+          SELECT_OUTCOME: ${{ steps.select.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p canary-logs
+          {
+            printf "### ❌ Canary FAIL — \`%s\` (tree selection: %s)\n\n" "$OS_NAME" "${SELECT_OUTCOME:-not run}"
+            printf "The canary could not select its trusted tree for \`%s\`, so it ran no check: nothing was installed, booted or measured. Do not promote. No deprecate lines: this run measured nothing about the published packages. Fix the call and re-run.\n" "$VERSION"
+          } | tee canary-logs/verdict.txt
+          cat canary-logs/verdict.txt >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::canary FAIL — the tree selection did not succeed; no repository script ran after it"
+          exit 1
 
       - name: Upload canary logs
         # flair#1782: the logs (boot, doctor, verdict, skew) are the EVIDENCE for

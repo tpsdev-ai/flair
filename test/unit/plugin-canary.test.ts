@@ -34,6 +34,8 @@ import {
   parseArgs,
   pinCheck,
   pluginCanaryWired,
+  pluginStepCondition,
+  PLUGIN_STEP_CONDITIONS,
   readDocumentedPin,
   readInstalledVersion,
   registrySpec,
@@ -186,7 +188,47 @@ describe("CLI refuses to pass when it cannot run", () => {
     expect(BOOT_FAILED_LINE).toBe("boot failed → plugin unmeasurable");
     expect(CANARY_YML).toContain(BOOT_FAILED_LINE);
     expect(CANARY_YML).toContain("--boot-outcome");
-    expect(CANARY_YML).toMatch(/if:\s*success\(\)\s*\|\|\s*failure\(\)/);
+    // The PLUGIN step's own condition still runs it after a failed boot (so the
+    // line above is printed, not skipped). flair#1928 slice 2 gates that same
+    // condition on a successful tree selection: a failed selection must not run
+    // the caller's checkout.
+    const cond = pluginStepCondition(CANARY_YML);
+    expect(cond).toBe("(success() || failure()) && steps.select.outcome == 'success'");
+    expect(PLUGIN_STEP_CONDITIONS).toContain(cond!);
+  });
+
+  test("the boot guard reads the PLUGIN step's own condition, and only one that runs it after a failed boot", () => {
+    const yml = (cond: string | null, otherIf = "") => `
+jobs:
+  canary:
+    steps:
+      - name: other
+        id: other
+${otherIf ? `        if: ${otherIf}\n` : ""}        run: echo other
+      - name: plugin canary
+        id: plugin
+${cond === null ? "" : `        if: ${cond}\n`}        env:
+          BOOT_OUTCOME: \${{ steps.boot.outcome }}
+        run: |
+          node scripts/ci/check-plugin-canary.mjs --boot-outcome "$BOOT_OUTCOME"
+          echo "::error::${BOOT_FAILED_LINE}"
+      - if: always()
+        env:
+          PLUGIN_OUTCOME: \${{ steps.plugin.outcome }}
+        run: echo verdict
+`;
+    // Runs after a failed boot: ungated, gated on the tree selection, or wrapped in ${{ }}.
+    expect(pluginCanaryWired(yml("success() || failure()")).wired).toBe(true);
+    expect(pluginCanaryWired(yml("(success() || failure()) && steps.select.outcome == 'success'")).wired).toBe(true);
+    expect(pluginCanaryWired(yml("${{ success() || failure() }}")).wired).toBe(true);
+    // Skipped after a failed boot (or run even when cancelled): not wired.
+    for (const c of ["success()", "always()", "failure()", "steps.select.outcome == 'success'"]) {
+      expect(pluginCanaryWired(yml(c)).hasBootGuard, c).toBe(false);
+    }
+    // No condition on the plugin step is not wired, even when ANOTHER step carries
+    // the right one: the old file-wide match accepted that.
+    expect(pluginCanaryWired(yml(null)).hasBootGuard).toBe(false);
+    expect(pluginCanaryWired(yml(null, "success() || failure()")).hasBootGuard).toBe(false);
   });
 
   test("parseArgs reads the required flags", () => {
