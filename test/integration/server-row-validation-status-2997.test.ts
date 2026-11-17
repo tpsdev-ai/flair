@@ -106,6 +106,22 @@ async function memoryRow(id: string): Promise<any | null> {
   return rows[0] ?? null;
 }
 
+/**
+ * Reads a Memory row after the asynchronous background embedder has finished
+ * stamping it (`embedding`, `embeddedContentHash`, `updatedAt`), so comparisons
+ * against an unchanged predecessor row are deterministic (flair#3035).
+ */
+async function settledMemoryRow(id: string, timeoutMs = 15_000): Promise<any | null> {
+  const deadline = Date.now() + timeoutMs;
+  let row = await memoryRow(id);
+  while (Date.now() < deadline) {
+    if (row?.embeddedContentHash) return row;
+    await new Promise((r) => setTimeout(r, 50));
+    row = await memoryRow(id);
+  }
+  return row;
+}
+
 async function memoryRowsBySubject(subjectId: string): Promise<any[]> {
   return ops({
     operation: "search_by_value", database: "flair", table: "Memory",
@@ -171,7 +187,7 @@ describe("flair#2997 — the caller's row keeps its 400", () => {
         skillSubjectId: id, durability: "persistent", visibility: "shared", createdAt: now(),
       }],
     });
-    const beforeRow = await memoryRow(id);
+    const beforeRow = await settledMemoryRow(id);
     const beforeEvents = await eventsOf(A.id);
     const res = await call(A, "PUT", memPath(id), skillBody(A, id, "v2", { visibility: 123 }));
     expect(res.status, res.text.slice(0, 300)).toBe(400);
@@ -196,7 +212,7 @@ describe("flair#2997 — an invalid InstructionVersion or OrgEvent row answers 5
           skillSubjectId: id, durability: "persistent", visibility: "shared", createdAt: now(),
         }],
       });
-      const before = await memoryRow(id);
+      const before = await settledMemoryRow(id);
       const res = await call(agent, "PUT", memPath(id), skillBody(agent, id, "v2", { visibility: "shared" }));
       expect(res.status, res.text.slice(0, 300)).toBe(500);
       expect(JSON.parse(res.text).error).toBe("instruction_version_append_failed");
@@ -221,7 +237,7 @@ describe("flair#2997 — a Memory successor field keeps the caller's 400", () =>
         skillSubjectId: id, durability: "persistent", visibility: "shared", createdAt: now(),
       }],
     });
-    const before = await memoryRow(id);
+    const before = await settledMemoryRow(id);
     const res = await call(agent, "PUT", memPath(id), skillBody(agent, id, "v2", { visibility: "shared" }));
     expect(res.status, res.text.slice(0, 300)).toBe(400);
     const body = JSON.parse(res.text);
