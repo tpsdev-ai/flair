@@ -776,7 +776,7 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
 }
 
 /**
- * Checks `added` against the first introduction day; an id absent from history uses today.
+ * Checks `added` against the first history day; an id absent from history uses today.
  */
 export function validateAllowlistHistory(allowlist, firstDays, today) {
   const problems = [];

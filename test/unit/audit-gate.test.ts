@@ -1528,7 +1528,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
   });
 
   for (const first of ["2026-09-10", "2030-01-01"]) {
-    it(`keeps first introduction ${first} through removal and an earlier-dated reintroduction`, () => {
+    it(`keeps first history day ${first} through removal and an earlier-dated reintroduction`, () => {
       const root = historyRepo([
         { date: `${first}T12:00:00Z`, entries: [entry()] },
         { date: "2026-09-15T12:00:00Z", entries: [] },
@@ -1568,7 +1568,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
     }
   });
 
-  it("keeps an introduction day when a descendant has an earlier committer date", () => {
+  it("keeps a first history day when a descendant has an earlier committer date", () => {
     const root = historyRepo([
       { date: "2026-09-10T12:00:00Z", entries: [entry()] },
       { date: "2026-08-01T12:00:00Z", entries: [entry()] },
