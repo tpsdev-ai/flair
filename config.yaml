@@ -30,13 +30,15 @@ authentication:
     # (flair#1152). Requires @harperfast/oauth >= 2.5.0 (resolved-version
     # assertion + behavioral gate: test/integration/mcp-oauth-boot-safety.test.ts).
     #
-    # ASYMMETRY (load-bearing, measured on oauth 2.5.0): the two readers of
-    # this flag accept DIFFERENT vocabularies. The component's
-    # coerceConfigBoolean accepts ONLY "true"/"false" and DELETES any other
-    # string (unresolved placeholder, "1", "yes", garbage) so its disabled
-    # default applies. flair's mcpOAuthEnabled() accepts 1/true/yes/on.
+    # ASYMMETRY (load-bearing, measured on @harperfast/oauth 2.9.0): the two
+    # readers of this flag accept DIFFERENT vocabularies. The component's
+    # coerceConfigBoolean trims and lowercases, mapping "true"/"false" to a
+    # boolean, and normalizeBooleanField deletes strings it cannot coerce
+    # (unresolved placeholder, "1", "yes", garbage), so its disabled default
+    # applies (dist/lib/config.js). flair's mcpOAuthEnabled() accepts
+    # 1/true/yes/on.
     #
-    # Failure modes (oauth 2.5.0):
+    # Failure modes (oauth 2.9.0):
     #   unset             -> placeholder deleted -> both sides OFF, clean boot
     #   true              -> both flag readers accept this value
     #   false             -> both sides OFF

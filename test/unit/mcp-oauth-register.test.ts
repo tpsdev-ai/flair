@@ -470,6 +470,54 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
     },
   );
 
+  it("refuses a literal issuer that differs from FLAIR_MCP_ISSUER without disclosing either value", async () => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "true";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper({ mcp: { enabled: true, issuer: "https://flair.example.net" } });
+    try {
+      const error = await registerMcpOAuthRoute(deps).then(() => null, (error) => error);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toContain("(differs from FLAIR_MCP_ISSUER)");
+      expect(error.message).not.toContain("flair.example.com");
+      expect(error.message).not.toContain("flair.example.net");
+      const logged = errors.mock.calls.map(args => args.map(String).join(" ")).join("\n");
+      expect(logged).not.toContain("flair.example.com");
+      expect(logged).not.toContain("flair.example.net");
+      expect(httpCalls).toHaveLength(0);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it.each([
+    { env: "https://flair.example.com/", component: "https://flair.example.com" },
+    { env: "https://flair.example.com", component: "https://flair.example.com/" },
+  ])("mounts when the issuers differ only in a trailing slash ($env / $component)", async ({ env, component }) => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "true";
+    process.env.FLAIR_MCP_ISSUER = env;
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper({ mcp: { enabled: true, issuer: component } });
+    expect(await registerMcpOAuthRoute(deps)).toBe(true);
+    expect(httpCalls).toHaveLength(1);
+  });
+
+  it("mounts the shipped ${FLAIR_MCP_ISSUER} reference unchanged", async () => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "true";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper({ mcp: { enabled: true, issuer: "${FLAIR_MCP_ISSUER}" } });
+    expect(await registerMcpOAuthRoute(deps)).toBe(true);
+    expect(httpCalls).toHaveLength(1);
+  });
+
   it("names an unset issuer variable", async () => {
     delete process.env.FLAIR_MCP_ISSUER;
     process.env.FLAIR_MCP_OAUTH = "true";
