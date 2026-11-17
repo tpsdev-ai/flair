@@ -13,35 +13,5 @@
     "otherwise checked version be age-checked. Re-read the reason before re-dating; removing the entry",
     "once the version has aged past the window is the normal outcome."
   ],
-  "entries": [
-    {
-      "package": "node-forge",
-      "version": "1.4.2",
-      "ghsa": [
-        "GHSA-86w9-cpqp-85rv",
-        "GHSA-8hrf-8g6f-7xwp",
-        "GHSA-hqq3-7jhf-c5jx",
-        "GHSA-5x38-2vff-x55p",
-        "GHSA-7wch-p9px-956x",
-        "GHSA-jc66-7q78-782g",
-        "GHSA-6wvx-3r32-xmcg",
-        "GHSA-525v-9gp9-w22h",
-        "GHSA-5cwg-6vw7-rj6p",
-        "GHSA-4642-5mcj-2rqw",
-        "GHSA-h6cr-wjv9-3cpp",
-        "GHSA-4487-j8r4-4g2f"
-      ],
-      "added": "2026-11-01",
-      "expires": "2026-11-07",
-      "reason": "Root override pins node-forge 1.4.2, outside the affected range (<=1.4.0) of the twelve advisories listed here, which block the Dependency Audit gate. Its only consumer in the lockfile is harper 5.3.1 (node-forge ^1.3.1), which the pin satisfies. 1.4.2 was published 2026-10-27 14:09Z, inside the 7-day bake window; it reaches the bake age at 2026-11-03 14:09Z; remove this entry after that and before it expires."
-    },
-    {
-      "package": "joi",
-      "version": "17.13.9",
-      "ghsa": "GHSA-4528-x5fx-h6hg",
-      "added": "2026-11-01",
-      "expires": "2026-11-08",
-      "reason": "Root override pins joi 17.13.9, the fixed release for GHSA-4528-x5fx-h6hg (high, affected range >=17.1.1 <17.13.9), which blocks the Dependency Audit gate. Its only consumer in the lockfile is harper 5.3.1, which declares joi 17.13.8 exactly; the override moves that copy to the next patch release on the same line. 17.13.9 was published 2026-10-28 10:04Z, inside the 7-day bake window; it reaches the bake age at 2026-11-04 10:04Z; remove this entry after that and before it expires."
-    }
-  ]
+  "entries": []
 }

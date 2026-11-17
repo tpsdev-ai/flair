@@ -34,6 +34,7 @@ const add = (file: string, sites: string[], reason: string) => {
 
 // ── GATED skill-writer sinks (run SkillScan + forced durability) ──
 add("write-journal", ["alias-source:(databases as any).flair.Memory#1"], "Identifies successor undo pause points.");
+add("write-journal", ["alias-source:(databases as any)?.flair?.Memory#1"], "Read-only primaryStore handle for the compensation write lock (flair#2950). No write through this handle.");
 add("write-journal", ["writer:this.transactions.delete#1", "writer:this.staged.delete#1"], "In-memory journal bookkeeping.");
 
 add("MemoryArchive", ["writer:Memory.put#1"], "Guarded by Memory.put().");
@@ -79,7 +80,7 @@ add("Memory", ["writer:patchRecord#1"],
 add("Memory", ["writer:(databases as any).flair.Memory.delete#1"],
   "Memory.delete(): removal, not a write.");
 add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4", "alias-source:(databases as any).flair.Memory#5", "alias-source:(databases as any).flair.Memory#6", "alias-source:(databases as any).flair.Memory#7", "alias-source:(databases as any).flair.Memory#8", "alias-source:(databases as any).flair.Memory#9", "alias-source:(databases as any).flair.Memory#10", "alias-source:(databases as any).flair.Memory#11", "alias-source:(databases as any).flair.Memory#13", "alias-source:(databases as any).flair.Memory#14", "alias-source:(databases as any)?.flair?.Memory#1"],
-  "Table handles: #1 reads the derivedFrom lastReflected stamp's committed source row; #3 supplies confirmSkillDelete's reads and close retry (writer:table.put#1 above); #4 is the re-embed's confirm (flair#2465) and #5 its post-commit verification (flair#2656); #6 is the class heritage; the optional handle reads the write-lock store. #7/#9/#10/#14 read committed rows for the Memory PUT skill path, the composed PUT, the PATCH and the ordinary PUT; #8, #11 and #13 hand confirmCommittedRow the Memory PUT new row, the reindex re-PUT and the composed PUT: all only read committed rows.");
+  "Table handles: #1 reads the derivedFrom lastReflected stamp's committed source row; #3 supplies confirmSkillDelete's reads and close retry (writer:table.put#1 above); #4 is the re-embed's confirm (flair#2465) and #5 its post-commit verification (flair#2656); #6 is the class heritage; the optional handles read the write-lock store (flair#2950). #7/#9/#10/#14 read committed rows for the Memory PUT skill path, the composed PUT, the PATCH and the ordinary PUT; #8, #11 and #13 hand confirmCommittedRow the Memory PUT new row, the reindex re-PUT and the composed PUT: all only read committed rows.");
 
 // ── Non-skill writers in other modules ──
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1", "writer:table.put#1"],
@@ -142,6 +143,8 @@ add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"],
 // ── Table aliases ──
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read-only alias (resolveSkillHead searches the live skill head).");
+add("skill-version-write", ["alias-source:(databases as any)?.flair?.Memory#1"],
+  "Read-only primaryStore handle for the confirmation and compensation write locks (flair#2950). No write through this handle.");
 add("AdminMemory", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only admin alias.");
 add("Federation", ["alias-source:(databases as any).flair.Memory#1"],

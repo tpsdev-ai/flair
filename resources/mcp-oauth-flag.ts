@@ -30,17 +30,17 @@
  * Read from `FLAIR_MCP_OAUTH` — truthy values: "1", "true", "yes", "on"
  * (case-insensitive). Anything else (incl. unset / empty) → OFF.
  *
- * ASYMMETRY (load-bearing, flair#1152, measured on oauth 2.5.0): config.yaml's
- * `mcp.enabled: ${FLAIR_MCP_OAUTH}` hands the SAME env var to
+ * ASYMMETRY (load-bearing, flair#1152, measured on @harperfast/oauth 2.9.0):
+ * config.yaml's `mcp.enabled: ${FLAIR_MCP_OAUTH}` hands the SAME env var to
  * @harperfast/oauth, but the two readers accept DIFFERENT vocabularies. The
- * component's coerceConfigBoolean takes ONLY "true"/"false" and DELETES any
- * other string (unresolved placeholder, "1", "yes", garbage) so its disabled
- * default applies; this function takes 1/true/yes/on. Consequences:
- *   - "true" is the ONE value that enables both sides (`flair mcp enable`
- *     stages exactly that).
- *   - "1"/"yes"/"on" turn flair's /mcp handler ON while the component AS
- *     stays OFF — fail-closed broken-on (every request 401s, no AS
- *     advertised).
+ * component's coerceConfigBoolean trims and lowercases, mapping "true"/"false"
+ * to a boolean, and normalizeBooleanField deletes strings it cannot coerce
+ * (unresolved placeholder, "1", "yes", garbage), so its disabled default
+ * applies (dist/lib/config.js); this function takes 1/true/yes/on.
+ * Consequences:
+ *   - "true" is accepted by both readers.
+ *   - "1"/"yes"/"on" make this reader true while the component deletes the
+ *     value and stays off; /mcp is not mounted.
  *   - garbage (e.g. "maybe") disables BOTH: the component deletes it, this
  *     stays false, no /mcp handler exists — no data path (flair's own
  *     discovery documents still serve whenever this flag is off, by design).
@@ -62,12 +62,10 @@ export function mcpOAuthEnabled(): boolean {
  * the client-controlled Host header) is the audience-confusion defense called
  * out in the plugin's production checklist.
  *
- * Configurable via `FLAIR_MCP_ISSUER` (fall back to `FLAIR_PUBLIC_URL`, which the
- * XAA token path already uses as the canonical public base). No hardcoded
- * default — an operator turning the flag on MUST set the public origin.
+ * Configured via `FLAIR_MCP_ISSUER`.
  */
 export function mcpIssuer(): string | undefined {
-  const raw = (process.env.FLAIR_MCP_ISSUER ?? process.env.FLAIR_PUBLIC_URL ?? "").trim();
+  const raw = (process.env.FLAIR_MCP_ISSUER ?? "").trim();
   return raw || undefined;
 }
 

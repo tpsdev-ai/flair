@@ -35,7 +35,7 @@ import {
 
 const MODULE = join(import.meta.dir, "..", "..", "src", "lib", "backup-approval-store.ts");
 const ARCHIVE = Buffer.from(JSON.stringify({
-  version: 1, agents: [{ id: "flint" }], souls: [],
+  version: 1, agents: [{ id: "flint", name: "flint" }], souls: [],
   memories: [{ id: "m1", agentId: "flint", content: "approved note", promotionStatus: "approved", promotedAt: "2026-10-01T00:00:00.000Z", promotedBy: "kern" }],
 }));
 const SHA = createHash("sha256").update(ARCHIVE).digest("hex");

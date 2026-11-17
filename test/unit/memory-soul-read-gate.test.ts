@@ -39,6 +39,7 @@ let versionStore: Map<string, any>;
 let eventStore: Map<string, any>;
 const versionPrimaryStore = { tryLock: () => true, unlock: () => {}, resetReadTxn: () => {} };
 const InstructionVersionBase = {
+  validate() {},
   primaryStore: versionPrimaryStore,
   async *search(query: any) {
     const conditions: any[] = query?.conditions ?? [];
@@ -99,6 +100,7 @@ class BaseSoul {
 // flair#2139 3b: the instruction-version writer appends one OrgEvent row in the
 // same transaction; the write aborts when the table is missing (D2).
 const OrgEventBase = {
+  validate() {},
   async *search() {},
   async create(record: any) {
     if (eventStore.has(record.id)) throw new Error("Record already exists");

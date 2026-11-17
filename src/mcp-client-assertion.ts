@@ -45,10 +45,7 @@
  *     `sub`).
  *   - RFC 8707 `resource` parameter: accepted, exact-match, fail-closed,
  *     defaulting to the configured canonical resource — `buildTokenRequestForm`
- *     already carries an optional `resource` pass-through (see below), and
- *     `defaultMcpResource()` supplies the configured canonical default
- *     (mirrors `resources/mcp-oauth-flag.ts`'s `mcpResource()` — the same
- *     `<issuer>/mcp` value the AS will exact-match against).
+ *     already carries an optional `resource` pass-through (see below).
  *   - Issued token `sub` = `client_id`; access-token TTL default 300s
  *     (`mcp.clientCredentials.accessTokenTtl`); no `refresh_token` — agents
  *     re-mint on 401/near-expiry instead (see `getMcpAccessToken` below).
@@ -649,12 +646,7 @@ export async function getMcpAccessToken(params: GetMcpAccessTokenParams): Promis
 
 // ─── Convenience defaults (this Flair instance's own /mcp + oauth surface) ──
 //
-// Mirrors resources/mcp-oauth-flag.ts's mcpIssuer()/mcpResource() env-driven
-// defaults. Duplicated here (rather than imported) because src/ (this CLI's
-// build root, tsconfig.cli.json) and resources/ (tsconfig.json) are separate
-// TypeScript compilation roots with no existing cross-import in this repo —
-// keep both in sync if either changes. These are only DEFAULTS: every value
-// is overridable via CLI flags, since an agent may authenticate to a
+// Each default is overridable via CLI flags, since an agent may authenticate to a
 // DIFFERENT Harper MCP server than the one running this CLI (identity is
 // portable — the whole point of the design, see
 // ~/ops/FLAIR-AGENT-AUTH-CONSUMER-SPEC.md "Wiring / usage").

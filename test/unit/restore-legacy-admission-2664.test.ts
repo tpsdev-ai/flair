@@ -30,7 +30,7 @@ const commanderPath = join(import.meta.dirname, "../../node_modules/commander/in
 
 const archiveValue = {
   version: 1,
-  agents: [{ id: "flint" }],
+  agents: [{ id: "flint", name: "flint" }],
   souls: [],
   memories: [{ id: "m1", agentId: "flint", content: "legacy note", durability: "persistent" }],
 };

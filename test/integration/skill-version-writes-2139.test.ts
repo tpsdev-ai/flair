@@ -78,6 +78,15 @@ async function memoryRow(id: string): Promise<any | null> {
   return rows[0] ?? null;
 }
 
+async function eventsFor(versionIds: string[]): Promise<any[]> {
+  if (versionIds.length === 0) return [];
+  const rows = await ops({
+    operation: "search_by_id", database: "flair", table: "OrgEvent",
+    ids: versionIds.map((versionId) => `instruction-change:${versionId}`), get_attributes: ["*"],
+  });
+  return (rows as any[]).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+}
+
 const memPath = (id: string) => `/Memory/${encodeURIComponent(id)}`;
 
 function skillBody(id: string, content: string, extra: Record<string, unknown> = {}) {
@@ -341,5 +350,39 @@ describe("skill writer refusal boundaries", () => {
     expect(updated.status, updated.text).toBeLessThan(300);
     const successor = await memoryRow(JSON.parse(updated.text).id);
     for (const key of Object.keys(forged)) expect(successor[key]).toBe(stored[key]);
+  }, 120_000);
+});
+
+describe("flair#2979 — a commit-time Memory validation failure", () => {
+  test("an invalid declared Memory field returns 400 naming the field and commits nothing", async () => {
+    const id = nextId("invalid-field");
+    const created = await call(A, "PUT", memPath(id), skillBody(id, "before"));
+    expect(created.status, created.text.slice(0, 300)).toBeLessThan(300);
+    const beforeRow = await memoryRow(id);
+    const beforeVersions = await versionsOf(id);
+    expect(beforeVersions).toHaveLength(1);
+    const beforeEvents = await eventsFor(beforeVersions.map((version) => version.id));
+    const nextVersionId = `skill:${id}:${(BigInt(beforeVersions[0].version) + 1n).toString()}`;
+
+    const res = await call(A, "PUT", memPath(id), skillBody(id, "after", { retrievalCount: "not-an-int" }));
+    expect(res.status, res.text.slice(0, 300)).toBe(400);
+    const body = JSON.parse(res.text);
+    expect(body.code).toBe("ValidationError");
+    expect(Array.isArray(body.detail), JSON.stringify(body)).toBe(true);
+    expect(body.detail.some((issue: any) => issue.path === "retrievalCount"), JSON.stringify(body.detail)).toBe(true);
+
+    expect(await memoryRow(id)).toEqual(beforeRow);
+    expect(await versionsOf(id)).toEqual(beforeVersions);
+    expect(await eventsFor(beforeVersions.map((version) => version.id))).toEqual(beforeEvents);
+    expect(await eventsFor([nextVersionId]), "the rejected version must leave no event").toEqual([]);
+
+    const updated = await call(A, "PUT", memPath(id), skillBody(id, "after"));
+    expect(updated.status, updated.text.slice(0, 300)).toBeLessThan(300);
+    const afterVersions = await versionsOf(id);
+    expect(afterVersions).toHaveLength(beforeVersions.length + 1);
+    expect(afterVersions[afterVersions.length - 1].id).toBe(nextVersionId);
+    const afterEvents = await eventsFor([nextVersionId]);
+    expect(afterEvents).toHaveLength(1);
+    expect(afterEvents[0].id).toBe(`instruction-change:${nextVersionId}`);
   }, 120_000);
 });

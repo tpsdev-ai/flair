@@ -197,7 +197,9 @@ export async function runMigrationCycle(rawDeps: RunnerDeps): Promise<CycleResul
     return { ran: false, reason: `lock error: ${(err as Error)?.message ?? String(err)}` };
   }
   if (!lock.acquired) {
-    return { ran: false, reason: `single-flight: ${lock.reason}` };
+    return lock.kind === "held"
+      ? { ran: false, reason: `single-flight: ${lock.reason}` }
+      : { ran: false, reason: `lock error: ${lock.reason}` };
   }
 
   try {

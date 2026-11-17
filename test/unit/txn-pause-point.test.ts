@@ -207,6 +207,9 @@ describe("pause-point names (flair#2382)", () => {
     for (const { file, text } of sources) {
       const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
       const pauseNames = new Set(["txnPausePoint"]);
+      // The synchronous form arms the same marker files, keyed by the name
+      // alone, so it shares one name space with the asynchronous form.
+      const syncNames = new Set(["txnPausePointSync"]);
       const deleteNames = new Set(["deleteOwnedRow"]);
       for (const statement of source.statements) {
         if (!ts.isImportDeclaration(statement)) continue;
@@ -215,11 +218,12 @@ describe("pause-point names (flair#2382)", () => {
         for (const binding of bindings.elements) {
           const imported = (binding.propertyName ?? binding.name).text;
           if (imported === "txnPausePoint") pauseNames.add(binding.name.text);
+          if (imported === "txnPausePointSync") syncNames.add(binding.name.text);
           if (imported === "deleteOwnedRow") deleteNames.add(binding.name.text);
         }
       }
       const visit = (node: ts.Node): void => {
-        if (ts.isIdentifier(node) && (pauseNames.has(node.text) || deleteNames.has(node.text))) {
+        if (ts.isIdentifier(node) && (pauseNames.has(node.text) || syncNames.has(node.text) || deleteNames.has(node.text))) {
           let reference: ts.Node = node;
           while (ts.isParenthesizedExpression(reference.parent) || ts.isAsExpression(reference.parent) ||
                  ts.isTypeAssertionExpression(reference.parent) || ts.isNonNullExpression(reference.parent) ||
@@ -259,6 +263,7 @@ describe("pause-point names (flair#2382)", () => {
               forwardsProperty = true;
             } else add(argument, where);
           }
+          if (syncNames.has(name)) add(node.arguments[0], where);
           if (deleteNames.has(name)) {
             const spec = node.arguments[1];
             if (!spec || !ts.isObjectLiteralExpression(spec) ||
@@ -306,11 +311,21 @@ describe("pause-point names (flair#2382)", () => {
     ["unscanned property argument", "txnPausePoint(other.point);", "unresolved pause point"],
     ["unresolvable spec", "deleteOwnedRow(ctx, spec);", "unresolved pause point"],
     ["spread override of point", 'deleteOwnedRow(ctx, { point: "fixture-delete", ...other });', "unresolved pause point"],
+    ["malformed sync name", 'txnPausePointSync("Bad Name");', "malformed pause point"],
+    ["duplicate sync name", 'txnPausePointSync("fixture-sync-pause"); txnPausePointSync("fixture-sync-pause");', "duplicate pause point"],
+    ["sync name shared with an async call", 'txnPausePointSync("supersede-close");', "duplicate pause point"],
+    ["unresolvable sync property argument", "txnPausePointSync(other.point);", "unresolved pause point"],
+    ["aliased sync call", 'import { txnPausePointSync as pauseAt } from "../txn-pause-point.js"; pauseAt("Bad Name");', "malformed pause point"],
   ]) {
     it(`scan rejects ${title}`, () => {
       expect(() => scanPausePoints([...sources(), { file: "fixture.ts", text }])).toThrow(error);
     });
   }
+
+  it("accepts a well-formed sync name", () => {
+    expect(() => scanPausePoints([...sources(), { file: "fixture.ts", text: 'txnPausePointSync("fixture-sync-accept");' }]))
+      .not.toThrow();
+  });
 
   it("refuses a malformed name at call time with a named error", () => {
     for (const bad of ["Bad Name", "no_underscores", "-leading", "trailing-", "double--hyphen", ""]) {

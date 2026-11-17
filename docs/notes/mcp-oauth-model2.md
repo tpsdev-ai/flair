@@ -157,12 +157,12 @@ registered identities.
    credentials.
 
 2. **Set the env:**
-   - `FLAIR_MCP_OAUTH=true` — turns on the `/mcp` route registration AND the
-     component AS (flair#1152: `true` is the ONE value both readers accept —
-     flair's flag takes 1/true/yes/on, but the component's config read of the
-     same var accepts only "true"/"false" and deletes anything else, so `1`
-     gives you a guarded `/mcp` with no authorization server behind it).
-   - `FLAIR_MCP_ISSUER=https://your-public-origin` (or `FLAIR_PUBLIC_URL`).
+   - `FLAIR_MCP_OAUTH=true` — the recommended value, which both readers accept
+     (the component trims it and ignores case, but `1`, `yes` and `on` leave it
+     disabled); the authorization
+     server also needs the issuer and provider credentials. An instance enabled
+     before 0.46 may still have `FLAIR_MCP_OAUTH=1`.
+   - `FLAIR_MCP_ISSUER=https://your-public-origin` — a bare HTTP(S) origin.
    - `OAUTH_GITHUB_CLIENT_ID`, `OAUTH_GITHUB_CLIENT_SECRET` and
      `OAUTH_GITHUB_REDIRECT_URI=https://your-public-origin/oauth` — staged by
      `flair mcp enable` using `--issuer` (default: `--instance`).
