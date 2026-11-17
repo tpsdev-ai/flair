@@ -312,10 +312,16 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.7).",
+      "reason": "Renewed 2026-11-01 after re-reading against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01. harper 5.3.1's npm-shrinkwrap pins fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri and 4.2.1 at node_modules/harper/node_modules/fastify/node_modules/fast-json-stringify/node_modules/fast-uri in an npm install of flair, and npm honours those pins over root overrides; harper 5.3.5 ships no npm-shrinkwrap.json, but its bundled tree carries the same 3.1.0 and 4.2.1. Fixed releases (3.1.9 on 3.x, 4.2.3 on 4.x) are inside the ranges the packages that pull each copy declare (^3.0.0 and ^3.0.1 for the 3.x copy, ^4.0.0 for the 4.x copy), but npm installs carry harper's pins. flair's own lockfile resolves a single fixed copy (the root override fast-uri 4.2.3). flair does not import fast-uri. Of harper's two copies, only 3.1.0 is in this advisory's affected range (>=3.0.0 <3.1.7). Re-checked 2026-11-17: the npm-install observation still resolves fast-uri 3.1.0 at node_modules/harper/node_modules/fast-uri, and harper 5.4.1, npm's latest on that date, still bundles fast-uri 3.1.0 and 4.2.1.",
       "added": "2026-09-28",
-      "expires": "2026-11-27",
-      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <3.1.7), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper."
+      "expires": "2027-01-16",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves every fast-uri copy outside this advisory's affected range (>=3.0.0 <3.1.7), whether pinned by its npm-shrinkwrap or shipped in its bundle; or flair stops depending on harper.",
+      "overCapApproval": {
+        "approvedBy": "tps-flint",
+        "reason": "harper 5.4.1 still bundles fast-uri 3.1.0, which this advisory affects; the fix is a harper release that updates it.",
+        "approvedOn": "2026-11-17",
+        "expires": "2027-01-16"
+      }
     },
     {
       "ghsa": "GHSA-hrr3-gc8f-f4qj",
@@ -576,13 +582,13 @@
       "severity": "moderate",
       "class": "vendor-pinned",
       "introducedBy": "harper -> stream-json",
-      "reason": "Split and re-read 2026-11-01 against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01: this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. harper 5.3.1 declares stream-json 1.9.1 exactly, and its npm-shrinkwrap pins 1.9.1 at node_modules/harper/node_modules/stream-json in an npm install of flair; npm honours that pin over root overrides. harper 5.3.5 declares the same exact 1.9.1 and bundles it. 1.9.1 is in this advisory's affected range (<=3.4.0); the patched releases are on the 3.x line. flair does not import stream-json; harper 5.3.1 imports it in dist/dataLayer/bulkLoad.js:55-56.",
+      "reason": "Split and re-read 2026-11-01 against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01: this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. harper 5.3.1 declares stream-json 1.9.1 exactly, and its npm-shrinkwrap pins 1.9.1 at node_modules/harper/node_modules/stream-json in an npm install of flair; npm honours that pin over root overrides. harper 5.3.5 declares the same exact 1.9.1 and bundles it. 1.9.1 is in this advisory's affected range (<=3.4.0); the patched releases are on the 3.x line. flair does not import stream-json; harper 5.3.1 imports it in dist/dataLayer/bulkLoad.js:55-56. Re-checked 2026-11-17: the npm-install observation still resolves stream-json 1.9.1 at node_modules/harper/node_modules/stream-json, and harper 5.4.1, npm's latest on that date, still declares and bundles 1.9.1.",
       "sources": [
         "npm-install"
       ],
       "approvedBy": "tps-flint",
       "added": "2026-09-04",
-      "expires": "2026-12-03",
+      "expires": "2027-01-16",
       "removeWhen": "harper ships a build resolving stream-json > 3.4.0 (the patched line), or flair stops depending on harper."
     },
     {
@@ -606,13 +612,13 @@
       "severity": "moderate",
       "class": "vendor-pinned",
       "introducedBy": "harper -> stream-json",
-      "reason": "Split and re-read 2026-11-01 against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01: this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. harper 5.3.1 declares stream-json 1.9.1 exactly, and its npm-shrinkwrap pins 1.9.1 at node_modules/harper/node_modules/stream-json in an npm install of flair; npm honours that pin over root overrides. harper 5.3.5 declares the same exact 1.9.1 and bundles it. 1.9.1 is in this advisory's affected range (<3.6.0); the patched releases are on the 3.x line. flair does not import stream-json; harper 5.3.1 imports it in dist/dataLayer/bulkLoad.js:55-56.",
+      "reason": "Split and re-read 2026-11-01 against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01: this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. harper 5.3.1 declares stream-json 1.9.1 exactly, and its npm-shrinkwrap pins 1.9.1 at node_modules/harper/node_modules/stream-json in an npm install of flair; npm honours that pin over root overrides. harper 5.3.5 declares the same exact 1.9.1 and bundles it. 1.9.1 is in this advisory's affected range (<3.6.0); the patched releases are on the 3.x line. flair does not import stream-json; harper 5.3.1 imports it in dist/dataLayer/bulkLoad.js:55-56. Re-checked 2026-11-17: the npm-install observation still resolves stream-json 1.9.1 at node_modules/harper/node_modules/stream-json, and harper 5.4.1, npm's latest on that date, still declares and bundles 1.9.1.",
       "sources": [
         "npm-install"
       ],
       "approvedBy": "tps-flint",
       "added": "2026-10-06",
-      "expires": "2026-12-03",
+      "expires": "2027-01-16",
       "removeWhen": "harper ships a build resolving stream-json >= 3.6.0, or flair stops depending on harper."
     },
     {
@@ -636,13 +642,13 @@
       "severity": "moderate",
       "class": "vendor-pinned",
       "introducedBy": "harper -> stream-json",
-      "reason": "Split and re-read 2026-11-01 against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01: this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. harper 5.3.1 declares stream-json 1.9.1 exactly, and its npm-shrinkwrap pins 1.9.1 at node_modules/harper/node_modules/stream-json in an npm install of flair; npm honours that pin over root overrides. harper 5.3.5 declares the same exact 1.9.1 and bundles it. 1.9.1 is in this advisory's affected range (<=3.5.0); the patched releases are on the 3.x line. flair does not import stream-json; harper 5.3.1 imports it in dist/dataLayer/bulkLoad.js:55-56.",
+      "reason": "Split and re-read 2026-11-01 against harper 5.3.1, the version flair pins (package.json:69), and harper 5.3.5, npm's latest harper on 2026-11-01: this entry now covers only the npm-install observation, and the bun.lock copy has its own remediation-available entry. harper 5.3.1 declares stream-json 1.9.1 exactly, and its npm-shrinkwrap pins 1.9.1 at node_modules/harper/node_modules/stream-json in an npm install of flair; npm honours that pin over root overrides. harper 5.3.5 declares the same exact 1.9.1 and bundles it. 1.9.1 is in this advisory's affected range (<=3.5.0); the patched releases are on the 3.x line. flair does not import stream-json; harper 5.3.1 imports it in dist/dataLayer/bulkLoad.js:55-56. Re-checked 2026-11-17: the npm-install observation still resolves stream-json 1.9.1 at node_modules/harper/node_modules/stream-json, and harper 5.4.1, npm's latest on that date, still declares and bundles 1.9.1.",
       "sources": [
         "npm-install"
       ],
       "approvedBy": "tps-flint",
       "added": "2026-10-06",
-      "expires": "2026-12-03",
+      "expires": "2027-01-16",
       "removeWhen": "harper ships a build resolving stream-json > 3.5.0, or flair stops depending on harper; re-check this entry if harper moves to a stream-json major that includes the JSONC parser."
     },
     {
