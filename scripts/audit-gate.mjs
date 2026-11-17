@@ -32,8 +32,10 @@
  *   3. Every allowlist entry must be well-formed: advisory id, package, the
  *      reason it cannot be fixed here, an expiry date, and the condition that
  *      removes it. Missing any field BLOCKS.
- *   4. Lifetime is capped by severity (see the allowlist's `policy` block).
- *      An over-cap entry requires a valid overCapApproval.
+ *   4. Lifetime is capped by severity. The four ceilings are pinned in this file
+ *      (MAX_LIFETIME_DAYS_BY_SEVERITY); the allowlist's `policy` block may set a
+ *      lower cap for a severity, never a higher one. An over-cap entry requires
+ *      a valid overCapApproval.
  *   5. An expired entry BLOCKS. That is the point of the mechanism, not a flaw:
  *      the build stops and a human re-decides.
  *   6. STALENESS — an allowlist entry whose advisory no longer appears BLOCKS
@@ -111,6 +113,7 @@ export const CONSUMER_INSTALLS = [
   { flag: "--openclaw-npm-install-prefix", source: "npm-install-openclaw", package: "@tpsdev-ai/openclaw-flair", dir: "packages/openclaw-flair" },
   { flag: "--pi-npm-install-prefix", source: "npm-install-pi", package: "@tpsdev-ai/pi-flair", dir: "packages/pi-flair" },
   { flag: "--n8n-npm-install-prefix", source: "npm-install-n8n", package: "@tpsdev-ai/n8n-nodes-flair", dir: "packages/n8n-nodes-flair" },
+  { flag: "--bench-npm-install-prefix", source: "npm-install-bench", package: "@tpsdev-ai/flair-bench", dir: "packages/flair-bench" },
 ];
 
 // The observations the gate runs. `bun` is the lockfile observation (`bun
@@ -538,6 +541,67 @@ function loadAllowlist() {
  * ------------------------------------------------------------------ */
 
 const DAY_MS = 86_400_000;
+
+/**
+ * Ceiling (days) for `policy.maxLifetimeDaysBySeverity`. The allowlist may
+ * shorten a severity's cap, never raise it above these values.
+ */
+export const MAX_LIFETIME_DAYS_BY_SEVERITY = Object.freeze({
+  critical: 30,
+  high: 60,
+  moderate: 180,
+  low: 180,
+});
+
+/**
+ * The caps actually enforced, starting from the pinned ceilings. A declared cap
+ * below its ceiling replaces it; a missing, invalid or over-ceiling declaration
+ * is a named problem and leaves the pinned ceiling in force.
+ */
+export function lifetimeCapsFromPolicy(allowlist, problems) {
+  const declared = allowlist?.policy?.maxLifetimeDaysBySeverity;
+  const caps = { ...MAX_LIFETIME_DAYS_BY_SEVERITY };
+  if (declared === null || typeof declared !== "object" || Array.isArray(declared)) {
+    problems.push(
+      "policy.maxLifetimeDaysBySeverity must be an object naming critical, high, moderate and low",
+    );
+    return caps;
+  }
+  for (const severity of Object.keys(MAX_LIFETIME_DAYS_BY_SEVERITY)) {
+    const ceiling = MAX_LIFETIME_DAYS_BY_SEVERITY[severity];
+    if (!Object.hasOwn(declared, severity)) {
+      problems.push(
+        `policy.maxLifetimeDaysBySeverity is missing "${severity}"; its pinned ceiling is ${ceiling}d`,
+      );
+      continue;
+    }
+    const value = declared[severity];
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      const shown = typeof value === "number" ? String(value) : JSON.stringify(value);
+      problems.push(
+        `policy.maxLifetimeDaysBySeverity["${severity}"] must be a finite positive number; ` +
+          `got ${shown} (its pinned ceiling is ${ceiling}d)`,
+      );
+    } else if (value > ceiling) {
+      problems.push(
+        `policy.maxLifetimeDaysBySeverity["${severity}"] is ${value}d, above the ${ceiling}d ` +
+          `ceiling pinned in scripts/audit-gate.mjs`,
+      );
+    } else {
+      caps[severity] = value;
+    }
+  }
+  for (const severity of Object.keys(declared)) {
+    if (!Object.hasOwn(MAX_LIFETIME_DAYS_BY_SEVERITY, severity)) {
+      problems.push(
+        `policy.maxLifetimeDaysBySeverity names "${severity}", which has no pinned ceiling; ` +
+          `expected critical, high, moderate or low`,
+      );
+    }
+  }
+  return caps;
+}
+
 /** A real calendar date: the UTC year, month and day round-trip. */
 function isCalendarDate(s) {
   if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
@@ -552,40 +616,47 @@ function utcDay(value) {
   return (value instanceof Date ? value : new Date(value)).toISOString().slice(0, 10);
 }
 
+const MAX_ALLOWLIST_HISTORY_COMMITS = 10_000;
+
+const ALLOWLIST_LINEAGE_START = "847c40549c85dd9eb805b20f1790bf6956e8f38c";
+const ALLOWLIST_HISTORY_PATH = ".github/audit-allowlist.json";
+
 /**
- * The first commit day each advisory id appears in parsed allowlist snapshots,
- * oldest first, following file renames and comparing ids case-insensitively.
- * Dates are read as UTC calendar days, because a commit made late in a negative
- * offset is already the next day in UTC.
- *
- * A shallow repository, a failed git call or an unreadable allowlist throws.
- * The repository root comes from the script location, so the gate behaves the
- * same whatever directory it is run from.
+ * Reads only the fixed path from the pinned start and every descendant in HEAD's
+ * ancestry; missing paths, non-JSON blobs or blobs without an `entries` array refuse
+ * the lineage. An introduction contains an id absent from ancestry within the pinned
+ * lineage. Its earliest UTC day is retained; ids compare case-insensitively.
  */
 export function readAllowlistHistory(repoRoot = REPO_ROOT) {
-  const allowlistPath = join(repoRoot, ".github", "audit-allowlist.json");
+  const allowlistPath = join(repoRoot, ALLOWLIST_HISTORY_PATH);
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(allowlistPath, "utf8"));
   } catch (e) {
-    throw new Error(`cannot read ${allowlistPath}: ${e.message}`);
+    throw new Error(`allowlist lineage cannot be established: cannot read ${allowlistPath}: ${e.message}`);
   }
   if (!Array.isArray(parsed?.entries)) {
-    throw new Error(`${allowlistPath} must have an "entries" array`);
+    throw new Error(`allowlist lineage cannot be established: ${allowlistPath} must have an "entries" array`);
   }
 
-  const runGit = (args) => {
-    const res = spawnSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 120_000 });
+  const git = (args, { input } = {}) => {
+    const res = spawnSync("git", ["-C", repoRoot, ...args], {
+      encoding: "utf8",
+      timeout: 120_000,
+      maxBuffer: 64 * 1024 * 1024,
+      ...(input === undefined ? {} : { input }),
+    });
     if (res.error) throw new Error(`git ${args[0]} failed: ${res.error.message}`);
     if (res.status !== 0) {
       throw new Error(`git ${args[0]} failed (exit ${res.status}): ${(res.stderr ?? "").trim()}`);
     }
-    return res.stdout;
+    return res;
   };
+  const runGit = (args, input) => git(args, { input }).stdout;
 
   if (runGit(["rev-parse", "--is-shallow-repository"]).trim() === "true") {
     throw new Error(
-      `repository ${repoRoot} is shallow, so the allowlist history is incomplete. ` +
+      `allowlist lineage cannot be established: repository ${repoRoot} is a shallow clone. ` +
         "Fetch full history (fetch-depth: 0) before running the gate.",
     );
   }
@@ -597,53 +668,115 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
   }
   if (ids.size > 1_000) throw new Error(`allowlist has ${ids.size} advisory ids; refusing to read history for more than 1000`);
 
-  let path = ".github/audit-allowlist.json";
-  const history = runGit(["log", "--follow", "--name-status", "--format=%x1e%H%x09%cI", "--", path]);
-  const snapshots = [];
-  for (const record of history.split("\x1e").filter((record) => record.trim())) {
-    const [header, ...changes] = record.trim().split("\n");
-    const [sha, timestamp] = header.split("\t");
-    const day = utcDayFromTimestamp(timestamp);
-    if (!day) throw new Error(`git returned an unparseable date for ${sha}: ${timestamp}`);
-    if (!changes.includes(`D\t${path}`)) snapshots.push({ sha, day, path });
-    for (const line of changes) {
-      const rename = /^R\d+\t(.+)\t(.+)$/.exec(line);
-      if (rename && rename[2] === path) path = rename[1];
+  const epochDay = (value, sha) => {
+    const seconds = Number(value);
+    if (!Number.isSafeInteger(seconds) || seconds < 0) {
+      throw new Error(`git returned an unparseable date for ${sha}: ${value}`);
+    }
+    const day = new Date(seconds * 1000).toISOString().slice(0, 10);
+    if (!isCalendarDate(day)) throw new Error(`git returned an unparseable date for ${sha}: ${value}`);
+    return day;
+  };
+
+  const commits = [];
+  for (const line of runGit(["rev-list", "--topo-order", "--reverse", "--parents", "--timestamp", "HEAD"]).split("\n")) {
+    if (!line) continue;
+    const [timestamp, sha, ...parents] = line.split(" ");
+    if (!sha || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)) {
+      throw new Error(`git rev-list returned an unparseable commit: ${line}`);
+    }
+    commits.push({ sha, parents, day: epochDay(timestamp, sha) });
+  }
+  if (commits.length === 0) {
+    throw new Error("allowlist lineage cannot be established: HEAD has no commits");
+  }
+  if (commits.length > MAX_ALLOWLIST_HISTORY_COMMITS) {
+    throw new Error(
+      `allowlist lineage cannot be established: the ancestry has ${commits.length} commits, above the ` +
+        `${MAX_ALLOWLIST_HISTORY_COMMITS}-commit bound. The gate walks every ancestor commit; raise the bound ` +
+        "only with a CI cost review.",
+    );
+  }
+
+  if (!commits.some((commit) => commit.sha === ALLOWLIST_LINEAGE_START)) {
+    throw new Error(
+      `allowlist lineage cannot be established: pinned start ${ALLOWLIST_LINEAGE_START} is not an ancestor of HEAD`,
+    );
+  }
+  const descendants = new Set();
+  const walked = new Set();
+  const lineage = [];
+  for (const commit of commits) {
+    for (const parent of commit.parents) {
+      if (!walked.has(parent)) {
+        throw new Error(`allowlist lineage cannot be established: parent ${parent} of ${commit.sha} is outside the walked ancestry`);
+      }
+    }
+    walked.add(commit.sha);
+    if (commit.sha === ALLOWLIST_LINEAGE_START || commit.parents.some((parent) => descendants.has(parent))) {
+      descendants.add(commit.sha);
+      lineage.push(commit);
     }
   }
 
-  const firstDays = new Map();
-  for (const { sha, day, path } of snapshots.reverse()) {
-    const contents = runGit(["show", `${sha}:${path}`]);
-    let snapshot;
-    try {
-      snapshot = JSON.parse(contents);
-    } catch (e) {
-      throw new Error(`cannot parse allowlist snapshot ${sha}:${path}: ${e.message}`);
-    }
-    if (!Array.isArray(snapshot?.entries)) {
-      throw new Error(`allowlist snapshot ${sha}:${path} must have an "entries" array`);
-    }
-    for (const entry of snapshot.entries) {
-      if (typeof entry?.ghsa !== "string") continue;
-      const id = entry.ghsa.toUpperCase();
-      if (!firstDays.has(id)) firstDays.set(id, day);
-    }
+  const input = lineage.map((commit) => `${commit.sha}:${ALLOWLIST_HISTORY_PATH}\n`).join("");
+  const rows = runGit(["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], input).trimEnd().split("\n");
+  if (rows.length !== lineage.length) {
+    throw new Error(`allowlist lineage cannot be established: git cat-file returned ${rows.length} rows for ${lineage.length} commits`);
   }
+  const parsedBlobs = new Map();
+  const seenByCommit = new Map();
+  const firstDays = new Map();
+  for (const [index, commit] of lineage.entries()) {
+    const row = rows[index];
+    if (row.endsWith(" missing")) {
+      throw new Error(`allowlist lineage cannot be established: missing ${ALLOWLIST_HISTORY_PATH} at ${commit.sha}`);
+    }
+    const [oid, type, size] = row.split(" ");
+    if (type !== "blob" || !oid || !Number.isSafeInteger(Number(size))) {
+      throw new Error(`allowlist lineage cannot be established: invalid snapshot at ${commit.sha}:${ALLOWLIST_HISTORY_PATH}: ${row}`);
+    }
+    let snapshotIds = parsedBlobs.get(oid);
+    if (!snapshotIds) {
+      let snapshot;
+      try {
+        snapshot = JSON.parse(runGit(["cat-file", "blob", oid]));
+      } catch (e) {
+        throw new Error(`allowlist lineage cannot be established: cannot parse allowlist snapshot ${commit.sha}:${ALLOWLIST_HISTORY_PATH}: ${e.message}`);
+      }
+      if (!Array.isArray(snapshot?.entries)) {
+        throw new Error(`allowlist lineage cannot be established: snapshot ${commit.sha}:${ALLOWLIST_HISTORY_PATH} must have an "entries" array`);
+      }
+      snapshotIds = new Set();
+      for (const entry of snapshot.entries) {
+        if (typeof entry?.ghsa === "string") snapshotIds.add(entry.ghsa.toUpperCase());
+      }
+      parsedBlobs.set(oid, snapshotIds);
+    }
+    const seen = new Set();
+    for (const parent of commit.parents) {
+      for (const id of seenByCommit.get(parent) ?? []) seen.add(id);
+    }
+    for (const id of snapshotIds) {
+      if (!seen.has(id)) {
+        const previous = firstDays.get(id);
+        if (previous === undefined || commit.day < previous) firstDays.set(id, commit.day);
+      }
+    }
+    for (const id of snapshotIds) seen.add(id);
+    seenByCommit.set(commit.sha, seen);
+  }
+  firstDays.cost = {
+    commitsWalked: commits.length,
+    commitsWithAllowlist: lineage.length,
+    blobsRead: parsedBlobs.size,
+    commitLimit: MAX_ALLOWLIST_HISTORY_COMMITS,
+  };
   return firstDays;
 }
 
-function utcDayFromTimestamp(value) {
-  if (!isCalendarDate(value.slice(0, 10))) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  const day = date.toISOString().slice(0, 10);
-  return isCalendarDate(day) ? day : null;
-}
-
 /**
- * Each entry's `added` must be a real calendar date no later than the first day its advisory id
- * appears in the parsed snapshots. An id absent from those snapshots uses today.
+ * Checks `added` against the first introduction day; an id absent from history uses today.
  */
 export function validateAllowlistHistory(allowlist, firstDays, today) {
   const problems = [];
@@ -717,9 +850,9 @@ export function overCapApprovalProblems(entry, today, cap) {
   return problems;
 }
 
-export function validateAllowlist(allowlist, today) {
+export function validateAllowlist(allowlist, today, enforcedCaps) {
   const problems = [];
-  const caps = allowlist?.policy?.maxLifetimeDaysBySeverity ?? {};
+  const caps = enforcedCaps ?? lifetimeCapsFromPolicy(allowlist, problems);
   const seenKeys = new Map();
   const singleSourceOwner = new Map();
 
@@ -807,8 +940,8 @@ export function validateAllowlist(allowlist, today) {
     const cap = caps[entry.severity];
     if (typeof cap !== "number") {
       problems.push(
-        `${where}: no lifetime cap is configured for severity "${entry.severity}". Add it to ` +
-          `policy.maxLifetimeDaysBySeverity; an entry without a cap cannot be admitted.`,
+        `${where}: no lifetime cap is configured for severity "${entry.severity}" ` +
+          `(expected critical, high, moderate or low); an entry without a pinned ceiling cannot be admitted.`,
       );
     } else if (lifetimeDays > cap || entry.overCapApproval !== undefined) {
       const approvalProblems = overCapApprovalProblems(entry, today, cap);
@@ -827,6 +960,28 @@ export function validateAllowlist(allowlist, today) {
   });
 
   return problems;
+}
+
+/**
+ * The over-cap report's lines, built from the caps the gate enforces. `caps` is
+ * the map `lifetimeCapsFromPolicy` returns, so the report and the validation
+ * cannot disagree about a severity's cap.
+ */
+export function overCapReportLines(allowlist, caps) {
+  const lines = [];
+  for (const entry of allowlist.entries) {
+    const cap = caps[entry?.severity];
+    if (typeof cap !== "number" || !isCalendarDate(entry?.added) || !isCalendarDate(entry?.expires)) continue;
+    const lifetimeDays = Math.round((Date.parse(entry.expires) - Date.parse(entry.added)) / DAY_MS);
+    if (!(lifetimeDays > cap)) continue;
+    const approval = entry.overCapApproval;
+    lines.push(
+      `  OVER-CAP: ${entry.ghsa} ${entry.package} — cumulative ${lifetimeDays}d lifetime, ` +
+        `${cap}d ${entry.severity} cap, approval recorded for ${approval.approvedBy} until ` +
+        `${approval.expires}: ${approval.reason}`,
+    );
+  }
+  return lines;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1519,6 +1674,14 @@ async function main() {
   }
   try {
     firstDays = readAllowlistHistory(REPO_ROOT);
+    if (EXPLAIN) {
+      const cost = firstDays.cost;
+      console.log(
+        `\n  Allowlist history: walked ${cost.commitsWalked} ancestor commits ` +
+          `(${cost.commitsWithAllowlist} contain a tracked allowlist path; ${cost.blobsRead} distinct blobs read; ` +
+          `limit ${cost.commitLimit}).\n`,
+      );
+    }
   } catch (e) {
     console.error(`\n  DEPENDENCY AUDIT GATE: FAILED TO READ ALLOWLIST HISTORY\n\n  ${e.message}\n`);
     console.error(
@@ -1546,7 +1709,9 @@ async function main() {
       a.package.localeCompare(b.package),
   );
 
-  const schemaProblems = validateAllowlist(allowlist, today);
+  const policyProblems = [];
+  const caps = lifetimeCapsFromPolicy(allowlist, policyProblems);
+  const schemaProblems = [...policyProblems, ...validateAllowlist(allowlist, today, caps)];
   for (const p of schemaProblems) fail(`allowlist is malformed — ${p}`);
   const historyProblems = validateAllowlistHistory(allowlist, firstDays, today);
   for (const p of historyProblems) fail(`allowlist history/date invalid — ${p}`);
@@ -1921,22 +2086,9 @@ async function main() {
   console.log(`  allowlisted (justified + dated):  ${new Set(allowed.map(({ adv }) => adv)).size}`);
   console.log(`  blocking:                         ${blocked.length}\n`);
 
-  const caps = allowlist.policy?.maxLifetimeDaysBySeverity ?? {};
-  const overCap = allowlist.entries.filter((entry) => {
-    const cap = caps[entry?.severity];
-    if (typeof cap !== "number" || !isCalendarDate(entry?.added) || !isCalendarDate(entry?.expires)) return false;
-    return Math.round((Date.parse(entry.expires) - Date.parse(entry.added)) / DAY_MS) > cap;
-  });
-  for (const entry of overCap) {
-    const approval = entry.overCapApproval;
-    const lifetimeDays = Math.round((Date.parse(entry.expires) - Date.parse(entry.added)) / DAY_MS);
-    console.log(
-      `  OVER-CAP: ${entry.ghsa} ${entry.package} — cumulative ${lifetimeDays}d lifetime, ` +
-        `${caps[entry.severity]}d ${entry.severity} cap, approval recorded for ${approval.approvedBy} until ` +
-        `${approval.expires}: ${approval.reason}`,
-    );
-  }
-  if (overCap.length) console.log("");
+  const overCapLines = overCapReportLines(allowlist, caps);
+  for (const line of overCapLines) console.log(line);
+  if (overCapLines.length) console.log("");
 
   for (const { entry } of notReportedByBun) {
     console.log(

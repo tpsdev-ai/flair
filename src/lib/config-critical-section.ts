@@ -18,11 +18,11 @@
  *      the configured entry does not exist AND the parent resolves. A dangling
  *      symlink is not absence; EACCES / ELOOP / ENOTDIR are resolution ERRORS
  *      and HOLD, never "absent".
- *   2. LOCK: an `O_EXCL` create of `<resolvedTarget>.lock`, beside the
- *      RESOLVED target so stable symlink aliases share one lock, computed once
- *      per attempt. Content is diagnostic only (`<pid> <iso> <hostname>`),
- *      never an authorization input. Bounded retry then a NAMED refusal. No
- *      reclaim, no age-out, no pid-liveness shortcut.
+ *   2. LOCK: an `O_EXCL` create of `<resolvedTarget>.lock` unless the caller
+ *      supplies `lockPath`, computed once per attempt. Content is
+ *      diagnostic only (`<pid> <iso> <hostname>`), never an authorization
+ *      input. Bounded retry then a NAMED refusal. No reclaim, no age-out, no
+ *      pid-liveness shortcut.
  *   3. RE-OBSERVE INSIDE the lock and compare. Any change of entry type,
  *      entry identity, resolved path, target identity, parent identity or
  *      absence state HELDS the write (fixture 11/12), naming which
@@ -83,9 +83,8 @@
  * (every wired client re-reads at startup). ACL, xattr and hard-link
  * preservation are NOT handled and are documented, not silently dropped.
  *
- * Leaf module: imports only node:fs, node:crypto, node:os and node:path.
- * NEVER import src/cli.ts here — its `writeFileAtomic` lacks exclusive temp
- * creation, fsync, locking and identity checks (flair#1778 2c-i-b ruling).
+ * Leaf module: imports only node:fs, node:child_process, node:crypto, node:os
+ * and node:path. NEVER import src/cli.ts here.
  */
 import {
   closeSync,
@@ -99,15 +98,17 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  statfsSync,
   statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
   type Stats,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { hostname } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 // ── observations ────────────────────────────────────────────────────────────
 
@@ -178,6 +179,27 @@ export interface ConfigSectionOptions {
   maxAttempts?: number;
   /** Lock acquisition: bounded retry (default 40 × 50 ms). */
   lockRetry?: { attempts?: number; delayMs?: number };
+  /** Explicit lock path (default `<resolvedTarget>.lock`). Integrity uses the
+   *  same path for registry publication, commit, tombstone and recovery;
+   *  initial directory and key creation occur outside it. */
+  lockPath?: string;
+  /** In-lock staging for a protocol that must publish side records
+   *  before the target replacement. Runs after `decide` returns a write and
+   *  before the temp file is created for the target. It must not replace the
+   *  target or any name a reader can resolve to current state; an unreferenced
+   *  staging orphan may be replaced. A throw leaves the target unchanged;
+   *  staged files may remain. When it returns a
+   *  function, that cleanup runs under the SAME lock if the target replacement
+   *  does not land (a throw or a pre-rename failure). Added for the integrity
+   *  generation/registry protocol (flair#971); existing sinks leave it unset. */
+  stage?: (bytes: Uint8Array, identity: ConfigObservation) => void | (() => void);
+  /** Runs immediately before rename, after the fsync test hook; a throw refuses publication. */
+  beforeRename?: () => void;
+  /** Runs immediately after the rename test hook; a throw becomes a cleanup warning. */
+  afterRename?: () => void;
+  /** Runs under the lock after replacement with no cleanup warning.
+   *  A throw becomes a cleanup warning. */
+  onCommitted?: () => void;
   /** TEST-ONLY deterministic barriers at the production read/write boundary.
    *  Inert unless a fixture sets them. `afterPreObserve` fires between the
    *  pre-lock observation and the lock; `afterRead` fires between the in-lock
@@ -194,6 +216,9 @@ export interface ConfigSectionOptions {
     afterRead?: (attempt: number) => void;
     afterTempCreate?: (tempPath: string) => void;
     afterFsync?: (tempPath: string) => void;
+    /** TEST-ONLY: runs after rename, before directory fsync.
+     *  A throw skips that fsync and returns a cleanup warning. */
+    afterRename?: (targetPath: string) => void;
   };
 }
 
@@ -215,6 +240,164 @@ export interface ConfigSectionResult {
   committed?: boolean;
   /** Set when the write COMMITTED but a post-rename cleanup step failed. */
   cleanupWarning?: string | null;
+}
+
+// ── filesystem support ──────────────────────────────────────────────────────
+
+/** Linux custody allowlist, keyed by `statfs` magic. Overlayfs crash durability
+ *  depends on the upper layer's backing, which this check does not verify.
+ *  macOS is classified by mount-table name. */
+const LOCAL_FILESYSTEM_TYPES: Record<number, string> = {
+  0xef53: "ext2/ext3/ext4",
+  0x58465342: "xfs",
+  0x9123683e: "btrfs",
+  0x2fc12fc1: "zfs",
+  0x794c7630: "overlayfs",
+  0x3153464a: "jfs",
+  0xf2f52010: "f2fs",
+};
+
+/** macOS filesystem names accepted for custody, as named in the mount table. */
+const LOCAL_FILESYSTEM_NAMES = new Set(["apfs", "hfs"]);
+
+export type FilesystemSupport =
+  | { ok: true; type: string }
+  | { ok: false; reason: string };
+
+/** Whether a Linux statfs magic is allowlisted. */
+export function isSupportedLocalFilesystemType(type: number): boolean {
+  return Object.hasOwn(LOCAL_FILESYSTEM_TYPES, type);
+}
+
+/** Whether a filesystem NAME reported by the platform is accepted. */
+export function isSupportedLocalFilesystemName(name: string): boolean {
+  return LOCAL_FILESYSTEM_NAMES.has(name.toLowerCase());
+}
+
+/** One entry from the macOS mount table. `mount` prints
+ *  `<device> on <mount point> (<type>, <option>, ...)`. */
+export interface MountEntry {
+  device: string;
+  mountPoint: string;
+  type: string;
+  options: string[];
+}
+
+/** `<device> on <mount point> (<type>, <option>, ...)`. Mount points can
+ *  contain spaces, so nothing here splits on whitespace. */
+const MOUNT_LINE = /^(.+) on (.+) \(([^,()]+)((?:, [^()]*)?)\)$/;
+
+/** Parse one `mount` output line. Returns null for anything that does not
+ *  match the documented shape. */
+export function parseMountLine(line: string): MountEntry | null {
+  const match = MOUNT_LINE.exec(line);
+  if (!match) return null;
+  const device = match[1];
+  const mountPoint = match[2];
+  const type = match[3].trim();
+  const rawOptions = match[4];
+  const options = rawOptions
+    ? rawOptions.split(",").map((option) => option.trim()).filter((option) => option !== "")
+    : [];
+  return { device, mountPoint, type, options };
+}
+
+/** Select exactly one entry at the covering mount point reported by df. */
+export function selectMountEntry(
+  entries: MountEntry[],
+  mountPoint: string,
+): MountEntry | null {
+  const matches = entries.filter((entry) => entry.mountPoint === mountPoint);
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+/** One `df -P` data row: device, blocks, used, available, capacity, mount. */
+const DF_DATA_LINE = /^(.+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+%)\s+(.+)$/;
+
+/** The one non-data line `df -P` prefixes: its column header. */
+const DF_HEADER_LINE = /^Filesystem\s+(?:512|1024)-blocks\s+Used\s+Available\s+Capacity\s+Mounted\s+on$/;
+
+/** Parse `df -P` output. The output must be the header (optional) plus exactly
+ *  one data row; any other nonempty line is a refusal, never skipped. */
+export function parseDfMountPoint(output: string): string | null {
+  const lines = output.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+  if (lines.length === 0) return null;
+  const rows = DF_HEADER_LINE.test(lines[0]!) ? lines.slice(1) : lines;
+  if (rows.length !== 1) return null;
+  const match = DF_DATA_LINE.exec(rows[0]!);
+  return match !== null && match[6]!.startsWith("/") ? match[6]! : null;
+}
+
+function readDarwinDf(path: string): string {
+  return execFileSync("/bin/df", ["-P", path], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000, killSignal: "SIGKILL",
+  });
+}
+
+/** Classify the covering mount reported by df. */
+export function classifyDarwinFilesystem(
+  realPath: string,
+  mountOutput: string,
+  readDf: (path: string) => string = readDarwinDf,
+): FilesystemSupport {
+  const entries: MountEntry[] = [];
+  for (const line of mountOutput.split("\n")) {
+    if (line.trim() === "") continue;
+    const entry = parseMountLine(line);
+    if (entry === null) return { ok: false, reason: "unparseable mount entry" };
+    entries.push(entry);
+  }
+  let mountPoint: string | null;
+  try {
+    mountPoint = parseDfMountPoint(readDf(realPath));
+  } catch (err) {
+    return { ok: false, reason: `cannot read the covering mount for ${realPath}: ${msg(err)}` };
+  }
+  if (mountPoint === null) return { ok: false, reason: "unparseable df output" };
+  const entry = selectMountEntry(entries, mountPoint);
+  if (entry === null) return { ok: false, reason: `no unique mount entry for ${mountPoint}` };
+  if (!isSupportedLocalFilesystemName(entry.type) || !entry.options.includes("local")) {
+    return { ok: false, reason: `mount at ${mountPoint} is not a recognized local filesystem` };
+  }
+  return { ok: true, type: entry.type.toLowerCase() };
+}
+
+export function assertSupportedLocalFilesystem(targetPath: string): FilesystemSupport {
+  let probe = resolve(targetPath);
+  // Try at most 256 paths, stopping early at root; refuse if the cap is exhausted.
+  for (let i = 0; i < 256; i++) {
+    if (existsSync(probe)) break;
+    const parent = dirname(probe);
+    if (parent === probe) return { ok: false, reason: `cannot find an existing ancestor of ${targetPath}` };
+    if (i === 255) return { ok: false, reason: `ancestor walk reached its iteration cap for ${targetPath}` };
+    probe = parent;
+  }
+  if (process.platform === "darwin") {
+    let realProbe: string;
+    try {
+      realProbe = realpathSync(probe);
+    } catch (err) {
+      return { ok: false, reason: `cannot resolve ${probe}: ${msg(err)}` };
+    }
+    let table: string;
+    try {
+      table = execFileSync("/sbin/mount", [], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000, killSignal: "SIGKILL" });
+    } catch (err) {
+      return { ok: false, reason: `cannot read the mount table for ${realProbe}: ${msg(err)}` };
+    }
+    return classifyDarwinFilesystem(realProbe, table);
+  }
+  let st: { type: number };
+  try {
+    st = statfsSync(probe);
+  } catch (err) {
+    return { ok: false, reason: `cannot inspect the filesystem for ${probe}: ${msg(err)}` };
+  }
+  const name = isSupportedLocalFilesystemType(st.type) ? LOCAL_FILESYSTEM_TYPES[st.type] : undefined;
+  if (!name) {
+    return { ok: false, reason: `filesystem type 0x${st.type.toString(16)} at ${probe} is not allowlisted for custody` };
+  }
+  return { ok: true, type: name };
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -488,6 +671,9 @@ export function atomicReplace(
   // (flair#1778 2c-i-d2 crash window, T1c). A SIGKILL here leaves the target
   // byte-identical and orphans the temp + lock (cleanup bypassed).
   onAfterFsync?: (tempPath: string) => void,
+  onAfterRename?: (targetPath: string) => void,
+  onBeforeRename?: () => void,
+  onPublished?: () => void,
 ): ReplaceResult {
   if (original && !isRegularMode(original.mode)) {
     return { ok: false, reason: `the destination ${targetPath} is not a regular file (mode ${original.mode.toString(8)}); refusing to replace it` };
@@ -544,15 +730,25 @@ export function atomicReplace(
   envBarrier("fsync");
   onAfterFsync?.(tempPath);
 
+  try { onBeforeRename?.(); }
+  catch (err) { return fail(`pre-rename check failed: ${msg(err)}`); }
   try { renameSync(tempPath, targetPath); }
   catch (err) { cleanupTemp(); return { ok: false, reason: `could not rename the staging file into place: ${msg(err)}` }; }
 
   let cleanupWarning: string | null = null;
   try {
-    const dfd = openSync(dir, "r");
-    try { fsyncSync(dfd); } finally { try { closeSync(dfd); } catch { /* */ } }
+    onAfterRename?.(targetPath);
+    onPublished?.();
   } catch (err) {
-    cleanupWarning = `the replacement is committed but the directory fsync failed: ${msg(err)}`;
+    cleanupWarning = `the replacement is committed but the post-rename step failed: ${msg(err)}`;
+  }
+  if (cleanupWarning === null) {
+    try {
+      const dfd = openSync(dir, "r");
+      try { fsyncSync(dfd); } finally { try { closeSync(dfd); } catch { /* */ } }
+    } catch (err) {
+      cleanupWarning = `the replacement is committed but the directory fsync failed: ${msg(err)}`;
+    }
   }
   return { ok: true, cleanupWarning };
 }
@@ -586,7 +782,7 @@ export function withConfigCriticalSection(
     barrier(opts.testHooks?.afterPreObserve, "preObserve", attempt);
 
     // 2. LOCK (computed once per attempt).
-    const lockPath = `${targetPath}.lock`;
+    const lockPath = opts.lockPath ?? `${targetPath}.lock`;
     const lock = acquireLock(lockPath, lockRetry);
     if (!lock.ok) {
       return { status: "refused", path: targetPath, attempts, message: lockRefusalLine(lockPath, lock.holder) };
@@ -647,13 +843,35 @@ export function withConfigCriticalSection(
         return { status: "noop", path: targetPath, attempts, message: decision.noop, backupPath };
       }
 
-      // 5. WRITE.
+      // 5. WRITE. Stage under the SAME lock before replacing the target.
+      let stageCleanup: (() => void) | undefined;
+      if (opts.stage) {
+        try {
+          const staged = opts.stage(decision.write, obs);
+          stageCleanup = typeof staged === "function" ? staged : undefined;
+        } catch (err) {
+          return { status: "refused", path: targetPath, attempts, message: `target was not replaced; staged files may remain: staging failed: ${msg(err)}`, backupPath };
+        }
+      }
       const original = obs.target.type === "regular"
         ? { mode: obs.target.mode!, uid: obs.target.uid!, gid: obs.target.gid! }
         : null;
-      const wr = atomicReplace(targetPath, decision.write, original, opts.testHooks?.afterTempCreate, opts.testHooks?.afterFsync);
+      let wr: ReplaceResult;
+      try {
+        wr = atomicReplace(targetPath, decision.write, original, opts.testHooks?.afterTempCreate, opts.testHooks?.afterFsync, opts.testHooks?.afterRename, opts.beforeRename, opts.afterRename);
+      } catch (err) {
+        try { stageCleanup?.(); } catch { /* the original failure stands */ }
+        throw err;
+      }
       if (!wr.ok) {
-        return { status: "refused", path: targetPath, attempts, message: `nothing written: ${wr.reason}`, backupPath };
+        try { stageCleanup?.(); } catch { /* the refusal stands */ }
+        const prefix = opts.stage ? "target was not replaced; staged files may remain" : "target was not replaced";
+        return { status: "refused", path: targetPath, attempts, message: `${prefix}: ${wr.reason}`, backupPath };
+      }
+      let cleanupWarning = wr.cleanupWarning;
+      if (cleanupWarning === null && opts.onCommitted) {
+        try { opts.onCommitted(); }
+        catch (err) { cleanupWarning = `the replacement is committed but the post-rename step failed: ${msg(err)}`; }
       }
       return {
         status: "written",
@@ -662,7 +880,7 @@ export function withConfigCriticalSection(
         message: "",
         backupPath,
         committed: true,
-        cleanupWarning: wr.cleanupWarning,
+        cleanupWarning,
       };
     } finally {
       // 6. RELEASE in finally, including when decide() throws.

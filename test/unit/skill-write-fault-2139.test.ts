@@ -7,7 +7,7 @@ import { join, relative } from "node:path";
 import { maybeThrowSkillWriteFault, setSkillWriteFaultHook } from "../../resources/skill-write-fault.ts";
 
 const ROOT = join(import.meta.dir, "..", "..");
-const STEPS = ["successor", "close", "pointer", "append"] as const;
+const STEPS = ["successor", "close", "pointer", "append", "event"] as const;
 
 afterEach(() => setSkillWriteFaultHook(null));
 

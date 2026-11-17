@@ -30,20 +30,20 @@ authentication:
     # (flair#1152). Requires @harperfast/oauth >= 2.5.0 (resolved-version
     # assertion + behavioral gate: test/integration/mcp-oauth-boot-safety.test.ts).
     #
-    # ASYMMETRY (load-bearing, measured on oauth 2.5.0): the two readers of
-    # this flag accept DIFFERENT vocabularies. The component's
-    # coerceConfigBoolean accepts ONLY "true"/"false" and DELETES any other
-    # string (unresolved placeholder, "1", "yes", garbage) so its disabled
-    # default applies. flair's mcpOAuthEnabled() accepts 1/true/yes/on.
+    # ASYMMETRY (load-bearing, measured on @harperfast/oauth 2.9.0): the two
+    # readers of this flag accept DIFFERENT vocabularies. The component's
+    # coerceConfigBoolean trims and lowercases, mapping "true"/"false" to a
+    # boolean, and normalizeBooleanField deletes strings it cannot coerce
+    # (unresolved placeholder, "1", "yes", garbage), so its disabled default
+    # applies (dist/lib/config.js). flair's mcpOAuthEnabled() accepts
+    # 1/true/yes/on.
     #
-    # Failure modes (oauth 2.5.0):
+    # Failure modes (oauth 2.9.0):
     #   unset             -> placeholder deleted -> both sides OFF, clean boot
-    #   true              -> BOTH sides ON — the one working enable value
-    #                        (`flair mcp enable` stages exactly this)
+    #   true              -> both flag readers accept this value
     #   false             -> both sides OFF
-    #   1 / yes / on      -> flair /mcp handler ON, component AS OFF ->
-    #                        fail-closed broken-on: every /mcp request 401s,
-    #                        no AS is advertised. Use "true" instead.
+    #   1 / yes / on      -> flair's reader is ON, the component deletes the
+    #                        value (AS stays OFF); /mcp is not mounted.
     #   garbage (maybe)   -> deleted -> component OFF; flair strict -> OFF.
     #                        Inert: no /mcp handler, no data path (flair's own
     #                        discovery documents still serve, by design).

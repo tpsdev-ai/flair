@@ -114,6 +114,8 @@ function stageOrRun(ctx: any, apply: () => void): void {
 }
 
 export class BaseMemory {
+  /** Harper's table validator surface (flair#2997's pre-staging check). */
+  static validate() {}
   static _readTxnForContext(_ctx: any) { return undefined; }
   static transformEntryForSelect(select: any) {
     return ({ value: row }: any) => {
@@ -358,6 +360,8 @@ export class BaseMemoryDeletionHistory {
 // flair#2139 3b: the instruction-version writer appends one event per version
 // through `databases.flair.OrgEvent.create(record, shared)`.
 export class BaseOrgEvent {
+  /** Harper's table validator surface (flair#2997's pre-staging check). */
+  static validate() {}
   static async create(record: any, ctx?: any) {
     stageOrRun(ctx, () => harnessState.eventStore.set(record.id, { ...record }));
   }

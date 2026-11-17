@@ -1,0 +1,6 @@
+- **Restore refuses an archive row these admission checks reject before deleting the live copy.**
+  Archive admission conservatively refuses a row id containing `.` because a suffix such as `.json` or `.content` can be read as a content type or an attribute selector, and it checks a row restore writes against that table's GraphQL schema: a required column the write does not supply (for Agent, createdAt and publicKey are copied from the stored row, and the resource refuses when no stored row exists), or a present non-null column holding the wrong JS type. Each schema-type refusal names the row, the field and the expected type; a dotted-id refusal names the row and the field. Restore stops before any request.
+
+  > **Heads-up:** `flair restore`, with or without `--replace`, now refuses the whole archive when any
+  > agents, souls or memories row has an id containing `.`, naming that row. It stops before any
+  > request, so nothing is deleted.

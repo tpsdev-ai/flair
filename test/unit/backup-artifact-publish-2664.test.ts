@@ -41,7 +41,7 @@ const MODULE = join(import.meta.dir, "..", "..", "src", "lib", "backup-artifact.
 
 const archiveValue = (label: string) => ({
   version: 1, createdAt: "2026-10-19T00:00:00.000Z", source: `http://${label}.invalid`,
-  agents: [{ id: "flint" }], souls: [], memories: [{ id: `m-${label}`, agentId: "flint", content: `${label} content é ✓` }],
+  agents: [{ id: "flint", name: "flint" }], souls: [], memories: [{ id: `m-${label}`, agentId: "flint", content: `${label} content é ✓` }],
 });
 const archiveText = (label: string): string => JSON.stringify(archiveValue(label), null, 2) + "\n";
 const OLD = archiveText("old");
@@ -130,7 +130,7 @@ describe("publishing a backup archive with its digest sidecar, single writer (#2
   test("the digest covers the exact bytes given, not a re-serialization: non-canonical input", () => {
     const { out } = setUp("no files");
     // Neither the compact nor the pretty-printed form of this document.
-    const serialized = `{ "version":1,"agents" : [ {"id":"flint"} ], "souls":[],\n"memories":[]  }\n`;
+    const serialized = `{ "version":1,"agents" : [ {"id":"flint","name":"flint"} ], "souls":[],\n"memories":[]  }\n`;
     const value = JSON.parse(serialized);
     expect(serialized).not.toBe(JSON.stringify(value));
     expect(serialized).not.toBe(JSON.stringify(value, null, 2) + "\n");
