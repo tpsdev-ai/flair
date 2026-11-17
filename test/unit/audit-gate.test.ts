@@ -1417,7 +1417,14 @@ describe("cumulative allowlist lifetime (#2897)", () => {
   });
 
   it("requires the full GHSA id shape in allowlist entries (#2993)", () => {
-    for (const badGhsa of ["GHSA-a", "GHSA-aaaa-bbbb", "GHSA-aaaaa-bbbb-cccc"]) {
+    for (const badGhsa of [
+      "GHSA-a",
+      "GHSA-aaaa-bbbb",
+      "GHSA-aaaaa-bbbb-cccc",
+      "GHSA-aaaa-bbbb-ccccc",
+      "GHSA-aaaa-bbbb-cccc-",
+      "GHSA-aaaa-bbbb-cccc-dddd",
+    ]) {
       const problems = validateAllowlist(
         { policy, entries: [entry({ ghsa: badGhsa })] },
         new Date("2026-09-21"),
