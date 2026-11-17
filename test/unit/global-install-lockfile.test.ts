@@ -91,9 +91,9 @@ function healthyPrefix() {
   const prefix = mkdtempSync(join(tmpdir(), "flair-gi-"));
   fixtures.push(prefix);
   const paths = treePaths(prefix);
-  writePackage(paths.flair, { name: FLAIR_PACKAGE, version: "0.0.1", dependencies: { harper: "5.3.4" } });
+  writePackage(paths.flair, { name: FLAIR_PACKAGE, version: "0.0.1", dependencies: { harper: "5.3.6" } });
   const harper = join(paths.flair, "node_modules", "harper");
-  writePackage(harper, { name: "harper", version: "5.3.4", dependencies: { "fs-extra": "11.3.0" } });
+  writePackage(harper, { name: "harper", version: "5.3.6", dependencies: { "fs-extra": "11.3.0" } });
   mkdirSync(paths.harperLoggingDir, { recursive: true });
   const fsExtra = join(harper, "node_modules", "fs-extra");
   writePackage(fsExtra, { name: "fs-extra", version: "11.3.0", main: "index.js" });
@@ -125,7 +125,7 @@ function addPackages(prefix: string, count: number, namePrefix = "pkg") {
 }
 
 /**
- * A prefix shaped like harper 5.3.4's: harper's dependencies live in its own
+ * A prefix shaped like harper 5.3.6's: harper's dependencies live in its own
  * bundled `node_modules`, so an npm summary line can count one package where
  * the disk holds four beneath harper (six in the graph with flair and harper).
  */
@@ -133,12 +133,12 @@ function bundledPrefix() {
   const prefix = mkdtempSync(join(tmpdir(), "flair-gi-bundled-"));
   fixtures.push(prefix);
   const paths = treePaths(prefix);
-  writePackage(paths.flair, { name: FLAIR_PACKAGE, version: "0.0.1", dependencies: { harper: "5.3.4" } });
+  writePackage(paths.flair, { name: FLAIR_PACKAGE, version: "0.0.1", dependencies: { harper: "5.3.6" } });
   const harper = join(paths.flair, "node_modules", "harper");
   const bundled = ["bundled-0", "bundled-1", "bundled-2", "@scope/bundled-scoped"];
   writePackage(harper, {
     name: "harper",
-    version: "5.3.4",
+    version: "5.3.6",
     dependencies: Object.fromEntries(bundled.map((name) => [name, "1.0.0"])),
   });
   for (const name of bundled) {
@@ -216,8 +216,8 @@ describe("the reviewed floor (flair#1683)", () => {
   // Measured with npm 11.19.1 (the canary pin) on 2026-10-23: this branch at
   // d55695aa (harper 5.3.3) → 492; origin/main at 0c24e5ce (harper 5.3.1) → 520.
   // npm 10.9.4 measured 492 at d55695aa (harper 5.3.3), 492 at 0c24e5ce
-  // (harper 5.3.1) and 492 at 1654a8f6 (harper 5.3.4).
-  const HEAD_MEASURED = 492;
+  // (harper 5.3.1), 492 at 1654a8f6 (harper 5.3.4) and 493 at harper 5.3.6.
+  const HEAD_MEASURED = 493;
   const MAIN_MEASURED = 520;
 
   test("sits below both measured trees and above the broken shape", () => {
@@ -291,7 +291,7 @@ describe("the count follows Flair's dependency graph, not the prefix", () => {
     writePackage(paths.flair, {
       name: FLAIR_PACKAGE,
       version: "0.0.1",
-      dependencies: { harper: "5.3.4" },
+      dependencies: { harper: "5.3.6" },
       optionalDependencies: { "absent-optional": "1.0.0" },
     });
     expect(countFlairTree(paths.flair, paths.globalNodeModules)).toBe(3);
