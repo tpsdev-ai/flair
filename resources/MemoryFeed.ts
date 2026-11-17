@@ -243,10 +243,12 @@ export class FeedMemories extends Resource {
       // for the branch: every Memory row this write writes is held.
       // The live head is resolved before the acquisition and its id joins the
       // lock set, because it is the row the write closes when the addressed id
-      // is absent. Under the locks the head is resolved again; a head that is
-      // not one of the held ids releases and retries with the new head. The
-      // write is refused skill_head_moved only if the resolved head stays
-      // outside the held set through the final attempt.
+      // is absent. The addressed row and the predecessor are pre-lock reads
+      // too; validateSkillSnapshots makes both fresh under the locks. Under the
+      // locks the head is resolved again; a head that is not one of the held
+      // ids releases and retries with the new head. The write is refused
+      // skill_head_moved only if the resolved head stays outside the held set
+      // through the final attempt.
       // One acquisition per attempt, taken before the version writer's
       // instruction lock.
       const baseLockIds = [successorId, addressedId, predecessor ? String(predecessor.id) : null]
@@ -278,6 +280,7 @@ export class FeedMemories extends Resource {
             ctx,
             subjectId,
             agentId,
+            heldMemoryIds: attemptIds,
             head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
             plan: async (head, shared) => {
               if (head && !heldIds.has(String(head.id))) {

@@ -133,6 +133,41 @@ function reorderMemories(archivePath: string, orderedIds: string[]): void {
   writeFileSync(`${archivePath}.sha256`, `${createHash("sha256").update(text).digest("hex")}  ${basename(archivePath)}\n`);
 }
 
+/**
+ * A proxy in front of this test's Harper that answers DELETE of one Memory id
+ * with `status` and proxies the rest to this test's Harper. restore treats a
+ * 4xx other than 404, and a 5xx, as a failed DELETE.
+ */
+function refusingDeleteProxy(refusedId: string, status = 422): { url: string; refusals: string[]; stop: () => void } {
+  const refusals: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (req.method === "DELETE" && url.pathname === `/Memory/${encodeURIComponent(refusedId)}`) {
+        refusals.push(refusedId);
+        return new Response(JSON.stringify({ error: "memory_delete_refused" }), {
+          status,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const target = new URL(url.pathname + url.search, harper.httpURL);
+      const headers = new Headers(req.headers);
+      headers.delete("host");
+      const res = await fetch(target, {
+        method: req.method,
+        headers,
+        body: req.method === "GET" || req.method === "HEAD" ? undefined : await req.text(),
+        signal: AbortSignal.timeout(30_000),
+      });
+      return new Response(res.body, { status: res.status, headers: res.headers });
+    },
+  });
+  if (server.port === 9925 || server.port === 9926) throw new Error("refusing to run: proxy landed on a production ops port");
+  return { url: `http://127.0.0.1:${server.port}`, refusals, stop: () => server.stop(true) };
+}
+
 /** Rewrite an archive's Soul order and its digest sidecar. */
 function reorderSouls(archivePath: string, orderedIds: string[]): void {
   const archive = JSON.parse(readFileSync(archivePath, "utf8"));
@@ -341,11 +376,11 @@ describe("flair restore --replace refuses a learned-content Soul replay before d
     }
   }, 300_000);
 
-  test("case (vi): a Memory DELETE the server refuses stops the run before any Soul row is deleted", async () => {
+  test("case (vi): a Memory DELETE the proxy refuses stops the run before any Soul row is deleted", async () => {
     const home = tempDir("flair-2941-real-home-");
     const agent = "learned-legacy-member-agent";
     const soulId = `${agent}:identity`;
-    const memoryId = `${agent}:legacy.content`;
+    const memoryId = `${agent}:legacy-member`;
     const value = "the text shared by the soul and the legacy memory";
 
     await seedAgent(agent);
@@ -357,24 +392,30 @@ describe("flair restore --replace refuses a learned-content Soul replay before d
       records: [{ id: memoryId, agentId: agent, content: value, durability: "persistent", createdAt: CREATED_AT }],
     });
     const archive = await backup(home, "learned-legacy-member.json", agent);
+    const proxy = refusingDeleteProxy(memoryId);
 
-    const before = { soul: await row("Soul", soulId), memory: await row("Memory", memoryId) };
+    try {
+      const before = { soul: await row("Soul", soulId), memory: await row("Memory", memoryId) };
 
-    const restored = await runCli(["restore", archive, "--replace", "--url", harper.httpURL], home, { FLAIR_ADMIN_PASS: harper.admin.password });
+      const restored = await runCli(["restore", archive, "--replace", "--url", proxy.url], home, { FLAIR_ADMIN_PASS: harper.admin.password });
 
-    expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
-    expect(await row("Soul", soulId)).toEqual(before.soul);
-    expect(await row("Memory", memoryId)).toEqual(before.memory);
-    expect(restored.stderr).toContain(memoryId);
-    expect(restored.stderr).toContain("no Soul row was deleted");
+      expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
+      expect(await row("Soul", soulId)).toEqual(before.soul);
+      expect(await row("Memory", memoryId)).toEqual(before.memory);
+      expect(restored.stderr).toContain(memoryId);
+      expect(restored.stderr).toContain("no Soul row was deleted");
+      expect(proxy.refusals).toContain(memoryId);
+    } finally {
+      proxy.stop();
+    }
   }, 300_000);
 
-  test("case (vii): a later Memory DELETE failure restores a Memory the run already deleted", async () => {
+  test("case (vii): a later Memory DELETE the proxy refuses restores a Memory the run already deleted", async () => {
     const home = tempDir("flair-2941-real-home-");
     const agent = "learned-partial-delete-agent";
     const soulId = `${agent}:identity`;
     const ordinaryId = `${agent}:a-ordinary`;
-    const refusedId = `${agent}:z-legacy.content`;
+    const refusedId = `${agent}:z-legacy-member`;
     const value = "the text shared by the soul and the legacy memory";
 
     await seedAgent(agent);
@@ -390,16 +431,22 @@ describe("flair restore --replace refuses a learned-content Soul replay before d
     });
     const archive = await backup(home, "learned-partial-delete.json", agent);
     reorderMemories(archive, [ordinaryId, refusedId]);
+    const proxy = refusingDeleteProxy(refusedId);
 
-    const before = { soul: await row("Soul", soulId), refused: await row("Memory", refusedId) };
+    try {
+      const before = { soul: await row("Soul", soulId), refused: await row("Memory", refusedId) };
 
-    const restored = await runCli(["restore", archive, "--replace", "--url", harper.httpURL], home, { FLAIR_ADMIN_PASS: harper.admin.password });
+      const restored = await runCli(["restore", archive, "--replace", "--url", proxy.url], home, { FLAIR_ADMIN_PASS: harper.admin.password });
 
-    expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
-    expect(restored.stderr).toContain("no Soul row was deleted");
-    expect(await row("Memory", ordinaryId)).toMatchObject({ agentId: agent, content: "an ordinary note" });
-    expect(await row("Memory", refusedId)).toEqual(before.refused);
-    expect(await row("Soul", soulId)).toEqual(before.soul);
+      expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
+      expect(restored.stderr).toContain("no Soul row was deleted");
+      expect(await row("Memory", ordinaryId)).toMatchObject({ agentId: agent, content: "an ordinary note" });
+      expect(await row("Memory", refusedId)).toEqual(before.refused);
+      expect(await row("Soul", soulId)).toEqual(before.soul);
+      expect(proxy.refusals).toContain(refusedId);
+    } finally {
+      proxy.stop();
+    }
   }, 300_000);
 
 

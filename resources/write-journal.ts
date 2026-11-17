@@ -67,6 +67,20 @@ export class WriteJournal {
     return active.run(this, fn);
   }
 
+  /** The Memory row ids this journal's writes touched, sorted. Undo holds
+   *  these ids' per-id write lock around its checks and writes (flair#2950). */
+  memoryWriteIds(): string[] {
+    const store = (databases as any)?.flair?.Memory?.primaryStore;
+    if (!store) return [];
+    const ids = new Set<string>();
+    for (const entry of this.entries) {
+      if (entry.operation?.store === store && entry.operation.key != null) {
+        ids.add(String(entry.operation.key));
+      }
+    }
+    return [...ids].sort();
+  }
+
   async transaction<T>(ctx: any, fn: (capture: () => void, complete: () => void) => Promise<T>): Promise<T> {
     let callbackCompleted = false;
     const releases: (() => void)[] = [];

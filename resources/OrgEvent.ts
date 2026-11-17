@@ -206,6 +206,8 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   }
 
   private async _store(content: any, mode: CreatedAtWriteMode, pausePoint: () => Promise<void> | undefined, addressedId?: any) {
+    // Not pre-validated: this row carries the caller's fields as supplied, so a
+    // schema failure stays the caller's 400 at commit (flair#3002).
     const table = (databases as any).flair.OrgEvent;
     const records = Array.isArray(content) ? content : [content];
     const auth = await this._auth();

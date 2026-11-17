@@ -71,10 +71,13 @@ describe("mcpIssuer / mcpResource", () => {
     expect(mcpIssuer()).toBe("https://flair.example.com");
   });
 
-  it("falls back to FLAIR_PUBLIC_URL", () => {
+  it("FLAIR_PUBLIC_URL does not configure the MCP issuer", () => {
     clearEnv();
     process.env.FLAIR_PUBLIC_URL = "https://pub.example.com";
-    expect(mcpIssuer()).toBe("https://pub.example.com");
+    process.env.FLAIR_MCP_OAUTH = "true";
+    expect(mcpIssuer()).toBeUndefined();
+    expect(mcpResource()).toBeUndefined();
+    expect(mcpAuthConfig()).toBeUndefined();
   });
 
   it("resource is issuer + /mcp (trailing slash trimmed)", () => {

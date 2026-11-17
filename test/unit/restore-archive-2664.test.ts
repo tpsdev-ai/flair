@@ -74,7 +74,7 @@ function backup(memories: Row[] = [memory("m-1")], extra: Row = {}): Row {
     version: 1,
     createdAt: "2026-10-03T00:00:00.000Z",
     source: "http://flair.invalid",
-    agents: [{ id: AGENT, displayName: "Agent A" }],
+    agents: [{ id: AGENT, name: "Agent A", displayName: "Agent A" }],
     souls: [{ id: "soul-1", agentId: AGENT, key: "role", value: "builder" }],
     memories,
     ...extra,
@@ -96,12 +96,17 @@ function accepted(doc: unknown): RestoreArchive {
   return result.archive;
 }
 
-/** Validate one row inside an otherwise valid archive; return its failures. */
+/** Validate one row as a Memory admission entry; return its failures. The
+ *  row is passed to the validator directly: archive admission now also refuses
+ *  the schema-type violations some cases here exercise. */
 function rowFailures(row: Row): readonly RestoreEntryFailure[] {
-  const result = validateRestoreSelection(accepted(backup([row])));
-  if (result.ok) return [];
-  expect(result.code).toBe("entries-refused");
-  return result.failures;
+  const result = validateRestoreMemoryRow(row);
+  return result.ok ? [] : result.failures;
+}
+
+/** An archive holding `memories`, not built through parse admission. */
+function rawBackup(memories: Row[]): RestoreArchive {
+  return { version: 1, agents: [], souls: [], memories } as unknown as RestoreArchive;
 }
 
 function expectOnlyFailure(row: Row, code: RestoreEntryFailure["code"], field: string): void {
@@ -435,27 +440,36 @@ describe("the archive shape matches what flair backup writes", () => {
   test("a dot-segment row id refuses in every collection", () => {
     for (const id of [".", ".."]) {
       expect(refusal(backup([memory(id)]))).toMatchObject({ ok: false, code: "invalid-row", location: "/memories/0/id" });
-      expect(refusal(backup(undefined, { agents: [{ id }] }))).toMatchObject({ ok: false, code: "invalid-row", location: "/agents/0/id" });
+      expect(refusal(backup(undefined, { agents: [{ id, name: "Agent A" }] }))).toMatchObject({ ok: false, code: "invalid-row", location: "/agents/0/id" });
     }
     expect(refusal(backup([memory("a/b?c#d%")])).ok).toBe(true);
+  });
+
+  test("a row id containing a dot refuses in every collection", () => {
+    const dotted = "soul-1.json";
+    expect(refusal(backup([memory(dotted)]))).toMatchObject({ ok: false, code: "invalid-row", location: "/memories/0/id" });
+    expect(refusal(backup(undefined, { agents: [{ id: dotted, name: "Agent A" }] })))
+      .toMatchObject({ ok: false, code: "invalid-row", location: "/agents/0/id" });
+    expect(refusal(backup(undefined, { souls: [{ id: dotted, agentId: AGENT, key: "role", value: "builder" }] })))
+      .toMatchObject({ ok: false, code: "invalid-row", location: "/souls/0/id" });
   });
 
   test("a Soul or Memory row without a non-empty string agentId refuses; an Agent row needs none", () => {
     expect(refusal(backup([memory("m-1", { agentId: "" })]))).toMatchObject({ ok: false, code: "invalid-row", location: "/memories/0/agentId" });
     expect(refusal(backup(undefined, { souls: [{ id: "soul-1", key: "role", value: "builder" }] })))
       .toMatchObject({ ok: false, code: "invalid-row", location: "/souls/0/agentId" });
-    expect(refusal(backup(undefined, { agents: [{ id: AGENT }] })).ok).toBe(true);
+    expect(refusal(backup(undefined, { agents: [{ id: AGENT, name: "Agent A" }] })).ok).toBe(true);
   });
 
   test("a repeated id within a collection refuses at the repeat", () => {
     expect(refusal(backup([memory("m-1"), memory("m-2"), memory("m-1", { content: "other" })])))
       .toMatchObject({ ok: false, code: "duplicate-id", location: "/memories/2/id" });
-    expect(refusal(backup(undefined, { souls: [{ id: "s", agentId: AGENT }, { id: "s", agentId: AGENT }] })))
+    expect(refusal(backup(undefined, { souls: [{ id: "s", agentId: AGENT, key: "role", value: "a" }, { id: "s", agentId: AGENT, key: "role", value: "b" }] })))
       .toMatchObject({ ok: false, code: "duplicate-id", location: "/souls/1/id" });
   });
 
   test("the same id in different collections is not a repeat", () => {
-    const result = refusal(backup([memory(AGENT)], { souls: [{ id: AGENT, agentId: AGENT }] }));
+    const result = refusal(backup([memory(AGENT)], { souls: [{ id: AGENT, agentId: AGENT, key: "role", value: "builder" }] }));
     expect(result.ok).toBe(true);
   });
 
@@ -702,16 +716,16 @@ describe("validateRestoreSelection admits promotion fields readers can interpret
 });
 
 describe("validateRestoreSelection is all-or-nothing", () => {
-  const mixed = () => accepted(backup([
+  const mixed = () => rawBackup([
     memory("m-1"),
     bound("m-2", { promotionContentHash: promotionContentHash("not the content") }),
     bound("m-3"),
     memory("m-4", { content: 4 }),
     legacy("m-5"),
-  ]));
+  ]);
 
   test("one failing entry refuses the selection and returns no entries", () => {
-    const result = validateRestoreSelection(accepted(backup([memory("m-1"), memory("m-2", { content: 2 }), bound("m-3")])));
+    const result = validateRestoreSelection(rawBackup([memory("m-1"), memory("m-2", { content: 2 }), bound("m-3")]));
     expect(result).toMatchObject({ ok: false, code: "entries-refused" });
     expect("entries" in result).toBe(false);
   });
@@ -725,7 +739,7 @@ describe("validateRestoreSelection is all-or-nothing", () => {
   });
 
   test("a row with several problems lists each of them", () => {
-    const result = validateRestoreSelection(accepted(backup([memory("m-1", { content: 1, promotionStatus: "maybe", promotedBy: 3 })])));
+    const result = validateRestoreSelection(rawBackup([memory("m-1", { content: 1, promotionStatus: "maybe", promotedBy: 3 })]));
     expect(result.ok ? [] : result.failures.map(({ code, field }) => ({ code, field }))).toEqual([
       { code: "content-not-string", field: "content" },
       { code: "undeclared-promotion-status", field: "promotionStatus" },

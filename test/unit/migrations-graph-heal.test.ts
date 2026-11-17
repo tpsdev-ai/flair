@@ -112,6 +112,7 @@ function makeFakeOrgEventTable() {
         puts.push(content);
         return content;
       },
+      validate() {},
     },
   };
 }

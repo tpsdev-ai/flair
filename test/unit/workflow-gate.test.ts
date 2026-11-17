@@ -126,10 +126,10 @@ function execute(script: string) {
 }
 
 describe("workflow coverage-gate checker — the adapter script on real bash", () => {
-  test.skipIf(!HAS_BASH)(`exits 0 only when both dependencies succeed${BASH_SKIP}`, () => {
+  test.skipIf(!HAS_BASH)(`exits 0 only when all dependencies succeed${BASH_SKIP}`, () => {
     const script = adapterScript(ADAPTER_WORKFLOW);
     const jobs = dependencyJobs(script);
-    expect(jobs.sort()).toEqual(["test-darwin-gated", "test-unit"]);
+    expect(jobs.sort()).toEqual(["custody-denial-root", "test-darwin-gated", "test-unit"]);
     const wrong = resultCombinations(jobs)
       .map((results) => {
         const label = jobs.map((job) => `${job}=${results[job]}`).join(", ");
@@ -144,8 +144,8 @@ describe("workflow coverage-gate checker — the adapter script on real bash", (
   test.skipIf(!HAS_BASH)(`the joined fixture exits 0 for a failed unit dependency, and the checker refuses it${BASH_SKIP}`, () => {
     const script = adapterScript(JOINED_FIXTURE);
     const jobs = dependencyJobs(script);
-    expect(jobs.sort()).toEqual(["test-darwin-gated", "test-unit"]);
-    const failedUnit = { "test-unit": "failure", "test-darwin-gated": "success" };
+    expect(jobs.sort()).toEqual(["custody-denial-root", "test-darwin-gated", "test-unit"]);
+    const failedUnit = { "test-unit": "failure", "test-darwin-gated": "success", "custody-denial-root": "success" };
     expect(execute(substitute(script, failedUnit)).status).toBe(0);
     expect(() => checkCoverageGate(fixture("refused-adapter-joined-exit.yml"), GATE)).toThrow(
       `the required "Unit Tests" job "${ADAPTER_JOB_ID}" must run the canonical adapter script`,

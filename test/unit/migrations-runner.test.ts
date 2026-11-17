@@ -283,7 +283,7 @@ describe("runMigrationCycle — derived-only happy path (count+marker gate, no h
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -803,7 +803,7 @@ describe("runMigrationCycle — schema-additive happy path (count+full-envelope 
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -839,7 +839,7 @@ describe("runMigrationCycle — schema-additive happy path (count+full-envelope 
       dataDir,
       runningVersion: "0.1.0",
       sleep: meddlingSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true); // the CYCLE completed; the individual migration halted
@@ -880,7 +880,7 @@ describe("runMigrationCycle — shared envelope re-baselines after an earlier mi
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -933,7 +933,7 @@ describe("runMigrationCycle — shared envelope re-baselines after an earlier mi
       dataDir,
       runningVersion: "0.1.0",
       sleep: meddlingSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -960,7 +960,7 @@ describe("runMigrationCycle — content-transform (count+old-row-envelope+new-ro
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -987,7 +987,7 @@ describe("runMigrationCycle — content-transform (count+old-row-envelope+new-ro
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1030,7 +1030,7 @@ describe("runMigrationCycle — pre-flight space ladder", () => {
       runningVersion: "0.1.0",
       sleep: fastSleep,
       spaceProbe: { getFreeBytes: () => 0, getTotalBytes: () => 1_000_000 },
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1102,7 +1102,7 @@ describe("runMigrationCycle — snapshot + content-export fallback both failing 
       sleep: fastSleep,
       snapshotRoot,
       exportRoot,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1136,7 +1136,7 @@ describe("runMigrationCycle — completion gate: row count still nonzero", () =>
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1193,7 +1193,7 @@ describe("runMigrationCycle — flair#807 completion-gate safety net (migration.
         dataDir,
         runningVersion: "0.1.0",
         sleep: fastSleep,
-        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
       });
 
       expect(result.ran).toBe(true);
@@ -1228,7 +1228,7 @@ describe("runMigrationCycle — flair#807 completion-gate safety net (migration.
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1253,7 +1253,7 @@ describe("runMigrationCycle — flair#807 completion-gate safety net (migration.
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1283,7 +1283,7 @@ describe("runMigrationCycle — flair#807 completion-gate safety net (migration.
         dataDir,
         runningVersion: "0.1.0",
         sleep: fastSleep,
-        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
       });
 
       expect(result.ran).toBe(true);
@@ -1318,7 +1318,7 @@ describe("runMigrationCycle — flair#807 completion-gate safety net (migration.
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1361,7 +1361,7 @@ describe("runMigrationCycle — flair#807 completion-gate safety net (migration.
       dataDir,
       runningVersion: "0.1.0",
       sleep: fastSleep,
-      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
     });
 
     expect(result.ran).toBe(true);
@@ -1641,7 +1641,7 @@ describe("runMigrationCycle — a failed state-file write is logged and surfaced
         runningVersion: "0.1.0",
         sleep: fastSleep,
         statePath: failedStatePath,
-        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; }, validate: () => {} } },
       });
 
       // (b) the DATA outcome is unchanged — the migration still completes.

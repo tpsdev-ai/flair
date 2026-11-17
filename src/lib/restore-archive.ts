@@ -23,6 +23,17 @@
  * used this parser (flair#2664 slice 1b) plus unique ids within each
  * collection, over the document `flair backup` writes (src/commands/backup.ts).
  *
+ * Schema admission (flair#2953): a row of a table restore writes is also
+ * checked against that table's GraphQL schema (schemas/*.graphql). A `!`
+ * column the row does not hold is refused, except a field the write supplies
+ * itself (RESTORE_WRITE_SUPPLIED_FIELDS: Agent copies createdAt and publicKey
+ * from the stored row and refuses when no stored row exists);
+ * every present non-null held column must hold the JS value its declared type
+ * names. Admission runs before any delete. After admission and preflight,
+ * a non-dry-run replace attempts the archived Memory DELETEs and, only if that
+ * stage completes without failure, the archived Soul DELETEs. A failed Soul
+ * DELETE is recorded and that row's PUT still runs.
+ *
  * Archive diagnostics. `parseRestoreArchive` returns the first problem it
  * finds as one refusal with a JSON Pointer `location`. Decoding and JSON-syntax
  * refusals (`invalid-utf8`, `invalid-json`, `duplicate-key`) also carry a byte
@@ -64,6 +75,80 @@ const COLLECTIONS = [
   { key: "souls", table: "Soul", owned: true },
   { key: "memories", table: "Memory", owned: true },
 ] as const;
+
+/** A column's declared GraphQL type, as the JSON value a row holds for it. */
+export type RestoreColumnType = "ID" | "String" | "Int" | "Float" | "Boolean" | "String[]" | "Float[]";
+
+export interface RestoreColumn {
+  readonly type: RestoreColumnType;
+  /** The schema marks the column `!`. */
+  readonly required: boolean;
+}
+
+/**
+ * Every column of each table restore writes, in schema order, with the type
+ * and requiredness `schemas/agent.graphql` and `schemas/memory.graphql`
+ * declare. A hand table, like DECLARED_MEMORY_ATTRIBUTES: the CLI does not read
+ * the schema files at runtime. test/unit/restore-soul-admission-2953.test.ts
+ * reads each `type <Table> @table { … }` body as a token stream and pins this
+ * table to it; a field the parser cannot read fails there, naming the line.
+ */
+export const RESTORE_TABLE_FIELDS: Readonly<Record<"Agent" | "Soul" | "Memory", Readonly<Record<string, RestoreColumn>>>> = Object.freeze({
+  Agent: Object.freeze({
+    id: { type: "ID", required: false }, name: { type: "String", required: true },
+    role: { type: "String", required: false }, type: { type: "String", required: false },
+    kind: { type: "String", required: false }, displayName: { type: "String", required: false },
+    status: { type: "String", required: false }, publicKey: { type: "String", required: true },
+    defaultTrustTier: { type: "String", required: false }, admin: { type: "Boolean", required: false },
+    runtime: { type: "String", required: false }, runtimeEndpoint: { type: "String", required: false },
+    subjects: { type: "String[]", required: false }, createdAt: { type: "String", required: true },
+    updatedAt: { type: "String", required: false }, originatorInstanceId: { type: "String", required: false },
+  } as const),
+  Soul: Object.freeze({
+    id: { type: "ID", required: false }, agentId: { type: "String", required: true },
+    key: { type: "String", required: true }, value: { type: "String", required: true },
+    priority: { type: "String", required: false }, metadata: { type: "String", required: false },
+    provenance: { type: "String", required: false }, durability: { type: "String", required: false },
+    createdAt: { type: "String", required: true }, updatedAt: { type: "String", required: false },
+    originatorInstanceId: { type: "String", required: false },
+  } as const),
+  Memory: Object.freeze({
+    id: { type: "ID", required: false }, agentId: { type: "String", required: true },
+    content: { type: "String", required: true }, contentHash: { type: "String", required: false },
+    trigger: { type: "String", required: false }, visibility: { type: "String", required: false },
+    embedding: { type: "Float[]", required: false }, embeddingModel: { type: "String", required: false },
+    embeddedContentHash: { type: "String", required: false }, tags: { type: "String[]", required: false },
+    durability: { type: "String", required: false }, source: { type: "String", required: false },
+    type: { type: "String", required: false }, createdAt: { type: "String", required: true },
+    updatedAt: { type: "String", required: false }, instanceToken: { type: "String", required: false },
+    expiresAt: { type: "String", required: false }, retrievalCount: { type: "Int", required: false },
+    lastRetrieved: { type: "String", required: false }, usageCount: { type: "Int", required: false },
+    writeBackWriteId: { type: "String", required: false }, promotionStatus: { type: "String", required: false },
+    promotedAt: { type: "String", required: false }, promotedBy: { type: "String", required: false },
+    promotionContentHash: { type: "String", required: false }, archived: { type: "Boolean", required: false },
+    archivedAt: { type: "String", required: false }, archivedBy: { type: "String", required: false },
+    parentId: { type: "String", required: false }, derivedFrom: { type: "String[]", required: false },
+    sessionId: { type: "String", required: false }, lastReflected: { type: "String", required: false },
+    supersedes: { type: "String", required: false }, subject: { type: "String", required: false },
+    summary: { type: "String", required: false }, validFrom: { type: "String", required: false },
+    validTo: { type: "String", required: false }, _safetyFlags: { type: "String[]", required: false },
+    provenance: { type: "String", required: false }, originatorInstanceId: { type: "String", required: false },
+    metadata: { type: "String", required: false }, entities: { type: "String[]", required: false },
+    skillSubjectId: { type: "String", required: false },
+  } as const),
+});
+
+/**
+ * Required columns the write supplies, so an archived row may omit them:
+ * The admission test pins assignment on every path to Soul's validate,
+ * Agent's super.put or Memory's content table PUT through putLocked, plus
+ * Agent's stored-field copies and refusal when no stored row exists.
+ */
+export const RESTORE_WRITE_SUPPLIED_FIELDS: Readonly<Record<"Agent" | "Soul" | "Memory", ReadonlySet<string>>> = Object.freeze({
+  Agent: new Set(["createdAt", "publicKey"]),
+  Soul: new Set(["createdAt"]),
+  Memory: new Set(["createdAt"]),
+});
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -519,6 +604,13 @@ function rowShapeProblem(row: unknown, owned: boolean): { reason: string; field?
   if (!isRecord(row)) return { reason: "the row is not a JSON object" };
   const id = ownValue(row, "id");
   if (typeof id !== "string" || id.length === 0) return { reason: "the row id is not a non-empty string", field: "id" };
+  if (id.includes(".")) {
+    return {
+      reason: "the row id contains \".\", which admission conservatively refuses because a suffix such as "
+        + "\".json\" or \".content\" can be read as a content type or an attribute selector",
+      field: "id",
+    };
+  }
   try {
     encodeRecordId(id);
   } catch {
@@ -529,6 +621,56 @@ function rowShapeProblem(row: unknown, owned: boolean): { reason: string; field?
     if (typeof agentId !== "string" || agentId.length === 0) {
       return { reason: "the row agentId is not a non-empty string", field: "agentId" };
     }
+  }
+  return undefined;
+}
+
+/** What a column of this type must hold, in words. */
+function expectedValue(type: RestoreColumnType): string {
+  switch (type) {
+    case "ID": return "a string";
+    case "String": return "a string";
+    case "Int": return "an integer";
+    case "Float": return "a number";
+    case "Boolean": return "a boolean";
+    case "String[]": return "an array of strings";
+    case "Float[]": return "an array of numbers";
+  }
+}
+
+/** Whether `value` is the JS value a column of this type holds. */
+function holdsColumnType(value: unknown, type: RestoreColumnType): boolean {
+  switch (type) {
+    case "ID": return typeof value === "string";
+    case "String": return typeof value === "string";
+    case "Int": return typeof value === "number" && Number.isInteger(value);
+    case "Float": return typeof value === "number" && Number.isFinite(value);
+    case "Boolean": return typeof value === "boolean";
+    case "String[]": return Array.isArray(value) && value.every((item) => typeof item === "string");
+    case "Float[]": return Array.isArray(value) && value.every((item) => typeof item === "number" && Number.isFinite(item));
+  }
+}
+
+/**
+ * Why `row` does not match the schema of the table restore writes it to;
+ * `field` names the refused column. A column the row does not hold is refused
+ * only when the schema marks it `!` and the write does not supply it; a column
+ * it holds must match the declared type. Null reads as absent.
+ */
+function rowSchemaProblem(
+  row: Record<string, unknown>,
+  table: "Agent" | "Soul" | "Memory",
+): { reason: string; field: string } | undefined {
+  for (const [field, column] of Object.entries(RESTORE_TABLE_FIELDS[table])) {
+    const value = ownValue(row, field);
+    if (value === undefined || value === null) {
+      if (column.required && !RESTORE_WRITE_SUPPLIED_FIELDS[table].has(field)) {
+        return { reason: `the row has no ${field} (the schema requires ${column.type})`, field };
+      }
+      continue;
+    }
+    if (holdsColumnType(value, column.type)) continue;
+    return { reason: `the row ${field} is not ${expectedValue(column.type)} (the schema declares ${column.type})`, field };
   }
   return undefined;
 }
@@ -548,7 +690,8 @@ function archiveShapeRefusal(doc: unknown): ShapeRefusal | undefined {
     const seen = new Map<string, number>();
     for (let index = 0; index < rows.length; index++) {
       const row: unknown = rows[index];
-      const problem = rowShapeProblem(row, owned);
+      const problem = rowShapeProblem(row, owned)
+        ?? rowSchemaProblem(row as Record<string, unknown>, table);
       if (problem) {
         return {
           code: "invalid-row",
@@ -577,8 +720,10 @@ function archiveShapeRefusal(doc: unknown): ShapeRefusal | undefined {
  * a leading byte order mark, invalid JSON, a repeated object key at any depth,
  * a version other than 1, a missing or non-array `agents`, `souls` or
  * `memories` collection, a row that is not an object with a non-empty string
- * id addressing one record path segment (Soul and Memory rows also need a
- * non-empty string `agentId`), and a repeated id within a collection.
+ * id containing no `.` (Soul and Memory rows also need a non-empty string
+ * `agentId`), a row whose held columns do not match its table's schema or
+ * that omits a required one the write does not supply, and a repeated id
+ * within a collection.
  * Decoding runs first, then the single parse, which reports whichever syntax
  * error or repeated key it reaches first (a leading byte order mark is refused
  * there). Then comes the version check, then each collection in turn
