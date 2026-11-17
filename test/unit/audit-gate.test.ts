@@ -1421,6 +1421,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       "GHSA-a",
       "GHSA-aaaa-bbbb",
       "GHSA-aaaaa-bbbb-cccc",
+      "GHSA-aaaa-bbbbb-cccc",
       "GHSA-aaaa-bbbb-ccccc",
       "GHSA-aaaa-bbbb-cccc-",
       "GHSA-aaaa-bbbb-cccc-dddd",
