@@ -202,36 +202,79 @@ function disagreementError(rawEnv: string, configured: unknown): Error {
   return new Error(`${base} ${remedy}`);
 }
 
-function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
-  let configured: unknown;
-  let issuer: unknown;
-  try {
-    configured = (component.mcp as Record<string, unknown>).issuer;
-    issuer = expandWholeTokenEnv(configured);
-  } catch {
-    throw new Error(
-      "mcp.issuer could not be read. Set FLAIR_MCP_ISSUER to an absolute http(s) origin " +
-      "and set mcp.issuer to ${FLAIR_MCP_ISSUER}. Refusing to mount /mcp.",
-    );
-  }
-  let failedRule = "not absolute";
+function issuerUnreadableError(phase: "mount" | "serve" = "mount"): Error {
+  return new Error(
+    "mcp.issuer could not be read. Set FLAIR_MCP_ISSUER to an absolute http(s) origin " +
+    "and set mcp.issuer to ${FLAIR_MCP_ISSUER}. Refusing to " + phase + " /mcp.",
+  );
+}
+
+/**
+ * FLAIR_MCP_ISSUER is unset or blank at request time. That is its own fault,
+ * not an unreadable component value: withMCPAuth verifies tokens against this
+ * variable, so without it a request has nothing to check against, whether or
+ * not the live config is readable.
+ */
+function issuerEnvMissingError(): Error {
+  return new Error(
+    "FLAIR_MCP_ISSUER is unset or blank, so a /mcp request cannot be checked against " +
+    "the authorization server's issuer. Refusing to serve /mcp. " +
+    "Set FLAIR_MCP_ISSUER to this instance's public origin.",
+  );
+}
+
+function liveMcpConfigUnreadableError(): Error {
+  return new Error(
+    "The live @harperfast/oauth MCP configuration could not be verified. Refusing to serve /mcp. " +
+    "Inspect the registered @harperfast/oauth component and ensure its mcp settings are a plain mapping " +
+    "with enabled and issuer.",
+  );
+}
+
+/**
+ * The live @harperfast/oauth MCP config is absent, or present with
+ * `enabled !== true`: the authorization server cannot mint a token for this
+ * surface, and the per-request check refuses every /mcp request as
+ * unavailable (503) before withMCPAuth runs. Absent is also what a
+ * component with no valid provider leaves behind, so the remedy names one.
+ */
+function mcpAuthUnavailableError(): Error {
+  return new Error(
+    "The @harperfast/oauth component is not serving an MCP authorization configuration " +
+    "(its live mcpConfig is absent or disabled). Refusing to serve /mcp. " +
+    "Configure a valid OAuth provider for the component — its client ID, client secret " +
+    "and redirect URI — and set FLAIR_MCP_OAUTH=true and FLAIR_MCP_ISSUER to this " +
+    "instance's public origin, with mcp.enabled true and mcp.issuer set to " +
+    "${FLAIR_MCP_ISSUER}, then restart.",
+  );
+}
+
+/**
+ * The boot guard's issuer rule, over one candidate value: the failed rule, or
+ * undefined when the value is a canonical origin that also matches
+ * FLAIR_MCP_ISSUER after the trailing-slash trim. A valid origin returns
+ * undefined when FLAIR_MCP_ISSUER is unset — the rule cannot compare against an
+ * absent reference — so the request-time check refuses an unset issuer before
+ * calling this. flair#3032: the per-request check below holds this same rule
+ * against the authorization server's live issuer, so the two checks cannot
+ * drift apart.
+ */
+function issuerFailedRule(issuer: unknown): string | undefined {
+  let failedRule: string;
   // new URL() removes ASCII tab, LF and CR anywhere and trims C0 controls
   // and spaces at the ends; other embedded C0 controls or spaces in a host throw.
   // Refuse whitespace and controls anyway: the component keeps the raw issuer.
-  if (typeof issuer !== "string") {
-    failedRule = "not a string";
-  } else if (/[\u0000-\u0020\u007F]/.test(issuer)) {
-    failedRule = "has whitespace or control characters";
-  } else try {
-    const parsedIssuer = new URL(issuer as string);
+  if (typeof issuer !== "string") return "not a string";
+  if (/[\u0000-\u0020\u007F]/.test(issuer)) return "has whitespace or control characters";
+  try {
+    const parsedIssuer = new URL(issuer);
     const pathWithoutTrailingSlash = parsedIssuer.pathname.replace(/\/+$/, "");
     if (parsedIssuer.protocol !== "http:" && parsedIssuer.protocol !== "https:") failedRule = "not http/https";
     else if (pathWithoutTrailingSlash !== "") failedRule = "has a path";
     // Stricter than @harperfast/oauth 2.9.0 on purpose: an empty `?` or `#` leaves
     // URL.search/hash empty, so the component accepts it, then prefixes every endpoint
     // with the raw value (`https://host?/oauth/mcp/token`). Refuse any raw delimiter.
-    else if (parsedIssuer.search !== "" || parsedIssuer.hash !== "" ||
-      (typeof issuer === "string" && /[?#]/.test(issuer))) failedRule = "has a query/hash";
+    else if (parsedIssuer.search !== "" || parsedIssuer.hash !== "" || /[?#]/.test(issuer)) failedRule = "has a query/hash";
     else if (parsedIssuer.username !== "" || parsedIssuer.password !== "") failedRule = "has userinfo";
     else if (issuer.replace(/\/+$/, "") !== parsedIssuer.origin) failedRule = "not in canonical origin form";
     // flair#3032: the authorization server mints tokens for THIS value, while
@@ -241,30 +284,144 @@ function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
       const envIssuer = mcpIssuer();
       if (envIssuer !== undefined && issuer.replace(/\/+$/, "") !== envIssuer.replace(/\/+$/, "")) {
         failedRule = "differs from FLAIR_MCP_ISSUER";
-      } else return;
+      } else return undefined;
     }
   } catch {
     failedRule = "not absolute";
   }
+  return failedRule;
+}
+
+function issuerRefusalError(
+  configured: unknown,
+  failedRule: string,
+  phase: "mount" | "serve" = "mount",
+): Error {
   const envName = typeof configured === "string" && configured.startsWith("${") && configured.endsWith("}")
     ? configured.slice(2, -1) : undefined;
   const detail = envName === undefined ? ` (${failedRule})`
     : process.env[envName] === undefined ? ` (environment variable ${JSON.stringify(envName)} is unset)`
     : ` (environment variable ${JSON.stringify(envName)} value fails the rule: ${failedRule})`;
   if (failedRule === "differs from FLAIR_MCP_ISSUER") {
-    throw new Error(
+    return new Error(
       "The @harperfast/oauth component's mcp.issuer is a valid absolute http(s) origin" + detail +
       ", but withMCPAuth verifies tokens against FLAIR_MCP_ISSUER, so the tokens the component mints cannot verify here. " +
-      "Refusing to mount /mcp. Set FLAIR_MCP_ISSUER and mcp.issuer to the same public origin, " +
+      `Refusing to ${phase} /mcp. Set FLAIR_MCP_ISSUER and mcp.issuer to the same public origin, ` +
       "or set mcp.issuer to ${FLAIR_MCP_ISSUER}.",
     );
   }
-  throw new Error(
+  return new Error(
     "The @harperfast/oauth component's mcp.issuer must be an absolute http(s) origin" + detail +
-    ". Refusing to mount /mcp. Set FLAIR_MCP_ISSUER to an absolute http(s) origin " +
+    `. Refusing to ${phase} /mcp. Set FLAIR_MCP_ISSUER to an absolute http(s) origin ` +
     "without a path, query, fragment or userinfo, written as scheme://host[:port] with a lowercase host, " +
     "no default port, and at most a trailing slash, and set mcp.issuer to ${FLAIR_MCP_ISSUER}.",
   );
+}
+
+function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
+  let configured: unknown;
+  let issuer: unknown;
+  try {
+    configured = (component.mcp as Record<string, unknown>).issuer;
+    issuer = expandWholeTokenEnv(configured);
+  } catch {
+    throw issuerUnreadableError();
+  }
+  const failedRule = issuerFailedRule(issuer);
+  if (failedRule !== undefined) throw issuerRefusalError(configured, failedRule);
+}
+
+/**
+ * The authorization server's live MCP config: `OAuthResource.mcpConfig` on the
+ * registered oauth resource. A successful `@harperfast/oauth` reload
+ * (`updateConfiguration` → `OAuthResource.configure`) replaces it with
+ * `expandEnvVarsDeep(options.mcp)`; a reload that leaves no valid provider clears
+ * it. That static is the value the component actually mints and advertises with —
+ * the raw config.yaml entry can still hold a `${VAR}` reference and is only what
+ * the boot guard reads. A cleared config is reported as unavailable below.
+ */
+type LiveMcpConfigRead =
+  | { kind: "absent" }
+  | { kind: "present"; config: Record<string, unknown> }
+  | { kind: "unreadable" };
+
+function readLiveMcpConfig(harperNs: any): LiveMcpConfigRead {
+  let config: unknown;
+  try {
+    config = (harperNs ?? harper).server?.resources?.get("oauth")?.Resource?.mcpConfig;
+  } catch {
+    return { kind: "unreadable" };
+  }
+  // No live MCP config means the component is not serving an authorization
+  // server for this surface at all: the per-request check refuses it as
+  // unavailable (503), and getConfig returns undefined for it.
+  if (config == null) return { kind: "absent" };
+  if (!isRecord(config)) return { kind: "unreadable" };
+  return { kind: "present", config };
+}
+
+/**
+ * flair#3032 — hold the boot guard's issuer rule on every /mcp request.
+ *
+ * The boot guard runs once, at registration. When the authorization server's
+ * issuer changes on a running instance, /mcp stays registered and every new
+ * token would be refused as a generic `invalid_token`. This re-runs the same
+ * `issuerFailedRule` (same trailing-slash trim, same `differs from
+ * FLAIR_MCP_ISSUER` rule) against the live issuer, and refuses with the boot
+ * guard's named error and remedy. Flair refuses when it cannot verify the
+ * live config. A missing FLAIR_MCP_ISSUER is a separate
+ * refusal with its own message: the request cannot be checked at all.
+ *
+ * `served` means the live config is present, enabled, and its issuer passed
+ * the rule. Every other outcome refuses.
+ */
+type McpRequestCheck =
+  | { kind: "served" }
+  | { kind: "refused"; code: string; status: string; reason: string };
+
+function checkLiveMcpConfig(harperNs: any): McpRequestCheck {
+  const unavailable = (reason: string): McpRequestCheck => ({
+    kind: "refused",
+    code: "mcp_auth_unavailable",
+    status: "MCP auth unavailable",
+    reason,
+  });
+
+  // withMCPAuth verifies against FLAIR_MCP_ISSUER; without it at request time
+  // there is no comparison to hold, so this is a refusal, never a skip. It is
+  // not a component read failure, so it gets its own message.
+  if (mcpIssuer() === undefined) return unavailable(issuerEnvMissingError().message);
+
+  const read = readLiveMcpConfig(harperNs);
+  if (read.kind === "unreadable") return unavailable(liveMcpConfigUnreadableError().message);
+  // No live config, or a disabled one, cannot mint a token for this surface.
+  if (read.kind === "absent") return unavailable(mcpAuthUnavailableError().message);
+
+  let enabled: unknown;
+  let issuer: unknown;
+  try {
+    enabled = read.config.enabled;
+  } catch {
+    return unavailable(liveMcpConfigUnreadableError().message);
+  }
+  if (enabled !== true) return unavailable(mcpAuthUnavailableError().message);
+  try {
+    issuer = read.config.issuer;
+  } catch {
+    return unavailable(issuerUnreadableError("serve").message);
+  }
+  if (issuer === undefined || issuer === null) return unavailable(issuerUnreadableError("serve").message);
+
+  const failedRule = issuerFailedRule(issuer);
+  if (failedRule === undefined) return { kind: "served" };
+  return {
+    kind: "refused",
+    code: "mcp_issuer_refused",
+    status: "Issuer refused",
+    // No configured value: the live issuer never belongs in the response or
+    // the log, so the refusal names only the rule and the remedy.
+    reason: issuerRefusalError(undefined, failedRule, "serve").message,
+  };
 }
 
 export function assertHarperOAuthComponentDeclared(harperNs?: any) {
@@ -323,9 +480,11 @@ export interface RegisterDeps {
  * ── The recorded mount decision (flair#1001) ────────────────────────────────
  *
  * Whether `/mcp` is actually being served, as decided and recorded by
- * `registerMcpOAuthRoute` itself. Anything that wants to *describe* the surface
- * — the admin Endpoints table is the first such consumer — reads this instead of
- * re-reading `FLAIR_MCP_OAUTH`.
+ * `registerMcpOAuthRoute` itself. When the route is mounted, the answer is
+ * derived on read from the live @harperfast/oauth config (flair#3032), so a
+ * config change is reported without waiting for a /mcp request. Anything that
+ * wants to *describe* the surface — the admin Endpoints table is the first such
+ * consumer — reads this instead of re-reading `FLAIR_MCP_OAUTH`.
  *
  * That distinction is the whole point. The admin Instance page used to render a
  * literal `<publicUrl>/mcp` row on every install, so a default install's own
@@ -361,8 +520,25 @@ let routeState: McpRouteState = {
   reason: "MCP route registration has not run.",
 };
 
-/** Read the mount decision the router recorded. */
+/**
+ * The namespace whose `/mcp` route is mounted, captured at mount time. A read
+ * of `mcpRouteState()` evaluates the same refusal helper against it, so the
+ * recorded answer tracks the live config instead of the last request.
+ */
+let mountedNamespace: any | undefined;
+
+/**
+ * Read the mount decision, derived from the live config when the route is
+ * mounted. A mounted route whose live config would now be refused reports the
+ * refusal, never "mounted".
+ */
 export function mcpRouteState(): McpRouteState {
+  if (routeState.mounted && mountedNamespace !== undefined) {
+    const check = checkLiveMcpConfig(mountedNamespace);
+    if (check.kind === "refused") {
+      return { mounted: false, status: check.status, reason: check.reason };
+    }
+  }
   return routeState;
 }
 
@@ -373,6 +549,7 @@ export function mcpRouteState(): McpRouteState {
  */
 function decide(state: McpRouteState): boolean {
   routeState = state;
+  if (!state.mounted) mountedNamespace = undefined;
   return state.mounted;
 }
 
@@ -493,17 +670,46 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
   // stub build of harper lacks the export.
   const srv = deps.server ?? ((harper as any).server);
 
-  // Mount /mcp after the guard.
+  // Mount /mcp after the guard. The listener below holds the issuer rule on
+  // every request before the wrapper runs (flair#3032), so a live issuer
+  // change is answered with the boot guard's named refusal instead of the
+  // wrapper's generic invalid_token.
+  const harperNs = deps.harper ?? harper;
+  const guardedMcp = withMCPAuth(rateLimitedMcpHandler(handler), {
+    getConfig: () => {
+      try {
+        const live = readLiveMcpConfig(harperNs);
+        if (live.kind !== "present" || live.config.enabled !== true) return undefined;
+        if (issuerFailedRule(live.config.issuer) !== undefined) return undefined;
+        return mcpAuthConfig();
+      } catch {
+        return undefined;
+      }
+    },
+  });
+
   srv.http(
-    withMCPAuth(rateLimitedMcpHandler(handler), {
-      getConfig: () => (deps.harper ?? harper).server?.resources?.get("oauth")?.Resource?.mcpConfig?.enabled === true
-        ? mcpAuthConfig()
-        : undefined,
-    }),
+    async (request: any, next: any) => {
+      const check = checkLiveMcpConfig(harperNs);
+      if (check.kind === "refused") {
+        // The body carries the named refusal, which names the rule and the
+        // remedy but no resolved issuer value.
+        return {
+          status: 503,
+          headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+          body: JSON.stringify({ error: check.code, error_description: check.reason }),
+        };
+      }
+      // Reaching the wrapper means the live config is present, enabled, and
+      // its issuer passed the rule; mounted state is derived on read, never
+      // recorded for a request that may then be denied.
+      return guardedMcp(request, next);
+    },
     { urlPath: "/mcp", after: MULTI_WORKER_GUARD_HTTP_NAME },
   );
 
   console.error(`[mcp-oauth] /mcp mounted (OAuth-guarded); issuer=${config.issuer}`);
+  mountedNamespace = harperNs;
   return decide({ mounted: true });
 }
 

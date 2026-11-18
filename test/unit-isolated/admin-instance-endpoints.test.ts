@@ -65,6 +65,14 @@ function makeDeps() {
     loadWithMCPAuth: async () => (handler: any, _options: any) => handler,
     mcpHandler: () => ({ status: 200 }),
     skipComponentGuard: true,
+    // The live @harperfast/oauth config that mcpRouteState() evaluates on read.
+    harper: {
+      server: {
+        resources: {
+          get: () => ({ Resource: { mcpConfig: { enabled: true, issuer: process.env.FLAIR_MCP_ISSUER } } }),
+        },
+      },
+    },
   };
 }
 

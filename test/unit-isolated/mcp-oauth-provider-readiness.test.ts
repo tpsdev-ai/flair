@@ -19,7 +19,7 @@ mock.module("harper", () => ({ Resource: class {}, server: {}, databases: {}, lo
 const { handleApplication, OAuthResource } = await import("@harperfast/oauth");
 const { MCPKeyStore, resetMCPKeysTableCache } = await import("../../node_modules/@harperfast/oauth/dist/lib/mcp/keyStore.js");
 const { signAccessToken } = await import("../../node_modules/@harperfast/oauth/dist/lib/mcp/tokenIssuer.js");
-const { registerMcpOAuthRoute } = await import("../../resources/mcp-oauth.ts");
+const { registerMcpOAuthRoute, mcpRouteState } = await import("../../resources/mcp-oauth.ts");
 
 afterAll(() => {
   process.env = savedEnv;
@@ -46,8 +46,14 @@ async function fixture() {
     set(path, Resource, exportTypes) { entries.set(path, { Resource, path, exportTypes, hasSubPaths: false, relativeURL: "" }); },
     get(path) { return entries.get(path); },
   };
-  const configure = async (providers: Record<string, any>, enabled = true) => {
-    const options = Object.assign(new EventEmitter(), { getAll: () => ({ providers, mcp: { ...mcp, enabled } }) });
+  const configure = async (
+    providers: Record<string, any>,
+    enabled = true,
+    issuer = process.env.FLAIR_MCP_ISSUER!,
+  ) => {
+    const options = Object.assign(new EventEmitter(), {
+      getAll: () => ({ providers, mcp: { ...mcp, issuer, enabled } }),
+    });
     await handleApplication({ options, resources, server: { http() {} }, on() {} } as any);
   };
   let guarded: any;
@@ -78,30 +84,73 @@ test("configured provider and enabled MCP accept a valid token through Harper's 
 test("no provider denies a valid token against a persisted key; provider removal also denies it", async () => {
   const f = await fixture();
   await f.configure({});
-  expect((await f.request()).status).toBe(401);
+  const noProvider = await f.request();
+  expect(noProvider.status).toBe(503);
+  expect(noProvider.body).toContain("not serving an MCP authorization configuration");
   expect(f.reached()).toBe(0);
   await f.configure(providers);
   expect((await f.request()).status).toBe(200);
-  await f.configure({});
-  expect((await f.request()).status).toBe(401);
+  await f.configure({ github: { ...providers.github, clientId: "", clientSecret: "" } });
+  const removed = await f.request();
+  expect(removed.status).toBe(503);
+  expect(removed.body).toContain("not serving an MCP authorization configuration");
   expect(f.reached()).toBe(1);
   expect(f.rows.has(f.key.kid)).toBe(true);
 });
 
-test("disabled MCP denies a previously valid token with the provider still configured", async () => {
+test("disabled MCP refuses a previously valid token with the provider still configured", async () => {
   const f = await fixture();
   await f.configure(providers);
   expect((await f.request()).status).toBe(200);
   await f.configure(providers, false);
-  expect((await f.request()).status).toBe(401);
+  const disabled = await f.request();
+  expect(disabled.status).toBe(503);
+  expect(disabled.body).toContain("not serving an MCP authorization configuration");
   expect(f.reached()).toBe(1);
 });
 
-test("unconfigured provider denies a previously valid token", async () => {
+test("unconfigured provider refuses a previously valid token", async () => {
   const f = await fixture();
   await f.configure(providers);
   expect((await f.request()).status).toBe(200);
   await f.configure({ github: { ...providers.github, clientId: "", clientSecret: "" } });
-  expect((await f.request()).status).toBe(401);
+  const unconfigured = await f.request();
+  expect(unconfigured.status).toBe(503);
+  expect(unconfigured.body).toContain("not serving an MCP authorization configuration");
   expect(f.reached()).toBe(1);
+});
+
+test("a live config removed or disabled after a refusal is unavailable and never reported mounted; restored config serves", async () => {
+  const f = await fixture();
+  await f.configure(providers);
+  expect((await f.request()).status).toBe(200);
+  expect(mcpRouteState().mounted).toBe(true);
+
+  // A refusal while the authorization server is live.
+  await f.configure(providers, true, "https://other-provider-readiness.flair.test");
+  const refused = await f.request();
+  expect(refused.status).toBe(503);
+  expect(refused.body).toContain("differs from FLAIR_MCP_ISSUER");
+  expect(mcpRouteState()).toMatchObject({ mounted: false, status: "Issuer refused" });
+
+  // Removed: no valid provider remains, so the component clears mcpConfig.
+  await f.configure({});
+  expect(mcpRouteState()).toMatchObject({ mounted: false, status: "MCP auth unavailable" });
+  const removed = await f.request();
+  expect(removed.status).toBe(503);
+  expect(removed.body).toContain("not serving an MCP authorization configuration");
+  expect(mcpRouteState().mounted).toBe(false);
+
+  // Disabled with the provider still configured.
+  await f.configure(providers, false);
+  expect(mcpRouteState()).toMatchObject({ mounted: false, status: "MCP auth unavailable" });
+  const disabled = await f.request();
+  expect(disabled.status).toBe(503);
+  expect(disabled.body).toContain("not serving an MCP authorization configuration");
+
+  // Restored.
+  await f.configure(providers);
+  expect(mcpRouteState().mounted).toBe(true);
+  expect((await f.request()).status).toBe(200);
+  expect(f.reached()).toBe(2);
 });
