@@ -11,8 +11,10 @@
  * page reports the URL again.
  *
  * The live issuer is read from the oauth resource's mcpConfig
- * (OAuthResource.mcpConfig), which @harperfast/oauth republishes when its
- * options change; this test exercises that republish through Harper's
+ * (OAuthResource.mcpConfig), which a successful @harperfast/oauth reload
+ * republishes; a rejected reload keeps the previous value, and a reload that
+ * leaves no valid provider clears it (the per-request check reports that as an
+ * unavailable refusal). This test exercises the republish through Harper's
  * config.yaml watcher rather than poking the module.
  */
 

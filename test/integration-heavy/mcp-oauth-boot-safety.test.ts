@@ -36,7 +36,7 @@
  *      the load error naming the variable — the library's check is NOT loosened.
  *   2d. NO PROVIDER (flair#2194): no-provider boot returns 404 for both
  *      protected-resource forms and 401 for an unauthenticated /mcp request.
- *      A token minted with a provider returns 401 after provider removal.
+ *      A token minted with a provider is refused as unavailable after provider removal.
  *   3. MUTATION-PROVE (literal true): mcp.enabled: true + env unset -> boots
  *      DEGRADED. Proves test 2's clean-boot assertions CAN fire.
  *   4. GARBAGE VALUE (flair#1152 residual): FLAIR_MCP_OAUTH=maybe. Measured
@@ -318,7 +318,7 @@ describe("flair#2194: a declared signingKeyPem with an unset variable still fail
 });
 
 describe("flair#2194: MCP on with NO provider configured — fail-closed discovery", () => {
-  test("a token minted with a provider returns 401 after provider removal and restart", async () => {
+  test("a token minted with a provider is refused as unavailable after provider removal and restart", async () => {
     const issuer = "https://provider-removal.flair.test";
     const workDir = makeWorkDirWithShippedConfig("flair-provider-removal-");
     let harper = await startHarper({
@@ -395,11 +395,13 @@ describe("flair#2194: MCP on with NO provider configured — fail-closed discove
     expect(keys).toHaveLength(1);
     expect(keys[0]!.kid).toBe(kid);
     expect(keys[0]!.public_key_pem).toContain("BEGIN PUBLIC KEY");
-    expect((await postMcp()).status).toBe(401);
+    const removedMcp = await postMcp();
+    expect(removedMcp.status).toBe(503);
+    expect(await removedMcp.text()).toContain("not serving an MCP authorization configuration");
   }, 300_000);
 
   test(
-    "no OAUTH_GITHUB_* set: boots clean, both protected-resource forms 404 and unauthenticated /mcp returns 401",
+    "no OAUTH_GITHUB_* set: boots clean, both protected-resource forms 404 and unauthenticated /mcp is refused as unavailable",
     async () => {
       const workDir = makeWorkDirWithShippedConfig("flair-no-provider-");
       const harper = await startHarper({
@@ -418,9 +420,11 @@ describe("flair#2194: MCP on with NO provider configured — fail-closed discove
         const res = await fetch(`${harper.httpURL}${path}`, { signal: AbortSignal.timeout(10_000) });
         expect(res.status).toBe(404);
       }
-      // /mcp is still mounted by flair and denies the unauthenticated request.
+      // /mcp is still mounted by flair; with no live MCP config it answers the
+      // named unavailable refusal.
       const mcpRes = await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) });
-      expect(mcpRes.status).toBe(401);
+      expect(mcpRes.status).toBe(503);
+      expect(await mcpRes.text()).toContain("not serving an MCP authorization configuration");
     },
     120_000,
   );
