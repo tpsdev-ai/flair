@@ -430,7 +430,11 @@ describe("flair#2194: MCP on with NO provider configured — fail-closed discove
       // Both FLAIR_MCP_* variables are set here; the cause is the missing
       // provider, so the remedy has to name one.
       expect(mcpBody).toContain("Configure a valid OAuth provider");
+      expect(mcpBody).toContain("client ID");
+      expect(mcpBody).toContain("client secret");
       expect(mcpBody).toContain("redirect URI");
+      expect(mcpBody).toContain("FLAIR_MCP_OAUTH");
+      expect(mcpBody).toContain("FLAIR_MCP_ISSUER");
     },
     120_000,
   );

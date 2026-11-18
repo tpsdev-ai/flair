@@ -359,9 +359,8 @@ function readLiveMcpConfig(harperNs: any): LiveMcpConfigRead {
  * token would be refused as a generic `invalid_token`. This re-runs the same
  * `issuerFailedRule` (same trailing-slash trim, same `differs from
  * FLAIR_MCP_ISSUER` rule) against the live issuer, and refuses with the boot
- * guard's named error and remedy. Every state that cannot mint a token for
- * this surface — no live config, a disabled one, an unreadable one — is a
- * named refusal, never equality. A missing FLAIR_MCP_ISSUER is a separate
+ * guard's named error and remedy. Flair refuses when it cannot verify the
+ * live config. A missing FLAIR_MCP_ISSUER is a separate
  * refusal with its own message: the request cannot be checked at all.
  *
  * `served` means the live config is present, enabled, and its issuer passed
