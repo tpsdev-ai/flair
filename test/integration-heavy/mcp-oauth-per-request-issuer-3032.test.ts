@@ -104,7 +104,7 @@ describe("flair#3032 — a changed live issuer is refused per request, then serv
 
       expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
 
-      // ── Mint a token for /mcp (the provider-removal fixture) ──
+      // ── Mint a token for /mcp (the issuer-change fixture) ──
       const verifier = randomBytes(32).toString("base64url");
       const clientId = "per-request-issuer-client";
       const redirectUri = `${ISSUER_A}/callback`;
