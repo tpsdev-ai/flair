@@ -624,8 +624,9 @@ const ALLOWLIST_HISTORY_PATH = ".github/audit-allowlist.json";
 /**
  * Reads only the fixed path from the pinned start and every descendant in HEAD's
  * ancestry; missing paths, non-JSON blobs or blobs without an `entries` array refuse
- * the lineage. An introduction contains an id absent from ancestry within the pinned
- * lineage. Its earliest UTC day is retained; ids compare case-insensitively.
+ * the lineage. A qualifying commit contains an id absent from its ancestry within the pinned
+ * lineage; the earliest UTC day of such a commit is the id's first history day.
+ * Ids compare case-insensitively.
  */
 export function readAllowlistHistory(repoRoot = REPO_ROOT) {
   const allowlistPath = join(repoRoot, ALLOWLIST_HISTORY_PATH);
@@ -776,7 +777,7 @@ export function readAllowlistHistory(repoRoot = REPO_ROOT) {
 }
 
 /**
- * Checks `added` against the first introduction day; an id absent from history uses today.
+ * Checks `added` against the first history day; an id absent from history uses today.
  */
 export function validateAllowlistHistory(allowlist, firstDays, today) {
   const problems = [];
@@ -803,8 +804,8 @@ export function validateAllowlistHistory(allowlist, firstDays, today) {
     if (entry.added <= boundary) return;
     const bound =
       firstDays.has(id)
-        ? `the first day this advisory appears in parsed allowlist history (${boundary})`
-        : `today (${boundary}), and no parsed snapshot contained this advisory id`;
+        ? `the advisory's first history day (${boundary}), the earliest day its id appears in parsed allowlist history`
+        : `today (${boundary}), because the advisory has no first history day in parsed allowlist history`;
     problems.push(
       `entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"}): lifetime cap: "added" (${entry.added}) is later than ${bound}.`,
     );
