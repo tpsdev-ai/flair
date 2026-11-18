@@ -124,6 +124,27 @@ function addPackages(prefix: string, count: number, namePrefix = "pkg") {
   }
 }
 
+/** Write `count` package directories in a chain below `prefix`'s flair package. */
+function dependencyChain(prefix: string, count: number) {
+  const paths = treePaths(prefix);
+  writePackage(paths.flair, {
+    name: FLAIR_PACKAGE,
+    version: "0.0.1",
+    dependencies: { "dep-0": "1.0.0" },
+  });
+  let parent = paths.flair;
+  for (let i = 0; i < count; i++) {
+    const dir = join(parent, "node_modules", `dep-${i}`);
+    writePackage(dir, {
+      name: `dep-${i}`,
+      version: "1.0.0",
+      ...(i + 1 < count ? { dependencies: { [`dep-${i + 1}`]: "1.0.0" } } : {}),
+    });
+    parent = dir;
+  }
+  return paths;
+}
+
 /**
  * A prefix shaped like harper 5.3.6's: harper's dependencies live in its own
  * bundled `node_modules`, so an npm summary line can count one package where
@@ -254,6 +275,24 @@ describe("the count follows Flair's dependency graph, not the prefix", () => {
     addPackages(prefix, 200, "decoy");
     // The decoys are siblings of @tpsdev-ai/flair in lib/node_modules.
     expect(countFlairTree(paths.flair, paths.globalNodeModules)).toBe(3);
+  });
+
+  test("refuses a dependency chain deeper than the walk's depth bound", () => {
+    const prefix = mkdtempSync(join(tmpdir(), "flair-gi-deep-"));
+    fixtures.push(prefix);
+    // Flair plus 65 dependencies: the deepest package sits at depth 65, past the 64 bound.
+    const paths = dependencyChain(prefix, 65);
+    expect(() => countFlairTree(paths.flair, paths.globalNodeModules)).toThrow(/deeper than 64 packages/);
+  });
+
+  test("refuses a graph with more packages than the walk's count bound", () => {
+    const prefix = mkdtempSync(join(tmpdir(), "flair-gi-count-"));
+    fixtures.push(prefix);
+    // A test-only small limit over a real six-package chain, not an enormous tree.
+    const paths = dependencyChain(prefix, 5);
+    expect(() => countFlairTree(paths.flair, paths.globalNodeModules, { maxPackages: 3 })).toThrow(
+      /more than 3 packages/,
+    );
   });
 
   test("a collapsed Flair tree padded with decoy manifests stays below the floor and fails", () => {

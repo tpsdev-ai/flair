@@ -64,7 +64,13 @@ export function treePaths(prefix: string): TreePaths;
  * required dependency that does not resolve and on a missing, unreadable or
  * malformed manifest; an absent optional dependency is skipped.
  */
-export function countFlairTree(flairDir: string, root?: string): number;
+export interface GraphLimits {
+  /** Maximum dependency-edge depth; defaults to the script's hard bound. */
+  maxDepth?: number;
+  /** Maximum counted packages; defaults to the script's hard bound. */
+  maxPackages?: number;
+}
+export function countFlairTree(flairDir: string, root?: string, limits?: GraphLimits): number;
 export function parseAddedCount(log: string): number | null;
 export function hasDamagedLockfileWarning(log: string): boolean;
 /** `ok` is false unless the resolve lands inside `paths.flair` (no ambient hoist). */

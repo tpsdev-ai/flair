@@ -122,8 +122,9 @@ export function treePaths(prefix) {
 
 /**
  * Hard bounds for the graph walk. They do not depend on what is installed: a
- * graph that exceeds either is a corrupt install, and the walk throws rather
- * than reporting a lower count as a measurement.
+ * graph that exceeds either is larger than the gate can measure, so the walk
+ * throws rather than reporting a lower count as a measurement. Size alone does
+ * not prove corruption.
  */
 const MAX_GRAPH_DEPTH = 64;
 const MAX_GRAPH_PACKAGES = 250_000;
@@ -237,20 +238,22 @@ function resolveDependencyDir(fromDir, name, root) {
  * failed read is never reported as a smaller tree. An optional dependency that
  * is not installed is skipped.
  */
-export function countFlairTree(flairDir, root = enclosingNodeModules(flairDir)) {
+export function countFlairTree(flairDir, root = enclosingNodeModules(flairDir), limits = {}) {
+  const maxDepth = limits.maxDepth ?? MAX_GRAPH_DEPTH;
+  const maxPackages = limits.maxPackages ?? MAX_GRAPH_PACKAGES;
   const flairReal = realpathSync(flairDir);
   const rootReal = realpathSync(root);
   const seen = new Set();
   let packages = 0;
 
   const visit = (dir, depth) => {
-    if (depth > MAX_GRAPH_DEPTH) {
-      throw new Error(`dependency graph is deeper than ${MAX_GRAPH_DEPTH} packages at ${dir}`);
+    if (depth > maxDepth) {
+      throw new Error(`dependency graph is deeper than ${maxDepth} packages at ${dir}`);
     }
     if (seen.has(dir)) return;
     seen.add(dir);
-    if (++packages > MAX_GRAPH_PACKAGES) {
-      throw new Error(`dependency graph under ${rootReal} has more than ${MAX_GRAPH_PACKAGES} packages`);
+    if (++packages > maxPackages) {
+      throw new Error(`dependency graph under ${rootReal} has more than ${maxPackages} packages`);
     }
     const manifest = readPackageIdentity(dir);
     const required = Object.keys(manifest.dependencies ?? {});

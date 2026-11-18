@@ -714,7 +714,8 @@ describe("vendor-pinned npm-install nodes", () => {
   });
 
   function runFixtureGate(nodes: string[], installedVersion = "5.11.3", adk = false,
-    adkVersions: { installed?: string | null; reported?: string } = {}) {
+    adkVersions: { installed?: string | null; reported?: string } = {},
+    options: { hoisted?: boolean; entryOverrides?: Record<string, unknown> } = {}) {
     const root = mkdtempSync(join(tmpdir(), "flair-audit-gate-"));
     try {
       mkdirSync(join(root, "scripts"));
@@ -724,11 +725,27 @@ describe("vendor-pinned npm-install nodes", () => {
       mkdirSync(join(root, "tmp"));
       // The prefix the stand-in npm reports the advisory in.
       const tree = join(root, "tree");
-      mkdirSync(join(tree, harperNode), { recursive: true });
-      writeFileSync(join(tree, "node_modules/harper/npm-shrinkwrap.json"), JSON.stringify({
-        packages: { "node_modules/fastify": { version: "5.11.3" } },
-      }));
-      writeFileSync(join(tree, harperNode, "package.json"), JSON.stringify({ version: installedVersion }));
+      if (options.hoisted) {
+        mkdirSync(join(tree, "node_modules", "harper"), { recursive: true });
+        writeFileSync(join(tree, "node_modules", "harper", "package.json"), JSON.stringify({
+          name: "harper", version: "5.11.3", dependencies: { fastify: "5.11.3" },
+        }));
+        mkdirSync(join(tree, hoistedNode), { recursive: true });
+        writeFileSync(join(tree, hoistedNode, "package.json"), JSON.stringify({ name: "fastify", version: "5.11.3" }));
+        writeFileSync(join(tree, "package-lock.json"), JSON.stringify({
+          packages: {
+            "": { dependencies: { harper: "1.0.0" } },
+            "node_modules/harper": { version: "5.11.3", dependencies: { fastify: "5.11.3" } },
+            [hoistedNode]: { version: "5.11.3" },
+          },
+        }));
+      } else {
+        mkdirSync(join(tree, harperNode), { recursive: true });
+        writeFileSync(join(tree, "node_modules/harper/npm-shrinkwrap.json"), JSON.stringify({
+          packages: { "node_modules/fastify": { version: "5.11.3" } },
+        }));
+        writeFileSync(join(tree, harperNode, "package.json"), JSON.stringify({ version: installedVersion }));
+      }
       writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts/audit-gate.mjs")));
       writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({
         policy: ALLOWLIST.policy,
@@ -747,6 +764,8 @@ describe("vendor-pinned npm-install nodes", () => {
           added: "2026-09-03",
           expires: "2027-03-02",
           removeWhen: "harper's shrinkwrap resolves fastify >=5.12.1",
+          ...(options.hoisted ? { hoistedNode } : {}),
+          ...options.entryOverrides,
         }],
       }));
       commitAllowlistHistory(root);
@@ -933,6 +952,24 @@ esac
     expect(res.status).not.toBe(0);
     expect(res.stdout).toContain("installed version 5.12.0");
     expect(res.stdout).not.toContain("NOT-REPORTED-BY-BUN");
+  }, 12_000);
+
+  it("passes the gate for a hoisted node whose only edge comes from harper", () => {
+    const { res } = runFixtureGate([hoistedNode], "5.11.3", false, {}, { hoisted: true });
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("PASS —");
+  }, 12_000);
+
+  it("blocks a hoisted node whose allowlist provenance does not start at harper", () => {
+    const { res } = runFixtureGate([hoistedNode], "5.11.3", false, {}, {
+      hoisted: true,
+      entryOverrides: { introducedBy: "fixture -> fastify" },
+    });
+    expect(res.error).toBeUndefined();
+    expect(res.status).not.toBe(0);
+    expect(res.stdout).toContain('does not start with "harper -> "');
+    expect(res.stdout).not.toContain("PASS —");
   }, 12_000);
 
   it("refuses unknown node evidence with a nonzero gate exit and no success output or writes", () => {
@@ -3156,6 +3193,44 @@ describe("vendor-pinned nodes shipped in harper's bundle", () => {
         const problems = vendorPinnedNodeProblems(advisory("fastify", fastify, "5.12.5"), prefix).join("\n");
         expect(problems).toContain("has no entry");
       },
+    );
+  });
+});
+
+// ─── hoistedNode entries are scoped to the vendor-pinned class and package ───
+
+describe("hoistedNode allowlist schema", () => {
+  const TODAY = new Date("2026-10-01");
+  const entryWith = (extra: Record<string, unknown> = {}) => ({
+    ghsa: "GHSA-aaaa-bbbb-cccc",
+    package: "pkg-a",
+    severity: "moderate",
+    class: "vendor-pinned",
+    sources: ["npm-install"],
+    approvedBy: "reviewer-a",
+    introducedBy: "harper -> pkg-a",
+    reason: "Fixture entry for the hoisted-node schema tests.",
+    added: "2026-09-03",
+    expires: "2026-12-02",
+    removeWhen: "harper ships a release that resolves pkg-a patched",
+    ...extra,
+  });
+  const problems = (extra: Record<string, unknown> = {}) =>
+    validateAllowlist({ policy: ALLOWLIST.policy, entries: [entryWith(extra)] }, TODAY).join("\n");
+
+  it("accepts hoistedNode on a vendor-pinned entry for this package's top-level node", () => {
+    expect(problems({ hoistedNode: "node_modules/pkg-a" })).toBe("");
+  });
+
+  it("refuses hoistedNode on a non-vendor-pinned entry", () => {
+    expect(problems({ class: "no-patch-published", hoistedNode: "node_modules/pkg-a" })).toContain(
+      '"hoistedNode" is only valid on a vendor-pinned entry',
+    );
+  });
+
+  it("refuses a hoistedNode that is not this package's top-level node", () => {
+    expect(problems({ hoistedNode: "node_modules/pkg-b" })).toContain(
+      '"hoistedNode" must name this package\'s hoisted install-relative node ("node_modules/pkg-a")',
     );
   });
 });

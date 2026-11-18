@@ -219,6 +219,53 @@ describe.skipIf(NPM_ABSENT)(
     );
 
     it(
+      "refuses a hoisted node when harper ships an npm-shrinkwrap",
+      () => {
+        const { hoisted } = npmInstalls();
+        const prefix = `${hoisted}-shrinkwrap`;
+        cpSync(hoisted, prefix, { recursive: true });
+        writeFileSync(join(prefix, HARPER, "npm-shrinkwrap.json"), JSON.stringify({ packages: {} }));
+        const problems = check(prefix, "dep-h", DEP_H, "1.0.0", { hoistedNode: DEP_H }).join("\n");
+        expect(problems).toContain("harper ships npm-shrinkwrap.json");
+      },
+      CASE_BUDGET_MS,
+    );
+
+    it(
+      "refuses a hoisted node whose consumer package-lock row differs from harper's exact pin",
+      () => {
+        const { hoisted } = npmInstalls();
+        const prefix = `${hoisted}-lock-version`;
+        cpSync(hoisted, prefix, { recursive: true });
+        const lockPath = join(prefix, "package-lock.json");
+        const lock = JSON.parse(readFileSync(lockPath, "utf8"));
+        lock.packages[DEP_H] = { ...lock.packages[DEP_H], version: "1.0.1" };
+        writeFileSync(lockPath, JSON.stringify(lock));
+        const problems = check(prefix, "dep-h", DEP_H, "1.0.0", { hoistedNode: DEP_H }).join("\n");
+        expect(problems).toContain('records "1.0.1"');
+      },
+      CASE_BUDGET_MS,
+    );
+
+    it(
+      "refuses an unreadable consumer package-lock for a hoisted node",
+      () => {
+        const { hoisted } = npmInstalls();
+        const prefix = `${hoisted}-lock-unreadable`;
+        cpSync(hoisted, prefix, { recursive: true });
+        const lockPath = join(prefix, "package-lock.json");
+        rmSync(lockPath);
+        // A directory where the lockfile belongs: readFileSync fails with EISDIR,
+        // which root does not bypass (chmod 000 would).
+        mkdirSync(lockPath);
+        const problems = check(prefix, "dep-h", DEP_H, "1.0.0", { hoistedNode: DEP_H }).join("\n");
+        expect(problems).toContain("cannot verify hoisted node");
+        expect(problems).toContain(DEP_H);
+      },
+      CASE_BUDGET_MS,
+    );
+
+    it(
       "refuses a hoisted node that a second package also reaches, naming it",
       () => {
         const { shared } = npmInstalls();
