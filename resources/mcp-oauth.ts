@@ -234,7 +234,8 @@ function liveMcpConfigUnreadableError(): Error {
 /**
  * The live @harperfast/oauth MCP config is absent, or present with
  * `enabled !== true`: the authorization server cannot mint a token for this
- * surface, so the guard would deny every request. Absent is also what a
+ * surface, and the per-request check refuses every /mcp request as
+ * unavailable (503) before withMCPAuth runs. Absent is also what a
  * component with no valid provider leaves behind, so the remedy names one.
  */
 function mcpAuthUnavailableError(): Error {
@@ -352,7 +353,8 @@ function readLiveMcpConfig(harperNs: any): LiveMcpConfigRead {
     return { kind: "unreadable" };
   }
   // No live MCP config means the component is not serving an authorization
-  // server for this surface at all; the wrapper's own enabled check denies.
+  // server for this surface at all: the per-request check refuses it as
+  // unavailable (503), and getConfig returns undefined for it.
   if (config == null) return { kind: "absent" };
   if (!isRecord(config)) return { kind: "unreadable" };
   return { kind: "present", config };

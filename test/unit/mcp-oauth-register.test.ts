@@ -98,7 +98,7 @@ describe("registerMcpOAuthRoute — flag-OFF no-op", () => {
     expect(loadCount).toBe(0); // bails before loading the plugin
   });
 
-  it("flag ON + issuer → the withMCPAuth-wrapped handler is mounted on urlPath '/mcp'", async () => {
+  it("flag ON + issuer → a listener that runs the issuer check and delegates to the withMCPAuth-wrapped handler is mounted on urlPath '/mcp'", async () => {
     clearEnv();
     process.env.FLAIR_MCP_OAUTH = "1";
     process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
