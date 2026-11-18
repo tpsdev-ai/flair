@@ -2057,7 +2057,7 @@ describe("the committed allowlist", () => {
   });
 
   it("keeps every entry added on or before 2026-11-17 at an expiry, and any approval expiry, no earlier than 2027-01-01", () => {
-    // Filtering by `added` keeps this valid as later entries land; a later renewal only moves dates later.
+    // Filtering by `added` leaves entries dated after 2026-11-17 out of scope.
     const before2027 = (date: string | undefined) => !(date && date >= "2027-01-01");
     const short = ALLOWLIST.entries
       .filter((e: { added: string }) => e.added <= "2026-11-17")
