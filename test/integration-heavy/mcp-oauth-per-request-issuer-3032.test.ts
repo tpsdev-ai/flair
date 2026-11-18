@@ -4,11 +4,11 @@
  *
  * A real Harper boots with the MCP surface enabled and a matching issuer. While
  * it runs, the component's configured mcp.issuer changes to a different origin.
- * The next /mcp request must answer with the boot guard's named refusal
- * ("differs from FLAIR_MCP_ISSUER") and its remedy — not with the wrapper's
- * generic invalid_token — and the admin Instance page must report that refusal
- * instead of the mounted URL. Restoring the issuer serves requests again and the
- * page reports the URL again.
+ * After the edit, the test polls until a /mcp request receives 503, then
+ * requires the boot guard's named refusal ("differs from FLAIR_MCP_ISSUER") and
+ * its remedy — not the wrapper's generic invalid_token — and the admin Instance
+ * page must report that refusal instead of the mounted URL. Restoring the issuer
+ * serves requests again (polled the same way) and the page reports the URL again.
  *
  * The live issuer is read from the oauth resource's mcpConfig
  * (OAuthResource.mcpConfig), which a successful @harperfast/oauth reload
