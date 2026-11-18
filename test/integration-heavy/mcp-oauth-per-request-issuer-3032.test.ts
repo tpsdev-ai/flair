@@ -12,10 +12,9 @@
  *
  * The live issuer is read from the oauth resource's mcpConfig
  * (OAuthResource.mcpConfig), which a successful @harperfast/oauth reload
- * republishes; a rejected reload keeps the previous value, and a reload that
- * leaves no valid provider clears it (the per-request check reports that as an
- * unavailable refusal). This test exercises the republish through Harper's
- * config.yaml watcher rather than poking the module.
+ * republishes; a reload that leaves no valid provider clears it (the per-request
+ * check reports that as an unavailable refusal). This test exercises the republish
+ * through Harper's config.yaml watcher rather than poking the module.
  */
 
 import { describe, test, expect, afterAll } from "bun:test";

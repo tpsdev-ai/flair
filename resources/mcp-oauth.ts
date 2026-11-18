@@ -223,6 +223,14 @@ function issuerEnvMissingError(): Error {
   );
 }
 
+function liveMcpConfigUnreadableError(): Error {
+  return new Error(
+    "The live @harperfast/oauth MCP configuration could not be verified. Refusing to serve /mcp. " +
+    "Inspect the registered @harperfast/oauth component and ensure its mcp settings are a plain mapping " +
+    "with enabled and issuer.",
+  );
+}
+
 /**
  * The live @harperfast/oauth MCP config is absent, or present with
  * `enabled !== true`: the authorization server cannot mint a token for this
@@ -326,10 +334,9 @@ function assertEffectiveMcpIssuer(component: Record<string, unknown>): void {
  * The authorization server's live MCP config: `OAuthResource.mcpConfig` on the
  * registered oauth resource. A successful `@harperfast/oauth` reload
  * (`updateConfiguration` → `OAuthResource.configure`) replaces it with
- * `expandEnvVarsDeep(options.mcp)`; a reload that throws leaves the previous
- * value in place, and a reload that leaves no valid provider clears it. That
- * static is the value the component actually mints and advertises with — the
- * raw config.yaml entry can still hold a `${VAR}` reference and is only what
+ * `expandEnvVarsDeep(options.mcp)`; a reload that leaves no valid provider clears
+ * it. That static is the value the component actually mints and advertises with —
+ * the raw config.yaml entry can still hold a `${VAR}` reference and is only what
  * the boot guard reads. A cleared config is reported as unavailable below.
  */
 type LiveMcpConfigRead =
@@ -384,7 +391,7 @@ function checkLiveMcpConfig(harperNs: any): McpRequestCheck {
   if (mcpIssuer() === undefined) return unavailable(issuerEnvMissingError().message);
 
   const read = readLiveMcpConfig(harperNs);
-  if (read.kind === "unreadable") return unavailable(issuerUnreadableError("serve").message);
+  if (read.kind === "unreadable") return unavailable(liveMcpConfigUnreadableError().message);
   // No live config, or a disabled one, cannot mint a token for this surface.
   if (read.kind === "absent") return unavailable(mcpAuthUnavailableError().message);
 
@@ -392,6 +399,10 @@ function checkLiveMcpConfig(harperNs: any): McpRequestCheck {
   let issuer: unknown;
   try {
     enabled = read.config.enabled;
+  } catch {
+    return unavailable(liveMcpConfigUnreadableError().message);
+  }
+  try {
     issuer = read.config.issuer;
   } catch {
     return unavailable(issuerUnreadableError("serve").message);

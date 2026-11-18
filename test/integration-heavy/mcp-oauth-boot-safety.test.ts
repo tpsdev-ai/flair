@@ -434,7 +434,7 @@ describe("flair#2194: MCP on with NO provider configured — fail-closed discove
       expect(mcpBody).toContain("client secret");
       expect(mcpBody).toContain("redirect URI");
       expect(mcpBody).toContain("FLAIR_MCP_OAUTH");
-      expect(mcpBody).toContain("FLAIR_MCP_ISSUER");
+      expect(mcpBody).toContain("FLAIR_MCP_ISSUER to this instance's public origin");
     },
     120_000,
   );
