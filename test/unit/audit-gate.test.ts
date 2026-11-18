@@ -2056,6 +2056,20 @@ describe("the committed allowlist", () => {
     expect(validateAllowlist(ALLOWLIST, ALLOWLIST_AS_OF)).toEqual([]);
   });
 
+  it("keeps every entry added on or before 2026-11-17 at an expiry, and any approval expiry, no earlier than 2027-01-01", () => {
+    // Filtering by `added` keeps this valid as later entries land; a later renewal only moves dates later.
+    const before2027 = (date: string | undefined) => !(date && date >= "2027-01-01");
+    const short = ALLOWLIST.entries
+      .filter((e: { added: string }) => e.added <= "2026-11-17")
+      .flatMap((e: { ghsa: string; package: string; expires?: string; overCapApproval?: { expires?: string } }) => [
+        ...(before2027(e.expires) ? [`${e.ghsa} (${e.package}) expires ${e.expires ?? "no expiry"}`] : []),
+        ...(e.overCapApproval && before2027(e.overCapApproval.expires)
+          ? [`${e.ghsa} (${e.package}) overCapApproval expires ${e.overCapApproval.expires ?? "no expiry"}`]
+          : []),
+      ]);
+    expect(short).toEqual([]);
+  });
+
   it("gives every entry a reason, an expiry and a removal condition", () => {
     for (const e of ALLOWLIST.entries) {
       expect(e.reason.length).toBeGreaterThan(40);
