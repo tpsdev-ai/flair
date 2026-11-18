@@ -1,0 +1,53 @@
+# Spike tables for flair#2047. They exist only in this isolated Harper app.
+# Nothing here is mounted by Flair, federated, or a product schema change.
+
+# Today's lexical payload: the fields a memory row already stores that the
+# in-memory BM25 index reads. No terms index.
+type SpikeBase @table(database: "spike") {
+  id: ID @primaryKey
+  agentId: String @indexed
+  archived: Boolean @indexed
+  content: String
+  docLen: Int
+}
+
+# Proposal: unique tokens in an indexed array, plus per-doc term frequency and
+# length on the same row. `content` is repeated so this table is a full
+# adopted-shape row (existing fields + derived terms), and disk growth versus
+# SpikeBase is the cost of adding the terms index to a row that already has content.
+type SpikeTerms @table(database: "spike") {
+  id: ID @primaryKey
+  agentId: String @indexed
+  archived: Boolean @indexed
+  content: String
+  docLen: Int
+  tfPacked: String
+  terms: [String] @indexed
+}
+
+# Same row shape as SpikeTerms, used only to separate "terms index" ingest from
+# "terms index + maintained scope aggregates" and from per-term df maintenance.
+# Cleared and rewritten by those arms. Not the decision table.
+type SpikeAlt @table(database: "spike") {
+  id: ID @primaryKey
+  agentId: String @indexed
+  archived: Boolean @indexed
+  content: String
+  docLen: Int
+  tfPacked: String
+  terms: [String] @indexed
+}
+
+# Maintained per-scope N and sum(docLen). id is the agentId, or "__all__".
+type SpikeScopeStat @table(database: "spike") {
+  id: ID @primaryKey
+  n: Int
+  sumDl: Int
+}
+
+# Maintained per-(scope, term) document frequency. id is `${scope}\u0000${term}`.
+# Written only by the df-maintenance arm so its write cost is visible on its own.
+type SpikeTermDf @table(database: "spike") {
+  id: ID @primaryKey
+  df: Int
+}
