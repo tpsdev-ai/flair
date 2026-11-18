@@ -506,7 +506,7 @@ function npmFixtureEnvironment(root: string): NodeJS.ProcessEnv {
   writeFileSync(userconfig, "");
   writeFileSync(globalconfig, "");
   return {
-    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^npm_config_/i.test(key))),
+    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "NODE_OPTIONS" && !/^npm_config_/i.test(key))),
     npm_config_userconfig: userconfig,
     npm_config_globalconfig: globalconfig,
     npm_config_cache: join(root, "npm-cache"),
@@ -611,7 +611,7 @@ describe("check-global-install-lockfile — real npm", () => {
       env,
     );
     const run = spawnSync(
-      nodeBin(),
+      nodeBin({ env }),
       [join(REPO, "scripts/check-global-install-lockfile.mjs"), "--package", bad, "--prefix", prefix],
       { env, encoding: "utf8", timeout: REAL_NPM_TIMEOUT_MS, killSignal: "SIGKILL" },
     );
