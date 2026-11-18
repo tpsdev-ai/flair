@@ -425,7 +425,12 @@ describe("flair#2194: MCP on with NO provider configured — fail-closed discove
       // named unavailable refusal.
       const mcpRes = await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) });
       expect(mcpRes.status).toBe(503);
-      expect(await mcpRes.text()).toContain("not serving an MCP authorization configuration");
+      const mcpBody = await mcpRes.text();
+      expect(mcpBody).toContain("not serving an MCP authorization configuration");
+      // Both FLAIR_MCP_* variables are set here; the cause is the missing
+      // provider, so the remedy has to name one.
+      expect(mcpBody).toContain("Configure a valid OAuth provider");
+      expect(mcpBody).toContain("redirect URI");
     },
     120_000,
   );

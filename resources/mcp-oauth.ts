@@ -210,16 +210,33 @@ function issuerUnreadableError(phase: "mount" | "serve" = "mount"): Error {
 }
 
 /**
+ * FLAIR_MCP_ISSUER is unset or blank at request time. That is its own fault,
+ * not an unreadable component value: withMCPAuth verifies tokens against this
+ * variable, so without it a request has nothing to check against, whether or
+ * not the live config is readable.
+ */
+function issuerEnvMissingError(): Error {
+  return new Error(
+    "FLAIR_MCP_ISSUER is unset or blank, so a /mcp request cannot be checked against " +
+    "the authorization server's issuer. Refusing to serve /mcp. " +
+    "Set FLAIR_MCP_ISSUER to this instance's public origin.",
+  );
+}
+
+/**
  * The live @harperfast/oauth MCP config is absent, or present with
  * `enabled !== true`: the authorization server cannot mint a token for this
- * surface, so the guard would deny every request.
+ * surface, so the guard would deny every request. Absent is also what a
+ * component with no valid provider leaves behind, so the remedy names one.
  */
 function mcpAuthUnavailableError(): Error {
   return new Error(
     "The @harperfast/oauth component is not serving an MCP authorization configuration " +
     "(its live mcpConfig is absent or disabled). Refusing to serve /mcp. " +
-    "Set FLAIR_MCP_OAUTH=true and FLAIR_MCP_ISSUER to this instance's public origin, " +
-    "with mcp.enabled true and mcp.issuer set to ${FLAIR_MCP_ISSUER}, then restart.",
+    "Configure a valid OAuth provider for the component — its client ID, client secret " +
+    "and redirect URI — and set FLAIR_MCP_OAUTH=true and FLAIR_MCP_ISSUER to this " +
+    "instance's public origin, with mcp.enabled true and mcp.issuer set to " +
+    "${FLAIR_MCP_ISSUER}, then restart.",
   );
 }
 
@@ -343,8 +360,9 @@ function readLiveMcpConfig(harperNs: any): LiveMcpConfigRead {
  * `issuerFailedRule` (same trailing-slash trim, same `differs from
  * FLAIR_MCP_ISSUER` rule) against the live issuer, and refuses with the boot
  * guard's named error and remedy. Every state that cannot mint a token for
- * this surface — no live config, a disabled one, an unreadable one, no
- * FLAIR_MCP_ISSUER to compare against — is a named refusal, never equality.
+ * this surface — no live config, a disabled one, an unreadable one — is a
+ * named refusal, never equality. A missing FLAIR_MCP_ISSUER is a separate
+ * refusal with its own message: the request cannot be checked at all.
  *
  * `served` means the live config is present, enabled, and its issuer passed
  * the rule. Every other outcome refuses.
@@ -362,8 +380,9 @@ function checkLiveMcpConfig(harperNs: any): McpRequestCheck {
   });
 
   // withMCPAuth verifies against FLAIR_MCP_ISSUER; without it at request time
-  // there is no comparison to hold, so this is a refusal, never a skip.
-  if (mcpIssuer() === undefined) return unavailable(issuerUnreadableError("serve").message);
+  // there is no comparison to hold, so this is a refusal, never a skip. It is
+  // not a component read failure, so it gets its own message.
+  if (mcpIssuer() === undefined) return unavailable(issuerEnvMissingError().message);
 
   const read = readLiveMcpConfig(harperNs);
   if (read.kind === "unreadable") return unavailable(issuerUnreadableError("serve").message);

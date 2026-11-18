@@ -273,27 +273,33 @@ describe("flair#3032 — per-request issuer check on the mounted /mcp listener",
     }
   });
 
-  it("FLAIR_MCP_ISSUER removed after mounting → 503 and the handler is not reached", async () => {
+  it("FLAIR_MCP_ISSUER removed after mounting → 503 naming the unset variable, and the handler is not reached", async () => {
     const handler = await mount({ enabled: true, issuer: MATCHING });
     delete process.env.FLAIR_MCP_ISSUER;
     const res = await handler({}, () => ({ next: true }));
     expect(res.status).toBe(503);
-    expect(res.body).toContain("mcp.issuer could not be read");
+    expect(res.body).toContain("FLAIR_MCP_ISSUER is unset or blank");
+    expect(res.body).toContain("Set FLAIR_MCP_ISSUER to this instance's public origin");
+    expect(res.body).not.toContain("mcp.issuer could not be read");
     expect(res.body).toContain("Refusing to serve /mcp");
+    expect(res.body).not.toContain(MATCHING);
     expect(wrappedCalls).toBe(0);
     expect(mcpRouteState().mounted).toBe(false);
   });
 
   it.each(["", " "])(
-    "a request-time FLAIR_MCP_ISSUER of %j is refused as unavailable before the comparison",
+    "a request-time FLAIR_MCP_ISSUER of %j is refused as unavailable before the comparison, naming the variable",
     async (value) => {
       const handler = await mount({ enabled: true, issuer: MATCHING });
       process.env.FLAIR_MCP_ISSUER = value;
       const res = await handler({}, () => ({ next: true }));
       expect(res.status).toBe(503);
       expect(JSON.parse(res.body)).toMatchObject({ error: "mcp_auth_unavailable" });
-      expect(res.body).toContain("mcp.issuer could not be read");
+      expect(res.body).toContain("FLAIR_MCP_ISSUER is unset or blank");
+      expect(res.body).toContain("Set FLAIR_MCP_ISSUER to this instance's public origin");
+      expect(res.body).not.toContain("mcp.issuer could not be read");
       expect(res.body).toContain("Refusing to serve /mcp");
+      expect(res.body).not.toContain(MATCHING);
       expect(wrappedCalls).toBe(0);
       expect(mcpRouteState()).toMatchObject({ mounted: false, status: "MCP auth unavailable" });
     },
