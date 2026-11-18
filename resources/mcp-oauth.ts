@@ -402,12 +402,12 @@ function checkLiveMcpConfig(harperNs: any): McpRequestCheck {
   } catch {
     return unavailable(liveMcpConfigUnreadableError().message);
   }
+  if (enabled !== true) return unavailable(mcpAuthUnavailableError().message);
   try {
     issuer = read.config.issuer;
   } catch {
     return unavailable(issuerUnreadableError("serve").message);
   }
-  if (enabled !== true) return unavailable(mcpAuthUnavailableError().message);
   if (issuer === undefined || issuer === null) return unavailable(issuerUnreadableError("serve").message);
 
   const failedRule = issuerFailedRule(issuer);

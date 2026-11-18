@@ -293,6 +293,25 @@ describe("flair#3032 — per-request issuer check on the mounted /mcp listener",
     }
   });
 
+  it("a disabled live config with a throwing issuer getter gets the unavailable refusal and the provider remedy", async () => {
+    const live = { enabled: false, issuer: MATCHING };
+    Object.defineProperty(live, "issuer", { get() { throw new Error("getter-value-canary"); } });
+    const handler = await mount(live);
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await handler({}, () => ({ next: true }));
+      expect(res.status).toBe(503);
+      expect(JSON.parse(res.body)).toMatchObject({ error: "mcp_auth_unavailable" });
+      expectProviderRemedy(res.body);
+      expect(res.body).not.toContain("mcp.issuer could not be read");
+      expect(wrappedCalls).toBe(0);
+      expect(mcpRouteState()).toMatchObject({ mounted: false, status: "MCP auth unavailable" });
+      expect(res.body).not.toContain("getter-value-canary");
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it("a ${...}-shaped live issuer carrying a canary is refused without the canary in the body or a request-time log entry", async () => {
     const handler = await mount({ enabled: true, issuer: "${canary-value}" });
     const errors = spyOn(console, "error").mockImplementation(() => {});
