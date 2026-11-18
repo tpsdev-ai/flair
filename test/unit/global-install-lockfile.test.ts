@@ -14,7 +14,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -490,7 +490,7 @@ describe("resolveFromLoggingDir requires the hit to be inside the tree", () => {
   });
 });
 
-// The real-npm test below runs five child processes (three `npm pack`, one
+// The failed install test below runs five child processes (three `npm pack`, one
 // `npm install`, and the gate script, which installs again). Each direct
 // child is sent SIGKILL at REAL_NPM_TIMEOUT_MS (SIGKILL, not the default
 // SIGTERM: the sync spawn waits for the child to exit), and the test declares
@@ -535,6 +535,46 @@ function packFixturePackage(dir: string, manifest: Record<string, unknown>, dest
 }
 
 describe("check-global-install-lockfile — real npm", () => {
+  test("accepts an omitted optional dependency also declared in dependencies after npm install", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "flair-gi-optional-")));
+    fixtures.push(root);
+    const prefix = join(root, "prefix");
+    const env = npmFixtureEnvironment(root);
+    const depTgz = packFixturePackage(join(root, "fixture-dep-a"), { name: "dep-a", version: "1.0.0" }, root, env);
+    const dependency = `file:${depTgz}`;
+    const tgz = packFixturePackage(
+      join(root, "fixture-flair"),
+      {
+        name: FLAIR_PACKAGE,
+        version: "0.0.1",
+        dependencies: { "dep-a": dependency },
+        optionalDependencies: { "dep-a": dependency },
+      },
+      root,
+      env,
+    );
+    writePackage(prefix, { name: "fixture-project", version: "1.0.0", private: true });
+    const run = spawnSync("npm", ["install", "--prefix", prefix, "--omit=optional", tgz], {
+      cwd: prefix,
+      env,
+      encoding: "utf8",
+      timeout: REAL_NPM_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+    });
+    expect(run.status).toBe(0);
+    const nodeModules = join(prefix, "node_modules");
+    const flair = join(nodeModules, FLAIR_PACKAGE);
+    const installed = JSON.parse(readFileSync(join(flair, "package.json"), "utf8"));
+    expect(installed.dependencies["dep-a"]).toBe(dependency);
+    expect(installed.optionalDependencies["dep-a"]).toBe(dependency);
+    const lockfile = JSON.parse(readFileSync(join(prefix, "package-lock.json"), "utf8"));
+    expect(lockfile.packages[`node_modules/${FLAIR_PACKAGE}`].optionalDependencies["dep-a"]).toBe(dependency);
+    expect(lockfile.packages["node_modules/dep-a"].optional).toBe(true);
+    expect(existsSync(join(nodeModules, "dep-a"))).toBe(false);
+    expect(existsSync(join(flair, "node_modules", "dep-a"))).toBe(false);
+    expect(countFlairTree(flair, nodeModules)).toBe(1);
+  }, REAL_NPM_TEST_TIMEOUT_MS);
+
   test("an install that fails while a tree remains is refused, naming the exit status", () => {
     const root = mkdtempSync(join(tmpdir(), "flair-gi-realm-"));
     fixtures.push(root);
