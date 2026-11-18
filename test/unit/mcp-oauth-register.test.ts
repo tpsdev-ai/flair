@@ -290,24 +290,11 @@ describe("flair#3032 — per-request issuer check on the mounted /mcp listener",
   });
 
   it("FLAIR_MCP_ISSUER removed after mounting → 503 naming the unset variable, and the handler is not reached", async () => {
-    const handler = await mount({ enabled: true, issuer: MATCHING });
+    const live = { enabled: true, issuer: MATCHING, resource: `${MATCHING}/mcp`, signingKeyPem: "resolved-key-canary" };
+    const handler = await mount(live);
     delete process.env.FLAIR_MCP_ISSUER;
-    const res = await handler({}, () => ({ next: true }));
-    expect(res.status).toBe(503);
-    expect(res.body).toContain("FLAIR_MCP_ISSUER is unset or blank");
-    expect(res.body).toContain("Set FLAIR_MCP_ISSUER to this instance's public origin");
-    expect(res.body).not.toContain("mcp.issuer could not be read");
-    expect(res.body).toContain("Refusing to serve /mcp");
-    expect(res.body).not.toContain(MATCHING);
-    expect(wrappedCalls).toBe(0);
-    expect(mcpRouteState().mounted).toBe(false);
-  });
-
-  it.each(["", " "])(
-    "a request-time FLAIR_MCP_ISSUER of %j is refused as unavailable before the comparison, naming the variable",
-    async (value) => {
-      const handler = await mount({ enabled: true, issuer: MATCHING });
-      process.env.FLAIR_MCP_ISSUER = value;
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    try {
       const res = await handler({}, () => ({ next: true }));
       expect(res.status).toBe(503);
       expect(JSON.parse(res.body)).toMatchObject({ error: "mcp_auth_unavailable" });
@@ -315,9 +302,66 @@ describe("flair#3032 — per-request issuer check on the mounted /mcp listener",
       expect(res.body).toContain("Set FLAIR_MCP_ISSUER to this instance's public origin");
       expect(res.body).not.toContain("mcp.issuer could not be read");
       expect(res.body).toContain("Refusing to serve /mcp");
-      expect(res.body).not.toContain(MATCHING);
+      for (const value of Object.values(live)) {
+        expect(res.body).not.toContain(String(value));
+        expect(JSON.stringify(errors.mock.calls)).not.toContain(String(value));
+      }
+      expect(wrappedCalls).toBe(0);
+      expect(mcpRouteState().mounted).toBe(false);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it.each(["", " "])(
+    "a request-time FLAIR_MCP_ISSUER of %j is refused as unavailable before the comparison, naming the variable",
+    async (value) => {
+      const live = { enabled: true, issuer: MATCHING, resource: `${MATCHING}/mcp`, signingKeyPem: "resolved-key-canary" };
+      const handler = await mount(live);
+      process.env.FLAIR_MCP_ISSUER = value;
+      const errors = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const res = await handler({}, () => ({ next: true }));
+        expect(res.status).toBe(503);
+        expect(JSON.parse(res.body)).toMatchObject({ error: "mcp_auth_unavailable" });
+        expect(res.body).toContain("FLAIR_MCP_ISSUER is unset or blank");
+        expect(res.body).toContain("Set FLAIR_MCP_ISSUER to this instance's public origin");
+        expect(res.body).not.toContain("mcp.issuer could not be read");
+        expect(res.body).toContain("Refusing to serve /mcp");
+        for (const resolved of Object.values(live)) {
+          expect(res.body).not.toContain(String(resolved));
+          expect(JSON.stringify(errors.mock.calls)).not.toContain(String(resolved));
+        }
+        expect(wrappedCalls).toBe(0);
+        expect(mcpRouteState()).toMatchObject({ mounted: false, status: "MCP auth unavailable" });
+      } finally {
+        errors.mockRestore();
+      }
+    },
+  );
+
+  it.each([undefined, "", " "])(
+    "a request-time FLAIR_MCP_ISSUER of %j takes precedence over an unreadable live config",
+    async (value) => {
+      clearEnv();
+      process.env.FLAIR_MCP_OAUTH = "1";
+      process.env.FLAIR_MCP_ISSUER = MATCHING;
+      const deps = depsWithLiveMcpConfig({ enabled: true, issuer: MATCHING });
+      const unreadable = mock(() => { throw new Error("registry failed"); });
+      (deps as any).harper.server.resources.get = unreadable;
+      expect(await registerMcpOAuthRoute(deps)).toBe(true);
+      if (value === undefined) delete process.env.FLAIR_MCP_ISSUER;
+      else process.env.FLAIR_MCP_ISSUER = value;
+      const res = await httpCalls[0].handler({}, () => ({ next: true }));
+      expect(res.status).toBe(503);
+      expect(JSON.parse(res.body)).toMatchObject({ error: "mcp_auth_unavailable" });
+      expect(res.body).toContain("FLAIR_MCP_ISSUER is unset or blank");
+      expect(res.body).toContain("Set FLAIR_MCP_ISSUER to this instance's public origin");
+      expect(res.body).not.toContain("mcp.issuer could not be read");
+      expect(res.body).toContain("Refusing to serve /mcp");
       expect(wrappedCalls).toBe(0);
       expect(mcpRouteState()).toMatchObject({ mounted: false, status: "MCP auth unavailable" });
+      expect(unreadable).not.toHaveBeenCalled();
     },
   );
 
