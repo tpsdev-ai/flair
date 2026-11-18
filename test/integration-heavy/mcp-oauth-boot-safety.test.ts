@@ -35,7 +35,8 @@
  *      `signingKeyPem: ${VAR}` with the variable unset still degrades the boot,
  *      the load error naming the variable — the library's check is NOT loosened.
  *   2d. NO PROVIDER (flair#2194): no-provider boot returns 404 for both
- *      protected-resource forms and 401 for an unauthenticated /mcp request.
+ *      protected-resource forms and 503 (unavailable) for an unauthenticated
+ *      /mcp request.
  *      A token minted with a provider is refused as unavailable after provider removal.
  *   3. MUTATION-PROVE (literal true): mcp.enabled: true + env unset -> boots
  *      DEGRADED. Proves test 2's clean-boot assertions CAN fire.

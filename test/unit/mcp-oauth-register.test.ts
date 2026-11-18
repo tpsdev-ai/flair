@@ -216,6 +216,8 @@ describe("flair#3032 — per-request issuer check on the mounted /mcp listener",
       expect(JSON.parse(res.body)).toMatchObject({ error: "mcp_issuer_refused" });
       expect(res.body).toContain("(differs from FLAIR_MCP_ISSUER)");
       expect(res.body).toContain("Set FLAIR_MCP_ISSUER and mcp.issuer to the same public origin");
+      expect(res.body).toContain("Refusing to serve /mcp");
+      expect(res.body).not.toContain("Refusing to mount /mcp");
       // Neither resolved issuer value is disclosed in the 503 body or in a log
       // line written while serving the refusal. (Registration logs the resolved
       // issuer before this spy starts.)
@@ -282,6 +284,21 @@ describe("flair#3032 — per-request issuer check on the mounted /mcp listener",
     expect(mcpRouteState().mounted).toBe(false);
   });
 
+  it.each(["", " "])(
+    "a request-time FLAIR_MCP_ISSUER of %j is refused as unavailable before the comparison",
+    async (value) => {
+      const handler = await mount({ enabled: true, issuer: MATCHING });
+      process.env.FLAIR_MCP_ISSUER = value;
+      const res = await handler({}, () => ({ next: true }));
+      expect(res.status).toBe(503);
+      expect(JSON.parse(res.body)).toMatchObject({ error: "mcp_auth_unavailable" });
+      expect(res.body).toContain("mcp.issuer could not be read");
+      expect(res.body).toContain("Refusing to serve /mcp");
+      expect(wrappedCalls).toBe(0);
+      expect(mcpRouteState()).toMatchObject({ mounted: false, status: "MCP auth unavailable" });
+    },
+  );
+
   it("a throwing oauth resource read is unreadable, not absent", async () => {
     const deps = makeDeps();
     (deps as any).harper = { server: { resources: { get() { throw new Error("registry failed"); } } } };
@@ -291,12 +308,13 @@ describe("flair#3032 — per-request issuer check on the mounted /mcp listener",
     expect(await registerMcpOAuthRoute(deps)).toBe(true);
     const res = await httpCalls[0].handler({}, () => ({ next: true }));
     expect(res.status).toBe(503);
+    expect(JSON.parse(res.body)).toMatchObject({ error: "mcp_auth_unavailable" });
     expect(res.body).toContain("mcp.issuer could not be read");
     expect(wrappedCalls).toBe(0);
-    expect(mcpRouteState().mounted).toBe(false);
+    expect(mcpRouteState()).toMatchObject({ mounted: false, status: "MCP auth unavailable" });
   });
 
-  it("a live config whose mcpConfig getter throws is unreadable, not absent", async () => {
+  it("a live config whose Resource getter throws is unreadable, not absent", async () => {
     const deps = makeDeps();
     const entry: any = { path: "oauth" };
     Object.defineProperty(entry, "Resource", { get() { throw new Error("getter failed"); } });
@@ -310,6 +328,25 @@ describe("flair#3032 — per-request issuer check on the mounted /mcp listener",
     expect(res.body).toContain("mcp.issuer could not be read");
     expect(wrappedCalls).toBe(0);
     expect(mcpRouteState().mounted).toBe(false);
+  });
+
+  it("a live config whose mcpConfig getter throws is unreadable, not absent", async () => {
+    const deps = makeDeps();
+    const Resource: any = {};
+    Object.defineProperty(Resource, "mcpConfig", { get() { throw new Error("getter failed"); } });
+    (deps as any).harper = { server: { resources: { get: () => ({ Resource }) } } };
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "1";
+    process.env.FLAIR_MCP_ISSUER = MATCHING;
+    expect(await registerMcpOAuthRoute(deps)).toBe(true);
+    const res = await httpCalls[0].handler({}, () => ({ next: true }));
+    expect(res.status).toBe(503);
+    expect(JSON.parse(res.body)).toMatchObject({ error: "mcp_auth_unavailable" });
+    expect(res.body).toContain("mcp.issuer could not be read");
+    expect(res.body).toContain("Refusing to serve /mcp");
+    expect(res.body).not.toContain("Refusing to mount /mcp");
+    expect(wrappedCalls).toBe(0);
+    expect(mcpRouteState()).toMatchObject({ mounted: false, status: "MCP auth unavailable" });
   });
 
   it.each([
@@ -360,6 +397,37 @@ describe("flair#3032 — per-request issuer check on the mounted /mcp listener",
     expect(mcpRouteState().mounted).toBe(true);
   });
 
+  it("getConfig returns the env-pinned iss/resource when the live config is present, enabled and passes the rule", async () => {
+    await mount({ enabled: true, issuer: MATCHING });
+    expect(withMCPAuthCalls[0].options.getConfig()).toEqual({
+      enabled: true,
+      issuer: MATCHING,
+      resource: `${MATCHING}/mcp`,
+    });
+  });
+
+  it("getConfig returns undefined when the live config is absent", async () => {
+    await mount(undefined);
+    expect(withMCPAuthCalls[0].options.getConfig()).toBeUndefined();
+  });
+
+  it("getConfig returns undefined when the live config is disabled", async () => {
+    await mount({ enabled: false, issuer: MATCHING });
+    expect(withMCPAuthCalls[0].options.getConfig()).toBeUndefined();
+  });
+
+  it("getConfig returns undefined when the live issuer fails the rule", async () => {
+    await mount({ enabled: true, issuer: OTHER });
+    expect(withMCPAuthCalls[0].options.getConfig()).toBeUndefined();
+  });
+
+  it("getConfig returns undefined when reading the live config throws", async () => {
+    const live: any = { issuer: MATCHING };
+    Object.defineProperty(live, "enabled", { get() { throw new Error("getter failed"); } });
+    await mount(live);
+    expect(withMCPAuthCalls[0].options.getConfig()).toBeUndefined();
+  });
+
   it("mcpRouteState() reports a live config change with no /mcp request in between", async () => {
     const live: any = { enabled: true, issuer: MATCHING };
     await mount(live);
@@ -373,12 +441,18 @@ describe("flair#3032 — per-request issuer check on the mounted /mcp listener",
     expect(mcpRouteState().mounted).toBe(true);
   });
 
-  it("a live config with no issuer is refused, not served", async () => {
-    const handler = await mount({ enabled: true });
+  it.each([
+    ["absent", { enabled: true }],
+    ["explicitly null", { enabled: true, issuer: null }],
+  ] as Array<[string, any]>)("a live config whose issuer is %s is refused as unavailable, not served", async (_label, live) => {
+    const handler = await mount(live);
     const res = await handler({}, () => ({ next: true }));
     expect(res.status).toBe(503);
+    expect(JSON.parse(res.body)).toMatchObject({ error: "mcp_auth_unavailable" });
     expect(res.body).toContain("mcp.issuer could not be read");
+    expect(res.body).toContain("Refusing to serve /mcp");
     expect(wrappedCalls).toBe(0);
+    expect(mcpRouteState()).toMatchObject({ mounted: false, status: "MCP auth unavailable" });
   });
 
   it("refused while the issuer differs, then served and reported mounted again when it matches", async () => {
@@ -699,6 +773,8 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
       const error = await registerMcpOAuthRoute(deps).then(() => null, (error) => error);
       expect(error).toBeInstanceOf(Error);
       expect(error.message).toContain("(differs from FLAIR_MCP_ISSUER)");
+      expect(error.message).toContain("Refusing to mount /mcp");
+      expect(error.message).not.toContain("Refusing to serve /mcp");
       expect(error.message).not.toContain("flair.example.com");
       expect(error.message).not.toContain("flair.example.net");
       const logged = errors.mock.calls.map(args => args.map(String).join(" ")).join("\n");
@@ -873,11 +949,15 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
     const deps = makeDeps();
     delete (deps as any).skipComponentGuard;
     (deps as any).harper = mockHarper(component);
-    await expect(registerMcpOAuthRoute(deps)).rejects.toThrow(
-      field === "issuer"
-        ? /mcp\.issuer could not be read/
-        : /configuration could not be read.*Remedy: make config\.yaml.*set FLAIR_MCP_OAUTH=true/,
-    );
+    const error = await registerMcpOAuthRoute(deps).then(() => null, (error: any) => error);
+    expect(error).toBeInstanceOf(Error);
+    if (field === "issuer") {
+      expect(error.message).toContain("mcp.issuer could not be read");
+      expect(error.message).toContain("Refusing to mount /mcp");
+      expect(error.message).not.toContain("Refusing to serve /mcp");
+    } else {
+      expect(error.message).toMatch(/configuration could not be read.*Remedy: make config\.yaml.*set FLAIR_MCP_OAUTH=true/);
+    }
     expect(httpCalls).toHaveLength(0);
   });
 
