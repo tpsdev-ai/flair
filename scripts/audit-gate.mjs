@@ -872,9 +872,9 @@ export function validateAllowlist(allowlist, today, enforcedCaps) {
     }
     if (problems.some((p) => p.startsWith(where))) return;
 
-    if (!/^GHSA-[a-z0-9-]+$/i.test(entry.ghsa)) {
+    if (!/^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$/i.test(entry.ghsa)) {
       problems.push(`${where}: "ghsa" must be a GHSA id`);
-    } else if (!/^GHSA-[a-z0-9-]+$/.test(entry.ghsa)) {
+    } else if (!/^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$/.test(entry.ghsa)) {
       problems.push(`${where}: "ghsa" must use canonical casing (uppercase GHSA- prefix, lowercase remainder)`);
     }
     const key = entryKey(entry);
