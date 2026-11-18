@@ -106,6 +106,13 @@ async function memoryRow(id: string): Promise<any | null> {
   return rows[0] ?? null;
 }
 
+// The embedding-stamp migration writes these on its own schedule (30 s, 2 min and 10 min after boot).
+function withoutEmbedderFields(row: any) {
+  if (!row) return row;
+  const { embedding, embeddedContentHash, updatedAt, ...rest } = row;
+  return rest;
+}
+
 async function memoryRowsBySubject(subjectId: string): Promise<any[]> {
   return ops({
     operation: "search_by_value", database: "flair", table: "Memory",
@@ -177,7 +184,7 @@ describe("flair#2997 — the caller's row keeps its 400", () => {
     expect(res.status, res.text.slice(0, 300)).toBe(400);
     expect(JSON.parse(res.text).error).toBe("invalid_visibility");
 
-    expect(await memoryRow(id)).toEqual(beforeRow);
+    expect(withoutEmbedderFields(await memoryRow(id))).toEqual(withoutEmbedderFields(beforeRow));
     expect((await memoryRowsBySubject(id)).map((row: any) => row.id), "no successor may survive").toEqual([id]);
     expect(await versionsOf(id), "no version row may survive").toHaveLength(0);
     expect(await eventsOf(A.id), "no event may survive").toEqual(beforeEvents);
@@ -202,7 +209,7 @@ describe("flair#2997 — an invalid InstructionVersion or OrgEvent row answers 5
       expect(JSON.parse(res.text).error).toBe("instruction_version_append_failed");
 
       const after = await memoryRow(id);
-      expect(after).toEqual(before);
+      expect(withoutEmbedderFields(after)).toEqual(withoutEmbedderFields(before));
       expect((await memoryRowsBySubject(id)).map((row: any) => row.id), "no successor may survive").toEqual([id]);
       expect(await versionsOf(id), "no version row may survive").toHaveLength(0);
       expect(await eventsOf(agent.id), "no event may survive").toHaveLength(0);
@@ -229,7 +236,7 @@ describe("flair#2997 — a Memory successor field keeps the caller's 400", () =>
     expect(body.detail.some((issue: any) => issue.path === "instanceToken"), JSON.stringify(body.detail)).toBe(true);
 
     const after = await memoryRow(id);
-    expect(after).toEqual(before);
+    expect(withoutEmbedderFields(after)).toEqual(withoutEmbedderFields(before));
     expect((await memoryRowsBySubject(id)).map((row: any) => row.id), "no successor may survive").toEqual([id]);
     expect(await versionsOf(id), "no version row may survive").toHaveLength(0);
     expect(await eventsOf(agent.id), "no event may survive").toHaveLength(0);
