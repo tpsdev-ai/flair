@@ -225,6 +225,7 @@ function mockDeps(over: Partial<FabricUpgradeDeps> = {}): {
   calls: { deploy: DeployOptions[]; npmInstall: string[]; logs: string[] };
 } {
   const calls = { deploy: [] as DeployOptions[], npmInstall: [] as string[], logs: [] as string[] };
+  let deployedReads = 0;
   const deps: FabricUpgradeDeps = {
     fetchLatestFlairVersion: async () => "0.14.0",
     fetchDeclaredHarperVersion: async () => "5.0.21",
@@ -244,7 +245,7 @@ function mockDeps(over: Partial<FabricUpgradeDeps> = {}): {
         JSON.stringify({ name: "@tpsdev-ai/flair", version: "0.14.0" }),
       );
     },
-    fetchDeployedVersion: async () => "0.13.0",
+    fetchDeployedVersion: async () => (++deployedReads === 1 ? "0.13.0" : "0.14.0"),
     deploy: async (opts: DeployOptions): Promise<DeployResult> => {
       calls.deploy.push(opts);
       return {
@@ -363,8 +364,8 @@ describe("fabricUpgrade (deploy path)", () => {
     expect(dOpts.packageRoot).toContain("flair");
 
     expect(result.deployed).toBe(true);
-    // Verification re-queries the Fabric (mock returns 0.13.0 — a soft warn, not a throw).
-    expect(result.verifiedVersion).toBe("0.13.0");
+    // The post-deploy read reports the deployed version. An older or non-semver read is unverified.
+    expect(result.verifiedVersion).toBe("0.14.0");
     // Staging dir is cleaned up.
     const { existsSync } = await import("node:fs");
     expect(existsSync(result.stagingDir)).toBe(false);

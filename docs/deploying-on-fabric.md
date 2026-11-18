@@ -37,6 +37,8 @@ flair deploy --fabric-org <org> --fabric-cluster <cluster>
 
 Target defaults to `https://<cluster>.<org>.harperfabric.com`; override with `--target`.
 
+`flair deploy --target https://<host>:9926 --operations-endpoint https://<host>:9925 --application-endpoint https://<host>:9926` sends `deploy_component` to port 9925 and probes the application on port 9926. Different hosts are refused. Only the ports may differ. The admin Basic credentials go to the operations endpoint for `deploy_component` and to the application endpoint for resource probes, `/Health`, `/HealthDetail`, and the fleet sweep. <!-- docs-freshness-allow: Fabric application port 9926 and ops port 9925 -->
+
 Credentials go via the environment, not argv, so they stay out of `ps`. Use
 `--fabric-password-file <path>` (mode `0600`) when scripting; inline flags leak to history.
 
@@ -86,14 +88,11 @@ flair agent add mybot --target "$FLAIR_URL" --ops-target <ops-url>
 OAuth metadata and A2A discovery advertise `FLAIR_PUBLIC_URL`; with it unset, every
 URL a client is handed points at loopback and no remote client can authorize.
 
-`flair deploy` ships it. The deploy already knows the URL — it is the target it
-verifies the served API against immediately afterwards — so it writes
-`FLAIR_PUBLIC_URL=<target>` into a `.env` in the component payload, and then checks
-`GET <target>/OAuthMetadata` really does advertise a non-loopback issuer. That check
-fails the deploy if it does not.
+`flair deploy` sets `FLAIR_PUBLIC_URL` from the application endpoint when that
+URL is not loopback. `/OAuthMetadata` advertising a loopback issuer fails the deploy.
 
-To advertise something other than the deploy target — a CDN, a reverse proxy, a
-vanity domain — put your own `.env` in the package root:
+To advertise a different URL — a CDN, a reverse proxy, a vanity domain — put
+your own `.env` in the package root:
 
 ```
 FLAIR_PUBLIC_URL=https://flair.example.com
@@ -119,26 +118,20 @@ Three things worth knowing about that file:
 
 ---
 
-## Ports: the derivation trap
+## Ports
 
-Locally, Flair serves data on `19926` and the ops API on `19925`. The CLI derives
-**ops = data − 1** everywhere.
+Locally, Flair serves data on `19926` and the ops API on `19925`. For an explicit
+port other than 443, the CLI derives ops = data − 1.
 
-A managed endpoint is HTTPS on 443 with no port, so derivation produces **`:442`** —
-where nothing answers:
+HTTPS with no port, or with port 443, derives the Fabric operations port 9925. <!-- docs-freshness-allow: Fabric ops API port -->
 
-```bash
-# --target https://<cluster>.<org>.harperfabric.com   → ops derived as :442  ✗
-# --target https://<fabric-node>:19926/<instance>     → ops derived as :19925 ✓
-```
+<!-- docs-freshness-allow: Fabric ops API -->
+`--target https://<cluster>.<org>.harperfabric.com` derives operations port 9925. `--target https://<fabric-node>:19926/<instance>` derives operations port 19925.
 
 **Fabric's ops API runs on the same hostname at port 9925** <!-- docs-freshness-allow: Fabric ops API port, not legacy data port --> (the deploy/upgrade path already targets this port). For a managed `*.harperfabric.com` instance:
 
-```bash
-# Same hostname, port 9925 — not port 442 <!-- docs-freshness-allow: Fabric ops API -->
-flair init --target https://<cluster>.<org>.harperfabric.com \
-    --ops-target https://<cluster>.<org>.harperfabric.com:9925 <!-- docs-freshness-allow: Fabric ops API -->
-```
+<!-- docs-freshness-allow: Fabric ops API -->
+`flair init --target https://<cluster>.<org>.harperfabric.com --ops-target https://<cluster>.<org>.harperfabric.com:9925`
 
 **Pass `--ops-target <url>` explicitly** (or set `FLAIR_OPS_TARGET`) on any command that
 touches the ops API: `init --target`, `agent add --target`, `federation token --target`.

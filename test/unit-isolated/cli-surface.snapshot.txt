@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=149 options=704
+# commands=149 options=708
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -1725,6 +1725,12 @@ flair upgrade
     --target <url>
       description: Upgrade the Flair deployed to this Fabric URL (not the local install)
       attr: target
+    --operations-endpoint <url>
+      description: For --target: operations endpoint for deploy_component (default: --target)
+      attr: operationsEndpoint
+    --application-endpoint <url>
+      description: For --target: application endpoint for migration, discovery, and verification (default: --target)
+      attr: applicationEndpoint
     --fabric-user <user>
       description: Fabric admin username — for --target (env: FABRIC_USER preferred; inline leaks to shell history)
       attr: fabricUser
@@ -1872,6 +1878,12 @@ flair deploy
     --target <url>
       description: Override the Fabric URL template (https://<cluster>.<org>.harperfabric.com)
       attr: target
+    --operations-endpoint <url>
+      description: Operations endpoint for deploy_component (default: the target URL)
+      attr: operationsEndpoint
+    --application-endpoint <url>
+      description: Application endpoint for migration, discovery, and verification (default: the target URL)
+      attr: applicationEndpoint
     --project <name>
       description: Component name in Fabric
       attr: project
@@ -5186,6 +5198,11 @@ Options:
                                  versions
   --target <url>                 Upgrade the Flair deployed to this Fabric URL
                                  (not the local install)
+  --operations-endpoint <url>    For --target: operations endpoint for
+                                 deploy_component (default: --target)
+  --application-endpoint <url>   For --target: application endpoint for
+                                 migration, discovery, and verification
+                                 (default: --target)
   --fabric-user <user>           Fabric admin username — for --target (env:
                                  FABRIC_USER preferred; inline leaks to shell
                                  history)
@@ -5350,6 +5367,10 @@ Options:
                                  reserved for future Fabric bearer support
   --target <url>                 Override the Fabric URL template
                                  (https://<cluster>.<org>.harperfabric.com)
+  --operations-endpoint <url>    Operations endpoint for deploy_component
+                                 (default: the target URL)
+  --application-endpoint <url>   Application endpoint for migration, discovery,
+                                 and verification (default: the target URL)
   --project <name>               Component name in Fabric (default: "flair")
   --pkg-version <semver>         Override version label (default: installed
                                  package version)
