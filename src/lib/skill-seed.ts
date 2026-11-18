@@ -83,6 +83,13 @@ export const SEED_SKILL_WRITE_TIMEOUT_MS = 180_000;
 /** How long the skill row's write runs before init says what it is waiting on. */
 export const SEED_SKILL_WRITE_NOTICE_MS = 5_000;
 
+/**
+ * Backoff schedule (in ms) when the skill row's write is refused with a
+ * retryable `503 memory_provider_timeout` (flair#3043). Capped by the
+ * remaining time in `skillWriteTimeoutMs`.
+ */
+export const SEED_SKILL_RETRY_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000];
+
 export type SeedAction = "create" | "unchanged" | "replace" | "keep";
 
 /** A skill row as the seed reads it. */
@@ -110,7 +117,7 @@ export interface SeedAssignment {
 export type SeedRead<T> = { ok: boolean; row?: T | null; detail?: string };
 
 /** A write result. `ok:false` carries what failed. */
-export type SeedWrite = { ok: boolean; detail?: string };
+export type SeedWrite = { ok: boolean; detail?: string; status?: number; errorCode?: string };
 
 export interface SkillSeedIo {
   /** The operator principal the writes run as: the Basic administrator's username. */
@@ -369,6 +376,12 @@ export interface SkillSeedRestOptions {
   requestTimeoutMs?: number;
   skillWriteTimeoutMs?: number;
   skillWriteNoticeMs?: number;
+  /**
+   * Internal/testing knobs: backoff schedule and sleep implementation for
+   * retryable `503 memory_provider_timeout` attempts (flair#3043).
+   */
+  retryBackoffMs?: number[];
+  sleepImpl?: (ms: number) => Promise<void>;
 }
 
 function detailOf(err: unknown): string {
@@ -457,9 +470,21 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      return { ok: false, detail: `HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}` };
+      let errorCode: string | undefined;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object" && typeof parsed.error === "string") {
+          errorCode = parsed.error;
+        }
+      } catch {}
+      return {
+        ok: false,
+        status: res.status,
+        errorCode,
+        detail: `HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`,
+      };
     }
-    return { ok: true };
+    return { ok: true, status: res.status };
   };
 
   // The skill row's write waits on the instance's embedding model (see
@@ -468,6 +493,12 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
   // instance, which may still land it. The id is fixed, so a re-run updates
   // that row rather than adding one; a re-run started while the first write is
   // still pending can send a second PUT to the same id.
+  //
+  // Within its announced wait, a 503 memory_provider_timeout refusal is
+  // treated as retryable (flair#3043): the provider did not answer within
+  // its bound, nothing was written, and the instance may still be loading or
+  // downloading the embedding model. Later attempts back off and retry until
+  // the wait is exhausted or a non-retryable refusal occurs.
   const putRow = async (): Promise<SeedWrite> => {
     const notice = setTimeout(() => {
       opts.notify?.(
@@ -476,12 +507,45 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
       );
     }, skillNoticeMs);
     (notice as unknown as { unref?: () => void }).unref?.();
+
+    const start = Date.now();
+    const deadline = start + skillWriteMs;
+    const backoff = opts.retryBackoffMs ?? SEED_SKILL_RETRY_BACKOFF_MS;
+    const sleep = opts.sleepImpl ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+
+    const onTimeout = (ms: number) =>
+      `no answer within ${seconds(ms)} — the instance embeds a skill row as it writes it, so this write also ` +
+      `waits for its embedding model, which may need to download or load; 'flair doctor' reports embeddings. The write may ` +
+      `still land; the id is fixed, so a re-run updates that row rather than adding one`;
+
     try {
-      return await putById("Memory", SEED_SKILL_ID, seedSkillBody(opts.user, current), skillWriteMs, (ms) =>
-        `no answer within ${seconds(ms)} — the instance embeds a skill row as it writes it, so this write also ` +
-        `waits for its embedding model, which may need to download or load; 'flair doctor' reports embeddings. The write may ` +
-        `still land; the id is fixed, so a re-run updates that row rather than adding one`,
-      );
+      let attempt = 0;
+      let lastResult: SeedWrite = { ok: false, detail: onTimeout(skillWriteMs) };
+
+      while (true) {
+        attempt++;
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+          return lastResult.detail ? lastResult : { ok: false, detail: onTimeout(skillWriteMs) };
+        }
+
+        const res = await putById("Memory", SEED_SKILL_ID, seedSkillBody(opts.user, current), remainingMs, onTimeout);
+        if (res.ok) return res;
+        lastResult = res;
+
+        // A 503 memory_provider_timeout refusal is retryable within the announced wait (flair#3043).
+        if (res.status === 503 && res.errorCode === "memory_provider_timeout") {
+          const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 1_000;
+          if (deadline - (Date.now() + waitMs) > 0) {
+            await sleep(waitMs);
+            continue;
+          }
+        }
+
+        // Fails when the wait is exhausted or the refusal is not retryable;
+        // final message names the last error.
+        return lastResult;
+      }
     } finally {
       clearTimeout(notice);
     }

@@ -7,6 +7,7 @@ import {
   SEED_ASSIGNMENT_ID,
   SEED_REQUEST_TIMEOUT_MS,
   SEED_SKILL_ID,
+  SEED_SKILL_RETRY_BACKOFF_MS,
   SEED_SKILL_WRITE_TIMEOUT_MS,
   seedAssignmentProblems,
   seedRowProblems,
@@ -473,5 +474,114 @@ describe("skillSeedRestIo — a slow first skill-row write", () => {
     const out = await runSkillSeed(io, current);
     expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
     expect((out as { message: string }).message).toContain(`"${SEED_ASSIGNMENT_ID}" org assignment failed (no answer within`);
+  });
+
+  it("exports a non-empty retry backoff schedule (flair#3043)", () => {
+    expect(SEED_SKILL_RETRY_BACKOFF_MS.length).toBeGreaterThan(0);
+    expect(SEED_SKILL_RETRY_BACKOFF_MS[0]).toBeGreaterThanOrEqual(1_000);
+  });
+
+  it("retries when the skill-row write is refused with 503 memory_provider_timeout, and succeeds when the next attempt answers (flair#3043)", async () => {
+    let memoryPuts = 0;
+    const slept: number[] = [];
+    const instance = slowInstance();
+    const originalFetch = instance.fetch;
+
+    instance.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === `/Memory/${encodeURIComponent(SEED_SKILL_ID)}` && (init?.method ?? "GET") === "PUT") {
+        memoryPuts++;
+        if (memoryPuts === 1) {
+          instance.puts.push(`Memory/${SEED_SKILL_ID}`);
+          return Response.json(
+            { error: "memory_provider_timeout", message: "the embedding provider did not answer within its bound; nothing was written, retry" },
+            { status: 503 },
+          );
+        }
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    const io = skillSeedRestIo(
+      restOptions(instance, {
+        retryBackoffMs: [5, 10],
+        sleepImpl: async (ms) => {
+          slept.push(ms);
+        },
+      }),
+      current,
+    );
+
+    const out = await runSkillSeed(io, current);
+    expect(out).toMatchObject({ kind: "ok", action: "create", skillId: SEED_SKILL_ID, assignmentId: SEED_ASSIGNMENT_ID });
+    expect(memoryPuts).toBe(2);
+    expect(slept).toEqual([5]);
+    expect(instance.puts).toEqual([`Memory/${SEED_SKILL_ID}`, `Memory/${SEED_SKILL_ID}`, `OrgSkillAssignment/${SEED_ASSIGNMENT_ID}`]);
+  });
+
+  it("fails and names the last error when 503 memory_provider_timeout exhausts the write bound (flair#3043)", async () => {
+    let memoryPuts = 0;
+    const slept: number[] = [];
+    const instance = slowInstance();
+
+    instance.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === `/Memory/${encodeURIComponent(SEED_SKILL_ID)}` && (init?.method ?? "GET") === "PUT") {
+        memoryPuts++;
+        instance.puts.push(`Memory/${SEED_SKILL_ID}`);
+        return Response.json(
+          { error: "memory_provider_timeout", message: "the embedding provider did not answer within its bound; nothing was written, retry" },
+          { status: 503 },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    const io = skillSeedRestIo(
+      restOptions(instance, {
+        skillWriteTimeoutMs: 60,
+        retryBackoffMs: [20, 20],
+        sleepImpl: async (ms) => {
+          slept.push(ms);
+          await Bun.sleep(ms);
+        },
+      }),
+      current,
+    );
+
+    const out = await runSkillSeed(io, current);
+    expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
+    const message = (out as { message: string }).message;
+    expect(message).toContain("HTTP 503");
+    expect(message).toContain("memory_provider_timeout");
+    expect(memoryPuts).toBeGreaterThanOrEqual(2);
+  });
+
+  it("does not retry a non-retryable refusal like HTTP 400 or HTTP 500 (flair#3043)", async () => {
+    let memoryPuts = 0;
+    const instance = slowInstance();
+
+    instance.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === `/Memory/${encodeURIComponent(SEED_SKILL_ID)}` && (init?.method ?? "GET") === "PUT") {
+        memoryPuts++;
+        instance.puts.push(`Memory/${SEED_SKILL_ID}`);
+        return Response.json({ error: "invalid_body", message: "malformed row" }, { status: 400 });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    const io = skillSeedRestIo(
+      restOptions(instance, {
+        retryBackoffMs: [5, 10],
+      }),
+      current,
+    );
+
+    const out = await runSkillSeed(io, current);
+    expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
+    expect((out as { message: string }).message).toContain("HTTP 400");
+    expect((out as { message: string }).message).toContain("invalid_body");
+    expect(memoryPuts).toBe(1);
   });
 });
