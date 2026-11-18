@@ -257,12 +257,11 @@ export function countFlairTree(flairDir, root = enclosingNodeModules(flairDir), 
     }
     const manifest = readPackageIdentity(dir);
     const required = Object.keys(manifest.dependencies ?? {});
-    const optional = Object.keys(manifest.optionalDependencies ?? {});
-    for (const name of [...required, ...optional]) {
-      const isOptionalOnly = !required.includes(name);
+    const optional = new Set(Object.keys(manifest.optionalDependencies ?? {}));
+    for (const name of new Set([...required, ...optional])) {
       const resolved = resolveDependencyDir(dir, name, rootReal);
       if (resolved === null) {
-        if (isOptionalOnly) continue;
+        if (optional.has(name)) continue;
         throw new Error(`dependency ${name} of ${manifest.name}@${manifest.version} did not resolve from ${dir}`);
       }
       if (!resolved.startsWith(`${rootReal}${sep}`)) {

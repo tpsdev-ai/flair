@@ -336,6 +336,17 @@ describe("the count follows Flair's dependency graph, not the prefix", () => {
     expect(countFlairTree(paths.flair, paths.globalNodeModules)).toBe(3);
   });
 
+  test("optionalDependencies takes precedence for an absent name also in dependencies", () => {
+    const { paths } = healthyPrefix();
+    writePackage(paths.flair, {
+      name: FLAIR_PACKAGE,
+      version: "0.0.1",
+      dependencies: { harper: "5.3.6", "absent-optional": "1.0.0" },
+      optionalDependencies: { "absent-optional": "1.0.0" },
+    });
+    expect(countFlairTree(paths.flair, paths.globalNodeModules)).toBe(3);
+  });
+
   test("a package candidate with no manifest fails, naming the path", () => {
     const { paths } = healthyPrefix();
     mkdirSync(join(paths.flair, "node_modules", "dep-a"), { recursive: true });
@@ -489,21 +500,37 @@ const REAL_NPM_TIMEOUT_MS = 60_000;
 const REAL_NPM_CHILDREN = 5;
 const REAL_NPM_TEST_TIMEOUT_MS = REAL_NPM_CHILDREN * REAL_NPM_TIMEOUT_MS + 30_000;
 
+function npmFixtureEnvironment(root: string): NodeJS.ProcessEnv {
+  const userconfig = join(root, "user.npmrc");
+  const globalconfig = join(root, "global.npmrc");
+  writeFileSync(userconfig, "");
+  writeFileSync(globalconfig, "");
+  return {
+    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^npm_config_/i.test(key))),
+    npm_config_userconfig: userconfig,
+    npm_config_globalconfig: globalconfig,
+    npm_config_cache: join(root, "npm-cache"),
+    npm_config_json: "false",
+    npm_config_offline: "true",
+    npm_config_audit: "false",
+    npm_config_fund: "false",
+    npm_config_ignore_scripts: "true",
+    npm_config_update_notifier: "false",
+  };
+}
+
 /** Pack a tiny package directory into `dest` with the real npm, returning the tarball path. */
-function packFixturePackage(dir: string, manifest: Record<string, unknown>, dest: string): string {
+function packFixturePackage(dir: string, manifest: Record<string, unknown>, dest: string, env: NodeJS.ProcessEnv): string {
   writePackage(dir, manifest);
-  const packed = execFileSync("npm", ["pack", "--silent", "--pack-destination", dest], {
+  const packed = execFileSync("npm", ["pack", "--json", "--pack-destination", dest], {
     cwd: dir,
+    env,
     encoding: "utf8",
     timeout: REAL_NPM_TIMEOUT_MS,
     killSignal: "SIGKILL",
   });
-  const name = packed
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .pop();
-  if (!name) throw new Error("npm pack printed no filename");
+  const [{ filename: name }] = JSON.parse(packed);
+  if (typeof name !== "string" || !name) throw new Error("npm pack printed no filename");
   return join(dest, name);
 }
 
@@ -512,15 +539,18 @@ describe("check-global-install-lockfile — real npm", () => {
     const root = mkdtempSync(join(tmpdir(), "flair-gi-realm-"));
     fixtures.push(root);
     const prefix = join(root, "prefix");
+    const env = npmFixtureEnvironment(root);
 
     // First install succeeds and leaves a real tree at the prefix.
-    const depTgz = packFixturePackage(join(root, "fixture-dep-a"), { name: "dep-a", version: "1.0.0" }, root);
+    const depTgz = packFixturePackage(join(root, "fixture-dep-a"), { name: "dep-a", version: "1.0.0" }, root, env);
     const good = packFixturePackage(
       join(root, "fixture-good"),
       { name: FLAIR_PACKAGE, version: "0.0.1", dependencies: { "dep-a": `file:${depTgz}` } },
       root,
+      env,
     );
     const first = spawnSync("npm", ["install", "-g", "--prefix", prefix, good], {
+      env,
       encoding: "utf8",
       timeout: REAL_NPM_TIMEOUT_MS,
       killSignal: "SIGKILL",
@@ -538,11 +568,12 @@ describe("check-global-install-lockfile — real npm", () => {
         dependencies: { "dep-b": `file:${join(root, "missing-dep-b-1.0.0.tgz")}` },
       },
       root,
+      env,
     );
     const run = spawnSync(
       nodeBin(),
       [join(REPO, "scripts/check-global-install-lockfile.mjs"), "--package", bad, "--prefix", prefix],
-      { encoding: "utf8", timeout: REAL_NPM_TIMEOUT_MS, killSignal: "SIGKILL" },
+      { env, encoding: "utf8", timeout: REAL_NPM_TIMEOUT_MS, killSignal: "SIGKILL" },
     );
     expect(run.status).toBe(1);
     expect(run.stderr).toContain("exited with status");
