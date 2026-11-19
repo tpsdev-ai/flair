@@ -250,4 +250,51 @@ describe("restore verifies preserved content (#2226)", () => {
     expect(result.exitCode).toBe(0);
     expect(result.calls.filter(c => c.method === "GET")).toHaveLength(3);
   });
+
+  describe("flair restore --dry-run (#2992)", () => {
+    test("restore --replace --dry-run against an archive a real replace refuses exits non-zero and reports the refusals without deleting or writing", async () => {
+      const archive = {
+        version: 1,
+        agents: [agent],
+        memories: [],
+        souls: [{ id: "flint:role", agentId: "flint", key: "role", value: "r", scopeTag: "illegal" }],
+      };
+      const result = await run(archive, [], ["--replace", "--dry-run"]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("the Soul scope-field rule refuses");
+      expect(result.stderr).toContain("no rows were deleted");
+      expect(result.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+    });
+
+    test("restore --replace --dry-run runs read-only preflight checks and exits 0 on a clean archive without deleting or writing", async () => {
+      const archive = {
+        version: 1,
+        agents: [agent],
+        memories: [],
+        souls: [{ id: "flint:role", agentId: "flint", key: "role", value: "r" }],
+      };
+      const faults = [
+        { method: "GET", path: "/Memory", body: [] },
+        { method: "GET", path: "/AdminMemoryCandidates/flint", body: { candidates: [], hasMore: false } },
+      ];
+      const result = await run(archive, faults, ["--replace", "--dry-run"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Dry run complete — no changes made");
+      expect(result.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+      expect(result.calls.some((c) => c.path === "/Memory")).toBe(true);
+    });
+
+    test("restore --dry-run in merge mode exits 0 without writing", async () => {
+      const archive = {
+        version: 1,
+        agents: [agent],
+        memories: [{ id: "m1", agentId: "flint", content: "c" }],
+        souls: [{ id: "flint:role", agentId: "flint", key: "role", value: "r" }],
+      };
+      const result = await run(archive, [], ["--dry-run"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Dry run complete — no changes made");
+      expect(result.calls).toHaveLength(0);
+    });
+  });
 });
