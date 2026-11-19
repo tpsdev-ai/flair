@@ -135,11 +135,6 @@ addAdminPassOptions(
     console.log(`  Memories: ${memories.length}`);
     console.log(`  Souls:    ${souls.length}`);
 
-    if (dryRun) {
-      console.log("\n✅ Dry run complete — no changes made");
-      return;
-    }
-
     async function adminWrite(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<{ status: number | undefined; error: string | undefined; redirected: boolean }> {
       try {
         const res = await fetch(`${baseUrl}${path}`, {
@@ -222,7 +217,7 @@ addAdminPassOptions(
       // process's tmpdir/TMPDIR/TMP/TEMP and working directory, while the
       // server uses its own environment (resources/skill-provenance.ts), so a
       // filesystem-path source can be durable to one and not the other.
-      // Non-dry-run replace refuses every such row before any delete; a
+      // Replace (dry-run included) refuses every such row before any delete; a
       // non-path source keeps the environment-independent copied predicate.
       const filesystemSourceRefused = new Set<string>();
       for (const row of writtenSouls) {
@@ -359,6 +354,12 @@ addAdminPassOptions(
         process.exitCode = 1;
         return;
       }
+
+      if (dryRun) {
+        console.log("\n✅ Dry run complete — no changes made");
+        return;
+      }
+
       console.log("\nDeleting existing data (replace mode)...");
       // Memory rows go first: the learned-content check above assumes the
       // archived Memory ids are gone before a Soul write. A Memory DELETE the
@@ -432,6 +433,11 @@ addAdminPassOptions(
           failures.push(diagnostic("Soul", row, "DELETE", status));
         }
       }
+    }
+
+    if (dryRun) {
+      console.log("\n✅ Dry run complete — no changes made");
+      return;
     }
 
     for (const { name, rows } of collections) {
