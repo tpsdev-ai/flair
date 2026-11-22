@@ -45,9 +45,9 @@
  * a file exists: `opts.backup` runs BEFORE `decide` on every call that reaches
  * the read — including calls whose decision ends up noop or held; the churn is
  * the price of backing up before parsing. `opts.backupOnWrite` runs only after
- * `decide` returns a write, so a held, refused or noop decision leaves no
- * backup. Either is skipped where the read is skipped: an absent destination,
- * or a non-regular one (refused above).
+ * `decide` returns a write, so a decision that does not write (hold or noop)
+ * leaves no backup. Either is skipped where the read is skipped: an absent
+ * destination, or a non-regular one (refused above).
  *   6. FRESH-ATTEMPT PROTOCOL: another cooperative writer's committed
  *      replacement changes the target inode, so a waiting writer's in-lock
  *      comparison FAILS and it is HELD — by design, never waived. The
@@ -179,8 +179,8 @@ export interface ConfigSectionOptions {
   backup?: (bytes: Uint8Array) => string | null | void;
   /** Invoked on the IN-LOCK bytes only after `decide` returns a write, before
    *  the temp file is created. Returns the backup path (or null). Throwing
-   *  refuses the write with nothing written. A held, refused or noop decision
-   *  never takes this backup. */
+   *  refuses the write with nothing written. A decision that does not write
+   *  (hold or noop) never takes this backup. */
   backupOnWrite?: (bytes: Uint8Array) => string | null | void;
   /** Maximum COMPLETE fresh attempts (default 3). */
   maxAttempts?: number;
