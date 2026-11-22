@@ -414,8 +414,9 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
     };
     await deleteAt(c2, S_STAGED, S_GATE);
     // c3: delete after confirmation. The attempt has already confirmed, so it
-    // still commits and reaches its post-commit point; hold it there and
-    // release that point before arming the next row's first point. Arming the
+    // still commits and reaches its post-commit point. Hold c3 at its own
+    // post-commit point, arm c4's pre-lock gate before releasing c3, and
+    // observe c4 at that gate before arming its post-commit point. Arming the
     // post-commit point before the release keeps the attempt from reaching it
     // while the next arm is being written.
     await handOff(S_GATE, S_CONFIRMED);
