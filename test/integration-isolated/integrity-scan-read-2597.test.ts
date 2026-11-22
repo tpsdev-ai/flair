@@ -180,12 +180,12 @@ test("a Memory exact count that never converges fails naming the rows present", 
   await insert(present, randomUUID());
   try {
     await expect(waitForExactCount(-1, "an impossible count", 50)).rejects.toThrow(new RegExp(`rows now: \\[[^\\]]*"${present}"`));
+    await expect(controlledScan(false, { afterDeleteCount: -1, retryMs: 50 })).rejects.toThrow(
+      new RegExp(`the exact count did not observe the raw delete; rows now: \\[[^\\]]*"${present}"`),
+    );
   } finally {
     await remove(present);
   }
-  await expect(controlledScan(false, { afterDeleteCount: -1, retryMs: 50 })).rejects.toThrow(
-    /the exact count did not observe the raw delete; rows now: \[/,
-  );
 }, 30_000);
 
 test("the keyset Memory read retries a page whose after-count sees a raw delete", async () => {
