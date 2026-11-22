@@ -364,9 +364,10 @@ export class HealthDetail extends Resource {
         id, memoryCount: 0, hashFallback: 0, writes24h: 0, lastWriteAt: null, usageCount: 0,
       });
       // The count, the names and the table all come from the Agent records,
-      // so they cannot disagree. A Memory row whose author has no Agent record
-      // (the operator's `skill:using-flair` seed) is kept in a separate list,
-      // never added to `perAgent` as if it were an agent (flair#3051).
+      // so the admin total, names and row set describe the same agents. A
+      // Memory row whose author has no Agent record (the operator's
+      // `skill:using-flair` seed) is kept in a separate list, never added to
+      // `perAgent` as if it were an agent (flair#3051).
       const perAgentMap = new Map<string, AgentRow>();
       for (const a of agents) {
         if (a.id) perAgentMap.set(a.id, blank(a.id));
@@ -401,8 +402,8 @@ export class HealthDetail extends Resource {
         count: agents.length,
         names: isAdmin ? agents.map((a: any) => a.id).filter(Boolean) : undefined,
         perAgent,
-        // Non-admins keep exactly the agent rows they saw before; the seed
-        // author's id and memory count are not disclosed to them.
+        // Non-admins keep the existing Agent-record exposure and never
+        // receive the unregistered author list.
         unregisteredMemoryAuthors: isAdmin ? unregisteredMemoryAuthors : undefined,
       };
     } catch { stats.agents = null; }

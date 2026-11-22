@@ -188,7 +188,7 @@ test("two agents plus the operator seed: count and table are the same two agents
   expect(output).not.toMatch(/operator-seed\s+1\b/);
 });
 
-test("a non-admin caller sees only its own agent row and no seed line", async () => {
+test("a non-admin caller sees no seed line and no other zero-memory agent", async () => {
   agentRows = [{ id: "agent-a" }, { id: "agent-b" }];
   authVerdict = { kind: "agent", agentId: "agent-a", isAdmin: false };
   const detail: any = await new HealthDetail().get();
