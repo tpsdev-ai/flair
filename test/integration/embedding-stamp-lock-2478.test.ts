@@ -52,6 +52,7 @@ import { join } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 import type { ProbeComponent } from "../helpers/component-with-replay-probe";
 import { RaceHarness, composeTracedComponent, cosine, expectEmptyOwnerVector, expectRefused, newAgent } from "../helpers/embedding-writer-race";
+import { armMemoryReadFailure, memoryReadConsumerStack } from "../helpers/host-pointer-failing-component";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
 
@@ -355,12 +356,14 @@ describe("flair#2478 — the migration's HTTP delegation holds the id's lock thr
     // unconfirmed, and the id is fenced.
     await handOff(GATE, "memory-reembed-verify");
     await h.assertPaused("memory-reembed-verify");
-    writeFileSync(join(pauseDir, "arm.memory-get-fail.esl-b4"), "");
+    armMemoryReadFailure(pauseDir, "esl-b4", "reembed-verify");
     await h.release("memory-reembed-verify");
     expect(await waitForCycleDone(90_000), "the cycle did not finish").toBe(true);
     const unreadable = "[embedding-stamp] esl-b4: the re-embed request was refused 503 write_outcome_unknown";
     expect(await h.waitForLog(unreadable), `the unreadable-read refusal was not logged within 30s: ${unreadable}`).toBe(true);
     expect(serverLog()).toContain(unreadable);
+    expect(memoryReadConsumerStack(pauseDir, "esl-b4"), "the read-back was not the read that consumed the failure")
+      .toMatch(/\bat (?:async )?reembedStoredRow \(/);
     await expectRefused(await ownerWrite("PUT", "esl-b4", OWNER_TEXT), "write_outcome_unknown");
     expect(runs()[0]).toEqual({ processed: 1, touchedIds: ["esl-b3"], unconfirmedIds: ["esl-b4"] });
     for (const id of ["esl-b1", "esl-b2", "esl-b4"]) expect(touched(id), `${id} was counted`).toBe(0);
@@ -432,7 +435,7 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
     await h.assertPaused(S_VERIFY);
     await expectStillStale(c6, EDITED);
     expect(h.writesBy(c6, SUFFIX_WRITER), "the changed row was written").toEqual([]);
-    writeFileSync(join(pauseDir, `arm.memory-get-fail.${c7}`), "");
+    armMemoryReadFailure(pauseDir, c7, "content-suffix-verify");
     await handOff(S_VERIFY, S_GATE);
 
     // c8: another writer holds the id when the fallback tries its lock.
@@ -440,6 +443,8 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
     const unconfirmedC7 = `[embedding-stamp] ${c7}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed`;
     expect(await h.waitForLog(unconfirmedC7), `the unconfirmed outcome of ${c7} was not logged within 30s: ${unconfirmedC7}`).toBe(true);
     expect(serverLog()).toContain(unconfirmedC7);
+    expect(memoryReadConsumerStack(pauseDir, c7), "the fallback's read-back was not the read that consumed the failure")
+      .toMatch(/\bat (?:async )?regenContentSuffixRow \(/);
     h.arm("memory-patch-entry");
     const holder = suffixWrite("PATCH", c8);
     try {
@@ -546,11 +551,14 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
       await h.rawUpdate(f2, { content: EDITED });
       await handOff(S_CONFIRMED, S_COMMITTED);
       await h.assertPaused(S_COMMITTED);
-      writeFileSync(readFault, "");
+      armMemoryReadFailure(pauseDir, f2, "content-suffix-retry");
       await h.release(S_COMMITTED);
       // The read failure propagates as before: run() throws and the runner halts the migration.
       expect(await waitForHalt("run() threw mid-batch: test component: forced Memory read failure", 60_000), "the migration did not halt on the retry's read failure").toBe(true);
       expect(existsSync(readFault), "the retry's fresh read was not attempted").toBe(false);
+      const consumer = memoryReadConsumerStack(pauseDir, f2) ?? "";
+      expect(consumer, "the retry's fresh read was not the read that consumed the failure").toContain("embedding-stamp.js");
+      expect(consumer, "the retry's fresh read was not the read that consumed the failure").toMatch(/\bat Object\.run \(/);
     } finally {
       h.letGo(S_CONFIRMED);
       h.letGo(S_COMMITTED);
