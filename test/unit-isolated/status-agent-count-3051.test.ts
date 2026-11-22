@@ -214,6 +214,12 @@ test("a non-admin caller sees no seed line and no other zero-memory agent", asyn
   expect(output).not.toContain("agent-b");
   expect(output).not.toContain("operator-seed");
   expect(output).not.toContain("Unregistered memory owners");
+
+  const deepOutput = await statusOutput(detail, ["deep"]);
+  expect(deepOutput).toContain("agent-a");
+  expect(deepOutput).not.toContain("agent-b");
+  expect(deepOutput).not.toContain("operator-seed");
+  expect(deepOutput).not.toContain("Unregistered memory owners");
 });
 
 test("no Agent registered: plain status still renders the seed author line", async () => {
@@ -226,6 +232,7 @@ test("no Agent registered: plain status still renders the seed author line", asy
   expect(detail.agents.unregisteredMemoryAuthors).toEqual([{ id: "operator-seed", memoryCount: 1 }]);
 
   const output = await statusOutput(detail, []);
+  expect(output).not.toMatch(/^Agents$/m);
   expect(output).toContain("Unregistered memory owners");
   expect(output).toContain("operator-seed (1 memory)");
   expect(output).not.toMatch(/operator-seed\s+1\b/);
@@ -238,6 +245,7 @@ test("no Agent registered: deep status still renders the seed author line", asyn
   expect(detail.agents.count).toBe(0);
 
   const output = await statusOutput(detail, ["deep"]);
+  expect(output).not.toContain("═══ Agents");
   expect(output).toContain("Unregistered memory owners");
   expect(output).toContain("operator-seed (1 memory)");
   expect(output).not.toMatch(/operator-seed\s+1\b/);
@@ -305,6 +313,7 @@ test("no Agent registered and an incomplete scan: plain status says unavailable 
   expect(detail.agents.unregisteredMemoryAuthors).toBeNull();
 
   const output = await statusOutput(detail, []);
+  expect(output).not.toMatch(/^Agents$/m);
   expect(output).toMatch(/Unregistered memory owners\s+unavailable — memory scan did not complete/);
   expect(output).not.toContain("operator-seed");
 });
@@ -319,6 +328,7 @@ test("no Agent registered and an incomplete scan: deep status says unavailable a
   expect(detail.agents.unregisteredMemoryAuthors).toBeNull();
 
   const output = await statusOutput(detail, ["deep"]);
+  expect(output).not.toContain("═══ Agents");
   expect(output).toContain("Unregistered memory owners: unavailable — memory scan did not complete");
   expect(output).not.toContain("operator-seed");
 });
