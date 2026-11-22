@@ -1,1 +1,1 @@
-- **The dependency audit gate refuses dependency names with an `@` inside a package-name segment.** ([#2813](https://github.com/tpsdev-ai/flair/pull/2813))
+- **The dependency audit gate refuses to resolve Harper bundle dependency names with an `@` inside a package-name segment.** ([#2813](https://github.com/tpsdev-ai/flair/pull/2813))

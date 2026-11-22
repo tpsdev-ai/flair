@@ -1,1 +1,1 @@
-- **The n8n search node declares its `@langchain/core` peer range as `>=0.3.0 <2`.** ([#2831](https://github.com/tpsdev-ai/flair/pull/2831))
+- **`@tpsdev-ai/n8n-nodes-flair` declares its `@langchain/core` peer range as `>=0.3.0 <2`.** ([#2831](https://github.com/tpsdev-ai/flair/pull/2831))
