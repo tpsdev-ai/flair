@@ -11,8 +11,10 @@
 //   - installs the writer hook: scope (A2A) or refId (key-registration target;
 //     authorId is the admin) starting with `fault-mutate-<site>-` gets a
 //     non-string summary, which the table
-//     validator must refuse; the graph-heal action activates the installed hook
-//     for that call;
+//     validator must refuse; a `graph-heal` action with `corrupt: true`
+//     activates the installed hook for the rows built inside THAT call only
+//     (async-scoped, so a graph-heal run the boot migration cycle makes at the
+//     same moment is left alone), and returns the ids of the rows it corrupted;
 //   - wraps the OrgEvent table's own `put`, so every row a staging call receives
 //     is appended to <ROOTPATH>/org-event-write-fault-3002/staged.jsonl before
 //     the original put runs. The probe's `staged` action reads that file
@@ -31,9 +33,12 @@ const ROOT = process.env.ROOTPATH;
 const OUT_DIR = ROOT ? join(ROOT, "org-event-write-fault-3002") : null;
 const STAGED = OUT_DIR ? join(OUT_DIR, "staged.jsonl") : null;
 
-let graphHealCorrupt = false;
-/** Collects the rows staged inside the current `graph-heal` call (async-scoped). */
-const callStaged = new AsyncLocalStorage();
+/**
+ * The current `graph-heal` call (async-scoped): `corrupt` says whether its
+ * rows get the fault, `staged` collects the rows staged inside it and
+ * `faulted` the rows the hook corrupted inside it.
+ */
+const graphHealCall = new AsyncLocalStorage();
 
 function recordStaged(row) {
   const entry = {
@@ -43,8 +48,8 @@ function recordStaged(row) {
     summaryType: typeof row?.summary,
     summary: typeof row?.summary === "string" ? row.summary : null,
   };
-  const sink = callStaged.getStore();
-  if (sink) sink.push(entry);
+  const call = graphHealCall.getStore();
+  if (call) call.staged.push(entry);
   if (!STAGED) return;
   mkdirSync(OUT_DIR, { recursive: true });
   appendFileSync(STAGED, JSON.stringify(entry) + "\n");
@@ -70,7 +75,10 @@ function resetStaged() {
 
 setOrgEventWriteFaultHook((site, row) => {
   if (site === "graph-heal") {
-    if (graphHealCorrupt) row.summary = 123;
+    const call = graphHealCall.getStore();
+    if (!call?.corrupt) return;
+    row.summary = 123;
+    call.faulted.push({ id: row?.id ?? null });
     return;
   }
   const owner = site === "a2a" ? row?.scope : row?.refId;
@@ -97,14 +105,9 @@ export class OrgEventWriteProbe extends Resource {
       return { reset: true };
     }
     if (action === "graph-heal") {
-      graphHealCorrupt = corrupt === true;
-      const rows = [];
-      try {
-        const result = await callStaged.run(rows, () => createGraphHealMigration().run(0));
-        return { result, staged: rows, corrupt: graphHealCorrupt };
-      } finally {
-        graphHealCorrupt = false;
-      }
+      const call = { corrupt: corrupt === true, staged: [], faulted: [] };
+      const result = await graphHealCall.run(call, () => createGraphHealMigration().run(0));
+      return { result, staged: call.staged, faulted: call.faulted, corrupt: call.corrupt };
     }
     throw new Error("unknown probe action");
   }

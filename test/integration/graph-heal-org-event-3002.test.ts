@@ -10,6 +10,13 @@
 //
 // The staging call is observed through a wrapper on the OrgEvent table's put;
 // it appends every row handed to staging to a file under ROOTPATH.
+//
+// This instance's own boot migration cycle (resources/migration-boot.ts) also
+// runs graph-heal once beforeAll's canary row exists: the migration's own
+// writeGraphHealEvent and the runner's writeLedgerEvent each store a refId
+// "graph-heal" OrgEvent, and with the embedding model present (as in CI) that
+// cycle lands while these tests run. The invalid case therefore asserts on the
+// row ITS call built, never on a count of refId "graph-heal" rows.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -83,6 +90,13 @@ async function eventsByRef(): Promise<any[]> {
   });
 }
 
+async function eventsById(id: string): Promise<any[]> {
+  return ops({
+    operation: "search_by_id", database: "flair", table: "OrgEvent",
+    ids: [id], get_attributes: ["id", "refId", "kind", "summary", "detail"],
+  });
+}
+
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
   composed = componentWithReplayProbe({ probe: FAULT_PROBE });
@@ -139,9 +153,14 @@ describe("flair#3002 — the graph-heal event writer against the real OrgEvent t
 
   test("an invalid heal row is refused before staging; the heal swallows the failure", async () => {
     await resetStaged();
-    const before = (await eventsByRef()).length;
     const bad = await graphHeal(true);
     expect(bad.status, bad.text).toBe(200);
+    // The call must have built (and the hook corrupted) exactly one row, or
+    // nothing below is about an invalid row at all.
+    const faulted = bad.body.faulted as Array<{ id: string | null }>;
+    expect(faulted, "this call must build the invalid row").toHaveLength(1);
+    const badId = faulted[0].id;
+    expect(typeof badId, "the invalid row's id").toBe("string");
     const callRows = bad.body.staged as Array<{ id: string | null; summaryType: string }>;
     expect(callRows, "the invalid row must not reach staging").toHaveLength(0);
     // The writer's catch swallows a ledger failure: run() still resolves.
@@ -151,6 +170,13 @@ describe("flair#3002 — the graph-heal event writer against the real OrgEvent t
     // invalid (non-string summary) row.
     const invalid = (await staged()).filter((row) => row.summaryType !== "string");
     expect(invalid, "the invalid row must not reach staging").toHaveLength(0);
-    expect(await eventsByRef(), "no event may be stored").toHaveLength(before);
+    // Stored: the row this call built is absent. A row under the same id can
+    // only be the boot cycle's own heal event written in the same millisecond,
+    // which carries the writer's real summary, never the invalid one.
+    for (const row of await eventsById(badId as string)) {
+      expect(row.summary, "the invalid row must not be stored").toMatch(/^HNSW graph-heal: recall /);
+    }
+    const storedInvalid = (await eventsByRef()).filter((row) => typeof row.summary !== "string");
+    expect(storedInvalid, "no stored graph-heal event may carry a non-string summary").toHaveLength(0);
   }, 150_000);
 });
