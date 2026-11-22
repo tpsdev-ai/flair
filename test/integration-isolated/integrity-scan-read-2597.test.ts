@@ -69,7 +69,10 @@ async function waitForExactCount(want: number, what: string, timeoutMs = 5_000):
 beforeAll(async () => { harper = await startHarper(); }, HARPER_START_BUDGET_MS);
 afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
-async function controlledScan(replaceEveryRead: boolean) {
+async function controlledScan(
+  replaceEveryRead: boolean,
+  opts: { afterDeleteCount?: number; retryMs?: number } = {},
+) {
   const id = `integrity-2597-${randomUUID()}`;
   let token = randomUUID();
   const tokens = new Set([token]);
@@ -126,10 +129,10 @@ async function controlledScan(replaceEveryRead: boolean) {
           // depends on — the delete visible to the count — and answer the scan
           // with that response. Then re-create the row and wait for the count to
           // show it, so the next attempt starts from a settled table.
-          const afterDelete = initialRows.length - 1;
+          const afterDelete = opts.afterDeleteCount ?? initialRows.length - 1;
           let countRes = res;
           let count = await countRes.clone().json() as { record_count: number };
-          const deadline = Date.now() + 5_000;
+          const deadline = Date.now() + (opts.retryMs ?? 5_000);
           while (count.record_count !== afterDelete && Date.now() < deadline) {
             await new Promise((resolve) => setTimeout(resolve, 10));
             countRes = await nativeFetch(url, init);
@@ -161,7 +164,12 @@ async function controlledScan(replaceEveryRead: boolean) {
     globalThis.fetch = nativeFetch;
     process.exit = originalExit;
     process.stdout.write = originalWrite;
-    await remove(id);
+    if (shimError !== undefined) {
+      // Best effort: the shim may have failed after its raw delete; never let cleanup mask its error.
+      await ops({ operation: "delete", database: "flair", table: "Memory", hash_values: [id] }).catch(() => {});
+    } else if (!pendingRecreate) {
+      await remove(id);
+    }
   }
   if (shimError !== undefined) throw shimError;
   return { code, verdict: JSON.parse(output), reads, observed, checkpoint, saved: readFileSync(path, "utf8") };
@@ -169,7 +177,10 @@ async function controlledScan(replaceEveryRead: boolean) {
 
 test("a Memory exact count that never converges fails naming the rows present", async () => {
   await expect(waitForExactCount(-1, "an impossible count", 50)).rejects.toThrow(/rows now: \[/);
-});
+  await expect(controlledScan(false, { afterDeleteCount: -1, retryMs: 50 })).rejects.toThrow(
+    /the exact count did not observe the raw delete; rows now: \[/,
+  );
+}, 30_000);
 
 test("the keyset Memory read retries a page whose after-count sees a raw delete", async () => {
   const r = await controlledScan(false);
