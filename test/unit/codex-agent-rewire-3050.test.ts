@@ -493,6 +493,40 @@ const TOML_DECODES_U_ESCAPES = (() => {
 const TOML_REJECTS_REDEFINED_TABLE = (() => {
   try { Bun.TOML.parse("[a]\nx = 1\n\n[a]\ny = 2\n"); return false; } catch { return true; }
 })();
+const TOML_READS_ESCAPED_TRIPLE_QUOTES = (() => {
+  try { return (Bun.TOML.parse('a = """\n\\"""\n"""\n') as any).a === '"""\n'; } catch { return false; }
+})();
+
+describe("Codex pre-header multiline delimiters", () => {
+  for (const env of [ENV_A, ENV_B]) {
+    for (const quote of ['"""', "'''"]) {
+      it(`refuses a fake section inside ${quote} for ${env.FLAIR_AGENT_ID}`, () => {
+        const raw = seed([
+          `description = ${quote}`,
+          quote === '"""' ? '\\"""' : "\\''",
+          tomlSnippet(ENV_A),
+          "[after]",
+          quote,
+          "",
+        ].join("\n"));
+        if (quote === "'''" || TOML_READS_ESCAPED_TRIPLE_QUOTES) {
+          expect((Bun.TOML.parse(raw) as any).mcp_servers).toBeUndefined();
+        }
+        const bytes = readFileSync(cfgPath());
+        const result = wireCodex(env);
+        expect(result.message).toContain("multiline-string delimiters precede");
+        expectRefusal(raw, result);
+        expect(readFileSync(cfgPath())).toEqual(bytes);
+      });
+
+      it(`refuses a section after a closed ${quote} preamble for ${env.FLAIR_AGENT_ID}`, () => {
+        const raw = seed(`description = ${quote}text${quote}\n${tomlSnippet(ENV_A)}\n`);
+        expect((Bun.TOML.parse(raw) as any).mcp_servers.flair.env.FLAIR_AGENT_ID).toBe("agent-a");
+        expectRefusal(raw, wireCodex(env));
+      });
+    }
+  }
+});
 
 describe("Codex fallback definition guard", () => {
   for (const header of [

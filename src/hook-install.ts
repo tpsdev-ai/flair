@@ -645,9 +645,11 @@ export interface RepinSessionStartHookOptions {
   agentId?: string;
 }
 
-/** The pure re-pin decision over a parsed settings object. `ok:false` marks a
- *  named REFUSAL (a parse/shape/identity the writer will not touch); a policy
- *  hold (an AHEAD pin) keeps ok:true. Nothing here mutates `config`. */
+/** The pure re-pin decision over a parsed settings object. `ok` reports the
+ *  outcome for the caller: some shapes the writer will not touch still return
+ *  ok:true (duplicate matching hooks; a non-comparable version hold), while an
+ *  unreadable running CLI version returns ok:false. Read each branch of
+ *  decideSessionStartHookRewrite for its exact value. Nothing here mutates `config`. */
 type SessionStartHookRewrite =
   | { kind: "skip"; ok: boolean; message: string }
   | { kind: "hold"; ok: boolean; message: string }

@@ -101,7 +101,7 @@ for (const quote of ['"', "'"]) {
     expectRefresh(block(STALE_SPEC) + later);
   });
 
-  test(`wireCodex refreshes after a closed earlier ${fence} string`, () => {
+  test(`wireCodex refuses a closed earlier ${fence} string`, () => {
     const earlier = [
       "[other.tool]",
       `note = ${fence}`,
@@ -110,7 +110,7 @@ for (const quote of ['"', "'"]) {
       "",
       "",
     ].join("\n");
-    expectRefresh(earlier + block(STALE_SPEC));
+    expectRefusal(earlier + block(STALE_SPEC));
   });
 
   test(`wireCodex recognizes the current pin before a later ${fence} string`, () => {

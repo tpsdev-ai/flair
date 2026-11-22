@@ -318,7 +318,7 @@ function continuesCodexFlairSection(line: string): boolean {
   return /^[ \t]*\[\[?[ \t]*(?:mcp_servers|"mcp_servers"|'mcp_servers')[ \t]*\.[ \t]*(?:flair|"flair"|'flair')[ \t]*(?:\.|\])/.test(line);
 }
 
-/** Read and replace the same span; foreign lines cannot license a rewrite. */
+/** Read and replace the same span; refuse pre-header triple quotes and foreign lines. */
 function locateCodexFlairSection(raw: string): CodexFlairShape {
   const lines = raw.split("\n");
   const starts: number[] = [];
@@ -343,13 +343,10 @@ function locateCodexFlairSection(raw: string): CodexFlairShape {
   if (foreignHeader) return { kind: "refused", reason: "another noncanonical [mcp_servers.flair] header appears" };
 
   const h = headerLines[0]!;
-  // An opening multiline string before the candidate makes its context
-  // ambiguous; refuse rather than rewrite text that may be string content.
+  // Triple quotes before the candidate make its string context ambiguous.
   const beforeHeader = raw.slice(0, starts[h]!);
-  for (const quote of ['"', "'"]) {
-    if (countText(beforeHeader, quote.repeat(3)) % 2 === 1) {
-      return { kind: "refused", reason: "unmatched multiline-string delimiters precede [mcp_servers.flair]" };
-    }
+  if (beforeHeader.includes('"""') || beforeHeader.includes("'''")) {
+    return { kind: "refused", reason: "multiline-string delimiters precede [mcp_servers.flair]" };
   }
   let i = h + 1;
   const refuse = (reason: string): CodexFlairShape => ({ kind: "refused", reason });
