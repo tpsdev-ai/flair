@@ -16,7 +16,9 @@
  * (FLAIR_ENABLE_TEST_FAULT_INJECTION + FLAIR_TEST_PAUSE_DIR):
  *   - memory-patch-verify: the owner PATCH's post-commit verification read runs
  *     here; the test arms a Memory read failure for the id, so the PATCH
- *     records the id outcome-unknown (the marker the cases below read);
+ *     records the id outcome-unknown (the marker the cases below read). The arm
+ *     names the verification read as the only caller allowed to consume it, and
+ *     the consuming read's stack is recorded (flair#3053);
  *   - feed-ingest-staged: the ordinary feed write is staged and the id's lock
  *     is held;
  *   - skill-close-staged: a skill write's close is staged and its locks are
@@ -37,6 +39,7 @@ import { join, resolve } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import type { ProbeComponent } from "../helpers/component-with-replay-probe";
 import { RaceHarness, composeTracedComponent, expectRefused, newAgent, type TestAgent } from "../helpers/embedding-writer-race";
+import { armMemoryReadFailure, memoryReadConsumerStack } from "../helpers/host-pointer-failing-component";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const owner = newAgent("fsl-owner");
@@ -81,16 +84,19 @@ function expectSkillWritesUnderHeldIds(): void {
 }
 
 /** Mark `id` outcome-unknown: an owner PATCH whose verification read is failed
- *  on demand (the arm file is consumed by the first Memory read of that id). */
+ *  on demand. The arm names the PATCH's verification read as its only consumer,
+ *  and the consuming read's stack is recorded. */
 async function markOutcomeUnknown(id: string): Promise<void> {
   h.arm("memory-patch-verify");
   const held = h.signed(owner, "PATCH", memPath(id), { embedding: null, embeddingModel: null });
   await h.assertPaused("memory-patch-verify");
-  writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), "");
+  armMemoryReadFailure(pauseDir, id, "memory-patch-verify");
   await h.release("memory-patch-verify");
   const marked = await held;
   const body = await marked.clone().json() as any;
   expect(existsSync(join(pauseDir, `arm.memory-get-fail.${id}`)), "the read-back was not the read that failed").toBe(false);
+  expect(memoryReadConsumerStack(pauseDir, id), "the read-back was not the read that consumed the failure")
+    .toMatch(/\bat (?:async )?verifyWrittenRow \(/);
   expect(marked.status, JSON.stringify(body)).toBe(503);
   expect(body.error).toBe("write_outcome_unknown");
 }
@@ -345,6 +351,29 @@ describe("flair#2927 — a skill-tagged feed write (real Harper)", () => {
     const unmarkedBody = await unmarked.clone().json() as any;
     expect(unmarked.status, JSON.stringify(unmarkedBody)).toBe(409);
     expect(unmarkedBody).toEqual({ error: "skill_head_missing" });
+  }, 180_000);
+
+  it("a read of a marked id by another caller inside the armed window does not take the injected failure", async () => {
+    // A second caller reads the id while the PATCH is paused after its commit
+    // and its failure arm is live. Only the PATCH's own verification read may
+    // consume the arm.
+    const id = "fsl-second-reader";
+    await seed(id);
+    h.arm("memory-patch-verify");
+    const held = h.signed(owner, "PATCH", memPath(id), { embedding: null, embeddingModel: null });
+    await h.assertPaused("memory-patch-verify");
+    armMemoryReadFailure(pauseDir, id, "memory-patch-verify");
+    const second = await h.admin("POST", "/MemoryReadProbe/", { op: "read", id });
+    expect(second.status, await second.clone().text()).toBe(200);
+    expect(await second.json()).toEqual({ found: true });
+    await h.release("memory-patch-verify");
+    const marked = await held;
+    const body = await marked.clone().json() as any;
+    expect(existsSync(join(pauseDir, `arm.memory-get-fail.${id}`)), "the read-back was not the read that failed").toBe(false);
+    expect(marked.status, JSON.stringify(body)).toBe(503);
+    expect(body.error).toBe("write_outcome_unknown");
+    expect(memoryReadConsumerStack(pauseDir, id), "another caller's read consumed the failure the PATCH armed")
+      .toMatch(/\bat (?:async )?verifyWrittenRow \(/);
   }, 180_000);
 
   it("CONTROL: an uncontended skill feed create is stored and its Memory write runs under the id's lock", async () => {

@@ -9,8 +9,13 @@
  *    with the lock helper's callback wrapped so every traced `put`/`update`
  *    names the lock phase it ran under (`unattributed` outside any lock);
  *  - the armable Memory read failure (FAILING_MEMORY_READ_MODULE_SRC), so a
- *    case can make one Memory read of a named id fail (`arm.memory-get-fail.<id>`
- *    in the pause directory, consumed by the first read);
+ *    case can make one Memory read of a named id fail. The arm file
+ *    `arm.memory-get-fail.<id>` names the calling phase (MEMORY_READ_PHASES)
+ *    that may consume it, so a read by any other caller of that id leaves it
+ *    in place, and the consuming read's stack is written to
+ *    `consumed.memory-get-fail.<id>` (flair#3053);
+ *  - the second-caller read probe (SECOND_READ_MODULE_SRC), so a case can read
+ *    a named id through `Memory.get` from outside the writer under test;
  *  - the armable write-stamp failure ({@link GUARD_STAMP_FAILURE_MODULE_SRC}), so
  *    a case can make the next embedding-space write-stamp notification throw
  *    (`arm.guard-stamp-fail`, consumed by the first call), through the guard's
@@ -28,7 +33,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { componentWithReplayProbe, type ProbeComponent } from "./component-with-replay-probe";
-import { FAILING_MEMORY_READ_MODULE_REL, FAILING_MEMORY_READ_MODULE_SRC } from "./host-pointer-failing-component";
+import { FAILING_MEMORY_READ_MODULE_REL, FAILING_MEMORY_READ_MODULE_SRC, SECOND_READ_MODULE_REL, SECOND_READ_MODULE_SRC } from "./host-pointer-failing-component";
 import type { HarperInstance } from "./harper-lifecycle";
 
 export const TRACE_FILE = "memory-write-trace-2478.jsonl";
@@ -80,6 +85,7 @@ export function composeTracedComponent(): ProbeComponent {
     'import { traceMemoryWriter } from "./zz-memory-write-trace-2478.js";\n' +
     lockSource.replace(invocation, "value: await traceMemoryWriter(options.phase, () => fn(scope), memoryWriteLockTokenIds(scope))"));
   writeFileSync(join(component.dir, FAILING_MEMORY_READ_MODULE_REL), FAILING_MEMORY_READ_MODULE_SRC);
+  writeFileSync(join(component.dir, SECOND_READ_MODULE_REL), SECOND_READ_MODULE_SRC);
   writeFileSync(join(component.dir, GUARD_STAMP_FAILURE_MODULE_REL), GUARD_STAMP_FAILURE_MODULE_SRC);
   return component;
 }
