@@ -868,7 +868,7 @@ describe("smoke instance resolution sizes its client timeouts and sleeps to a 30
       : { costMs: (timeoutMs) => timeoutMs, ok: "throw" }));
     const error = await h.run().then(() => null, (err: Error) => err);
 
-    expect(error?.message).toContain("did not respond within 30s");
+    expect(error?.message).toContain("was not confirmed healthy before the client-side deadline (30s)");
     expect(h.clock.elapsed()).toBe(INSTANCE_RESOLVE_BUDGET_MS);
     for (const r of h.requests) expect(r.timeoutMs).toBeLessThanOrEqual(Math.min(HEALTH_REQUEST_TIMEOUT_MS, r.leftMs));
     expect(h.requests.at(-1)).toEqual({ timeoutMs: 1_001, leftMs: 1_001 });
@@ -881,7 +881,7 @@ describe("smoke instance resolution sizes its client timeouts and sleeps to a 30
     const h = resolverHarness(() => ({ costMs: () => 300, ok: "throw" }));
     const error = await h.run().then(() => null, (err: Error) => err);
 
-    expect(error?.message).toContain("did not respond within 30s");
+    expect(error?.message).toContain("was not confirmed healthy before the client-side deadline (30s)");
     expect(h.clock.elapsed()).toBe(INSTANCE_RESOLVE_BUDGET_MS);
     expect(h.sleeps.at(-1)).toBe(100);
     for (const ms of h.sleeps) expect(ms).toBeLessThanOrEqual(HEALTH_POLL_INTERVAL_MS);
@@ -893,7 +893,7 @@ describe("smoke instance resolution sizes its client timeouts and sleeps to a 30
     const h = resolverHarness(() => ({ costMs: () => INSTANCE_RESOLVE_BUDGET_MS, ok: true }));
     const error = await h.run().then(() => null, (err: Error) => err);
 
-    expect(error?.message).toContain("did not respond within 30s");
+    expect(error?.message).toContain("was not confirmed healthy before the client-side deadline (30s)");
     expect(h.calls()).toBe(1);
     expect(h.clock.elapsed()).toBe(INSTANCE_RESOLVE_BUDGET_MS);
   }, 5_000);
@@ -919,7 +919,7 @@ describe("smoke instance resolution sizes its client timeouts and sleeps to a 30
       : { costMs: (timeoutMs) => timeoutMs, ok: "throw" }));
     const error = await h.run().then(() => null, (err: Error) => err);
 
-    expect(error?.message).toContain("did not respond within 30s");
+    expect(error?.message).toContain("was not confirmed healthy before the client-side deadline (30s)");
     expect(h.calls()).toBe(13);
     expect(h.requests.at(-1)!.timeoutMs).toBe(1_000);
     expect(h.requests.at(-1)!.leftMs).toBeCloseTo(1_000.6, 6);
@@ -939,7 +939,7 @@ describe("smoke instance resolution sizes its client timeouts and sleeps to a 30
     const h = resolverHarness(() => ({ costMs: () => 299.6, ok: false }));
     const error = await h.run().then(() => null, (err: Error) => err);
 
-    expect(error?.message).toContain("did not respond within 30s");
+    expect(error?.message).toContain("was not confirmed healthy before the client-side deadline (30s)");
     expect(h.calls()).toBe(38);
     expect(h.requests.at(-1)!.timeoutMs).toBe(414);
     expect(h.sleeps.at(-1)).toBe(115);
@@ -969,7 +969,7 @@ describe("smoke instance resolution sizes its client timeouts and sleeps to a 30
       const counter = { calls: 0 };
       const error = await resolveFlairInstance({ budgetMs: 50, sleep: async () => {}, fetchImpl: lateHealthFetch(counter) })
         .then(() => null, (err: Error) => err);
-      expect(error?.message).toContain("did not respond within 0.05s");
+      expect(error?.message).toContain("was not confirmed healthy before the client-side deadline (0.05s)");
       expect(counter.calls).toBe(1);
     } finally {
       Date.now = realNow;
@@ -985,7 +985,7 @@ describe("smoke instance resolution sizes its client timeouts and sleeps to a 30
       const counter = { calls: 0 };
       const error = await resolveFlairInstance({ budgetMs: 50, sleep: async () => {}, fetchImpl: lateHealthFetch(counter) })
         .then(() => null, (err: Error) => err);
-      expect(error?.message).toContain("did not respond within 0.05s");
+      expect(error?.message).toContain("was not confirmed healthy before the client-side deadline (0.05s)");
       expect(counter.calls).toBe(1);
     } finally {
       Date.now = realNow;

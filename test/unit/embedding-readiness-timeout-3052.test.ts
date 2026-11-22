@@ -335,7 +335,7 @@ describe("flair#3052 — smoke instance resolution under Node's real AbortSignal
     const out = JSON.parse(result.stdout.trim().split("\n").at(-1)!);
 
     expect(out.runtime).toBe("node");
-    expect(out.message).toContain("did not respond within 30s");
+    expect(out.message).toContain("was not confirmed healthy before the client-side deadline (30s)");
     expect(out.calls).toBe(13);
     expect(out.timeouts).toEqual([...Array(12).fill(2_000), 1_000]);
     expect(out.sleeps).toEqual(Array(12).fill(500));

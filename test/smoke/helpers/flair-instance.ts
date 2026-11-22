@@ -130,7 +130,7 @@ export async function resolveFlairInstance(opts: ResolveFlairInstanceOptions = {
 
   if (!ready) {
     throw new Error(
-      `Flair instance at ${baseUrl} did not respond within ${budgetMs / 1000}s. ` +
+      `Flair instance at ${baseUrl} was not confirmed healthy before the client-side deadline (${budgetMs / 1000}s). ` +
       `Ensure a Flair instance is running (local: 'flair serve', Docker: see CI workflow). ` +
       `Or set FLAIR_TEST_URL to an existing instance.`,
     );
