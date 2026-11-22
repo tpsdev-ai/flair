@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
-import { componentWithFailingMemoryRead, type FailingComponent } from "../helpers/host-pointer-failing-component";
+import { armMemoryReadFailure, componentWithFailingMemoryRead, memoryReadConsumerStack, type FailingComponent } from "../helpers/host-pointer-failing-component";
 
 interface TestAgent { id: string; publicKey: Uint8Array; secretKey: Uint8Array; }
 const owner: TestAgent = { id: "fence-owner", ...nacl.sign.keyPair() };
@@ -90,13 +90,15 @@ async function markOutcomeUnknown(id: string): Promise<void> {
   arm(point);
   const held = signed("PATCH", `/Memory/${id}`, { embedding: null, embeddingModel: null });
   expect(await waitFor(join(pauseDir, `paused.${point}`), 60_000), "the re-embed PATCH never reached its pre-verification pause").toBe(true);
-  writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), "");
+  armMemoryReadFailure(pauseDir, id, "memory-patch-verify");
   await releaseAndConfirm(point);
   const res = await held;
   const body = await res.json() as any;
   expect(res.status, JSON.stringify(body)).toBe(503);
   expect(body.error).toBe("write_outcome_unknown");
   expect(existsSync(join(pauseDir, `arm.memory-get-fail.${id}`)), "the verification read was not the read that failed").toBe(false);
+  expect(memoryReadConsumerStack(pauseDir, id), "the verification read was not the read that consumed the failure")
+    .toMatch(/\bat (?:async )?verifyWrittenRow \(/);
 }
 
 beforeAll(async () => {
