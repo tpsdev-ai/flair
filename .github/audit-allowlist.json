@@ -546,22 +546,6 @@
       }
     },
     {
-      "ghsa": "GHSA-fc5q-39xc-vjpf",
-      "package": "picomatch",
-      "severity": "high",
-      "class": "no-patch-published",
-      "sources": [
-        "bun",
-        "npm-install"
-      ],
-      "approvedBy": "tps-flint",
-      "introducedBy": "harper -> micromatch -> picomatch; harper -> fast-glob -> micromatch -> picomatch",
-      "reason": "Added 2026-11-17. No fixed release exists: the advisory lists no patched version for its affected range (<=4.0.7), and every picomatch release on npm is inside that range. Both reported copies are pulled only by harper 5.3.1, the version flair pins (package.json:69), through micromatch 4.0.8 (^2.3.1), which harper requires directly (^4.0.8) and through fast-glob 3.3.3: bun.lock resolves picomatch 2.3.2, and harper 5.3.1's npm-shrinkwrap pins picomatch 2.3.1 at node_modules/harper/node_modules/picomatch in an npm install of flair. No other consumer install reports it. flair does not import picomatch, micromatch, fast-glob or anymatch. harper 5.3.1 builds its micromatch and fast-glob patterns from component configuration and from component directories under the configured components root. flair's own config.yaml names only .env, schemas/*.graphql and dist/resources/*.js in its files options and configures no static handler. We found no request path to those patterns other than harper's component-management operations (deploy_component, set_component_file and add_component among them), each of which requires super_user or a role whose operations allowlist grants it: a caller that can already place code harper loads and runs.",
-      "added": "2026-11-17",
-      "expires": "2027-01-16",
-      "removeWhen": "picomatch publishes a fixed release that this advisory's affected range no longer covers, and both reported copies resolve one: bun.lock's copy (a fixed 2.x release within micromatch's ^2.3.1, a micromatch release whose range admits a fixed release, or a root override) and the copy in an npm install of flair (a harper release whose npm-shrinkwrap or bundle carries one); or flair stops depending on harper. Until then, this entry's expiry is the backstop."
-    },
-    {
       "ghsa": "GHSA-528h-pc64-c93x",
       "package": "stream-json",
       "severity": "moderate",
