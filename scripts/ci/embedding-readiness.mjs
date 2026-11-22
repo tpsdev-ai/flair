@@ -317,8 +317,8 @@ export async function warmInstanceEmbeddings(opts) {
           }),
           // `remainingMs` bounds this client's wait, not the provider call: an
           // in-process timeout cannot preempt a provider that never yields
-          // (resources/memory-write-lock.ts). A monotonic clock yields fractional
-          // milliseconds, which `AbortSignal.timeout` rejects.
+          // (resources/memory-write-lock.ts). A monotonic clock may yield fractional
+          // milliseconds; Node's `AbortSignal.timeout` requires an integer.
           signal: AbortSignal.timeout(Math.max(1, Math.ceil(remainingMs))),
         });
       },

@@ -581,7 +581,7 @@ describe("embedding readiness waits on total elapsed time (flair#3052)", () => {
   }
 
   test("each warm-up PUT and read-back gets the time left as its AbortSignal bound, rounded up to a whole millisecond", async () => {
-    // A fractional clock: every bound below would be fractional without the rounding.
+    // A fractional clock: both read-back bounds and the second PUT bound are fractional before rounding.
     const clock = virtualClock(1_000_000.25);
     let memoryId = "";
     let readBacks = 0;
