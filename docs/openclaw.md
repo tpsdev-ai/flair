@@ -96,10 +96,10 @@ flair agent add review-agent
 Set persistent context that shapes how the agent behaves:
 
 ```bash
-flair soul set --agent my-agent --key role \
+flair soul set --admin-pass-file ~/.flair/admin-pass --agent my-agent --key role \
   --value "Senior engineer focused on reliability. Ship quality over speed."
 
-flair soul set --agent my-agent --key project \
+flair soul set --admin-pass-file ~/.flair/admin-pass --agent my-agent --key project \
   --value "E-commerce API. Node.js, PostgreSQL. 200K DAU."
 ```
 
@@ -116,7 +116,7 @@ The plugin finds Ed25519 keys for the host-provided agent identity: `keyPath` fr
 flair status
 
 # Verify the agent exists
-flair agent list
+flair agent list --agent my-agent
 
 # Test memory roundtrip
 flair memory add --agent my-agent --content "test memory"

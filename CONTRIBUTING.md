@@ -43,10 +43,10 @@ truthy value (nonblank after trimming, excluding `0` and `false` case-insensitiv
 `CI=true`), and CI also passes `--keep-going` explicitly. `--keep-going` forces
 it anywhere; `--fail-fast` forces the first-failure stop even when `CI` is set,
 which is what the release script passes. In keep-going mode a step that runs
-past its time limit (90 s; 360 s for the root unit tests step) is killed and
-counts as a failed step, and the whole lane has a 510 s budget, so the summary is
-expected to print inside the CI job's 10-minute limit even if steps hang, as long
-as the job's work outside the lane stays within the 90 s reserved for it; a step the budget
+past its time limit (150 s by default; 450 s for root unit shards and 360 s for n8n) is killed and
+counts as a failed step. The CI job has a 22-minute limit, with 120 s reserved
+for guards, reporting, and post-lane steps. Its budget is derived from
+the recorded job start, capped at 1200 s (also the fallback without a usable timestamp); a step the budget
 leaves unrun is listed as not run. The limits are measured on CI runners, so a
 fail-fast run is not time-limited. The home-isolation and temp-leak guards run
 once at the end in either mode. In keep-going mode a guard failure is listed in
@@ -76,9 +76,9 @@ checks passed.
 Run the CLI against a local Flair instance:
 
 ```bash
-./dist/cli.js --help
-./dist/cli.js init --data-dir /tmp/flair-dev --port 19926
-./dist/cli.js status --port 19926
+node dist/cli.js --help
+node dist/cli.js init --data-dir /tmp/flair-dev --port 19926
+node dist/cli.js status --port 19926
 ```
 
 ## PR expectations
@@ -155,12 +155,10 @@ package to npm from CI — no local npm login. Full runbook: [docs/releasing.md]
 ./scripts/release.sh 0.7.0
 # ... review and merge the PR on GitHub ...
 
-# Phase 2 — tag the merged release; the tag push triggers the stage-publish CI
-git checkout main && git pull
-git tag v0.7.0 && git push origin v0.7.0
+# Phase 2 — release-auto-tag creates vX.Y.Z after the merged release passes its checks
 ```
 
-Pushing the `vX.Y.Z` tag triggers the [`release-publish`](.github/workflows/release-publish.yml)
+The [`release-auto-tag`](.github/workflows/release-auto-tag.yml) workflow tags an eligible merged release after its checks pass. The `vX.Y.Z` tag triggers the [`release-publish`](.github/workflows/release-publish.yml)
 workflow: it authenticates to npm with a short-lived **OIDC** token (no stored `NPM_TOKEN`),
 builds, and submits all packages to npm **staging** with provenance. They are **not live**
 until a maintainer reviews the staged tarballs and **approves them on npmjs.com with 2FA** —
@@ -170,7 +168,7 @@ The same tag starts the `adk-flair` PyPI workflow, subject to its version check 
 
 Phase 1 assembles every `.changelog/unreleased/` fragment into a `## [X.Y.Z]` section of
 `CHANGELOG.md` and deletes the fragments — there is nothing to promote by hand. It refuses
-to run if there are neither fragments nor eligible dependency commits. The legacy `./scripts/release.sh 0.7.0 --publish`
+to run if there are neither fragments nor eligible dependency commits. The legacy `./scripts/release.sh 0.7.0 --publish --break-glass`
 direct-publish path remains as a break-glass fallback for when CI is unavailable.
 
 ## Questions

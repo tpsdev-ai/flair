@@ -8,7 +8,7 @@ Flair runs Harper v5 (a Node.js HTTP+storage runtime) plus a small CLI/MCP layer
 |---|---|---|
 | RAM | 1 GB free | 500–800 MB resident is typical for a single-agent spoke. |
 | Disk | 250 MB | Harper data dir grows ~50–200 MB per active agent over weeks. |
-| Node | 22 LTS or 24 LTS | Native fetch + WebStreams. Verified on 22.22.x and 25.9.x. |
+| Node | `^22.18.0 \|\| >=24.0.0` | Native fetch + WebStreams. Verified on 22.22.x and 25.9.x. |
 | Network | Outbound HTTPS | For federation-sync to a hub. Local-only deployments need none. |
 
 ## Measured at idle (single agent, no load)
@@ -37,6 +37,6 @@ A 4-agent Mac mini at full embeddings + federation runs comfortably in 1 GB. An 
 
 ## Known constraints
 
-- **Free Fabric tier.** ~512 MB plan ceiling. The full embedding model + HNSW + Harper is tight at that ceiling for a multi-agent spoke; a 1-agent personal spoke fits. Larger deployments (Phase 2 SLM-summarization, multi-agent hubs) require a paid Fabric tier or self-host.
+- **Free Fabric tier.** ~512 MB plan ceiling. The full embedding model + HNSW + Harper is tight at that ceiling for a multi-agent spoke; a 1-agent personal spoke fits. Larger deployments (multi-agent hubs) require a paid Fabric tier or self-host.
 - **Cold-start.** Embedding model load is ~3–5 s on Mac arm64, ~8–12 s on commodity Linux x86. Subsequent operations are warm.
-- **No GPU required.** Embeddings run on CPU. HNSW is in-memory and CPU-only. GPU only matters if you deploy a Phase 2 SLM-based summarizer (separate process — see [bridges.md](./bridges.md#phase-2-summary-service)).
+- **No GPU required.** Embeddings default to Metal on Apple Silicon when the Metal backend is usable, otherwise CPU. HNSW is in-memory and CPU-only.

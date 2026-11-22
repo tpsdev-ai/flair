@@ -10,7 +10,7 @@ Every agent framework gives you chat history. None give you *identity*. Flair gi
 
 ## Quick start
 
-Runs on a laptop, a VPS, or anywhere Node does. Needs **Node.js 22+**.
+Runs on a laptop, a VPS, or anywhere Node does. Needs **Node.js `^22.18.0 || >=24.0.0`**.
 
 ```bash
 # 1. Install the CLI (no sudo)
@@ -41,7 +41,7 @@ Step 5 finds the memory you never keyword-matched:
 
 ```
   Harper v5 sandbox blocks node:module but process.dlopen works
-  ( 2026-07-28 · standard · 100% )
+  ( 2026-07-28 · standard · <score>% )
 ```
 
 By default, that percentage displays semantic similarity with a small keyword-match
@@ -57,14 +57,14 @@ Full walkthrough with expected output at every step: **[docs/quickstart.md](docs
 
 ### One install, one binary
 
-`npm install -g @tpsdev-ai/flair` puts a single command on your `PATH`: `flair`. That is the whole install, and it needs a **user-writable npm global prefix** — which is why step 1 says *no sudo*. A root-owned install can't write the embedding model into its own package directory, so semantic search silently degrades to keyword-only. Use `nvm`, or point npm at your home directory — `npm config set prefix ~/.npm-global`, then add `~/.npm-global/bin` to `PATH`. `flair init` and `flair doctor` both check for this and say so loudly.
+`npm install -g @tpsdev-ai/flair` puts a single command on your `PATH`: `flair`. Use a **user-writable npm global prefix** to install without sudo. The embedding model downloads to `<data-dir>/models` (default `~/.flair/data/models`), or `FLAIR_MODELS_DIR` when set.
 
 > **Known install-size issue.** `npm install -g @tpsdev-ai/flair` currently pulls roughly 130 MB of React Native tooling that a Node install never uses — an optional dependency of Harper's SQL engine. It is inert and Flair runs normally. The durable fix is upstream ([harperfast/harper#1937](https://github.com/harperfast/harper/issues/1937)). Do **not** install with `--omit=optional` to avoid it: that also drops Harper's platform RocksDB binding, and Flair will not start.
 
 Two MCP paths, on purpose. A client on this machine and a remote connector are different trust situations, and each has its own mechanism. The write-up that joins them is [docs/mcp-clients.md — Two MCP paths](docs/mcp-clients.md#two-mcp-paths).
 
-- **Local client: the `npx` stdio adapter.** `@tpsdev-ai/flair-mcp` is a separate package and is not installed globally. `flair init --agent <id>` attempts to wire detected clients when wiring is enabled, using `npx -y @tpsdev-ai/flair-mcp@<version>` pinned to the CLI's version. The adapter sends requests to `FLAIR_URL`, signing with an Ed25519 key when one resolves and otherwise using configured administrator Basic credentials when available. Loopback HTTP is the right scheme on this machine (the default is `http://127.0.0.1:19926`). A remote `FLAIR_URL` should use HTTPS. This is the path for Claude Code, Cursor, Codex, Gemini, and every other local MCP client.
-- **Remote client: native `/mcp`.** A JSON-RPC endpoint inside the server, OAuth bearer, exposing the curated tools that the JSON-RPC `tools/list` method on `/mcp` returns. It is off by default: an unset `FLAIR_MCP_OAUTH` leaves `/mcp` unregistered; a truthy flag and a configured issuer make Flair attempt to mount it, while only the literal value `true` also enables the OAuth component. `true` is the value that turns on both Flair's route and the OAuth component; `1`, `yes`, and `on` leave the component off and every call 401s. OAuth client-metadata is fetched over HTTPS and refuses a private, loopback, or link-local host. Remote connectors need a publicly reachable HTTPS origin; `flair mcp enable` accepts loopback or unspecified targets for the local restart but refuses local issuers, while route registration itself does not enforce a public HTTPS issuer.
+- **Local client: the `npx` stdio adapter.** `@tpsdev-ai/flair-mcp` is a separate package and is not installed globally. `flair init --agent <id>` attempts to wire detected clients when wiring is enabled, using `npx -y @tpsdev-ai/flair-mcp@<version>` pinned to the CLI's version. The adapter sends requests to `FLAIR_URL`, signing with an Ed25519 key when one resolves and otherwise using configured administrator Basic credentials when available. Loopback HTTP is the right scheme on this machine (the adapter default is `http://localhost:19926`). A remote `FLAIR_URL` should use HTTPS.
+- **Remote client: native `/mcp`.** A JSON-RPC endpoint inside the server, OAuth bearer, exposing the curated tools that the JSON-RPC `tools/list` method on `/mcp` returns. It is off by default: an unset `FLAIR_MCP_OAUTH` leaves `/mcp` unregistered; a truthy flag and a configured issuer make Flair attempt to mount it, while only the literal value `true` also enables the OAuth component. `true` is the value that turns on both Flair's route and the OAuth component; `1`, `yes`, and `on` leave the component off, so the boot guard refuses to mount `/mcp`. Disabling the live component after mounting returns 503. OAuth client-metadata is fetched over HTTPS and refuses a private, loopback, or link-local host. Remote connectors need a publicly reachable HTTPS origin; `flair mcp enable` accepts loopback or unspecified targets for the local restart but refuses local issuers, while route registration itself does not enforce a public HTTPS issuer.
 `@tpsdev-ai/flair-client` is likewise its own package: add it to a project when you want to call Flair from your own code ([JavaScript / TypeScript](#javascript--typescript)).
 
 ### Where the agent's key lives
@@ -96,12 +96,14 @@ flair uninstall --purge   # remove data, keys, secrets, schedulers, and client w
                           # (the npm package is left; `npm uninstall -g @tpsdev-ai/flair`)
 ```
 
+On macOS after a fresh init, run `flair restart` before `flair stop` to hand the directly started process to launchd ([#3067](https://github.com/tpsdev-ai/flair/issues/3067)).
+
 ### Upgrading
 
 `flair status` and `flair doctor` compare your installed version against the latest published release and print a nudge when you're behind:
 
 ```
-⚠ flair 0.16.1 is behind — latest is 0.20.1 (4 releases behind). Upgrade: npm i -g @tpsdev-ai/flair@latest
+⚠ flair 0.16.1 is behind — latest is 0.20.1 (4 minor versions behind). Run: flair upgrade
 ```
 
 ```bash
@@ -164,7 +166,7 @@ Agent ──[Ed25519-signed request]──▶ Flair (Harper)
 
 Embeddings are generated in-process by [nomic-embed-text](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) (768-dim) via a Harper plugin, on CPU or GPU (Metal, CUDA). No API calls, no sidecar, no network hop. **[Supply-chain policy](docs/supply-chain-policy.md)** covers the bake-time and dependency pinning that keep it that way.
 
-Requests are signed as `agentId:timestamp:nonce:METHOD:/path` and verified against the agent's registered public key, with a 30-second replay window and nonce deduplication.
+Requests are signed as `agentId:timestamp:nonce:METHOD:<path+query>` and verified against the agent's registered public key, with a 30-second replay window and nonce deduplication.
 
 See **[DESIGN.md](https://github.com/tpsdev-ai/flair/blob/main/DESIGN.md)** for the invariants behind the three primitives — why they're shaped the way they are.
 
@@ -233,7 +235,7 @@ Then add to your `CLAUDE.md`: <!-- docs-freshness-allow: names a file in the rea
 
 (`mcp__flair__bootstrap` is Claude Code's namespaced name for the server's `bootstrap` tool.) Use `flair bootstrap --agent <id>` when MCP is not wired — previewing context, scripts, or any agent that can run a shell command.
 
-The `flair-mcp` server exposes `memory_store`, `memory_search`, `memory_update`, `memory_get`, `memory_delete`, `relationship_store`, `bootstrap`, `soul_set`, `soul_get`, `flair_workspace_set` and `flair_orgevent`. Memory follows the agent across CLIs — same instance, same identity, switch harness without losing state.
+The `flair-mcp` tools are listed in the [shared tool descriptors](https://github.com/tpsdev-ai/flair/blob/main/packages/flair-tool-descriptors/src/index.ts). Memory follows the agent across CLIs — same instance, same identity, switch harness without losing state.
 
 Per-CLI config snippets (Gemini CLI's `~/.gemini/settings.json`, Codex CLI's `~/.codex/config.toml`) are in **[docs/mcp-clients.md](docs/mcp-clients.md)**; a deeper Claude Code walk-through is in [docs/claude-code.md](docs/claude-code.md).
 
@@ -262,7 +264,7 @@ flair memory add --agent mybot "learned something important"
 flair search --agent mybot "that important thing"
 flair soul set --agent mybot --key role --value "Security reviewer" --admin-pass-file ~/.flair/admin-pass
 flair bootstrap --agent mybot --max-tokens 4000        # cold-start: soul + relevant memories
-flair backup --admin-pass-file ~/.flair/admin-pass     # logical JSON export
+flair backup --output ./backup.json --admin-pass-file ~/.flair/admin-pass # logical JSON export
 FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair restore ./backup.json
 ```
 
@@ -305,7 +307,7 @@ curl -H "Authorization: TPS-Ed25519 mybot:$TS:$NONCE:$SIG" \
   -d '{"id": "mybot-123", "agentId": "mybot", "content": "...", "durability": "standard"}'
 ```
 
-Sign `agentId:timestamp:nonce:METHOD:/path` with the agent's private key. Protocol in [SECURITY.md](SECURITY.md). Consolidated endpoint, auth-per-resource, and schema catalog: **[docs/api-reference.md](docs/api-reference.md)**.
+Sign `agentId:timestamp:nonce:METHOD:<path+query>` with the agent's private key. Protocol in [SECURITY.md](SECURITY.md). Consolidated endpoint, auth-per-resource, and schema catalog: **[docs/api-reference.md](docs/api-reference.md)**.
 
 ### Embedded in a Harper app (in-process)
 
@@ -317,7 +319,7 @@ Adding it takes nothing away. The HTTP surface keeps serving MCP clients and rem
 
 ```javascript
 import { server } from "harper";
-import { agentContext, collectionResource } from "@tpsdev-ai/flair/dist/resources/in-process.js";
+import { agentContext, collectionResource } from "@tpsdev-ai/flair/server";
 
 // The RESOURCE — auth, read-scoping, visibility, embedding.
 // Registry keys carry no leading slash: get("Memory"), never get("/Memory").
@@ -332,6 +334,8 @@ await h.post({ agentId: "mybot", content: "...", durability: "standard" });
 **This path needs no key at all.** Keys are how an agent *outside* the process proves who it is. Code running inside the same Harper instance asserts identity through the call context instead — `agentContext("mybot")` — which Flair reads and acts on with no signature, no `Agent`-table lookup and no registration. That is deliberate: same-process code could write the storage tables directly, so demanding a signature from it would be theatre. It is also why that id must come from your own server-side state and never from request data.
 
 **→ [Embedding Flair in a Harper app](docs/embedding-in-a-harper-app.md)** — the whole in-process contract, measured against a real instance: resolving the resource, the table-vs-resource distinction that decides whether your memories are scoped at all, N agents in one process, and registering agents with no shell on the node.
+
+The `Flair` facade exported from `@tpsdev-ai/flair` currently returns `{ results: [...] }` from `recall()`, despite its array return type; `memory.get()` can return `{ error: "not found", status: 404 }` for an existing row, and `memory.search()` ignores `limit` ([#3068](https://github.com/tpsdev-ai/flair/issues/3068)).
 
 ### Auth across surfaces
 
@@ -357,13 +361,15 @@ Run Flair on a VPS or cloud instance; agents connect over HTTPS.
 
 ```bash
 # On the server
-flair init --agent mybot --port 19926
+flair init --agent mybot --port 19926 --http-bind 0.0.0.0
+# Proxy HTTP :19926 and the ops API :19925 through TLS.
 
-# On each client — --target seeds the agent on the remote instance
-flair agent add otherbot --target https://your-server:19926
+# On each client — use the remote instance's admin credential
+flair agent add otherbot --target https://your-server:19926 \
+  --ops-target https://your-ops-server:19925 --admin-pass-file ./remote-admin-pass
 ```
 
-`--target` derives the operations API as *REST port − 1*. If that isn't where your ops API lives, pass `--ops-target` explicitly. Good for teams with multiple machines or always-on agents.
+`--ops-target` names the operations API explicitly when it differs from the URL derived from `--target`.
 
 ### Harper Fabric
 
@@ -385,7 +391,8 @@ Full model, threat analysis and recommendations in [SECURITY.md](SECURITY.md).
 
 ```
 flair/
-├── src/cli.ts                 # CLI: init, agent, status, backup, grant
+├── src/cli.ts                 # CLI entry point
+├── src/commands/              # CLI command handlers
 ├── config.yaml                # Harper app configuration
 ├── schemas/*.graphql          # Agent, Memory, Soul, Federation, OAuth tables
 ├── resources/
@@ -412,7 +419,7 @@ Key decisions:
 ```bash
 bun install          # install dependencies
 bun run build        # compile TypeScript → dist/
-bun test             # unit + integration tests
+bun run test:unit    # shared unit lane
 ```
 
 Integration tests spin up a real Harper instance on a random port and tear it down afterwards — no mocks for the database layer. CI for pull requests to main and pushes to main runs unit and integration tests, type checks, dependency audit, Semgrep and CodeQL SAST. See [CONTRIBUTING.md](https://github.com/tpsdev-ai/flair/blob/main/CONTRIBUTING.md).

@@ -56,8 +56,8 @@ Copy this into your project's `CLAUDE.md` (or `.claude/settings.md`, `AGENTS.md`
 
     - Remember something: `flair memory add --agent my-project --content "what you learned"`
     - Search memory: `flair search "your query" --agent my-project`
-    - Store a lesson: `flair memory add --agent my-project --content "lesson text" --type lesson --durability persistent`
-    - Store a decision: `flair memory add --agent my-project --content "decision text" --type decision --durability persistent`
+    - Store a lesson: `flair memory add --agent my-project --content "lesson text" --durability persistent`
+    - Store a decision: `flair memory add --agent my-project --content "decision text" --durability persistent`
 
     ### What to remember
 
@@ -136,7 +136,7 @@ Then add the hook to `~/.claude/settings.json`:
 }
 ```
 
-Swap `my-project` for your agent ID and `<version>` for `flair --version`. The binary runs with the `node` found on the hook's `PATH`, which must be Node 22 or later. The `sh -c ... || true` wrapper is the same one the SessionStart hook uses: if the command cannot run at all, the prompt goes through with no output. Nothing in the CLI rewrites this entry or that directory, so re-run the `npm install` with the new version after an upgrade.
+Swap `my-project` for your agent ID and `<version>` for `flair --version`. The binary runs with the `node` found on the hook's `PATH`, which must satisfy Node `^22.18.0 || >=24.0.0`. The `sh -c ... || true` wrapper is the same one the SessionStart hook uses: if the command cannot run at all, the prompt goes through with no output. Nothing in the CLI rewrites this entry or that directory, so re-run the `npm install` with the new version after an upgrade.
 
 The same `npx -y -p @tpsdev-ai/flair-mcp@<version> flair-prompt-recall` invocation the SessionStart hook uses also works in place of the binary path, at a cost: npx resolves the package before the hook process starts, on every prompt, outside the hook's budget. That adds npm's own start-up to every turn even when the package is cached, and a download when the pinned version is not in npx's cache.
 
@@ -150,7 +150,7 @@ The environment wins over the config file, where the keys are top-level entries;
 
 ### Action recall (`flair-action-recall`)
 
-`flair hook install --action-recall` copies the version-matched hook and its runtime modules to `~/.flair/hooks/action-recall/<version>-<content hash>/` and probes that installed command. This Flair-owned directory survives npm cache eviction; uninstall removes it. Status probes a detected entry; absence is informational. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first, then `flair hook install --action-recall`. An incompatible SessionStart entry or held pin refuses installation.
+Action recall requires Bun `>=1.3.10 <2` on PATH or at `FLAIR_BUN_PATH`. `flair hook install --action-recall` copies the version-matched hook and its runtime modules to `~/.flair/hooks/action-recall/<version>-<content hash>/` and probes that installed command. This Flair-owned directory survives npm cache eviction; uninstall removes it. Status probes a detected entry; absence is informational. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first, then `flair hook install --action-recall`. An incompatible SessionStart entry or held pin refuses installation.
 
 **How it decides.** A lesson opts in through its JSON `metadata` field:
 
@@ -168,7 +168,7 @@ The hot path reads a per-session cache of the agent's own lessons under `~/.flai
 
 ### Learning capture (`flair-capture`)
 
-`flair hook install --capture` copies the version-matched hook and its runtime modules to `~/.flair/hooks/capture/<version>-<content hash>/` and probes that installed command. It wires three Claude Code events: `PostToolUseFailure` (matching `Bash`), `PostToolUse` (matching `Write|Edit|NotebookEdit|Bash`) and `Stop`.
+Capture requires Bun `>=1.3.10 <2` on PATH or at `FLAIR_BUN_PATH`. `flair hook install --capture` copies the version-matched hook and its runtime modules to `~/.flair/hooks/capture/<version>-<content hash>/` and probes that installed command. It wires three Claude Code events: `PostToolUseFailure` (matching `Bash`), `PostToolUse` (matching `Write|Edit|NotebookEdit|Bash`) and `Stop`.
 
 The hook may stage a possible matching follow-up to a failed `Bash` call, or a cue-matching sentence from the turn's final text, in a bounded local spool under `~/.flair/capture/`. Network writes run in a detached flush. The foreground stdin deadline is 2 seconds; the default append-lock wait for Stop, PostToolUse and flush snapshot/rewrite operations is 200 ms. A failed-tool append waits up to 2 seconds for the lock and refuses if it remains busy. The installed command suppresses stdout, keeps stderr for lock-contention and pending-write warnings, and exits 0. The flush bounds its asynchronous setup and each write with one deadline; the 10 ms p95 hot-path budget in `scripts/capture-latency.mjs` is a manual measurement, not a CI gate.
 
@@ -299,15 +299,15 @@ Want Claude Code to have consistent personality or project context? Set soul ent
 
 ```bash
 # Project context
-flair soul set --agent my-project --key project \
+flair soul set --admin-pass-file ~/.flair/admin-pass --agent my-project --key project \
   --value "E-commerce platform. Rust backend, React frontend. Ship quality over speed."
 
 # Coding standards
-flair soul set --agent my-project --key standards \
+flair soul set --admin-pass-file ~/.flair/admin-pass --agent my-project --key standards \
   --value "Always write tests. Prefer composition over inheritance. No any types in TypeScript."
 
 # Review guidelines
-flair soul set --agent my-project --key review \
+flair soul set --admin-pass-file ~/.flair/admin-pass --agent my-project --key review \
   --value "Check for: error handling, edge cases, performance implications, security."
 ```
 
@@ -325,18 +325,14 @@ flair agent add my-project
 
 # On client machines
 npm install -g @tpsdev-ai/flair  # for the CLI
-export FLAIR_URL=http://your-server:19926
+ssh -f -N -L 19926:localhost:19926 your-server
+export FLAIR_URL=http://localhost:19926
 export FLAIR_AGENT_ID=my-project
 # Copy the key from the server:
 scp server:~/.flair/keys/my-project.key ~/.flair/keys/
 ```
 
-Or use an SSH tunnel:
-
-```bash
-ssh -f -N -L 19926:localhost:19926 your-server
-# Now FLAIR_URL=http://localhost:19926 works
-```
+The tunnel reaches the server's default loopback listener.
 
 ## Programmatic Access
 

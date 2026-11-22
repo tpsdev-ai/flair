@@ -80,7 +80,7 @@ The agent now answers using both its current chat history (from Flair Chat Memor
 
 n8n memory connectors expose a `sessionKey` parameter that scopes the chat history. Flair has a richer model:
 
-- **Subject** (required) — the entity / conversation / topic the memory is about. For Flair Search Get By Subject, the client compares subjects after retrieval and the node requests no ordering. Default: `={{ $workflow.name }}`.
+- **Subject** — the entity / conversation / topic the memory is about. Flair Chat Memory defaults to `={{ $workflow.name }}`; Search Get By Subject and Write default to blank (Write's Subject is optional). For Get By Subject, the client compares subjects after retrieval and the node requests no ordering.
 - **Session Sub-Key** (optional) — appended to the subject as `<subject>:<sessionKey>`. Use the n8n execution id (`={{ $execution.id }}`) for per-run chat-history grouping by subject, or a customer/user id for per-customer scoping, or leave blank to share across runs.
 
 Patterns:
@@ -103,12 +103,7 @@ The Flair Search node currently exposes Semantic Search and Get By Subject. **Ge
 
 ## Worked examples
 
-Two example workflows are coming in a follow-up release; they're authored inside a real n8n instance and round-tripped via Export so they import cleanly:
-
-- **`chat-memory-demo.json`** — Webhook → AI Agent (Claude + Flair Chat Memory) → Respond. Demonstrates the conversation-buffer use case. Run twice with the same input to see memory replay.
-- **`knowledge-search-demo.json`** — Schedule → AI Agent (Claude + Flair Chat Memory + Flair Search as Tool) → action. Demonstrates the structured-knowledge-search use case.
-
-In the interim, follow the [Setup](#setup-5-minutes) and [Subject and SessionId guidance](#subject-and-sessionid-guidance) sections — wiring is straightforward without an example file.
+The [review-capture workflow](https://github.com/tpsdev-ai/flair/blob/main/packages/n8n-nodes-flair/examples/ks-review-capture/workflow.json) is in the repository; its [setup guide](https://github.com/tpsdev-ai/flair/blob/main/packages/n8n-nodes-flair/examples/ks-review-capture/README.md) describes the required configuration.
 
 ## Compared to other Flair surfaces
 

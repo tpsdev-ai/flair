@@ -55,6 +55,8 @@ n8n's v1 API docs mention `PATCH /api/v1/workflows/:id` with `{ "active": true }
 
 The `n8n update:workflow` CLI command works when n8n is **not running**. It updates both `active` and `activeVersionId` in the DB. On the next `n8n start`, `ActiveWorkflowManager.init()` reads `getAllActiveIds()` and registers all workflows with non-null `activeVersionId`.
 
+The launchd label, Node path, and n8n version below are site-specific examples; substitute your installation's values.
+
 ```bash
 # Stop n8n
 launchctl stop ai.tpsdev.n8n
@@ -71,7 +73,7 @@ launchctl start ai.tpsdev.n8n
 **Caveats**:
 - `update:workflow` is deprecated (n8n v2 will replace it with `publish:workflow`/`unpublish:workflow`)
 - Requires a full stop/start cycle (downtime for all workflows)
-- `npx` needs node@24 (`/opt/homebrew/opt/node@24/bin/node`)
+- Use the Node version required by your installed n8n release.
 
 ### Approach 3: Internal REST API (editor UI)
 
