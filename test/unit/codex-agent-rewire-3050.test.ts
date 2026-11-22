@@ -484,6 +484,16 @@ describe("Codex shape boundaries", () => {
   }
 });
 
+// The fixture checks below use the runtime's own TOML parser as an oracle. The Bun version the repo
+// pins (packageManager) decodes no \U escapes and accepts a redefined table, so each check runs only
+// where the parser implements that part of TOML 1.0; the refusal itself is asserted on every runtime.
+const TOML_DECODES_U_ESCAPES = (() => {
+  try { return (Bun.TOML.parse('a = "\\U00000066"') as any).a === "f"; } catch { return false; }
+})();
+const TOML_REJECTS_REDEFINED_TABLE = (() => {
+  try { Bun.TOML.parse("[a]\nx = 1\n\n[a]\ny = 2\n"); return false; } catch { return true; }
+})();
+
 describe("Codex fallback definition guard", () => {
   for (const header of [
     '[mcp_servers."\\u0066lair"]', '["\\u006dcp_servers".flair]',
@@ -496,7 +506,9 @@ describe("Codex fallback definition guard", () => {
         const raw = seed((tomlSnippet(ENV_A)
           .replace('[mcp_servers.flair]', header)
           .replace('[mcp_servers.flair.env]', header.slice(0, -1) + '.env]') + "\n").replaceAll("\n", ending));
-        expect((Bun.TOML.parse(raw) as any).mcp_servers.flair.env.FLAIR_AGENT_ID).toBe("agent-a");
+        if (!header.includes("\\U") || TOML_DECODES_U_ESCAPES) {
+          expect((Bun.TOML.parse(raw) as any).mcp_servers.flair.env.FLAIR_AGENT_ID).toBe("agent-a");
+        }
         expectRefusal(raw, wireCodex(ENV_B));
       });
     }
@@ -522,8 +534,9 @@ describe("Codex fallback definition guard", () => {
         const raw = seed(placement === "before"
           ? extra + tomlSnippet(ENV_A) + "\n"
           : tomlSnippet(ENV_A) + '\n\n[other]\nx = "v"\n\n' + extra);
-        if (header.endsWith('.env]')) expect(() => Bun.TOML.parse(raw)).toThrow();
-        else {
+        if (header.endsWith('.env]')) {
+          if (TOML_REJECTS_REDEFINED_TABLE) expect(() => Bun.TOML.parse(raw)).toThrow();
+        } else {
           const extra = (Bun.TOML.parse(raw) as any).mcp_servers.flair.extra;
           expect((Array.isArray(extra) ? extra[0] : extra).extra).toBe("value");
         }
