@@ -15,7 +15,7 @@ export const CODEX_CONDITION_CLAUSES = [
   `(3) no triple-quote delimiter text (""" or '''), even in a comment, comes before [mcp_servers.flair],`,
   "and with no section none appears anywhere, because Flair appends the section at the end of the file;",
   "(4) an existing [mcp_servers.flair] section is exactly the shape Flair writes: edit it, or remove it and its [mcp_servers.flair.*] tables so Flair appends a fresh one.",
-  "Fix whichever do not hold and re-run flair init, or configure Codex by hand.",
+  "Fix any that do not hold and re-run flair init; if Flair still cannot read the file as safe, configure Codex by hand.",
   "These cover the file's content only: the pin guard (for example, an existing pin newer than this flair) and a failed write can still stop wiring.",
 ] as const;
 

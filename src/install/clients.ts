@@ -406,16 +406,94 @@ function locateCodexFlairSection(raw: string): CodexFlairShape {
   return { kind: "recognized", start, end, text: raw.slice(start, end), spec: args[1]!, agentId, url };
 }
 
+const CODEX_TOML_KEY = String.raw`(?:"(?:[^"\\]|\\.)*"|'[^']*'|[A-Za-z0-9_-]+)`;
+const CODEX_TOML_KEY_LINE_RE = new RegExp(String.raw`^[ \t]*(${CODEX_TOML_KEY}(?:[ \t]*\.[ \t]*${CODEX_TOML_KEY})*)[ \t]*=(.*)$`);
+
+/** Where a value spread over lines stands: open array/inline-table depth, and an open multiline string. */
+type CodexValueState = { depth: number; inStr: '"""' | "\'\'\'" | null };
+
+/** The index of the `"""` that closes a multiline basic string, skipping escapes; -1 when not on this line. */
+function codexBasicMultilineClose(text: string, from: number): number {
+  for (let i = from; i < text.length; i++) {
+    if (text[i] === "\\") { i++; continue; }
+    if (text.startsWith('"""', i)) return i;
+  }
+  return -1;
+}
+
+/**
+ * Advance a value's state over one fragment: single-line basic and literal strings, multiline strings
+ * (which may open and close across lines), and bracket depth, stopping at a comment. Returns null when
+ * the fragment is unreadable here (an unclosed single-line string, or more closers than openers).
+ */
+function codexScanValue(fragment: string, state: CodexValueState): CodexValueState | null {
+  let { depth, inStr } = state;
+  let i = 0;
+  while (i < fragment.length) {
+    if (inStr !== null) {
+      const close = inStr === '"""' ? codexBasicMultilineClose(fragment, i) : fragment.indexOf("\'\'\'", i);
+      if (close === -1) return { depth, inStr };
+      i = close + 3;
+      inStr = null;
+      continue;
+    }
+    const ch = fragment[i]!;
+    if (ch === "#") break;
+    if (fragment.startsWith('"""', i)) { inStr = '"""'; i += 3; continue; }
+    if (fragment.startsWith("\'\'\'", i)) { inStr = "\'\'\'"; i += 3; continue; }
+    if (ch === '"') {
+      i++;
+      while (i < fragment.length && fragment[i] !== '"') i += fragment[i] === "\\" ? 2 : 1;
+      if (i >= fragment.length) return null;
+      i++;
+      continue;
+    }
+    if (ch === "'") {
+      const close = fragment.indexOf("'", i + 1);
+      if (close === -1) return null;
+      i = close + 1;
+      continue;
+    }
+    if (ch === "[" || ch === "{") depth++;
+    else if (ch === "]" || ch === "}") {
+      depth--;
+      if (depth < 0) return null;
+    }
+    i++;
+  }
+  return { depth, inStr };
+}
+
 function codexOutsideDefinition(raw: string, span?: { start: number; end: number }): boolean {
   let offset = 0;
+  // Lines inside a value spread over lines (a multiline array or string) are value text, not keys.
+  let state: CodexValueState = { depth: 0, inStr: null };
   for (const rawLine of raw.split("\n")) {
     const line = rawLine.replace(/^\uFEFF/, "").replace(/\r$/, "");
     const outside = !span || offset < span.start || offset >= span.end;
     offset += rawLine.length + 1;
-    if (!outside || /^[ \t]*(?:#|$)/.test(line)) continue;
+    if (!outside) continue;
+    if (state.depth > 0 || state.inStr !== null) {
+      // Kept from the line-based scan: text inside a multiline string that reads as an mcp_servers
+      // key or header still refuses, in case the string boundary was misread.
+      if (state.inStr !== null && /^[ \t]*\[?[ \t]*["']?mcp_servers/.test(line)) return true;
+      const next = codexScanValue(line, state);
+      if (next === null) return true;
+      state = next;
+      continue;
+    }
+    if (/^[ \t]*(?:#|$)/.test(line)) continue;
     const header = line.match(/^[ \t]*\[\[?[ \t]*(.*?)[ \t]*\]\]?[ \t]*(?:#.*)?$/);
-    const key = header?.[1] ?? line.match(/^[ \t]*((?:[^=]+))=/)?.[1];
-    if (!key) continue;
+    let key: string | undefined = header?.[1];
+    if (key === undefined) {
+      const assignment = line.match(CODEX_TOML_KEY_LINE_RE);
+      // A line that is neither a header nor a readable `key = value` cannot be ruled out.
+      if (!assignment) return true;
+      key = assignment[1]!;
+      const next = codexScanValue(assignment[2]!, { depth: 0, inStr: null });
+      if (next === null) return true;
+      state = next;
+    }
     const first = key.match(/^[ \t]*("(?:[^"\\]|\\.)*"|'[^']*'|[A-Za-z0-9_-]+)/)?.[1];
     if (!first) return true;
     const decoded = first.startsWith('"') || first.startsWith("'")
@@ -435,7 +513,8 @@ function codexOutsideDefinition(raw: string, span?: { start: number; end: number
       if (child === undefined || child === "flair") return true;
     }
   }
-  return false;
+  // A value still open at the end of the file is not TOML the scanner can read.
+  return state.depth !== 0 || state.inStr !== null;
 }
 
 /** Node ships no TOML parser here; refuse possible definitions outside the span. */
@@ -1158,7 +1237,8 @@ export const CODEX_APPEND_DELIMITER_REASON =
 export const CODEX_LOSSY_BYTES_REASON = "the file is not lossless UTF-8";
 
 /**
- * The config-content conditions Flair needs before it writes Codex's config. A refusal names the
+ * The config-content conditions Flair needs before it writes Codex's config: necessary, not sufficient, because
+ * the line scan refuses TOML it cannot read even when they hold. A refusal names the
  * reason it found, then lists all of them, because one file can fail several and fixing only the
  * named one may not be enough (for example, removing a malformed section leaves delimiter text the
  * append then meets). They are about the file's content only: the pin guard and the write itself
@@ -1174,7 +1254,7 @@ export const CODEX_WIRING_CONDITIONS =
   "and with no section none appears anywhere, because Flair appends the section at the end of the file; " +
   "(4) an existing [mcp_servers.flair] section is exactly the shape Flair writes: edit it, or remove it and " +
   "its [mcp_servers.flair.*] tables so Flair appends a fresh one. " +
-  "Fix whichever do not hold and re-run flair init, or configure Codex by hand. " +
+  "Fix any that do not hold and re-run flair init; if Flair still cannot read the file as safe, configure Codex by hand. " +
   "These cover the file's content only: the pin guard (for example, an existing pin newer than this " +
   "flair) and a failed write can still stop wiring.";
 

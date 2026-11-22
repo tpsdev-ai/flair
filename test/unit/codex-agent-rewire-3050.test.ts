@@ -571,6 +571,46 @@ describe("Codex fallback definition guard", () => {
       expectRefusal(raw, wireCodex(ENV_B));
     });
   }
+  // flair#3050: the outside-definition scan reads values spread over lines (multiline arrays and strings) as values,
+  // not as keys; anything it cannot read still refuses.
+  for (const [what, raw] of [
+    ["another server's multiline args holding an = sign", '[mcp_servers.other]\ncommand = "npx"\nargs = [\n  "-y",\n  "other-mcp",\n  "--port=8080",\n]\n'],
+    ["inline tables inside a multiline array", '[other]\nitems = [\n  { k = "v" },\n  { k = "w" },\n]\n'],
+    ["a quoted key holding an = sign", '[other]\n"a=b" = "v"\n'],
+    ["a string inside a multiline array that looks like the Flair header", '[other]\nitems = [\n  "[mcp_servers.flair]",\n]\n'],
+    ["an unbalanced bracket inside a string in a multiline array", '[other]\nargs = [\n  "--range=[1",\n]\n'],
+  ] as const) {
+    it(`wires a file with ${what}`, () => {
+      seed(raw);
+      expect(Bun.TOML.parse(raw) as any).toBeTruthy();
+      const res = wireCodex(ENV_B);
+      expect(res.message).toContain("wired");
+      expect(res.ok).toBe(true);
+      expect((Bun.TOML.parse(readFileSync(cfgPath(), "utf8")) as any).mcp_servers.flair.env.FLAIR_AGENT_ID).toBe("agent-b");
+    });
+  }
+  it("rewires a section followed by a multiline string whose text has = signs and a bracketed line", () => {
+    const raw = seed(tomlSnippet(ENV_A) + '\n\n[other.tool]\nnote = """\nline with = sign\n[not.a.header]\n"""\n');
+    expect((Bun.TOML.parse(raw) as any).other.tool.note).toContain("[not.a.header]");
+    const res = wireCodex(ENV_B);
+    expect(res.ok).toBe(true);
+    expect((Bun.TOML.parse(readFileSync(cfgPath(), "utf8")) as any).mcp_servers.flair.env.FLAIR_AGENT_ID).toBe("agent-b");
+  });
+  it("still refuses a mcp_servers.flair definition after a closed multiline array", () => {
+    const raw = seed('[other]\nitems = [\n  "x",\n]\nmcp_servers.flair.command = "npx"\n');
+    expect((Bun.TOML.parse(raw) as any).other.mcp_servers.flair.command).toBe("npx");
+    expectRefusal(raw, wireCodex(ENV_B));
+  });
+  it("refuses a multiline array still open at the end of the file", () => {
+    const raw = seed('[other]\nitems = [\n  "x",\n');
+    expect(() => Bun.TOML.parse(raw)).toThrow();
+    expectRefusal(raw, wireCodex(ENV_B));
+  });
+  it("still refuses text inside a multiline string that reads as an mcp_servers key", () => {
+    const raw = seed(tomlSnippet(ENV_A) + '\n\n[other.tool]\nnote = """\nmcp_servers.flair.command = "x"\n"""\n');
+    expect((Bun.TOML.parse(raw) as any).other.tool.note).toContain("mcp_servers.flair");
+    expectRefusal(raw, wireCodex(ENV_B));
+  });
   // The remedy each refusal names is one that clears it: follow it, re-run, and the wiring succeeds.
   for (const [what, raw, repaired] of [
     ["an inline flair entry in [mcp_servers]", '[mcp_servers]\nflair = { command = "npx" }\n', ""],
