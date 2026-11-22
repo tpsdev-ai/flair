@@ -136,7 +136,7 @@ Then add the hook to `~/.claude/settings.json`:
 }
 ```
 
-Swap `my-project` for your agent ID and `<version>` for `flair --version`. The binary runs with the `node` found on the hook's `PATH`, which must satisfy Node `^22.18.0 || >=24.0.0`. The `sh -c ... || true` wrapper is the same one the SessionStart hook uses: if the command cannot run at all, the prompt goes through with no output. Nothing in the CLI rewrites this entry or that directory, so re-run the `npm install` with the new version after an upgrade.
+Swap `my-project` for your agent ID and `<version>` for `flair --version`. The binary runs with the `node` found on the hook's `PATH`, which must satisfy Node `>=22` (`@tpsdev-ai/flair-mcp`'s `engines.node`). The `sh -c ... || true` wrapper is the same one the SessionStart hook uses: if the command cannot run at all, the prompt goes through with no output. Nothing in the CLI rewrites this entry or that directory, so re-run the `npm install` with the new version after an upgrade.
 
 The same `npx -y -p @tpsdev-ai/flair-mcp@<version> flair-prompt-recall` invocation the SessionStart hook uses also works in place of the binary path, at a cost: npx resolves the package before the hook process starts, on every prompt, outside the hook's budget. That adds npm's own start-up to every turn even when the package is cached, and a download when the pinned version is not in npx's cache.
 
@@ -150,7 +150,7 @@ The environment wins over the config file, where the keys are top-level entries;
 
 ### Action recall (`flair-action-recall`)
 
-Action recall requires Bun `>=1.3.10 <2` on PATH or at `FLAIR_BUN_PATH`. `flair hook install --action-recall` copies the version-matched hook and its runtime modules to `~/.flair/hooks/action-recall/<version>-<content hash>/` and probes that installed command. This Flair-owned directory survives npm cache eviction; uninstall removes it. Status probes a detected entry; absence is informational. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first, then `flair hook install --action-recall`. An incompatible SessionStart entry or held pin refuses installation.
+Action recall requires Bun `>=1.3.10 <2` (resolved from `FLAIR_BUN_PATH` when set, otherwise `PATH` and then `~/.bun/bin/bun`). `flair hook install --action-recall` copies the version-matched hook and its runtime modules to `~/.flair/hooks/action-recall/<version>-<content hash>/` and probes that installed command. This Flair-owned directory survives npm cache eviction; uninstall removes it. Status probes a detected entry; absence is informational. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first, then `flair hook install --action-recall`. An incompatible SessionStart entry or held pin refuses installation.
 
 **How it decides.** A lesson opts in through its JSON `metadata` field:
 
@@ -168,7 +168,7 @@ The hot path reads a per-session cache of the agent's own lessons under `~/.flai
 
 ### Learning capture (`flair-capture`)
 
-Capture requires Bun `>=1.3.10 <2` on PATH or at `FLAIR_BUN_PATH`. `flair hook install --capture` copies the version-matched hook and its runtime modules to `~/.flair/hooks/capture/<version>-<content hash>/` and probes that installed command. It wires three Claude Code events: `PostToolUseFailure` (matching `Bash`), `PostToolUse` (matching `Write|Edit|NotebookEdit|Bash`) and `Stop`.
+Capture requires Bun `>=1.3.10 <2` (resolved from `FLAIR_BUN_PATH` when set, otherwise `PATH` and then `~/.bun/bin/bun`). `flair hook install --capture` copies the version-matched hook and its runtime modules to `~/.flair/hooks/capture/<version>-<content hash>/` and probes that installed command. It wires three Claude Code events: `PostToolUseFailure` (matching `Bash`), `PostToolUse` (matching `Write|Edit|NotebookEdit|Bash`) and `Stop`.
 
 The hook may stage a possible matching follow-up to a failed `Bash` call, or a cue-matching sentence from the turn's final text, in a bounded local spool under `~/.flair/capture/`. Network writes run in a detached flush. The foreground stdin deadline is 2 seconds; the default append-lock wait for Stop, PostToolUse and flush snapshot/rewrite operations is 200 ms. A failed-tool append waits up to 2 seconds for the lock and refuses if it remains busy. The installed command suppresses stdout, keeps stderr for lock-contention and pending-write warnings, and exits 0. The flush bounds its asynchronous setup and each write with one deadline; the 10 ms p95 hot-path budget in `scripts/capture-latency.mjs` is a manual measurement, not a CI gate.
 

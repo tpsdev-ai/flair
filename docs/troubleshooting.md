@@ -76,7 +76,7 @@ flair restart
 flair doctor                                  # should now report semantic search operational
 ```
 
-**Other causes:** a missing native llama.cpp addon for your platform, or a corrupted/partial model download. `flair doctor` prints the underlying init error. Restart Flair to retry model initialization, then run `flair reembed --agent <id>` to regenerate stored embeddings.
+**Other causes:** a missing native llama.cpp addon for your platform, or a corrupted/partial model download. `flair doctor` prints the underlying init error. Restart Flair to retry model initialization, then run `FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed --agent <id>` to regenerate stored embeddings.
 
 **HuggingFace outage:** the model normally resolves from HuggingFace (`nomic-ai/nomic-embed-text-v1.5-GGUF`). If HF is down or 403/429-ing, point `FLAIR_MODELS_DIR` at a directory containing your own copy of `nomic-embed-text-v1.5.Q4_K_M.gguf` instead of waiting it out:
 ```bash
@@ -93,7 +93,7 @@ The `ci-models` release above is a first-party mirror of the same file (public, 
 
 ### "Embeddings hash-512d:N"
 
-**Symptoms:** `flair status` lists `hash-512d:N` under `Embeddings` and suggests `flair reembed --stale-only --dry-run`. Search returns poor results.
+**Symptoms:** `flair status` lists `hash-512d:N` under `Embeddings` (and, when hash-fallback rows reach 10% of total memories on an unfiltered `flair status`, suggests `flair reembed --stale-only --dry-run`). Search returns poor results.
 
 **Cause:** The nomic-embed-text model failed to load. Usually a missing native binary or corrupted model file.
 
@@ -101,7 +101,7 @@ The `ci-models` release above is a first-party mirror of the same file (public, 
 ```bash
 flair doctor    # shows the specific error
 flair restart  # retry model initialization
-flair reembed --agent <id> --stale-only # regenerate stale embeddings
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed --agent <id> --stale-only # regenerate stale embeddings
 ```
 
 If `flair doctor` shows a native addon error:
@@ -238,7 +238,7 @@ flair agent list --admin-pass-file ~/.flair/admin-pass
 **Symptoms:** You wrote a memory but search doesn't find it.
 
 **Possible causes:**
-1. **Hash-fallback embeddings:** Check `flair status` — if embeddings are in hash mode, semantic search won't work properly. Restart to retry model initialization, then run `flair reembed --agent <id> --stale-only`.
+1. **Hash-fallback embeddings:** Check `flair status` — if embeddings are in hash mode, semantic search won't work properly. Restart to retry model initialization, then run `FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed --agent <id> --stale-only`.
 2. **Content safety flags:** The memory might have been flagged. Search for it directly: `flair memory list --agent <id>`.
 3. **`visibility: private`:** Only its author can find a `private` memory. This is the most common cause when one agent wrote the memory and another is searching for it, because **`private` is what a bare write lands on**: visibility defaults from durability (`permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private`), and a write with no `--durability` is `standard`. Check what the memory landed on with `flair memory list --agent <author> --json` (the table view doesn't show visibility, the JSON records do), then either search as its author, or rewrite it with `--visibility shared` so every agent on the instance can find it (no grant needed — non-private reads are open within the instance).
 4. **Dedup threshold:** If the content is very similar to an existing memory, it may have been deduplicated. Check with `flair memory list`.

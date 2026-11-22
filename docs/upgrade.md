@@ -542,8 +542,8 @@ Fix with:
 ```bash
 FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed # re-embed fetched rows; needs each agent's local key
 FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed --stale-only
-flair reembed --agent <id>    # scope to one agent
-flair reembed --agent <id> --dry-run # show the count without writing
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed --agent <id> # scope to one agent
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed --agent <id> --dry-run # show the count without writing
 ```
 
 The CLI waits for the batched re-embed loop; the server stays available. This is
