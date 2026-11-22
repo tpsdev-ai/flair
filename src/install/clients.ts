@@ -346,7 +346,7 @@ function locateCodexFlairSection(raw: string): CodexFlairShape {
   // Triple quotes before the candidate make its string context ambiguous.
   const beforeHeader = raw.slice(0, starts[h]!);
   if (beforeHeader.includes('"""') || beforeHeader.includes("'''")) {
-    return { kind: "refused", reason: "multiline-string delimiters precede [mcp_servers.flair]" };
+    return { kind: "refused", reason: CODEX_PRE_HEADER_DELIMITER_REASON };
   }
   let i = h + 1;
   const refuse = (reason: string): CodexFlairShape => ({ kind: "refused", reason });
@@ -1143,7 +1143,20 @@ function codexFlairSectionEnvMatches(raw: string, env: WireEnv): boolean {
   );
 }
 
+/** The refusal reason for a triple-quoted string before the Flair header. Removing the section does not
+ *  clear it (the string stays), so its message names a different remedy. */
+export const CODEX_PRE_HEADER_DELIMITER_REASON = "multiline-string delimiters precede [mcp_servers.flair]";
+
 function codexForeignShapeMessage(display: string, reason: string): string {
+  if (reason === CODEX_PRE_HEADER_DELIMITER_REASON) {
+    return (
+      `Codex: refusing to rewrite ${display} — the [mcp_servers.flair] section is not ` +
+      `the shape Flair writes (${reason}); a triple-quoted string before the section makes its ` +
+      `context ambiguous, so removing the section alone does not let flair init wire Codex. ` +
+      `Remove or rewrite the triple-quoted strings that appear before [mcp_servers.flair], ` +
+      `or configure the section by hand.`
+    );
+  }
   return (
     `Codex: refusing to rewrite ${display} — the [mcp_servers.flair] section is not ` +
     `the shape Flair writes (${reason}); edit the [mcp_servers.flair] section by hand, ` +

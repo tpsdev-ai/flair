@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  CODEX_PRE_HEADER_DELIMITER_REASON,
   recognizeCodexFlairSection,
   codexFlairSectionSpan,
   codexReplacementPreservesBoundary,
@@ -71,11 +72,19 @@ function section(spec: string, agent: string, url: string): string {
 /** A refusal is ok:false, names the file and the hand-edit remedy, and writes
  *  nothing — no bytes change and no `.bak` appears. */
 function expectRefusal(raw: string, res: { ok: boolean; message: string }): void {
-  expect(recognizeCodexFlairSection(raw).kind).toBe("refused");
+  const shape = recognizeCodexFlairSection(raw);
+  expect(shape.kind).toBe("refused");
   expect(res.ok).toBe(false);
   expect(res.message).toContain("~/.codex/config.toml");
   expect(res.message).toContain("not the shape Flair writes");
-  expect(res.message).toContain("edit the [mcp_servers.flair] section by hand, or remove it and re-run flair init");
+  if (shape.kind === "refused" && shape.reason === CODEX_PRE_HEADER_DELIMITER_REASON) {
+    // Removing the section would leave the triple-quoted preamble, so that remedy is not offered.
+    expect(res.message).toContain("removing the section alone does not let flair init wire Codex");
+    expect(res.message).toContain("Remove or rewrite the triple-quoted strings that appear before [mcp_servers.flair]");
+    expect(res.message).not.toContain("remove it and re-run flair init");
+  } else {
+    expect(res.message).toContain("edit the [mcp_servers.flair] section by hand, or remove it and re-run flair init");
+  }
   expect(readFileSync(cfgPath(), "utf-8")).toBe(raw);
   expect(existsSync(`${cfgPath()}.bak`)).toBe(false);
   expect(readdirSync(join(isoHome, ".codex")).sort().join(",")).toBe("config.toml");
