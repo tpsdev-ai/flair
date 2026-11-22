@@ -71,6 +71,18 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
+echo "--- embedding readiness ---"
+# flair#3052: a test Harper's FIRST embedding can exceed the provider's own
+# ~20 s bound and answer 503 memory_provider_timeout (nothing written), so this
+# wait runs before the first write. The wait is bounded by total elapsed time
+# and by a hard attempt cap (MAX_READINESS_ATTEMPTS), and records its duration
+# in the job's step summary.
+FLAIR_ADMIN_PASS="$ADMIN_PASS" node "${FLAIR_DIR}/scripts/ci/embedding-readiness.mjs" \
+  --base-url "http://localhost:${PORT}" \
+  --label "Integration Tests (E2E CLI)" \
+  --deadline-ms "${EMBEDDING_READY_DEADLINE_MS:-180000}"
+echo "PASS: embedding readiness"
+
 echo "--- status ---"
 "${FLAIR[@]}" status
 echo "PASS: status"
@@ -78,18 +90,6 @@ echo "PASS: status"
 echo "--- agent add ---"
 "${FLAIR[@]}" agent add "$AGENT_ID" --name "E2E Bot" --admin-pass "$ADMIN_PASS" --port "$PORT"
 echo "PASS: agent add"
-
-# flair#3052: a test Harper's FIRST embedding can exceed the provider's own
-# ~20 s bound and answer 503 memory_provider_timeout (nothing written), so the
-# first memory write is preceded by a bounded wait for one successful embedding
-# through the shared helper. The wait is bounded by total elapsed time, not by
-# attempt count, and records its duration in the job's step summary.
-echo "--- embedding readiness ---"
-FLAIR_ADMIN_PASS="$ADMIN_PASS" node "${FLAIR_DIR}/scripts/ci/embedding-readiness.mjs" \
-  --base-url "http://localhost:${PORT}" \
-  --label "Integration Tests (E2E CLI)" \
-  --deadline-ms "${EMBEDDING_READY_DEADLINE_MS:-180000}"
-echo "PASS: embedding readiness"
 
 echo "--- memory add ---"
 "${FLAIR[@]}" memory add --agent "$AGENT_ID" --content "The quick brown fox jumps over the lazy dog"

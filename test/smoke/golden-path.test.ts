@@ -48,9 +48,10 @@ const MARKER_CONTENT = `Smoke test marker ${RANDOM}`;
 // The model loads lazily on the first embed call and that load can exceed the
 // per-write 10s client timeout on a cold/loaded CI runner, so the warm-up must
 // be allowed to run well past both the default hook timeout and that 10s abort.
-// flair#3052: the warm-up itself is bounded by total elapsed time (180 s), so
-// the hook must outlive that bound for its named failure to be reported.
-const WARMUP_TIMEOUT_MS = 200_000;
+// flair#3052: the hook covers the whole path, not only the wait — instance
+// resolution (up to 30 s), the warm-up agent create (10 s), its 180 s
+// total-elapsed wait, and its two deletes (10 s each), 240 s worst case.
+const SETUP_TIMEOUT_MS = 250_000;
 
 beforeAll(async () => {
   flair = await resolveFlairInstance();
@@ -59,14 +60,14 @@ beforeAll(async () => {
   // flair#1219: warm the embedding model BEFORE any timed step. `/Health` 200
   // does not imply the embedding model is loaded — it loads lazily on the first
   // embed call. Paying that cold-start cost here (on a throwaway agent+memory)
-  // guarantees the measured Step-2 write is a warm write, never the one that
-  // absorbs the model load. Without this, Step 2 flaked with
+  // means the measured Step-2 write is a warm write, not the one that absorbs
+  // the model load. Without this, Step 2 flaked with
   // `TimeoutError: The operation timed out` at ~10s on cold CI runners.
   const warm = await warmEmbeddingModel(flair);
   console.log(
     `[golden-path] Embedding model warm (${warm.elapsedMs}ms, ${warm.attempts} attempt(s))`,
   );
-}, WARMUP_TIMEOUT_MS);
+}, SETUP_TIMEOUT_MS);
 
 afterAll(async () => {
   if (flair && agentId) {

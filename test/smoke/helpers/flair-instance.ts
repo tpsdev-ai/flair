@@ -230,14 +230,16 @@ export async function writeMemory(
  * This helper pays the cold-start cost UP FRONT, on a throwaway agent+memory,
  * so the model is hot before the measured Step-2 write ever runs. It exercises
  * the exact same path the timed step does (create agent → PUT /Memory,
- * admin-authed), so it warms precisely what Step 2 needs. It creates and
- * deletes its own throwaway agent, leaving no residue in the instance.
+ * admin-authed), so it warms precisely what Step 2 needs. It deletes its own
+ * throwaway agent and reports a failed delete rather than treating it as gone.
  *
  * flair#3052: the wait is bounded by TOTAL ELAPSED TIME (the shared helper in
- * scripts/ci/embedding-readiness.mjs), not by attempt count. Each provider
- * call ends at the server's own ~20 s bound, so three attempts gave up at ~62 s
- * however generous the per-attempt budget was. Only a `503
- * memory_provider_timeout` is retried; any other error fails at once.
+ * scripts/ci/embedding-readiness.mjs) and by a hard attempt cap
+ * (MAX_READINESS_ATTEMPTS), not by an attempt count alone. Each provider call
+ * ends at the server's own ~20 s bound, so three attempts gave up at ~62 s
+ * however generous the per-attempt budget was. Only a 503 whose JSON error
+ * field is `memory_provider_timeout` is retried; any other answer fails at
+ * once.
  *
  * NOTE: this deliberately does NOT weaken `writeMemory`'s 10s timeout — that
  * timeout is a real client-side guard and stays put. The fix is to ensure the

@@ -7,12 +7,13 @@
 // Retrying by ATTEMPT COUNT gives up too early: three attempts each end at the
 // server's own bound, so the wait stops at ~62 s no matter how large the
 // per-attempt budget is. This wait is bounded by TOTAL ELAPSED TIME instead,
-// up to EMBEDDING_READY_DEADLINE_MS, and only that 503 is retried — any other
-// answer means the provider is not merely cold, and fails at once.
+// up to EMBEDDING_READY_DEADLINE_MS, and retries only a 503 whose JSON `error`
+// field is `memory_provider_timeout` — a different status or error, or an
+// unparseable body, means the provider is not merely cold and fails at once.
 //
 // Used by test/smoke/helpers/flair-instance.ts (in-process) and by
-// test/e2e-cli.sh (this file run directly under node) so every lane waits
-// through one implementation.
+// test/e2e-cli.sh (this file run directly under node), so the smoke and CLI
+// E2E paths wait through one implementation.
 
 import { randomBytes } from "node:crypto";
 import { appendFileSync } from "node:fs";
@@ -35,12 +36,19 @@ function defaultSleep(ms) {
 
 /**
  * True only for the cold-model answer the wait exists to absorb: HTTP 503
- * carrying `memory_provider_timeout`. Every other status and body fails at once.
+ * whose JSON `error` field is exactly `memory_provider_timeout`. A 503 that
+ * merely mentions the code elsewhere in its body, or whose body is not JSON,
+ * is a different answer and is not retried.
  */
 export function isProviderTimeout(status, bodyText) {
-  return status === PROVIDER_TIMEOUT_STATUS
-    && typeof bodyText === "string"
-    && bodyText.includes(PROVIDER_TIMEOUT_ERROR);
+  if (status !== PROVIDER_TIMEOUT_STATUS || typeof bodyText !== "string") return false;
+  let body;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    return false;
+  }
+  return body !== null && typeof body === "object" && body.error === PROVIDER_TIMEOUT_ERROR;
 }
 
 function neverReady(label, elapsedMs, attempts, lastDetail) {
@@ -52,8 +60,9 @@ function neverReady(label, elapsedMs, attempts, lastDetail) {
 
 /**
  * Call `attempt(remainingMs)` until it answers ok, the deadline passes, or a
- * non-timeout answer arrives. `attempt` must apply `remainingMs` as its own
- * client bound so a hung provider cannot outlive the deadline.
+ * non-timeout answer arrives. `remainingMs` is a CLIENT-SIDE wait bound: the
+ * caller applies it to its own request. An in-process timeout cannot preempt a
+ * provider that never yields the event loop (resources/memory-write-lock.ts).
  *
  * @returns {Promise<{elapsedMs: number, attempts: number}>}
  */
@@ -81,13 +90,21 @@ export async function awaitEmbeddingReady(opts) {
       res = await opts.attempt(remaining);
     } catch (err) {
       lastDetail = `${err?.message ?? err}`;
-      // A client bound that expired is the deadline being spent, not a
-      // different answer from the provider; report it as never-ready.
-      if (now() >= deadline) break;
+      // AbortSignal.timeout runs on the event loop's monotonic clock while the
+      // deadline uses wall-clock time, so the client bound can fire with time
+      // left on the deadline. Treat either as the deadline being spent rather
+      // than a different answer from the provider; report it as never-ready.
+      if (err?.name === "TimeoutError" || now() >= deadline) break;
       throw new Error(`${label}: embedding provider call failed: ${lastDetail}`);
     }
 
     if (res.ok) {
+      // Check the clock before success too: an answer that arrives after the
+      // deadline is a late answer, not a ready provider.
+      if (now() > deadline) {
+        lastDetail = `HTTP ${res.status} answered after the ${deadlineMs}ms client-side wait bound`;
+        break;
+      }
       const elapsedMs = Math.round(now() - startedAt);
       log(`${label}: embedding ready after ${elapsedMs}ms and ${attempts} attempt(s)`);
       return { elapsedMs, attempts };
@@ -108,15 +125,20 @@ export async function awaitEmbeddingReady(opts) {
   throw neverReady(label, now() - startedAt, attempts, lastDetail);
 }
 
-/** Record the warm-up duration in the job summary when CI provides one. */
+/**
+ * Record the warm-up duration in the job summary. An absent summary file is a
+ * no-op; a configured one that cannot be written fails the caller by name.
+ */
 export function recordStepSummary(label, result) {
   const dest = process.env.GITHUB_STEP_SUMMARY;
   if (!dest) return false;
   try {
     appendFileSync(dest, `- ${label}: embedding model ready in ${result.elapsedMs} ms after ${result.attempts} attempt(s)\n`);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    throw new Error(
+      `${label}: could not append the embedding-readiness duration to GITHUB_STEP_SUMMARY (${dest}): ${err?.message ?? err}`,
+    );
   }
 }
 
@@ -163,22 +185,34 @@ export async function createWarmAgent(opsUrl, authHeader, fetchImpl = fetch) {
   return id;
 }
 
+/** Delete the warm-up rows and agent; return one message per failed delete. */
 async function deleteWarmResidue(opsUrl, authHeader, agentId, memoryIds, fetchImpl) {
-  // A failed row delete must not skip the agent delete, or the agent leaks.
+  const failures = [];
+  // A failed row delete must not skip the agent delete.
   if (memoryIds.length > 0) {
-    await opsPost(opsUrl, authHeader, {
-      operation: "delete", database: "flair", table: "Memory", ids: memoryIds,
-    }, fetchImpl).catch(() => {});
+    try {
+      await opsPost(opsUrl, authHeader, {
+        operation: "delete", database: "flair", table: "Memory", ids: memoryIds,
+      }, fetchImpl);
+    } catch (err) {
+      failures.push(`Memory [${memoryIds.join(", ")}]: ${err?.message ?? err}`);
+    }
   }
-  await opsPost(opsUrl, authHeader, {
-    operation: "delete", database: "flair", table: "Agent", ids: [agentId],
-  }, fetchImpl);
+  try {
+    await opsPost(opsUrl, authHeader, {
+      operation: "delete", database: "flair", table: "Agent", ids: [agentId],
+    }, fetchImpl);
+  } catch (err) {
+    failures.push(`Agent [${agentId}]: ${err?.message ?? err}`);
+  }
+  return failures;
 }
 
 /**
  * Wait for one successful embedding on a real instance, through a throwaway
- * agent and memory row that are removed afterwards. Same write path a lane's
- * first memory write takes, so the model is warm before that write runs.
+ * agent and memory row the helper deletes when the wait ends. A failed delete
+ * fails the wait and names the rows and agent that remain. Same write path a
+ * lane's first memory write takes, so the model is warm before that write runs.
  *
  * @returns {Promise<{elapsedMs: number, attempts: number}>}
  */
@@ -187,8 +221,10 @@ export async function warmInstanceEmbeddings(opts) {
   const label = opts.label ?? "embedding readiness";
   const agentId = await createWarmAgent(opts.opsUrl, opts.authHeader, fetchImpl);
   const memoryIds = [];
+  let result;
+  let readinessError;
   try {
-    return await awaitEmbeddingReady({
+    result = await awaitEmbeddingReady({
       label,
       deadlineMs: opts.deadlineMs,
       backoffMs: opts.backoffMs,
@@ -213,16 +249,24 @@ export async function warmInstanceEmbeddings(opts) {
             durability: "ephemeral",
             createdAt: new Date().toISOString(),
           }),
-          // The client bound is what remains of the deadline, so a hung
-          // provider cannot outlive it.
+          // `remainingMs` bounds this client's wait, not the provider call: an
+          // in-process timeout cannot preempt a provider that never yields
+          // (resources/memory-write-lock.ts).
           signal: AbortSignal.timeout(Math.max(1, remainingMs)),
         });
       },
     });
-  } finally {
-    // Never leak the warm-up agent or its rows, even on failure.
-    await deleteWarmResidue(opts.opsUrl, opts.authHeader, agentId, memoryIds, fetchImpl).catch(() => {});
+  } catch (err) {
+    readinessError = err;
   }
+  const cleanupFailures = await deleteWarmResidue(opts.opsUrl, opts.authHeader, agentId, memoryIds, fetchImpl);
+  if (cleanupFailures.length > 0) {
+    const message = `${label}: embedding warm-up cleanup failed; these rows may remain: ${cleanupFailures.join("; ")}`;
+    if (readinessError) throw new Error(`${readinessError.message}; ${message}`);
+    throw new Error(message);
+  }
+  if (readinessError) throw readinessError;
+  return result;
 }
 
 function argValue(argv, name) {
