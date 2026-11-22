@@ -55,6 +55,7 @@ import { join } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 import type { ProbeComponent } from "../helpers/component-with-replay-probe";
 import { RaceHarness, composeTracedComponent, cosine, expectEmptyOwnerVector, expectRefused, newAgent } from "../helpers/embedding-writer-race";
+import { armMemoryReadFailure, memoryReadConsumerStack } from "../helpers/host-pointer-failing-component";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
@@ -465,13 +466,15 @@ describe("flair#2478 — the backfill's unknown outcomes and the fence (real Har
     await trigger(id);
     try {
       await h.assertPaused(CONFIRMED);
-      writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), "");
+      armMemoryReadFailure(pauseDir, id, "backfill-read-back");
       await h.release(CONFIRMED);
     } finally {
       h.letGo(CONFIRMED);
     }
     // The backfill logs "[auto-embed] Outcome unconfirmed for <id>: <error>".
     expect(await h.waitForLogMatch(new RegExp(`\\[auto-embed\\][^\\n]*Outcome unconfirmed[^\\n]*${id}`)), "the unconfirmed backfill was not logged").toBe(true);
+    expect(memoryReadConsumerStack(pauseDir, id), "the read-back was not the read that consumed the failure")
+      .toMatch(/\bat writeBackCommittedRow \(/);
     const put = await ownerWrite("PUT", id, OWNER_TEXT);
     expect(put.status, await put.clone().text()).toBe(200);
     const stored = await h.readRow(id);
@@ -489,9 +492,11 @@ describe("flair#2478 — the backfill's unknown outcomes and the fence (real Har
       h.arm("memory-put-verify");
       const pendingPut = ownerWrite("PUT", id, OWNER_TEXT);
       await h.assertPaused("memory-put-verify");
-      writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), "");
+      armMemoryReadFailure(pauseDir, id, "memory-put-verify");
       await h.release("memory-put-verify");
       await expectRefused(await pendingPut, "write_outcome_unknown");
+      expect(memoryReadConsumerStack(pauseDir, id), "the verification read was not the read that consumed the failure")
+        .toMatch(/\bat (?:async )?verifyWrittenRow \(/);
       await h.release(ENTRY);
       expect(await h.waitForLog(`[auto-embed] ${id}: skipped; the per-id write lock answered unknown`), "the backfill did not report the fenced id").toBe(true);
     } finally {

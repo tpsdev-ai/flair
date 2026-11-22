@@ -62,6 +62,7 @@ import { join } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 import type { ProbeComponent } from "../helpers/component-with-replay-probe";
 import { LEGACY_REEMBED_UPDATE_FIELDS, RaceHarness, composeTracedComponent, cosine, expectEmptyOwnerVector, expectRefused, newAgent } from "../helpers/embedding-writer-race";
+import { armMemoryReadFailure, memoryReadConsumerStack } from "../helpers/host-pointer-failing-component";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
@@ -441,13 +442,15 @@ describe("flair#2478 — the re-embed's unknown and bounded outcomes (real Harpe
     const pending = reembed(id);
     try {
       await h.assertPaused(point);
-      writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), "");
+      armMemoryReadFailure(pauseDir, id, "reembed-verify");
       await h.release(point);
     } finally {
       h.letGo(point);
     }
     const body = await expectRefused(await pending, "write_outcome_unknown");
     expect(body.outcome).toBe("unconfirmed");
+    expect(memoryReadConsumerStack(pauseDir, id), "the read-back was not the read that consumed the failure")
+      .toMatch(/\bat (?:async )?reembedStoredRow \(/);
     for (const [verb, send] of [
       ["PUT", () => ownerWrite("PUT", id, OWNER_TEXT)],
       ["PATCH", () => ownerWrite("PATCH", id, OWNER_TEXT)],
