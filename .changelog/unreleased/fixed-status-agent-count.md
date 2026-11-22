@@ -1,0 +1,1 @@
+- **`flair status` builds its agent total, names and table from Agent records, and lists memory authors without an Agent record on a separate labelled line.** This stops the operator's `skill:using-flair` seed appearing as an unexplained `admin` agent row.

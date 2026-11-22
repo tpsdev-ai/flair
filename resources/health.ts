@@ -363,14 +363,20 @@ export class HealthDetail extends Resource {
       const blank = (id: string): AgentRow => ({
         id, memoryCount: 0, hashFallback: 0, writes24h: 0, lastWriteAt: null, usageCount: 0,
       });
+      // The count, the names and the table all come from the Agent records,
+      // so they cannot disagree. A Memory row whose author has no Agent record
+      // (the operator's `skill:using-flair` seed) is kept in a separate list,
+      // never added to `perAgent` as if it were an agent (flair#3051).
       const perAgentMap = new Map<string, AgentRow>();
       for (const a of agents) {
         if (a.id) perAgentMap.set(a.id, blank(a.id));
       }
+      const unregisteredMap = new Map<string, AgentRow>();
       const cutoff24h = nowMs - 24 * 3600 * 1000;
       for (const m of memoriesList) {
         if (!m.agentId) continue;
-        const row = perAgentMap.get(m.agentId) ?? blank(m.agentId);
+        const known = perAgentMap.get(m.agentId);
+        const row = known ?? unregisteredMap.get(m.agentId) ?? blank(m.agentId);
         row.memoryCount++;
         row.usageCount += (m.usageCount ?? 0);
         if (!m.embeddingModel || m.embeddingModel === "hash-512d") row.hashFallback++;
@@ -381,16 +387,23 @@ export class HealthDetail extends Resource {
             row.lastWriteAt = m.createdAt;
           }
         }
-        perAgentMap.set(m.agentId, row);
+        if (known) perAgentMap.set(m.agentId, row);
+        else unregisteredMap.set(m.agentId, row);
       }
       const perAgentFull = Array.from(perAgentMap.values()).sort((a, b) => b.memoryCount - a.memoryCount);
       const perAgent = isAdmin
         ? perAgentFull
         : perAgentFull.filter((r) => r.id === callerAgent || r.memoryCount > 0);
+      const unregisteredMemoryAuthors = Array.from(unregisteredMap.values())
+        .sort((a, b) => b.memoryCount - a.memoryCount)
+        .map((r) => ({ id: r.id, memoryCount: r.memoryCount }));
       stats.agents = {
         count: agents.length,
         names: isAdmin ? agents.map((a: any) => a.id).filter(Boolean) : undefined,
         perAgent,
+        // Non-admins keep exactly the agent rows they saw before; the seed
+        // author's id and memory count are not disclosed to them.
+        unregisteredMemoryAuthors: isAdmin ? unregisteredMemoryAuthors : undefined,
       };
     } catch { stats.agents = null; }
 

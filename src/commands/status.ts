@@ -611,7 +611,7 @@ const statusCmd = program
       console.log(`\n${render.wrap(render.c.bold, "Agents")}`);
       const nameStr = agents.names?.length > 0 ? ` ${render.wrap(render.c.dim, "—")} ${agents.names.join(render.wrap(render.c.dim, ", "))}` : "";
       console.log(render.kv("Total", `${render.wrap(render.c.bold, String(agents.count))}${nameStr}`));
-      if (agents.count > 1 && Array.isArray(agents.perAgent) && agents.perAgent.length > 0) {
+      if (Array.isArray(agents.perAgent) && agents.perAgent.length > 0) {
         const hasDeep = agents.perAgent.some(
           (r: any) => typeof r.hashFallback === "number" || typeof r.writes24h === "number",
         );
@@ -629,6 +629,12 @@ const statusCmd = program
               { label: "last_write", key: "lastWriteAt", format: (v) => render.relativeTime(v as string | null) },
             ];
         console.log(render.table(cols, agents.perAgent as Array<Record<string, unknown>>));
+      }
+      if (Array.isArray(agents.unregisteredMemoryAuthors) && agents.unregisteredMemoryAuthors.length > 0) {
+        const owners = agents.unregisteredMemoryAuthors.map(
+          (r: any) => `${r.id} (${r.memoryCount} ${r.memoryCount === 1 ? "memory" : "memories"})`,
+        );
+        console.log(render.kv("Unregistered memory owners", owners.join(render.wrap(render.c.dim, ", "))));
       }
     }
 
@@ -1080,6 +1086,12 @@ statusCmd
             `  ${(r.id ?? "").padEnd(idW)}  ${String(r.memoryCount).padStart(8)}  ${fb.padStart(7)}  ${w24.padStart(3)}  ${relativeTime(r.lastWriteAt)}`,
           );
         }
+      }
+      if (Array.isArray(agents.unregisteredMemoryAuthors) && agents.unregisteredMemoryAuthors.length > 0) {
+        const owners = agents.unregisteredMemoryAuthors.map(
+          (r: any) => `${r.id} (${r.memoryCount} ${r.memoryCount === 1 ? "memory" : "memories"})`,
+        );
+        console.log(`Unregistered memory owners: ${owners.join(", ")}`);
       }
     }
 
