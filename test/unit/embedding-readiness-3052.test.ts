@@ -127,7 +127,7 @@ describe("the 503 matcher reads the JSON error field (flair#3052)", () => {
 });
 
 describe("embedding readiness waits on total elapsed time (flair#3052)", () => {
-  test("never ready fails at the deadline, naming the elapsed time", async () => {
+  test("never ready fails once the deadline has passed, naming the elapsed time", async () => {
     const clock = virtualClock();
     let attempts = 0;
     const call = awaitEmbeddingReady({
@@ -665,7 +665,7 @@ describe("the CLI takes credentials only from the environment (flair#3052)", () 
   });
 });
 
-describe("smoke instance resolution is a strict 30 s monotonic bound (flair#3052)", () => {
+describe("smoke instance resolution sizes its client timeouts and sleeps to a 30 s monotonic deadline and refuses a late success (flair#3052)", () => {
   const savedUrl = process.env.FLAIR_TEST_URL;
   afterEach(() => {
     if (savedUrl === undefined) delete process.env.FLAIR_TEST_URL;

@@ -88,7 +88,10 @@ export async function resolveFlairInstance(opts: ResolveFlairInstanceOptions = {
   const authHeader = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
   // Wait for Flair to be healthy, within INSTANCE_RESOLVE_BUDGET_MS measured on
-  // a monotonic clock. No request timeout or sleep may end past the deadline.
+  // a monotonic clock: each request's client timeout and each sleep are sized to
+  // the time left, and a success that arrives at or after the deadline is refused.
+  // This is a client-side timeout and acceptance policy; a fetch or sleep that
+  // ignores its timer can still settle later.
   const now = opts.now ?? (() => performance.now());
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const fetchImpl = opts.fetchImpl ?? fetch;
