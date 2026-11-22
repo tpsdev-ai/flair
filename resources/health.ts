@@ -210,7 +210,8 @@ export class HealthDetail extends Resource {
     let mixedEmbeddingSpaces = false;
     let memoryScanOk = false;
     // Set only when the Memory scan finished without throwing. A failed or
-    // partial scan leaves it false so derived lists are reported unavailable.
+    // partial scan leaves it false, and the unregistered-author list is then
+    // reported unavailable (null); no other field reads this flag.
     let memoryScanComplete = false;
     let memoryModelCounts: Record<string, number> = {};
 
