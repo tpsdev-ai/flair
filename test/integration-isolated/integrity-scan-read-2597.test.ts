@@ -86,61 +86,69 @@ async function controlledScan(replaceEveryRead: boolean) {
   let reads = 0;
   let pendingRecreate = false;
   const observed: any[][] = [];
+  // An assertion inside the fetch shim would otherwise be caught by the scan and become its
+  // verdict reason; keep the first one and rethrow it after the scan, so it fails as itself.
+  let shimError: unknown;
   try {
     bindIntegrityCli({ resolveOpsPort: () => harper.opsURL, resolveAdminUser: () => harper.admin.username });
     globalThis.fetch = (async (url: any, init: any) => {
-      const body = JSON.parse(init.body);
-      const res = await nativeFetch(url, init);
-      expect(res.status).toBe(200);
-      if (body.operation === "sql" && /FROM flair\.Memory\b/.test(String(body.sql))) {
-        // The scan reads Memory by keyset on `id`: no cursor on the first page,
-        // `id > '<last>'` on the next, and only the requested columns returned.
-        expect(String(body.sql)).toMatch(/^SELECT id, durability, instanceToken FROM flair\.Memory( WHERE id > '[^']*')? ORDER BY id LIMIT \d+$/);
-        const rows = await res.clone().json() as any[];
-        expect(Array.isArray(rows)).toBe(true);
-        for (const row of rows) {
-          expect(Object.keys(row).sort()).toEqual([...attributes].sort());
-          expect(typeof row.id).toBe("string");
+      try {
+        const body = JSON.parse(init.body);
+        const res = await nativeFetch(url, init);
+        expect(res.status).toBe(200);
+        if (body.operation === "sql" && /FROM flair\.Memory\b/.test(String(body.sql))) {
+          // The scan reads Memory by keyset on `id`: no cursor on the first page,
+          // `id > '<last>'` on the next, and only the requested columns returned.
+          expect(String(body.sql)).toMatch(/^SELECT id, durability, instanceToken FROM flair\.Memory( WHERE id > '[^']*')? ORDER BY id LIMIT \d+$/);
+          const rows = await res.clone().json() as any[];
+          expect(Array.isArray(rows)).toBe(true);
+          for (const row of rows) {
+            expect(Object.keys(row).sort()).toEqual([...attributes].sort());
+            expect(typeof row.id).toBe("string");
+          }
+          const matching = rows.filter(row => row.id === id);
+          expect(matching.length).toBeGreaterThan(0);
+          for (const row of matching) {
+            expect(row.durability).toBe("permanent");
+            expect(tokens.has(row.instanceToken)).toBe(true);
+          }
+          observed.push(rows);
+          reads++;
+          if (replaceEveryRead || reads === 1) {
+            // Hold the real page across a raw delete; re-create after its after-count.
+            await remove(id);
+            pendingRecreate = true;
+          }
+        } else if (body.operation === "describe_table" && body.table === "Memory" && pendingRecreate) {
+          expect(body.exact_count).toBe(true);
+          // The exact count is a live scan, not a snapshot: a read that races the
+          // raw delete can still include the row. Wait for the read this case
+          // depends on — the delete visible to the count — and answer the scan
+          // with that response. Then re-create the row and wait for the count to
+          // show it, so the next attempt starts from a settled table.
+          const afterDelete = initialRows.length - 1;
+          let countRes = res;
+          let count = await countRes.clone().json() as { record_count: number };
+          const deadline = Date.now() + 5_000;
+          while (count.record_count !== afterDelete && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            countRes = await nativeFetch(url, init);
+            expect(countRes.status, String(body.operation)).toBe(200);
+            count = await countRes.clone().json() as { record_count: number };
+          }
+          expect(count.record_count, `the exact count did not observe the raw delete; rows now: ${JSON.stringify((await ops(searchQuery)).map((row: any) => row.id))}`).toBe(afterDelete);
+          token = randomUUID();
+          tokens.add(token);
+          await insert(id, token);
+          pendingRecreate = false;
+          await waitForExactCount(initialRows.length, "the re-created row");
+          return countRes;
         }
-        const matching = rows.filter(row => row.id === id);
-        expect(matching.length).toBeGreaterThan(0);
-        for (const row of matching) {
-          expect(row.durability).toBe("permanent");
-          expect(tokens.has(row.instanceToken)).toBe(true);
-        }
-        observed.push(rows);
-        reads++;
-        if (replaceEveryRead || reads === 1) {
-          // Hold the real page across a raw delete; re-create after its after-count.
-          await remove(id);
-          pendingRecreate = true;
-        }
-      } else if (body.operation === "describe_table" && body.table === "Memory" && pendingRecreate) {
-        expect(body.exact_count).toBe(true);
-        // The exact count is a live scan, not a snapshot: a read that races the
-        // raw delete can still include the row. Wait for the read this case
-        // depends on — the delete visible to the count — and answer the scan
-        // with that response. Then re-create the row and wait for the count to
-        // show it, so the next attempt starts from a settled table.
-        const afterDelete = initialRows.length - 1;
-        let countRes = res;
-        let count = await countRes.clone().json() as { record_count: number };
-        const deadline = Date.now() + 5_000;
-        while (count.record_count !== afterDelete && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          countRes = await nativeFetch(url, init);
-          expect(countRes.status, String(body.operation)).toBe(200);
-          count = await countRes.clone().json() as { record_count: number };
-        }
-        expect(count.record_count, `the exact count did not observe the raw delete; rows now: ${JSON.stringify((await ops(searchQuery)).map((row: any) => row.id))}`).toBe(afterDelete);
-        token = randomUUID();
-        tokens.add(token);
-        await insert(id, token);
-        pendingRecreate = false;
-        await waitForExactCount(initialRows.length, "the re-created row");
-        return countRes;
+        return res;
+      } catch (err) {
+        shimError ??= err;
+        throw err;
       }
-      return res;
     }) as typeof fetch;
     process.exit = ((value: number) => { code = value; throw new Error(`exit:${value}`); }) as typeof process.exit;
     process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
@@ -155,8 +163,13 @@ async function controlledScan(replaceEveryRead: boolean) {
     process.stdout.write = originalWrite;
     await remove(id);
   }
+  if (shimError !== undefined) throw shimError;
   return { code, verdict: JSON.parse(output), reads, observed, checkpoint, saved: readFileSync(path, "utf8") };
 }
+
+test("a Memory exact count that never converges fails naming the rows present", async () => {
+  await expect(waitForExactCount(-1, "an impossible count", 50)).rejects.toThrow(/rows now: \[/);
+});
 
 test("the keyset Memory read retries a page whose after-count sees a raw delete", async () => {
   const r = await controlledScan(false);
