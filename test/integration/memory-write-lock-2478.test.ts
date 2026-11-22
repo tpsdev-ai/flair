@@ -4,17 +4,12 @@
  *
  * Ordinary owner row PUT/PATCH acquire the per-id lock before their first
  * stored read and commit their owned transaction before releasing it. Re-embed
- * PATCH uses an inner owned transaction. Composed promotion and an admin
- * `_reindex` joining an open transaction can commit after release.
+ * PATCH uses an inner owned transaction. Composed promotion can commit after
+ * release.
  * A same-id writer waits within its budget (200 attempts, 10 ms apart), then
  * acquires the lock or answers 503 memory_busy without writing, unless an attempt
  * observes an outcome-unknown marker (503 write_outcome_unknown; the fence test).
  *
- * After a normal storage result, the ordinary owned row write verifies its
- * token and declared agentId/content/visibility/durability after commit; a
- * successful re-embed checks its token after its inner commit. Refusals and
- * storage Responses return before the read. Skill PUT has no ordinary-row verification;
- * composed promotion uses its caller's in-transaction existence check.
  * PUT and PATCH require an id before entering the lock helper.
  *
  * DETERMINISTIC ORDERING via the `memory-put-committed` / `memory-patch-committed`
@@ -135,13 +130,13 @@ function arm(point: string): void {
 function release(point: string): void {
   writeFileSync(join(pauseDir, `go.${point}`), "");
 }
-async function seedMemory(id: string, content: string): Promise<void> {
+async function seedMemory(id: string, content: string, extra: Record<string, unknown> = {}): Promise<void> {
   await opsCall({
     operation: "insert", database: "flair", table: "Memory",
     records: [{
       id, agentId: owner.id, content, durability: "standard", visibility: "shared",
       embedding: [0.1, 0.2, 0.3], instanceToken: randomUUID(),
-      usageCount: 0, createdAt: new Date().toISOString(),
+      usageCount: 0, createdAt: new Date().toISOString(), ...extra,
     }],
   });
 }
@@ -150,20 +145,7 @@ beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
   home = mkdtempSync(join(tmpdir(), "flair-2478-home-"));
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2478-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper({ homeDir: home });
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir }, homeDir: home });
   authHeader = "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
   const http = new URL(harper.httpURL);
   const ops = new URL(harper.opsURL);
@@ -448,6 +430,92 @@ describe("flair#2478 — post-commit verification on a re-embed PATCH and a lega
   }, 120_000);
 });
 
+describe("flair#2645 — an ordinary owner PATCH verifies retained request fields", () => {
+  for (const replaced of [false, true]) {
+    it(`a redacted-content PATCH answers ${replaced ? "409 when a newer write replaces it" : "success when retained"}`, async () => {
+      const id = `wlk-redacted-${replaced}-${Date.now()}`;
+      await seedMemory(id, "the original text");
+      const point = "memory-patch-verify";
+      arm(point);
+      const held = patchBodyAs(owner, id, {
+        agentId: owner.id, content: `rotate ghp_${"A".repeat(36)}`,
+      });
+      try {
+        expect(await waitFor(join(pauseDir, `paused.${point}`), 30_000)).toBe(true);
+        const committed = await readRow(id);
+        expect(committed?.content).toBe("rotate [redacted]");
+        if (replaced) {
+          await opsCall({
+            operation: "update", database: "flair", table: "Memory",
+            records: [{ id, agentId: owner.id, content: "the newer content", createdAt: committed.createdAt }],
+          });
+        }
+      } finally {
+        release(point);
+      }
+      const res = await held;
+      await assertReleased(point);
+      const body = await res.json() as any;
+      if (replaced) {
+        expect(res.status, JSON.stringify(body)).toBe(409);
+        expect(body.error).toBe("stored_row_changed");
+      } else {
+        expect(res.status, JSON.stringify(body)).toBeLessThan(300);
+        expect(body.stored).toEqual({ content: "rotate [redacted]" });
+      }
+      expect((await readRow(id))?.content).toBe(replaced ? "the newer content" : "rotate [redacted]");
+    }, 120_000);
+  }
+
+  it("a tags-only PATCH whose tags a newer full write discarded answers 409 stored_row_changed", async () => {
+    const id = `wlk-declared-tags-${Date.now()}`;
+    await seedMemory(id, "the original text", { tags: ["original-tag"] });
+    const point = "memory-patch-verify";
+    arm(point);
+    const held = patchBodyAs(owner, id, { agentId: owner.id, tags: ["declared-tag"] });
+    expect(await waitFor(join(pauseDir, `paused.${point}`), 30_000), "the PATCH never reached its pre-verification pause").toBe(true);
+
+    const committed = await readRow(id);
+    expect(committed?.tags, "the PATCH did not commit its tags before the pause").toEqual(["declared-tag"]);
+    // A newer FULL write from a lock-bypassing writer: same id, same incarnation
+    // token, newer content, and NO tags. The PATCH's declared tags are discarded.
+    await opsCall({ operation: "delete", database: "flair", table: "Memory", ids: [id] });
+    const copy: Record<string, unknown> = { ...committed, content: "the newer content" };
+    delete copy.tags;
+    for (const key of ["__createdtime__", "__updatedtime__"]) delete copy[key];
+    await opsCall({ operation: "insert", database: "flair", table: "Memory", records: [copy] });
+
+    release(point);
+    const res = await held;
+    await assertReleased(point);
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(409);
+    expect(body.error).toBe("stored_row_changed");
+    expect((await readRow(id))?.tags ?? null, "the answered PATCH's tags are missing from the stored row").toBeNull();
+  }, 120_000);
+
+  it("a metadata-only PATCH answers success with the metadata present", async () => {
+    const id = `wlk-declared-metadata-${Date.now()}`;
+    await seedMemory(id, "the original text");
+    const res = await patchBodyAs(owner, id, { agentId: owner.id, metadata: "kept" });
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+    expect((await readRow(id))?.metadata, "the metadata-only PATCH did not land").toBe("kept");
+  }, 120_000);
+
+  it("a mixed PATCH answers success with every declared field present", async () => {
+    const id = `wlk-declared-mixed-${Date.now()}`;
+    await seedMemory(id, "the original text", { tags: ["original-tag"] });
+    const res = await patchBodyAs(owner, id, {
+      agentId: owner.id, content: "the mixed text", tags: ["mixed-tag"], metadata: "mixed",
+    });
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+    const row = await readRow(id);
+    expect(row?.content, "the mixed PATCH content did not land").toBe("the mixed text");
+    expect(row?.tags, "the mixed PATCH tags did not land").toEqual(["mixed-tag"]);
+    expect(row?.metadata, "the mixed PATCH metadata did not land").toBe("mixed");
+  }, 120_000);
+});
+
 // An idless Memory PUT or PATCH is refused for every caller and writes nothing.
 // A non-admin caller is refused first by the owner-scoped write policy (a write
 // to the collection rather than one record, 403); an admin caller reaches the
@@ -537,7 +605,7 @@ it.each([
       `\n${provider}\n`);
     instance = await startHarper({
       cwd: component,
-      env: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_MEMORY_LOCK_PROVIDER_TIMEOUT_MS: "50" },
+      serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_MEMORY_LOCK_PROVIDER_TIMEOUT_MS: "50" },
     });
     const basic = "Basic " + Buffer.from(`${instance.admin.username}:${instance.admin.password}`).toString("base64");
     const ops = async (body: Record<string, unknown>): Promise<any> => {
@@ -577,6 +645,101 @@ it.each([
     const next = await write("PATCH", { tags: ["after-timeout"] });
     expect(next.status, await next.clone().text()).toBeLessThan(300);
     expect((await read())?.tags).toEqual(["after-timeout"]);
+  } finally {
+    try {
+      if (instance) await stopHarper(instance);
+    } finally {
+      rmSync(component, { recursive: true, force: true });
+    }
+  }
+}, 240_000 + HARPER_STOP_BUDGET_MS);
+
+it.each([
+  ["pending", "getEmbedding = async () => new Promise(() => {});"],
+  ["late vector", "getEmbedding = async () => { const started = performance.now(); while (performance.now() - started < 100) {} return [1, 0, 0]; };"],
+])("a locked POST provider timeout (%s), at the dedup probe and at the embedding, answers memory_provider_timeout, writes nothing and releases the real Harper lock", async (_settlement, provider) => {
+  const component = mkdtempSync(join(tmpdir(), "flair-2478-post-provider-timeout-"));
+  let instance: HarperInstance | undefined;
+  try {
+    for (const entry of ["config.yaml", "package.json", "dist", "schemas"]) {
+      cpSync(join(process.cwd(), entry), join(component, entry), { recursive: true });
+    }
+    symlinkSync(join(process.cwd(), "node_modules"), join(component, "node_modules"), "dir");
+    appendFileSync(join(component, "dist/resources/embeddings-provider.js"),
+      `\n${provider}\n`);
+    instance = await startHarper({
+      cwd: component,
+      serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_MEMORY_LOCK_PROVIDER_TIMEOUT_MS: "50" },
+    });
+    const basic = "Basic " + Buffer.from(`${instance.admin.username}:${instance.admin.password}`).toString("base64");
+    const ops = async (body: Record<string, unknown>): Promise<any> => {
+      const response = await fetch(instance!.opsURL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: basic },
+        body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+      return response.json();
+    };
+    await ops({ operation: "upsert", database: "flair", table: "Agent", records: [{
+      id: owner.id, name: owner.id, publicKey: Buffer.from(owner.publicKey).toString("base64"),
+      createdAt: new Date().toISOString(),
+    }] });
+    const target = `wlk-post-timeout-target-${randomUUID()}`;
+    await ops({ operation: "insert", database: "flair", table: "Memory", records: [{
+      id: target, agentId: owner.id, content: "the original text", createdAt: new Date().toISOString(),
+      embedding: [0.1, 0.2, 0.3], instanceToken: randomUUID(),
+      durability: "standard", visibility: "shared",
+    }] });
+    const read = async (id: string) => (await ops({
+      operation: "search_by_id", database: "flair", table: "Memory", ids: [id], get_attributes: ["*"],
+    }))[0] ?? null;
+    const before = await read(target);
+    expect(before?.content).toBe("the original text");
+    const post = (body: Record<string, unknown>) => fetch(`${instance!.httpURL}/Memory`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: ed25519Header(owner, "POST", "/Memory") },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
+    });
+    // The bound is 50 ms; an unbounded call to a pending provider would hold
+    // the POST, and the id's lock, until this test's request timeout.
+    const refusedWithin = async (body: Record<string, unknown>) => {
+      const started = Date.now();
+      const refused = await post(body);
+      expect(refused.status, await refused.clone().text()).toBe(503);
+      expect((await refused.json() as any).error).toBe("memory_provider_timeout");
+      expect(Date.now() - started, "the refusal did not come within this test's 5 s response ceiling").toBeLessThan(5_000);
+    };
+
+    // At the dedup probe: a create under a named id (locked) with no supersedes.
+    const created = `wlk-post-timeout-create-${randomUUID()}`;
+    await refusedWithin({ id: created, agentId: owner.id, content: "a new note long enough for the dedup probe", visibility: "shared" });
+    expect(await read(created), "the refused create wrote a row").toBeNull();
+    // At the embedding: a successor (locked with its supersedes target), which skips the probe.
+    const successor = `wlk-post-timeout-successor-${randomUUID()}`;
+    await refusedWithin({ id: successor, agentId: owner.id, content: "the successor's text", visibility: "shared", supersedes: target });
+    expect(await read(successor), "the refused successor wrote a row").toBeNull();
+    expect(await read(target), "the refused successor changed its target").toEqual(before);
+
+    // The ids are free again: writes that need no provider call land at once.
+    const targetPath = `/Memory/${target}`;
+    const patched = await fetch(`${instance.httpURL}${targetPath}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: ed25519Header(owner, "PATCH", targetPath) },
+      body: JSON.stringify({ tags: ["after-timeout"] }), signal: AbortSignal.timeout(20_000),
+    });
+    expect(patched.status, await patched.clone().text()).toBeLessThan(300);
+    expect((await read(target))?.tags).toEqual(["after-timeout"]);
+    for (const id of [created, successor]) {
+      const put = await fetch(`${instance.httpURL}/Memory/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: basic },
+        body: JSON.stringify({ id, agentId: owner.id, content: "an admin write with its own vector", embedding: [0.4, 0.5, 0.6], visibility: "shared" }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      expect(put.status, await put.clone().text()).toBe(200);
+      expect((await read(id))?.content).toBe("an admin write with its own vector");
+    }
   } finally {
     try {
       if (instance) await stopHarper(instance);

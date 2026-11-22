@@ -64,6 +64,7 @@ class BaseMemory {
   /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
    *  double injects one (test/helpers/memory-lock-double.ts). */
   static primaryStore = memoryLockDouble();
+  static validate() {}
   async post(content: any) {
     const id = content.id ?? `mock-${++idCounter}`;
     content.id = id;
@@ -207,6 +208,7 @@ const { computeContentHash } = await import("../../resources/memory-feed-lib.ts"
 const { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryText, suppliedMemoryTextFields, suppliedSkillTextFields, suppliedStoredTextFields } = await import("../../resources/memory-redaction.ts");
 const { WRITE_RESPONSE_WITHHELD, WRITE_RESPONSE_WITHHELD_MESSAGE, buildFromAllowlist, feedResponseFields, REDACTION_RULES, storageResult, suppliedMemoryFields, writeResultResponse } = await import("../../resources/memory-write-response.ts");
 const { SEED_SKILL_ROW_ID } = await import("../../resources/seed-ids.ts");
+const { resetMemoryWriteOutcomeUnknownForTest } = await import("../../resources/memory-write-lock.ts");
 const { redactSecrets, redactSecretsWithCount } = await import("../../packages/flair-mcp/src/secret-redaction.ts");
 
 function makeMemory(ctxRequest: any) {
@@ -222,6 +224,11 @@ beforeEach(() => {
   idCounter = 0;
   embedInputs = [];
   agentStore.clear();
+  // These cases reuse feed ids across the status loop; a withheld-result case
+  // leaves the id outcome-unknown in the production marker (flair#2857).
+  resetMemoryWriteOutcomeUnknownForTest("feed-new");
+  resetMemoryWriteOutcomeUnknownForTest("feed-repair");
+  resetMemoryWriteOutcomeUnknownForTest("changed-feed");
 });
 
 // Credential-shaped values the shared redactor recognizes.
@@ -675,7 +682,7 @@ describe("flair#2573 — a vector or stamp counts as caller-supplied only when i
 });
 
 describe("flair#2407 — a deduplicated feed write reports the count in its response only", () => {
-  it("the second identical feed write returns the stored row plus the count; the stored row has no count", async () => {
+  it("the duplicate response reports redaction without the unsupplied hash or commit marker", async () => {
     const f: any = new (FeedMemories as any)();
     f.getContext = () => ({ request: agentCtx(AGENT) });
     const original = `feed memory carrying ${GITHUB_TOKEN} twice`;
@@ -684,9 +691,10 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
 
     const { redactedValues, ...rest } = second;
     expect(redactedValues).toBe(1);
-    // flair#2561: the stored row less contentHash, which the request did not supply.
-    const { contentHash, ...reported } = memoryStore.get(first.id);
+    const { contentHash, writeBackWriteId, ...reported } = memoryStore.get(first.id);
     expect(typeof contentHash).toBe("string");
+    expect(writeBackWriteId).toBeString();
+    expect(rest).not.toHaveProperty("writeBackWriteId");
     expect(rest).toEqual(reported);
     expect(memoryStore.size).toBe(1);
     expect("redactedValues" in memoryStore.get(first.id)).toBe(false);
@@ -803,7 +811,10 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
     const oldCreate = (Memory as any).create;
     const body = redacted ? `rotate ${GITHUB_TOKEN}` : "a changed note";
     const answers: Array<[string, any]> = [];
-    BaseMemory.post = async () => result();
+    BaseMemory.post = async (content: any) => {
+      memoryStore.set(content.id, { ...content });
+      return result();
+    };
     // Stage the row for ordinary owned PUT verification after a normal result.
     // Refusals, storage Responses and skill PUT return before that read; composed
     // promotion uses its caller's in-transaction existence check.
@@ -811,10 +822,17 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
       await oldPut.call(BaseMemory, content, ctx);
       return result();
     };
-    BaseMemory.prototype.patch = async () => result();
+    BaseMemory.prototype.patch = async function (content: any) {
+      const patched = result();
+      if (!(patched instanceof Response)) await oldPatch.call(this, content);
+      return patched;
+    };
     try {
       for (const adapter of ["post", "create"]) {
-        if (adapter === "create") (Memory as any).create = async () => result();
+        if (adapter === "create") (Memory as any).create = async (_id: any, content: any) => {
+          memoryStore.set(content.id, { ...content });
+          return result();
+        };
         memoryStore.clear();
         answers.push([`POST ${adapter}`, await makeMemory(agentCtx(AGENT)).post({ id: row.id, agentId: AGENT, content: body, visibility: "shared" })]);
       }

@@ -1,4 +1,7 @@
-// flair#1586 — MQTT must be fully off on every Harper spawn path, and
+// flair#1586 — MQTT must be fully off on every Harper spawn path, the
+// component-deployment channel must set every MQTT listener off in the
+// instance's configuration (it sets the configuration and requests the restart
+// that applies it; it does not confirm the listeners' live state), and
 // test-Harpers must not bind the shared inspector port a live Flair holds.
 //
 // The previous disable nulled only `mqtt.network.port`. Harper's mqtt
@@ -7,19 +10,28 @@
 // restart` / `flair upgrade`) omitted HARPER_SET_CONFIG and restored the
 // defaults entirely.
 //
-// Wiring, not a live Harper: the three SET_CONFIG builders and
-// buildDirectSpawnEnv are the doors. Reading the source finds a missing
-// door that a runtime test of one path would not.
+// Wiring, not a live Harper: the three SET_CONFIG builders, buildDirectSpawnEnv
+// and the deploy channel's set_configuration are the doors. Reading the source
+// finds a missing door that a runtime test of one path would not. The deploy
+// channel's requests are also checked at the HTTP boundary
+// (test/unit/deploy-mqtt-off.test.ts) and against real Harpers
+// (test/integration/mqtt-off-deploy-doctor.test.ts,
+// test/integration/mqtt-off-isolated-deploy.test.ts,
+// test/integration/mqtt-off-fabric-upgrade.test.ts).
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildDirectSpawnEnv } from "../../src/cli.ts";
+import { MQTT_DISABLED_CONFIG, MQTT_DISABLED_SET_CONFIGURATION } from "../../src/lib/mqtt-config.ts";
+import { buildMqttOffOperation } from "../../src/deploy.ts";
 
 function stripComments(s: string): string {
   return s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 
 const cliSrc = stripComments(readFileSync(join(import.meta.dir, "..", "..", "src", "cli.ts"), "utf8"));
+const mqttConfigSrc = stripComments(readFileSync(join(import.meta.dir, "..", "..", "src", "lib", "mqtt-config.ts"), "utf8"));
+const deploySrc = stripComments(readFileSync(join(import.meta.dir, "..", "..", "src", "mqtt-off-deploy.ts"), "utf8"));
 // flair#1636 (epic #1618): `flair init`'s two HARPER_SET_CONFIG builders moved
 // to src/commands/init.ts, so "every production spawn path" now spans two files.
 const initSrc = stripComments(readFileSync(join(import.meta.dir, "..", "..", "src", "commands", "init.ts"), "utf8"));
@@ -30,9 +42,24 @@ const lifecycleSrc = stripComments(
 
 describe("MQTT is fully disabled on every production spawn path (flair#1586)", () => {
   test("one shared MQTT_DISABLED_CONFIG nulls both ports and the WebSocket path", () => {
-    expect(cliSrc).toMatch(/const MQTT_DISABLED_CONFIG\s*=\s*\{/);
-    expect(cliSrc).toMatch(/network:\s*\{\s*port:\s*null,\s*securePort:\s*null\s*\}/);
-    expect(cliSrc).toMatch(/webSocket:\s*false/);
+    expect(mqttConfigSrc).toMatch(/export const MQTT_DISABLED_CONFIG\s*=\s*\{/);
+    expect(mqttConfigSrc).toMatch(/network:\s*\{\s*port:\s*null,\s*securePort:\s*null\s*\}/);
+    expect(mqttConfigSrc).toMatch(/webSocket:\s*false/);
+    expect(MQTT_DISABLED_CONFIG).toEqual({ network: { port: null, securePort: null }, webSocket: false });
+    // cli.ts uses the shared constant rather than a copy of its own.
+    expect(cliSrc).toMatch(/import \{ MQTT_DISABLED_CONFIG \} from "\.\/lib\/mqtt-config\.js"/);
+    expect(cliSrc).not.toMatch(/const MQTT_DISABLED_CONFIG\s*=/);
+  });
+
+  test("the deploy channel sets the same configuration with set_configuration parameters", () => {
+    expect(MQTT_DISABLED_SET_CONFIGURATION).toEqual({
+      mqtt_network_port: null,
+      mqtt_network_securePort: null,
+      mqtt_webSocket: false,
+    });
+    expect(buildMqttOffOperation(false)).toEqual({ operation: "set_configuration", ...MQTT_DISABLED_SET_CONFIGURATION });
+    expect(buildMqttOffOperation(true)).toEqual({ operation: "set_configuration", ...MQTT_DISABLED_SET_CONFIGURATION, replicated: true });
+    expect(deploySrc).toMatch(/\.\.\.MQTT_DISABLED_SET_CONFIGURATION/);
   });
 
   test("all three HARPER_SET_CONFIG builders use MQTT_DISABLED_CONFIG", () => {

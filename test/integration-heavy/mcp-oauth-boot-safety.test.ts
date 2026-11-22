@@ -35,13 +35,15 @@
  *      `signingKeyPem: ${VAR}` with the variable unset still degrades the boot,
  *      the load error naming the variable — the library's check is NOT loosened.
  *   2d. NO PROVIDER (flair#2194): no-provider boot returns 404 for both
- *      protected-resource forms and 401 for an unauthenticated /mcp request.
- *      A token minted with a provider returns 401 after provider removal.
+ *      protected-resource forms and 503 (unavailable) for an unauthenticated
+ *      /mcp request.
+ *      A token minted with a provider is refused as unavailable after provider removal.
  *   3. MUTATION-PROVE (literal true): mcp.enabled: true + env unset -> boots
  *      DEGRADED. Proves test 2's clean-boot assertions CAN fire.
  *   4. GARBAGE VALUE (flair#1152 residual): FLAIR_MCP_OAUTH=maybe. Measured
- *      on oauth 2.5.0 the component's coerceConfigBoolean accepts ONLY
- *      "true"/"false" and DELETES anything else — so garbage disables the
+ *      on oauth 2.5.0: the component's coerceConfigBoolean maps only
+ *      true/false strings (trimmed, any case in 2.9.0) to a boolean and
+ *      normalizeBooleanField deletes anything else — so garbage disables the
  *      component too, and flair's strict mcpOAuthEnabled() stays false: BOTH
  *      sides off, no /mcp handler, no data path. (The AS-metadata 200 in that
  *      state is flair's OWN discovery document — oauth-discovery.ts serves it
@@ -53,23 +55,17 @@
  *      mounts, the component's github provider initializes, the COMPONENT's
  *      AS metadata advertises CIMD, and the RFC 9728
  *      metadata carries the DERIVED `<issuer>/mcp` resource (flair#1180 — no
- *      composite literal). "true" is the ONE value both readers accept:
- *      flair's flag takes 1/true/yes/on but the component deletes anything
- *      but "true"/"false", so e.g. FLAIR_MCP_OAUTH=1 yields a guarded /mcp
- *      with NO authorization server behind it (fail-closed broken-on).
- *   6. BROKEN-ON (flair#1285): FLAIR_MCP_OAUTH=1 with the FULL enablement env
- *      otherwise staged — the exact state a regression re-staging '1' in
- *      buildSecretsBundle would ship. Asserts BOTH halves at boot level:
- *      flair's /mcp handler IS mounted and guarded (401), AND the component's
- *      authorization-server surface is NOT (component-dispatched
- *      /oauth/mcp/authorize answers 404, and the AS well-known — which flair's
- *      discovery handler deliberately falls through when the strict flag is on
- *      — has nobody behind it). The unit coverage in mcp-oauth-flag only
- *      exercises flair's side of the vocabulary table; this is the
- *      discriminating boot test for the divergence itself.
+ *      composite literal). "true" is the recommended value both readers
+ *      accept: flair's flag takes 1/true/yes/on but the component deletes
+ *      anything but a true/false string (trimmed, any case). FLAIR_MCP_OAUTH=1 with the shipped env reference
+ *      makes the boot guard refuse to mount /mcp (flair#1322).
+ *   6. LEGACY "1" (flair#1285 / flair#1322): FLAIR_MCP_OAUTH=1 with the shipped
+ *      env reference. The boot guard refuses: the process stays up, /mcp is
+ *      not mounted, and the log names FLAIR_MCP_OAUTH=true. The component's
+ *      authorization server is not mounted either.
  */
 
-import { describe, test, expect, beforeAll, afterEach, afterAll } from "bun:test";
+import { describe, test, expect, afterAll } from "bun:test";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, copyFileSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -88,31 +84,21 @@ const ENABLED_ENV_REFERENCE = "${FLAIR_MCP_OAUTH}";
 let instances: HarperInstance[] = [];
 let tempDirs: string[] = [];
 
-// ── Env hygiene: every boot in this file must control the FLAIR_MCP_* env ──
-// The shipped config now REFERENCES the environment, so an ambient
-// FLAIR_MCP_OAUTH leaking in from the runner would change what these tests
-// boot. Save once, restore after every test.
-const MCP_ENV_KEYS = [
-  "FLAIR_MCP_OAUTH",
-  "FLAIR_MCP_ISSUER",
-  "FLAIR_PUBLIC_URL",
-  "FLAIR_MCP_SIGNING_KEY_PEM",
-  "OAUTH_GITHUB_CLIENT_ID",
-  "OAUTH_GITHUB_CLIENT_SECRET",
-  "OAUTH_GITHUB_REDIRECT_URI",
-] as const;
-const savedEnv: Record<string, string | undefined> = {};
-beforeAll(() => {
-  for (const k of MCP_ENV_KEYS) savedEnv[k] = process.env[k];
-});
-afterEach(() => {
-  for (const k of MCP_ENV_KEYS) {
-    if (savedEnv[k] === undefined) delete process.env[k];
-    else process.env[k] = savedEnv[k]!;
-  }
-});
-function clearMcpEnv(): void {
-  for (const k of MCP_ENV_KEYS) delete process.env[k];
+// ── Server env: each boot declares the listed MCP/OAuth fixture variables ──
+// The shipped config REFERENCES the environment, so an ambient FLAIR_MCP_OAUTH
+// leaking in from the runner would change what these tests boot. An
+// `undefined` value removes an inherited one.
+function mcpServerEnv(values: Record<string, string> = {}): Record<string, string | undefined> {
+  return {
+    FLAIR_MCP_OAUTH: undefined,
+    FLAIR_MCP_ISSUER: undefined,
+    FLAIR_PUBLIC_URL: undefined,
+    FLAIR_MCP_SIGNING_KEY_PEM: undefined,
+    OAUTH_GITHUB_CLIENT_ID: undefined,
+    OAUTH_GITHUB_CLIENT_SECRET: undefined,
+    OAUTH_GITHUB_REDIRECT_URI: undefined,
+    ...values,
+  };
 }
 
 afterAll(async () => {
@@ -218,12 +204,12 @@ describe("flair#1136/#1152 boot-safety: shipped config with env-referenced mcp.e
       // boot degrades, and /mcp answers 500, so this test goes RED alongside
       // the version assertion. That red is the drift speaking — a positive
       // control, not a flake.
-      clearMcpEnv();
       const workDir = makeWorkDirWithShippedConfig("flair-boot-safety-");
 
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv(),
       });
       instances.push(harper);
 
@@ -266,17 +252,17 @@ describe("flair#2194 boot-safety: shipped config with MCP on and no signing key"
   test(
     "configured provider and no signing key boots clean",
     async () => {
-      clearMcpEnv();
-      process.env.FLAIR_MCP_OAUTH = "true";
-      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.OAUTH_GITHUB_CLIENT_ID = "no-signing-key-client";
-      process.env.OAUTH_GITHUB_CLIENT_SECRET = "no-signing-key-secret";
-      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
-
       const workDir = makeWorkDirWithShippedConfig("flair-no-signing-key-");
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv({
+          FLAIR_MCP_OAUTH: "true",
+          FLAIR_MCP_ISSUER: "https://test.example.com",
+          OAUTH_GITHUB_CLIENT_ID: "no-signing-key-client",
+          OAUTH_GITHUB_CLIENT_SECRET: "no-signing-key-secret",
+          OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
+        }),
       });
       instances.push(harper);
 
@@ -304,16 +290,20 @@ describe("flair#2194: a declared signingKeyPem with an unset variable still fail
   test(
     "mcp.signingKeyPem declared with `${FLAIR_MCP_SIGNING_KEY_PEM}` unset: the plugin load is refused, naming the variable",
     async () => {
-      clearMcpEnv();
-      process.env.FLAIR_MCP_OAUTH = "true";
-      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.OAUTH_GITHUB_CLIENT_ID = "declared-pin-client";
-      process.env.OAUTH_GITHUB_CLIENT_SECRET = "declared-pin-secret";
-      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
       const workDir = makeWorkDirWithShippedConfig("flair-declared-pin-", (shipped) =>
         shipped.replace("    enabled: ${FLAIR_MCP_OAUTH}", "    enabled: ${FLAIR_MCP_OAUTH}\n    signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}"),
       );
-      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      const harper = await startHarper({
+        cwd: workDir,
+        harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv({
+          FLAIR_MCP_OAUTH: "true",
+          FLAIR_MCP_ISSUER: "https://test.example.com",
+          OAUTH_GITHUB_CLIENT_ID: "declared-pin-client",
+          OAUTH_GITHUB_CLIENT_SECRET: "declared-pin-secret",
+          OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
+        }),
+      });
       instances.push(harper);
 
       // The library's hard check is intact: a DECLARED, unresolved pin degrades the boot.
@@ -329,16 +319,20 @@ describe("flair#2194: a declared signingKeyPem with an unset variable still fail
 });
 
 describe("flair#2194: MCP on with NO provider configured — fail-closed discovery", () => {
-  test("a token minted with a provider returns 401 after provider removal and restart", async () => {
-    clearMcpEnv();
+  test("a token minted with a provider is refused as unavailable after provider removal and restart", async () => {
     const issuer = "https://provider-removal.flair.test";
-    process.env.FLAIR_MCP_OAUTH = "true";
-    process.env.FLAIR_MCP_ISSUER = issuer;
-    process.env.OAUTH_GITHUB_CLIENT_ID = "provider-removal-client";
-    process.env.OAUTH_GITHUB_CLIENT_SECRET = "provider-removal-secret";
-    process.env.OAUTH_GITHUB_REDIRECT_URI = `${issuer}/oauth`;
     const workDir = makeWorkDirWithShippedConfig("flair-provider-removal-");
-    let harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+    let harper = await startHarper({
+      cwd: workDir,
+      harperBinDir: REPO_ROOT,
+      serverEnv: mcpServerEnv({
+        FLAIR_MCP_OAUTH: "true",
+        FLAIR_MCP_ISSUER: issuer,
+        OAUTH_GITHUB_CLIENT_ID: "provider-removal-client",
+        OAUTH_GITHUB_CLIENT_SECRET: "provider-removal-secret",
+        OAUTH_GITHUB_REDIRECT_URI: `${issuer}/oauth`,
+      }),
+    });
     instances.push(harper);
     const verifier = randomBytes(32).toString("base64url");
     const clientId = "provider-removal-client";
@@ -380,10 +374,12 @@ describe("flair#2194: MCP on with NO provider configured — fail-closed discove
     expect((await postMcp()).status).toBe(200);
     const installDir = harper.installDir;
     await stopHarper(harper, { keepInstallDir: true });
-    delete process.env.OAUTH_GITHUB_CLIENT_ID;
-    delete process.env.OAUTH_GITHUB_CLIENT_SECRET;
-    delete process.env.OAUTH_GITHUB_REDIRECT_URI;
-    harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, installDir });
+    harper = await startHarper({
+      cwd: workDir,
+      harperBinDir: REPO_ROOT,
+      installDir,
+      serverEnv: mcpServerEnv({ FLAIR_MCP_OAUTH: "true", FLAIR_MCP_ISSUER: issuer }),
+    });
     instances.push(harper);
     expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
     expect(harper.getLog?.() ?? "").toContain("OAuth provider 'github' not configured. Missing: clientId, clientSecret");
@@ -400,17 +396,20 @@ describe("flair#2194: MCP on with NO provider configured — fail-closed discove
     expect(keys).toHaveLength(1);
     expect(keys[0]!.kid).toBe(kid);
     expect(keys[0]!.public_key_pem).toContain("BEGIN PUBLIC KEY");
-    expect((await postMcp()).status).toBe(401);
+    const removedMcp = await postMcp();
+    expect(removedMcp.status).toBe(503);
+    expect(await removedMcp.text()).toContain("not serving an MCP authorization configuration");
   }, 300_000);
 
   test(
-    "no OAUTH_GITHUB_* set: boots clean, both protected-resource forms 404 and unauthenticated /mcp returns 401",
+    "no OAUTH_GITHUB_* set: boots clean, both protected-resource forms 404 and unauthenticated /mcp is refused as unavailable",
     async () => {
-      clearMcpEnv();
-      process.env.FLAIR_MCP_OAUTH = "true";
-      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
       const workDir = makeWorkDirWithShippedConfig("flair-no-provider-");
-      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      const harper = await startHarper({
+        cwd: workDir,
+        harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv({ FLAIR_MCP_OAUTH: "true", FLAIR_MCP_ISSUER: "https://test.example.com" }),
+      });
       instances.push(harper);
 
       const opsRes = await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) });
@@ -422,9 +421,27 @@ describe("flair#2194: MCP on with NO provider configured — fail-closed discove
         const res = await fetch(`${harper.httpURL}${path}`, { signal: AbortSignal.timeout(10_000) });
         expect(res.status).toBe(404);
       }
-      // /mcp is still mounted by flair and denies the unauthenticated request.
-      const mcpRes = await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) });
-      expect(mcpRes.status).toBe(401);
+      // /mcp is still mounted by flair; with no live MCP config it answers the
+      // named unavailable refusal.
+      const mcpRes = await fetch(`${harper.httpURL}/mcp`, {
+        headers: { Origin: "https://browser.flair.test" },
+        signal: AbortSignal.timeout(10_000),
+      });
+      expect(mcpRes.status).toBe(503);
+      // On the wire, the 503 carries the two CORS headers withMCPAuth puts on its
+      // denials, so a cross-origin browser can read the refusal.
+      expect(mcpRes.headers.get("access-control-allow-origin")).toBe("*");
+      expect(mcpRes.headers.get("access-control-expose-headers")).toBe("WWW-Authenticate");
+      const mcpBody = await mcpRes.text();
+      expect(mcpBody).toContain("not serving an MCP authorization configuration");
+      // Both FLAIR_MCP_* variables are set here; the cause is the missing
+      // provider, so the remedy has to name one.
+      expect(mcpBody).toContain("Configure a valid OAuth provider");
+      expect(mcpBody).toContain("client ID");
+      expect(mcpBody).toContain("client secret");
+      expect(mcpBody).toContain("redirect URI");
+      expect(mcpBody).toContain("FLAIR_MCP_OAUTH");
+      expect(mcpBody).toContain("FLAIR_MCP_ISSUER to this instance's public origin");
     },
     120_000,
   );
@@ -436,7 +453,6 @@ describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
   test(
     "literal true: Harper boots DEGRADED when mcp.enabled is true but FLAIR_MCP_* env is unset",
     async () => {
-      clearMcpEnv();
       const shipped = readFileSync(SHIPPED_CONFIG, "utf-8");
       const mutated = shipped.replace(`enabled: ${ENABLED_ENV_REFERENCE}`, "enabled: true");
       // The mutation must actually land — if the shipped enabled line ever
@@ -454,6 +470,7 @@ describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv(),
       });
       instances.push(harper);
 
@@ -481,16 +498,20 @@ describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
 
 describe("flair#1152 garbage value: FLAIR_MCP_OAUTH=maybe", () => {
   test("flair's strict mcpOAuthEnabled() stays false for a garbage value (in-process divergence)", () => {
-    // The asymmetry that keeps the garbage case inert, asserted at its
-    // source: the component treats any non-empty resolved string as truthy;
-    // this function does not.
-    clearMcpEnv();
+    // The value is read IN-PROCESS by mcpOAuthEnabled(), not by a spawned
+    // Harper, so this one stays in process.env.
+    const priorFlag = process.env.FLAIR_MCP_OAUTH;
     process.env.FLAIR_MCP_OAUTH = "maybe";
-    expect(mcpOAuthEnabled()).toBe(false);
-    // Positive control — the same code path DOES accept the real values, so
-    // a broken import/allowlist can't fake the assertion above.
-    process.env.FLAIR_MCP_OAUTH = "1";
-    expect(mcpOAuthEnabled()).toBe(true);
+    try {
+      expect(mcpOAuthEnabled()).toBe(false);
+      // Positive control — the same code path DOES accept the real values, so
+      // a broken import/allowlist can't fake the assertion above.
+      process.env.FLAIR_MCP_OAUTH = "1";
+      expect(mcpOAuthEnabled()).toBe(true);
+    } finally {
+      if (priorFlag === undefined) delete process.env.FLAIR_MCP_OAUTH;
+      else process.env.FLAIR_MCP_OAUTH = priorFlag;
+    }
   });
 
   test(
@@ -508,17 +529,17 @@ describe("flair#1152 garbage value: FLAIR_MCP_OAUTH=maybe", () => {
       // never validates the issuer). If either reader's vocabulary changes,
       // an assertion below flips — re-derive the whole table before shipping
       // that change.
-      clearMcpEnv();
-      process.env.FLAIR_MCP_OAUTH = "maybe";
-      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.OAUTH_GITHUB_CLIENT_ID = "test-client-id";
-      process.env.OAUTH_GITHUB_CLIENT_SECRET = "test-client-secret";
-      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
-
       const workDir = makeWorkDirWithShippedConfig("flair-garbage-value-");
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv({
+          FLAIR_MCP_OAUTH: "maybe",
+          FLAIR_MCP_ISSUER: "https://test.example.com",
+          OAUTH_GITHUB_CLIENT_ID: "test-client-id",
+          OAUTH_GITHUB_CLIENT_SECRET: "test-client-secret",
+          OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
+        }),
       });
       instances.push(harper);
 
@@ -580,19 +601,19 @@ describe("flair#1152 enabled path: shipped config verbatim + env set", () => {
       // "true", NOT "1": the component's coerceConfigBoolean accepts only
       // "true"/"false" and deletes anything else, while flair's flag takes
       // 1/true/yes/on — so "true" is the one value that enables BOTH sides
-      // (and it is what buildSecretsBundle stages). With "1" this test fails:
-      // /mcp is guarded (flair on) but the AS metadata 404s (component off).
-      clearMcpEnv();
-      process.env.FLAIR_MCP_OAUTH = "true";
-      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.OAUTH_GITHUB_CLIENT_ID = "test-client-id";
-      process.env.OAUTH_GITHUB_CLIENT_SECRET = "test-client-secret";
-      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
-
+      // (and it is what buildSecretsBundle stages). With "1" the boot guard
+      // refuses and /mcp is not mounted (flair#1322).
       const workDir = makeWorkDirWithShippedConfig("flair-enabled-");
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv({
+          FLAIR_MCP_OAUTH: "true",
+          FLAIR_MCP_ISSUER: "https://test.example.com",
+          OAUTH_GITHUB_CLIENT_ID: "test-client-id",
+          OAUTH_GITHUB_CLIENT_SECRET: "test-client-secret",
+          OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
+        }),
       });
       instances.push(harper);
 
@@ -637,72 +658,67 @@ describe("flair#1152 enabled path: shipped config verbatim + env set", () => {
   );
 });
 
-// ─── 6. BROKEN-ON (flair#1285): FLAIR_MCP_OAUTH=1 → guarded /mcp, NO AS ──────
+// ─── 6. LEGACY "1" (flair#1285 / flair#1322): boot guard refuses ─────────────
 
-describe("flair#1285 vocabulary-asymmetry broken-on: FLAIR_MCP_OAUTH=1", () => {
+/** Local spawn captures the child log. External mode's getLog is "". */
+function expectLegacyFlagRefusalLog(instance: { external: boolean; getLog?: () => string }): void {
+  if (instance.external) return;
+  const log = instance.getLog?.() ?? "";
+  expect(log).toContain("Set FLAIR_MCP_OAUTH=true.");
+  expect(log).not.toContain("[mcp-oauth] /mcp mounted");
+}
+
+describe("flair#1322 legacy FLAIR_MCP_OAUTH=1: boot guard refuses to mount /mcp", () => {
+  test("local spawn asserts the remedy line; external mode does not read an empty log", () => {
+    expectLegacyFlagRefusalLog({
+      external: false,
+      getLog: () => "Set FLAIR_MCP_OAUTH=true.\n",
+    });
+    expectLegacyFlagRefusalLog({ external: true, getLog: () => "" });
+  });
+
   test(
-    "flair's /mcp is mounted+guarded (401) while the component's authorization server is NOT mounted",
+    "shipped config with FLAIR_MCP_OAUTH=1 stays up, does not mount /mcp, and logs the remedy",
     async () => {
-      // The exact state a regression re-staging '1' in buildSecretsBundle
-      // (src/lib/mcp-enable.ts) would deploy: the FULL enablement env —
-      // issuer, IdP credentials — with the flag spelled "1".
-      // flair's strict reader (resources/mcp-oauth-flag.ts) accepts 1/true/
-      // yes/on; the component's coerceConfigBoolean accepts ONLY "true"/
-      // "false" and DELETES anything else, so its disabled default applies.
-      // Result: broken-on — every /mcp request 401s and there is no
-      // authorization server for the client to satisfy the challenge against.
-      // Fail-closed (no unauthenticated data path), but broken; case 5 pins
-      // the one spelling that works, this pins the divergence itself.
-      clearMcpEnv();
-      process.env.FLAIR_MCP_OAUTH = "1";
-      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.OAUTH_GITHUB_CLIENT_ID = "test-client-id";
-      process.env.OAUTH_GITHUB_CLIENT_SECRET = "test-client-secret";
-      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
-
-      const workDir = makeWorkDirWithShippedConfig("flair-broken-on-");
+      // Pre-0.46 enablement staged "1". The component deletes that string, so
+      // its effective mcp.enabled is not true while Flair's reader is on.
+      // The boot guard throws before server.http; the module-load catch logs
+      // the remedy and leaves the process up. The child receives that env
+      // through serverEnv below.
+      const workDir = makeWorkDirWithShippedConfig("flair-legacy-flag-");
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv({
+          FLAIR_MCP_OAUTH: "1",
+          FLAIR_MCP_ISSUER: "https://test.example.com",
+          OAUTH_GITHUB_CLIENT_ID: "test-client-id",
+          OAUTH_GITHUB_CLIENT_SECRET: "test-client-secret",
+          OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
+        }),
       });
       instances.push(harper);
 
-      // Boot is CLEAN: normalizeBooleanField deleted the "1", so the plugin
-      // never validated its config and never degraded the boot.
       const opsRes = await fetch(harper.opsURL, {
         signal: AbortSignal.timeout(10_000),
       });
       expect(opsRes.status).toBe(200);
 
-      // HALF 1 — flair's side is ON: /mcp is registered and guarded.
-      // 401, not 404 (that would mean flair's reader stopped accepting "1" —
-      // re-derive the whole vocabulary table before shipping that) and not
-      // 500 (degraded boot).
+      // External mode (HARPER_HTTP_URL) captures no child log: getLog() is "".
+      expectLegacyFlagRefusalLog(harper);
+
       const mcpRes = await fetch(`${harper.httpURL}/mcp`, {
         signal: AbortSignal.timeout(10_000),
       });
-      expect(mcpRes.status).toBe(401);
+      expect(mcpRes.status).toBe(404);
 
-      // HALF 2a — the component's AS is NOT mounted. /oauth/mcp/* is
-      // dispatched by the component itself and NEVER shadowed by flair (the
-      // same tripwire case 4 uses): its dispatcher answers 404 whenever
-      // mcp.enabled is falsy, and "1" was deleted. If the component's
-      // vocabulary ever widens to accept "1", this becomes a live authorize
-      // endpoint (non-404) and THIS assertion fires — at which point '1'
-      // would be broken differently, not fixed; re-derive the table.
+      // The component still does not advertise an authorization server.
       const authorizeRes = await fetch(
         `${harper.httpURL}/oauth/mcp/authorize`,
         { signal: AbortSignal.timeout(10_000) },
       );
       expect(authorizeRes.status).toBe(404);
 
-      // HALF 2b — the client-visible symptom: NO AS metadata anywhere. With
-      // the strict flag ON, flair's discovery handler deliberately falls
-      // through to the component's well-known handlers (makeWellKnownHandler
-      // behaviour 2, resources/oauth-discovery.ts) — and the component is not
-      // there to answer. Contrast case 4 (flag off → flair's own document,
-      // 200) and case 5 (component on → component document, 200): here the
-      // 401 challenge from /mcp has no authorization server behind it at all.
       const metaRes = await fetch(
         `${harper.httpURL}/.well-known/oauth-authorization-server`,
         { signal: AbortSignal.timeout(10_000) },
@@ -711,4 +727,70 @@ describe("flair#1285 vocabulary-asymmetry broken-on: FLAIR_MCP_OAUTH=1", () => {
     },
     120_000,
   );
+});
+
+
+describe("flair#1322 public URL without MCP issuer", () => {
+  test("shipped config keeps the process up and leaves /mcp unmounted", async () => {
+    const workDir = makeWorkDirWithShippedConfig("flair-missing-mcp-issuer-");
+    const harper = await startHarper({
+      cwd: workDir,
+      harperBinDir: REPO_ROOT,
+      serverEnv: mcpServerEnv({
+        FLAIR_MCP_OAUTH: "true",
+        FLAIR_PUBLIC_URL: "https://test.example.com",
+        OAUTH_GITHUB_CLIENT_ID: "test-client-id",
+        OAUTH_GITHUB_CLIENT_SECRET: "test-client-secret",
+        OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
+      }),
+    });
+    instances.push(harper);
+    expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
+    // Flair's own routes keep serving: the guard refuses only the /mcp mount.
+    expect((await fetch(`${harper.httpURL}/Health`, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
+    // @harperfast/oauth itself fails to load on the unresolved issuer, and Harper then
+    // answers every path nothing else claims with that load error (an error resource at
+    // "/", as in the mutation-prove case above). Flair does not mount /mcp, so /mcp is
+    // one of those paths: 500 carrying the component's cause, never Flair's 401-only route.
+    const mcpRes = await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) });
+    expect(mcpRes.status).toBe(500);
+    const mcpBody = await mcpRes.text();
+    expect(mcpBody).toContain("Could not load component '@harperfast/oauth'");
+    expect(mcpBody).toContain("${FLAIR_MCP_ISSUER}");
+    if (!harper.external) {
+      const log = harper.getLog?.() ?? "";
+      expect(log).toContain("Set FLAIR_MCP_ISSUER to an absolute http(s) origin");
+      expect(log).not.toContain("[mcp-oauth] /mcp mounted");
+    }
+  }, 120_000);
+});
+
+describe("flair#1322 padded FLAIR_MCP_ISSUER", () => {
+  test.each([
+    { issuer: "https://test.example.com\n", rule: "has whitespace or control characters" },
+    { issuer: "https://test.example.com\\", rule: "not in canonical origin form" },
+  ])("shipped config stays up and does not mount /mcp ($rule)", async ({ issuer, rule }) => {
+    const workDir = makeWorkDirWithShippedConfig("flair-padded-mcp-issuer-");
+    const harper = await startHarper({
+      cwd: workDir,
+      harperBinDir: REPO_ROOT,
+      serverEnv: mcpServerEnv({
+        FLAIR_MCP_OAUTH: "true",
+        FLAIR_MCP_ISSUER: issuer,
+        OAUTH_GITHUB_CLIENT_ID: "test-client-id",
+        OAUTH_GITHUB_CLIENT_SECRET: "test-client-secret",
+        OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
+      }),
+    });
+    instances.push(harper);
+    expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
+    expect((await fetch(`${harper.httpURL}/Health`, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
+    const mcpRes = await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) });
+    expect(mcpRes.status).not.toBe(401);
+    if (!harper.external) {
+      const log = harper.getLog?.() ?? "";
+      expect(log).toContain(rule);
+      expect(log).not.toContain("[mcp-oauth] /mcp mounted");
+    }
+  }, 120_000);
 });

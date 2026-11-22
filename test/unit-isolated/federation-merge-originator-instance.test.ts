@@ -30,6 +30,7 @@ import nacl from "tweetnacl";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto.js";
 import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
 import { installFakeHarperTransaction } from "../helpers/fake-harper-txn.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double.ts";
 
 const PEER_ID = "inst-remote";
 const ORIGIN = "instance-origin";
@@ -52,7 +53,9 @@ function emptyGen() {
 }
 
 function table(name: string) {
+  const store = memoryLockDouble();
   return {
+    primaryStore: store,
     get: async (id: string) => {
       if (name === "Memory" && pauseRead) {
         signalPause?.();
@@ -74,6 +77,10 @@ function table(name: string) {
       }
       stores[name].set(r.id, JSON.parse(JSON.stringify(r)));
       return r;
+    },
+    update: async (id: string, patch: Record<string, unknown>) => {
+      const row = { ...(stores[name].get(id) ?? {}), ...patch };
+      if (!harperTxn.stage(id, { table: name, row })) stores[name].set(id, JSON.parse(JSON.stringify(row)));
     },
     search: () => emptyGen(),
   };
@@ -216,7 +223,11 @@ describe("flair#1965 — the federated merge preserves an authenticated peer's r
       // the receiver's OWN bookkeeping stamp is the separate underscore field
       expect(stored._originatorInstanceId).toBe(PEER_ID);
     });
+  }
 
+  // Agent is covered separately below: an existing Agent row's home changes
+  // only through a record from that home (flair#2665).
+  for (const tableName of ["Memory", "Soul", "Relationship"]) {
     it(`${tableName}: a NEWER inbound update keeps the REMOTE (pushed-row) value over the local row's`, async () => {
       const { secretKey, publicKey } = keypair();
       peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
@@ -234,6 +245,36 @@ describe("flair#1965 — the federated merge preserves an authenticated peer's r
       expect(stored[ROWS[tableName].field]).toBe(data[ROWS[tableName].field]); // control: the merge really applied the remote row
     });
   }
+
+  it("Agent: a NEWER inbound update from the row's stored home keeps the REMOTE (pushed-row) value", async () => {
+    const { secretKey, publicKey } = keypair();
+    peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+    const local = ROWS.Agent.data(PEER_ID);
+    stores.Agent.set(local.id, { ...local, name: "Local Principal", updatedAt: OLD });
+
+    const data = ROWS.Agent.data(ORIGIN);
+    const res: any = await postSync({ instanceId: PEER_ID, records: [pushedRecord("Agent", data.id, data, NEW, secretKey)], lamportClock: 2 }, secretKey);
+
+    expect(res.merged).toBe(1);
+    const stored = stores.Agent.get(data.id);
+    expect(stored.originatorInstanceId).toBe(ORIGIN);
+    expect(stored.originatorInstanceId).not.toBe(LOCAL_ORIGIN);
+    expect(stored.name).toBe(data.name);
+  });
+
+  it("Agent: a NEWER inbound update from a peer that is not the row's stored home is refused and the stored row is kept", async () => {
+    const { secretKey, publicKey } = keypair();
+    peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+    const local: Record<string, any> = { ...ROWS.Agent.data(LOCAL_ORIGIN), name: "Local Principal", updatedAt: OLD };
+    stores.Agent.set(local.id, local);
+
+    const data = ROWS.Agent.data(ORIGIN);
+    const res: any = await postSync({ instanceId: PEER_ID, records: [pushedRecord("Agent", data.id, data, NEW, secretKey)], lamportClock: 2 }, secretKey);
+
+    expect(res.merged).toBe(0);
+    expect(res.refused).toEqual([{ table: "Agent", id: data.id, reason: "agent_identity_not_from_home" }]);
+    expect(stores.Agent.get(data.id)).toEqual(local);
+  });
 });
 
 describe("FederationSync ephemeral expiry", () => {

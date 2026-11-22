@@ -46,7 +46,7 @@ export const RESTORE_PRESERVED_FIELDS: Readonly<Record<string, readonly string[]
     "id", "agentId", "content", "contentHash", "trigger", "visibility",
     "tags", "durability", "source", "type",
     "createdAt", "expiresAt", "usageCount", "promotionStatus", "promotedAt",
-    "promotedBy", "archived", "archivedAt", "archivedBy", "parentId",
+    "promotedBy", "promotionContentHash", "archived", "archivedAt", "archivedBy", "parentId",
     "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject",
     "summary", "validFrom", "validTo", "metadata", "entities",
     "meta", "kind",

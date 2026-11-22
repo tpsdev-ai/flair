@@ -22,8 +22,7 @@ const RESOURCE = `${ISSUER}/mcp`;
 const CLIENT_ID = "lifecycle-dcr-client";
 const REDIRECT_URI = `${ISSUER}/callback`;
 
-const ENV_KEYS = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "FLAIR_MCP_SIGNING_KEY_PEM", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET", "OAUTH_GITHUB_REDIRECT_URI"] as const;
-let originalEnv: Record<(typeof ENV_KEYS)[number], string | undefined> | undefined;
+let serverEnv: Record<string, string> = {};
 
 let pinPrivatePem: string;
 let pinPublicPem: string;
@@ -47,13 +46,6 @@ afterAll(async () => {
   for (const d of tempDirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
   }
-  if (originalEnv) {
-    for (const k of ENV_KEYS) {
-      const value = originalEnv[k];
-      if (value === undefined) delete process.env[k];
-      else process.env[k] = value;
-    }
-  }
 }, 60_000);
 
 /** A temp app dir carrying the shipped config (or a mutated copy) + node_modules/dist symlinks. */
@@ -69,14 +61,14 @@ function makeWorkDir(prefix: string, mutate?: (shipped: string) => string): stri
 
 /** MCP on, issuer + a CONFIGURED github provider, and (optionally) a staged pin. */
 function setEnableEnv(pin?: string): void {
-  originalEnv ??= Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]])) as Record<(typeof ENV_KEYS)[number], string | undefined>;
-  process.env.FLAIR_MCP_OAUTH = "true";
-  process.env.FLAIR_MCP_ISSUER = ISSUER;
-  process.env.OAUTH_GITHUB_CLIENT_ID = "lifecycle-client-id";
-  process.env.OAUTH_GITHUB_CLIENT_SECRET = "lifecycle-client-secret";
-  process.env.OAUTH_GITHUB_REDIRECT_URI = `${ISSUER}/oauth`;
-  if (pin === undefined) delete process.env.FLAIR_MCP_SIGNING_KEY_PEM;
-  else process.env.FLAIR_MCP_SIGNING_KEY_PEM = pin;
+  serverEnv = {
+    FLAIR_MCP_OAUTH: "true",
+    FLAIR_MCP_ISSUER: ISSUER,
+    OAUTH_GITHUB_CLIENT_ID: "lifecycle-client-id",
+    OAUTH_GITHUB_CLIENT_SECRET: "lifecycle-client-secret",
+    OAUTH_GITHUB_REDIRECT_URI: `${ISSUER}/oauth`,
+  };
+  if (pin !== undefined) serverEnv.FLAIR_MCP_SIGNING_KEY_PEM = pin;
 }
 
 function basicHeader(h: HarperInstance): string {
@@ -187,7 +179,7 @@ describe("flair#2194 signing-key lifecycle: no pin, the library's own mint persi
     async () => {
       setEnableEnv(undefined);
       workDir = makeWorkDir("flair-lifecycle-nopin-");
-      harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, serverEnv });
       instances.push(harper);
 
       // Clean boot — the component loaded (no refused signingKeyPem pin).
@@ -212,7 +204,7 @@ describe("flair#2194 signing-key lifecycle: no pin, the library's own mint persi
 
       const installDir = harper.installDir;
       await stopHarper(harper, { keepInstallDir: true });
-      harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, installDir });
+      harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, installDir, serverEnv });
       instances.push(harper);
       expect(await postMcp(harper, token)).toBe(200);
     },
@@ -229,7 +221,7 @@ describe("flair#2194 signing-key lifecycle: pinned then unpinned (upgrade path)"
       const pinnedDir = makeWorkDir("flair-lifecycle-pinned-", (shipped) =>
         shipped.replace("    enabled: ${FLAIR_MCP_OAUTH}", "    enabled: ${FLAIR_MCP_OAUTH}\n    signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}"),
       );
-      let harper = await startHarper({ cwd: pinnedDir, harperBinDir: REPO_ROOT });
+      let harper = await startHarper({ cwd: pinnedDir, harperBinDir: REPO_ROOT, serverEnv });
       instances.push(harper);
       expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
 
@@ -250,7 +242,7 @@ describe("flair#2194 signing-key lifecycle: pinned then unpinned (upgrade path)"
       await stopHarper(harper, { keepInstallDir: true });
       setEnableEnv(undefined);
       const shippedDir = makeWorkDir("flair-lifecycle-unpinned-");
-      harper = await startHarper({ cwd: shippedDir, harperBinDir: REPO_ROOT, installDir });
+      harper = await startHarper({ cwd: shippedDir, harperBinDir: REPO_ROOT, installDir, serverEnv });
       instances.push(harper);
       expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
       expect(await postMcp(harper, token)).toBe(200);

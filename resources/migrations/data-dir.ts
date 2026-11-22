@@ -270,13 +270,27 @@ export function describeUnresolvableDataDir(tried: readonly DataDirProbe[]): str
   );
 }
 
+/** The data dir this process's boot selected for writes, once recorded (flair#2840). */
+let selectedForWrites: string | null = null;
+
+/**
+ * Records the data dir the boot path selected with
+ * {@link resolveWritableMigrationDataDir}; from then on
+ * {@link resolveMigrationDataDirForRead} returns it. `null` clears the record.
+ */
+export function noteSelectedMigrationDataDir(dir: string | null): void {
+  selectedForWrites = dir;
+}
+
 /**
  * READ-ONLY counterpart for `/HealthDetail`, which must never create
- * directories as a side effect of a GET. Prefers whichever candidate
- * already carries a `.migrations` directory (i.e. the one a boot actually
- * chose), falling back to the first candidate so the field is never empty.
+ * directories as a side effect of a GET. Returns the directory recorded by
+ * {@link noteSelectedMigrationDataDir} when there is one (flair#2840).
+ * Otherwise it prefers whichever candidate already carries a `.migrations`
+ * path, falling back to the first candidate so the field is never empty.
  */
 export function resolveMigrationDataDirForRead(env: NodeJS.ProcessEnv = process.env): string {
+  if (selectedForWrites !== null) return selectedForWrites;
   const candidates = migrationDataDirCandidates(env);
   for (const candidate of candidates) {
     if (existsSync(join(candidate, MIGRATIONS_SUBDIR))) return candidate;

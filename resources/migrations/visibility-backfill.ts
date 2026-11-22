@@ -4,8 +4,7 @@
  * which never stamped `visibility` at all. riskClass 'derived-only':
  * `visibility` here is a derived stamp recomputable at any time from
  * `durability` (which remains on the row, untouched, forever) — never the
- * only copy of anything (invariant I) — and this migration only ever writes
- * into a field that is CURRENTLY EMPTY, so the cheapest posture applies:
+ * only copy of anything (invariant I). The plan requires an empty visibility:
  * metadata-only snapshot, no content-hash gate (row-count + stamp
  * convergence only, same as `embedding-stamp`/`graph-heal`).
  *
@@ -45,13 +44,8 @@
  * definition is the safer contract than a shared import with a landmine
  * behind it. If this rule ever changes, both copies must change together.
  *
- * NEVER OVERWRITES an existing `visibility` value — that is an explicit
- * author decision (their own call, even if it disagrees with what this
- * migration would have derived). Only rows where `visibility` is
- * null/undefined are eligible, and `run()` below re-verifies that on a
- * freshly-read record immediately before writing (the actual enforcement
- * of "never overwrite" — see the write-gate comment there), independent of
- * how precisely the candidate-selection query below narrowed things.
+ * The per-id Memory lock shared with owner PUT/PATCH protects the missing-
+ * visibility decision and write. Writers outside that lock are not serialized.
  *
  * THE CANDIDATE QUERY — why it looks different from `embedding-stamp`'s:
  * `visibility` is declared in `schemas/memory.graphql` but NOT `@indexed`
@@ -69,11 +63,11 @@
  * find. A NEGATED comparator does match them (`undefined !== "private"` is
  * true), so the pending condition here is `visibility not_equals "private"
  * AND visibility not_equals "shared"` — no separate `equals: null` leg
- * needed (unlike `embedding-stamp`, whose write path can leave an
- * intermediate explicit-null state on a failed HTTP regen; this migration's
- * write is a single in-process read-modify-write that either fully
- * succeeds or leaves the row in its exact prior state, so there is no
- * intermediate state to add a leg for). This exact `not_equal`-covers-
+ * needed (unlike `embedding-stamp`, whose pending condition carries an
+ * `equals: null` leg for rows whose `embeddingModel` is an explicit null; this
+ * migration's write stages only `{ visibility }` through an incremental
+ * `update`, so it creates no explicit-null state to add a leg for). This exact
+ * `not_equal`-covers-
  * absent-and-null-and-nothing-else-with-the-value-itself semantics is
  * already relied on, in production, by `resources/memory-read-scope.ts`'s
  * cross-agent read-scope condition on this SAME field (`visibility !=
@@ -100,29 +94,25 @@
  * don't-brick (invariant II), and worth surfacing loudly if it ever
  * happens, since a garbage `visibility` value is itself a bug worth seeing.
  *
- * THE WRITE PATH — deliberately NOT `embedding-stamp`'s loopback-HTTP
- * `PUT /Memory/:id` trick. That mechanism exists ONLY because
- * `embedding-stamp` needs `resources/Memory.ts`'s SUBCLASS override (the
- * `content.content && !content.embedding` regen branch) to actually fire,
- * and the raw `databases.flair.Memory` reference (what this migration and
- * that one both get via their table accessor) resolves to the RAW
- * underlying table, silently skipping every subclass override — see that
- * file's module doc for the full, empirically-confirmed mechanism. This
- * migration needs NO subclass business logic (no dedup, no regen, no
- * provenance stamping, no rate limiting) — it is a narrow, single-field
- * patch, which is exactly the shape `resources/table-helpers.ts`'s
- * `patchRecord` documents and this codebase already uses directly against
- * the RAW table for the same kind of narrow metadata write:
- * `resources/auth-middleware.ts`'s `backfillEmbedding()` (patches
- * `embedding`), `resources/MemoryReflect.ts` and `resources/Memory.ts`
- * itself (both patch `lastReflected` this exact way). Per that file's own
- * warning, Harper's raw `.put()` is FULL RECORD REPLACEMENT — a partial
- * object silently deletes every field not included — so `run()` below
- * always spreads the freshly-read `existing` record before adding
- * `visibility`, the same read-modify-write shape `patchRecord` implements
- * (inlined here rather than calling that helper directly only because
- * `run()` already needs its own `.get()` for the write-gate check above,
- * and re-using that same read avoids a second, redundant round-trip).
+ * THE WRITE PATH — a single-field incremental `update`, not
+ * `embedding-stamp`'s loopback HTTP request. For ordinary row ids,
+ * embedding-stamp sends a loopback `PATCH /Memory/:id` with
+ * `{ embedding: null, embeddingModel: null }`, invoking Memory.patch()'s
+ * re-embed path, because it needs `resources/Memory.ts`'s SUBCLASS logic: the raw
+ * `databases.flair.Memory` reference (what this migration and that one both
+ * get via their table accessor) resolves to the RAW underlying table, silently
+ * skipping every subclass override — see that file's module doc for the full,
+ * empirically-confirmed mechanism. This migration needs NO subclass business
+ * logic (no dedup, no regen, no provenance stamping, no rate limiting): it
+ * writes only `visibility`, through `writeBackCommittedRow`
+ * (`resources/write-back.ts`), whose `update` plan calls the table's
+ * incremental `update` with `{ visibility }` and refuses when the table has
+ * none (`applyFieldUpdate`). Nothing spreads the stored row into a full-record
+ * `put`, so the full-record-replacement hazard `resources/table-helpers.ts`'s
+ * `patchRecord` warns about does not arise here. `run()` hands the candidate
+ * from its search to the write-back as `expectedRow`; the write-back re-reads
+ * the row inside its owned transaction, requires the row's identity fields to
+ * still match that basis, and confirms the committed row after staging.
  *
  * NO `recheckPending()`: that hook exists specifically to catch a stale
  * SECONDARY INDEX diverging from live values (flair#807, `embedding-stamp`
@@ -134,10 +124,10 @@
  * omitting it.
  */
 import { databases } from "harper";
-import { stripUndeclaredMemoryAttributes } from "../memory-declared-attributes.js";
 import { writeBackCommittedRow as writeBackCommittedRowImpl, type WriteBackFn } from "../write-back.js";
 import { txnPausePoint } from "../txn-pause-point.js";
-import type { Migration, RunBatchResult } from "./types.js";
+import { withMemoryWriteLockOnce } from "../memory-write-lock.js";
+import { BatchOutcomeError, type Migration, type RunBatchResult } from "./types.js";
 
 export type BackfilledVisibility = "private" | "shared";
 
@@ -149,6 +139,11 @@ export interface MemoryTableLike {
 
 function defaultMemoryTable(): MemoryTableLike {
   return (databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory;
+}
+
+/** The per-id lock the backfill's writes run under (flair#2478 slice 2). */
+function defaultMemoryLockStore(): unknown {
+  return (databases as any)?.flair?.Memory?.primaryStore;
 }
 
 export const VISIBILITY_BACKFILL_ID = "visibility-backfill";
@@ -180,15 +175,16 @@ function pendingCondition() {
 }
 
 /**
- * `getTable` is injectable so unit tests exercise this migration's full
- * detect/countPending/run logic against an in-memory fake table (matching
- * `embedding-stamp.ts`'s DI style) — no real Harper needed. Unlike
- * `embedding-stamp`, there is no separate HTTP mechanism to inject: the
- * write IS the table's own `.put()`, already covered by the same fake.
+ * `getTable` and the write-back are injectable so unit tests exercise this
+ * migration's full detect/countPending/run logic against an in-memory fake
+ * table and a fake write-back (matching `embedding-stamp.ts`'s DI style) — no
+ * real Harper needed. The default write-back is the real helper; an `update`
+ * plan needs the table's incremental `update`.
  */
 export function createVisibilityBackfillMigration(
   getTable: () => MemoryTableLike = defaultMemoryTable,
   writeBackCommittedRow: WriteBackFn = writeBackCommittedRowImpl,
+  getLockStore: () => unknown = defaultMemoryLockStore,
 ): Migration {
   return {
     id: VISIBILITY_BACKFILL_ID,
@@ -210,6 +206,17 @@ export function createVisibilityBackfillMigration(
       return n;
     },
 
+    async checkUnconfirmed(id: string) {
+      const row = await getTable().get(id);
+      if (!row) return "no-row" as const;
+      // This migration only fills an absent visibility (flair#2840): once any
+      // value is present, run() never writes the row again, so the unconfirmed
+      // record is cleared. An owner's later value supersedes the unconfirmed
+      // write.
+      const visibility = (row as { visibility?: unknown }).visibility;
+      return visibility !== undefined && visibility !== null ? "at-target" as const : "pending" as const;
+    },
+
     async run(batchSize: number): Promise<RunBatchResult> {
       const table = getTable();
 
@@ -219,45 +226,74 @@ export function createVisibilityBackfillMigration(
       }
 
       const touchedIds: string[] = [];
+      const unconfirmedIds: string[] = [];
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
-        const outcome = await writeBackCommittedRow(
-          table as unknown as Parameters<WriteBackFn>[0],
-          id,
-          (existing: any) => {
-            if (!existing) return { skip: true } as const; // deleted since the search above — nothing to fix
+        // flair#2840: the write-back reports an attempt whose committed effect
+        // its post-commit verification read did not show. The row is counted as
+        // done only if a later attempt's write is verified; otherwise it is
+        // reported by id.
+        let ownUnconfirmed = false;
+        try {
+          // The decision and the write run under the per-id memory write lock
+          // (flair#2478 slice 2). One attempt: a held id is left for the next
+          // cycle, never written unserialized and never waited on unboundedly.
+          const outcome = await withMemoryWriteLockOnce(getLockStore(), [id], async () => {
+            const result = await writeBackCommittedRow(
+              table as unknown as Parameters<WriteBackFn>[0],
+              id,
+              (existing: any) => {
+                if (!existing) return { skip: true } as const; // deleted since the search above — nothing to fix
 
-            // The write-gate: this is what actually enforces "never overwrite an
-            // existing visibility value", independent of how precisely the
-            // candidate query above narrowed things (see module doc — a
-            // garbage third value would still be pulled in as a candidate).
-            if (existing.visibility !== undefined && existing.visibility !== null) return { skip: true } as const;
+                // Under the per-id Memory lock shared with owner PUT/PATCH,
+                // fill only an absent visibility.
+                if (existing.visibility !== undefined && existing.visibility !== null) return { skip: true } as const;
 
-            const derived = deriveVisibilityFromDurability(existing.durability);
-            // Never-widen invariant, asserted, not just tested: the only two
-            // values `deriveVisibilityFromDurability` can ever produce are
-            // "private"/"shared" (see its own doc), so this can never fire
-            // today — it exists to fail loudly (halting this migration via the
-            // runner's mid-batch-throw path, never a silent bad write) if a
-            // future edit to that function ever widens its return type or is
-            // bypassed via a type-unsafe call.
-            if (derived !== "private" && derived !== "shared") {
-              throw new Error(
-                `visibility-backfill: derived an invalid visibility for row ${id} — refusing to write`,
-              );
-            }
+                const derived = deriveVisibilityFromDurability(existing.durability);
+                // Never-widen invariant, asserted, not just tested: the only two
+                // values `deriveVisibilityFromDurability` can ever produce are
+                // "private"/"shared" (see its own doc), so this can never fire
+                // today — it exists to fail loudly (halting this migration via the
+                // runner's mid-batch-throw path, never a silent bad write) if a
+                // future edit to that function ever widens its return type or is
+                // bypassed via a type-unsafe call.
+                if (derived !== "private" && derived !== "shared") {
+                  throw new Error(
+                    `visibility-backfill: derived an invalid visibility for row ${id} — refusing to write`,
+                  );
+                }
 
-            const backfillRow = { ...existing, visibility: derived };
-            stripUndeclaredMemoryAttributes(backfillRow);
-            return { write: backfillRow };
-          },
-          { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), expectedRow: row },
-        );
-        if ("write" in outcome) touchedIds.push(id);
+                // Idempotent: once visibility is committed, a fresh plan sees it
+                // present and skips, so re-applying leaves the same committed row.
+                return { idempotent: true, update: { visibility: derived } } as const;
+              },
+              { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), confirmPoint: () => txnPausePoint("visibility-backfill-confirmed"), expectedRow: row, onUnconfirmed: () => { ownUnconfirmed = true; } },
+            );
+            // Test-only: the write-back committed and the lock is still held.
+            const committed = txnPausePoint("visibility-backfill-committed");
+            if (committed) await committed;
+            return result;
+          }, { phase: "visibility-backfill" });
+          if (outcome.kind !== "done") continue;
+          if ("skip" in outcome.value) {
+            // A skip is not a write this run verified. If it follows an attempt
+            // whose committed effect was unconfirmed, the row is reported as
+            // unconfirmed; otherwise this run wrote nothing to the row
+            // (flair#2840).
+            if (ownUnconfirmed) unconfirmedIds.push(id);
+          } else if ("update" in outcome.value) touchedIds.push(id);
+        } catch (err) {
+          // flair#2840: carry this batch's outcomes on the error — the runner
+          // has no RunBatchResult to read when run() throws.
+          if (ownUnconfirmed) unconfirmedIds.push(id);
+          throw new BatchOutcomeError({ touchedIds, unconfirmedIds }, err);
+        }
       }
 
-      return { processed: touchedIds.length, touchedIds };
+      return unconfirmedIds.length > 0
+        ? { processed: touchedIds.length, touchedIds, unconfirmedIds }
+        : { processed: touchedIds.length, touchedIds };
     },
   };
 }

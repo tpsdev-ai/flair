@@ -143,11 +143,12 @@ test("non-admin HealthDetail and doctor qualify a runner state-file short circui
   process.env.ROOTPATH = target;
   const { MigrationRegistry } = await import("../../resources/migrations/registry.ts");
   const { runMigrationCycle } = await import("../../resources/migrations/runner.ts");
-  const { defaultStatePath, writeMigrationStateEntry } = await import("../../resources/migrations/state.ts");
+  const { defaultStatePath } = await import("../../resources/migrations/state.ts");
+  const { seedMigrationStateEntry } = await import("../helpers/migration-state.ts");
   const statePath = defaultStatePath(target);
   const id = "recorded-fixture";
   const version = "fixture-version";
-  writeMigrationStateEntry(statePath, id, { completedAtVersion: version, lastOutcome: "success" });
+  await seedMigrationStateEntry(statePath, id, { completedAtVersion: version, lastOutcome: "success" });
   const detect = mock(async () => true);
   const registry = new MigrationRegistry().register({
     id, riskClass: "derived-only", affectsTables: ["Memory"], detect,

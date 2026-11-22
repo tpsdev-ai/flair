@@ -83,7 +83,7 @@ Without `hooks.allowPromptInjection` the plugin contributes no context and logs 
 
 ## Multi-Agent
 
-Each OpenClaw agent writes with its `agentId` as a field (tags are optional); reads use owner plus visibility. A verified agent can read all its own records (private included) and other agents' non-private records on the instance; grants do not expand that read scope.
+Each OpenClaw agent writes with its `agentId` as a field (tags are optional); reads use owner plus visibility. The base memory scope includes the reader's own records and other agents' non-private records; non-admin by-id and collection reads additionally check current authority for retained closed skills, and grants do not expand the read scope.
 
 ```bash
 flair agent add research-agent

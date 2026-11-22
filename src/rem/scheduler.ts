@@ -70,6 +70,13 @@ export interface SchedulerSubstitutions {
   NODE_BIN: string;
   /** Absolute path to the shim script the scheduler should call. */
   SHIM_PATH: string;
+  /**
+   * Absolute path to the owner-only admin-password file the shim passes to
+   * `run-once` with `--admin-pass-file`. Resolved at enable time so the shim
+   * performs no path lookup when the scheduler runs it; the file's VALUE is
+   * never read here and never lands in the shim.
+   */
+  ADMIN_PASS_FILE: string;
   /** Operator's home directory (HOME env var value). */
   HOME: string;
   /** Agent id passed via env. */
@@ -116,6 +123,12 @@ export interface EnableOpts {
   homeOverride?: string;
   /** Override the template root for testing. */
   templateRootOverride?: string;
+  /**
+   * Admin-password file whose ABSOLUTE path is baked into the shim. Defaults
+   * to `<home>/.flair/admin-pass` (the file `flair init` writes). The file is
+   * not read at enable time; `run-once` reads it at run time.
+   */
+  adminPassFile?: string;
   /** Skip the launchctl/systemctl invocation (testing). */
   skipLoad?: boolean;
 }
@@ -236,16 +249,27 @@ function validateSchedule(hour: number, minute: number): void {
   }
 }
 
+/**
+ * Quote a value as ONE POSIX shell word. Embedded single quotes are closed,
+ * escaped, and reopened, so the shell reads the value literally and never
+ * interprets `$()`, backticks, or quotes inside it.
+ */
+export function quoteShimArg(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 function buildSubstitutions(opts: EnableOpts, shimPath: string, flairBin: string, nodeBin: string): SchedulerSubstitutions {
   validateSchedule(opts.hour, opts.minute);
   if (!/^[a-zA-Z0-9_-]+$/.test(opts.agentId)) {
     throw new Error(`invalid agent id: ${opts.agentId}`);
   }
+  const home = opts.homeOverride ?? resolveHome();
   return {
     FLAIR_BIN: flairBin,
     NODE_BIN: nodeBin,
     SHIM_PATH: shimPath,
-    HOME: opts.homeOverride ?? resolveHome(),
+    ADMIN_PASS_FILE: resolve(opts.adminPassFile ?? join(home, ".flair", "admin-pass")),
+    HOME: home,
     AGENT_ID: opts.agentId,
     FLAIR_URL: opts.flairUrl,
     HOUR: String(opts.hour),
@@ -529,8 +553,15 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
   }
   const stderrLogPath = resolve(logsDir, "rem-nightly.stderr.log");
 
-  // 1. Deploy the shim (always — both platforms invoke it).
-  const shimContents = renderTemplate(readTemplate(templateRoot, "bin/flair-rem-nightly.sh.tmpl"), subs);
+  // 1. Deploy the shim (always — both platforms invoke it). Every path passed
+  // to the command is one POSIX single-quoted argument; none is double-quoted,
+  // so shell syntax inside a path stays literal.
+  const shimContents = renderTemplate(readTemplate(templateRoot, "bin/flair-rem-nightly.sh.tmpl"), {
+    ...subs,
+    NODE_BIN: quoteShimArg(subs.NODE_BIN),
+    FLAIR_BIN: quoteShimArg(subs.FLAIR_BIN),
+    ADMIN_PASS_FILE: quoteShimArg(subs.ADMIN_PASS_FILE),
+  });
   writeFileWithDir(shimPath, shimContents, 0o700);
   chmodSync(shimPath, 0o700);
 

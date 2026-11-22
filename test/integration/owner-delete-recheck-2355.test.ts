@@ -9,8 +9,9 @@
  * MemoryGrant, WorkspaceState, MemoryCandidate and Relationship confirm through
  * resources/owner-delete-recheck.ts, while a transaction the delete owns is
  * open. Memory's ordinary-row check is inline in resources/Memory.ts (through
- * withSharedWriteTransaction, which JOINS a request-owned transaction when one
- * exists); its skill-tagged check is inline in the same file's version writer.
+ * withOwnedTransaction, which detaches any request transaction, commits its own
+ * and restores the request's afterwards); its skill-tagged check is inline in
+ * the same file's version writer.
  * These cases change a row's owner around that transaction (a raw table update,
  * as an operator would make); one skill case removes the head instead:
  *
@@ -207,21 +208,7 @@ function changeOwner(c: ResourceCase, id: string) {
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-odr-2355-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper();
-  } finally {
-    // The spawned Harper has its copy; no later Harper in this process inherits it.
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
   assertOwnInstance(harper);
   await seedAgent(harper, owner);
   await seedAgent(harper, other);

@@ -26,11 +26,13 @@ import { fileURLToPath } from "node:url";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto.js";
 import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
 import { installFakeHarperTransaction } from "../helpers/fake-harper-txn.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double.ts";
 
 const PEER_ID = "inst-remote";
 let peerStore: Map<string, any>;
 let memoryStore: Map<string, any>;
 let syncLogStore: Map<string, any>;
+let writeRace: "conflict" | "unconfirmed" | undefined;
 
 function emptyGen() {
   async function* gen() {}
@@ -38,7 +40,7 @@ function emptyGen() {
 }
 
 const harperTxn = installFakeHarperTransaction((id: string, payload: { row: any }) => {
-  memoryStore.set(id, { ...payload.row });
+  memoryStore.set(id, { ...payload.row, ...(writeRace === "unconfirmed" ? { content: "competing" } : {}) });
 });
 
 mock.module("harper", () => ({
@@ -55,14 +57,20 @@ mock.module("harper", () => ({
         search: () => emptyGen(),
       },
       Memory: {
+        primaryStore: memoryLockDouble(),
         get: async (id: string) => memoryStore.get(id) ?? null,
         put: async (r: any) => {
+          if (writeRace === "conflict") memoryStore.set(r.id, { ...memoryStore.get(r.id), content: "competing" });
           // flair#2441: the merge's Memory write is a write-back inside an owned
           // transaction — stage it so the committed re-read still sees the
           // committed store row (as real Harper does).
           if (harperTxn.stage(r.id, { row: r })) return r;
           memoryStore.set(r.id, { ...r });
           return r;
+        },
+        update: async (id: string, patch: Record<string, unknown>) => {
+          const row = { ...memoryStore.get(id), ...patch };
+          if (!harperTxn.stage(id, { row })) memoryStore.set(id, row);
         },
         search: () => emptyGen(),
       },
@@ -139,7 +147,22 @@ beforeEach(() => {
   peerStore = new Map();
   memoryStore = new Map();
   syncLogStore = new Map();
+  writeRace = undefined;
 });
+
+for (const outcome of ["conflict", "unconfirmed"] as const) {
+  it(`Federation maps ${outcome} to ${outcome === "conflict" ? "merge_target_changed" : "indeterminate"}`, async () => {
+    writeRace = outcome;
+    const { secretKey, publicKey } = keypair();
+    peerStore.set(PEER_ID, { id: PEER_ID, publicKey, role: "hub", status: "connected" });
+    const record = memoryRecord({ id: "race", data: { id: "race", agentId: "agent-a", content: "submitted", visibility: "shared", createdAt: "2026-09-02T00:00:00.000Z" }, updatedAt: "2026-09-02T00:00:00.000Z", originatorInstanceId: PEER_ID }, secretKey);
+    const result: any = await postSync({ instanceId: PEER_ID, records: [record], lamportClock: 9 }, secretKey);
+    expect(result.merged).toBe(0);
+    expect(result.skipped).toBe(outcome === "conflict" ? 1 : 0);
+    expect(result.indeterminate).toEqual(outcome === "unconfirmed" ? [{ table: "Memory", id: "race" }] : []);
+    if (outcome === "conflict") expect(result.refused).toContainEqual({ table: "Memory", id: "race", reason: "merge_target_changed" });
+  });
+}
 
 describe("flair#1940 round 22 — the federated merge preserves provenance", () => {
   const OLD = "2026-09-01T00:00:00.000Z";
@@ -232,6 +255,7 @@ describe("round 23 — sender projection through signed federation receive", () 
     });
     const sent: any[] = [];
     let projectionCalls = 0;
+    const retryRows = new Map<string, any>();
     globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
       const url = String(urlInput);
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
@@ -240,6 +264,9 @@ describe("round 23 — sender projection through signed federation receive", () 
       ] });
       if (url.endsWith("/FederationInstance")) return Response.json({ id: PEER_ID, publicKey, role: "spoke" });
       if (body?.operation === "search_by_conditions") {
+        if (body.table === "FederationRetry") {
+          return Response.json([...retryRows.values()].filter((row) => row.state === "pending" && row.peerId === "hub" && row.table === "Memory"));
+        }
         if (body.table !== "Memory") return Response.json([]);
         // The REAL sender query passes Harper's ops validation and projection.
         // A fetch mock returning the entire row would hide this regression.
@@ -250,6 +277,10 @@ describe("round 23 — sender projection through signed federation receive", () 
         });
         return Response.json(JSON.parse(projected));
       }
+      if (body?.operation === "search_by_hash" && body.table === "FederationRetry") {
+        const hashes: string[] = body.hash_values ?? [];
+        return Response.json(hashes.map((id) => retryRows.get(id)).filter(Boolean));
+      }
       if (url.endsWith("/FederationSync")) {
         sent.push(...structuredClone(body.records));
         const result = await new (FederationSync as any)().post(body);
@@ -258,7 +289,13 @@ describe("round 23 — sender projection through signed federation receive", () 
       if (body?.operation === "search_by_value" && body.table === "Peer") {
         return Response.json([{ id: "hub", role: "hub", status: "connected" }]);
       }
-      if (body?.operation === "update" || body?.operation === "upsert") return Response.json({ update_hashes: ["hub"] });
+      if (body?.operation === "update" || body?.operation === "upsert") {
+        if (body.table === "FederationRetry") {
+          for (const row of body.records ?? []) retryRows.set(row.id, { ...retryRows.get(row.id), ...row });
+          return Response.json({ update_hashes: (body.records ?? []).map((r: any) => r.id) });
+        }
+        return Response.json({ update_hashes: ["hub"] });
+      }
       throw new Error(`Unexpected round-trip fetch: ${url} ${body?.operation}`);
     }) as any;
     const { runFederationSyncOnce } = await import("../../src/cli.ts");

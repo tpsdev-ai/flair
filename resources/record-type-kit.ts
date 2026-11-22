@@ -189,10 +189,8 @@ function ownerOnlyReadScope(ownerField: string): (authAgentId: string) => Promis
 
 /**
  * Resolve the read-scope resolver for a table, by mode:
- *   - "owner-only": own records only, scoped on `ownerField` (defaults to
- *     "agentId" — every current owner-only caller uses that field; the
- *     parameter exists so a future owner-only type using a different field,
- *     the way OrgEvent's WRITE path uses "authorId", isn't hardcoded out).
+ *   - "owner-only": own records only, scoped on `ownerField`. The owner field
+ *     defaults to "agentId"; Credential supplies "principalId".
  *   - "open-within-org": delegates to the EXACT existing
  *     resolveReadScope()/PRIVATE_VISIBILITY semantics in
  *     ./memory-read-scope.ts — Memory's own module, untouched, not

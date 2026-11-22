@@ -26,10 +26,8 @@
  * (resources/Memory.ts: "a non-admin agent may only write memories it
  * owns") would 403 every single legitimate call. Bypassing that check
  * instead would open the door to modifying ANY field on another agent's
- * memory through this surface — not just the count. So this endpoint does
- * the narrowest possible thing instead: a TARGETED `usageCount`-only
- * bump (read-full-record, merge just this one field, write — see
- * ./usage-recording.ts's recordUsageContribution()) against the RAW
+ * memory through this surface — not just the count. This endpoint increments
+ * `usageCount` with a commit marker against the RAW
  * `Memory` table object, entirely bypassing the `Memory` RESOURCE class
  * (and its ownership gate) — its own auth model is verified-agent +
  * within-org + the caller's READ SCOPE + explicitly NO ownership requirement.

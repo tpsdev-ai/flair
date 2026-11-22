@@ -1,0 +1,1 @@
+- **Before answering success, an AgentSeed confirms each starter memory it wrote in a fresh committed read and returns the stored rows.** A committed row that does not show the seed's write, or a failed read, answers `500 agent_seed_unconfirmed` (#2645).

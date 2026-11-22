@@ -33,7 +33,7 @@
  * For addressed single-record HTTP PUT/PATCH, Harper loads the row through
  * `Table.getResource` → `resource._loadRecord` before the resource method runs;
  * a no-argument `super.get()` then returns the cached row. If reached before
- * that load, the non-admin write guard checks string or number body ids before stored ownership.
+ * that load, the non-admin write guard checks the body id before stored ownership.
  * Its stored-row read failure returns `owner_check_unavailable`. The
  * real-Harper test injects an initial load failure: a non-admin agent gets that
  * named refusal, and an administrator gets Harper's own 500. It does not cover

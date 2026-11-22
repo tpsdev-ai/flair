@@ -87,7 +87,7 @@ async function insertGrant(harper: HarperInstance, ownerId: string, granteeId: s
   expect(res.status, `MemoryGrant insert ${ownerId}->${granteeId} returned ${res.status}`).toBe(200);
 }
 
-/** Signed PUT to /Memory/<id> — the only HTTP-reachable create path, so the
+/** Signed PUT to /Memory/<id> — the write path these tests use, so the
  *  embedding is generated for real (Memory.ts put() → getEmbedding()), not
  *  synthesized. */
 async function putMemory(harper: HarperInstance, agent: TestAgent, id: string, body: Record<string, any>): Promise<void> {

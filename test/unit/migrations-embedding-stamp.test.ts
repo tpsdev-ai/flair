@@ -360,3 +360,28 @@ describe("embedding-stamp migration — flair#2465: the embedded-text hash bindi
     expect(await m.countPending()).toBe(0);
   });
 });
+
+describe("embedding-stamp migration — a loopback PATCH that may have written", () => {
+  it("reports a 503 write_outcome_unknown row as unconfirmed, not counted", async () => {
+    const { table } = makeFakeMemoryTable([
+      { id: "m1", agentId: "a1", content: "a", embeddingModel: null },
+    ]);
+    const originalFetch = globalThis.fetch;
+    const originalPass = process.env.HDB_ADMIN_PASSWORD;
+    process.env.HDB_ADMIN_PASSWORD = "test-admin-password";
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: "write_outcome_unknown" }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch;
+    try {
+      // No third argument: the real loopback regen path, with fetch answered above.
+      const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL);
+      expect(await m.run(10)).toEqual({ processed: 0, touchedIds: [], unconfirmedIds: ["m1"] });
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalPass === undefined) delete process.env.HDB_ADMIN_PASSWORD;
+      else process.env.HDB_ADMIN_PASSWORD = originalPass;
+    }
+  });
+});

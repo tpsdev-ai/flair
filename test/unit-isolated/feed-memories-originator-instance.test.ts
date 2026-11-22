@@ -37,6 +37,7 @@ function fromStore(): AsyncIterable<any> {
 const databasesMock = {
   flair: {
     Memory: {
+      primaryStore: { tryLock: () => true, unlock: () => {}, resetReadTxn: () => {} },
       get: async (id: string) => memoryStore.get(id) ?? null,
       put: async (record: any) => {
         if (txn.stage(record.id, { ...record })) return record;

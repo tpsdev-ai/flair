@@ -1,0 +1,1 @@
+- **Migration re-checks retain unconfirmed ids for unrecognized answers and log types without answer content; a later verified batch can clear those ids.** During re-check, the migration runner keeps an unconfirmed id for any answer other than at-target or no-row and logs an unrecognized answer's type and, for strings, its length. A later verified batch can clear the id.

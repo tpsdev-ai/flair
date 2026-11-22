@@ -135,7 +135,7 @@ Verified against a real instance: that lands `kind: "agent"`, `status: "active"`
 
 > **Prefer this to `databases.flair.Agent.put()`.** The raw table applies **no** defaults, so a hand-written literal has to reproduce every field above and then stay in step with Flair as the Principal model grows. Records written that way are missing `kind`/`status`/`defaultTrustTier` and read as under-specified Principals in the admin surfaces.
 
-> **Admin is one meaning with one answer.** `role === "admin"` is the authority; the `admin` boolean is a mirror of it that the server maintains. Write **either** through the `Agent` resource and both are set — you no longer have to know which one is real, and a record cannot be stored saying one thing in one field and the opposite in the other. Nothing reads the mirror to make an authorization decision, and a promotion applied through the resource takes effect on the next request rather than after the 60-second admin-lookup cache expires.
+> **Admin is one meaning with one answer.** On the Agent record, `role === "admin"` is the authority; the `admin` boolean is a mirror of it that the server maintains. An id listed in the instance's `FLAIR_ADMIN_AGENTS` is also an administrator, whatever its record's role. Write **either** through the `Agent` resource and both are set — you no longer have to know which one is real, and a record cannot be stored saying one thing in one field and the opposite in the other. The signed-request admin lookup does not use the `admin` mirror.
 >
 > A record written straight to the table (`databases.flair.Agent.put()`, an ops-API insert, a federation merge) skips that reconciliation and can still carry a mismatch. `flair principal show` and the admin dashboard flag such a record rather than silently picking a side; re-issuing the grant repairs it.
 
@@ -154,7 +154,7 @@ Flair accepts the public key as 64-char hex, or base64 of the raw 32 bytes.
 
 Both verified end to end: an agent registered this way, with a key its app minted, then authenticated over HTTP with a real `TPS-Ed25519` signature — and a request signed with the *wrong* key was rejected.
 
-> **Two traps.** `Agent.put()` on the *resource* silently strips `publicKey`, so set the key when you **create** the record; to rotate one later, write `databases.flair.Agent.put({ ...existing, publicKey })` on the raw table (which is what `flair agent rotate-key` does through the admin ops API — there is no dedicated endpoint today). And do **not** call `AgentSeed` in-process: although its `allowCreate()` explicitly permits the trusted `internal` verdict, its `post()` then re-checks for a named admin and returns `403 forbidden: admin only` — confirmed by running it.
+> **Setting the key, and who may call `AgentSeed`.** `Agent.put()` on the *resource* is an administrator operation (a trusted in-process call is admitted; over HTTP an agent that is not an administrator is refused and updates its own record with PATCH). It updates an existing record and keeps its stored `publicKey` (a `publicKey` in the body is ignored), and an admitted PUT to an id with no record is refused with `404 agent_put_requires_existing`, so set the key when you **create** the record; to rotate one later, write `databases.flair.Agent.put({ ...existing, publicKey })` on the raw table (`flair agent rotate-key` does the equivalent through the admin operations API, an `update` of the record's `publicKey` — there is no dedicated endpoint today). `AgentSeed` writes the agent's Soul, so its `post()` admits only a Soul-write source (`authorizeSoulWrite` in `resources/soul-write-policy.ts`): over HTTP, operator Basic (a verified Harper administrator's `Basic` credential; an admin agent's `TPS-Ed25519` key is refused `403 soul_write_requires_operator`), and in-process, a deliberate trusted internal call made with `internalContext()` on the resource `collectionResource()` binds. `collectionResource()` called without a context throws `InProcessContextError` before `post()` runs, and an explicit context that lacks the internal marker is refused `403 soul_write_requires_operator`. An unauthenticated request is refused.
 
 ---
 
@@ -178,7 +178,9 @@ Flair uses the raw table where it *wants* to bypass its own rules — the federa
 | `{ request: { tpsAnonymous: true } }` | `anonymous` | Denied everywhere |
 | `{ request: { tpsAgent: "mybot" } }` | `agent` | Scoped to that agent — **use this** |
 | `{ request: { tpsAgent: "mybot", tpsAgentIsAdmin: true } }` | admin | Unfiltered reads, cross-agent writes |
-| **Nothing**, or an empty/missing `tpsAgent` | `internal` | **Trusted. Unfiltered.** See the warning above. |
+| **Nothing** (with no ambient Harper context), or an in-process `{ request: {} }` | `internal` | Unfiltered `Memory` reads. An `allowAdmin` check admits it only when the context carries the marker that `internalContext()` sets and no request headers, and refuses it otherwise. See the warning below. |
+
+A context with an anonymous marker or request headers can resolve differently.
 
 Build these with `agentContext(id)`, `adminContext(id)` and `internalContext()` rather than by hand — see [below](#the-api-is-built-so-omission-cannot-happen-quietly) for why the hand-written form is a trap.
 
@@ -198,7 +200,7 @@ There are exactly two ways to lose the model, from opposite ends. Both are pinne
 
 | | |
 |---|---|
-| **By omission** | No usable agent id ⇒ `internal` ⇒ admin-equivalent, unfiltered. |
+| **By omission** | No context argument and no ambient Harper context, or an in-process `{ request: {} }` ⇒ `internal` ⇒ unfiltered `Memory` reads. Without the marker that `internalContext()` sets, an `allowAdmin` check refuses it when Harper consults the gate. |
 | **By assertion** | An attacker-influenced `agentId` is honoured verbatim. |
 
 ### The API is built so omission cannot happen quietly
@@ -207,19 +209,19 @@ There are exactly two ways to lose the model, from opposite ends. Both are pinne
 
 ```
 resolveAgentAuth({ request: { tpsAgent: undefined } })  ->  { kind: "internal" }
-allowAdmin({ request: { tpsAgent: undefined } })        ->  true
+allowAdmin({ request: { tpsAgent: undefined } })        ->  false
 ```
 
-That would turn the most ordinary bug there is — `agentContext(session.agentId)` where the field came back undefined — into silent administrator access. So the helpers refuse rather than default:
+That would turn `agentContext(session.agentId)`, where the field came back undefined, into unfiltered `Memory` reads across every agent. The admin-only gate refuses it: `allowAdmin` admits the `internal` verdict only for a call that carries `internalContext()`'s marker and no request headers. So the helpers refuse rather than default:
 
 | | |
 |---|---|
 | `agentContext(id)` | **Throws** `InProcessContextError` on a missing, empty or blank id. Takes **no options**, so no object spread into it can escalate. |
-| `adminContext(id)` | The *only* way to get admin authority. Same id guard. |
-| `internalContext()` | The *only* way to get the unfiltered verdict. |
+| `adminContext(id)` | Builds `{ request: { tpsAgent: id, tpsAgentIsAdmin: true } }`. Same id guard. |
+| `internalContext()` | Builds `{ request: {}, __flairInternal: true }`, which resolves to `internal` and carries the marker that `allowAdmin` checks. |
 | `collectionResource(Cls, context)` | Context is **required**; omitting it throws rather than granting `internal`. |
 
-The privileged paths are now the longest ones to type, and `git grep "adminContext\|internalContext"` enumerates every deliberate escalation in your codebase. These are runtime guards, not type annotations — a plain-JavaScript embedder gets exactly the same protection.
+Elevated calls have named helpers, and `git grep "adminContext\|internalContext"` finds textual references to those helper names in tracked files. These are runtime guards, not type annotations.
 
 ### Individual identities, not one app identity
 
@@ -346,11 +348,11 @@ export async function remember(agentId, content, opts = {}) {
 >
 > `collectionResource(Cls, context)` is a two-line wrapper over the supported call — `Cls.getResource({}, context, { isCollection: true })` — and exists so this is written once. **Reads do not need it:** `Cls.get(id, context)` and `Cls.search(query, context)` thread the context themselves.
 >
-> They do still need the **context**. Only the collection binding is unnecessary for a read, never the identity — `Cls.search(query)` with the second argument left off resolves to the trusted `internal` verdict when it runs outside a request scope (a boot hook, a timer, a queue worker, a detached promise) and returns every agent's private records. On that path the resource's `allow*` gate is not consulted at all. Pass the context to every call, read and write.
+> They do still need the **context**. Pass the context to every call, read and write; the warning below covers what omitting it does.
 
-> ### ⚠️ A resource with no context is an administrator
+> ### ⚠️ A `Memory` read with no context can run unfiltered
 >
-> A resource built without a context resolves to Flair's trusted `internal` verdict and runs **unfiltered** — every read unscoped, every write unowned. Silently. No error, no warning, no trace.
+> A resource given no context, when no ambient Harper context is present, resolves to Flair's trusted `internal` verdict. A `Memory` read then runs **unfiltered** across every agent, and the omission raises no error. An `allowAdmin` check refuses the same verdict when Harper consults the gate.
 >
 > Measured, not inferred: a context-less `Memory.search()` returns every agent's `private` records, and so does a context-less `SemanticSearch`.
 >
@@ -383,7 +385,7 @@ export async function registerAgent(id, { publicKey = "pending", admin = false }
 
 ### What we measured, so you do not have to
 
-Run end to end on **Harper 5.1.22**, from a second component loaded into the same instance — the exact shape above. `test/integration/in-process-agents.test.ts` in the Flair repo is that run, and `test/fixtures/inproc-app` is the component it drives.
+Run end to end on **Harper 5.1.22**, from a second component loaded into the same instance — the exact shape above. `test/integration-heavy/in-process-agents.test.ts` in the Flair repo is that run, and `test/fixtures/inproc-app` is the component it drives.
 
 | Claim | Result |
 |---|---|
@@ -402,4 +404,4 @@ Handlers return a `Response` for `401`/`403`/`400` rather than throwing — chec
 
 ## See also
 
-[Integrations](integrations.md) · [Deployment](deployment.md) · [Federation](federation.md) · [Auth](auth.md) · [Architecture](../DESIGN.md)
+[Integrations](integrations.md) · [Deployment](deployment.md) · [Federation](federation.md) · [Auth](auth.md) · [Architecture](https://github.com/tpsdev-ai/flair/blob/main/DESIGN.md)

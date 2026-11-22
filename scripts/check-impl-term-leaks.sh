@@ -198,7 +198,7 @@ done < "$TMPFILE"
 # Without -H a one-file scan (the exact shape of the unit fixtures) would
 # print the raw line and never name the token or the rule (flair#1381).
 set +e
-OUTPUT=$(grep -n -H -E "$PATTERNS" "${FILES[@]}" 2>"$ERRFILE")
+OUTPUT=$(grep -n -H -E "$PATTERNS" ${FILES[@]+"${FILES[@]}"} 2>"$ERRFILE")
 GREP_RC=$?
 set -e
 

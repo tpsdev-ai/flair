@@ -111,6 +111,9 @@ describe("exception baseline is ungameable (flair#1825)", () => {
 });
 
 describe("the gate today (flair#1825)", () => {
+  // This case scans the full test tree, parsing each file with TypeScript's
+  // parser (flair#2774); on a CI runner that has taken longer than bun's
+  // default 5 s per-test timeout, hence the explicit one.
   it("the current tree has ZERO new and ZERO stale offenders (0 after the change)", () => {
     // Pre-change the extended scanner finds 149 offenders (34 spawn + 115 case);
     // after the change the six named sites are budgeted and the rest baselined.
@@ -120,7 +123,7 @@ describe("the gate today (flair#1825)", () => {
     expect(newOffenders).toEqual([]);
     expect(staleEntries).toEqual([]);
     expect(ok).toBe(true);
-  });
+  }, 60_000);
 
   it("offenderKey is never a file:line and is stable across whitespace", () => {
     const o = { file: "test/unit/x.test.ts", scope: "runCli", fingerprint: normalizeFingerprint('["bun",\n  "src/cli.ts"]'), kind: "spawn-no-timeout", occurrence: 0 };

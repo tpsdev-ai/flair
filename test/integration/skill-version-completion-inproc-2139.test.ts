@@ -7,10 +7,6 @@
 // update paths. Each must return the ACTUAL successor id, and the stable
 // subject must carry the chain across the changed physical ids.
 //
-// This is acceptance COVERAGE, not a behaviour change: the writer response
-// already returns the successor id on #2246's head, so these cases pass there
-// too. They are kept green-on-green on purpose — the deferred work this closes
-// was the missing end-to-end acceptance through the in-process seam.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -80,6 +76,33 @@ afterAll(async () => {
 }, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2139 S2c (6) — in-process POST / MCP skill update returns the successor id", () => {
+  for (const abort of [true, false]) {
+    test(`a skill POST and its version follow the caller's ${abort ? "abort" : "commit"}`, async () => {
+      const id = `${AGENT}-joined-${abort}`;
+      const credential = `ghp_${"a".repeat(24)}`;
+      const res = await fleet("supersedeInCallerTransaction", {
+        agentId: AGENT, id, content: "joined procedure", tags: ["skill"],
+        metadata: JSON.stringify({ name: credential, description: "joined description" }),
+        trigger: "when joined", abort,
+      });
+      expect(res.ok, JSON.stringify(res)).toBe(true);
+      expect(res.value).toEqual({ aborted: abort, written: true });
+      const rows = await ops({
+        operation: "search_by_hash", database: "flair", table: "Memory", hash_values: [id], get_attributes: ["*"],
+      });
+      const versions = await versionsOf(id);
+      if (abort) {
+        expect(rows).toEqual([]);
+        expect(versions).toEqual([]);
+      } else {
+        expect(rows).toHaveLength(1);
+        expect(rows[0].content).toBe("joined procedure");
+        expect(JSON.parse(rows[0].metadata)).toEqual({ name: "[redacted]", description: "joined description" });
+        expect(versions.map((v) => [v.kind, v.memoryId])).toEqual([["create", id]]);
+      }
+    }, 120_000);
+  }
+
   test("skill_store (in-process Memory.post) appends a create version at the returned id", async () => {
     const res = await tool("skill_store", { content: "procedure v1", trigger: "when v1", name: "proc" });
     expect(res.id, res.error ?? "").toBeTruthy();

@@ -708,9 +708,8 @@ class MemoryApi {
         record.usedMemoryIds = opts.usedMemoryIds;
       }
       applyPointerFields(record);
-      // The Memory schema does not expose a working HTTP POST route (see
-      // resources/Memory.ts) — Memory.post() is only reachable in-process
-      // (resources/mcp-tools.ts). So the supersede-link write goes through
+      // An HTTP POST /Memory reaches Memory.post() (resources/Memory.ts), but
+      // this client writes through PUT: the supersede-link write goes through
       // the same PUT-with-explicit-(new)-id path as a normal create; the
       // server's Memory.put() validates/authorizes `supersedes`, writes this
       // new record, then closes the old one transactionally (write-new

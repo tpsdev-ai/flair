@@ -94,21 +94,7 @@ beforeAll(async () => {
   await mkdir(join(appDir, "node_modules", "@tpsdev-ai"), { recursive: true });
   await symlink(REPO_ROOT, join(appDir, "node_modules", "@tpsdev-ai", "flair"), "dir");
   pauseDir = await mkdtemp(join(tmpdir(), "flair-gvm-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper({ cwd: appDir, harperBinDir: REPO_ROOT });
-  } finally {
-    // The spawned Harper has its copy; no later Harper in this process inherits it.
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir }, cwd: appDir, harperBinDir: REPO_ROOT });
   await fleet("register", { id: OWNER });
   await fleet("register", { id: GRANTEE });
   await ops({

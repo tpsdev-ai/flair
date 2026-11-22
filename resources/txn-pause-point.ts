@@ -26,9 +26,8 @@ const POLL_MS = 20;
  * (after the pre-existing ownership read, before the delete's transactional
  * re-read or staging) and an in-transaction point (between that transaction's
  * ownership re-read and its delete), so both interleavings of a concurrent
- * owner change can be exercised. The write transaction is one the delete
- * owns, except Memory's ordinary delete: withSharedWriteTransaction JOINS a
- * request-owned transaction when one exists and creates one otherwise.
+ * owner change can be exercised. The write transaction is one the delete owns
+ * (Memory's ordinary delete included, since flair#2632).
  */
 export const PAUSE_POINT_PATTERN = /^[a-z]+(?:-[a-z]+)*$/;
 
@@ -52,10 +51,117 @@ function logRefusal(): void {
   console.warn("txn-pause-point: filesystem check failed; hook inert");
 }
 
+/**
+ * A test-only failure switch, gated and path-checked like {@link txnPausePoint}:
+ * true when the caller armed `fail.<point>`. The caller turns it into the
+ * failure its branch handles (a thrown read, a skipped write). Inert unless
+ * the fault-injection opt-in is set.
+ */
+export function txnFault(
+  point: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (!PAUSE_POINT_PATTERN.test(point)) throw new InvalidPausePointError(point);
+  if (env[TEST_FAULT_INJECTION_ENV] !== "1") return false;
+  let armPath: string;
+  try {
+    const configured = env[TEST_PAUSE_DIR_ENV];
+    if (!configured || !isAbsolute(configured) || !process.getuid || !constants.O_NOFOLLOW) throw new Error();
+    const dir = realpathSync(configured);
+    const info = statSync(dir);
+    if (lstatSync(configured).isSymbolicLink() || !isInside(realpathSync(tmpdir()), dir) ||
+      !info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o022) !== 0) throw new Error();
+    armPath = join(dir, `fail.${point}`);
+  } catch {
+    logRefusal();
+    return false;
+  }
+  try {
+    const fd = openSync(armPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    if (!fstatSync(fd).isFile()) {
+      closeSync(fd);
+      return false;
+    }
+    closeSync(fd);
+    unlinkSync(armPath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    logRefusal();
+    return false;
+  }
+}
+
+/**
+ * Synchronous form of {@link txnPausePoint} for callers that cannot await
+ * (migration-lock acquisition is synchronous). It claims the same
+ * `arm.<point>` / `paused.<point>` / `released.<point>` / `go.<point>` marker
+ * files and blocks the calling thread in bounded sleeps until the go file
+ * appears or `limitMs` expires. Inert unless the fault-injection opt-in is
+ * set (flair#2866).
+ */
+export function txnPausePointSync(
+  point: string,
+  env: NodeJS.ProcessEnv = process.env,
+  limitMs: number = PAUSE_LIMIT_MS,
+  snapshot?: unknown,
+): void {
+  if (!PAUSE_POINT_PATTERN.test(point)) throw new InvalidPausePointError(point);
+  if (env[TEST_FAULT_INJECTION_ENV] !== "1") return;
+  let armFd: number | undefined;
+  let pausedFd: number | undefined;
+  let releasedFd: number | undefined;
+  let dir: string | undefined;
+  try {
+    const configured = env[TEST_PAUSE_DIR_ENV];
+    if (!configured || !isAbsolute(configured) || !process.getuid || !constants.O_NOFOLLOW) throw new Error();
+    dir = realpathSync(configured);
+    const info = statSync(dir);
+    if (lstatSync(configured).isSymbolicLink() || !isInside(realpathSync(tmpdir()), dir) ||
+      !info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o022) !== 0) throw new Error();
+    const armPath = join(dir, `arm.${point}`);
+    try {
+      armFd = openSync(armPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (!fstatSync(armFd).isFile()) throw new Error();
+    const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
+    closeSync(openSync(join(dir, `claimed.${point}`), flags, 0o600));
+    pausedFd = openSync(join(dir, `paused.${point}`), flags, 0o600);
+    releasedFd = openSync(join(dir, `released.${point}`), flags, 0o600);
+    writeFileSync(pausedFd, snapshot === undefined ? String(Date.now()) : JSON.stringify(snapshot));
+    unlinkSync(armPath);
+  } catch {
+    if (pausedFd !== undefined) closeSync(pausedFd);
+    if (releasedFd !== undefined) closeSync(releasedFd);
+    logRefusal();
+    return;
+  } finally {
+    if (armFd !== undefined) closeSync(armFd);
+  }
+  const paused = pausedFd as number;
+  const released = releasedFd as number;
+  try {
+    const go = join(dir as string, `go.${point}`);
+    const deadline = Date.now() + limitMs;
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+    while (!existsSync(go) && Date.now() < deadline) Atomics.wait(sleeper, 0, 0, POLL_MS);
+    writeFileSync(released, existsSync(go) ? "go" : "timeout");
+  } catch {
+    logRefusal();
+  } finally {
+    closeSync(paused);
+    closeSync(released);
+  }
+}
+
 export function txnPausePoint(
   point: string,
   env: NodeJS.ProcessEnv = process.env,
   limitMs: number = PAUSE_LIMIT_MS,
+  snapshot?: unknown,
 ): Promise<void> | undefined {
   if (!PAUSE_POINT_PATTERN.test(point)) throw new InvalidPausePointError(point);
   if (env[TEST_FAULT_INJECTION_ENV] !== "1") return undefined;
@@ -83,7 +189,7 @@ export function txnPausePoint(
     closeSync(claimedFd);
     pausedFd = openSync(join(dir, `paused.${point}`), flags, 0o600);
     releasedFd = openSync(join(dir, `released.${point}`), flags, 0o600);
-    writeFileSync(pausedFd, String(Date.now()));
+    writeFileSync(pausedFd, snapshot === undefined ? String(Date.now()) : JSON.stringify(snapshot));
     unlinkSync(armPath);
   } catch {
     if (pausedFd !== undefined) closeSync(pausedFd);

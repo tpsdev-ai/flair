@@ -1,5 +1,5 @@
 /**
- * migrations-progress-boot-failure.test.ts — `markIdleMigrationsFailed`
+ * migrations-progress-boot-failure.test.ts — `markUnstartedMigrationsFailed`
  * (flair#812), the lever the boot path uses to turn an instance-wide
  * "the cycle could not run" into the per-migration state `flair doctor` and
  * `flair quality`'s `instance.migrationsClean` actually read.
@@ -15,7 +15,7 @@
  */
 import { describe, it, expect, beforeEach } from "bun:test";
 import {
-  markIdleMigrationsFailed,
+  markUnstartedMigrationsFailed,
   listMigrationProgress,
   seedIdleProgress,
   setMigrationProgress,
@@ -28,11 +28,11 @@ beforeEach(() => {
   _resetProgressForTests();
 });
 
-describe("markIdleMigrationsFailed", () => {
+describe("markUnstartedMigrationsFailed", () => {
   it("marks every migration that never started, carrying the reason", () => {
     seedIdleProgress(["embedding-stamp", "graph-heal", "visibility-backfill"]);
 
-    const marked = markIdleMigrationsFailed(
+    const marked = markUnstartedMigrationsFailed(
       ["embedding-stamp", "graph-heal", "visibility-backfill"],
       REASON,
     );
@@ -48,7 +48,7 @@ describe("markIdleMigrationsFailed", () => {
     seedIdleProgress(["a", "b"]);
     setMigrationProgress({ id: "a", rowsDone: 3, rowsRemaining: 7, state: "halted", reason: "blocked on disk: …" });
 
-    const marked = markIdleMigrationsFailed(["a", "b"], REASON);
+    const marked = markUnstartedMigrationsFailed(["a", "b"], REASON);
 
     expect(marked).toEqual(["b"]);
     const a = listMigrationProgress().find((p) => p.id === "a");
@@ -61,7 +61,7 @@ describe("markIdleMigrationsFailed", () => {
     seedIdleProgress(["done", "never-ran"]);
     setMigrationProgress({ id: "done", rowsDone: 12, rowsRemaining: 0, state: "completed" });
 
-    const marked = markIdleMigrationsFailed(["done", "never-ran"], REASON);
+    const marked = markUnstartedMigrationsFailed(["done", "never-ran"], REASON);
 
     expect(marked).toEqual(["never-ran"]);
     expect(listMigrationProgress().find((p) => p.id === "done")?.state).toBe("completed");
@@ -69,13 +69,13 @@ describe("markIdleMigrationsFailed", () => {
   });
 
   it("marks an id with no progress entry at all (nothing has spoken for it either)", () => {
-    expect(markIdleMigrationsFailed(["unseeded"], REASON)).toEqual(["unseeded"]);
+    expect(markUnstartedMigrationsFailed(["unseeded"], REASON)).toEqual(["unseeded"]);
     expect(listMigrationProgress().find((p) => p.id === "unseeded")?.state).toBe("failed");
   });
 
   it("returns an empty list when every migration already reached a terminal state", () => {
     seedIdleProgress(["x"]);
     setMigrationProgress({ id: "x", rowsDone: 0, rowsRemaining: 0, state: "running" });
-    expect(markIdleMigrationsFailed(["x"], REASON)).toEqual([]);
+    expect(markUnstartedMigrationsFailed(["x"], REASON)).toEqual([]);
   });
 });

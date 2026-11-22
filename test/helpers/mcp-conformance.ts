@@ -21,6 +21,7 @@ import { estimateTokens } from "../../resources/token-estimate";
 // seeded/delivered rows, not against hardcoded fixture strings (which tracked
 // the fixture, not the semantic class the #1200 filter suppresses).
 import { isZeroRowNoOpEvent } from "../../resources/memory-bootstrap-lib";
+import { RESERVED_EVENT_KINDS } from "../../src/lib/instruction-event-contract";
 
 type FieldType = "string" | "number" | "boolean" | "object" | "array";
 function jsTypeOf(v: any): string {
@@ -134,11 +135,13 @@ export function conform(toolName: string, result: any, contract: ToolContract, o
     const arr = getPath(result, container) ?? [];
     const seen = new Set<string>();
     for (const item of arr) {
-      const sig = JSON.stringify(signatureFields.map((f) => {
-        const v = item?.[f];
-        return Array.isArray(v) ? [...v].sort() : (v ?? null);
-      }));
-      expect(seen.has(sig), `${toolName}: duplicate '${container}' entry by content-signature ${sig}`).toBe(false);
+      const sig = JSON.stringify(container === "events" && RESERVED_EVENT_KINDS.includes(item?.kind)
+        ? ["instruction", item.refId]
+        : signatureFields.map((f) => {
+          const v = item?.[f];
+          return Array.isArray(v) ? [...v].sort() : (v ?? null);
+        }));
+      expect(seen.has(sig), `${toolName}: duplicate '${container}' entry by signature ${sig}`).toBe(false);
       seen.add(sig);
     }
   }

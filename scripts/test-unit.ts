@@ -22,6 +22,7 @@ import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isola
 // `unitPlan` and `ROOT_STEP_TIMEOUT_MS` from this module.
 import {
   LANE_SHARDS,
+  N8N_STEP_TIMEOUT_MS,
   ROOT_STEP_TIMEOUT_MS,
   laneShardPlans,
   unitPlan,
@@ -47,21 +48,26 @@ export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv):
 // final summary nor the end-of-lane guards ever run. Every number below is
 // derived from that job: `.github/workflows/test.yml`, job `test-unit`,
 // `timeout-minutes: 22`. Measured on 105 completed `Unit Tests (node N, shard
-// M)` legs from the last 45 `test.yml` runs (2026-10-17), plus a local run on
-// the same tree:
+// M)` legs from the last 45 `test.yml` runs (2026-10-17), plus 16 legs from 8
+// recent completed `test.yml` runs and a local run on the same tree
+// (2026-10-18):
 //   - the job's own steps outside the lane (setup before it, the skip-count
 //     check and post steps after it): at most 53 s (2026-09-29);
 //   - the whole lane: each leg runs one shard (flair#2311); the slowest shard
-//     measured at least 781 s (its slowest legs were killed at the old 780 s cap,
-//     so 781 s is a lower bound; p90 over the sample 755 s), 740 s locally;
+//     measured 793 s on 2026-10-18 (earlier legs were killed at the old 780 s
+//     cap; p90 over the 2026-10-17 sample 755 s), 740 s locally;
 //   - `root unit tests`: 96–266 s per root shard, and the two root shards one
 //     lane shard carries together measure 229–330 s and 392–526 s;
 //   - the slowest non-root step measured 43 s; in that set the median is 1–2 s.
-// The budget is whole-lane headroom: 1320 − 120 = 1200 s, at most about 1.54×
-// the slowest measured shard (at least 781 s), still subject to each step's own limit below;
-// the old 780 s budget sat below that shard and killed whichever late step was
-// running on a busy runner (flair#2614: four node-22 shard runs were killed at
-// `test/unit-isolated/` steps with steps unrun on 2026-10-17).
+// A CI leg starts the lane after the job's first step records the start, so it
+// runs under the DERIVED budget, not this fixed fallback. Setup measured
+// 24–34 s on the 2026-10-18 legs (`lane deadline: 1166–1176 s`), leaving at
+// least 1.45× the slowest lane at the worst setup (1166 s vs 793 s), still
+// subject to each step's own limit below; the fixed 1320 − 120 = 1200 s
+// fallback is used only when no usable start was recorded. The old 780 s
+// budget sat below the slowest shard and killed whichever late step was running on a busy runner
+// (flair#2614: four node-22 shard runs were killed at `test/unit-isolated/`
+// steps with steps unrun on 2026-10-17).
 // unit-runner.test.ts pins the job limit and re-checks the arithmetic, so a
 // change to either side fails there first.
 //
@@ -72,33 +78,49 @@ export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv):
 
 /** The CI job limit the lane has to report inside (`timeout-minutes: 22`). */
 export const CI_JOB_LIMIT_MS = 22 * 60_000;
-/** Reserved for the job's own steps outside the lane: 53 s measured, 67 s spare. */
+/** Reserved for the runner guards, summary and post-lane workflow steps. */
 export const CI_OUTSIDE_LANE_MS = 120_000;
-/**
- * Keep-going's whole-lane budget: 1320 − 120 = 1200 s, at most about 1.54× the
- * slowest measured shard (at least 781 s; its slowest legs hit the old cap). A step still running when it runs out is killed and every later
- * step is reported as not run, so the summary and both guards are expected to
- * print before the job limit however many steps hang, provided the job's steps
- * outside the lane stay within the reserve above (an observed margin, not a
- * bound on workflow setup).
- */
+/** Keep-going's whole-lane budget without a usable first-step timestamp. */
 export const KEEP_GOING_LANE_BUDGET_MS = CI_JOB_LIMIT_MS - CI_OUTSIDE_LANE_MS;
+/** The epoch-second timestamp recorded by the job's first step (flair#2619). */
+export const JOB_START_ENV = "FLAIR_UNIT_JOB_START";
+/** The minimum remaining lane budget required to start (flair#2619). */
+export const LANE_MIN_BUDGET_MS = 30_000;
+
+/**
+ * Returns the fixed budget for an absent or unusable first-step timestamp, and
+ * `undefined` when less than `LANE_MIN_BUDGET_MS` of lane budget remains.
+ */
+export function laneBudgetMsFromJobStart(env: NodeJS.ProcessEnv, nowMs: number): number | undefined {
+  const recorded = env[JOB_START_ENV]?.trim();
+  if (!recorded) return KEEP_GOING_LANE_BUDGET_MS;
+  const jobStartMs = Number(recorded) * 1000;
+  const elapsedMs = nowMs - jobStartMs;
+  if (!Number.isFinite(jobStartMs) || elapsedMs < 0 || elapsedMs > CI_JOB_LIMIT_MS) {
+    return KEEP_GOING_LANE_BUDGET_MS;
+  }
+  const remaining = CI_JOB_LIMIT_MS - elapsedMs - CI_OUTSIDE_LANE_MS;
+  if (remaining < LANE_MIN_BUDGET_MS) return undefined;
+  return Math.min(remaining, KEEP_GOING_LANE_BUDGET_MS);
+}
 /**
  * The default per-step limit: 150 s, at least 3× the slowest ordinary step (43 s). One
- * hung step costs at most that, so the rest of the slowest lane still runs
- * inside the budget (781 + 150 = 931 s ≤ 1200 s).
+ * hung default step costs at most that, so the rest of the slowest lane still runs
+ * inside the worst derived budget (793 + 150 = 943 s ≤ 1166 s). A step with its
+ * own limit costs at most that limit instead (ROOT_STEP_TIMEOUT_MS for the root
+ * unit shards, N8N_STEP_TIMEOUT_MS for the n8n package).
  */
 export const STEP_TIMEOUT_MS = 150_000;
 // `root unit tests`' own limit is 450 s, 1.69× its slowest measured root shard
-// (266 s). If it hangs, the slowest lane shard's other steps still fit (781 −
-// 266 + 450 = 965 s ≤ 1200 s). It is defined in scripts/ci/lane-shards.mjs, which
+// (266 s). If it hangs, the slowest lane shard's other steps still fit (793 −
+// 266 + 450 = 977 s ≤ 1166 s). It is defined in scripts/ci/lane-shards.mjs, which
 // builds the plan, and re-exported above for this module's tests.
 
 /** The time limits a lane runs under (flair#2030). */
 export interface UnitLaneLimits {
   /** The limit for a step that sets no `timeoutMs` of its own. */
   stepTimeoutMs: number;
-  /** A whole-lane budget. Unset means none. */
+  /** A whole-lane budget. Unset means none; nonpositive means exhausted. */
   laneBudgetMs?: number;
 }
 
@@ -269,6 +291,27 @@ function parseShardArgs(args: readonly string[]): { index: number; of: number } 
   return { index, of };
 }
 
+/** The limits and banner for a lane invocation (flair#2619). */
+export function laneRunSetup(
+  invocation: UnitLaneInvocation,
+  env: NodeJS.ProcessEnv,
+  nowMs: number,
+): { limits?: Readonly<UnitLaneLimits>; mode: string } {
+  const derivedLaneBudgetMs = invocation.keepGoing
+    ? laneBudgetMsFromJobStart(env, nowMs)
+    : undefined;
+  const limits: Readonly<UnitLaneLimits> | undefined = invocation.limits
+    ? { ...invocation.limits, laneBudgetMs: derivedLaneBudgetMs ?? 0 }
+    : undefined;
+  const laneLimit = derivedLaneBudgetMs === undefined
+    ? "remaining lane budget below the start floor"
+    : `lane deadline: ${seconds(derivedLaneBudgetMs)}`;
+  const mode = invocation.keepGoing
+    ? `keep-going: attempts later steps while budget remains; failures are summed at the end; per-step caps: ${seconds(STEP_TIMEOUT_MS)} (root unit tests: ${seconds(ROOT_STEP_TIMEOUT_MS)}; n8n-nodes-flair unit tests: ${seconds(N8N_STEP_TIMEOUT_MS)}), pre-empted by an earlier lane deadline; ${laneLimit}`
+    : "fail-fast: stops at the first failing step; steps are not time-limited";
+  return { limits, mode };
+}
+
 /**
  * The one summary keep-going mode prints at the end: how many steps ran and
  * failed, then each failed step with its reason, then each step the time
@@ -432,8 +475,11 @@ export function runUnitSteps(
   process.env.TMPDIR = laneTempRoot;
   process.env.FLAIR_UNIT_TEMP_ROOT = laneTempRoot;
   const laneBudgetMs = limits?.laneBudgetMs;
-  const deadline = laneBudgetMs === undefined ? Infinity : Date.now() + laneBudgetMs;
-  const budgetRanOut = `the lane's ${seconds(laneBudgetMs ?? 0)} time budget ran out`;
+  const exhaustedBeforeStart = laneBudgetMs !== undefined && laneBudgetMs <= 0;
+  const deadline = exhaustedBeforeStart ? 0 : laneBudgetMs === undefined ? Infinity : Date.now() + laneBudgetMs;
+  const budgetRanOut = exhaustedBeforeStart
+    ? "budget exhausted before start"
+    : `the lane's ${seconds(laneBudgetMs ?? 0)} time budget ran out`;
   // The service-manager tripwire (flair#2062). Created BEFORE the temp-dir
   // snapshot below, so its own scratch directory is never mistaken for a leak
   // this lane caused. Every step runs with `tripwire.dir` FIRST on PATH; after
@@ -523,11 +569,8 @@ export function runUnitSteps(
   const shardTimings: Array<{ index: number; of: number; ms: number }> = [];
   let completed = 0;
   for (const [index, step] of steps.entries()) {
-    if (step.shard && !step.files.length) {
-      console.log(`\n${step.name}: empty shard; skipped`);
-      completed++;
-      continue;
-    }
+    // Check the deadline before skipping an empty shard, so an exhausted lane
+    // runs no step (flair#2619).
     const remaining = deadline - Date.now();
     if (remaining < 1) {
       // The budget is spent before this step could start: it and every later
@@ -536,11 +579,16 @@ export function runUnitSteps(
       console.error(`\nUnit lane: ${budgetRanOut}; ${notRun.length} step${notRun.length === 1 ? "" : "s"} not run.`);
       if (!keepGoing) {
         runGuards();
-        console.error(`Unit lane failed: ${budgetRanOut} before ${step.name}. ${completed}/${steps.length} steps completed.`);
+        console.error(`Unit lane failed: ${budgetRanOut}${exhaustedBeforeStart ? "" : ` before ${step.name}`}. ${completed}/${steps.length} steps completed.`);
         return finish(1);
       }
       for (const skipped of notRun) stepFailures.push({ kind: "not-run", name: skipped.name, detail: budgetRanOut });
       break;
+    }
+    if (step.shard && !step.files.length) {
+      console.log(`\n${step.name}: empty shard; skipped`);
+      completed++;
+      continue;
     }
     console.log(`\n${step.name}${step.files.length ? ` (${step.files.length} files)` : ""}`);
     const stepStartedMs = Date.now();
@@ -575,7 +623,6 @@ export function runUnitSteps(
         console.error(`Unit lane failed: ${step.name} (${reason}). ${completed}/${steps.length} steps completed.`);
         return finish(1);
       }
-      // Keep-going (the CI default): record the failure and run every later step.
       stepFailures.push({ kind: "step", name: step.name, detail: reason, ...(outcome.killedByBudget ? { budgetKill: true } : {}) });
       continue;
     }
@@ -622,16 +669,14 @@ if (import.meta.main) {
       }
       const node = spawnSync("node", ["--version"], { encoding: "utf8" });
       if (node.error || node.status !== 0) throw new Error("Node.js is required on PATH for builds and subprocess tests (see package.json engines).");
-      const mode = invocation.keepGoing
-        ? `keep-going: every step runs and failures are summed at the end; a step is killed after ${seconds(STEP_TIMEOUT_MS)} (root unit tests: ${seconds(ROOT_STEP_TIMEOUT_MS)}) and the lane after ${seconds(KEEP_GOING_LANE_BUDGET_MS)}`
-        : "fail-fast: stops at the first failing step; steps are not time-limited";
+      const { limits, mode } = laneRunSetup(invocation, process.env, Date.now());
       const shardNote = invocation.shard
         ? `; shard ${invocation.shard.index}/${invocation.shard.of} of the shared unit lane (the shared setup steps run in every shard; the rest are this shard's test-bearing steps, flair#2311)`
         : "";
       console.log(`Unit lane: Bun ${Bun.version}; Node ${node.stdout.trim()}; ${steps.length} steps${shardNote}; ${mode}. Ambient FLAIR_/HARPER_/HDB_/FABRIC_ settings are removed from child environments; each step runs under a sandbox HOME and behind a launchctl/systemctl tripwire (a unit test that reaches a host service manager without its own fake fails the lane). A guard fails the lane if a real client config changed. Integration, heavy, Python and Playwright suites are separate.`);
       process.exitCode = runUnitSteps(steps, process.execPath, realHomeDir(), {
         keepGoing: invocation.keepGoing,
-        limits: invocation.limits,
+        limits,
       });
     }
   } catch (error) {

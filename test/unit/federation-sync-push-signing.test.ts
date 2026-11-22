@@ -79,6 +79,7 @@ describe("federation sync push — per-record signing (federation-edge-hardening
 
   function installMock(memoryRows: any[], rowsByTable: Record<string, any[]> = {}) {
     capturedCalls = [];
+    const retryRows = new Map<string, any>();
     globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
       const url = typeof urlInput === "string" ? urlInput : urlInput.toString();
       const method = init?.method ?? "GET";
@@ -92,6 +93,9 @@ describe("federation sync push — per-record signing (federation-edge-hardening
         return res(true, 200, { id: INSTANCE_ID, publicKey: publicKeyB64url, role: "spoke" });
       }
       if (body?.operation === "search_by_conditions") {
+        if (body.table === "FederationRetry") {
+          return res(true, 200, [...retryRows.values()].filter((row) => row.state === "pending" && row.peerId === "hub-1" && row.table === "Memory"));
+        }
         const extra = rowsByTable[body.table];
         if (extra && body.conditions?.[0]?.search_type === "greater_than") {
           return res(true, 200, extra);
@@ -113,7 +117,15 @@ describe("federation sync push — per-record signing (federation-edge-hardening
         // loadInstanceSecretKey DB fallback (keystore is empty in test env)
         return res(true, 200, [{ id: INSTANCE_ID, _keySeed: Buffer.from(testKp.secretKey.slice(0, 32)).toString("base64url") }]);
       }
+      if (body?.operation === "search_by_hash" && body.table === "FederationRetry") {
+        const hashes: string[] = body.hash_values ?? [];
+        return res(true, 200, hashes.map((id) => retryRows.get(id)).filter(Boolean));
+      }
       if (body?.operation === "update" || body?.operation === "upsert") {
+        if (body.table === "FederationRetry") {
+          for (const row of body.records ?? []) retryRows.set(row.id, { ...retryRows.get(row.id), ...row });
+          return res(true, 200, { update_hashes: (body.records ?? []).map((r: any) => r.id) });
+        }
         return res(true, 200, { ok: true });
       }
       if (method === "POST" && url.includes("/FederationSync")) {

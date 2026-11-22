@@ -78,6 +78,20 @@ describe("Memory authority fields over HTTP", () => {
       expect(await read(`new-${field}`)).toBeUndefined();
     }
   }, 30_000);
+  test("request bodies cannot set a write-back marker", async () => {
+    const id = "authority-write-marker";
+    await seed("Memory", [{ id, agentId: owner.id, content: "marker guard", createdAt: now, writeBackWriteId: "stored-attempt" }]);
+    for (const method of ["PUT", "PATCH"]) {
+      for (const value of ["forged", null]) {
+        expect((await request(owner, method, `/Memory/${id}`, { writeBackWriteId: value })).status).toBe(method === "PATCH" ? 204 : 403);
+        expect((await read(id)).writeBackWriteId).toBe("stored-attempt");
+      }
+    }
+    expect((await request(owner, "POST", "/Memory", { id: `${id}-post`, agentId: owner.id, content: "forged marker", writeBackWriteId: "forged" })).status).toBe(403);
+    expect((await request(owner, "POST", "/FeedMemories", { id: `${id}-feed`, content: "forged feed marker", writeBackWriteId: "forged" })).status).toBe(403);
+    const row = await read(id);
+    expect(row.writeBackWriteId).toBe("stored-attempt");
+  }, 60_000);
   test("administrator REST writes cannot manufacture verdicts either", async () => {
     for (const method of ["PUT", "PATCH"]) {
       const response = await fetch(`${harper.httpURL}/Memory/stamped`, {

@@ -9,11 +9,13 @@
  *   - errors mid-flight produce status="failed" with preRestoreSnapshotPath
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, mkdtempSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, jest } from "bun:test";
+import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, mkdtempSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { applySnapshot, type ApiCall, type OpsSearch } from "../src/rem/restore.ts";
+import { applySnapshot, CANDIDATE_LIST_LIMIT, CANDIDATE_LIST_MAX_PAGES, type ApiCall } from "../src/rem/restore.ts";
+import { ApiHttpError } from "../src/lib/auth-resolve.ts";
+import { SOUL_SCOPE_FIELDS_REFUSAL } from "../src/lib/soul-scope-fields.ts";
 import { buildOpsSearch } from "../src/commands/rem.ts";
 import { createSnapshot } from "../src/rem/snapshot.ts";
 import { create as tarCreate, extract as tarExtract } from "tar";
@@ -61,6 +63,7 @@ function recordingApi(handlers: Record<string, (path: string, body?: unknown) =>
     // Default fall-throughs for the read endpoints when not stubbed
     if (method === "GET" && path.startsWith("/Memory?")) return [];
     if (method === "GET" && path.startsWith("/Soul?")) return [];
+    if (method === "GET" && path.startsWith("/AdminMemoryCandidates/")) return { candidates: [], hasMore: false };
     if (method === "DELETE" || method === "PUT") return { ok: true };
     throw new Error(`unexpected api: ${method}:${path}`);
   };
@@ -92,6 +95,9 @@ function statefulApi(seed: { memories?: any[]; souls?: any[]; candidates?: any[]
     calls.push({ method, path, body });
     if (method === "GET" && path.startsWith("/Memory?")) return Array.from(state.memories.values());
     if (method === "GET" && path.startsWith("/Soul?")) return Array.from(state.souls.values());
+    if (method === "GET" && path.startsWith("/AdminMemoryCandidates/")) {
+      return { candidates: Array.from(state.candidates.values()).map((c) => ({ id: c.id })), hasMore: false };
+    }
     if (method === "DELETE" && path.startsWith("/Memory/")) {
       state.memories.delete(decodeURIComponent(path.split("/")[2]));
       return { ok: true };
@@ -128,23 +134,15 @@ describe("applySnapshot — dry-run", () => {
     const { api, calls } = recordingApi({
       "GET:/Memory": () => current,
       "GET:/Soul": () => [{ id: "current-soul", agentId: "test-agent" }],
+      // Candidates are listed through the apiCall the Memory writes use, on the
+      // admin-only route `/AdminMemoryCandidates/{agentId}`.
+      "GET:/AdminMemoryCandidates": () => ({ candidates: [{ id: "cand-1" }, { id: "cand-2" }], hasMore: false }),
     });
-    // Candidates are listed through the injected ops-API helper (admin-authed
-    // ops port), NOT `apiCall` with the REST URL suffix Harper 405s.
-    const opsSearchCalls: Array<{ table: string; conditions: any[]; getAttributes: string[] }> = [];
-    const opsSearch: OpsSearch = async (table, conditions, getAttributes) => {
-      opsSearchCalls.push({ table, conditions, getAttributes });
-      return [
-        { id: "cand-1", agentId: "test-agent", claim: "leftover claim" },
-        { id: "cand-2", agentId: "test-agent", claim: "another claim" },
-      ];
-    };
     const r = await applySnapshot({
       agentId: "test-agent",
       snapshotPath,
       flairVersion: "0.0.0-test",
       apiCall: api,
-      opsSearch,
       preRestoreSnapshotRoot: snapshotRoot,
       tmpRootOverride: testRoot,
       dryRun: true,
@@ -158,15 +156,52 @@ describe("applySnapshot — dry-run", () => {
     expect(r.preRestoreSnapshotPath).toBeUndefined();
     expect(r.errors).toEqual([]);
 
-    expect(calls.some((c) => c.method === "POST" && c.path === "/MemoryCandidate/search_by_conditions")).toBe(false);
+    expect(calls.some((c) => c.method === "GET" && c.path === "/AdminMemoryCandidates/test-agent?limit=500")).toBe(true);
     expect(calls.some((c) => c.path.includes("search_by_conditions"))).toBe(false);
-    expect(opsSearchCalls.length).toBe(1);
-    expect(opsSearchCalls[0].table).toBe("MemoryCandidate");
-    expect(opsSearchCalls[0].conditions).toEqual([
-      { search_attribute: "agentId", search_type: "equals", search_value: "test-agent" },
-    ]);
     const writes = calls.filter((c) => c.method === "DELETE" || c.method === "PUT");
     expect(writes).toEqual([]);
+  });
+
+  it("reports an unrecognised candidate-route body as an error, not as no candidates", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api } = recordingApi({
+      "GET:/Memory": () => [],
+      "GET:/Soul": () => [],
+      "GET:/AdminMemoryCandidates": () => ({ error: "fixture" }),
+    });
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+      dryRun: true,
+    });
+    expect(r.status).toBe("failed");
+    expect(r.errors).toEqual([
+      "fetch-current: the target's MemoryCandidate listing for agent test-agent could not be read completely: GET /AdminMemoryCandidates returned an unexpected response shape: candidates is not an array. No target rows were deleted or written.",
+    ]);
+  });
+
+  it("reports a /Memory 404 with its own message, not the candidate route's, when listing is off", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = recordingApi({
+      "GET:/Memory": () => { throw new ApiHttpError(404, "memory route missing"); },
+    });
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+      dryRun: true,
+      listCandidates: false,
+    });
+    expect(r.status).toBe("failed");
+    expect(r.errors).toEqual(["fetch-current: memory route missing"]);
+    expect(calls.some((c) => c.path.startsWith("/AdminMemoryCandidates/"))).toBe(false);
   });
 });
 
@@ -235,6 +270,82 @@ describe("applySnapshot — missing snapshot", () => {
     expect(r.status).toBe("failed");
     expect(r.errors[0]).toContain("does not exist");
   });
+});
+
+describe("applySnapshot — a refused Soul row", () => {
+  it("reports the row id and refusal from a simulated ApiHttpError", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const inner = statefulApi({ souls: [{ id: "current-soul", agentId: "test-agent" }] });
+    const soulId = snapshotSoul.id;
+    const api: ApiCall = async (method, path, body) => {
+      if (method === "PUT" && path === `/Soul/${encodeURIComponent(soulId)}`) {
+        throw ApiHttpError.fromResponse(403, JSON.stringify({ error: SOUL_SCOPE_FIELDS_REFUSAL }));
+      }
+      return inner.api(method, path, body);
+    };
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("failed");
+    expect(r.errors).toContain(`put-soul ${soulId}: HTTP 403: ${SOUL_SCOPE_FIELDS_REFUSAL}`);
+    expect(r.restored.souls).toBe(0);
+  });
+});
+
+describe("applySnapshot — an unreadable live listing", () => {
+  /**
+   * A 2xx listing whose shape is neither an array nor `{results}`/`{items}`.
+   * asArray would read it as an empty table; the pre-restore snapshot would
+   * miss every live row and the scope preflight would see no live Souls, so
+   * the DELETE and PUT loops must not run (flair#2931).
+   */
+  async function restoreWithListing(table: "Memory" | "Soul", malformed: unknown) {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = recordingApi({
+      "GET:/Memory": () => (table === "Memory" ? malformed : []),
+      "GET:/Soul": () => (table === "Soul" ? malformed : []),
+    });
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: join(testRoot, "pre-restore-snapshots"),
+      tmpRootOverride: testRoot,
+    });
+    const writes = calls.filter((c) => c.method === "DELETE" || c.method === "PUT");
+    const preRestoreRoot = join(testRoot, "pre-restore-snapshots");
+    const snapshots = existsSync(preRestoreRoot) ? readdirSync(preRestoreRoot) : [];
+    return { r, writes, snapshots };
+  }
+
+  for (const table of ["Memory", "Soul"] as const) {
+    it(`refuses a malformed ${table} listing before the snapshot and before any delete or put`, async () => {
+      const { r, writes, snapshots } = await restoreWithListing(table, { data: [], total: 0 });
+
+      expect(r.status).toBe("failed");
+      expect(r.errors.some((e) => e.includes("live-listing-unreadable"))).toBe(true);
+      expect(r.errors.length).toBe(1);
+      expect(r.errors[0]).toContain(`GET /${table}?agentId=test-agent`);
+      expect(r.errors[0]).toContain('"results"');
+      expect(r.errors[0]).toContain('"items"');
+      expect(r.errors[0]).toContain("check the API response");
+      expect(r.preRestoreSnapshotPath).toBeUndefined();
+      expect(snapshots).toEqual([]);
+      expect(writes).toEqual([]);
+      expect(r.deleted.memories).toBe(0);
+      expect(r.deleted.souls).toBe(0);
+      expect(r.restored.memories).toBe(0);
+      expect(r.restored.souls).toBe(0);
+    });
+  }
 });
 
 describe("applySnapshot — real restore", () => {
@@ -323,14 +434,11 @@ describe("applySnapshot — real restore", () => {
       souls: [],
       candidates: [leftover],
     });
-    const opsSearch: OpsSearch = async () => Array.from(state.candidates.values());
-
     const r = await applySnapshot({
       agentId: "test-agent",
       snapshotPath,
       flairVersion: "0.0.0-test",
       apiCall: api,
-      opsSearch,
       preRestoreSnapshotRoot: snapshotRoot,
       tmpRootOverride: testRoot,
     });
@@ -373,7 +481,285 @@ describe("applySnapshot — real restore", () => {
       .split("\n")
       .map((l) => JSON.parse(l));
     expect(lines).toEqual(beforeState);
+    // flair#2680: restore takes no candidate count, so the metadata says so.
+    expect(JSON.parse(readFileSync(join(extractDir, "metadata.json"), "utf-8")).pendingCandidateCount).toBeNull();
   });
+
+  it("a failed candidate listing stops --apply before any delete or write (flair#2687)", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = recordingApi({
+      "GET:/Memory": () => [{ id: "mem-1", agentId: "test-agent" }],
+      "GET:/Soul": () => [{ id: "soul-1", agentId: "test-agent" }],
+      "GET:/AdminMemoryCandidates": () => { throw new Error("route down"); },
+    });
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("failed");
+    const writes = calls.filter((c) => ["DELETE", "PUT", "POST", "PATCH"].includes(c.method));
+    expect(writes).toEqual([]);
+    expect(r.deleted).toEqual({ memories: 0, souls: 0, candidates: 0 });
+    expect(r.errors).toEqual([
+      "fetch-candidates: the target's MemoryCandidate listing for agent test-agent could not be read completely: GET /AdminMemoryCandidates failed: route down. No target rows were deleted or written.",
+    ]);
+  });
+
+  it("lists through the target's apiCall, never an injected operations search", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = recordingApi({
+      "GET:/Memory": () => [],
+      "GET:/Soul": () => [],
+      "GET:/AdminMemoryCandidates": () => ({ candidates: [{ id: "target-candidate" }], hasMore: false }),
+    });
+    let opsCalls = 0;
+    const opts: any = {
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      opsSearch: async () => {
+        opsCalls++;
+        return [{ id: "other-endpoint-candidate" }];
+      },
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+      verifyPostRestore: false,
+    };
+
+    const r = await applySnapshot(opts);
+
+    expect(r.status).toBe("completed");
+    expect(opsCalls).toBe(0);
+    expect(calls.some((c) => c.method === "GET" && c.path.startsWith("/AdminMemoryCandidates/"))).toBe(true);
+    expect(calls.some((c) => c.method === "DELETE" && c.path === "/MemoryCandidate/target-candidate")).toBe(true);
+    expect(calls.some((c) => c.path === "/MemoryCandidate/other-endpoint-candidate")).toBe(false);
+  });
+
+  it("a candidate-route 404 is refused with the server version that adds the route, before any delete or write", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = recordingApi({
+      "GET:/Memory": () => [{ id: "mem-1", agentId: "test-agent" }],
+      "GET:/Soul": () => [{ id: "soul-1", agentId: "test-agent" }],
+      "GET:/AdminMemoryCandidates": () => { throw new ApiHttpError(404, "Not found"); },
+    });
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("failed");
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0]).toContain("GET /AdminMemoryCandidates");
+    expect(r.errors[0]).toContain("Flair server 0.63.0");
+    expect(r.errors[0]).toContain("No target rows were deleted or written.");
+    expect(calls.filter((c) => ["DELETE", "PUT", "POST", "PATCH"].includes(c.method))).toEqual([]);
+  });
+
+  it("refuses listCandidates: false on a live restore before any request", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = recordingApi({
+      "GET:/Memory": () => [{ id: "mem-1", agentId: "test-agent" }],
+      "GET:/Soul": () => [{ id: "soul-1", agentId: "test-agent" }],
+      "GET:/AdminMemoryCandidates": () => ({ candidates: [{ id: "cand-1" }], hasMore: false }),
+    });
+    const soul = recordingApi();
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      soulApiCall: soul.api,
+      listCandidates: false,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(calls.filter((c) => ["DELETE", "PUT", "POST", "PATCH"].includes(c.method))).toEqual([]);
+    expect(soul.calls).toEqual([]);
+    expect(calls).toEqual([]);
+    expect(r.status).toBe("failed");
+    expect(r.errors).toEqual([
+      "listCandidates: false is accepted only with dryRun: a live restore lists leftover MemoryCandidate rows before any delete. No request was sent to the target.",
+    ]);
+    expect(r.preRestoreSnapshotPath).toBeUndefined();
+  });
+
+  it("refuses a candidate listing answered 500 candidate_id_unusable as incomplete, before any delete or write", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = recordingApi({
+      "GET:/Memory": () => [{ id: "mem-1", agentId: "test-agent" }],
+      "GET:/Soul": () => [{ id: "soul-1", agentId: "test-agent" }],
+      "GET:/AdminMemoryCandidates": () => {
+        throw ApiHttpError.fromResponse(500, JSON.stringify({ error: "candidate_id_unusable", message: "fixture" }));
+      },
+    });
+    const soul = recordingApi();
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      soulApiCall: soul.api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(calls.filter((c) => ["DELETE", "PUT", "POST", "PATCH"].includes(c.method))).toEqual([]);
+    expect(soul.calls).toEqual([]);
+    expect(r.status).toBe("failed");
+    expect(r.errors).toEqual([
+      "fetch-candidates: the target's MemoryCandidate listing for agent test-agent could not be read completely: GET /AdminMemoryCandidates answered candidate_id_unusable (a row has no usable id). "
+        + "No target rows were deleted or written. Remove or repair that agent's MemoryCandidate row without a usable id on the target, then retry.",
+    ]);
+  });
+
+  const malformedListings: Array<[string, unknown, string]> = [
+    ["a missing hasMore", { candidates: [{ id: "cand-1" }] }, "unexpected response shape: hasMore is missing or not a boolean"],
+    ["a non-boolean hasMore", { candidates: [{ id: "cand-1" }], hasMore: "false" }, "unexpected response shape: hasMore is missing or not a boolean"],
+    ["an entry without an id", { candidates: [{ id: "cand-1" }, {}], hasMore: false }, "unexpected response shape: candidates[1].id is not a non-empty string"],
+    ["a non-string id", { candidates: [{ id: 7 }], hasMore: false }, "unexpected response shape: candidates[0].id is not a non-empty string"],
+  ];
+  for (const [name, body, message] of malformedListings) {
+    it(`refuses a candidate listing with ${name} before any delete or write`, async () => {
+      const snapshotPath = await makeTestSnapshot();
+      const { api, calls } = recordingApi({
+        "GET:/Memory": () => [{ id: "mem-1", agentId: "test-agent" }],
+        "GET:/Soul": () => [{ id: "soul-1", agentId: "test-agent" }],
+        "GET:/AdminMemoryCandidates": () => body,
+      });
+      const soul = recordingApi();
+
+      const r = await applySnapshot({
+        agentId: "test-agent",
+        snapshotPath,
+        flairVersion: "0.0.0-test",
+        apiCall: api,
+        soulApiCall: soul.api,
+        preRestoreSnapshotRoot: snapshotRoot,
+        tmpRootOverride: testRoot,
+      });
+
+      expect(calls.filter((c) => ["DELETE", "PUT", "POST", "PATCH"].includes(c.method))).toEqual([]);
+      expect(soul.calls).toEqual([]);
+      expect(r.status).toBe("failed");
+      expect(r.errors).toHaveLength(1);
+      expect(r.errors[0]).toStartWith("fetch-candidates: ");
+      expect(r.errors[0]).toContain(message);
+      expect(r.errors[0]).toMatch(/no target rows were deleted or written/i);
+      expect(r.deleted).toEqual({ memories: 0, souls: 0, candidates: 0 });
+    });
+  }
+});
+
+describe("applySnapshot — paged candidate listing", () => {
+  /** A listing route over `ids` in id order that pages by `limit` and `after`, as the real route does. */
+  function pagedListing(ids: string[]) {
+    const sorted = [...ids].sort();
+    return (path: string) => {
+      const url = new URL(path, "http://target.test");
+      const limit = Number(url.searchParams.get("limit"));
+      const after = url.searchParams.get("after");
+      const rest = sorted.filter((id) => after === null || id > after);
+      return { candidates: rest.slice(0, limit).map((id) => ({ id })), hasMore: rest.length > limit };
+    };
+  }
+
+  async function restoreWith(listing: (path: string) => unknown) {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = recordingApi({
+      "GET:/Memory": () => [{ id: "mem-1", agentId: "test-agent" }],
+      "GET:/Soul": () => [{ id: "soul-1", agentId: "test-agent" }],
+      "GET:/AdminMemoryCandidates": listing,
+    });
+    const soul = recordingApi();
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      soulApiCall: soul.api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+      verifyPostRestore: false,
+    });
+    const listings = calls.filter((c) => c.method === "GET" && c.path.startsWith("/AdminMemoryCandidates/"));
+    const writes = [...calls, ...soul.calls].filter((c) => ["DELETE", "PUT", "POST", "PATCH"].includes(c.method));
+    return { r, listings, writes };
+  }
+
+  it("requests pages with after set to the last id of the page before, and deletes every listed candidate", async () => {
+    const ids = Array.from({ length: CANDIDATE_LIST_LIMIT * 2 + 1 }, (_, i) => `cand-${String(i).padStart(4, "0")}`);
+    const { r, listings, writes } = await restoreWith(pagedListing(ids));
+
+    expect(r.errors).toEqual([]);
+    expect(r.status).toBe("completed");
+    expect(listings.map((c) => c.path)).toEqual([
+      `/AdminMemoryCandidates/test-agent?limit=${CANDIDATE_LIST_LIMIT}`,
+      `/AdminMemoryCandidates/test-agent?limit=${CANDIDATE_LIST_LIMIT}&after=${ids[CANDIDATE_LIST_LIMIT - 1]}`,
+      `/AdminMemoryCandidates/test-agent?limit=${CANDIDATE_LIST_LIMIT}&after=${ids[CANDIDATE_LIST_LIMIT * 2 - 1]}`,
+    ]);
+    expect(r.deleted.candidates).toBe(ids.length);
+    expect(writes.filter((c) => c.path.startsWith("/MemoryCandidate/")).map((c) => c.path)).toEqual(ids.map((id) => `/MemoryCandidate/${id}`));
+  });
+
+  it("refuses a hasMore: true page with no candidates (candidate_cursor_not_advancing) before any delete or write", async () => {
+    let page = 0;
+    const { r, listings, writes } = await restoreWith(async () => {
+      await new Promise((resolve) => setImmediate(resolve));
+      page++;
+      return page === 1 ? { candidates: [{ id: "cand-1" }], hasMore: true } : { candidates: [], hasMore: true };
+    });
+
+    expect(r.status).toBe("failed");
+    expect(r.errors).toEqual([
+      "fetch-candidates: the target's MemoryCandidate listing for agent test-agent could not be read completely: page 2 of GET /AdminMemoryCandidates answered hasMore: true with no candidates, so the cursor cannot move past cand-1 (candidate_cursor_not_advancing). No target rows were deleted or written.",
+    ]);
+    expect(listings).toHaveLength(2);
+    expect(writes).toEqual([]);
+    expect(r.deleted).toEqual({ memories: 0, souls: 0, candidates: 0 });
+  }, 20_000);
+
+  it("refuses a page that lists an id again (candidate_id_repeated) before any delete or write", async () => {
+    const { r, listings, writes } = await restoreWith(() => ({ candidates: [{ id: "cand-1" }, { id: "cand-2" }], hasMore: true }));
+
+    expect(r.status).toBe("failed");
+    expect(r.errors).toEqual([
+      "fetch-candidates: the target's MemoryCandidate listing for agent test-agent could not be read completely: GET /AdminMemoryCandidates listed candidate id cand-1 twice (candidate_id_repeated). No target rows were deleted or written.",
+    ]);
+    expect(listings).toHaveLength(2);
+    expect(listings[1].path).toBe(`/AdminMemoryCandidates/test-agent?limit=${CANDIDATE_LIST_LIMIT}&after=cand-2`);
+    expect(writes).toEqual([]);
+  }, 20_000);
+
+  it("stops after CANDIDATE_LIST_MAX_PAGES pages that each answer hasMore: true (candidate_listing_page_limit) before any delete or write", async () => {
+    let page = 0;
+    const { r, listings, writes } = await restoreWith(async () => {
+      await new Promise((resolve) => setImmediate(resolve));
+      page++;
+      return { candidates: [{ id: `cand-${String(page).padStart(6, "0")}` }], hasMore: true };
+    });
+
+    expect(r.status).toBe("failed");
+    expect(r.errors).toEqual([
+      `fetch-candidates: the target's MemoryCandidate listing for agent test-agent could not be read completely: GET /AdminMemoryCandidates still answered hasMore: true after ${CANDIDATE_LIST_MAX_PAGES} pages of ${CANDIDATE_LIST_LIMIT}, the most restore requests (candidate_listing_page_limit). No target rows were deleted or written.`,
+    ]);
+    expect(listings).toHaveLength(CANDIDATE_LIST_MAX_PAGES);
+    expect(writes).toEqual([]);
+  }, 20_000);
 });
 
 describe("applySnapshot — post-restore verification (detects silent write drift)", () => {
@@ -517,6 +903,198 @@ describe("applySnapshot — failure modes", () => {
   });
 });
 
+
+/** The server's provider-bound refusal, as `sendJsonRequest` surfaces it: 503 with the body on the error. */
+function providerTimeout(): ApiHttpError {
+  return ApiHttpError.fromResponse(
+    503,
+    JSON.stringify({
+      error: "memory_provider_timeout",
+      message: "the embedding provider did not answer within its bound; nothing was written, retry",
+    }),
+  );
+}
+
+/**
+ * A target whose Memory PUT fails with the queued errors in order and writes
+ * the row on every other attempt. Reads reflect the writes, so the restore's
+ * own verification pass sees a clean state after a successful retry.
+ */
+function retryingTarget(putFailures: unknown[]): {
+  api: ApiCall;
+  calls: Array<{ method: string; path: string; body?: unknown }>;
+  state: { memories: Map<string, any>; souls: Map<string, any> };
+} {
+  const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+  const state = { memories: new Map<string, any>(), souls: new Map<string, any>() };
+  let memoryPuts = 0;
+  const api: ApiCall = async (method, path, body) => {
+    calls.push({ method, path, body });
+    if (method === "GET" && path.startsWith("/Memory?")) return Array.from(state.memories.values());
+    if (method === "GET" && path.startsWith("/Soul?")) return Array.from(state.souls.values());
+    if (method === "GET" && path.startsWith("/AdminMemoryCandidates/")) return { candidates: [], hasMore: false };
+    if (method === "DELETE") return { ok: true };
+    if (method === "PUT" && path.startsWith("/Memory/")) {
+      const failure = putFailures[memoryPuts++];
+      if (failure) throw failure;
+      state.memories.set(decodeURIComponent(path.split("/")[2]), body);
+      return { ok: true };
+    }
+    if (method === "PUT" && path.startsWith("/Soul/")) {
+      state.souls.set(decodeURIComponent(path.split("/")[2]), body);
+      return { ok: true };
+    }
+    throw new Error(`unexpected api: ${method}:${path}`);
+  };
+  return { api, calls, state };
+}
+
+describe("applySnapshot — provider-timeout retry (flair#2769)", () => {
+  it("restores a memory write refused with 503 memory_provider_timeout once, then succeeding, and reports the row as retried", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls, state } = retryingTarget([providerTimeout()]);
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("completed");
+    expect(r.errors).toEqual([]);
+    expect(r.restored.memories).toBe(2);
+    expect(r.retried.memories).toEqual(["m1"]);
+    expect(state.memories.get("m1")).toBeDefined();
+    expect(calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/")).length).toBe(3);
+    expect(r.verified?.missingMemoryIds).toEqual([]);
+  }, 20_000);
+
+  it("records the row as failed when the retry is refused with the same timeout", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = retryingTarget([providerTimeout(), providerTimeout()]);
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("failed");
+    expect(r.restored.memories).toBe(1); // m2 still restores; m1 stays failed
+    expect(r.retried.memories).toEqual(["m1"]);
+    expect(r.errors.some((e) => e.startsWith("put-memory m1:") && e.includes("memory_provider_timeout"))).toBe(true);
+    expect(calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/")).length).toBe(3);
+  }, 20_000);
+
+  it("waits for the retry's own answer: a retry answered after 30 s of faked time is restored, not recorded failed", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const target = retryingTarget([providerTimeout()]);
+    let answerRetry!: () => void;
+    const retryAnswered = new Promise<void>((resolve) => (answerRetry = resolve));
+    let firstPutSeen!: () => void;
+    const firstPut = new Promise<void>((resolve) => (firstPutSeen = resolve));
+    let memoryPuts = 0;
+    const api: ApiCall = async (method, path, body) => {
+      if (method === "PUT" && path.startsWith("/Memory/")) {
+        memoryPuts++;
+        // The clock is faked from the first memory PUT on, so the snapshot
+        // IO before it runs on real timers.
+        if (memoryPuts === 1) {
+          jest.useFakeTimers();
+          firstPutSeen();
+        }
+        if (memoryPuts === 2) await retryAnswered;
+      }
+      return target.api(method, path, body);
+    };
+    const settleTicks = async () => {
+      for (let i = 0; i < 200; i++) await Promise.resolve();
+    };
+
+    try {
+      let settled = false;
+      const run = applySnapshot({
+        agentId: "test-agent",
+        snapshotPath,
+        flairVersion: "0.0.0-test",
+        apiCall: api,
+        preRestoreSnapshotRoot: snapshotRoot,
+        tmpRootOverride: testRoot,
+      }).finally(() => (settled = true));
+
+      await firstPut;
+      await settleTicks();
+      jest.advanceTimersByTime(1_000);
+      await settleTicks();
+      expect(memoryPuts).toBe(2);
+
+      jest.advanceTimersByTime(30_000);
+      await settleTicks();
+      expect(settled).toBe(false);
+
+      answerRetry();
+      jest.useRealTimers();
+      const r = await run;
+
+      expect(r.status).toBe("completed");
+      expect(r.errors).toEqual([]);
+      expect(r.restored.memories).toBe(2);
+      expect(r.retried.memories).toEqual(["m1"]);
+      expect(target.state.memories.get("m1")).toBeDefined();
+      expect(memoryPuts).toBe(3);
+    } finally {
+      jest.useRealTimers();
+    }
+  }, 20_000);
+
+  it("does not retry a 503 with a different error code", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = retryingTarget([
+      ApiHttpError.fromResponse(503, JSON.stringify({ error: "memory_busy", caller: "agent-a" })),
+    ]);
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("failed");
+    expect(r.retried.memories).toEqual([]);
+    expect(calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/")).length).toBe(2);
+    expect(r.errors.some((e) => e.startsWith("put-memory m1:") && e.includes("memory_busy"))).toBe(true);
+  }, 20_000);
+
+  it("does not retry a 503 whose message text names the code but whose error field does not", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = retryingTarget([
+      ApiHttpError.fromResponse(503, JSON.stringify({ error: "memory_busy", message: "memory_provider_timeout would be retried" })),
+    ]);
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.retried.memories).toEqual([]);
+    expect(calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/")).length).toBe(2);
+    expect(r.errors.some((e) => e.startsWith("put-memory m1:"))).toBe(true);
+  }, 20_000);
+});
+
 describe("buildOpsSearch — CLI-wired candidate list uses the ops root", () => {
   it("POSTs the ops-root {search_by_conditions} body for MemoryCandidate, not a REST URL suffix", async () => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
@@ -554,5 +1132,14 @@ describe("buildOpsSearch — CLI-wired candidate list uses the ops root", () => 
       new Response("does not have a post method implemented", { status: 405 })) as unknown as typeof fetch;
     const opsSearch = buildOpsSearch({ opsPort: 19926, adminPass: "s3cret" }, fakeFetch);
     await expect(opsSearch("MemoryCandidate", [], ["id"])).rejects.toThrow(/ops API failed \(405\)/);
+  });
+
+  it("throws on a 2xx body that is neither rows nor { results: rows } (flair#2680)", async () => {
+    let body: unknown = { error: "fixture" };
+    const fakeFetch = (async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch;
+    const opsSearch = buildOpsSearch({ opsPort: 19926, adminPass: "s3cret" }, fakeFetch);
+    await expect(opsSearch("MemoryCandidate", [], ["id"])).rejects.toThrow("ops API returned an unexpected response shape");
+    body = { results: [{ id: "c1" }] };
+    expect(await opsSearch("MemoryCandidate", [], ["id"])).toEqual([{ id: "c1" }]);
   });
 });

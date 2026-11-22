@@ -122,7 +122,7 @@ export const FEED_FIELD_RULES: FieldRules = Object.freeze({
   agentId: STRING, content: STRING, contentHash: STRING, trigger: STRING, visibility: STRING,
   durability: STRING, source: STRING, type: STRING, createdAt: STRING, updatedAt: STRING,
   instanceToken: STRING, expiresAt: STRING, retrievalCount: INTEGER, lastRetrieved: STRING, usageCount: INTEGER,
-  promotionStatus: STRING, promotedAt: STRING, promotedBy: STRING, archived: BOOLEAN, archivedAt: STRING,
+  promotionStatus: STRING, promotedAt: STRING, promotedBy: STRING, promotionContentHash: STRING, archived: BOOLEAN, archivedAt: STRING,
   archivedBy: STRING, parentId: STRING, sessionId: STRING, lastReflected: STRING,
   supersedes: STRING, subject: STRING, summary: STRING, validFrom: STRING, validTo: STRING,
   provenance: STRING, originatorInstanceId: STRING, metadata: STRING, skillSubjectId: STRING,

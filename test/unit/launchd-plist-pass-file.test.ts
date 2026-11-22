@@ -32,7 +32,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   buildLaunchdPlist,
   writeFileAtomic,
@@ -331,18 +331,35 @@ describe("launcher script — never a second instance on a served data directory
     });
   }
 
-  test("hdb.pid names a LIVE process whose command line is not Harper-shaped (flair#2056) -> the launcher execs the fake node", () => {
+  test("hdb.pid names a LIVE process whose command line is not Harper-shaped (flair#2056) -> the launcher execs the fake node", async () => {
     const f = fixture();
-    // A live pid this test owns: the test runner itself, whose command line is
-    // not node or bun followed by a Harper entry path, so the launcher does not
-    // refuse and execs the fake node. See
-    // test/unit/launcher-pid-identity-2056.test.ts for the refusal of a Harper-shaped process.
-    writeFileSync(join(f.rootPath, "hdb.pid"), String(process.pid));
-    const r = launch(f);
-    expect(r.status).toBe(0);
-    expect(existsSync(f.marker)).toBe(true);
-    // The pid file is left as it was.
-    expect(readFileSync(join(f.rootPath, "hdb.pid"), "utf-8")).toBe(String(process.pid));
+    // A live process this test owns, `sleep 60`: its command line is not node
+    // or bun followed by a Harper entry path, so the launcher does not refuse
+    // and execs the fake node. See test/unit/launcher-pid-identity-2056.test.ts
+    // for the refusal of a Harper-shaped process. (Not this test runner's own
+    // pid: a runner given several test files can have `harper` in its command
+    // line, which the launcher treats as possibly this instance, flair#2697.)
+    const sleeper = spawn("sleep", ["60"], { stdio: "ignore" });
+    const pid = sleeper.pid as number;
+    try {
+      for (let i = 0; i < 100; i++) {
+        const line = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf-8", timeout: 5_000 }).stdout.trim();
+        if (line.startsWith("sleep")) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      writeFileSync(join(f.rootPath, "hdb.pid"), String(pid));
+      const r = launch(f);
+      expect(r.status).toBe(0);
+      expect(existsSync(f.marker)).toBe(true);
+      // flair#2697: the pid file is moved aside, content unchanged, so Harper's
+      // own hdb.pid check does not refuse on the live, unrelated pid.
+      expect(existsSync(join(f.rootPath, "hdb.pid"))).toBe(false);
+      const stale = readdirSync(f.rootPath).filter((n) => n.startsWith("hdb.pid.stale-"));
+      expect(stale.length).toBe(1);
+      expect(readFileSync(join(f.rootPath, stale[0]), "utf-8")).toBe(String(pid));
+    } finally {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    }
   });
 
   test("CONTROL: hdb.pid names a DEAD process -> the launcher starts Harper as before", () => {

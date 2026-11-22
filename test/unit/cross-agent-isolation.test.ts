@@ -77,7 +77,9 @@ const databasesMock = {
     OAuthAuthCode: {
       put: async (rec: any) => { authCodePut = rec; return rec; },
     },
-    OAuthClient: { get: async () => null },
+    // The OAuthAuthorize.post() fixtures name client_id "cl1"; the consent
+    // POST requires its OAuthClient record before it issues a code.
+    OAuthClient: { get: async (id: string) => (id === "cl1" ? { id: "cl1", name: "cl1 test client" } : null) },
     Agent: { get: async () => null, search: async function* () {} },
     IdpConfig: GenericTable,
     IdJagReplay: GenericTable,
@@ -209,13 +211,16 @@ describe("OrgEventCatchup.get() — cross-agent isolation (fail-open cross-agent
 // ─── OAuthAuthorize — resolved principal (identity spoof fix) ──────────────
 
 describe("OAuthAuthorize.post() — resolved principal, not hardcoded admin (identity spoof fix)", () => {
+  // The S256 challenge of RFC 7636 Appendix B: the consent POST refuses an
+  // approve without a valid S256 challenge before it resolves the approver.
+  const CODE_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
   const approveBody = (extra: Record<string, any> = {}) => ({
     action: "approve",
     client_id: "cl1",
     redirect_uri: "https://claude.com/api/mcp/auth_callback",
     scope: "memory:read",
     state: "st1",
-    code_challenge: "cc",
+    code_challenge: CODE_CHALLENGE,
     code_challenge_method: "S256",
     ...extra,
   });
@@ -242,6 +247,24 @@ describe("OAuthAuthorize.post() — resolved principal, not hardcoded admin (ide
     expect((res as Response).status).toBe(302);
     expect(authCodePut?.principalId).toBe("agent-alpha");
     expect(authCodePut?.principalId).not.toBe("admin");
+    expect(authCodePut?.codeChallenge).toBe(CODE_CHALLENGE);
+    expect(authCodePut?.codeChallengeMethod).toBe("S256");
+  });
+
+  it("an authenticated approve without an S256 code_challenge → 400 invalid_request, no auth code minted", async () => {
+    for (const pkce of [
+      { code_challenge: undefined },
+      { code_challenge: "cc" },
+      { code_challenge_method: "plain" },
+    ]) {
+      authCodePut = null;
+      const oa = makeInstance<any>(OAuthAuthorize, { ...agentCtx("agent-alpha", false), headers: mockAuthHeader });
+      const res = await oa.post(approveBody(pkce));
+      expect(res).toBeInstanceOf(Response);
+      expect((res as Response).status).toBe(400);
+      expect((await (res as Response).json()).error).toBe("invalid_request");
+      expect(authCodePut).toBeNull();
+    }
   });
 
   it("Basic super_user resolves via resolveAgentAuth to agentId=username (not the hardcoded literal)", async () => {

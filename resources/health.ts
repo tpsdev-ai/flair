@@ -805,6 +805,9 @@ export class HealthDetail extends Resource {
         lastCycleError: redactReason(rawSnapshot.lastCycleError),
         migrations: rawSnapshot.migrations.map((m) => ({
           ...m,
+          // Row ids are operator detail, like the state-file path below:
+          // verified non-admin callers get the count only (flair#2840).
+          unconfirmedIds: undefined,
           reason: m.state === "completed" && m.reason
             ? "recorded complete; not re-verified this boot"
             : redactReason(m.reason),
@@ -845,6 +848,11 @@ export class HealthDetail extends Resource {
       for (const m of snapshot.migrations) {
         if (m.state === "halted" || m.state === "failed") {
           warnings.push({ level: "warn", message: `migration '${m.id}' ${m.state}${m.reason ? `: ${m.reason}` : ""} — see \`flair doctor\`` });
+        } else if (m.state === "completed" && (m.rowsUnconfirmed ?? 0) > 0) {
+          warnings.push({
+            level: "warn",
+            message: `migration '${m.id}' completed with ${m.rowsUnconfirmed} row(s) it could not confirm`,
+          });
         }
       }
       // The boot trigger sets `scheduled` synchronously at module load, so

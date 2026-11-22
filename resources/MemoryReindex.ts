@@ -23,15 +23,25 @@
  * existing index, older records live in the primary store but never make it
  * into the secondary index. Scoped search() via RequestTarget.conditions —
  * which uses the agentId index — then returns empty for those agents.
- *
- * This endpoint is idempotent: running it again finds zero drift.
  */
 
 import { Resource, databases } from "harper";
-import { isAdmin, allowAdmin } from "./agent-auth.js";
-import { writeBackCommittedRow, writeBackIdentity } from "./write-back.js";
+import { annotatedCallerIsAdmin, allowAdmin } from "./agent-auth.js";
+import { WriteBackConflictError, writeBackCommittedRow, writeBackIdentity } from "./write-back.js";
+
+/** The re-PUT's row was confirmed after its commit, but a later agentId-index
+ *  query does not list it. The miss is reported without a cause: another
+ *  writer may have changed or removed the row after the confirmation. */
+class ReindexIndexUnconfirmed extends Error {
+  readonly outcome = "unconfirmed" as const;
+  constructor(id: string) {
+    super(`MemoryReindex: row ${id} was confirmed after commit but is now absent from the agentId index query (index unconfirmed)`);
+    this.name = "ReindexIndexUnconfirmed";
+  }
+}
 import { txnPausePoint } from "./txn-pause-point.js";
 import { buildReindexRow } from "./Memory.js";
+import { withMemoryWriteLockOnce } from "./memory-write-lock.js";
 
 type AgentDrift = { agentId: string; primary: number; indexed: number; missing: number };
 
@@ -40,11 +50,13 @@ type ReindexStats = {
   agentsWithDrift: number;
   totalMissing: number;
   reindexed: number;
+  skipped: number;
   errors: number;
   dryRun: boolean;
   agentFilter: string | null;
   drift: AgentDrift[];
-  errorSamples: Array<{ id: string; message: string }>;
+  errorSamples: Array<{ id: string; message: string; outcome?: WriteBackConflictError["outcome"] }>;
+  skippedSamples: Array<{ id: string; reason: string }>;
 };
 
 export class MemoryReindex extends Resource {
@@ -63,7 +75,7 @@ export class MemoryReindex extends Resource {
     const isBasicAdmin = basicAgent === "admin";
     const isEd25519Admin = Boolean(authAgent) && request?.tpsAgentIsAdmin === true;
 
-    if (!isBasicAdmin && !(isEd25519Admin && (await isAdmin(authAgent!)))) {
+    if (!isBasicAdmin && !(isEd25519Admin && (await annotatedCallerIsAdmin(request)))) {
       return new Response(
         JSON.stringify({ error: "forbidden: admin required" }),
         { status: 403, headers: { "Content-Type": "application/json" } },
@@ -80,11 +92,13 @@ export class MemoryReindex extends Resource {
       agentsWithDrift: 0,
       totalMissing: 0,
       reindexed: 0,
+      skipped: 0,
       errors: 0,
       dryRun,
       agentFilter,
       drift: [],
       errorSamples: [],
+      skippedSamples: [],
     };
 
     // Pass 1: primary-store scan. Count records per agent.
@@ -138,40 +152,109 @@ export class MemoryReindex extends Resource {
 
     // Pass 3: re-PUT every primary-store record through buildReindexRow, retaining
     // declared/named fields and stored provenance, stripping other undeclared
-    // fields and generating an absent token. The re-PUT forces Harper to re-insert
-    // into all secondary indices. Cheaper-than-sound variants (only re-PUT records
-    // that appear missing) would miss rows the primary scan sees fine but that
+    // fields and generating an absent token. Variants that only re-PUT records
+    // that appear missing would miss rows the primary scan sees fine but that
     // Harper's read path can't locate via any index path.
+    // Written ids are grouped by the agentId in their write plan; Pass 4
+    // confirms them against the index after every write has committed.
+    const writtenByAgent = new Map<any, string[]>();
     for (let i = 0; i < recordsToReindex.length; i += batchSize) {
       const chunk = recordsToReindex.slice(i, i + batchSize);
       for (const id of chunk) {
         try {
-          const outcome = await writeBackCommittedRow(
-            Memory,
-            id,
-            (record: any) => {
-              if (!record) return { skip: true };
-              // Built by the function Memory.put()'s `_reindex` branch uses,
-              // from this transaction's read.
-              const built = buildReindexRow({ ...record, _reindex: true }, record);
-              if (!("row" in built)) throw new Error(`${built.error}: ${built.message}`);
-              return { write: built.row };
-            },
-            { ctx, label: "MemoryReindex", pausePre: () => txnPausePoint("reindex-put-pre"), pausePoint: () => txnPausePoint("reindex-put"), expectedRow: selectedRows.get(id) },
+          let commitPauses = 0;
+          // flair#2478 slice 3c: an automatic writer takes the row's per-id
+          // Memory write lock once, without waiting. A held id, an unresolved
+          // earlier write or a store with no lock writes nothing for the row;
+          // the skip is reported in the result rather than dropped.
+          const locked = await withMemoryWriteLockOnce(
+            (databases as any)?.flair?.Memory?.primaryStore,
+            [id],
+            () => writeBackCommittedRow(
+              Memory,
+              id,
+              (record: any) => {
+                if (!record) return { skip: true };
+                // Built by the function Memory.put()'s `_reindex` branch uses,
+                // from this transaction's read.
+                const built = buildReindexRow({ ...record, _reindex: true }, record);
+                if (!("row" in built)) throw new Error(`${built.error}: ${built.message}`);
+                return { idempotent: true, write: built.row };
+              },
+              {
+                ctx, label: "MemoryReindex", expectedRow: selectedRows.get(id),
+                pausePre: () => txnPausePoint("reindex-put-pre"),
+                pausePoint: () => txnPausePoint("reindex-put"),
+                pauseAfterStage: () => txnPausePoint("reindex-put-staged"),
+                pauseBeforeCommit: () => {
+                  switch (commitPauses++) {
+                    case 0: return txnPausePoint("reindex-put-commit");
+                    case 1: return txnPausePoint("reindex-put-commit-retry");
+                    default: return txnPausePoint("reindex-put-commit-retry-retry");
+                  }
+                },
+              },
+            ),
+            { phase: "reindex-put" },
           );
+          if (locked.kind !== "done") {
+            stats.skipped++;
+            if (stats.skippedSamples.length < 5) {
+              stats.skippedSamples.push({ id, reason: locked.kind });
+            }
+            continue;
+          }
+          const outcome = locked.value;
           if ("skip" in outcome) { stats.errors++; continue; }
-          stats.reindexed++;
+          if (!("write" in outcome)) throw new Error("MemoryReindex: expected a full-row plan");
+          const written = writtenByAgent.get(outcome.write.agentId);
+          if (written) written.push(id);
+          else writtenByAgent.set(outcome.write.agentId, [id]);
         } catch (err: any) {
           stats.errors++;
           if (stats.errorSamples.length < 5) {
-            stats.errorSamples.push({ id, message: err?.message ?? String(err) });
+            stats.errorSamples.push({ id, message: err?.message ?? String(err), ...(err instanceof WriteBackConflictError || err instanceof ReindexIndexUnconfirmed ? { outcome: err.outcome } : {}) });
           }
         }
       }
     }
 
+    // Pass 4: confirm the written ids against the agentId index. One index
+    // scan per agent builds the set of ids the committed index lists; each
+    // written id is then checked against that set. The scans run after every
+    // write above, so no written row is checked against a pre-write index.
+    for (const [agentId, writtenIds] of writtenByAgent) {
+      const indexedIds = new Set<string>();
+      try {
+        for await (const row of Memory.search({
+          conditions: [{ attribute: "agentId", comparator: "equals", value: agentId }],
+        }, {})) {
+          indexedIds.add(String(row.id));
+        }
+      } catch (err: any) {
+        for (const id of writtenIds) {
+          stats.errors++;
+          if (stats.errorSamples.length < 5) {
+            stats.errorSamples.push({ id, message: err?.message ?? String(err) });
+          }
+        }
+        continue;
+      }
+      for (const id of writtenIds) {
+        if (indexedIds.has(id)) {
+          stats.reindexed++;
+          continue;
+        }
+        const err = new ReindexIndexUnconfirmed(id);
+        stats.errors++;
+        if (stats.errorSamples.length < 5) {
+          stats.errorSamples.push({ id, message: err.message, outcome: err.outcome });
+        }
+      }
+    }
+
     return {
-      message: `reindex complete: ${stats.reindexed} re-indexed, ${stats.errors} errors, ${stats.totalMissing} pre-existing index gap${stats.totalMissing === 1 ? "" : "s"} healed`,
+      message: `reindex complete: ${stats.reindexed} re-indexed, ${stats.skipped} skipped, ${stats.errors} errors, ${stats.totalMissing} pre-existing index gap${stats.totalMissing === 1 ? "" : "s"}`,
       stats,
     };
   }

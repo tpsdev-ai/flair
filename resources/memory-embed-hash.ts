@@ -85,3 +85,67 @@ export function embeddedHashMatches(row: Record<string, any> | null | undefined)
   const expected = embeddedTextHash(row);
   return typeof expected === "string" && recorded === expected;
 }
+
+/**
+ * The vector one write attempt staged and the text it was computed from, kept
+ * by a writer whose committed row that attempt could not confirm, so its retry
+ * can check whether the row still holds that vector (flair#2478).
+ */
+export interface StagedVector {
+  embedding: readonly number[];
+  text: string;
+}
+
+/** Relative element-wise tolerance for {@link holdsOwnStaleVector}. The staged
+ *  vector is the embedding provider's output as `getEmbedding` returns it; no
+ *  code here bounds or normalizes its components, so the comparison scales
+ *  with magnitude: two finite components match when
+ *  `|stored - staged| <= 1e-6 * max(1, |stored|, |staged|)`.
+ *  - At magnitude 1 and above the relative term applies. Rounding a
+ *    normal-range float32 value changes it by at most 2^-24 (about 6e-8) of
+ *    its magnitude, so a stored copy that went through float32 matches.
+ *  - Below magnitude 1 the absolute floor of 1e-6 applies, and that floor is
+ *    what accepts the round trip there: a subnormal float32 value such as
+ *    1e-45 rounds with a large relative error (about 40%) but an absolute
+ *    error far inside 1e-6.
+ *  - A non-finite component on either side never matches: a value beyond
+ *    float32 range rounds to Infinity, and NaN equals nothing. */
+const STAGED_VECTOR_RELATIVE_TOLERANCE = 1e-6;
+
+/** One component of {@link holdsOwnStaleVector}'s comparison: both components
+ *  finite, and within the tolerance above. */
+function matchesStagedComponent(stored: number, staged: number): boolean {
+  if (!Number.isFinite(stored) || !Number.isFinite(staged)) return false;
+  return Math.abs(stored - staged) <= STAGED_VECTOR_RELATIVE_TOLERANCE * Math.max(1, Math.abs(stored), Math.abs(staged));
+}
+
+/**
+ * True when the row's stored vector matches `staged.embedding` element by
+ * element within {@link STAGED_VECTOR_RELATIVE_TOLERANCE} while the row's current
+ * embedding text (`skillEmbedText`) is not `staged.text`. A match means the row
+ * holds a vector equal, within that tolerance, to the one this writer computed
+ * for `staged.text`, a text the row no longer has, so the caller re-embeds the
+ * current text. It is evidence that the stored vector matches this writer's
+ * computation, not proof of which writer stored it, and it assumes nothing
+ * about how far apart the vectors of different texts are. The stored
+ * `embeddedContentHash` is not consulted: it is null for a row with an empty
+ * owner and so would match any text. Returns false when nothing was staged,
+ * when the row's text is still `staged.text`, or when the stored vector does
+ * not match. A non-match says nothing about the vector's provenance; it only
+ * means this staged-vector exception does not apply, and the caller's normal
+ * eligibility decides whether the row is written: the embedding backfill writes
+ * a missing vector or one of at most 100 entries and skips a longer one; the
+ * embedding-stamp migration re-embeds a row whose stamp is not current or whose
+ * stored hash does not match its text, whatever vector it holds.
+ */
+export function holdsOwnStaleVector(row: Record<string, any> | null | undefined, staged: StagedVector | undefined): boolean {
+  if (!staged || !row || typeof row !== "object") return false;
+  if (skillEmbedText(row) === staged.text) return false;
+  const stored = row.embedding as ArrayLike<unknown> | null | undefined;
+  if (stored == null || typeof stored.length !== "number" || stored.length !== staged.embedding.length) return false;
+  for (let i = 0; i < staged.embedding.length; i++) {
+    const value = stored[i];
+    if (typeof value !== "number" || !matchesStagedComponent(value, staged.embedding[i])) return false;
+  }
+  return true;
+}

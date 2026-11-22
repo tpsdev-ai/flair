@@ -50,6 +50,9 @@ beforeEach(() => {
   store.clear();
   written = null;
   store.set("a1", { ...STORED });
+  // Agent.put() re-reads the row and writes inside one owned transaction
+  // (resources/request-transaction.ts, flair#2696); this stub runs the callback.
+  (globalThis as any).transaction = (_ctx: any, cb: (txn: any) => any) => cb({ open: 1, saveCommits: false });
 });
 
 test("a put that supplies or omits the bookkeeping writes the stored values", async () => {

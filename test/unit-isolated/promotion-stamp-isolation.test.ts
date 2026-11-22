@@ -1,8 +1,8 @@
 /**
- * stampMemoryPromotion failure after a successful Memory write must not abort
- * the auto-promote sweep or leave the candidate pending (Bugbot Medium on
- * #1534); on the manual path it fails the request (flair#2354). Isolated: owns
- * the harper + Memory mocks.
+ * A stamp failure after a successful Memory write does not abort the
+ * auto-promote sweep, and the candidate it could not stamp stays pending
+ * (Bugbot Medium on #1534, flair#2645); on the manual path it fails the
+ * request (flair#2354). Isolated: owns the harper + Memory mocks.
  */
 import { describe, expect, test, beforeEach, afterAll, mock } from "bun:test";
 import { installFakeHarperTransaction } from "../helpers/fake-harper-txn";
@@ -54,8 +54,12 @@ mock.module("harper", () => ({
       // Stamp reads the raw table. Returning null makes stampMemoryPromotion
       // throw — the Isolated wrapper must catch that.
       Memory: {
+        // No earlier promoted row for any candidate: the sweep's reuse lookup finds none.
+        search: () => (async function* () {})(),
+        primaryStore: { tryLock: () => true, unlock: () => {} },
         get: async (_id: string, ctx?: any) => { stampReadContexts.push(ctx); return null; },
         put: async () => { throw new Error("stamp put should not run when get misses"); },
+        update: async () => { throw new Error("stamp update should not run when get misses"); },
       },
     },
   },
@@ -66,7 +70,7 @@ mock.module("harper", () => ({
 
 mock.module("../../resources/agent-auth.ts", () => ({
   allowVerified: async () => true,
-  isAdmin: async () => false,
+  annotatedCallerIsAdmin: async () => false,
   resolveAgentAuth: async () => ({ kind: "agent", agentId: "alice", isAdmin: false }),
 }));
 
@@ -88,16 +92,15 @@ describe("stampMemoryPromotionIsolated", () => {
 });
 
 describe("AutoPromoteCandidates stamp isolation", () => {
-  test("a stamp failure after a Memory write does not stop the sweep or leave candidates pending", async () => {
+  test("a stamp failure after a Memory write does not stop the sweep, and leaves the candidate unpromoted", async () => {
     const r: any = new (AutoPromoteCandidates as any)();
     r.getContext = () => ({ request: { tpsAgent: "alice", tpsAgentIsAdmin: false } });
     const result = await r.post({ agentId: "alice" });
-    expect(result.promoted).toHaveLength(2);
-    expect(result.count).toBe(2);
+    expect(result.promoted).toHaveLength(0);
+    expect(result.count).toBe(0);
     expect(memoryPuts).toHaveLength(2);
-    expect(candidatePuts).toHaveLength(2);
-    expect(candidatePuts.every((c) => c.status === "promoted")).toBe(true);
-    expect(candidatePuts.map((c) => c.id).sort()).toEqual(["cand-1", "cand-2"]);
+    expect(candidatePuts).toHaveLength(0);
+    expect(result.skipped.map((s: any) => s.reason)).toEqual(["stamp_refused", "stamp_refused"]);
   });
 });
 

@@ -1,13 +1,6 @@
 /**
  * Home-resolver guard (flair#1858).
  *
- * ONE home resolver for all of `src/`: `resolveHome()` in `src/lib/home.ts`
- * (win32 → `USERPROFILE`, elsewhere → `HOME`, both falling back to `homedir()`).
- * #1854 moved the keystore and the client-config writers onto it; the rest of
- * `src/` still resolves home several other ways, so different subsystems can
- * disagree about where "home" is in the SAME process — doctor inspects one home
- * while the writers use another.
- *
  * This test walks every `src/**\/*.ts` with the TypeScript parser (so comments
  * and strings do not count) and flags:
  *   - a call to `homedir(...)` (with or without the `os.` qualifier); and
@@ -17,9 +10,7 @@
  * (`process.env.HOME = x`) or a `delete` is not a lookup and is not flagged;
  * `??`, `||`, `&&` and comparisons still READ the variable on the left.
  *
- * A hit is allowed only if its FILE is on the ALLOW list below, each with a
- * reason. The list is a ratchet: it names the sites that are genuinely not
- * invocation-home lookups, plus the files not yet migrated. It can only shrink.
+ * A hit is allowed only in the listed file and functions.
  */
 
 import { describe, expect, it } from "bun:test";
@@ -31,20 +22,17 @@ const REPO = join(import.meta.dir, "..", "..");
 const SRC_DIR = join(REPO, "src");
 const RESOLVER = "src/lib/home.ts";
 
-/**
- * Files allowed to resolve home outside `src/lib/home.ts`, with a reason.
- *
- * EMPTY (flair#1858 round 2): the `withHome()` overrides that read
- * `process.env.HOME` now live IN `src/lib/home.ts` (it sets HOME and USERPROFILE),
- * so no other file in `src/` reads either variable. Anything added here must say
- * why it is not a home lookup.
- */
-const ALLOW: Array<{ file: string; reason: string }> = [];
+const ALLOW = [{
+  file: "src/install/clients.ts",
+  functions: ["piAgentDir", "piLocalHome", "resolvePiExtensionPath"],
+  reason: "Pi settings and local entries use pi's home rules (#2908).",
+}];
 
 interface Hit {
   file: string;
   line: number;
   kind: string;
+  functionName?: string;
 }
 
 function tsFiles(dir: string): string[] {
@@ -118,22 +106,23 @@ function scan(file: string, text: string): Hit[] {
     return ts.isIdentifier(init.expression) && init.expression.text === "process";
   };
 
-  const walk = (node: ts.Node, parent: ts.Node | undefined): void => {
+  const walk = (node: ts.Node, parent: ts.Node | undefined, functionName?: string): void => {
+    if (ts.isFunctionDeclaration(node)) functionName = node.name?.text;
     if (ts.isCallExpression(node)) {
       const callee = node.expression;
       if (ts.isIdentifier(callee) && callee.text === "homedir") {
-        hits.push({ file, line: at(node), kind: "homedir()" });
+        hits.push({ file, line: at(node), kind: "homedir()", functionName });
       } else if (ts.isPropertyAccessExpression(callee) && callee.name.text === "homedir") {
-        hits.push({ file, line: at(node), kind: "os.homedir()" });
+        hits.push({ file, line: at(node), kind: "os.homedir()", functionName });
       }
     }
     if (isProcessEnvRead(node, parent)) {
-      hits.push({ file, line: at(node), kind: "process.env.HOME/USERPROFILE read" });
+      hits.push({ file, line: at(node), kind: "process.env.HOME/USERPROFILE read", functionName });
     }
     if (ts.isBindingElement(node) && isProcessEnvDestructure(node)) {
-      hits.push({ file, line: at(node), kind: "process.env.HOME/USERPROFILE read" });
+      hits.push({ file, line: at(node), kind: "process.env.HOME/USERPROFILE read", functionName });
     }
-    ts.forEachChild(node, (child) => walk(child, node));
+    ts.forEachChild(node, (child) => walk(child, node, functionName));
   };
   walk(sf, undefined);
   return hits;
@@ -147,7 +136,11 @@ function scanSource(text: string): Hit[] {
   return scan("snippet.ts", text);
 }
 
-describe("home resolver guard — src/ resolves home only via src/lib/home.ts (flair#1858)", () => {
+function isAllowed(hit: Hit): boolean {
+  return ALLOW.some(entry => entry.file === hit.file && entry.functions.includes(hit.functionName ?? ""));
+}
+
+describe("home resolver guard (flair#1858)", () => {
   const files = tsFiles(SRC_DIR).map((abs) => relative(REPO, abs));
 
   it("the scanner works and the walk reaches the source tree (positive control)", () => {
@@ -180,14 +173,18 @@ describe("home resolver guard — src/ resolves home only via src/lib/home.ts (f
     expect(found.every((h) => h.kind === "process.env.HOME/USERPROFILE read")).toBe(true);
   });
 
+  it("limits the pi exception to its named functions and file", () => {
+    const source = "function piAgentDir() { return homedir(); } function otherClient() { return homedir(); } homedir();";
+    expect(scan("src/install/clients.ts", source).map(isAllowed)).toEqual([true, false, false]);
+    expect(scan("src/other.ts", source).map(isAllowed)).toEqual([false, false, false]);
+  });
+
   it("every home lookup in src/ is routed through src/lib/home.ts or allow-listed", () => {
-    const allowed = new Set(ALLOW.map((a) => a.file));
     const offenders: string[] = [];
     for (const rel of files) {
       if (rel === RESOLVER) continue;
       const hits = scan(rel, readFileSync(join(REPO, rel), "utf8"));
-      if (allowed.has(rel)) continue;
-      for (const h of hits) offenders.push(`${h.file}:${h.line} ${h.kind}`);
+      for (const h of hits) if (!isAllowed(h)) offenders.push(`${h.file}:${h.line} ${h.kind}`);
     }
     expect(offenders).toEqual([]);
   });

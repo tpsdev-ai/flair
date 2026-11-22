@@ -15,10 +15,16 @@
  * "fully purged" when anything remains.
  */
 
-import { existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { resolveHome, withHome } from "./home.js";
-import { ALL_CLIENTS } from "../install/clients.js";
+import {
+  ALL_CLIENTS,
+  clientConfigBackupPath,
+  clientConfigHasFlairEntry,
+  type ClientId,
+  type UnwireResult,
+} from "../install/clients.js";
 import {
   uninstallContinuityHooks,
   uninstallHook,
@@ -46,7 +52,9 @@ export const FLAIR_NPM_PACKAGE = "@tpsdev-ai/flair";
 
 export interface PurgeLeftover {
   path: string;
-  kind: "intentional" | "failed";
+  /** `unverified`: purge could not decide this path. It is left in place
+   *  and reported by name (flair#2886). */
+  kind: "intentional" | "failed" | "unverified";
   reason: string;
   remedy?: string;
 }
@@ -54,6 +62,9 @@ export interface PurgeLeftover {
 export interface PurgeResult {
   removed: string[];
   leftovers: PurgeLeftover[];
+  /** Operator notes that are neither removals nor leftovers (e.g. an ignored
+   *  environment override). */
+  notes?: string[];
 }
 
 export interface PurgeOptions {
@@ -168,17 +179,275 @@ function sweepHookBackup(
 }
 
 /**
+ * After a failed read: is the path genuinely absent? A dangling symlink also
+ * reads as ENOENT but is an entry purge could not check — not a missing one.
+ */
+function backupEntryAbsent(path: string): boolean {
+  try {
+    lstatSync(path);
+    return false;
+  } catch (err: unknown) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
+/**
+ * Client configs get the same sibling snapshot as hook settings: an unwire
+ * that writes an existing config copies its pre-write bytes to `<config>.bak`
+ * when that copy write succeeds. Purge removes a copy that
+ * `clientConfigHasFlairEntry()` identifies as carrying a Flair entry and
+ * reports the path like a hook backup. A copy with no Flair entry may be the
+ * user's own file and stays — as does one whose wiring could not be decided,
+ * which is reported as not checked (flair#2886).
+ *
+ * Call inside `withHome(homeDir, ...)`: `clientConfigBackupPath()` resolves `~`
+ * at call time, so the sweep must run with the target home in the environment,
+ * not the caller's (flair#2886).
+ */
+function sweepClientConfigBackup(
+  clientId: ClientId,
+  homeDir: string,
+  removed: string[],
+  leftovers: PurgeLeftover[],
+): void {
+  const backup = clientConfigBackupPath(clientId);
+  const display = displayUnderHome(homeDir, backup);
+  let bytes: Uint8Array;
+  try {
+    bytes = readFileSync(backup);
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" && backupEntryAbsent(backup)) return;
+    leftovers.push({
+      path: display,
+      kind: "unverified",
+      reason: `could not check for Flair wiring: could not read the file${code ? ` (${code})` : ""}`,
+    });
+    return;
+  }
+  const scan = clientConfigHasFlairEntry(clientId, bytes, display);
+  if (scan.status === "unknown") {
+    leftovers.push({
+      path: display,
+      kind: "unverified",
+      reason: `could not check for Flair wiring: ${scan.reason}`,
+    });
+    return;
+  }
+  if (scan.status === "present") rmPath(backup, removed, leftovers, display);
+}
+
+export interface HeldClientBackup {
+  clientId: ClientId;
+  path: string;
+  heldPath: string;
+  /** The private hold directory this purge created for the move. */
+  heldDir: string;
+  display: string;
+}
+
+export interface ClientBackupHold {
+  held: HeldClientBackup[];
+  /** Clients whose pre-existing backup could not be held: neither their
+   *  unwire nor their backup sweep may run (flair#2886). */
+  skipped: Set<ClientId>;
+}
+
+/** A hold directory reserved and created by this purge, and the moved file
+ *  inside it. */
+interface HoldReservation {
+  dir: string;
+  path: string;
+}
+
+/**
+ * TEST-ONLY pause between choosing a hold directory name and creating it, so
+ * a fixture can occupy the name. Inert unless
+ * `FLAIR_TEST_PURGE_HOLD_BARRIER` names a directory; self-releases after 15 s.
+ */
+function holdSelectionBarrier(candidate: string): void {
+  const barrierDir = process.env.FLAIR_TEST_PURGE_HOLD_BARRIER;
+  if (!barrierDir) return;
+  try {
+    writeFileSync(join(barrierDir, `${process.pid}.hold-select`), candidate);
+  } catch { /* inert */ }
+  const release = join(barrierDir, `${process.pid}.go`);
+  const deadline = Date.now() + 15_000;
+  while (!existsSync(release) && Date.now() < deadline) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+  }
+}
+
+/**
+ * Select a hold directory name and create it exclusively. `mkdir` without
+ * `recursive` fails with `EEXIST` when any entry already occupies the name,
+ * so a user file or directory there is never adopted or overwritten. The name
+ * carries this process's pid and a per-client sequence; the directory is
+ * created with requested mode 0700.
+ */
+function reserveHoldPath(backup: string, seq: number): HoldReservation {
+  for (let attempt = 0; attempt < 16; attempt++) {
+    const candidate = `${backup}.purge-hold-${process.pid}-${seq}${attempt === 0 ? "" : `-${attempt}`}`;
+    holdSelectionBarrier(candidate);
+    try {
+      mkdirSync(candidate, { mode: 0o700 });
+      return { dir: candidate, path: join(candidate, basename(backup)) };
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
+      throw err;
+    }
+  }
+  throw new Error("no free hold path name after 16 attempts");
+}
+
+/**
+ * A pre-existing `<config>.bak` is the user's copy until this purge decides
+ * otherwise, but the unwire's snapshot write renames over it. Move it aside
+ * first and put it back before the sweep, so its bytes — or, for a symlink,
+ * the link itself — survive the unwire. This covers a copy that cannot be
+ * read or parsed too: a failed read must never license its replacement. The
+ * hold directory is created exclusively, so a file or directory already at
+ * its name is never overwritten; when no free name can be reserved, or the
+ * rename fails, the client is reported and its unwire and sweep are skipped.
+ * Call inside `withHome(homeDir, ...)`.
+ */
+function holdClientConfigBackups(homeDir: string, leftovers: PurgeLeftover[]): ClientBackupHold {
+  const held: HeldClientBackup[] = [];
+  const skipped = new Set<ClientId>();
+  for (const client of ALL_CLIENTS) {
+    const backup = clientConfigBackupPath(client.id);
+    try {
+      lstatSync(backup);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      const reason = err instanceof Error ? err.message : String(err);
+      leftovers.push({
+        path: displayUnderHome(homeDir, backup),
+        kind: "failed",
+        reason: `could not hold the backup across unwiring: ${reason}; skipped unwiring this client`,
+      });
+      skipped.add(client.id);
+      continue;
+    }
+    let hold: HoldReservation;
+    try {
+      hold = reserveHoldPath(backup, held.length);
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      leftovers.push({
+        path: displayUnderHome(homeDir, backup),
+        kind: "failed",
+        reason: `could not reserve a hold path: ${reason}; skipped unwiring this client`,
+      });
+      skipped.add(client.id);
+      continue;
+    }
+    try {
+      renameSync(backup, hold.path);
+      held.push({ clientId: client.id, path: backup, heldPath: hold.path, heldDir: hold.dir, display: displayUnderHome(homeDir, backup) });
+    } catch (err: unknown) {
+      rmSync(hold.dir, { recursive: true, force: true });
+      const reason = err instanceof Error ? err.message : String(err);
+      leftovers.push({
+        path: displayUnderHome(homeDir, backup),
+        kind: "failed",
+        reason: `could not hold the backup across unwiring: ${reason}; skipped unwiring this client`,
+      });
+      skipped.add(client.id);
+    }
+  }
+  return { held, skipped };
+}
+
+/** Put a held entry back over the snapshot this purge's unwire attempts to
+ *  write, then let the sweep decide it. A client whose restore fails is
+ *  returned so its sweep is skipped; the REASON names the held copy, and
+ *  after a failed restore that copy may remain only at the hold path. Call
+ *  inside `withHome(homeDir, ...)`. */
+export function restoreHeldClientConfigBackups(
+  homeDir: string,
+  held: HeldClientBackup[],
+  leftovers: PurgeLeftover[],
+): Set<ClientId> {
+  const unrestored = new Set<ClientId>();
+  for (const item of held) {
+    try {
+      rmSync(item.path, { force: true });
+      renameSync(item.heldPath, item.path);
+    } catch (err: unknown) {
+      unrestored.add(item.clientId);
+      const reason = err instanceof Error ? err.message : String(err);
+      leftovers.push({
+        path: item.display,
+        kind: "failed",
+        reason: `could not restore the backup held across unwiring: ${reason}; skipped this backup's sweep; ` +
+          `the held copy remains at ${displayUnderHome(homeDir, item.heldPath)}`,
+      });
+      continue;
+    }
+    // Empty now; remove only the directory this purge created. Its loss is
+    // not a restore failure — the copy is already back at the config path.
+    try { rmSync(item.heldDir, { recursive: true, force: true }); } catch { /* empty hold dir left */ }
+  }
+  return unrestored;
+}
+
+/** Restore held snapshots, then sweep eligible clients. A failed hold skips
+ *  unwiring and leaves the original backup in place. A failed restore skips
+ *  the sweep and reports the held path; the original backup path may be absent.
+ *  An absent backup is not held, and its client proceeds (flair#2886). */
+export function restoreAndSweepClientConfigBackups(
+  homeDir: string,
+  hold: ClientBackupHold,
+  removed: string[],
+  leftovers: PurgeLeftover[],
+): void {
+  const unrestored = restoreHeldClientConfigBackups(homeDir, hold.held, leftovers);
+  for (const client of ALL_CLIENTS) {
+    if (hold.skipped.has(client.id) || unrestored.has(client.id)) continue;
+    sweepClientConfigBackup(client.id, homeDir, removed, leftovers);
+  }
+}
+
+/** Run client-config work with `HOME` set to the home being purged, and —
+ *  when that home is not the caller's — with `PI_CODING_AGENT_DIR` ignored, so
+ *  pi resolves under the target home instead of the caller's pi directory. */
+function withClientConfigHome(homeDir: string, ignorePiDirOverride: boolean, fn: () => void): void {
+  if (!ignorePiDirOverride) {
+    withHome(homeDir, fn);
+    return;
+  }
+  const prevPiDir = process.env.PI_CODING_AGENT_DIR;
+  withHome(homeDir, () => {
+    delete process.env.PI_CODING_AGENT_DIR;
+    try {
+      fn();
+    } finally {
+      if (prevPiDir !== undefined) process.env.PI_CODING_AGENT_DIR = prevPiDir;
+    }
+  });
+}
+
+/**
  * Remove Flair-owned state under `homeDir`: the `~/.flair` tree (data, keys,
  * admin-pass, backups, logs, snapshots, shims), REM + federation scheduler
- * units on both platforms, SessionStart/continuity hooks, and MCP/native
- * client wiring. The npm package is listed as an intentional leftover
- * unless `omitNpmLeftover` is set.
+ * units on both platforms, SessionStart/continuity hooks, MCP/native
+ * client wiring, and the client-config snapshots left by unwiring. The npm
+ * package is listed as an intentional leftover unless `omitNpmLeftover` is set.
  */
 export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
-  const homeDir = opts.homeDir ?? resolveHome();
+  const callerHome = resolveHome();
+  const homeDir = opts.homeDir ?? callerHome;
+  const ignorePiDirOverride = homeDir !== callerHome && process.env.PI_CODING_AGENT_DIR !== undefined;
   const skipUnload = !!opts.skipSchedulerUnload;
   const removed: string[] = [];
   const leftovers: PurgeLeftover[] = [];
+  const notes: string[] = [];
+  if (ignorePiDirOverride) {
+    notes.push(
+      `ignored PI_CODING_AGENT_DIR while purging a different home: pi settings resolved under ${displayUnderHome(homeDir, join(homeDir, ".pi", "agent"))}`,
+    );
+  }
 
   disableAndSweepScheduler(homeDir, skipUnload, "rem", removed, leftovers);
   disableAndSweepScheduler(homeDir, skipUnload, "federation", removed, leftovers);
@@ -206,7 +475,17 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
     sweepHookBackup(hookSettingsPath(homeDir, harness), null, homeDir, removed, leftovers);
   }
 
-  const unwireResults = withHome(homeDir, () => ALL_CLIENTS.map((c) => c.unwire()));
+  const hold: ClientBackupHold = { held: [], skipped: new Set<ClientId>() };
+  withClientConfigHome(homeDir, ignorePiDirOverride, () => {
+    const found = holdClientConfigBackups(homeDir, leftovers);
+    hold.held.push(...found.held);
+    for (const id of found.skipped) hold.skipped.add(id);
+  });
+
+  const unwireResults: UnwireResult[] = [];
+  withClientConfigHome(homeDir, ignorePiDirOverride, () => {
+    unwireResults.push(...ALL_CLIENTS.filter((c) => !hold.skipped.has(c.id)).map((c) => c.unwire()));
+  });
   for (const u of unwireResults) {
     if (!u.ok) {
       leftovers.push({ path: u.message, kind: "failed", reason: u.message });
@@ -214,6 +493,13 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
       removed.push(u.message);
     }
   }
+
+  // Restore and sweep under the target home. A failed hold skipped unwiring
+  // and left the original backup in place; a failed restore skips the sweep,
+  // reports the held path, and may leave the original backup path absent.
+  withClientConfigHome(homeDir, ignorePiDirOverride, () => {
+    restoreAndSweepClientConfigBackups(homeDir, hold, removed, leftovers);
+  });
 
   const flairDir = join(homeDir, ".flair");
   rmPath(flairDir, removed, leftovers, "~/.flair");
@@ -235,23 +521,31 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
     });
   }
 
-  return { removed, leftovers };
+  return { removed, leftovers, notes };
 }
 
 export function formatPurgeReport(result: PurgeResult): { lines: string[]; claimedFullyPurged: boolean } {
   const lines: string[] = [];
+  for (const note of result.notes ?? []) {
+    lines.push(`ℹ️  ${note}`);
+  }
   for (const item of result.removed) {
     lines.push(`✅ Removed: ${item}`);
   }
 
   const failed = result.leftovers.filter((l) => l.kind === "failed");
+  const unverified = result.leftovers.filter((l) => l.kind === "unverified");
   const intentional = result.leftovers.filter((l) => l.kind === "intentional");
 
   for (const item of failed) {
     lines.push(`⚠️  Left (failed): ${item.path} — ${item.reason}`);
   }
 
-  if (failed.length === 0 && intentional.length === 0) {
+  for (const item of unverified) {
+    lines.push(`❓ Not checked: ${item.path} — ${item.reason}`);
+  }
+
+  if (failed.length === 0 && unverified.length === 0 && intentional.length === 0) {
     lines.push("");
     lines.push("🗑️  Flair fully purged");
     return { lines, claimedFullyPurged: true };
@@ -271,5 +565,7 @@ export function formatPurgeReport(result: PurgeResult): { lines: string[]; claim
 }
 
 export function purgeHadFailures(result: PurgeResult): boolean {
-  return result.leftovers.some((l) => l.kind === "failed");
+  // An unverified path means purge could not prove it was clean, so the run is
+  // not a success either (flair#2886).
+  return result.leftovers.some((l) => l.kind === "failed" || l.kind === "unverified");
 }

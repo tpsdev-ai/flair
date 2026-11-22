@@ -361,8 +361,10 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
     const stored = await readStored(firstBody.id);
     expect(stored && "redactedValues" in stored).toBe(false);
     expect(stored?.content).toBe(original.replace(SLACK_TOKEN, REDACTED));
-    // flair#2561: the stored row less contentHash, which the request did not supply.
-    const { contentHash, ...reported } = stored!;
+    // flair#2561: the stored row less contentHash, which the request did not supply, and the
+    // server-set write-back marker (flair#2653) the dedup write stamped; a response never echoes it.
+    const { contentHash, writeBackWriteId, ...reported } = stored!;
+    expect(typeof writeBackWriteId).toBe("string");
     expect(typeof contentHash).toBe("string");
     expect(rest).toEqual(reported);
   }, 60_000);
@@ -386,8 +388,9 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
     const stored = await readStored(id);
     expect(typeof stored?.expiresAt).toBe("string");
     expect(stored && "redactedValues" in stored).toBe(false);
-    // flair#2561: the stored row less contentHash, which the request did not supply.
-    const { contentHash, ...reported } = stored!;
+    // flair#2561: the stored row less contentHash, which the request did not supply, and any
+    // server-set write-back marker (flair#2653), which a response never echoes.
+    const { contentHash, writeBackWriteId: _marker, ...reported } = stored!;
     expect(typeof contentHash).toBe("string");
     expect(rest).toEqual(reported);
   }, 60_000);

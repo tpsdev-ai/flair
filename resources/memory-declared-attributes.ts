@@ -77,6 +77,7 @@ export function stripUndeclaredMemoryAttributes(content: unknown): string[] {
  * originator's value.
  */
 export const SERVER_STAMPED_MEMORY_FIELDS = Object.freeze([
+  "writeBackWriteId",
   "instanceToken",
   "provenance",
   "skillSubjectId",

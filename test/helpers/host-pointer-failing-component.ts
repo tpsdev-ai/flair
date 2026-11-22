@@ -8,7 +8,7 @@
  * copy forces a pointer-write/delete failure, so a real-Harper integration test
  * can assert the rollback. Nothing under resources/ is changed.
  */
-import { cpSync, existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +26,8 @@ const FAILING_ADAPTER_JS = `// Test-only build replacement: every pointer-table 
 // not be the module the loader imports, so the failure would never be injected.
 export async function putPointerRow() { throw new Error("test adapter: forced host-pointer write failure"); }
 export async function deletePointerRowViaTable() { throw new Error("test adapter: forced host-pointer delete failure"); }
+export { PointerAlreadyStoredError } from "./host-pointer/registry.js";
+export { putPointerRow as restorePointerRowIfAbsent };
 `;
 
 /** The exact ESM source the composed copy writes over the adapter, so a test
@@ -136,6 +138,18 @@ Memory.put = function (record, ...rest) {
   }
   return memoryPut.call(this, record, ...rest);
 };
+const memoryUpdate = Memory.update;
+Memory.update = async function (id, patch, ...rest) {
+  if (patch?.promotionStatus === "approved") {
+    const row = await Memory.get(id, rest[0]);
+    if (typeof row?.agentId === "string" && row.agentId.includes("stamp-failure")) {
+      const t = rest[0]?.transaction;
+      const open = !!t && t.open === 1 && !t.saveCommits;
+      throw new Error("test component: forced promotion stamp failure (" + (open ? "transaction open" : "no open transaction") + ")");
+    }
+  }
+  return memoryUpdate.call(this, id, patch, ...rest);
+};
 `;
 
 function repoRoot(): string {
@@ -217,26 +231,112 @@ export function componentWithFailingRepairPeerWrite(opts: { sourceRoot?: string 
   return composeComponent({ [FAILING_REPAIR_PEER_WRITE_MODULE_REL]: FAILING_REPAIR_PEER_WRITE_MODULE_SRC }, opts.sourceRoot ?? repoRoot());
 }
 
+/** The armable Memory read failure, bound to a calling phase (flair#3053).
+ *
+ * The composed copy replaces `Memory.get` with one that fails the read when
+ * `arm.memory-get-fail.<id>` exists AND the caller's stack carries the frame of
+ * the phase the arm names. A read of the same id by any other caller leaves the
+ * arm in place, so a background writer (the embedding backfill, a scan) cannot
+ * consume the failure the test armed for its own read-back. The arm is
+ * one-shot: the matching read removes it, records its stack in
+ * `consumed.memory-get-fail.<id>`, and throws.
+ */
+export const MEMORY_READ_PHASES = {
+  /** The ordinary PUT/PATCH/Skill post-commit verification read. */
+  "memory-patch-verify": ["verifyWrittenRow ("],
+  "memory-put-verify": ["verifyWrittenRow ("],
+  /** The feed write-back's post-commit read (resources/write-back.ts). */
+  "feed-write-back": ["writeBackCommittedRow ("],
+  /** The embedding backfill's post-commit read, same site as the feed's. */
+  "backfill-read-back": ["writeBackCommittedRow ("],
+  /** The feed dedup repair's confirmation read (resources/MemoryFeed.ts). */
+  "feed-dedup-repair": ["repairDeduplicatedExpiryLocked ("],
+  /** The re-embed PATCH's post-commit verification read. */
+  "reembed-verify": ["reembedStoredRow ("],
+  /** The embedding-stamp migration's `.content`-suffix fallback read. */
+  "content-suffix-verify": ["regenContentSuffixRow ("],
+  /** The migration's fresh read on the retry after an unconfirmed attempt. */
+  "content-suffix-retry": ["embedding-stamp.js", "Object.run ("],
+} as const;
+
+export type MemoryReadPhase = keyof typeof MEMORY_READ_PHASES;
+
+/** The one built resource the composed copy installs the armable read failure as. */
 export const FAILING_MEMORY_READ_MODULE_REL = join("dist", "resources", "zz-test-failing-memory-read.js");
 
-export const FAILING_MEMORY_READ_MODULE_SRC = `import { existsSync, unlinkSync } from "node:fs";
+export const FAILING_MEMORY_READ_MODULE_SRC = `import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { databases } from "harper";
 const { Memory } = databases.flair;
+// Each phase names the frames of the read the test means; the arm is consumed
+// only from a stack that carries one of them (flair#3053).
+const PHASES = ${JSON.stringify(MEMORY_READ_PHASES)};
 const memoryGet = Memory.get;
 Memory.get = function (id, ...rest) {
   const dir = process.env.FLAIR_TEST_PAUSE_DIR;
   if (dir && (typeof id === "string" || typeof id === "number")) {
     const arm = join(dir, "arm.memory-get-fail." + id);
     if (existsSync(arm)) {
-      unlinkSync(arm);
-      throw new Error("test component: forced Memory read failure");
+      const phase = readFileSync(arm, "utf8").trim();
+      const frames = PHASES[phase];
+      const stack = new Error("armed Memory read").stack ?? "";
+      const matches = Array.isArray(frames) &&
+        stack.split(String.fromCharCode(10)).some((line) => frames.every((part) => line.includes(part)));
+      if (matches) {
+        unlinkSync(arm);
+        writeFileSync(join(dir, "consumed.memory-get-fail." + id), stack);
+        throw new Error("test component: forced Memory read failure (" + phase + ")");
+      }
     }
   }
   return memoryGet.call(this, id, ...rest);
 };
 `;
 
+/** Arm the read failure for `id`, bound to `phase` (one of {@link MEMORY_READ_PHASES}). */
+export function armMemoryReadFailure(pauseDir: string, id: string, phase: MemoryReadPhase): void {
+  writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), phase);
+}
+
+/** The stack of the read that consumed the arm for `id`, or null if none did. */
+export function memoryReadConsumerStack(pauseDir: string, id: string): string | null {
+  const path = join(pauseDir, `consumed.memory-get-fail.${id}`);
+  return existsSync(path) ? readFileSync(path, "utf8") : null;
+}
+
+/** A composed copy that keeps every built resource and adds the armable Memory
+ *  read failure (FAILING_MEMORY_READ_MODULE_SRC). */
 export function componentWithFailingMemoryRead(opts: { sourceRoot?: string } = {}): FailingComponent {
   return composeComponent({ [FAILING_MEMORY_READ_MODULE_REL]: FAILING_MEMORY_READ_MODULE_SRC }, opts.sourceRoot ?? repoRoot());
+}
+
+/** Where a composed copy writes the second-caller read probe. */
+export const SECOND_READ_MODULE_REL = join("dist", "resources", "zz-test-second-reader.js");
+
+/** A test-only resource that reads one id through `Memory.get` on request, so a
+ *  test can prove an armed failure is not consumed by another caller's read
+ *  (flair#3053). POST /MemoryReadProbe/ {"op":"read","id":<id>}. */
+export const SECOND_READ_MODULE_SRC = `import { Resource, databases } from "harper";
+export class MemoryReadProbe extends Resource {
+  allowCreate() {
+    return true;
+  }
+
+  async post(body) {
+    if (body?.op !== "read") return { error: "unknown op" };
+    // A background reader swallows its own read error; report it instead.
+    try {
+      const row = await databases.flair.Memory.get(String(body.id), {});
+      return { found: row != null };
+    } catch (err) {
+      return { found: false, failed: String(err?.message ?? err) };
+    }
+  }
+}
+`;
+
+/** A composed copy that keeps every built resource and adds the second-caller
+ *  read probe (SECOND_READ_MODULE_SRC). */
+export function componentWithSecondReader(opts: { sourceRoot?: string } = {}): FailingComponent {
+  return composeComponent({ [SECOND_READ_MODULE_REL]: SECOND_READ_MODULE_SRC }, opts.sourceRoot ?? repoRoot());
 }

@@ -10,8 +10,9 @@
 import { describe, it, expect } from "bun:test";
 import {
   addressesNoSingleRecord,
-  bodyNamesDifferentRecord,
+  bodyIdRefusal,
   guardOwnerScopedWrites,
+  isAddressedKey,
   isRequestEntryTarget,
   OWNER_SCOPED_WRITE_GUARD,
   ownerScopedWriteGuardGaps,
@@ -260,15 +261,42 @@ describe("target predicates", () => {
     expect(addressesNoSingleRecord({ id: "r1" })).toBe(false);
   });
 
-  it("sees a string or number body id that names a different record than the addressed one", () => {
-    expect(bodyNamesDifferentRecord("fresh", { id: "victim", v: 1 })).toBe(true);
-    expect(bodyNamesDifferentRecord("r1", { id: "r1" })).toBe(false);
-    expect(bodyNamesDifferentRecord(7, { id: "7" })).toBe(false);       // equal by coercion
-    expect(bodyNamesDifferentRecord("r1", { v: 1 })).toBe(false);       // no body id
-    expect(bodyNamesDifferentRecord("r1", { id: ["r1"] })).toBe(false); // array id: left to the resource
-    expect(bodyNamesDifferentRecord("r1", { id: { label: "x" } })).toBe(false);
-    expect(bodyNamesDifferentRecord("r1", ["r1"])).toBe(false);         // array body
-    expect(bodyNamesDifferentRecord(null, { id: "victim" })).toBe(false); // no addressed id
+  it("matches a body id to the addressed key by text for a string or number pair, and element by element for arrays", () => {
+    expect(isAddressedKey("r1", "r1")).toBe(true);
+    expect(isAddressedKey(7, "7")).toBe(true);
+    expect(isAddressedKey("r1", "r2")).toBe(false);
+    expect(isAddressedKey(["a", "b"], ["a", "b"])).toBe(true);
+    expect(isAddressedKey(["a", "b"], ["a", "c"])).toBe(false);
+    expect(isAddressedKey(["a", "b"], ["a"])).toBe(false);
+    expect(isAddressedKey(["7"], [7])).toBe(false);
+    expect(isAddressedKey("r1", ["r1"])).toBe(false);
+    expect(isAddressedKey("a,b", ["a", "b"])).toBe(false);
+    expect(isAddressedKey(["a", "b"], "a,b")).toBe(false);
+    expect(isAddressedKey("r1", { label: "r1" })).toBe(false);
+    expect(isAddressedKey("true", true)).toBe(false);
+  });
+
+  it("names the refusal for a body id that is not the addressed record", async () => {
+    const named = async (r: Response | null) => (r ? { status: r.status, body: await r.json() } : null);
+    const NOT_ADDRESSED = { status: 403, body: { error: "write_id_not_addressed", message: "a write may name only the record it addresses" } };
+    const MISMATCH = { status: 400, body: { error: "id_target_mismatch", message: "the request body id does not match the address it was sent to" } };
+    expect(await named(bodyIdRefusal("fresh", { id: "victim", v: 1 }))).toEqual(NOT_ADDRESSED);
+    expect(await named(bodyIdRefusal("r1", { id: ["r1"] }))).toEqual(MISMATCH);
+    expect(await named(bodyIdRefusal("r1", { id: ["victim", "x"] }))).toEqual(MISMATCH);
+    expect(await named(bodyIdRefusal("r1", { id: { label: "x" } }))).toEqual(MISMATCH);
+    expect(await named(bodyIdRefusal("r1", { id: true }))).toEqual(MISMATCH);
+    expect(await named(bodyIdRefusal("r1", { id: [] }))).toEqual(MISMATCH);
+    expect(await named(bodyIdRefusal(["a", "b"], { id: "a,b" }))).toEqual(MISMATCH);
+    expect(await named(bodyIdRefusal("r1", [{ id: "r1" }, { id: "victim" }]))).toEqual(NOT_ADDRESSED); // array body element
+    expect(await named(bodyIdRefusal("r1", [{ id: ["victim"] }]))).toEqual(MISMATCH);
+    expect(bodyIdRefusal("r1", { id: "r1" })).toBeNull();
+    expect(bodyIdRefusal(7, { id: "7" })).toBeNull();          // equal by text
+    expect(bodyIdRefusal("r1", { v: 1 })).toBeNull();          // no body id
+    expect(bodyIdRefusal("r1", { id: null })).toBeNull();
+    expect(bodyIdRefusal(["a", "b"], { id: ["a", "b"] })).toBeNull();
+    expect(bodyIdRefusal("r1", [{ id: "r1" }, { v: 1 }, "x", null])).toBeNull(); // non-object elements are left to the resource
+    expect(bodyIdRefusal("r1", "victim")).toBeNull();          // a body that is not an object or array
+    expect(bodyIdRefusal(null, { id: "victim" })).toBeNull();  // no addressed id
   });
 });
 
@@ -286,6 +314,36 @@ describe("a write may name only the record it addresses (through the guard)", ()
       expect(d.reads, "no stored read happened before the body-id refusal").toEqual([]);
     });
   }
+
+  for (const method of ["put", "patch", "post"]) {
+    for (const [label, body] of [
+      ["a composite body id", { id: ["victim-id", "x"], summary: "x" }],
+      ["a one-element array body id", { id: ["victim-id"], summary: "x" }],
+      ["an object body id", { id: { label: "victim-id" }, summary: "x" }],
+      ["an array body whose element names another record", [{ id: "victim-id", summary: "x" }]],
+    ] as const) {
+      it(`refuses a non-admin ${method} with ${label}, before any stored read or write`, async () => {
+        const { Table, calls } = makeTable();
+        const d = deps();
+        guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);
+        const r = await refusalBody((Table as any).getResource(entry("fresh-id"), ctxWith(AGENT, body), { method }));
+        expect(r.status).toBe(Array.isArray(body) ? 403 : 400);
+        expect(r.body.error).toBe(Array.isArray(body) ? "write_id_not_addressed" : "id_target_mismatch");
+        expect(JSON.stringify(r.body)).not.toContain("victim-id");
+        expect(JSON.stringify(r.body)).not.toContain("fresh-id");
+        expect(calls, "the table was never reached").toEqual([]);
+        expect(d.reads, "no stored read happened before the body-id refusal").toEqual([]);
+      });
+    }
+  }
+
+  it("admits an array body id equal to an array address", async () => {
+    const { Table, calls } = makeTable();
+    const d = deps();
+    guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);
+    expect("ok" in await outcome((Table as any).getResource(entry(["a", "b"]), ctxWith(AGENT, { id: ["a", "b"], summary: "x" }), { method: "put" }))).toBe(true);
+    expect(calls.length).toBe(1);
+  });
 
   it("does not apply the body-id rule to DELETE", async () => {
     const { Table, calls } = makeTable();
@@ -321,7 +379,9 @@ describe("a write may name only the record it addresses (through the guard)", ()
     guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);
     expect("ok" in await outcome((Table as any).getResource(entry("fresh-id"), ctxWith(ADMIN, { id: "victim-id" }), { method: "put" }))).toBe(true);
     expect("ok" in await outcome((Table as any).getResource(entry("fresh-id"), ctxWith(INTERNAL, { id: "victim-id" }), { method: "put" }))).toBe(true);
-    expect(calls.length).toBe(2);
+    expect("ok" in await outcome((Table as any).getResource(entry("fresh-id"), ctxWith(ADMIN, { id: ["victim-id", "x"] }), { method: "put" }))).toBe(true);
+    expect("ok" in await outcome((Table as any).getResource(entry("fresh-id"), ctxWith(INTERNAL, { id: ["victim-id", "x"] }), { method: "put" }))).toBe(true);
+    expect(calls.length).toBe(4);
   });
 
   for (const method of ["post", "put", "patch"]) {

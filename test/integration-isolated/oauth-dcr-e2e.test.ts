@@ -49,12 +49,8 @@ async function clientRowCount(h: HarperInstance): Promise<number> {
 
 describe("DCR is closed on a default install (real Harper)", () => {
   let harper: HarperInstance;
-  let savedToken: string | undefined;
-  let savedRegisterLimit: string | undefined;
 
   beforeAll(async () => {
-    savedToken = process.env.FLAIR_OAUTH_DCR_TOKEN;
-    delete process.env.FLAIR_OAUTH_DCR_TOKEN;
     // The registration rate limiter runs BEFORE this gate (deliberately — see
     // the ordering test at the bottom of this file), and its default budget is
     // 5 per five minutes. These cases make more registration attempts than that
@@ -62,17 +58,14 @@ describe("DCR is closed on a default install (real Harper)", () => {
     // 429 by the limiter and never reach the gate under test. Raising it takes
     // an unrelated control out of the path; it does not weaken a single
     // assertion below, each of which still demands an exact status and body.
-    savedRegisterLimit = process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT;
-    process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT = "100";
-    harper = await startHarper();
+    // An empty DCR token reads as absent (resources/dcr-gate.ts).
+    harper = await startHarper({
+      serverEnv: { FLAIR_OAUTH_DCR_TOKEN: "", FLAIR_OAUTH_REGISTER_RATE_LIMIT: "100" },
+    });
   }, 180_000);
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-    if (savedToken === undefined) delete process.env.FLAIR_OAUTH_DCR_TOKEN;
-    else process.env.FLAIR_OAUTH_DCR_TOKEN = savedToken;
-    if (savedRegisterLimit === undefined) delete process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT;
-    else process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT = savedRegisterLimit;
   }, HARPER_STOP_BUDGET_MS);
 
   test("an anonymous POST /OAuthRegister is refused with 403", async () => {
@@ -124,28 +117,20 @@ describe("DCR is closed on a default install (real Harper)", () => {
 
 describe("DCR when an operator has opted in (real Harper)", () => {
   let harper: HarperInstance;
-  let savedToken: string | undefined;
-  let savedRegisterLimit: string | undefined;
 
   beforeAll(async () => {
-    savedToken = process.env.FLAIR_OAUTH_DCR_TOKEN;
-    process.env.FLAIR_OAUTH_DCR_TOKEN = TOKEN;
     // Same reason as the closed block: keep the registration limiter out of the
     // path so these assertions test the gate. This block currently makes four
     // registration requests against a default budget of five — it passes today
     // by one request, and the fifth test anyone adds would fail for a reason
     // that has nothing to do with what they were testing.
-    savedRegisterLimit = process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT;
-    process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT = "100";
-    harper = await startHarper();
+    harper = await startHarper({
+      serverEnv: { FLAIR_OAUTH_DCR_TOKEN: TOKEN, FLAIR_OAUTH_REGISTER_RATE_LIMIT: "100" },
+    });
   }, 180_000);
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-    if (savedToken === undefined) delete process.env.FLAIR_OAUTH_DCR_TOKEN;
-    else process.env.FLAIR_OAUTH_DCR_TOKEN = savedToken;
-    if (savedRegisterLimit === undefined) delete process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT;
-    else process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT = savedRegisterLimit;
   }, HARPER_STOP_BUDGET_MS);
 
   test("POSITIVE CONTROL: the right initial access token registers a client", async () => {
@@ -199,24 +184,18 @@ describe("the registration rate limiter runs BEFORE the DCR gate (real Harper)",
   // exhausted anything. Nothing asserted it, so it took a CI failure on a
   // combined branch to notice — hence this test.
   let harper: HarperInstance;
-  let savedToken: string | undefined;
-  let savedRegisterLimit: string | undefined;
   const LIMIT = 3;
 
   beforeAll(async () => {
-    savedToken = process.env.FLAIR_OAUTH_DCR_TOKEN;
-    delete process.env.FLAIR_OAUTH_DCR_TOKEN; // closed: every attempt is gate-refused
-    savedRegisterLimit = process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT;
-    process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT = String(LIMIT);
-    harper = await startHarper();
+    // DCR is closed (an empty token reads as absent): attempts within the rate
+    // budget are gate-refused; later attempts are rate-limited.
+    harper = await startHarper({
+      serverEnv: { FLAIR_OAUTH_DCR_TOKEN: "", FLAIR_OAUTH_REGISTER_RATE_LIMIT: String(LIMIT) },
+    });
   }, 180_000);
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-    if (savedToken === undefined) delete process.env.FLAIR_OAUTH_DCR_TOKEN;
-    else process.env.FLAIR_OAUTH_DCR_TOKEN = savedToken;
-    if (savedRegisterLimit === undefined) delete process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT;
-    else process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT = savedRegisterLimit;
   }, HARPER_STOP_BUDGET_MS);
 
   test("refused registrations still spend budget, and the limiter answers once it is gone", async () => {

@@ -20,6 +20,15 @@
  * call `_loadRecord`, so the same instance serves normal traffic until the test
  * arms the switch. Production ships no such switch.
  *
+ * Background migrations (flair#2748): the boot migration cycle and its delayed
+ * follow-ups (resources/migration-boot.ts) stamp `visibility` on a Memory row
+ * without one (visibility-backfill) and, with the embedding model present,
+ * re-embed a Memory row without a current `embeddingModel` (embedding-stamp).
+ * The seeded Memory row carries both, and the first test waits for a migration
+ * cycle that starts after its rows are seeded and requires each registered
+ * migration to report completed with no rows done or remaining before it
+ * compares any row.
+ *
  * MODEL: test/integration/credential-delete-authz.test.ts.
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
@@ -35,6 +44,8 @@ import {
   armFor,
   type FailingComponent,
 } from "../helpers/owner-guard-load-failure-component";
+import { getModelId } from "../../resources/embeddings-provider.ts";
+import { DEFAULT_STAMP_RECHECK_DELAYS_MS } from "../../resources/migrations/recheck.ts";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -84,6 +95,38 @@ async function authFetch(m: TestAgent, method: string, path: string, body?: unkn
   });
 }
 
+interface MigrationStatus {
+  cyclePhase: string;
+  lastCycleAt: string | null;
+  lastCycleError: string | null;
+  migrations: Array<{ id: string } & Record<string, unknown>>;
+}
+
+/** The instance's migration-cycle status, read from /HealthDetail as the administrator. */
+async function migrationStatus(): Promise<MigrationStatus> {
+  const res = await fetch(`${harper.httpURL}/HealthDetail`, { headers: { Authorization: adminBasic() } });
+  expect(res.status).toBe(200);
+  const body: any = await res.json();
+  expect(body.migrations, "/HealthDetail returned no migrations block").toBeTruthy();
+  return body.migrations;
+}
+
+/** Wait (bounded) for a migration cycle to finish after `since`, an earlier
+ *  finished cycle's lastCycleAt (null: any finished cycle). */
+async function waitForCycleAfter(since: string | null, timeoutMs: number): Promise<MigrationStatus> {
+  const deadline = Date.now() + timeoutMs;
+  let last: MigrationStatus | undefined;
+  while (Date.now() < deadline) {
+    last = await migrationStatus();
+    if (last.cyclePhase === "done" && last.lastCycleAt !== null && (since === null || last.lastCycleAt > since)) return last;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(`no migration cycle finished after ${since ?? "boot"} within ${timeoutMs} ms; last status: ${JSON.stringify(last)}`);
+}
+
+/** The boot migration cycle's status, read once it finished (beforeAll). */
+let bootCycle: MigrationStatus;
+
 /** Arm / disarm the injected load failure via the ROOTPATH sentinel. */
 function arm(): void { writeFileSync(join(harper.installDir, ARM_FILE), "1"); }
 function disarm(): void { const p = join(harper.installDir, ARM_FILE); if (existsSync(p)) rmSync(p, { force: true }); }
@@ -96,6 +139,9 @@ beforeAll(async () => {
   harper = await startHarper({ cwd: component.dir });
   const bootLog = (harper.getLog?.() ?? "").split("\n").filter((l) => l.includes("owner-guard-load-failure")).join("\n");
   console.log("[2468] injected-module boot log:\n" + (bootLog || "(module did not log)"));
+  // Nothing is seeded until the boot migration cycle has finished (flair#2748).
+  bootCycle = await waitForCycleAfter(null, 60_000);
+  expect(bootCycle.lastCycleError, "the boot migration cycle failed").toBeNull();
   for (const a of [owner, other]) {
     const res = await adminOp({
       operation: "insert", database: "flair", table: "Agent",
@@ -133,7 +179,9 @@ describe("flair#2468 — initial row-load failures on addressed single-record Ha
       },
       {
         table: "Memory", id: markerId("memory"),
-        seed: { agentId: owner.id, content: "stored" },
+        // The visibility visibility-backfill derives for a row without
+        // durability, and the instance's current embedding stamp (header).
+        seed: { agentId: owner.id, content: "stored", visibility: "private", embeddingModel: getModelId() },
         put: { content: "hi" },
         patch: { content: "hi" },
       },
@@ -181,6 +229,19 @@ describe("flair#2468 — initial row-load failures on addressed single-record Ha
       before.set(c.id, await readRow(c.table, c.id));
     }
 
+    // flair#2748: the first follow-up cycle starts at least its delay after the
+    // boot cycle finished, so it starts after the seeding above; each registered
+    // migration must report completed with no rows done or remaining.
+    const firstDelay = DEFAULT_STAMP_RECHECK_DELAYS_MS[0];
+    expect(Date.now(), "seeding outlasted the first follow-up delay").toBeLessThan(Date.parse(bootCycle.lastCycleAt!) + firstDelay);
+    const cycle = await waitForCycleAfter(bootCycle.lastCycleAt, firstDelay + 30_000);
+    console.log(`[2748] migration cycle after seeding: ${JSON.stringify(cycle)}`);
+    expect(cycle.lastCycleError).toBeNull();
+    expect(cycle.migrations.map((m) => m.id)).toEqual(expect.arrayContaining(["embedding-stamp", "visibility-backfill"]));
+    for (const m of cycle.migrations) {
+      expect(m, `migration ${m.id} after seeding (seed rows that already satisfy it)`).toEqual({ id: m.id, rowsDone: 0, rowsRemaining: 0, state: "completed" });
+    }
+
     arm();
 
     for (const c of seeded) {
@@ -221,7 +282,7 @@ describe("flair#2468 — initial row-load failures on addressed single-record Ha
         expect(await readRow(c.table, c.id), `${c.table}.${verb} (admin) must leave the full row unchanged`).toEqual(prior);
       }
     }
-  }, 60_000);
+  }, 150_000);
 
   test("control: armed injection permits a non-marker PUT and ownership refuses a cross-agent PATCH", async () => {
     arm();

@@ -75,7 +75,10 @@ export const AUTO_PROMOTE_RATIONALE =
  * runs once per nightly cycle, not on every write, and each promotion is a
  * bounded DB write (plus at most one embedding compute on the Memory.put path),
  * so this caps the blast radius of a single cycle rather than throttling a hot
- * path. Overflow stays `pending` and is swept on subsequent cycles.
+ * path. AutoPromoteCandidates counts every eligible candidate it attempts a
+ * Memory write for, whatever the outcome (a rejected or thrown attempt
+ * included), plus those it takes a recorded row for (flair#2714). Overflow
+ * stays `pending` and is swept on subsequent cycles.
  */
 export const DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE = 200;
 
@@ -104,10 +107,10 @@ export interface AutoPromoteCandidateInput {
 // src/rem/promote-policy.ts. This gate imports structuralImbalance from it; the
 // CLI flag path (src/commands/rem.ts) uses hasTerminalPunctuation from the same
 // module. A server file importing a PURE helper from src/ is established practice
-// in this repo (resources/PromoteMemoryCandidate.ts and resources/soul-adk-guard.ts
-// both import that module); what does not survive npm packaging is a CLI file
-// importing FROM resources/. One definition lets the CLI and this gate share a
-// single implementation rather than a hand-kept pair.
+// in this repo (resources/PromoteMemoryCandidate.ts imports that module); what
+// does not survive npm packaging is a CLI file importing FROM resources/. One
+// definition lets the CLI and this gate share a single implementation rather
+// than a hand-kept pair.
 //
 // Slice 1 handled a generation the backend LABELLED incomplete (finishReason
 // `length` / `content_filter`). This handles the other case: a claim reaches

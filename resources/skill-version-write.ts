@@ -1,10 +1,13 @@
+import { WriteJournal, currentWriteJournal } from "./write-journal.js";
+import { withKeyLock } from "./key-lock.js";
+import { withMemoryWriteLock } from "./memory-write-lock.js";
 import { normalizeEmptyEmbedding } from "./memory-embedding-value.js";
 /** Skill writes share the ["flair-instruction-version", "skill"] lock. */
 import { databases } from "harper";
 import { storageResult } from "./memory-write-response.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { recordVersion, readHead, skillRefReadable, SKILL_SUBJECT_TYPE, type RecordVersionOutcome } from "./instruction-version-record.js";
+import { recordVersion, readHead, readVersionRecord, readVersionRecordAfter, skillRefReadable, SKILL_SUBJECT_TYPE, type RecordVersionOutcome } from "./instruction-version-record.js";
 import { SKILL_TAG, enforceSkillDurability, skillEmbedText, skillMetadataHasDuplicateKey } from "./skill-write.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { skillWriteSource } from "./skill-write-policy.js";
@@ -14,9 +17,11 @@ import { FORBIDDEN } from "./record-type-kit.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 import { supersedesTargetUnreadable } from "./memory-id-guard.js";
-import { grantedCloseRevokedRefusal, writeGrantHeld } from "./write-back.js";
+import { grantedCloseRevokedRefusal, sameStoredRow, storedRowChangedRefusal, writeGrantHeld } from "./write-back.js";
+import { isJoinableTransaction, withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { committedVisibilityDiffers, grantedSuccessorVisibilityDenial, predecessorVisibilityChangedRefusal } from "./grant-visibility.js";
+import { isOpenLiveRow } from "../src/lib/open-live-row.js";
 
 /** Durability-keyed default visibility (mirrors Memory's write default). */
 function defaultVisibilityForDurability(durability: unknown): "private" | "shared" {
@@ -115,14 +120,6 @@ function okResponse(): Response {
   return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
 }
 
-function isOpenLiveRow(row: Record<string, any> | null | undefined): boolean {
-  if (!row || typeof row !== "object") return false;
-  if (row.archived === true) return false;
-  if (row.expiresAt != null && (typeof row.expiresAt !== "string" || !(Date.parse(row.expiresAt) > Date.now()))) return false;
-  if (typeof row.validTo === "string" && row.validTo.length > 0) return false;
-  return true;
-}
-
 /** Is this row a skill-tagged Memory row? */
 export function rowIsSkill(row: Record<string, any> | null | undefined): boolean {
   return !!row && Array.isArray(row.tags) && row.tags.includes(SKILL_TAG);
@@ -196,7 +193,7 @@ export async function prepareSkillBody(content: any, stored: Record<string, any>
   return { content: effective, predecessor };
 }
 
-/** Select exactly one open row; ambiguity refuses. */
+/** Return the sole live head, or null if none; refuse ambiguity. */
 export async function resolveSkillHead(
   subjectId: string | null,
   addressedId: string | null,
@@ -319,6 +316,9 @@ export interface SkillWriteHooks {
   closePredecessor?: (predecessor: Record<string, any>, patch: Record<string, unknown>, shared: any) => Promise<void | Response>;
   /** Pointer writes through the shared transaction; a Response denies and aborts. */
   pointer?: (shared: any) => Promise<Response | null>;
+  /** Re-check the caller's authority over the current committed predecessor
+   *  before a close that did not land is re-applied from a fresh read. */
+  authorizeClose?: (row: Record<string, any>, shared: any) => Promise<Response | null>;
 }
 
 /**
@@ -329,6 +329,11 @@ export interface SkillWriteHooks {
 export const defaultSkillHooks: SkillWriteHooks = {
   createSuccessor: async (successor, shared) => {
     normalizeEmptyEmbedding(successor);
+    // Not pre-validated: this row carries the caller's fields without that
+    // coercion, so a defect in it — a server-stamped field included — stays a
+    // caller error (400) at commit. Pre-validation covers the A2A,
+    // agent-key-register and instruction-version writer events and the
+    // migration rows (resources/server-row-validation.ts).
     const result = storageResult(await (databases as any).flair.Memory.put(successor, shared));
     if (result instanceof Response) return result;
     return String(successor.id);
@@ -336,6 +341,8 @@ export const defaultSkillHooks: SkillWriteHooks = {
   closePredecessor: async (predecessor, patch, shared) => {
     const closed = { ...predecessor, ...patch };
     normalizeEmptyEmbedding(closed);
+    // Not pre-validated: a close carries the caller's row; its defects stay a
+    // caller error at commit (see the successor note above).
     const result = storageResult(await (databases as any).flair.Memory.put(closed, shared));
     if (result instanceof Response) return result;
   },
@@ -343,6 +350,10 @@ export const defaultSkillHooks: SkillWriteHooks = {
 
 export interface RunSkillVersionWriteArgs {
   ctx: any;
+  /** Join the caller's open transaction. A plan that supersedes a predecessor
+   *  is first built there without staging a write, then planned again and
+   *  committed in a transaction this write owns (flair#2645). */
+  joinCallerTransaction?: boolean;
   /** The stable logical subject id. */
   subjectId: string;
   /** The subject owner's agent id (the skill's `agentId`). */
@@ -352,11 +363,19 @@ export interface RunSkillVersionWriteArgs {
   /**
    * Build the write plan from the live head resolved under the lock. Returning
    * a Response refuses the write (and rolls back: nothing is written).
+   * `attempt.joined` is true when this attempt plans in the caller's transaction.
    */
-  plan: (head: Record<string, any> | null, shared: any) => SkillWritePlan | Response | null | Promise<SkillWritePlan | Response | null>;
+  plan: (head: Record<string, any> | null, shared: any, attempt: { joined: boolean }) => SkillWritePlan | Response | null | Promise<SkillWritePlan | Response | null>;
   /** Resolve the live head under the lock. */
   head: (shared: any) => Promise<Record<string, any> | null>;
   hooks: SkillWriteHooks;
+  /** Return the pre-confirmation work instead of running it, so a verb can drop
+   *  its Memory locks first (flair#2645): the write has committed, and a later
+   *  same-subject write must be able to run before this one confirms. */
+  deferConfirmation?: boolean;
+  /** The caller-held Memory ids that inline confirmation and compensation
+   *  skip; deferred work treats no original ids as held (flair#2950). */
+  heldMemoryIds?: readonly string[];
 }
 
 /**
@@ -364,20 +383,17 @@ export interface RunSkillVersionWriteArgs {
  * close or a delete's head close. A grant-authorized cross-agent close stands on
  * the grant read at authorization time; re-read it on committed state HERE,
  * after the close is staged, through the shared write-back helper the non-skill
- * close uses (Memory.ts closeSupersededRecord, flair#2333 H10). Returns the named
- * 409 when the grant is gone — the caller returns it, so the whole transaction
- * rolls back: no close, no successor, no version — else null. A plan with no
- * grant (same-agent, operator, internal) reads nothing.
+ * close uses (Memory.ts closeSupersededRecord, flair#2333 H10).
  *
  * For a grant-authorized supersede, `successor` is the planned successor row.
  * Before the grant re-check, the predecessor's COMMITTED row (an empty-context
  * read, as for the grant) must read with the successor's visibility: a write
  * grant does not include changing a record's visibility (grant-visibility.ts).
- * A mismatch returns the named 409 predecessor_visibility_changed, and the
- * whole write rolls back the same way. As with the grant, a change committed
+ * A mismatch returns the named 409 predecessor_visibility_changed.
+ * As with the grant, a change committed
  * after this re-read and before the transaction commits is not seen by it.
  */
-async function afterCloseStaged(
+export async function afterCloseStaged(
   granted: GrantedClose | null | undefined,
   supersede?: { predecessorId: string; successor: Record<string, any> },
 ): Promise<Response | null> {
@@ -395,19 +411,361 @@ async function afterCloseStaged(
   return held ? null : grantedCloseRevokedRefusal();
 }
 
+/** Attempts at re-applying a skill update's close whose committed write did not land (flair#2645). */
+const SKILL_UPDATE_CLOSE_ATTEMPTS = 3;
+
+/** No caller-held Memory ids. */
+const NO_HELD_IDS: ReadonlySet<string> = new Set();
+
+/**
+ * Acquire missing Memory ids in sorted order. Inline compensation skips
+ * caller-held ids; deferred confirmation and compensation reacquire after
+ * release (flair#2950).
+ * Returns `locked: false` when a missing id's lock could not be taken.
+ */
+async function withSkillMemoryLocks<T>(
+  ids: readonly string[],
+  held: ReadonlySet<string>,
+  fn: () => Promise<T>,
+): Promise<{ locked: true; value: T } | { locked: false }> {
+  const missing = [...new Set(ids.map((id) => String(id)))].filter((id) => !held.has(id)).sort();
+  if (missing.length === 0) return { locked: true, value: await fn() };
+  const outcome = await withMemoryWriteLock((databases as any)?.flair?.Memory?.primaryStore, missing, fn, {
+    phase: "skill-version-write",
+  });
+  return outcome.kind === "done" ? { locked: true, value: outcome.value } : { locked: false };
+}
+
+/** The named 500 when the skill update cannot be confirmed. */
+function skillUpdateUnconfirmedFailure(): Response {
+  return Response.json({
+    error: "skill_update_unconfirmed",
+    message: "the skill update could not be confirmed",
+  }, { status: 500 });
+}
+
+/** The named 409 for an update whose close still is not visible after the bounded re-applies. */
+function skillUpdateNotClosedRefusal(attempts: number): Response {
+  return Response.json({
+    error: "skill_update_not_closed",
+    message: `the skill version close was not applied after ${attempts} attempts; not updated`,
+  }, { status: 409 });
+}
+
+/** The named 409 when neither a sole live successor nor ordered supersession is confirmed. */
+function skillUpdateNotConfirmedRefusal(): Response {
+  return Response.json({
+    error: "skill_update_not_confirmed",
+    message: "the committed store confirms neither this update's successor as the only live head nor its closure with this request's version record present, the record with the next sequence number linked to it by hash, and that later version deleting the successor or its row naming the successor as superseded",
+  }, { status: 409 });
+}
+
+/** The named 500 when compensation cannot be confirmed. */
+function skillUpdateCompensationFailure(message: string): Response {
+  return Response.json({ error: "skill_update_compensation_failed", message }, { status: 500 });
+}
+
+async function compensateUnlandedSkillUpdate(args: {
+  ctx: any;
+  journal: WriteJournal;
+  /** The Memory ids the caller still holds: its own lock acquisition. */
+  held?: ReadonlySet<string>;
+}): Promise<Response | null> {
+  args.journal.compensationAttempted = true;
+  try {
+    const table = (databases as any).flair?.InstructionVersion;
+    // Memory id locks before the instruction-version lock (the global order),
+    // so the undo's Memory writes are serialized with the other per-id-locked
+    // writers of those ids, not just the version append (flair#2950).
+    const locked = await withSkillMemoryLocks(args.journal.memoryWriteIds(), args.held ?? NO_HELD_IDS, async () =>
+      withKeyLock(table?.primaryStore, ["flair-instruction-version", "skill"], async () => {
+        const appended = [...args.journal.entries].reverse().find((entry) => entry.after?.subjectType === "skill");
+        if (appended) {
+          const head = await readHead(SKILL_SUBJECT_TYPE, appended.after.subjectId, {});
+          if (head && String(head.id) !== String(appended.after.id)) return false;
+        }
+        return args.journal.undo(args.ctx, withOwnedTransaction);
+      }, 200, 10));
+    if (!locked.locked) throw new Error("the Memory write lock could not be acquired for the skill write's undo");
+    const result = locked.value;
+    if (result.kind === "done" && result.value) return null;
+  } catch (err) {
+    console.error("skill-version-write: update undo could not be confirmed", err);
+  }
+  return skillUpdateCompensationFailure("the skill write's undo could not be confirmed; check its outcome, because its version and event may persist" +
+    (args.journal.pointerChanged ? "; a different host-pointer row was left in place" : ""));
+}
+
+/**
+ * flair#2645 — confirm a closed successor only when this request's update
+ * record is present, the record with the next sequence number links to it by
+ * hash, and that later version either deletes this successor (its `rowId`) or
+ * has a row that names this successor as superseded.
+ */
+async function confirmSupersededInOrder(args: {
+  subjectId: string;
+  successor: Record<string, any>;
+  appendedVersionId: string | null;
+  memory: SkillCloseTable;
+}): Promise<Response | null> {
+  if (!args.appendedVersionId) return skillUpdateNotConfirmedRefusal();
+  let appended: Record<string, any> | null;
+  let following: Record<string, any> | null;
+  try {
+    appended = await readVersionRecord(SKILL_SUBJECT_TYPE, args.subjectId, args.appendedVersionId, {});
+    following = appended
+      ? await readVersionRecordAfter(SKILL_SUBJECT_TYPE, args.subjectId, appended.version, {})
+      : null;
+  } catch {
+    return skillUpdateUnconfirmedFailure();
+  }
+  if (!appended || appended.kind !== "update" || String(appended.memoryId) !== String(args.successor.id)) {
+    return skillUpdateNotConfirmedRefusal();
+  }
+  if (!following || following.previousVersionHash !== appended.recordHash) return skillUpdateNotConfirmedRefusal();
+  if (following.kind === "delete") {
+    return String(following.rowId ?? "") === String(args.successor.id) ? null : skillUpdateNotConfirmedRefusal();
+  }
+  if (following.kind !== "update") return skillUpdateNotConfirmedRefusal();
+  const followingId = typeof following.memoryId === "string" ? following.memoryId : null;
+  if (!followingId) return skillUpdateNotConfirmedRefusal();
+  let followingRow: Record<string, any> | null;
+  try {
+    followingRow = await args.memory.get(followingId, {});
+  } catch {
+    return skillUpdateUnconfirmedFailure();
+  }
+  if (!followingRow || String(followingRow.supersedes ?? "") !== String(args.successor.id)) {
+    return skillUpdateNotConfirmedRefusal();
+  }
+  return null;
+}
+
+/** The table surface a confirmed skill close reads and re-applies through. */
+export interface SkillCloseTable {
+  get(id: string, ctx?: any): Promise<any>;
+  put(row: any, ctx?: any): Promise<any>;
+  search?(query: any, ctx?: any): AsyncIterable<any>;
+}
+
+export interface ConfirmSkillCloseArgs {
+  ctx: any;
+  table: SkillCloseTable;
+  /** The row as read and planned in the write's transaction. */
+  expected: Record<string, any>;
+  /** The fields the close stamps on the row it re-reads. */
+  closePatch: Record<string, unknown>;
+  /** Re-check the caller's authority on the current committed row. */
+  authorize: (row: Record<string, any>, shared: any) => Promise<Response | null>;
+  afterStaged?: (row: Record<string, any>, attempt: number) => Promise<Response | null>;
+  /** Check the committed effect beyond the close (a sole live successor or ordered supersession of a closed successor). */
+  confirmEffect?: () => Promise<Response | null>;
+  missing?: () => Response;
+  /** The named refusal when the close never lands. */
+  refusal: () => Response;
+  /** The named 500 when the close cannot be confirmed. */
+  unconfirmed: () => Response;
+  /** Attempts at re-applying the close. Default 3. */
+  attempts?: number;
+  /** The Memory ids the caller still holds while confirming; none after the
+   *  write verb released its lock (flair#2950). */
+  held?: ReadonlySet<string>;
+}
+
+/**
+ * flair#2645 — confirm a skill close in a fresh committed read, then answer
+ * success only when the committed store shows it. Harper can resolve the
+ * close's commit while skipping the queued full put (it loses to a newer write
+ * of the same row) and still commit the request's other writes. A close that
+ * did not land is re-applied from a fresh read, re-checking the row's identity
+ * and the caller's authority. Exhausted retries run compensation before the
+ * named refusal; unconfirmed compensation returns a named 500.
+ * Returns null only when the close and any caller-supplied effect are confirmed.
+ */
+export async function confirmSkillClose(args: ConfirmSkillCloseArgs): Promise<Response | null> {
+  const journal = currentWriteJournal() ?? new WriteJournal();
+  return journal.run(async () => {
+    const result = await confirmSkillCloseInner(args, journal);
+    if (result && !journal.compensationAttempted && journal.entries.some((entry) => entry.applied)) {
+      return (await compensateUnlandedSkillUpdate({ ctx: args.ctx, journal, held: args.held })) ?? result;
+    }
+    return result;
+  });
+}
+
+async function confirmSkillCloseInner(args: ConfirmSkillCloseArgs, journal: WriteJournal): Promise<Response | null> {
+  const { ctx, table, expected, closePatch, authorize, afterStaged, confirmEffect, refusal, unconfirmed } = args;
+  const compensate = () => compensateUnlandedSkillUpdate({ ctx, journal, held: args.held });
+  const attempts = args.attempts ?? SKILL_UPDATE_CLOSE_ATTEMPTS;
+  const id = String(expected.id);
+  for (let attempt = 1; ; attempt++) {
+    let committed: any;
+    try {
+      committed = await table.get(id, {});
+    } catch {
+      return unconfirmed();
+    }
+    if (!committed) {
+      const denied = args.missing?.() ?? storedRowChangedRefusal("Memory");
+      return (await compensate()) ?? denied;
+    }
+    if (!sameStoredRow(committed, expected)) {
+      // Replaced between the reads: not the row the caller meant.
+      return (await compensate()) ?? storedRowChangedRefusal("Memory");
+    }
+    if (typeof committed.validTo === "string" && committed.validTo.length > 0) {
+      const denied = confirmEffect ? await confirmEffect() : null;
+      return denied ? (await compensate()) ?? denied : null;
+    }
+    if (attempt > attempts) break;
+    let applied: "staged" | Response;
+    try {
+      // Hold the row's id across the retry's fresh transaction (flair#2950).
+      const locked = await withSkillMemoryLocks([id], args.held ?? NO_HELD_IDS, () =>
+        withOwnedTransaction(ctx, async (c) => {
+          const stored = await table.get(id, c);
+          if (!stored) return "staged";
+          if (!sameStoredRow(stored, expected)) return storedRowChangedRefusal("Memory");
+          const denied = await authorize(stored, c);
+          if (denied) return denied;
+          const closed = { ...stored, ...closePatch };
+          normalizeEmptyEmbedding(closed);
+          const result = storageResult(await table.put(closed, c));
+          if (result instanceof Response) throw result;
+          const revoked = await afterStaged?.(stored, attempt);
+          if (revoked) throw revoked;
+          return "staged";
+        }));
+      if (!locked.locked) return unconfirmed();
+      applied = locked.value;
+    } catch (err) {
+      if (err instanceof Response) applied = err;
+      else return unconfirmed();
+    }
+    if (applied instanceof Response) return (await compensate()) ?? applied;
+  }
+  return (await compensate()) ?? refusal();
+}
+
+/**
+ * flair#2645 — confirm the predecessor close and either this request's
+ * successor as the subject's only live head or its ordered supersession while closed.
+ */
+async function confirmSkillUpdate(args: {
+  ctx: any;
+  subjectId: string;
+  predecessor: Record<string, any>;
+  closePatch: Record<string, unknown>;
+  successor: Record<string, any>;
+  grantedClose: GrantedClose | null;
+  authorize: (row: Record<string, any>, shared: any) => Promise<Response | null>;
+  /** The version record this request appended (null when it wrote no version). */
+  appendedVersionId: string | null;
+  held?: ReadonlySet<string>;
+}): Promise<Response | null> {
+  const { ctx, subjectId, predecessor, closePatch, successor, grantedClose, authorize } = args;
+  const table = (databases as any).flair?.Memory;
+  if (!table || typeof table.get !== "function" || typeof table.put !== "function") {
+    return skillUpdateUnconfirmedFailure();
+  }
+  const confirmsSingleHead = async (): Promise<Response | null> => {
+    let successorCommitted: any;
+    try {
+      successorCommitted = await table.get(String(successor.id), {});
+    } catch {
+      return skillUpdateUnconfirmedFailure();
+    }
+    if (!successorCommitted || !sameStoredRow(successorCommitted, successor)) {
+      return skillUpdateNotConfirmedRefusal();
+    }
+    if (!isOpenLiveRow(successorCommitted)) {
+      if (typeof successorCommitted.validTo !== "string" || successorCommitted.validTo.length === 0) {
+        return skillUpdateNotConfirmedRefusal();
+      }
+      // The successor is closed; confirm the ordered supersession.
+      return confirmSupersededInOrder({
+        subjectId,
+        successor,
+        appendedVersionId: args.appendedVersionId,
+        memory: table,
+      });
+    }
+    if (typeof table.search !== "function") return skillUpdateUnconfirmedFailure();
+    const live: string[] = [];
+    try {
+      for await (const row of table.search({ conditions: [
+        { attribute: "skillSubjectId", comparator: "equals", value: subjectId },
+      ] }, {})) {
+        if (isOpenLiveRow(row)) live.push(String(row.id));
+      }
+    } catch {
+      return skillUpdateUnconfirmedFailure();
+    }
+    return live.length === 1 && live[0] === String(successor.id) ? null : skillUpdateNotConfirmedRefusal();
+  };
+  return confirmSkillClose({
+    ctx,
+    table,
+    expected: predecessor,
+    closePatch,
+    authorize,
+    afterStaged: async (_row, attempt) => {
+      const pause = attempt === 1 ? txnPausePoint("skill-update-retry-first")
+        : attempt === 2 ? txnPausePoint("skill-update-retry-second")
+          : txnPausePoint("skill-update-retry-third");
+      if (pause) await pause;
+      return afterCloseStaged(grantedClose, { predecessorId: String(predecessor.id), successor });
+    },
+    confirmEffect: confirmsSingleHead,
+    missing: () => storedRowChangedRefusal("Memory"),
+    refusal: () => skillUpdateNotClosedRefusal(SKILL_UPDATE_CLOSE_ATTEMPTS),
+    unconfirmed: skillUpdateUnconfirmedFailure,
+    held: args.held,
+  });
+}
+
+/** A skill write's outcome. `confirm` is the pre-confirmation work a caller may
+ *  run after its Memory lock releases (flair#2645). */
+export type SkillWriteOutcome =
+  | { ok: true; result: any; version: string; confirm?: () => Promise<Response | null> }
+  | { ok: false; response: Response };
+
 /**
  * Run one skill version write atomically. The append helper owns the lock, the
- * transaction and the version row; this function performs the Memory-side
+ * version row; this function performs the Memory-side
  * successor/close/pointer writes inside that same transaction.
  */
-export async function runSkillVersionWrite(args: RunSkillVersionWriteArgs): Promise<RecordVersionOutcome> {
+export async function runSkillVersionWrite(args: RunSkillVersionWriteArgs): Promise<SkillWriteOutcome> {
   // A raw table `create` inside the write (the InstructionVersion append, or
   // the successor upsert) can set Harper's `createdResource` flag on the
   // request context, which would surface as HTTP 201. The path a skill write
   // replaces returned 200, so restore the flag's prior value on the way out.
   const restoreCreated = captureCreatedFlag(args.ctx);
+  const held = new Set((args.heldMemoryIds ?? []).map((id) => String(id)));
   try {
-    return await runSkillVersionWriteInner(args);
+    const journal = new WriteJournal();
+    const result: SkillWriteOutcome = await journal.run(async (): Promise<SkillWriteOutcome> => {
+      const r = await runSkillVersionWriteInner(args);
+      if (!r.ok && !journal.compensationAttempted && journal.entries.some((entry) => entry.applied)) {
+        const failure = await compensateUnlandedSkillUpdate({ ctx: args.ctx, journal, held });
+        if (failure) return { ok: false, response: failure };
+      }
+      return r;
+    });
+    if (result.ok && result.confirm) {
+      const confirm = result.confirm;
+      return {
+        ...result,
+        confirm: async () => {
+          const denial = await confirm();
+          if (!denial) return null;
+          // The caller released the write's Memory locks before this ran.
+          const failure = await compensateUnlandedSkillUpdate({ ctx: args.ctx, journal });
+          return failure ?? denial;
+        },
+      };
+    }
+    return result;
   } finally {
     restoreCreated();
   }
@@ -426,18 +784,43 @@ export function captureCreatedFlag(ctx: any): () => void {
   };
 }
 
-async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promise<RecordVersionOutcome> {
+/** A plan whose success {@link confirmSkillUpdate} checks after the commit. */
+function supersedesPredecessor(plan: SkillWritePlan): plan is SkillSuccessorPlan & { kind: "update"; predecessor: Record<string, any> } {
+  return plan.kind === "update" && !!plan.predecessor;
+}
+
+/** A joined attempt's signal that its plan needs a commit this write owns. */
+const OWNED_COMMIT_REQUIRED = Symbol("skill-version-write.owned-commit-required");
+
+async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promise<SkillWriteOutcome> {
+  const joined = args.joinCallerTransaction === true && isJoinableTransaction(args.ctx);
+  const first = await runSkillVersionAttempt(args, joined);
+  if (first !== OWNED_COMMIT_REQUIRED) return first;
+  // flair#2645: the update is confirmed against the committed store after its
+  // commit, which a joined write leaves to the caller. The joined attempt
+  // stopped before staging a write; plan again from a fresh head, owned.
+  const owned = await runSkillVersionAttempt(args, false);
+  if (owned === OWNED_COMMIT_REQUIRED) throw new Error("skill-version-write: an owned attempt cannot require an owned commit");
+  return owned;
+}
+
+async function runSkillVersionAttempt(args: RunSkillVersionWriteArgs, joined: boolean): Promise<RecordVersionOutcome | typeof OWNED_COMMIT_REQUIRED> {
   let plan: SkillWritePlan | null = null;
   let owner = "";
-  return recordVersion(
+  let ownedCommitRequired = false;
+  const outcome = await recordVersion(
     args.ctx,
     {
       subjectType: "skill",
       prepare: async (shared: any) => {
         const head = await args.head(shared);
-        const built = await args.plan(head, shared);
+        const built = await args.plan(head, shared, { joined });
         if (built === null) return null;
         if (built instanceof Response) return built;
+        if (joined && supersedesPredecessor(built)) {
+          ownedCommitRequired = true;
+          return skillUpdateUnconfirmedFailure();
+        }
         // A write grant does not include changing a record's visibility;
         // visibility is set by the owner or an admin (grant-visibility.ts). The
         // plan is checked here and again on committed state once the close is
@@ -472,7 +855,7 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
         const revoked = await afterCloseStaged(writePlan.grantedClose);
         if (revoked) return revoked;
       } else {
-        maybeThrowSkillWriteFault("successor", owner);
+        maybeThrowSkillWriteFault("successor", owner, writePlan.successor);
         const created = await args.hooks.createSuccessor!(writePlan.successor, shared);
         if (created instanceof Response) return storageResult(created);
         if (writePlan.predecessor) {
@@ -492,5 +875,39 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
       if (pointerDenial) return pointerDenial;
       return okResponse();
     },
+    joined,
   );
+  if (ownedCommitRequired) return OWNED_COMMIT_REQUIRED;
+  if (!outcome.ok || plan === null) return outcome;
+  const writePlan = plan as SkillWritePlan;
+  if (!supersedesPredecessor(writePlan)) return outcome;
+  const confirm = async (): Promise<Response | null> => {
+    // Test-only: inert unless armed. Pauses between the committed write and the
+    // confirmation read, so a later update of the same subject can complete.
+    // The pause stays outside the confirmation's lock acquisition.
+    const confirmPause = txnPausePoint("skill-update-confirm");
+    if (confirmPause) await confirmPause;
+    const authorize = args.hooks.authorizeClose ?? (async () => skillUpdateUnconfirmedFailure());
+    // A deferred confirmation runs after the verb released its Memory locks; an
+    // inline one runs under the locks the caller still holds (flair#2950).
+    const held = args.deferConfirmation ? NO_HELD_IDS : new Set((args.heldMemoryIds ?? []).map(String));
+    // flair#2645: the owned transaction has committed, but its success is not
+    // proof that the queued close was applied. Confirm against the committed
+    // store before answering success.
+    return await confirmSkillUpdate({
+      ctx: args.ctx,
+      subjectId: args.subjectId,
+      predecessor: writePlan.predecessor,
+      closePatch: writePlan.closePatch,
+      successor: writePlan.successor,
+      grantedClose: writePlan.grantedClose,
+      authorize,
+      held,
+      appendedVersionId: outcome.version || null,
+    });
+  };
+  if (args.deferConfirmation) return { ...outcome, confirm } as SkillWriteOutcome;
+  const confirmation = await confirm();
+  if (confirmation) return { ok: false, response: confirmation };
+  return outcome;
 }

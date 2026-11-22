@@ -63,18 +63,18 @@ a bug in the script — add the file to `SOURCE_VERSION_FILES` in
 **The changelog is assembled, not hand-promoted.** Entries land during development as one
 file per change under `.changelog/unreleased/` (flair#835 — a shared `[Unreleased]` block
 conflicted on every concurrent PR, and resolving a conflict dismisses approvals). The
-release script runs:
-
-```bash
-node scripts/changelog-fragments.mjs promote 0.11.0
-```
-
-which writes a `## [0.11.0] - <date>` section from the fragments — Keep a Changelog category
-order, filename order within a category, entry bodies copied verbatim — and deletes the
-fragment files. Released history above it is not touched. It **refuses** to run when the
-fragment directory is empty (nothing to release) or when someone hand-wrote an entry into
-`## [Unreleased]` that the step would otherwise silently overwrite. Preview any time with
-`node scripts/changelog-fragments.mjs render`.
+release script invokes `bash scripts/release-promote-changelog.sh "$VERSION"`, which
+passes `--with-dependencies` to `changelog-fragments.mjs promote` and forwards any
+`--allow-no-release-tag` argument.
+The `### Dependencies` section lists `feat`/`fix` commits since the tag selected by
+`git describe` whose recorded author name matches `renovate[bot]` and whose changed
+Git basenames are all `package.json`, `bun.lock`, `bun.lockb`, `package-lock.json`, or
+`npm-shrinkwrap.json`.
+Pass `--allow-no-release-tag` to `release.sh` to permit release PR preparation when
+there is no `v*` tag.
+Promotion refuses when there are neither fragments nor eligible dependency commits,
+or when `## [Unreleased]` contains hand-written entries it would overwrite.
+Preview fragments with `node scripts/changelog-fragments.mjs render`.
 
 ### Phase 2 — tag the release
 
@@ -186,7 +186,7 @@ auto-cuts a [GitHub release](https://github.com/tpsdev-ai/flair/releases) for th
 Release notes are a **lede + links** rendering of the matching `## [X.Y.Z]` section
 (`scripts/changelog-release-notes.mjs`): each entry keeps its bold lede, up to three
 issue links, and any `> **Heads-up:**` operator lines. The deep record stays in
-`CHANGELOG.md` and is linked from the footer at that tag. It is idempotent: re-running
+`CHANGELOG.md` and is linked from the footer at that tag. <!-- docs-freshness-allow: the repository's changelog, not a package file --> It is idempotent: re-running
 the workflow or re-pushing the tag updates the existing release rather than failing.
 The GitHub release documents the tagged commit immediately; it does not wait on the
 npm 2FA gate. If the CHANGELOG has no section for the version, this job fails loudly

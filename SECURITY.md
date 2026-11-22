@@ -63,8 +63,8 @@ Reads are open **within an org**; writes are isolated per agent. Enforced at
 the database layer (Harper resource `search()` override via a single
 centralized read-scope rule), not application logic:
 
-- `GET /Memory/` — returns the authenticated agent's own memories (any
-  visibility) plus every **non-private** memory in the org
+- `GET /Memory/` — applies the owner/visibility base scope and omits retained
+  closed skill payloads that fail the non-admin reader's current-authority check
 - `POST /MemorySearch` — same read scope: own memories plus all non-private
 - `POST /Memory` — writes are attributed to the authenticated agent; an
   agent cannot write as another (write isolation)
@@ -92,11 +92,14 @@ OrgEvent, WorkspaceState, Presence):
   non-empty path segments, no `.` in the decoded id), for which Harper resolves
   the same record id. Other addressed forms are left to the guard, which uses
   Harper's resolved id.
-- If reached, the guard checks a differing string or number body `id` on POST/PUT/PATCH
-  first (`403 write_id_not_addressed`), then stored ownership (the same owner
-  refusal), using Harper's resolved record id. An absent or matching body `id`
-  passes the body-id check. OrgEvent and Memory bind an addressed POST's
-  missing body `id` to the addressed id.
+- If reached, the guard checks the body `id` on POST/PUT/PATCH first, then
+  stored ownership (the same owner refusal), using Harper's resolved record id.
+  An absent, null or matching body `id` passes the body-id check; a differing
+  string or number `id` gets `403 write_id_not_addressed`, and a present,
+  non-null `id` of any other type that is not the addressed key gets
+  `400 id_target_mismatch`. Each
+  object element of an array body is checked the same way. OrgEvent and Memory
+  bind an addressed POST's missing body `id` to the addressed id.
 - For a collection PUT, PATCH or DELETE, if reached, the table guard returns
   `403 forbidden: a non-admin write to <Table> must address one record by its id`;
   existing DELETE middleware may refuse earlier.
@@ -115,11 +118,16 @@ its own ownership rule.
 The guard exempts administrator and in-process calls. OrgEvent POST id
 selection also applies to administrator and in-process calls.
 
+Credential records are owner-scoped by `principalId`: non-admin callers read and
+modify only their own records, and administrators and trusted internal callers
+are unscoped. Anonymous HTTP access is refused.
+
 ### Cross-Agent Access (within an org)
 
-Within an org, an agent reads every non-private memory directly — no grant
-required. This is deliberate: the goal is relevance (surface what's useful to
-the org) over secrecy. A writer keeps something private by marking it
+Within an org, non-private memories pass the base read-scope check without a
+grant; non-admin by-id and collection reads of retained closed skills
+additionally require readable current authority. This is deliberate: the goal
+is relevance (surface what's useful to the org) over secrecy. A writer keeps something private by marking it
 `visibility: private`, which keeps it strictly owner-only. The access boundary
 that stays hard is the **federation edge** (cross-instance / cross-org), not
 within-org reads.

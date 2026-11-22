@@ -64,6 +64,7 @@ import { isAllowedBm25Candidate, type Condition } from "./bm25-filter.js";
 import { indexedBm25Ids } from "./bm25-index-service.js";
 import { byRecencyThenId } from "./sort-comparators.js";
 import { isTrustedVectorStamp, trustedVectorCondition } from "./embedding-space-guard.js";
+import { applyPromotionBinding } from "./promotion-binding.js";
 
 /**
  * Internal ranked retrieval row (flair#1415). `_rank` is required so a
@@ -120,7 +121,7 @@ function distanceToSimilarity(distance: number): number {
 // a permitted reader would never see their pointer.
 export const DEFAULT_SELECT = ["id", "agentId", "content", "contentHash", "visibility", "instanceToken", "tags", "durability",
   "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "usageCount", "lastRetrieved",
-  "promotionStatus", "promotedAt", "promotedBy", "archived", "archivedAt", "archivedBy",
+  "promotionStatus", "promotedAt", "promotedBy", "promotionContentHash", "archived", "archivedAt", "archivedBy",
   "parentId", "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject", "summary",
   "validFrom", "validTo", "_safetyFlags"];
 
@@ -432,7 +433,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
         const source = record.agentId !== agentId ? record.agentId : undefined;
         pushRanked(results, {
-          ...record,
+          ...applyPromotionBinding(record),
           content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
           _score: Math.round(finalScore * 1000) / 1000,
           _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
@@ -492,7 +493,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         // composite mode (composite ordering is unchanged by #985 — its
         // rrfRaw input and result order are exactly the pre-#985 behavior).
         pushRanked(results, {
-          ...record,
+          ...applyPromotionBinding(record),
           content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
           _score: Math.round(finalScore * 1000) / 1000,
           _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
@@ -582,7 +583,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
       const source = record.agentId !== agentId ? record.agentId : undefined;
       pushRanked(results, {
-        ...record,
+        ...applyPromotionBinding(record),
         content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
@@ -644,7 +645,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       // bump) is the abstention confidence signal on this legacy/bootstrap
       // (HNSW-leg-only) path.
       pushRanked(results, {
-        ...rest,
+        ...applyPromotionBinding(rest),
         content: isFlagged ? wrapUntrusted(rest.content, source) : rest.content,
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
@@ -684,7 +685,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       const isFlagged = rest._safetyFlags && Array.isArray(rest._safetyFlags) && rest._safetyFlags.length > 0;
       const source = record.agentId !== agentId ? record.agentId : undefined;
       pushRanked(results, {
-        ...rest,
+        ...applyPromotionBinding(rest),
         content: isFlagged ? wrapUntrusted(rest.content, source) : rest.content,
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,

@@ -27,12 +27,12 @@ server, which has them sign in at the identity provider configured under
 configures GitHub. The access token the app receives carries the login as its
 subject; for GitHub, that is the account's username.
 
-`/mcp` answers `initialize`, `ping` and `tools/list` for any valid token, and
-refuses a `tools/call` for an unknown tool name, before it looks at the mapping.
+`/mcp` answers `initialize` and `ping` for any valid token, and refuses a
+`tools/call` for an unknown tool name, before it looks at the mapping.
 On a `tools/call` for a known tool, Flair looks for a `Credential` of kind `idp`
 whose `idpSubject` is that login, that names a principal, and whose status is
-not `revoked`, and acts as that principal. There is no fallback to an anonymous
-or admin identity:
+exactly `active`, and acts as that principal. There is no fallback to an
+anonymous or admin identity:
 
 - **No mapping:** the call is refused. `/mcp` answers HTTP 200 with a JSON-RPC
   error:
@@ -41,12 +41,20 @@ or admin identity:
   {"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"forbidden: token subject is not a provisioned flair agent"}}
   ```
 
+- **The login's credentials are not `active` or name no principal:** refused
+  with code `-32001`. The message names one of those credentials and its stored
+  status (`revoked`, any other value, or no status), and says an operator must
+  re-link it.
 - **Mapped to a principal that does not exist:** refused with code `-32001` and
   a message naming the principal.
 - **Mapped to a deactivated principal:** refused; see
   [Revoking access](#revoking-access).
 - **The credential or the principal could not be read:** refused with code
   `-32000` and a message starting `unavailable:`.
+
+A `tools/list` reads the mapping the same way and answers each case above
+except **No mapping** with the same error; with no mapping it returns a tool
+list.
 
 ### Map a person to a principal
 
@@ -123,8 +131,8 @@ both take the same `--instance` and `--admin-pass`.
 
 ### One mapping per login
 
-`flair mcp enable` and the resolver both count a login's `idp` credential unless
-its status is `revoked` (the resolver also skips one that names no principal).
+`flair mcp enable` and the resolver both treat a login's `idp` credential as a
+mapping only when its status is exactly `active` and it names a principal.
 `flair mcp enable` keeps one such credential per login, whatever the provider
 name:
 
@@ -133,9 +141,10 @@ name:
   says `re-pointed`. Calls from that login then act as the principal the
   credential names. Memories are not moved or merged; each principal keeps its
   own.
-- If the login has a credential that is not `revoked` under a different
-  provider name, the run revokes it (the row stays, with status `revoked`) and
-  prints its id after `SUPERSEDED:`.
+- If the login has a credential under a different provider name whose status
+  is `active` and that names a principal, the run revokes it (the row stays,
+  with status `revoked`) and prints its id after `SUPERSEDED:`. A credential
+  whose status is anything else is not changed.
 - After writing, it requires exactly one resolvable (principal-bearing) active
   credential matching the written id and principal.
   Principal-less legacy rows are skipped and may remain active.

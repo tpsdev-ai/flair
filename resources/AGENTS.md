@@ -7,7 +7,7 @@ whether it is loaded. Check the loader configuration when extracting code.
 
 | Change | Start here | Shared contract |
 |---|---|---|
-| Soul authorship | `Soul.ts`, `soul-write-policy.ts` | Operator/internal source allowlist; generic learned-content backstop; dated `adk:` bridge in `soul-adk-guard.ts`; raw writer inventory in `test/unit/soul-writer-coverage.test.ts` |
+| Soul authorship | `Soul.ts`, `soul-write-policy.ts` | Operator/internal source allowlist; vendor-neutral scope-field refusal; generic learned-content backstop; raw writer inventory in `test/unit/soul-writer-coverage.test.ts` |
 | Memory writes/lifecycle | `Memory.ts` | `memory-durability.ts`, `memory-visibility.ts`, `provenance.ts` |
 | Read access | `memory-read-scope.ts` | `resolveReadScope()` supplies both query condition and row predicate |
 | Authentication/ownership | `agent-auth.ts`, `auth-middleware.ts` | `record-owner-guard.ts`, `owner-scoped-write-policy.ts`, `owner-field-guard.ts`, `record-types.ts` |
@@ -18,7 +18,7 @@ whether it is loaded. Check the loader configuration when extracting code.
 
 Preserve these boundaries:
 
-- For non-admin addressed writes, middleware can return the owner refusal before the table guard runs. The table guard checks a string or number body `id` on POST/PUT/PATCH before stored ownership, using Harper's resolved record id (`owner-scoped-write-policy.ts`). For collection PUT/PATCH/DELETE, if reached, the table guard returns the collection refusal; existing DELETE middleware may refuse earlier. Collection POST follows the resource's rules. A custom resource that extends `Resource` applies its own rule. Memory and OrgEvent bind an addressed POST's missing `id` to the addressed id.
+- For non-admin addressed writes, middleware can return the owner refusal before the table guard runs. The table guard checks the body `id` on POST/PUT/PATCH before stored ownership, using Harper's resolved record id (`owner-scoped-write-policy.ts`). For collection PUT/PATCH/DELETE, if reached, the table guard returns the collection refusal; existing DELETE middleware may refuse earlier. Collection POST follows the resource's rules. A custom resource that extends `Resource` applies its own rule. Memory and OrgEvent bind an addressed POST's missing `id` to the addressed id.
 - Resolve identity from the resource context. Keep authenticated HTTP and deliberate internal calls distinct.
 - Compose caller filters inside the authoritative read scope; preserve the row re-check after retrieval.
 - Audit each exposed mutation verb. A `put()` guard does not automatically cover `patch()` or `post()`.

@@ -558,14 +558,12 @@ describe("flair#1785 slice 2 — bypass: production cannot reach the composition
 
     // ── Production-reachable disable attempts, all at once. ──
     // env: plausibly-named toggles + the historical HDB_ROOT alias.
-    const envSaved: Record<string, string | undefined> = {};
-    for (const k of ["FLAIR_MIGRATION_DISABLE", "FLAIR_MIGRATIONS_DISABLED", "FLAIR_MIGRATIONS", "HDB_ROOT"]) {
-      envSaved[k] = process.env[k];
-    }
-    process.env.FLAIR_MIGRATION_DISABLE = "1";
-    process.env.FLAIR_MIGRATIONS_DISABLED = "1";
-    process.env.FLAIR_MIGRATIONS = "off";
-    process.env.HDB_ROOT = "/nonexistent/attempted-disable";
+    const serverEnv = {
+      FLAIR_MIGRATION_DISABLE: "1",
+      FLAIR_MIGRATIONS_DISABLED: "1",
+      FLAIR_MIGRATIONS: "off",
+      HDB_ROOT: "/nonexistent/attempted-disable",
+    };
 
     let first: HarperInstance | undefined;
     let second: HarperInstance | undefined;
@@ -575,6 +573,7 @@ describe("flair#1785 slice 2 — bypass: production cannot reach the composition
       // operator-reachable config surface (harperdb-config.yaml at ROOTPATH).
       first = await startHarper({
         appendRootConfigYaml: "flairTestMigrationDisable:\n  enabled: true\n",
+        serverEnv,
       });
       installDir = first.installDir;
       const auth1 = basicAuth(first);
@@ -597,7 +596,7 @@ describe("flair#1785 slice 2 — bypass: production cannot reach the composition
       // Same provisioned shape, so the ordinary boot records under ROOTPATH.
       blockHomeFlairDir(installDir);
 
-      second = await startHarper({ installDir });
+      second = await startHarper({ installDir, serverEnv });
       const auth2 = basicAuth(second);
       const state = await awaitMigrationStateFile({
         statePath: join(installDir, ".migrations", "state.json"),
@@ -609,10 +608,6 @@ describe("flair#1785 slice 2 — bypass: production cannot reach the composition
       const migrated = await rowsOn(second, auth2);
       for (const row of migrated) expect(row.visibility).toBe("shared");
     } finally {
-      for (const [k, v] of Object.entries(envSaved)) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
       try { if (first) await stopHarper(first); } catch { /* best effort */ }
       try { if (second) await stopHarper(second); } catch { /* best effort */ }
       if (installDir) {

@@ -251,9 +251,10 @@ describe("flair#2450 — spoke cursor update requests after successful and faile
   beforeEach(() => { calls = []; });
   afterEach(() => { globalThis.fetch = origFetch; setSystemTime(); });
 
-  function installBatchMock(batchStatuses: number[], rowCount = 1, onFirstTableQuery?: () => void) {
+  function installBatchMock(batchStatuses: number[], rowCount = 1, onFirstTableQuery?: () => void, initialRetryRows: any[] = []) {
     let post = 0;
     let advanced = false;
+    const retryRows = new Map<string, any>(initialRetryRows.map((row) => [row.id, row]));
     globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
       const url = typeof urlInput === "string" ? urlInput : urlInput.toString();
       const method = init?.method ?? "GET";
@@ -268,6 +269,9 @@ describe("flair#2450 — spoke cursor update requests after successful and faile
       }
       if (body?.operation === "search_by_conditions") {
         if (!advanced) { advanced = true; onFirstTableQuery?.(); }
+        if (body.table === "FederationRetry") {
+          return res(true, 200, [...retryRows.values()].filter((row) => row.state === "pending" && row.peerId === HUB && row.table === "Memory"));
+        }
         if (body.table !== "Memory") return res(true, 200, []);
         // Only the `updatedAt > cursor` query yields rows; the `updatedAt == null`
         // query yields none, so the row count is exactly `rowCount`.
@@ -281,12 +285,20 @@ describe("flair#2450 — spoke cursor update requests after successful and faile
       if (body?.operation === "search_by_value" && body.table === "Instance") {
         return res(true, 200, [{ id: INSTANCE, _keySeed: Buffer.from(kp.secretKey.slice(0, 32)).toString("base64url") }]);
       }
+      if (body?.operation === "search_by_hash" && body.table === "FederationRetry") {
+        const hashes: string[] = body.hash_values ?? [];
+        return res(true, 200, hashes.map((id) => retryRows.get(id)).filter(Boolean));
+      }
       if (method === "POST" && url.includes("/FederationSync")) {
         const status = batchStatuses[Math.min(post, batchStatuses.length - 1)] ?? 200;
         post++;
         const sent = (body?.records ?? []).length;
         return res(status === 200, status,
           status === 200 ? { merged: sent, skipped: 0, skippedReasons: {}, total: sent, durationMs: 1 } : { error: "service unavailable" });
+      }
+      if ((body?.operation === "update" || body?.operation === "upsert") && body?.table === "FederationRetry") {
+        for (const row of body.records ?? []) retryRows.set(row.id, { ...retryRows.get(row.id), ...row });
+        return res(true, 200, { update_hashes: (body.records ?? []).map((r: any) => r.id), skipped_hashes: [] });
       }
       if (body?.operation === "update" && body?.table === "Peer") {
         return res(true, 200, { update_hashes: [HUB], skipped_hashes: [] });
@@ -315,6 +327,61 @@ describe("flair#2450 — spoke cursor update requests after successful and faile
     const stamp = writes[0]?.body?.records?.[0]?.lastSyncAt;
     expect(stamp, "the cursor was not the pre-query timestamp").toBe(PRE_QUERY_STAMP);
     expect(writes[0]?.body?.records?.[0]?.id).toBe(HUB);
+  });
+
+  it("a pending retry row for the batch is seen by the stored-row read and retired on the confirmed merge", async () => {
+    setSystemTime(new Date(PRE_QUERY_STAMP));
+    const retryKey = JSON.stringify([HUB, "Memory", "mem-batch-0"]);
+    installBatchMock([200], 1, undefined, [{
+      id: retryKey,
+      peerId: HUB,
+      table: "Memory",
+      recordId: "mem-batch-0",
+      state: "pending",
+      lastReason: "merge_error",
+      attempts: 1,
+      firstRefusedAt: CURSOR,
+      lastAttemptAt: CURSOR,
+      createdAt: CURSOR,
+      updatedAt: CURSOR,
+      resolution: null,
+      completedAt: null,
+      bound: null,
+    }]);
+    const { runFederationSyncOnce } = await import("../../src/cli");
+    const result = await runFederationSyncOnce({ adminPass: "test-admin-pass", opsPort: "9925" });
+
+    expect(result.error, String(result.error)).toBeUndefined();
+    expect(result.pushed).toBe(1);
+    // The batch read happens after the send and before the outcome write.
+    const postIdx = calls.findIndex((c) => c.url.includes("/FederationSync") && c.method === "POST");
+    const firstRetryWriteAfterPost = calls.findIndex((c, i) =>
+      i > postIdx && ["update", "upsert"].includes(c.body?.operation ?? "") && c.body?.table === "FederationRetry");
+    const storedReadIdx = calls.findIndex((c, i) =>
+      i > postIdx && i < firstRetryWriteAfterPost &&
+      c.body?.operation === "search_by_hash" && (c.body?.hash_values ?? []).includes(retryKey));
+    expect(postIdx).toBeGreaterThan(-1);
+    expect(storedReadIdx, "the stored-row read did not see the pending row").toBeGreaterThan(postIdx);
+    const retryWrites = calls.filter((c) => ["update", "upsert"].includes(c.body?.operation ?? "") && c.body?.table === "FederationRetry");
+    expect(retryWrites.length).toBeGreaterThan(0);
+    expect(retryWrites[retryWrites.length - 1].body.records[0]).toMatchObject({ id: retryKey, state: "terminal", resolution: "merged" });
+    expect(cursorWrites().length, "the spoke cursor was not stamped exactly once").toBe(1);
+  });
+
+  it("a failed stored-row read refuses the batch outcome and writes no retry row", async () => {
+    installBatchMock([200], 1);
+    const base = globalThis.fetch;
+    globalThis.fetch = mock(async (url: any, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      if (body?.operation === "search_by_hash" && body.table === "FederationRetry") return res(false, 500, {});
+      return base(url, init);
+    }) as any;
+    const { runFederationSyncOnce } = await import("../../src/cli");
+    const result = await runFederationSyncOnce({ adminPass: "test-admin-pass", opsPort: "9925" });
+
+    expect(result.error?.message).toBe("FederationRetry read failed (500)");
+    expect(calls.filter((c) => ["update", "upsert"].includes(c.body?.operation ?? "") && c.body?.table === "FederationRetry")).toEqual([]);
+    expect(cursorWrites().length).toBe(0);
   });
 
   it("a LATER batch that fails does not stamp: an earlier 200 does not advance the cursor (no per-batch stamp)", async () => {

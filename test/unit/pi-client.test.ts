@@ -65,7 +65,7 @@ beforeEach(() => {
   // pi dir override) can never leak into these tests.
   prevPath = process.env.PATH;
   prevPiDir = process.env.PI_CODING_AGENT_DIR;
-  delete process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(isoHome, ".pi", "agent");
 });
 
 afterEach(() => {

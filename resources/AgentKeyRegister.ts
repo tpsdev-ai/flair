@@ -8,8 +8,9 @@
  * row (resources/agent-auth.ts), and a pending row's stored value is the literal
  * string `pending`, which can never verify — so a pending agent cannot
  * authenticate as itself. The Agent resource's `allowUpdate()` admits a Basic
- * admin, but its PUT and PATCH handlers strip `publicKey` from the body
- * (resources/Agent.ts), so neither verb writes the key. Here
+ * admin, but its PUT handler carries the STORED `publicKey` into the
+ * replacement and its PATCH handler strips `publicKey` from the body
+ * (resources/Agent.ts), so neither verb writes a key the body supplies. Here
  * `allowCreate()` returns true and the handler
  * decides: it admits only an admin and re-reads the row, failing closed on
  * absent evidence.
@@ -22,7 +23,8 @@
  * (resources/write-back.ts) before the commit, and the stored key is read back
  * AFTER the commit. The lock serializes registrations for that agent within one
  * Harper process; raw operations-API writes and other processes do not take it.
- * A change committed after confirmation and before commit is not seen; a commit-time pending check is a follow-up.
+ * The post-commit read-back detects surviving differences in compared fields
+ * or identity; a commit-time pending check is a follow-up.
  * The response is returned only when the read-back is equal.
  *
  * Accepted credentials: Basic admin or a verified Ed25519 agent with the admin
@@ -34,12 +36,14 @@ import { isDeepStrictEqual } from "node:util";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
-import { CommittedRowChanged, confirmCommittedRow } from "./write-back.js";
+import { CommittedRowChanged, confirmCommittedRow, verifyCommittedFields } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { isPrincipalDeactivated } from "../src/lib/principal-status.js";
 import { isForeignAgentHome, isSyncOriginatedAgentRow } from "../src/lib/agent-home-fields.js";
-import { isValidAgentId, invalidAgentIdMessage } from "../src/lib/agent-id-rule.js";
+import { AGENT_ID_STRING_REMEDY, isValidAgentId, invalidAgentIdMessage, isUnsafeAgentIdWireValue } from "../src/lib/agent-id-rule.js";
 import { localInstanceId } from "./instance-identity.js";
+import { maybeFaultOrgEventRow } from "./org-event-write-fault.js";
+import { validateServerRow } from "./server-row-validation.js";
 import {
   AGENT_KEY_REGISTERED_EVENT,
   AGENT_KEY_NOT_PENDING,
@@ -60,8 +64,8 @@ const LOCK_NAMESPACE = "flair-agent-key-register";
 const LOCK_ATTEMPTS = 40;
 const LOCK_WAIT_MS = 25;
 
-const jsonRefusal = (status: number, error: string, message: string): Response =>
-  new Response(JSON.stringify({ error, message }), { status, headers: { "content-type": "application/json" } });
+const jsonRefusal = (status: number, error: string, message: string, outcome?: "conflict" | "unconfirmed"): Response =>
+  new Response(JSON.stringify({ error, message, ...(outcome ? { outcome } : {}) }), { status, headers: { "content-type": "application/json" } });
 
 /** Read a header off either header-object shape Harper hands us. */
 function readHeader(reqLike: any, name: string): string {
@@ -106,11 +110,17 @@ export class AgentKeyRegister extends Resource {
 
     // Validate the body.
     const body = data && typeof data === "object" ? data : {};
-    const agentId = (body as any).agentId;
+    const suppliedAgentId = (body as any).agentId;
     const publicKey = (body as any).publicKey;
-    if (!isValidAgentId(agentId)) {
-      return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, invalidAgentIdMessage(agentId));
+    if (isUnsafeAgentIdWireValue(suppliedAgentId)) {
+      return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, AGENT_ID_STRING_REMEDY);
     }
+    if (!isValidAgentId(suppliedAgentId)) {
+      return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, invalidAgentIdMessage(suppliedAgentId));
+    }
+    // The rule accepts a number; the Agent row's key and the audit row's
+    // agentId are strings, so resolve the id to its string form once.
+    const agentId = String(suppliedAgentId);
     if (!isCanonicalEd25519Base64url(publicKey)) {
       return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, "publicKey must be a canonical base64url encoding of 32 bytes");
     }
@@ -170,30 +180,41 @@ export class AgentKeyRegister extends Resource {
               keyFingerprint: fingerprint,
               createdAt: now,
             }, c);
-            await events.put({
+            const event = {
               id: `${actorId}-${now}-${registrationId}`,
               authorId: actorId,
               kind: AGENT_KEY_REGISTERED_EVENT,
               summary: `registered a public key for ${agentId}`,
               detail: `key fingerprint ${fingerprint}`,
-              refId: agentId,
+              refId: String(agentId),
               createdAt: now,
               updatedAt: now,
-            }, c);
+            };
+            // Test-only: the hook may corrupt the exact row about to be staged
+            // (inert unless a fixture installs one).
+            maybeFaultOrgEventRow("agent-key-register", event);
+            validateServerRow(events, event);
+            await events.put(event, c);
             // Reject a row difference that persists and is visible at the confirmation read.
             // A write that restores the original values is not detected.
             await confirmCommittedRow(table, agentId, (committed) => {
               const row = asRow(committed);
               return row !== null && isDeepStrictEqual({ ...row }, basis);
             });
-            return { kind: "registered" as const, registrationId, updatedAt: now };
+            // Test-only: inert unless the fault-injection env opt-in is set and
+            // armed. Holds the registration after its final pre-commit
+            // confirmation and before its owned transaction commits, the window
+            // where a newer write can discard this write's effect (flair#2656).
+            const commitPause = txnPausePoint("agent-key-register-commit");
+            if (commitPause) await commitPause;
+            return { kind: "registered" as const, registrationId, updatedAt: now, basis };
           }),
         LOCK_ATTEMPTS,
         LOCK_WAIT_MS,
       );
     } catch (err) {
       if (err instanceof CommittedRowChanged) {
-        return jsonRefusal(409, REGISTRATION_CONFLICT, "the agent row changed while the key was being registered; nothing was changed");
+        return jsonRefusal(409, REGISTRATION_CONFLICT, "the agent row changed while the key was being registered; nothing was changed", "conflict");
       }
       // Constant format string + a structured data object (unsafe-formatstring).
       console.error("[agent-key-register] the registration transaction failed; nothing was changed", { agentId, err });
@@ -232,18 +253,30 @@ export class AgentKeyRegister extends Resource {
     const readBackPause = txnPausePoint("agent-key-register-read-back");
     if (readBackPause) await readBackPause;
 
-    let readBack: Record<string, any> | null;
+    // The registration is NON-IDEMPOTENT: it transitions a pending key once and
+    // writes a fresh audit row per attempt. Re-planning from a fresh read is
+    // unsafe after an unconfirmed commit: it can write another audit row. This
+    // handler does not retry; a post-commit mismatch or an unreadable read-back
+    // is answered 503 with outcome `unconfirmed`. Its commit is
+    // confirmed by commit-specific evidence — the AgentKeyRegistration row this
+    // attempt wrote under `registrationId` — together with the staged Agent
+    // fields; value equality alone does not name the attempt that committed.
+    const readBackVerdict = await verifyCommittedFields(table, agentId, value.basis, { publicKey: registered, updatedAt: value.updatedAt });
+    let registrationRow: any;
+    let registrationReadable = true;
     try {
-      readBack = asRow(await table.get(agentId, {}));
-    } catch (err) {
-      console.error("[agent-key-register] the read-back of the committed key failed", { agentId, err });
-      return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the committed key could not be read back; the stored state is unconfirmed");
+      registrationRow = await audit.get(value.registrationId, {});
+    } catch {
+      registrationReadable = false;
     }
-    if (readBack === null || readBack.publicKey !== registered || readBack.updatedAt !== value.updatedAt) {
-      return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the committed key could not be read back equal to the registered key; the stored state is unconfirmed");
+    if (readBackVerdict === "unreadable" || !registrationReadable) {
+      return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the committed key or its registration audit row could not be read back; the stored state is unconfirmed", "unconfirmed");
+    }
+    if (readBackVerdict !== "shown" || registrationRow == null || registrationRow.agentId !== agentId) {
+      return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the committed key could not be read back as this registration's row and audit; the stored state is unconfirmed", "unconfirmed");
     }
     return new Response(
-      JSON.stringify({ agentId, publicKey: readBack.publicKey, updatedAt: readBack.updatedAt, registrationId: value.registrationId }),
+      JSON.stringify({ agentId, publicKey: registered, updatedAt: value.updatedAt, registrationId: value.registrationId }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
   }

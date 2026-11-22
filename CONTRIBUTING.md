@@ -170,7 +170,7 @@ The same tag starts the `adk-flair` PyPI workflow, subject to its version check 
 
 Phase 1 assembles every `.changelog/unreleased/` fragment into a `## [X.Y.Z]` section of
 `CHANGELOG.md` and deletes the fragments — there is nothing to promote by hand. It refuses
-to run if the fragment directory is empty. The legacy `./scripts/release.sh 0.7.0 --publish`
+to run if there are neither fragments nor eligible dependency commits. The legacy `./scripts/release.sh 0.7.0 --publish`
 direct-publish path remains as a break-glass fallback for when CI is unavailable.
 
 ## Questions

@@ -19,6 +19,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun
 import { generateKeyPairSync, randomUUID, sign as edSign } from "node:crypto";
 import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
 import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double.ts";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -31,10 +32,17 @@ const PUBLIC_B64 = Buffer.from((publicKey.export({ format: "jwk" }) as any).x, "
 let txnDepth = 0;
 // Every embedding call, with whether a transaction was open when it ran.
 const embedCalls: { text: string; txnDepth: number }[] = [];
+// The per-id Memory write lock the backfill writes under (flair#2478), as the
+// mock table's primaryStore, and whether any id was locked at each embedding
+// call and each staged update.
+const memoryLock = memoryLockDouble();
+const lockedAtEmbed: boolean[] = [];
+const lockedAtUpdate: boolean[] = [];
 
 mock.module("../../resources/embeddings-provider.ts", () => ({
   getEmbedding: async (text: string) => {
     embedCalls.push({ text, txnDepth });
+    lockedAtEmbed.push(memoryLock.held.size > 0);
     return [0.11, 0.12, 0.13, 0.14];
   },
   getModelId: () => "mock-embedding-model",
@@ -64,9 +72,11 @@ function harperMock() {
           },
         },
         Memory: {
+          primaryStore: memoryLock,
           get: async (id: string) => memoryRows.get(id) ?? null,
           update: async (id: string, patch: Record<string, unknown>) => {
             writeCalls.push({ method: "update", id, fields: Object.keys(patch).sort() });
+            lockedAtUpdate.push(memoryLock.held.has(JSON.stringify(["memory", id])));
             const current = memoryRows.get(id);
             const merged = { ...current, ...patch };
             stagedCommits.set(id, merged);
@@ -161,6 +171,8 @@ beforeEach(() => {
   embedCalls.length = 0;
   txnDepth = 0;
   writeCalls.length = 0;
+  lockedAtEmbed.length = 0;
+  lockedAtUpdate.length = 0;
   stagedCommits = new Map();
 });
 
@@ -210,6 +222,36 @@ describe("flair#2484 — the embedding backfill computes its vector outside the 
     });
     expect(observed, "the transaction spy did not report an open transaction").toBe(1);
     expect(txnDepth, "the spy did not close the transaction").toBe(0);
+  });
+});
+
+describe("flair#2478 — the backfill writes under the id's lock, computed outside it", () => {
+  it("the vector is computed while no id is locked, and the update is staged while the row's id is", async () => {
+    const id = "bfx-lock-order";
+    memoryRows.set(id, { id, agentId: "agent-a", content: "text to embed", contentHash: id, instanceToken: "tok" });
+    await runBackfill(id);
+    expect(lockedAtEmbed, "the embedding provider was called while an id was locked").toEqual([false]);
+    expect(lockedAtUpdate, "the update was staged without the row's lock").toEqual([true]);
+    expect(memoryLock.held.size, "the lock was not released").toBe(0);
+  });
+
+  it("a held id is skipped and nothing is written", async () => {
+    const id = "bfx-lock-held";
+    memoryRows.set(id, { id, agentId: "agent-a", content: "text to embed", contentHash: id, instanceToken: "tok" });
+    expect(memoryLock.tryLock(["memory", id])).toBe(true);
+    try {
+      const mw = await loadMiddleware();
+      const res: any = await mw(makeRequest(`/Memory/${id}`, "PUT", "agent-a"), resultLayer(id));
+      expect(res.status).toBe(200);
+      const deadline = Date.now() + 2_000;
+      while (embedCalls.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, 50));
+      expect(embedCalls.length, "the backfill did not reach the lock").toBeGreaterThan(0);
+      expect(writeCalls).toEqual([]);
+      expect(memoryRows.get(id)?.embedding).toBeUndefined();
+    } finally {
+      memoryLock.unlock(["memory", id]);
+    }
   });
 });
 

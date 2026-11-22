@@ -51,20 +51,7 @@ describe("embedding-space-guard unknown verdict inside a real Harper worker (fla
     // Armed before Harper starts, so the first scan to reach the boot pause
     // parks there rather than reading.
     writeFileSync(join(pauseDir, `arm.${POINT}`), "");
-    const saved: Record<string, string | undefined> = {
-      [TEST_FAULT_INJECTION_ENV]: process.env[TEST_FAULT_INJECTION_ENV],
-      [TEST_PAUSE_DIR_ENV]: process.env[TEST_PAUSE_DIR_ENV],
-    };
-    process.env[TEST_FAULT_INJECTION_ENV] = "1";
-    process.env[TEST_PAUSE_DIR_ENV] = pauseDir;
-    try {
-      harper = await startHarper();
-    } finally {
-      for (const [key, value] of Object.entries(saved)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
+    harper = await startHarper({ serverEnv: { [TEST_FAULT_INJECTION_ENV]: "1", [TEST_PAUSE_DIR_ENV]: pauseDir } });
     // This test only runs against the Harper it spawned in this process.
     expect(harper.external).toBe(false);
     expect(harper.ownsInstallDir).toBe(true);

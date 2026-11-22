@@ -14,7 +14,7 @@ import { encodeRecordId } from "../lib/record-id-path.js";
 import { Command } from "commander";
 import { randomUUID } from "node:crypto";
 import * as render from "../render.js";
-import { resolveAdminUser } from "../lib/auth-resolve.js";
+import { resolveAdminUser, addAdminPassOptions, ApiHttpError } from "../lib/auth-resolve.js";
 
 export type IdpCli = {
   api: (...args: any[]) => Promise<any>;
@@ -42,17 +42,19 @@ export function register(program: Command): void {
 
   const idp = program.command("idp").description("Manage enterprise IdP configurations (XAA)");
 
-  idp
-    .command("add")
-    .description("Register a trusted enterprise IdP")
-    .requiredOption("--name <name>", "Display name (e.g., 'Harper Corporate')")
-    .requiredOption("--issuer <url>", "IdP issuer URL (e.g., https://accounts.google.com)")
-    .requiredOption("--jwks-uri <url>", "JWKS endpoint URL")
-    .requiredOption("--client-id <id>", "Flair's client_id at this IdP")
-    .option("--required-domain <domain>", "Reject tokens without this domain (hd/tid claim)")
-    .option("--no-jit-provision", "Disable auto-creation of principals for new IdP users")
-    .option("--default-trust <tier>", "Trust tier for JIT principals", "unverified")
-    .option("--admin-pass <pass>", "Admin password")
+  addAdminPassOptions(
+    idp
+      .command("add")
+      .description("Register a trusted enterprise IdP")
+      .requiredOption("--name <name>", "Display name (e.g., 'Harper Corporate')")
+      .requiredOption("--issuer <url>", "IdP issuer URL (e.g., https://accounts.google.com)")
+      .requiredOption("--jwks-uri <url>", "JWKS endpoint URL")
+      .requiredOption("--client-id <id>", "Flair's client_id at this IdP")
+      .option("--required-domain <domain>", "Reject tokens without this domain (hd/tid claim)")
+      .option("--no-jit-provision", "Disable auto-creation of principals for new IdP users")
+      .option("--default-trust <tier>", "Trust tier for JIT principals", "unverified"),
+    "Admin password",
+  )
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (opts) => {
@@ -100,10 +102,7 @@ export function register(program: Command): void {
       console.log(`   JIT:      ${opts.jitProvision !== false}`);
     });
 
-  idp
-    .command("list")
-    .description("List configured IdPs")
-    .option("--admin-pass <pass>", "Admin password")
+  addAdminPassOptions(idp.command("list").description("List configured IdPs"), "Admin password")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
@@ -157,10 +156,7 @@ export function register(program: Command): void {
       }
     });
 
-  idp
-    .command("remove <id>")
-    .description("Remove an IdP configuration")
-    .option("--admin-pass <pass>", "Admin password")
+  addAdminPassOptions(idp.command("remove <id>").description("Remove an IdP configuration"), "Admin password")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, opts) => {
@@ -186,10 +182,8 @@ export function register(program: Command): void {
       console.log(`✅ IdP '${id}' removed`);
     });
 
-  idp
-    .command("test <id>")
-    .description("Test IdP connectivity (fetches JWKS)")
-    .option("--admin-pass <pass>", "Admin password")
+  addAdminPassOptions(idp.command("test <id>").description("Test IdP connectivity (fetches JWKS)"), "Admin password")
+    .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, opts) => {
       const opsPort = resolveOpsPort(opts);
@@ -201,9 +195,13 @@ export function register(program: Command): void {
 
       let cfg: any;
       try {
-        cfg = await api("GET", `/IdpConfig/${encodeRecordId(id)}`);
-      } catch {
-        console.error(`IdP '${id}' not found`);
+        cfg = await api("GET", `/IdpConfig/${encodeRecordId(id)}`, undefined, {
+          explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null,
+        });
+      } catch (err: unknown) {
+        console.error(err instanceof ApiHttpError && err.status === 404
+          ? `IdP '${id}' not found`
+          : `Error: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(1);
       }
       console.log(`Testing IdP: ${cfg.name} (${cfg.issuer})`);

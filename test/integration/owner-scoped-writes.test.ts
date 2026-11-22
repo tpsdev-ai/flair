@@ -4,8 +4,8 @@
 //
 // The auth middleware's stored-owner check runs first on an addressed URL and
 // returns the owner refusal when stored ownership denies the caller.
-// If reached, the guard checks string or number body
-// ids before stored ownership. Whichever check decides, it decides on the id
+// If reached, the guard checks the body id before
+// stored ownership. Whichever check decides, it decides on the id
 // Harper resolves from the canonical request target (an encoded slash is part of
 // the id); a non-canonical target (repeated slashes or a dot segment) is refused
 // with the named 400 before any routing. Collection PUT/PATCH/DELETE is refused;
@@ -165,7 +165,8 @@ interface TableSpec {
 
 const SPECS: TableSpec[] = [
   { table: "Memory", pk: "id", mut: "content", ownerPatchable: true, idFor: (n) => `osw-mem-${n}`,
-    row: (id, o) => ({ id, agentId: o, content: "orig", durability: "persistent", createdAt: NOW, updatedAt: NOW }) },
+    // migrations/visibility-backfill.ts skips explicit visibility; keep the full-row comparisons below.
+    row: (id, o) => ({ id, agentId: o, content: "orig", durability: "persistent", visibility: "shared", createdAt: NOW, updatedAt: NOW }) },
   { table: "Relationship", pk: "id", mut: "object", ownerPatchable: true, idFor: (n) => `osw-rel-${n}`,
     row: (id, o) => ({ id, agentId: o, subject: "s", predicate: "p", object: "orig", createdAt: NOW }) },
   { table: "Soul", pk: "id", mut: "value", ownerPatchable: false, idFor: (n, o) => `${o}:osw-k${n}`,

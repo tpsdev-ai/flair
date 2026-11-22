@@ -32,7 +32,7 @@ beforeEach(() => {
   prevHome = process.env.HOME;
   process.env.HOME = isoHome;
   prevPiDir = process.env.PI_CODING_AGENT_DIR;
-  delete process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(isoHome, ".pi", "agent");
 });
 
 afterEach(() => {

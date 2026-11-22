@@ -58,6 +58,7 @@ import { withKeyLock } from "./key-lock.js";
 import { withDetachedTxn } from "./table-helpers.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
+import { withMemoryWriteLockOnce } from "./memory-write-lock.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import type { ReadScope, ScopableRecord } from "./memory-read-scope.js";
@@ -114,16 +115,23 @@ export class UsageLedgerReadError extends Error {
  * The ledger read and any create share an owned transaction. The count bump
  * uses a separate owned transaction through writeBackCommittedRow.
  *
+ * flair#2478: the whole contribution runs under the memory id's per-id write
+ * lock (resources/memory-write-lock.ts), taken before the ledger lock and once
+ * without waiting. The count bump is then decided on a committed row that an
+ * ordinary owner PUT, PATCH or DELETE in the same Harper process, which holds
+ * the lock until it commits, cannot change under it. Not serialized with it: a
+ * composed PUT that commits after releasing its lock, and a raw operations
+ * write. A contribution that cannot take that lock, or the ledger lock,
+ * writes nothing for that id and is logged as skipped.
+ *
  * The count bump is the shared write-back helper (write-back.ts): the row is
  * read inside a transaction this call OWNS, the bump is built from THAT read,
  * and the committed row is re-read before commit. The plan skips an absent
  * row or one outside the agent's read scope before any identity comparison.
  * For a row the plan does not skip, an identity change the in-transaction read
- * already sees throws WriteBackConflictError at once (no retry). Only a change to the committed
- * row found by the re-read after the bump is staged retries, from a fresh
- * read, at most WRITE_BACK_ATTEMPTS attempts in all (then
- * WriteBackConflictError). recordUsageBatch / recordCitations log either
- * refusal with the reason `stored_row_changed`. The earlier read only decides
+ * already sees throws WriteBackConflictError at once (no retry). Only a
+ * pre-commit conflict retries. A post-commit mismatch is terminal and
+ * unconfirmed. The earlier read only decides
  * the read-scope gate above; it never authorizes the count write on its own.
  *
  * Called by recordUsageBatch() (POST /RecordUsage, explicit usage feedback)
@@ -138,20 +146,48 @@ export async function recordUsageContribution(
   now: string,
   canRead: CanReadMemory,
 ): Promise<void> {
-  // Within one Harper process, the per-(agentId, memoryId) lock serializes
-  // contributions across the ledger check, any create and any count bump.
-  const store = (databases as any)?.flair?.MemoryUsage?.primaryStore;
-  const outcome = await withKeyLock(
-    store,
-    [USAGE_LEDGER_LOCK_NAMESPACE, agentId, memoryId],
-    () => recordUsageContributionLocked(ctx, agentId, memoryId, attribution, now, canRead),
-    USAGE_LOCK_ATTEMPTS,
-    USAGE_LOCK_WAIT_MS,
+  // Global lock order (flair#2478): the sorted Memory id locks first, then the
+  // usage ledger. Memory.put() records its citations after releasing its target
+  // id's lock, so a citation holds no other Memory id lock when it tries this
+  // one. The whole contribution — the ledger check, any ledger create
+  // and the count bump — runs under the memory id's write lock, taken once with
+  // no wait: the count bump's decision is then made on a committed row an
+  // ordinary owner PUT or PATCH cannot change under it (the writes it does not
+  // serialize are named above).
+  // Test-only: before this contribution tries the memory id's lock.
+  const beforeLock = txnPausePoint("usage-contribution-lock");
+  if (beforeLock) await beforeLock;
+  const memoryOutcome = await withMemoryWriteLockOnce(
+    (databases as any)?.flair?.Memory?.primaryStore,
+    [memoryId],
+    async () => {
+      // Within one Harper process, the per-(agentId, memoryId) lock serializes
+      // contributions across the ledger check, any create and any count bump.
+      const store = (databases as any)?.flair?.MemoryUsage?.primaryStore;
+      return withKeyLock(
+        store,
+        [USAGE_LEDGER_LOCK_NAMESPACE, agentId, memoryId],
+        () => recordUsageContributionLocked(ctx, agentId, memoryId, attribution, now, canRead),
+        USAGE_LOCK_ATTEMPTS,
+        USAGE_LOCK_WAIT_MS,
+      );
+    },
+    { phase: "usage-count" },
   );
-  // The lock could not be acquired (or the store has none): this contribution
-  // writes no ledger row and makes no count change; the caller still gets its
-  // recorded response. Other ids in the same batch may already have been credited.
-  if (outcome.kind !== "done") return;
+  // The memory lock could not be acquired (a held id, an outcome-unknown
+  // marker, or a store with no lock): this contribution writes nothing and is
+  // skipped, never written unserialized over an owner's write. It is reported
+  // here; the caller still gets its recorded response. Other ids in the same
+  // batch may already have been credited.
+  if (memoryOutcome.kind !== "done") {
+    console.warn("[usage-recording] contribution skipped: %s for memory %s", memoryOutcome.kind, memoryId);
+    return;
+  }
+  // The ledger lock could not be acquired: same skip, same report.
+  if (memoryOutcome.value.kind !== "done") {
+    console.warn("[usage-recording] contribution skipped: usage_ledger_%s for memory %s", memoryOutcome.value.kind, memoryId);
+    return;
+  }
 
   // Test-only: pause after the ledger lock releases and the owned transaction
   // commits, before this request's transaction commits (flair#2333).
@@ -223,18 +259,6 @@ async function recordUsageContributionLocked(
   });
   if (!prepared) return;
 
-  // Targeted usageCount-ONLY bump: an INCREMENTAL update of exactly this one
-  // field through the shared helper, against the RAW Memory table, NEVER
-  // Memory.put() (the resource class): that would 403 this cross-agent write via
-  // its ownership check, and bypassing that check directly would risk letting
-  // this write path smuggle OTHER field changes through instead of just the
-  // count (RecordUsage.ts module doc's "WHY THIS IS ITS OWN ENDPOINT"). The helper
-  // confirms, inside its own transaction, that the stored row is still the one
-  // this contribution was checked against (flair#2441): a row deleted or purged
-  // before the in-transaction read is skipped by the plan (absent row), as is a
-  // row outside the agent's read scope; for any other row an identity mismatch
-  // seen by the check is refused. An error from the transactional read is not
-  // caught here: it propagates to the caller.
   await writeBackCommittedRow(
     (databases as any).flair.Memory,
     memoryId,
@@ -244,9 +268,7 @@ async function recordUsageContributionLocked(
       // above stays). The count is only ever bumped on a row in the agent's
       // read scope.
       if (!row || !canRead(row)) return { skip: true };
-      // Only `usageCount`: an incremental update, never a
-      // full-row put of the row read above (flair#2470).
-      return { update: { usageCount: (row.usageCount ?? 0) + 1 } };
+      return { idempotent: false, commitMarkerField: "writeBackWriteId", update: { usageCount: (row.usageCount ?? 0) + 1 } };
     },
     {
       ctx,
@@ -257,6 +279,9 @@ async function recordUsageContributionLocked(
       expectedRow: prepared,
       pausePre: () => txnPausePoint("usage-count-pre"),
       pausePoint: () => txnPausePoint("usage-count"),
+      pauseAfterStage: () => txnPausePoint("usage-count-staged"),
+      pauseBeforeCommit: () => txnPausePoint("usage-count-commit"),
+      pauseBeforeVerify: () => txnPausePoint("usage-count-verify"),
     },
   );
 }
@@ -366,21 +391,16 @@ export async function recordCitations(
       if (!record || !scope.isAllowed(record)) continue;
       await recordFn(ctx, auth.agentId, id, undefined, now, scope.isAllowed);
     } catch (err) {
-      // Never let one bad id stop the batch — same no-op-on-error discipline
-      // as RecordUsage.post()'s loop, log server-side only.
+      // Log per-id failures without stopping the batch.
       if (err instanceof WriteBackConflictError) {
-        // flair#2441: the stored row is no longer the one read (a same-id
-        // replace, or a change found on every attempt); the count bump was
-        // refused. The ledger row was already written and committed before the
-        // bump, so it stays, and the count is not bumped.
-        console.error("recordCitations: not credited, stored_row_changed (no-op)", { memoryId: id, reason: "stored_row_changed", err });
+        console.error("recordCitations: %s, %s", err.outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed", err.outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", { memoryId: id, reason: err.outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", outcome: err.outcome, err });
       } else if (err instanceof UsageLedgerReadError) {
         // flair#2333: the ledger read that decides whether this pair already
         // has a row failed — not "no row". This contribution is aborted (no
         // ledger write, no count bump); the other ids stand.
         console.error("recordCitations: not credited, ledger read failed (no-op)", { memoryId: id, ledgerId: err.ledgerId, reason: "ledger_read_failed", err });
       } else {
-        console.error("recordCitations: failed to credit (no-op)", { memoryId: id, err });
+        console.error("recordCitations: failed to credit", { memoryId: id, err });
       }
     }
   }
@@ -428,22 +448,15 @@ export async function recordUsageBatch(
     try {
       await recordFn(ctx, agentId, memoryId, attribution, now, scope.isAllowed);
     } catch (err) {
-      // Never let one bad id fail the whole batch, and never let an internal
-      // error leak existence information either — log server-side, collapse
-      // to the same no-op the response already returns for every other
-      // outcome.
+      // Log per-id failures without changing the response.
       if (err instanceof WriteBackConflictError) {
-        // flair#2441: the stored row is no longer the one read (a same-id
-        // replace, or a change found on every attempt); the count bump was
-        // refused. The ledger row was already written and committed before the
-        // bump, so it stays, and the count is not bumped.
-        console.error("RecordUsage.post: not recorded, stored_row_changed (treated as no-op)", { memoryId, reason: "stored_row_changed", err });
+        console.error("RecordUsage.post: %s, %s", err.outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed", err.outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", { memoryId, reason: err.outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", outcome: err.outcome, err });
       } else if (err instanceof UsageLedgerReadError) {
         // flair#2333: the ledger read failed — not "no row". This contribution
         // is aborted (no ledger write, no count bump); the other ids stand.
         console.error("RecordUsage.post: not recorded, ledger read failed (treated as no-op)", { memoryId, ledgerId: err.ledgerId, reason: "ledger_read_failed", err });
       } else {
-        console.error("RecordUsage.post: failed to record usage (treated as no-op)", { memoryId, err });
+        console.error("RecordUsage.post: failed to record usage", { memoryId, err });
       }
     }
   }

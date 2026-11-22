@@ -116,7 +116,7 @@ function ed25519Header(a: TestAgent, method: string, path: string): string {
 }
 
 beforeAll(async () => {
-  harper = await startHarper({ env: { FLAIR_FEDERATION_PRESENCE_RECEIVE: "1" } });
+  harper = await startHarper({ serverEnv: { FLAIR_FEDERATION_PRESENCE_RECEIVE: "1" } });
   assertOwnInstance(harper);
   const now = new Date().toISOString();
   // The receiver's own identity.

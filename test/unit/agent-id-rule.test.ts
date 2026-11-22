@@ -7,6 +7,7 @@ import {
   AGENT_ID_ERROR,
   AGENT_ID_PATTERN,
   AGENT_ID_RULE,
+  AGENT_ID_STRING_REMEDY,
   invalidAgentIdMessage,
   isValidAgentId,
 } from "../../src/lib/agent-id-rule.js";
@@ -33,6 +34,108 @@ describe("flair#2359 — isValidAgentId accepts exactly ^[a-zA-Z0-9_-]{1,64}$", 
     for (const id of [null, undefined, {}, [], true]) {
       expect(isValidAgentId(id), String(id)).toBe(false);
     }
+  });
+
+  it("gives an integral number outside the safe range the string remedy", () => {
+    const rounded = Number("9007199254740993"); // 9007199254740992, not round-trippable
+    expect(Number.isSafeInteger(rounded)).toBe(false);
+    expect(isValidAgentId(rounded)).toBe(false);
+    expect(invalidAgentIdMessage(rounded)).toBe(AGENT_ID_STRING_REMEDY);
+    expect(invalidAgentIdMessage(2 ** 53)).toBe(AGENT_ID_STRING_REMEDY);
+    expect(invalidAgentIdMessage(9007199254740993n)).toBe(AGENT_ID_STRING_REMEDY);
+  });
+
+  it("gives a fractional number the ordinary rule refusal, not the string remedy", () => {
+    expect(isValidAgentId(1.5)).toBe(false);
+    const message = invalidAgentIdMessage(1.5);
+    expect(message).not.toBe(AGENT_ID_STRING_REMEDY);
+    expect(message).toContain(AGENT_ID_RULE);
+    expect(message).toContain("1.5");
+  });
+
+  it("shows a non-finite number as-is, not null", () => {
+    for (const id of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const message = invalidAgentIdMessage(id);
+      expect(isValidAgentId(id), String(id)).toBe(false);
+      expect(message, String(id)).toContain(String(id));
+      expect(message, String(id)).not.toContain("null");
+    }
+  });
+
+  it("reports a circular or throwing-toJSON object by type, with no string remedy", () => {
+    const circular: { self?: unknown } = {};
+    circular.self = circular;
+    const throwing = {
+      toJSON() {
+        throw new Error("not serializable");
+      },
+    };
+    for (const id of [circular, throwing]) {
+      const message = invalidAgentIdMessage(id);
+      expect(message).toContain("an object that cannot be serialized");
+      expect(message).toContain(AGENT_ID_RULE);
+      expect(message).not.toContain(AGENT_ID_STRING_REMEDY);
+    }
+  });
+
+  it("names undefined plainly in the refusal", () => {
+    expect(invalidAgentIdMessage(undefined)).toBe(
+      "invalid agent id undefined: an agent id must match ^[a-zA-Z0-9_-]{1,64}$ (1-64 characters: A-Z, a-z, 0-9, _ or -)",
+    );
+  });
+
+  it("names null plainly in the refusal", () => {
+    expect(invalidAgentIdMessage(null)).toBe(
+      "invalid agent id null: an agent id must match ^[a-zA-Z0-9_-]{1,64}$ (1-64 characters: A-Z, a-z, 0-9, _ or -)",
+    );
+  });
+
+  it("names an unserializable array as an array", () => {
+    const circular: unknown[] = [];
+    circular.push(circular);
+    for (const id of [circular, [1n]]) {
+      expect(invalidAgentIdMessage(id)).toBe(
+        "invalid agent id (an array that cannot be serialized): an agent id must match ^[a-zA-Z0-9_-]{1,64}$ (1-64 characters: A-Z, a-z, 0-9, _ or -)",
+      );
+    }
+  }, 5_000);
+
+  it("names a function or a toJSON returning undefined by type, not undefined", () => {
+    const func = () => "x";
+    const nullingToJSON = { toJSON: () => undefined };
+    const funcMessage = invalidAgentIdMessage(func);
+    expect(funcMessage).toContain("a function that cannot be serialized");
+    expect(funcMessage).not.toContain("undefined");
+    const objectMessage = invalidAgentIdMessage(nullingToJSON);
+    expect(objectMessage).toContain("an object that cannot be serialized");
+    expect(objectMessage).not.toContain("undefined");
+  });
+
+  it("names an array whose toJSON returns undefined as an array", () => {
+    const id = Object.assign([], { toJSON: () => undefined });
+    expect(invalidAgentIdMessage(id)).toBe(
+      "invalid agent id (an array that cannot be serialized): an agent id must match ^[a-zA-Z0-9_-]{1,64}$ (1-64 characters: A-Z, a-z, 0-9, _ or -)",
+    );
+  });
+
+  it("reports a revoked Proxy by type in the refusal", () => {
+    const { proxy, revoke } = Proxy.revocable([], {});
+    revoke();
+    expect(invalidAgentIdMessage(proxy)).toBe(
+      `invalid agent id (an object that cannot be serialized): an agent id must match ${AGENT_ID_RULE} (1-64 characters: A-Z, a-z, 0-9, _ or -)`,
+    );
+  });
+
+  it("shows a Symbol as String(id), not undefined", () => {
+    const id = Symbol("x");
+    const message = invalidAgentIdMessage(id);
+    expect(isValidAgentId(id)).toBe(false);
+    expect(message).toContain("Symbol(x)");
+    expect(message).not.toContain("undefined");
+  });
+
+  it("shows a JSON value through JSON.stringify", () => {
+    expect(invalidAgentIdMessage("with space")).toContain(JSON.stringify("with space"));
   });
 
   it("the exported pattern and rule text agree", () => {

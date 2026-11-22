@@ -2,12 +2,16 @@
  * Transaction helper for single-row Soul resource history (flair#2139 slice 1).
  */
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { databases } from "harper";
 import { authorizeSoulWrite } from "./soul-write-policy.js";
 import { authorizeSkillVersionWrite } from "./skill-write-policy.js";
 import { withKeyLock } from "./key-lock.js";
-import { withOwnedTransaction } from "./request-transaction.js";
+import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
+import { txnFault, txnPausePoint } from "./txn-pause-point.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
+import { validateServerRow } from "./server-row-validation.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 
 export const INSTRUCTION_VERSION_TABLE = "InstructionVersion";
@@ -16,6 +20,75 @@ export type VersionKind = "create" | "update" | "delete";
 export type InstructionSubjectType = "soul" | "skill";
 export type ActorKind = "operator" | "agent" | "internal" | "instance";
 export type SourceClass = "operator" | "internal" | "agent" | "federation" | "seed";
+
+/** flair#2139 S3b — an instruction event is reserved to the internal appender. */
+export const INSTRUCTION_EVENT_ID_PREFIX = "instruction-change:";
+
+/** The ten allowlisted detail fields, in this order (Sherlock 4). */
+export const INSTRUCTION_EVENT_DETAIL_FIELDS = [
+  "subjectType",
+  "subjectId",
+  "key",
+  "changeKind",
+  "actorKind",
+  "actorId",
+  "sourceClass",
+  "valueHash",
+  "previousVersionHash",
+  "recordHash",
+] as const;
+
+/** The three value-derived hashes D1 omits for a private skill's event. */
+const PRIVATE_SKILL_EVENT_OMITTED = ["valueHash", "previousVersionHash", "recordHash"] as const;
+
+/**
+ * flair#2139 S3b — the event for one appended version, built by explicit field
+ * enumeration of selected row fields. The three
+ * value-derived hashes are absent for a private skill (D1), gated on the
+ * version's stored visibility (which a tombstone carries as the closed head's
+ * last state).
+ */
+export function instructionEventFor(record: Record<string, any>): Record<string, unknown> {
+  const subjectType = record.subjectType === "soul" ? "soul" : "skill";
+  const detail: Record<string, unknown> = {
+    subjectType,
+    subjectId: record.subjectId,
+    key: subjectType === "soul" ? (record.key ?? null) : null,
+    changeKind: record.kind,
+    actorKind: record.actorKind,
+    actorId: record.actorId ?? null,
+    sourceClass: record.sourceClass,
+    valueHash: record.valueHash ?? null,
+    previousVersionHash: record.previousVersionHash ?? null,
+    recordHash: record.recordHash ?? null,
+  };
+  if (subjectType === "skill" && record.visibility === PRIVATE_VISIBILITY) {
+    for (const field of PRIVATE_SKILL_EVENT_OMITTED) delete detail[field];
+  }
+  return {
+    id: `${INSTRUCTION_EVENT_ID_PREFIX}${record.id}`,
+    authorId: "flair:internal",
+    kind: `${subjectType}.changed`,
+    scope: record.agentId,
+    summary: `${subjectType === "soul" ? "Soul entry" : "Skill"} ${record.kind}d`,
+    detail: JSON.stringify(detail),
+    targetIds: [],
+    refId: record.id,
+    createdAt: record.createdAt,
+  };
+}
+
+/** Append the event in the caller's transaction; a failure aborts the write (D2). */
+async function appendInstructionEvent(record: Record<string, any>, shared: any): Promise<void> {
+  const events = (databases as any).flair?.OrgEvent;
+  if (!isTableLike(events)) throw new Error("flair: the OrgEvent table is unavailable");
+  const event = instructionEventFor(record);
+  // Test-only: the hook may inspect the exact row about to be staged (inert
+  // unless a fixture installs one).
+  maybeThrowSkillWriteFault("event", record.agentId, event);
+  validateServerRow(events, event);
+  await events.create(event, shared);
+}
 
 /** Server-derived attribution for one version row; never read from a request body. */
 export interface VersionAttribution {
@@ -47,6 +120,58 @@ export interface RecordVersionInput {
   /** The closed subject's own agentId; the tombstone is about the OLD subject. */
   previousAgentId?: string | null;
   previousRowId?: string | null;
+}
+
+/**
+ * flair#2645 / flair#2642 — remove the version record this request appended, when
+ * it is still the subject's head. A close that a newer write made Harper skip can
+ * commit its version row (an update's successor version or a delete's tombstone)
+ * while leaving the row open; undoing that write must
+ * not leave a gap in the chain, so a record followed by a later version is left
+ * in place and reported as `superseded`.
+ */
+export async function removeAppendedVersion(
+  ctx: any,
+  subjectType: InstructionSubjectType,
+  subjectId: string,
+  versionRecordId: string,
+): Promise<"removed" | "superseded" | "busy" | "unavailable"> {
+  const store = (databases as any).flair?.InstructionVersion?.primaryStore;
+  const outcome = await withKeyLock(store, [LOCK_NAMESPACE, subjectType], async () => {
+    const staged = await withOwnedTransaction(ctx, async (shared) => {
+      const head = await readHead(subjectType, subjectId, shared);
+      if (!head) return "removed" as const;
+      if (String(head.id) !== versionRecordId) return "superseded" as const;
+      const table = (databases as any).flair.InstructionVersion;
+      // The resource class overrides `delete` and `get` for REST authority; the
+      // append helper's own table is its base prototype, which exposes the raw
+      // writer this in-process undo needs.
+      const raw = Object.getPrototypeOf(table);
+      if (typeof raw?.delete !== "function" || typeof raw?.get !== "function") return "unavailable" as const;
+      await raw.delete.call(table, versionRecordId, shared);
+      // Remove this record's event in the same transaction.
+      const events = (databases as any).flair?.OrgEvent;
+      if (!isTableLike(events)) throw new Error("flair: the OrgEvent table is unavailable");
+      await events.delete(`${INSTRUCTION_EVENT_ID_PREFIX}${versionRecordId}`, shared);
+      const pause = txnPausePoint("skill-version-rollback-staged");
+      if (pause) await pause;
+      return "deleted" as const;
+    });
+    if (staged !== "deleted" && staged !== "removed") return staged;
+    const table = (databases as any).flair.InstructionVersion;
+    const raw = Object.getPrototypeOf(table);
+    if (typeof raw?.get !== "function") return "unavailable" as const;
+    const pause = txnPausePoint("skill-version-rollback-committed");
+    if (pause) await pause;
+    const left = await raw.get.call(table, versionRecordId, {});
+    if (left != null) return "unavailable" as const;
+    return await raw.get.call(table, versionRecordId, {}) == null ? "removed" as const : "unavailable" as const;
+  },
+  LOCK_ATTEMPTS,
+  LOCK_WAIT_MS);
+  if (outcome.kind === "busy") return "busy";
+  if (outcome.kind === "unavailable") return "unavailable";
+  return outcome.value;
 }
 
 export interface RecordVersionSuccess { ok: true; result: any; version: string }
@@ -155,6 +280,65 @@ function jsonResponse(status: number, body: Record<string, unknown>): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
+type HarperValidationErrorCtor = new (errors: unknown[], message?: string) => Error;
+
+let harperValidationErrorCtor: HarperValidationErrorCtor | undefined;
+
+/**
+ * Read and memoize Harper's cached `ValidationError` constructor. `harper`
+ * exports only ".", so resolve the main entry to locate hdbError.js.
+ * An uncached load can execute globals.js and clear `global.transaction`;
+ * this helper never requires the module. Eviction/reload can leave the memoized
+ * constructor stale. A missing constructor reports no match.
+ */
+function harperValidationError(): HarperValidationErrorCtor | null {
+  if (harperValidationErrorCtor) return harperValidationErrorCtor;
+  try {
+    const req = createRequire(import.meta.url);
+    const mainPath = req.resolve("harper");
+    const errorPath = join(dirname(mainPath), "utility", "errors", "hdbError.js");
+    const loaded = (req.cache as Record<string, { exports?: { ValidationError?: unknown } } | undefined>)[errorPath];
+    const ctor = loaded?.exports?.ValidationError;
+    if (typeof ctor === "function") harperValidationErrorCtor = ctor as HarperValidationErrorCtor;
+  } catch { /* no class: fail closed below */ }
+  return harperValidationErrorCtor ?? null;
+}
+
+/**
+ * The validator's own client error, rendered with the problem-details fields
+ * Harper's REST responder uses for it (harper@5.3.1 dist/server/REST.js:498).
+ * The class is declared at dist/utility/errors/hdbError.js:243; in that
+ * version's dist it is constructed only at the two schema-validation sites,
+ * dist/resources/Table.js:6459 and dist/resources/defineResource.js:432, both
+ * with a non-empty issue list. Its constructor sets `name` and `code` to
+ * "ValidationError", a 400 `statusCode`, and the `errors` array. The status
+ * check refuses any 5xx.
+ */
+function validationErrorResponse(err: unknown): Response | null {
+  if (!err || typeof err !== "object") return null;
+  const candidate = err as { name?: unknown; code?: unknown; statusCode?: unknown; errors?: unknown; message?: unknown };
+  if (candidate.name !== "ValidationError" || candidate.code !== "ValidationError" || candidate.statusCode !== 400) return null;
+  const issues = candidate.errors;
+  // Only errors passing the shape checks reach the constructor lookup.
+  if (!Array.isArray(issues) || issues.length === 0) return null;
+  const wellFormed = issues.every((issue) => {
+    if (!issue || typeof issue !== "object") return false;
+    const fields = issue as { path?: unknown; code?: unknown; message?: unknown };
+    return typeof fields.path === "string" && typeof fields.code === "string" && typeof fields.message === "string";
+  });
+  if (!wellFormed) return null;
+  const ValidationError = harperValidationError();
+  if (!ValidationError || !(err instanceof ValidationError)) return null;
+  return jsonResponse(400, {
+    error: "ValidationError",
+    type: "error:ValidationError",
+    code: "ValidationError",
+    title: typeof candidate.message === "string" ? candidate.message : "invalid request body",
+    status: 400,
+    detail: issues,
+  });
+}
+
 function staleHeadResponse(expected: string, head: Record<string, any> | null): Response {
   return jsonResponse(409, {
     error: "instruction_version_head_mismatch",
@@ -181,8 +365,7 @@ function isTableLike(table: unknown): boolean {
  * the cached read snapshot; the read resource uses the same raw handle without a lock.
  */
 export async function readHead(subjectType: string, subjectId: string, shared?: any, soulIdentity?: { agentId: string; key: string }): Promise<Record<string, any> | null> {
-  const table = (databases as any).flair?.InstructionVersion;
-  if (!isTableLike(table)) throw new Error("flair: the InstructionVersion table is unavailable");
+  const table = instructionVersionTable();
   for await (const row of table.search({
     conditions: [
       { attribute: "subjectType", comparator: "equals", value: subjectType },
@@ -196,6 +379,51 @@ export async function readHead(subjectType: string, subjectId: string, shared?: 
     limit: 1,
   }, shared)) {
     return row as Record<string, any>;
+  }
+  return null;
+}
+
+function instructionVersionTable(): any {
+  const table = (databases as any).flair?.InstructionVersion;
+  if (!isTableLike(table)) throw new Error("flair: the InstructionVersion table is unavailable");
+  return table;
+}
+
+/** One version record of a subject's chain, by its addressable id, or null. */
+export async function readVersionRecord(
+  subjectType: string,
+  subjectId: string,
+  recordId: string,
+  shared?: any,
+): Promise<Record<string, any> | null> {
+  const table = instructionVersionTable();
+  for await (const row of table.search({
+    conditions: [
+      { attribute: "subjectType", comparator: "equals", value: subjectType },
+      { attribute: "subjectId", comparator: "equals", value: subjectId },
+    ],
+  }, shared)) {
+    if (String(row.id) === recordId) return row as Record<string, any>;
+  }
+  return null;
+}
+
+/** The record with the next sequence number after `version` for this subject, or null. */
+export async function readVersionRecordAfter(
+  subjectType: string,
+  subjectId: string,
+  version: bigint | number | string,
+  shared?: any,
+): Promise<Record<string, any> | null> {
+  const table = instructionVersionTable();
+  const next = BigInt(version) + 1n;
+  for await (const row of table.search({
+    conditions: [
+      { attribute: "subjectType", comparator: "equals", value: subjectType },
+      { attribute: "subjectId", comparator: "equals", value: subjectId },
+    ],
+  }, shared)) {
+    if (BigInt(row.version as any) === next) return row as Record<string, any>;
   }
   return null;
 }
@@ -262,12 +490,15 @@ export async function recordVersion(
   ctx: any,
   request: RecordVersionInput | PreparedVersionInput,
   mutateRow: (shared: any) => Promise<any>,
+  joinCallerTransaction = false,
 ): Promise<RecordVersionOutcome> {
   const store = (databases as any).flair?.InstructionVersion?.primaryStore;
+  const joinsCaller = joinCallerTransaction && isJoinableTransaction(ctx);
+  const callerTransaction = joinsCaller ? ctx.transaction : null;
   let outcome;
   try {
     outcome = await withKeyLock(store, [LOCK_NAMESPACE, request.subjectType], () =>
-      withOwnedTransaction(ctx, async (shared) => {
+      (joinsCaller ? withSharedWriteTransaction : withOwnedTransaction)(ctx, async (shared) => {
         const authorization = await resolveVersionAuthorization(request.subjectType, shared);
         if (authorization.denied) return { ok: false, response: authorization.denied } as RecordVersionOutcome;
         const attribution = authorization.attribution;
@@ -339,7 +570,9 @@ export async function recordVersion(
             expectedVersion: null,
           };
           oldRecord.recordHash = recordDigest(oldRecord);
+          validateServerRow(table, oldRecord);
           await table.create(oldRecord, shared);
+          await appendInstructionEvent(oldRecord, shared);
         }
         const sequence = head ? BigInt(head.version as any) + 1n : 1n;
         const id = versionId(input.subjectType, input.subjectId, sequence);
@@ -365,18 +598,34 @@ export async function recordVersion(
           expectedVersion: expected,
         };
         record.recordHash = recordDigest(record);
+        // Test-only pause after the append id is computed, inside the locked
+        // transaction (flair#2645 audit). Inert unless fault injection is armed.
+        await txnPausePoint("instruction-version-append");
         // flair#2139 S2 — test-only per-step fault injection (see
         // skill-write-fault.ts). Fires after the Memory-side successor/close
         // writes rode this same transaction, so the append failure aborts them
         // too: no successor, no close, no version.
-        if (input.subjectType === "skill") maybeThrowSkillWriteFault("append", input.agentId);
+        if (input.subjectType === "skill") maybeThrowSkillWriteFault("append", input.agentId, record);
+        validateServerRow(table, record);
         await table.create(record, shared);
+        // Test-only: fail after the version row is staged so a test can prove
+        // the abort rolls both it and the caller's staged row back. Inert
+        // unless the fault-injection opt-in is armed.
+        if (txnFault("instruction-version-append-fail")) throw new Error("test-only instruction version append failure");
+        await appendInstructionEvent(record, shared);
         return { ok: true, result, version: id } as RecordVersionOutcome;
       }),
     LOCK_ATTEMPTS,
     LOCK_WAIT_MS);
   } catch (err) {
+    if (callerTransaction) callerTransaction.abort();
     if (err instanceof RowMutationDenied) return { ok: false, response: err.response };
+    // Rows this append builds are validated before staging: their caller-derived
+    // fields are coerced to the schema's types where they are assigned, so a
+    // schema failure on one is a server defect. A Harper ValidationError that
+    // reaches here is the caller's row: report it as 400.
+    const validation = validationErrorResponse(err);
+    if (validation) return { ok: false, response: validation };
     // A head-read, append or commit failure aborts the whole transaction; report
     // unavailable rather than a success, so no caller reads a missing version as
     // "nothing happened" (fail-closed).

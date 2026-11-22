@@ -1,0 +1,1 @@
+- Visibility backfill and promotion stamps update only their own fields under the per-id Memory lock shared with owner PUT/PATCH.

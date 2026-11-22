@@ -21,6 +21,7 @@ import {
   type FederationVerifyDeps,
   type FederationVerifyOptions,
 } from "../../src/federation-verify";
+import { ApiRequestOutcomeUnknown } from "../../src/lib/auth-resolve";
 import { assertVisibilityAllowedForDurability } from "../../resources/memory-visibility";
 
 function makePeer(overrides: Partial<FederationPeerResult> = {}): FederationPeerResult {
@@ -525,7 +526,7 @@ describe("runFederationVerify", () => {
     const now = Date.parse("2026-09-12T00:10:00.000Z");
     const deps = makeDeps({
       clock: advancingClock(now),
-      sync: async () => ({ pushed: 0, skipped: 0, error: new Error("No hub peer configured") }),
+      sync: async () => ({ pushed: 0, skipped: 0 }),
       peers: [makeRecord({ lastSyncAt: "2026-09-12T00:09:00.000Z" })],
       fetchImpl: async () => jsonRes(200, { results: [] }),
     });
@@ -540,7 +541,7 @@ describe("runFederationVerify", () => {
     const now = Date.parse("2026-09-12T00:10:00.000Z");
     const deps = makeDeps({
       clock: advancingClock(now),
-      sync: async () => ({ pushed: 0, skipped: 0, error: new Error("sync down") }),
+      sync: async () => ({ pushed: 0, skipped: 0 }),
       peers: [makeRecord({ lastSyncAt: "2026-09-01T00:00:00.000Z" })],
       fetchImpl: async () => jsonRes(200, { results: [] }),
     });
@@ -548,6 +549,100 @@ describe("runFederationVerify", () => {
     expect(r.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
     expect(r.peers[0]?.status).toBe("fail");
     expect(r.peers[0]?.detail).toContain("stale");
+  });
+
+  test("a returned sync error is a failed verification, not unverifiable-only", async () => {
+    let fetches = 0;
+    const deps = makeDeps({
+      sync: async () => ({ pushed: 0, skipped: 0, error: new Error("No hub peer configured") }),
+      fetchImpl: async () => {
+        fetches += 1;
+        return jsonRes(200, { results: [] });
+      },
+    });
+    const r = await runFederationVerify(baseOpts(), deps);
+    expect(fetches).toBe(0);
+    expect(r.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
+    expect(r.verdict.kind).toBe("verification-failed");
+    expect(r.verdict.kind).not.toBe("unverifiable-only");
+    expect(r.verdict.kind).not.toBe("empty");
+    expect(r.verdict.summary).toContain("No hub peer configured");
+    const text = renderFederationVerifyVerdict(r.verdict);
+    expect(text).toContain("FAIL");
+    expect(text).toContain("No hub peer configured");
+  });
+
+  test("--peer that matches no listed peer is a failed verification, not empty", async () => {
+    let fetches = 0;
+    const deps = makeDeps({
+      fetchImpl: async () => {
+        fetches += 1;
+        return jsonRes(200, { results: [] });
+      },
+    });
+    const r = await runFederationVerify(baseOpts({ peerId: "missing" }), deps);
+    expect(fetches).toBe(0);
+    expect(r.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
+    expect(r.verdict.kind).toBe("verification-failed");
+    expect(r.verdict.kind).not.toBe("empty");
+    expect(r.verdict.summary).toContain("missing");
+  });
+
+  test("the real runFederationSyncOnce returns { error } from a real local server (no hub)", async () => {
+    await import("../../src/cli"); // binds the CLI's real api helper
+    const { runFederationSyncOnce } = await import("../../src/cli");
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "GET" && url.pathname === "/FederationPeers") {
+          return Response.json({ peers: [] });
+        }
+        return new Response("unexpected request", { status: 500 });
+      },
+    });
+    try {
+      const r = await runFederationSyncOnce({
+        target: `http://127.0.0.1:${server.port}`,
+        adminPass: "test-admin-pass",
+      });
+      expect(r.pushed).toBe(0);
+      expect(r.error).toBeInstanceOf(Error);
+      expect(r.error?.message).toContain("No hub peer configured");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("verify treats the real runFederationSyncOnce error as a failed verification", async () => {
+    await import("../../src/cli");
+    const { runFederationSyncOnce } = await import("../../src/cli");
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "GET" && url.pathname === "/FederationPeers") {
+          return Response.json({ peers: [] });
+        }
+        return new Response("unexpected request", { status: 500 });
+      },
+    });
+    try {
+      const deps = makeDeps({ sync: runFederationSyncOnce });
+      const r = await runFederationVerify(baseOpts({
+        syncOpts: {
+          target: `http://127.0.0.1:${server.port}`,
+          adminPass: "test-admin-pass",
+        },
+      }), deps);
+      expect(r.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
+      expect(r.verdict.kind).toBe("verification-failed");
+      expect(r.verdict.summary).toContain("No hub peer configured");
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("401 on one peer does not hide a diverged reachable peer", async () => {
@@ -588,8 +683,113 @@ describe("runFederationVerify", () => {
     });
     const r = await runFederationVerify(baseOpts(), deps);
     expect(r.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
+    expect(r.verdict.kind).toBe("verification-failed");
+    expect(r.verdict.summary).toContain("local write failed: disk full");
     expect(r.memId).toBeNull();
     expect(fetches).toBe(0);
     expect(deps.deletes.length).toBe(0);
+  });
+
+  test("an unknown archive PUT still deletes locally, reports the unknown outcome and exits 3", async () => {
+    const calls: string[] = [];
+    const errors: string[] = [];
+    const deps: FederationVerifyDeps = {
+      log: () => {},
+      error: (msg) => errors.push(msg),
+      clock: advancingClock(),
+      syncOnce: async () => ({ pushed: 1, skipped: 0 }),
+      fetch: (async () => jsonRes(200, { results: [{ content: "fed-verify-test — ok" }] })) as unknown as typeof fetch,
+      api: async (method, path, body) => {
+        calls.push(`${method} ${path}`);
+        if (method === "PUT" && path.startsWith("/Memory/")) {
+          if ((body as { archived?: boolean } | undefined)?.archived === true) {
+            throw new ApiRequestOutcomeUnknown("PUT", path, 100, undefined, "explicit");
+          }
+          return {};
+        }
+        if (method === "DELETE" && path.startsWith("/Memory/")) return {};
+        if (method === "GET" && path === "/FederationPeers") return { peers: [makeRecord()] };
+        throw new Error(`unexpected api ${method} ${path}`);
+      },
+    };
+    const r = await runFederationVerify(baseOpts(), deps);
+    const deletes = calls.filter((c) => c.startsWith("DELETE /Memory/"));
+    expect(deletes).toHaveLength(1);
+    expect(r.cleanedUp).toBe(true);
+    expect(r.exitCode).toBe(3);
+    expect(errors.join("\n")).toContain("Unknown outcome: PUT /Memory/");
+    expect(errors.join("\n")).toContain("may or may not have taken effect");
+  });
+
+  test("a returned sync failure and an unknown cleanup DELETE both print; exit 3", async () => {
+    const errors: string[] = [];
+    const deps: FederationVerifyDeps = {
+      log: () => {},
+      error: (msg) => errors.push(msg),
+      clock: advancingClock(),
+      syncOnce: async () => ({ pushed: 0, skipped: 0, error: new Error("push exploded") }),
+      fetch: (async () => jsonRes(200, { results: [] })) as unknown as typeof fetch,
+      api: async (method, path) => {
+        if (method === "DELETE" && path.startsWith("/Memory/")) {
+          throw new ApiRequestOutcomeUnknown("DELETE", path, 100, undefined, "explicit");
+        }
+        if (method === "PUT" && path.startsWith("/Memory/")) return {};
+        if (method === "GET" && path === "/FederationPeers") return { peers: [makeRecord()] };
+        throw new Error(`unexpected api ${method} ${path}`);
+      },
+    };
+    const r = await runFederationVerify(baseOpts(), deps);
+    const printed = errors.join("\n");
+    expect(printed).toContain("Error: push exploded");
+    expect(printed).toContain("Unknown outcome: DELETE /Memory/");
+    expect(r.exitCode).toBe(3);
+    expect(r.verdict.exitCode).toBe(3);
+    expect(r.verdict.kind).toBe("verification-failed");
+    expect(r.verdict.summary).toContain("push exploded");
+    expect(r.verdict.summary).toContain("cleanup");
+    expect(r.verdict.summary).toContain("unknown outcome");
+    expect(r.verdict.summary).not.toContain("no peers");
+  });
+
+  test.each([undefined, null])("a body dependency throwing %s returns a failing verdict", async (value) => {
+    const deps = makeDeps({
+      sync: async () => { throw value; },
+    });
+    const r = await runFederationVerify(baseOpts(), deps);
+    expect(r.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
+    expect(r.verdict.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
+    expect(r.verdict.kind).toBe("verification-failed");
+    expect(r.verdict.summary).toContain(String(value));
+    expect(r.cleanedUp).toBe(true);
+  });
+
+  test("a returned sync failure with a successful cleanup returns a failing verdict", async () => {
+    const deps = makeDeps({
+      sync: async () => ({ pushed: 0, skipped: 0, error: new Error("push exploded") }),
+    });
+    const r = await runFederationVerify(baseOpts(), deps);
+    expect(r.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
+    expect(r.verdict.kind).toBe("verification-failed");
+    expect(r.verdict.kind).not.toBe("diverged");
+    expect(r.verdict.summary).toContain("push exploded");
+    expect(r.verdict.summary).not.toContain("unknown");
+    expect(r.verdict.summary).not.toContain("no peers");
+  });
+
+  test("an empty peer listing after a successful canary push reports no peers to probe", async () => {
+    let fetches = 0;
+    const deps = makeDeps({
+      peers: [],
+      fetchImpl: async () => {
+        fetches += 1;
+        return jsonRes(200, { results: [] });
+      },
+    });
+    const r = await runFederationVerify(baseOpts(), deps);
+    expect(fetches).toBe(0);
+    expect(r.peers).toEqual([]);
+    expect(r.exitCode).toBe(FED_VERIFY_EXIT_OK);
+    expect(r.verdict.kind).toBe("empty");
+    expect(r.verdict.summary).toBe("no peers to probe.");
   });
 });

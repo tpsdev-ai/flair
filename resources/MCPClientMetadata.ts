@@ -1,6 +1,6 @@
 import { Resource, databases } from "harper";
-import { mcpIssuer } from "./mcp-oauth-flag.js";
 import { agentPublicKeyToJwk, buildCimdDocument } from "./mcp-client-metadata-fields.js";
+import { refuseRewrittenAgentId } from "./path-id-rewrite.js";
 
 /**
  * MCPClientMetadata — serves a Client ID Metadata Document (CIMD) for a
@@ -35,7 +35,7 @@ import { agentPublicKeyToJwk, buildCimdDocument } from "./mcp-client-metadata-fi
  *
  * Deployment coordination: the AS's `clientIdMetadataDocuments.allowedHosts`
  * config MUST include this route's host (derived from `FLAIR_MCP_ISSUER` /
- * `FLAIR_PUBLIC_URL`, same env vars as `mcpIssuer()` below) — merely being
+ * `FLAIR_PUBLIC_URL`) — merely being
  * reachable is not enough; the allowlist gate is AS-side config and
  * fail-closed. See docs/notes/mcp-agent-auth-consumer.md.
  */
@@ -56,8 +56,10 @@ export class MCPClientMetadata extends Resource {
         { status: 400, headers: { "Content-Type": "application/json" } },
       );
     }
+    const rewritten = refuseRewrittenAgentId((this as any).getContext?.(), agentId);
+    if (rewritten) return rewritten;
 
-    const issuer = mcpIssuer();
+    const issuer = (process.env.FLAIR_MCP_ISSUER ?? process.env.FLAIR_PUBLIC_URL ?? "").trim();
     if (!issuer) {
       // Fail closed rather than guess a client_id URL — CIMD requires the
       // document's client_id to equal the URL it was fetched from, byte for

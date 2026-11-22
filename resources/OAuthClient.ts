@@ -4,7 +4,7 @@ import { allowAdmin } from "./agent-auth.js";
 /**
  * OAuthClient holds registered OAuth client records (incl. secrets) — admin/system
  * only, no agent grant. OAuth endpoints (OAuthRegister/Authorize/Token) read+write
- * clients via internal calls (allowAdmin permits internal), so the OAuth flows keep
+ * clients through the raw table rather than this resource, so the OAuth flows keep
  * working; direct anonymous table access is denied. Self-authorizes now that the
  * global gate is non-rejecting.
  */

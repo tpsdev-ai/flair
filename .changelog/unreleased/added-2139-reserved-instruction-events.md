@@ -1,0 +1,1 @@
+- OrgEvent resource writes refuse reserved kinds (`soul.changed`, `skill.changed`) and the `instruction-change:` id prefix; stored checks and mutations share an owned transaction. With an admin credential and a verified operations endpoint, `flair doctor` names stored events that carry a reserved marker but fail the reader rule.

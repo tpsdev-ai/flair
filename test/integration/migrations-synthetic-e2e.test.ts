@@ -78,11 +78,11 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
   // seeded rows, which is also exactly the real-world shape (write data,
   // then a later restart/upgrade is what runs the migration).
   beforeAll(async () => {
-    process.env.FLAIR_ENABLE_TEST_MIGRATIONS = "1";
+    const serverEnv = { FLAIR_ENABLE_TEST_MIGRATIONS: "1" };
     homeDir = mkdtempSync(join(tmpdir(), "flair-test-default-"));
     const dataDir = join(homeDir, ".flair", "data");
     mkdirSync(dataDir, { recursive: true });
-    const first = await startHarper({ installDir: dataDir, homeDir });
+    const first = await startHarper({ installDir: dataDir, homeDir, serverEnv });
     authHeader = "Basic " + Buffer.from(`${first.admin.username}:${first.admin.password}`).toString("base64");
     harper = first;
 
@@ -106,11 +106,10 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
     }
 
     await stopHarper(first, { keepInstallDir: true });
-    harper = await startHarper({ installDir: first.installDir, homeDir });
+    harper = await startHarper({ installDir: first.installDir, homeDir, serverEnv });
   }, 180_000);
 
   afterAll(async () => {
-    delete process.env.FLAIR_ENABLE_TEST_MIGRATIONS;
     if (harper) await stopHarper(harper);
     if (homeDir) {
       const { rm } = await import("node:fs/promises");
@@ -134,7 +133,12 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
     expect(lastMig).toBeTruthy();
     expect(lastMig.state).toBe("completed");
     expect(lastMig.rowsRemaining).toBe(0);
-    expect(lastMig.rowsDone).toBeGreaterThanOrEqual(SEED_IDS.length);
+    // flair#2840: rowsDone counts writes whose committed effect was verified.
+    // This test expects every seeded row to be verified, so rowsDone is the
+    // seed count and no id is named unconfirmed.
+    expect(lastMig.rowsDone).toBe(SEED_IDS.length);
+    expect((lastMig.rowsUnconfirmed ?? 0) + lastMig.rowsDone).toBe(SEED_IDS.length);
+    expect(lastMig.unconfirmedIds ?? []).toEqual([]);
 
     for (const id of SEED_IDS) {
       const row = await fetchMemoryRow(id);
@@ -204,5 +208,7 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
     const state = JSON.parse(await Bun.file(statePath).text());
     expect(state[SYNTHETIC_MIGRATION_ID].lastOutcome).toBe("success");
     expect(typeof state[SYNTHETIC_MIGRATION_ID].completedAtVersion).toBe("string");
+    expect(state[SYNTHETIC_MIGRATION_ID].rowsProcessed).toBe(SEED_IDS.length);
+    expect(state[SYNTHETIC_MIGRATION_ID].rowsUnconfirmed ?? 0).toBe(0);
   });
 });

@@ -113,7 +113,7 @@ describe("execute: importFromYaml end-to-end", () => {
     expect(thrown.detail.field).toBe("map.content");
   });
 
-  test("attempting to set a Flair-reserved field throws", async () => {
+  test.each(["contentHash", "promotionContentHash"])("attempting to set reserved %s throws", async (field) => {
     writeFileSync(join(dir, "r.jsonl"), JSON.stringify({ c: "x" }) + "\n");
     const descriptor: YamlBridgeDescriptor = {
       name: "reserved",
@@ -123,14 +123,14 @@ describe("execute: importFromYaml end-to-end", () => {
         sources: [{
           path: "r.jsonl",
           format: "jsonl",
-          map: { content: "$.c", contentHash: "$.c" },
+          map: { content: "$.c", [field]: "$.c" },
         }],
       },
     };
     let thrown: any = null;
     try { await collect(importFromYaml(descriptor, { cwd: dir })); } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(BridgeRuntimeError);
-    expect(thrown.detail.field).toBe("map.contentHash");
+    expect(thrown.detail.field).toBe(`map.${field}`);
     expect(thrown.detail.hint).toMatch(/MUST NOT/);
   });
 

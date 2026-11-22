@@ -145,15 +145,8 @@ describe("a deployed component advertises the deploy's public URL (flair#1005)",
       // rather than read off harper's source.
       const OPERATOR_URL = "https://operator-set.example.com";
       const componentDir = await deployedComponentDir(PUBLIC_URL);
-      const prev = process.env.FLAIR_PUBLIC_URL;
-      process.env.FLAIR_PUBLIC_URL = OPERATOR_URL;
       let harper;
-      try {
-        harper = await startHarper({ cwd: componentDir, harperBinDir: REPO_ROOT });
-      } finally {
-        if (prev === undefined) delete process.env.FLAIR_PUBLIC_URL;
-        else process.env.FLAIR_PUBLIC_URL = prev;
-      }
+      harper = await startHarper({ cwd: componentDir, harperBinDir: REPO_ROOT, serverEnv: { FLAIR_PUBLIC_URL: OPERATOR_URL } });
       instances.push(harper);
 
       const doc = await fetchOAuthMetadata(harper.httpURL);

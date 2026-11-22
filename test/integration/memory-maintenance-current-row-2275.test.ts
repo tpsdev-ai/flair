@@ -75,14 +75,14 @@ async function updateMemory(records: Record<string, any>[]): Promise<void> {
 async function insertPointer(memoryId: string): Promise<void> {
   const res = await adminOp({
     operation: "insert", database: "flair", table: "MemoryHostSource",
-    records: [{ memoryId, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "host-a", memoryInstanceToken: randomUUID(), receivedAt: new Date().toISOString() }],
+    records: [{ memoryId, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: memoryId, memoryInstanceToken: randomUUID(), receivedAt: new Date().toISOString() }],
   });
   expect(res.status, `MemoryHostSource insert returned ${res.status}`).toBe(200);
 }
 async function replacePointer(memoryId: string, memoryInstanceToken: string): Promise<void> {
   const res = await adminOp({
     operation: "upsert", database: "flair", table: "MemoryHostSource",
-    records: [{ memoryId, hostSource: JSON.stringify({ ...POINTER, id: "run-bbbbbbbb" }), scopeAtWrite: null, authorId: "host-a", memoryInstanceToken, receivedAt: new Date().toISOString() }],
+    records: [{ memoryId, hostSource: JSON.stringify({ ...POINTER, id: "run-bbbbbbbb" }), scopeAtWrite: null, authorId: memoryId, memoryInstanceToken, receivedAt: new Date().toISOString() }],
   });
   expect(res.status, `MemoryHostSource upsert returned ${res.status}`).toBe(200);
 }
@@ -156,21 +156,7 @@ async function awaitCompetingWriteVisible(point: string, isVisible: () => Promis
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-mc-2275-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper();
-  } finally {
-    // The spawned Harper has its copy; no later Harper in this process inherits it.
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
   assertOwnInstance(harper);
 }, 240_000);
 

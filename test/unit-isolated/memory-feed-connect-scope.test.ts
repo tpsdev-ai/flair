@@ -27,7 +27,7 @@ let skillVersionHead: any;
 
 const databasesMock = {
   flair: {
-    InstructionVersion: { create() {}, async *search() { if (skillVersionHead) yield skillVersionHead; } },
+    InstructionVersion: { validate() {}, create() {}, async *search() { if (skillVersionHead) yield skillVersionHead; } },
     Memory: {
       async *search(query: any) {
         for (const row of stored.values()) {

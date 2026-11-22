@@ -10,6 +10,7 @@ let failHead = false;
 let failMemory = false;
 
 class VersionTable {
+  static validate() {}
   static create() {}
   static async *search(query: any) {
     if (failHead) throw new Error("head unavailable");

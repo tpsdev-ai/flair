@@ -430,6 +430,44 @@ describe("dedup co-gate — pure math (resources/dedup.ts)", () => {
 
 // ─── #526 replay + never-silent-loss ─────────────────────────────────────────
 describe("Memory.post — server-side dedup gate never suppresses a write", () => {
+  it("a joined POST leaves its row staged until its owner commits", async () => {
+    const ctx: any = { request: agentCtx("agent-1") };
+    const memory: any = new (Memory as any)();
+    memory.getContext = () => ctx;
+    const stagedPost = spyOn(BaseMemory, "post").mockImplementation(async (content: any, shared: any) => {
+      shared.transaction.staged.push(structuredClone(content));
+      return { id: content.id };
+    });
+    try {
+      await (globalThis as any).transaction(ctx, async () => {
+        const result = await memory.post({ id: "joined-post", agentId: "agent-1", content: "joined post text" });
+        expect(result instanceof Response).toBe(false);
+        expect(result.id).toBe("joined-post");
+        expect(ctx.transaction.open).toBe(1);
+        expect(memoryStore.has("joined-post")).toBe(false);
+      });
+    } finally {
+      stagedPost.mockRestore();
+    }
+    expect(memoryStore.get("joined-post")?.content).toBe("joined post text");
+  });
+
+  it("a POST whose committed confirmation read fails answers 503 write_outcome_unknown", async () => {
+    const original = BaseMemory.get;
+    const { resetMemoryWriteOutcomeUnknownForTest } = await import("../../resources/memory-write-lock.ts");
+    const body: any = { agentId: "agent-1", content: "a post whose committed read is unreadable" };
+    (BaseMemory as any).get = async () => { throw new Error("committed read failed"); };
+    try {
+      const res: any = await makeMemory(agentCtx("agent-1")).post(body);
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toBe("write_outcome_unknown");
+    } finally {
+      (BaseMemory as any).get = original;
+      // The fake id counter restarts every test, so clear the marker it set.
+      resetMemoryWriteOutcomeUnknownForTest(body.id);
+    }
+  });
+
   it("#526 replay: two topically-close but DISTINCT findings are BOTH written (not merged)", async () => {
     const m1 = makeMemory(agentCtx("agent-1"));
     const r1 = await m1.post({ agentId: "agent-1", content: FINDING_A });
@@ -2700,6 +2738,61 @@ it("a trusted PATCH repair invalidates a uniform verdict that did not cover the 
   await guard.embeddingSpaceVerdict();
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(guard.spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
+});
+
+describe("flair#2645 — PATCH staged values", () => {
+  for (const replaced of [false, true]) {
+    it(`redacted content ${replaced ? "replaced by a newer write answers 409" : "retained after commit answers success"}`, async () => {
+      const id = "patch-redacted";
+      memoryStore.set(id, {
+        id, agentId: "agent-1", content: "before", createdAt: "2026-01-01T00:00:00.000Z",
+        instanceToken: "same-incarnation",
+      });
+      const realPatch = BaseMemory.prototype.patch;
+      const patchSpy = spyOn(BaseMemory.prototype, "patch").mockImplementation(async function(this: any, body: any) {
+        expect(body.content).toBe("rotate [redacted]");
+        const result = await realPatch.call(this, body);
+        if (replaced) memoryStore.set(id, { ...memoryStore.get(id), content: "newer" });
+        return result;
+      });
+      try {
+        const m = makeMemory(agentCtx("agent-1"));
+        m._targetId = id;
+        const result = await m.patch({ content: `rotate ghp_${"A".repeat(36)}` });
+        if (replaced) {
+          expect(result).toBeInstanceOf(Response);
+          expect(result.status).toBe(409);
+          expect((await result.json()).error).toBe("stored_row_changed");
+        } else {
+          expect(result).toEqual({ id, written: true, redactedValues: 1, stored: { content: "rotate [redacted]" } });
+        }
+        expect(memoryStore.get(id).content).toBe(replaced ? "newer" : "rotate [redacted]");
+      } finally {
+        patchSpy.mockRestore();
+      }
+    });
+  }
+
+  it("a storage rewrite is verified against the staged value", async () => {
+    const id = "patch-storage-rewrite";
+    memoryStore.set(id, {
+      id, agentId: "agent-1", content: "before", createdAt: "2026-01-01T00:00:00.000Z",
+      instanceToken: "same-incarnation",
+    });
+    const realPatch = BaseMemory.prototype.patch;
+    const patchSpy = spyOn(BaseMemory.prototype, "patch").mockImplementation(async function(this: any, body: any) {
+      body.tags = body.tags.map((tag: string) => tag.trim());
+      return realPatch.call(this, body);
+    });
+    try {
+      const m = makeMemory(agentCtx("agent-1"));
+      m._targetId = id;
+      expect(await m.patch({ tags: [" staged "] })).toBeUndefined();
+      expect(memoryStore.get(id).tags).toEqual(["staged"]);
+    } finally {
+      patchSpy.mockRestore();
+    }
+  });
 });
 
 describe("flair#2478 — idless PATCH", () => {

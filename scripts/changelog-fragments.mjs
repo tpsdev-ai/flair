@@ -33,7 +33,7 @@
 //   node scripts/changelog-fragments.mjs render      print the assembled section
 //   node scripts/changelog-fragments.mjs list        one line per fragment
 //   node scripts/changelog-fragments.mjs check       validate; non-zero on error
-//   node scripts/changelog-fragments.mjs promote <version> [--date=YYYY-MM-DD]
+//   node scripts/changelog-fragments.mjs promote <version> [--date=YYYY-MM-DD] [--with-dependencies] [--allow-no-release-tag]
 //                                                    write the section into
 //                                                    CHANGELOG.md and delete the
 //                                                    fragments
@@ -42,6 +42,7 @@ import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, unlinkS
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { operatorRemedyViolation } from "./changelog-release-notes.mjs";
+import { collectRenovateDependencyCommits, formatDependenciesSection } from "./dependency-change.mjs";
 
 export const ROOT = resolve(fileURLToPath(import.meta.url), "../..");
 export const FRAGMENT_DIR_REL = join(".changelog", "unreleased");
@@ -63,7 +64,7 @@ const HEADING = {
 // The body `## [Unreleased]` carries once entries live in fragments. Kept as a
 // constant so the docs-freshness gate and the release script agree on it.
 export const UNRELEASED_NOTE = [
-  "Entries for the next release live as **fragment files** under [`.changelog/unreleased/`](.changelog/unreleased/) —",
+  "Write ordinary release entries as **fragment files** under [`.changelog/unreleased/`](.changelog/unreleased/) —",
   "one file per change, so two pull requests never edit the same lines and never conflict here.",
   "",
   "Add `.changelog/unreleased/<category>-<slug>.md` containing your entry exactly as it should read",
@@ -302,12 +303,12 @@ export function strayUnreleasedEntries(body) {
   return body.split("\n").filter((l) => l.startsWith("- "));
 }
 
-export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = FRAGMENT_DIR } = {}) {
+export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = FRAGMENT_DIR, dependencies = [] } = {}) {
   if (!/^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$/.test(version ?? "")) {
     throw new FragmentError(`promote: invalid version '${version}'. Expected semver, e.g. 0.31.0.`);
   }
   const fragments = readFragments(dir);
-  if (fragments.length === 0) {
+  if (fragments.length === 0 && dependencies.length === 0) {
     throw new FragmentError(
       `promote: no fragments in ${FRAGMENT_DIR_REL}/ — refusing to cut v${version} with an empty changelog section. ` +
         `Add the entries for this release before running the release script.`,
@@ -338,6 +339,10 @@ export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = F
     );
   }
 
+  // Eligible commits supplied by the release collector appear here.
+  const dependencySection = formatDependenciesSection(dependencies);
+  const sectionBody = [section, dependencySection].filter(Boolean).join("\n\n");
+
   const day = date ?? new Date().toISOString().slice(0, 10);
   const replacement = [
     "",
@@ -345,7 +350,7 @@ export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = F
     "",
     `## [${version}] - ${day}`,
     "",
-    section,
+    sectionBody,
     "",
   ];
   const next = [...lines.slice(0, loc.start + 1), ...replacement, ...lines.slice(loc.end)];
@@ -356,9 +361,8 @@ export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = F
 
 // ─── Fixed-fragment guard (flair#1498) ───────────────────────────────────────
 
-// A changelog fragment must not claim a GHSA the audit gate flags
-// FIXED-FOR-BUN-ONLY: those advisories are fixed for bun installs only and still
-// reach npm installs via harper's npm-shrinkwrap. Claiming them "fixed" in the
+// A changelog fragment must not claim "fixed" for an npm-install-only GHSA: the
+// allowlist says npm installs still report it. Claiming it "fixed" in the
 // changelog would overstate the fix. The pinned set is the allowlist entries
 // whose `sources` include "npm-install" but not "bun".
 export function fixedForBunOnlyGhsas(allowlist) {
@@ -371,15 +375,14 @@ export function fixedForBunOnlyGhsas(allowlist) {
   );
 }
 
-// Fragments whose body uses the word "fixed" for a pinned GHSA. The word check is
-// case-insensitive and word-bounded so "fixed" in prose still counts, but
-// "FIXED-FOR-BUN-ONLY" (the gate's own label) does not — that label is the gate
-// saying the advisory is NOT fixed for npm installs, so quoting it is not a claim.
+// Fragments whose body claims a pinned GHSA is fixed. The claim counts in the
+// forms fix, fixes, fixed and fixing. The check is case-insensitive and
+// word-bounded, so "prefix", "suffix" and "fixture" do not count.
 export function fixedFragmentsClaimingPinned(fragments, pinnedGhsas) {
   const offenders = [];
   for (const f of fragments) {
     const body = f.body.toUpperCase();
-    if (!/\bFIXED\b(?!-FOR-BUN-ONLY)/.test(body)) continue;
+    if (!/\bFIX(?:E[SD]|ING)?\b/.test(body)) continue;
     for (const ghsa of pinnedGhsas) {
       if (body.includes(ghsa)) {
         offenders.push({ name: f.name, ghsa });
@@ -451,19 +454,27 @@ if (isMain) {
       const offenders = fixedFragmentsClaimingPinned(readFragments(), pinned);
       if (offenders.length > 0) {
         throw new FragmentError(
-          `"fixed" fragments claim a GHSA that is FIXED-FOR-BUN-ONLY (harper-pinned): ` +
+          `"fixed" fragments claim an npm-install-only GHSA (allowlist sources include "npm-install" but not "bun"): ` +
             offenders.map((o) => `${o.name} (${o.ghsa})`).join(", ") +
-            `. npm installs still carry these via harper's shrinkwrap — re-word the fragment ` +
-            `(e.g. "fixed for bun installs") or drop the claim.`,
+            `. Re-word the fragment without "fixed" (e.g. "bun installs no longer report it") or drop the claim.`,
         );
       }
-      process.stdout.write(`✓ no "fixed" fragment claims a FIXED-FOR-BUN-ONLY GHSA.\n`);
+      process.stdout.write(`✓ no "fixed" fragment claims an npm-install-only GHSA.\n`);
     } else if (cmd === "promote") {
       const version = process.argv[3];
       const dateArg = process.argv.find((a) => a.startsWith("--date="));
-      const res = promote(version, { date: dateArg ? dateArg.slice("--date=".length) : undefined });
+      if (process.argv.includes("--allow-no-release-tag") && !process.argv.includes("--with-dependencies")) {
+        throw new FragmentError("promote: --allow-no-release-tag requires --with-dependencies");
+      }
+      const dependencies = process.argv.includes("--with-dependencies")
+        ? collectRenovateDependencyCommits({ cwd: ROOT, allowNoReleaseTag: process.argv.includes("--allow-no-release-tag") })
+        : [];
+      const res = promote(version, {
+        date: dateArg ? dateArg.slice("--date=".length) : undefined,
+        dependencies,
+      });
       process.stdout.write(
-        `✓ promoted ${res.entries} entr(ies) into '## [${res.version}] - ${res.date}'; removed ${res.removed.length} fragment(s).\n`,
+        `✓ promoted ${res.entries} fragment entr(ies) into '## [${res.version}] - ${res.date}'; removed ${res.removed.length} fragment(s).\n`,
       );
     } else {
       process.stderr.write(`changelog-fragments: unknown command '${cmd}'. Try: render | list | check | promote <version>\n`);

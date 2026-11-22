@@ -4,6 +4,7 @@
  * Run in its own process because module mocks are process-global.
  */
 import { afterEach, beforeEach, expect, mock, setSystemTime, spyOn, test } from "bun:test";
+import { memoryLockDouble } from "../helpers/memory-lock-double";
 
 const NOW = Date.parse("2026-09-28T12:00:00Z");
 const HOME = "/fixture/flair-2033";
@@ -69,6 +70,7 @@ mock.module("harper", () => ({
         rows[index] = { ...rows[index], ...structuredClone(patch) };
       },
       delete: async () => { throw new Error("validTo cleanup must not delete"); },
+      primaryStore: memoryLockDouble(),
     },
     MemoryHostSource: {
       search: async function* () {},
@@ -82,7 +84,7 @@ mock.module("harper", () => ({
 }));
 mock.module("../../resources/agent-auth.js", () => ({
   allowVerified: async () => true,
-  isAdmin: async () => false,
+  annotatedCallerIsAdmin: async () => false,
   resolveAgentAuth: async () => ({ kind: "internal" }),
 }));
 mock.module("../../resources/build-info.js", () => ({ resolveBuildInfo: () => null }));

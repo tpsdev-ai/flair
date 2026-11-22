@@ -40,10 +40,10 @@ async function healthDetail(): Promise<any> {
 
 describe("zero-touch migrations — halt on blocked disk space (real Harper)", () => {
   beforeAll(async () => {
-    process.env.FLAIR_ENABLE_TEST_MIGRATIONS = "1";
-    process.env.FLAIR_MIGRATION_TEST_FREE_BYTES = "1"; // ~zero free space, deterministically fails the space check (flair#720: fits-vs-free-bytes fails outright at ~1 byte free, independent of the reserve rule)
+    // ~zero free space, deterministically fails the space check (flair#720: fits-vs-free-bytes fails outright at ~1 byte free, independent of the reserve rule)
+    const serverEnv = { FLAIR_ENABLE_TEST_MIGRATIONS: "1", FLAIR_MIGRATION_TEST_FREE_BYTES: "1" };
 
-    const first = await startHarper();
+    const first = await startHarper({ serverEnv });
     authHeader = "Basic " + Buffer.from(`${first.admin.username}:${first.admin.password}`).toString("base64");
 
     await fetch(first.opsURL, {
@@ -70,12 +70,10 @@ describe("zero-touch migrations — halt on blocked disk space (real Harper)", (
     // Boot-keyed — restart so a fresh boot discovers the seeded row under
     // the now-forced low-space condition.
     await stopHarper(first, { keepInstallDir: true });
-    harper = await startHarper({ installDir: first.installDir });
+    harper = await startHarper({ installDir: first.installDir, serverEnv });
   }, 180_000);
 
   afterAll(async () => {
-    delete process.env.FLAIR_ENABLE_TEST_MIGRATIONS;
-    delete process.env.FLAIR_MIGRATION_TEST_FREE_BYTES;
     if (harper) {
       const { rm } = await import("node:fs/promises");
       const installDir = harper.installDir;

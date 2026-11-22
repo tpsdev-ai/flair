@@ -20,6 +20,7 @@ import { Resource, databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { makeAuthGate, makeScopedSearch, FORBIDDEN, UNAUTH, NOT_FOUND } from "./record-type-kit.js";
 import { localInstanceId } from "./instance-identity.js";
+import { refuseRewrittenAgentId } from "./path-id-rewrite.js";
 import {
   relaySend,
   relayInbox,
@@ -162,7 +163,10 @@ export class MessageInbox extends Resource {
   }
   async get(pathInfo?: any) {
     const auth = await resolveAgentAuth(ctxOf(this));
-    return relayInbox(relayDeps(), auth, pathId(pathInfo));
+    const to = pathId(pathInfo);
+    const rewritten = to === undefined ? null : refuseRewrittenAgentId(ctxOf(this), to);
+    if (rewritten) return rewritten;
+    return relayInbox(relayDeps(), auth, to);
   }
 }
 
@@ -196,7 +200,10 @@ export class MessageDeadLetter extends Resource {
   }
   async get(pathInfo?: any) {
     const auth = await resolveAgentAuth(ctxOf(this));
-    return relayDeadLetters(relayDeps(), auth, pathId(pathInfo));
+    const from = pathId(pathInfo);
+    const rewritten = from === undefined ? null : refuseRewrittenAgentId(ctxOf(this), from);
+    if (rewritten) return rewritten;
+    return relayDeadLetters(relayDeps(), auth, from);
   }
 }
 

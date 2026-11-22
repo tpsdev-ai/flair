@@ -52,8 +52,8 @@ function harperMock() {
       flair: {
         Agent: {
           get: async (id: string) => agentStore.get(id) ?? null,
-          // isAdmin() reads the admin set from this search; yield the stored agents
-          // so an agent seeded with role "admin" resolves as an admin.
+          // The gate decides admin from the row get() returns; search yields the
+          // stored agents for any reader that lists them.
           search: async function* () {
             for (const a of agentStore.values()) yield a;
           },

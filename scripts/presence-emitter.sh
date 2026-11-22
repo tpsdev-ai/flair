@@ -39,7 +39,7 @@ echo '[]' > "$ALL_PRS_FILE"
 
 IFS=',' read -ra REPO_LIST <<< "$REPOS"
 idx=0
-for repo in "${REPO_LIST[@]}"; do
+for repo in ${REPO_LIST[@]+"${REPO_LIST[@]}"}; do
     PR_FILE="$TMPDIR_PRES/prs_${idx}.json"
     idx=$((idx + 1))
     gh-as "$AGENT_ID" pr list \

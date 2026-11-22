@@ -69,6 +69,7 @@ describe("flair#2455 N2 — the sender logs no receiver-authored text", () => {
     batchRaw?: string;
   }) {
     let advanced = false;
+    const retryRows = new Map<string, any>();
     globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
       const url = typeof urlInput === "string" ? urlInput : urlInput.toString();
       const method = init?.method ?? "GET";
@@ -82,6 +83,9 @@ describe("flair#2455 N2 — the sender logs no receiver-authored text", () => {
       }
       if (body?.operation === "search_by_conditions") {
         if (!advanced) advanced = true;
+        if (body.table === "FederationRetry") {
+          return res(true, 200, [...retryRows.values()].filter((row) => row.state === "pending" && row.peerId === "hub-a" && row.table === "Memory"));
+        }
         if (body.table !== "Memory" || body.conditions?.[0]?.search_value === null) return res(true, 200, []);
         return res(true, 200, Array.from({ length: opts.rows ?? 0 }, (_, i) => ({
           id: `row-${i}`, agentId: "agent-a", content: `c${i}`, contentHash: `h${i}`,
@@ -92,6 +96,10 @@ describe("flair#2455 N2 — the sender logs no receiver-authored text", () => {
       if (body?.operation === "search_by_value" && body.table === "Instance") {
         return res(true, 200, [{ id: "spoke-a", _keySeed: Buffer.from(kp.secretKey.slice(0, 32)).toString("base64url") }]);
       }
+      if (body?.operation === "search_by_hash" && body.table === "FederationRetry") {
+        const hashes: string[] = body.hash_values ?? [];
+        return res(true, 200, hashes.map((id) => retryRows.get(id)).filter(Boolean));
+      }
       if (method === "POST" && url.includes("/FederationSync")) {
         const sent = (body?.records ?? []).length;
         if (sent > 0) {
@@ -99,6 +107,10 @@ describe("flair#2455 N2 — the sender logs no receiver-authored text", () => {
           return res(opts.batchStatus === 200, opts.batchStatus, opts.batchBody ?? { error: SECRET });
         }
         return res(opts.pingStatus === 200, opts.pingStatus, { error: SECRET });
+      }
+      if ((body?.operation === "update" || body?.operation === "upsert") && body?.table === "FederationRetry") {
+        for (const row of body.records ?? []) retryRows.set(row.id, { ...retryRows.get(row.id), ...row });
+        return res(true, 200, { update_hashes: (body.records ?? []).map((r: any) => r.id), skipped_hashes: [] });
       }
       if (body?.operation === "update" && body?.table === "Peer") {
         return res(true, 200, { update_hashes: ["hub-a"], skipped_hashes: [] });

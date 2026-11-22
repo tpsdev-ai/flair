@@ -31,7 +31,7 @@ describe("flair mcp disable remote admin password text", () => {
 
       expect(result.error).toBeUndefined();
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain("--admin-pass <pass> is required for a REMOTE target");
+      expect(result.stderr).toContain("--admin-pass <pass> or --admin-pass-file <path> is required for a target instance");
       expect(result.stderr).toContain("Pass the target instance's admin password explicitly.");
       expect(result.stderr).not.toContain("FLAIR_ADMIN_PASS");
     } finally {
@@ -39,7 +39,7 @@ describe("flair mcp disable remote admin password text", () => {
     }
   }, 20_000);
 
-  test("help requires the target's admin password via --admin-pass", () => {
+  test("help names both explicit password options for the target instance", () => {
     const result = spawnSync(process.execPath, [cli, "mcp", "disable", "--help"], {
       cwd: repo,
       encoding: "utf8",
@@ -48,7 +48,11 @@ describe("flair mcp disable remote admin password text", () => {
 
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);
-    expect(result.stdout).toMatch(/Admin password for the remote target instance; pass it\s+explicitly with --admin-pass/);
+    const help = result.stdout.replace(/\s+/g, " ");
+    expect(help).toContain("Admin password for the target instance; use --admin-pass or --admin-pass-file");
+    expect(help).toContain("Read the target instance's admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted)");
+    expect(help).toContain("Flair instance to disable against (else FLAIR_URL)");
+    expect(help).not.toContain("remote");
     expect(result.stdout).not.toContain("FLAIR_ADMIN_PASS");
   }, 20_000);
 });

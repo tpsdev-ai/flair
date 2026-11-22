@@ -127,7 +127,7 @@ async function withPausedMerge<T>(point: string, write: () => Promise<Response>,
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-fp-pause-"));
   harper = await startHarper({
-    env: {
+    serverEnv: {
       FLAIR_FEDERATION_PRESENCE_RECEIVE: "1",
       FLAIR_ENABLE_TEST_FAULT_INJECTION: "1",
       FLAIR_TEST_PAUSE_DIR: pauseDir,

@@ -110,6 +110,8 @@ httpBind: 127.0.0.1    # HTTP bind host; 0.0.0.0 widens (must include IPv4 loopb
 | `FLAIR_EMBED_GPU_LAYERS` | GPU layers to offload. Unset derives Metal (`99`) on Apple Silicon with a usable Metal prebuilt, else CPU (`0`). Stated on `/Health`. | Pin CPU with `0` on a Metal Mac, or force a layer count. See [deployment.md](deployment.md#performance-related-environment-variables). |
 | `FLAIR_HYBRID_RETRIEVAL` | Hybrid BM25 + vector retrieval (default on). | Set `false` to revert to HNSW-only. |
 | `FLAIR_MODELS_DIR` | Directory the embedding GGUF is loaded from. | When the model lives outside `<data-dir>/models`. |
+| `FLAIR_REQUEST_TIMEOUT_MS` | Whole-request deadline for REST calls through the CLI's shared REST sender (`authedRequest`), in milliseconds: an integer from `1` to `3600000`, default `300000` (5 minutes). It covers the request and the response body read. The four REM work routes listed under `FLAIR_REM_REQUEST_TIMEOUT_MS` resolve that variable instead, and any request that passes its own explicit deadline — those routes or a command's own — is validated and returned before this variable is read. On expiry a GET or HEAD fails; every other method through that sender raises an outcome-unknown error and is not retried, and `flair rem restore` does not write that table and record id again in the same run. An empty or whitespace-only value is unset. | When a legitimate request needs longer than the default. A value outside the range, or a non-integer, is refused for the requests that resolve this variable. |
+| `FLAIR_REM_REQUEST_TIMEOUT_MS` | Whole-request deadline for the REM work routes `POST /MemoryMaintenance`, `POST /ReflectMemories`, `POST /MemoryDedupStats` and `POST /AutoPromoteCandidates`, in milliseconds: an integer from `1` to `3600000`, default `1800000` (30 minutes). It overrides `FLAIR_REQUEST_TIMEOUT_MS` for those routes and is read only for them; every other request through the shared REST sender that passes no explicit deadline resolves `FLAIR_REQUEST_TIMEOUT_MS`, else the shared default. An empty or whitespace-only value is unset. | When a REM work route legitimately needs longer than 30 minutes. A value outside the range, or a non-integer, is refused for those routes before the request is sent. |
 
 ---
 
@@ -205,14 +207,39 @@ See [upgrade.md](upgrade.md) for the full walkthrough including re-embedding, ro
 ## Backup & restore
 
 ```bash
-# Backup all data (agents, memories, souls)
+# Backup all data (agents, memories, souls). Writes the archive and, beside it,
+# flair-backup-YYYYMMDD.json.sha256
 flair backup --output ~/flair-backup-$(date +%Y%m%d).json
 
-# Restore to a fresh instance
+# Restore an archive (its .sha256 sidecar sits beside it, unless the archive is approved on this host; see below)
 flair restore ~/flair-backup-20260405.json
 ```
 
 Always backup before upgrades. `flair backup` excludes private keys.
+
+Restore writes each archived Agent row through the Agent resource's administrator PUT, so the PUT's field rules apply: the target's stored `createdAt`, `publicKey`, `originatorInstanceId` and federation fields are kept, `updatedAt` is set by the server, and `role` and `admin` are reconciled (an archived row with `role: "agent"` and `admin: true` is stored as an admin, with `role: "admin"`). Restore's read-back of an Agent row currently verifies its id only, so a field the PUT set differently from the archive is not reported. An archived Agent row whose agent does not exist on the target is refused (HTTP 404, `agent_put_requires_existing`), so restore reports it as failed and exits non-zero; a full restore into a fresh instance needs a creation route for agents ([flair#2703](https://github.com/tpsdev-ai/flair/issues/2703)). Soul and Memory rows are still written, and restore reports a mismatch in the fields it verifies for them (the selected fields in `src/lib/restore-verify.ts`; server-managed fields such as `provenance` and `updatedAt` are excluded). Archived promotion verdicts are not restored either: restore reports a Memory row that carries one as failed (HTTP 403) unless the stored row already carries the same verdict.
+
+`flair backup` writes two files: the archive and `<archive>.sha256`, the SHA-256 of the archive's exact bytes in `sha256sum` format (from the archive's directory, `shasum -a 256 -c <archive>.sha256` or GNU `sha256sum -c <archive>.sha256` checks it; for a file name containing a carriage return, use GNU `sha256sum`). Keep and move the two files together. `flair restore` verifies the pair before it sends any request, `--dry-run` included. It refuses an archive whose sidecar does not match, and an archive with no sidecar unless that archive is approved on this host (below). The sidecar detects a damaged, truncated or mismatched file; it does not prove who wrote the archive.
+
+### Restoring an archive written before digest sidecars
+
+An archive with no `.sha256` sidecar is restored only after the operator approves its exact bytes on the host that restores it:
+
+```bash
+# 1. Print the archive's SHA-256. This approves nothing and needs no credentials.
+flair backup-approval legacy-admit ~/flair-backup-20250101.json
+
+# 2. Compare that digest with a record you trust, then approve exactly those bytes.
+flair backup-approval legacy-admit ~/flair-backup-20250101.json \
+  --confirm-digest 3f5c...e1a9 --admin-pass-file ~/.flair/admin-pass
+
+# 3. Restore it.
+flair restore ~/flair-backup-20250101.json
+```
+
+Approving, a confirmed legacy admission (with `--confirm-digest`) and revoking need operator credentials: the admin password, which the command checks as a super_user against this host's running Flair. It finds the operations port from `--ops-port`, `FLAIR_OPS_PORT`, the local config, or the HTTP port minus one. Approvals live in `~/.flair/approved-archives/`, which must be owned by you: its directories mode `0700` and its record and archive files mode `0600` (a private temp file left by an interrupted approval is ignored; any other entry is refused before the store creates anything). The store keeps a copy of each approved archive under its SHA-256 and a record of when and by whom it was approved. No REST route can approve, revoke, list or read it. `flair backup-approval list` shows the approvals and checks each stored copy; `flair backup-approval revoke <sha256>` withdraws one. Restore uses an approval, of either kind, only while it is unrevoked and its stored copy still hashes to the archive's digest, and it restores that stored copy.
+
+An approval authorizes those bytes on this host until you revoke it, so restoring an older approved archive deliberately is possible. It does not show where the archive came from, that a past promotion decision in it was right, or that an archive without a sidecar is unchanged since it was written. `flair backup-approval approve <archive>` records an approval for an archive that has its sidecar; `flair restore` does not need one for such an archive.
 
 ---
 

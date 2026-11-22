@@ -3,8 +3,8 @@ import { randomUUID } from "node:crypto";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { Memory } from "./Memory.js";
 import { MemoryCandidate } from "./MemoryCandidate.js";
-import { stampMemoryPromotion } from "./promotion-stamp.js";
-import { withComposedWriteTransaction } from "./request-transaction.js";
+import { PromotionStampStaleRowError, stampMemoryPromotion } from "./promotion-stamp.js";
+import { isJoinableTransaction, withComposedWriteTransaction } from "./request-transaction.js";
 import { derivePromotedTags, derivePromotedVisibility, validateHumanReviewerId, type SourceMemoryFetch } from "../src/rem/promote-policy.js";
 
 const error = (status: number, message: string) => new Response(JSON.stringify({ error: message }), {
@@ -65,6 +65,10 @@ export class PromoteMemoryCandidate extends Resource {
       if (result instanceof Response && !result.ok) return result;
       await stampMemoryPromotion(memoryId, reviewerId, decidedAt, undefined, shared);
       return result;
+    }).catch((err) => {
+      if (!(err instanceof PromotionStampStaleRowError)) throw err;
+      if (isJoinableTransaction(ctx)) ctx.transaction.abort();
+      return error(409, "promotion_stamp_stale_row");
     });
     if (written instanceof Response && !written.ok) return written;
     await (databases as any).flair.MemoryCandidate.put({

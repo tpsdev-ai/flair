@@ -171,18 +171,18 @@ describe("native MCP checks the principal's status on every tool call dispatched
     });
     privateKeyPem = privateKey;
 
-    // startHarper copies process.env into the spawned Harper; restore it
-    // immediately so no other file sees the change.
-    const envKeys = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "FLAIR_MCP_JIT_PROVISION", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET", "OAUTH_GITHUB_REDIRECT_URI"] as const;
-    const prior = envKeys.map((key) => [key, process.env[key]] as const);
-    process.env.FLAIR_MCP_OAUTH = "true";
-    process.env.FLAIR_MCP_ISSUER = ISSUER;
-    process.env.OAUTH_GITHUB_CLIENT_ID = "principal-status-client";
-    process.env.OAUTH_GITHUB_CLIENT_SECRET = "principal-status-secret";
-    process.env.OAUTH_GITHUB_REDIRECT_URI = `${ISSUER}/oauth`;
-    delete process.env.FLAIR_MCP_JIT_PROVISION;
-    try {
-      harper = await startHarper();
+    harper = await startHarper({
+      serverEnv: {
+        FLAIR_MCP_OAUTH: "true",
+        FLAIR_MCP_ISSUER: ISSUER,
+        OAUTH_GITHUB_CLIENT_ID: "principal-status-client",
+        OAUTH_GITHUB_CLIENT_SECRET: "principal-status-secret",
+        OAUTH_GITHUB_REDIRECT_URI: `${ISSUER}/oauth`,
+        // An empty value reads as unset: JIT must not be enabled for this boot.
+        FLAIR_MCP_JIT_PROVISION: "",
+      },
+    });
+    {
       // Talk only to this test's own ephemeral instance: loopback, the
       // OS-assigned ports it started on, never a production port, and a data
       // directory under the temp dir — checked before the first call.
@@ -196,11 +196,6 @@ describe("native MCP checks the principal's status on every tool call dispatched
       }
       if (http.port === ops.port || !harper.process?.pid || !harper.installDir.startsWith(tmpdir())) {
         throw new Error(`refusing to run: ${harper.httpURL} / ${harper.opsURL} is not an instance this test started`);
-      }
-    } finally {
-      for (const [k, v] of prior) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
       }
     }
 

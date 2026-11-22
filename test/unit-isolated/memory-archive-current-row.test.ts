@@ -38,29 +38,25 @@ afterEach(() => {
   resetLiveHitTracker();
 });
 
-async function archive(action: string) {
+async function archive(action: string, context: any = ctx) {
   const resource: any = new (MemoryArchive as any)();
-  resource.getContext = () => ctx;
+  resource.getContext = () => context;
   return resource.post({ id: "memory", action });
 }
 
 for (const action of ["basement", "restore"]) {
   describe(action, () => {
     for (const status of [403, 503]) {
-      for (const stage of ["initial read", "transaction read", "write"]) {
+      for (const stage of ["initial read", "transaction read"]) {
         it(`returns the ${status} Response from the ${stage}`, async () => {
           const response = new Response(JSON.stringify({ error: `failure-${status}` }), { status });
           const before = { ...harnessState.memoryStore.get("memory") };
-          if (stage === "write") {
-            (Memory as any).put = async () => response;
-          } else {
-            const realGet = (Memory as any).get;
-            let calls = 0;
-            (Memory as any).get = async (id: string, context: any) => {
-              if (++calls === (stage === "initial read" ? 1 : 2)) return response;
-              return realGet(id, context);
-            };
-          }
+          const realGet = (Memory as any).get;
+          let calls = 0;
+          (Memory as any).get = async (id: string, context: any) => {
+            if (++calls === (stage === "initial read" ? 1 : 2)) return response;
+            return realGet(id, context);
+          };
           const result = await archive(action);
           expect(result).toBe(response);
           expect(result.status).toBe(status);
@@ -69,6 +65,29 @@ for (const action of ["basement", "restore"]) {
         });
       }
     }
+
+    // flair#2478 part 3a: the write is the checked PUT body (putMemoryWithLock);
+    // its own refusals are returned with their status and body.
+    it("returns the 403 refusal of the write (another agent's row)", async () => {
+      const before = { ...harnessState.memoryStore.get("memory") };
+      const result = await archive(action, { request: { tpsAgent: "agent-b", tpsAgentIsAdmin: false } });
+      expect(result.status).toBe(403);
+      expect((await result.json()).error).toContain("cannot write memory owned by another agent");
+      expect(harnessState.memoryStore.get("memory")).toEqual(before);
+    });
+
+    it("returns the 503 refusal of the write (its supersedes target cannot be read)", async () => {
+      harnessState.memoryStore.set("memory", { ...harnessState.memoryStore.get("memory"), supersedes: "earlier" });
+      harnessState.getOverride = (id) => {
+        if (id === "earlier") throw new Error("store down");
+        return undefined;
+      };
+      const before = { ...harnessState.memoryStore.get("memory") };
+      const result = await archive(action);
+      expect(result.status).toBe(503);
+      expect((await result.json()).error).toBe("supersedes_target_unreadable");
+      expect(harnessState.memoryStore.get("memory")).toEqual(before);
+    });
 
     it("accepts an unchanged persisted row when hit stats appear on the second read", async () => {
       let calls = 0;
@@ -84,7 +103,8 @@ for (const action of ["basement", "restore"]) {
       expect(reads[1].retrievalCount).toBe(1);
       expect(reads[1].lastRetrieved).toBe("2026-01-02T00:00:00.000Z");
       expect(result instanceof Response).toBe(false);
-      expect(result.archived).toBe(action === "basement");
+      expect(result.written).toBe(true);
+      expect(harnessState.memoryStore.get("memory").archived).toBe(action === "basement");
     });
 
     for (const [field, value] of Object.entries({

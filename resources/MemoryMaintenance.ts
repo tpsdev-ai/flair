@@ -33,12 +33,81 @@ async function deletePointerRowOrThrow(memoryId: string, ctx: any): Promise<void
   }
   await table.delete(memoryId, ctx);
 }
-import { isAdmin } from "./agent-auth.js";
+import { annotatedCallerIsAdmin } from "./agent-auth.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { recordMemoryDeletion } from "./memory-deletion-history.js";
 import { txnPausePoint } from "./txn-pause-point.js";
+import { withMemoryWriteLockOnce } from "./memory-write-lock.js";
+import { verifyCommittedFields } from "./write-back.js";
+import { AGENT_ID_RULE, isValidAgentId } from "../src/lib/agent-id-rule.js";
+
+/** The 400 an admin run's refused `agentId` is answered with. */
+const INVALID_AGENT_ID_ERROR = `agentId must be a string matching ${AGENT_ID_RULE}`;
+
+/** The `remedy` the same 400 carries: what an operator can do today for a
+ *  legacy stored id outside the rule. An admin-scoped run needs a conforming
+ *  id. The agent's own authenticated run reaches its rows only when the stored
+ *  id can authenticate: the signed TPS-Ed25519 header cannot carry a colon or
+ *  whitespace. For an id the header cannot represent, a fleet-wide run reaches
+ *  its rows and also acts on other agents' eligible rows. */
+const INVALID_AGENT_ID_REMEDY =
+  "for a legacy stored agent id outside this rule, run that agent's own authenticated non-admin " +
+  "maintenance (POST /MemoryMaintenance with that agent's credential), which reaches its rows, when the " +
+  "stored id can authenticate: the signed TPS-Ed25519 header cannot carry a colon or whitespace. For an " +
+  "id the header cannot represent, omit agentId to run fleet-wide, which reaches that agent's rows and " +
+  "also expires and archives other agents' eligible rows. A run scoped to an admin agentId needs an id " +
+  "that matches the rule.";
+
+/** The per-id Memory write lock store (flair#2478 slice 3b). */
+function memoryLockStore(): unknown {
+  return (databases as any)?.flair?.Memory?.primaryStore;
+}
+
+/** Report a per-row action this run did not apply, and why. An automatic
+ *  writer's lock miss is a skip that is reported, never a row written
+ *  unserialized over an owner's write. */
+function noteSkipped(stats: { skipped: number }, id: unknown, reason: string): void {
+  stats.skipped++;
+  console.warn("[MemoryMaintenance] row skipped: %s (id %s)", reason, String(id));
+}
+
+/** What a request's `agentId` says about the run's target, for an ADMIN
+ *  request: it is a named target only when the field is a string that is
+ *  non-blank when trimmed, equal to its trimmed form, and accepted by Flair's
+ *  shared agent-id rule (src/lib/agent-id-rule.ts); it is absent only when
+ *  the body has no own `agentId` property and reading it yields `undefined`;
+ *  every other present value (a present `undefined`, `null`, non-string or
+ *  blank value included) is refused (400). A non-admin run ignores the field
+ *  and targets the authenticated caller. */
+type RequestedAgent =
+  | { kind: "absent" }
+  | { kind: "named"; agentId: string }
+  | { kind: "invalid" };
+
+/** This parser accepts only a non-blank string that equals its trimmed form;
+ *  any other value names no target. */
+function parseAgentIdValue(value: unknown): Exclude<RequestedAgent, { kind: "absent" }> {
+  if (typeof value !== "string" || value.trim().length === 0) return { kind: "invalid" };
+  if (value !== value.trim()) return { kind: "invalid" };
+  return { kind: "named", agentId: value };
+}
+
+/** Classify a request body's `agentId`. Presence is decided on the body itself,
+ *  before its value is parsed: the field is absent only when the body has no own
+ *  `agentId` property and reading `agentId` yields `undefined`. A present field
+ *  is parsed by value, so a supplied `undefined`, `null`, non-string, empty or
+ *  blank value is invalid rather than read as absent. A value parseAgentIdValue
+ *  accepts is then held to the shared agent-id rule. */
+function parseRequestedAgent(body: unknown): RequestedAgent {
+  const present = body != null && Object.prototype.hasOwnProperty.call(body, "agentId");
+  const value = body == null ? undefined : (body as any).agentId;
+  if (!present && value === undefined) return { kind: "absent" };
+  const parsed = parseAgentIdValue(value);
+  if (parsed.kind === "named" && !isValidAgentId(parsed.agentId)) return { kind: "invalid" };
+  return parsed;
+}
 
 export class MemoryMaintenance extends Resource {
   /** POST requires auth — either an agent acting on its own memories, or admin. */
@@ -49,21 +118,31 @@ export class MemoryMaintenance extends Resource {
   }
 
   async post(data: any) {
-    const { dryRun = false, agentId: bodyAgentId } = data || {};
+    const body = data || {};
+    const { dryRun = false } = body;
 
     const ctx = (this as any).getContext?.();
     const request = ctx?.request ?? ctx;
     const actorId: string | undefined = request?.tpsAgent;
     const callerIsAdmin: boolean = request?.tpsAgentIsAdmin === true
-      || (actorId ? await isAdmin(actorId) : false);
+      || (await annotatedCallerIsAdmin(request));
 
     // Scope rules:
-    //   - Admin can pass agentId to maintain a specific agent (or omit it
-    //     for fleet-wide maintenance).
-    //   - Non-admin agents are scoped to their own memories — bodyAgentId
+    //   - Admin can pass agentId to maintain a specific agent (or omit the
+    //     field for fleet-wide maintenance). An admin request whose body has
+    //     the field with a value that is not a string the shared agent-id rule
+    //     accepts — `undefined` included — is refused, dry run or not.
+    //   - Non-admin agents are scoped to their own memories — a body agentId
     //     either matches the authenticated agent or is ignored.
+    const requestedAgent = parseRequestedAgent(body);
+    if (callerIsAdmin && requestedAgent.kind === "invalid") {
+      return new Response(JSON.stringify({ error: INVALID_AGENT_ID_ERROR, remedy: INVALID_AGENT_ID_REMEDY }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }
     const targetAgent: string | undefined = callerIsAdmin
-      ? bodyAgentId
+      ? (requestedAgent.kind === "named" ? requestedAgent.agentId : undefined)
       : actorId;
 
     if (!targetAgent && !callerIsAdmin) {
@@ -77,7 +156,15 @@ export class MemoryMaintenance extends Resource {
     const stats = { expired: 0, archived: 0, total: 0, errors: 0, orphans: 0, skipped: 0, agent: targetAgent || "all" };
 
     try {
-      for await (const record of (databases as any).flair.Memory.search()) {
+      // A scoped run supplies the target agent as an indexed agentId condition
+      // (agentId is @indexed in schemas/memory.graphql), rather than scanning
+      // the whole table and filtering in process. The per-row check below still
+      // decides every row. No target means fleet-wide admin maintenance, which
+      // scans every row.
+      const memorySearch = targetAgent
+        ? (databases as any).flair.Memory.search({ conditions: [{ attribute: "agentId", comparator: "equals", value: targetAgent }] })
+        : (databases as any).flair.Memory.search();
+      for await (const record of memorySearch) {
         // Skip records not belonging to target agent (unless admin running fleet-wide).
         if (targetAgent && record.agentId !== targetAgent) continue;
         stats.total++;
@@ -107,31 +194,68 @@ export class MemoryMaintenance extends Resource {
               // re-read or the confirmation read below is a SKIP (recorded as
               // skipped); a change committed between the confirmation read and
               // the commit is not checked.
-              let deleted = false;
-              await withOwnedTransaction(ctx, async (c) => {
-                const stored = await (databases as any).flair.Memory.get(record.id, c);
-                if (!isDeepStrictEqual(stored, record)) return;
-                // The transaction pauses here, between its read and its act.
-                const pause = txnPausePoint("maintenance-expiry");
-                if (pause) await pause;
-                // Confirmation read: the committed row in an EXPLICIT fresh
-                // context (never contextless — a contextless read joins the
-                // request transaction and sees its old snapshot).
-                const confirmed = await (databases as any).flair.Memory.get(record.id, {});
-                if (!isDeepStrictEqual(confirmed, stored)) return;
-                const result = await (databases as any).flair.Memory.delete(record.id, c);
-                if (result !== true) throw new Error("Memory row delete was not confirmed");
-                await deletePointerRowOrThrow(record.id, c);
-                await recordMemoryDeletion({
-                  memoryId: record.id,
-                  memoryInstanceToken: stored.instanceToken ?? null,
-                  durability: stored.durability ?? null,
-                  actor: actorId ?? null,
-                  sourceClass: callerIsAdmin ? "admin" : "agent",
-                }, c);
-                deleted = true;
-              });
-              if (!deleted) { stats.skipped++; continue; }
+              // flair#2478 slice 3b: the whole read-decide-write runs under the
+              // id's per-id Memory write lock, taken once with no wait. A held
+              // id (or one carrying an outcome-unknown marker) is skipped and
+              // reported, never deleted over an owner's write.
+              const outcome = await withMemoryWriteLockOnce(memoryLockStore(), [record.id], async () => {
+                let deleted = false;
+                await withOwnedTransaction(ctx, async (c) => {
+                  const stored = await (databases as any).flair.Memory.get(record.id, c);
+                  if (!isDeepStrictEqual(stored, record)) return;
+                  // The transaction pauses here, between its read and its act.
+                  const pause = txnPausePoint("maintenance-expiry");
+                  if (pause) await pause;
+                  // Confirmation read: the committed row in an EXPLICIT fresh
+                  // context (never contextless — a contextless read joins the
+                  // request transaction and sees its old snapshot).
+                  const confirmed = await (databases as any).flair.Memory.get(record.id, {});
+                  if (!isDeepStrictEqual(confirmed, stored)) return;
+                  const result = await (databases as any).flair.Memory.delete(record.id, c);
+                  if (result !== true) throw new Error("Memory row delete was not confirmed");
+                  await deletePointerRowOrThrow(record.id, c);
+                  await recordMemoryDeletion({
+                    memoryId: record.id,
+                    memoryInstanceToken: stored.instanceToken ?? null,
+                    durability: stored.durability ?? null,
+                    actor: actorId ?? null,
+                    sourceClass: callerIsAdmin ? "admin" : "agent",
+                  }, c);
+                  // Test-only: the delete is staged and the lock is still held.
+                  const staged = txnPausePoint("maintenance-expiry-staged");
+                  if (staged) await staged;
+                  // Test-only: the last confirmation has passed and the
+                  // transaction has not committed yet.
+                  const commitPoint = txnPausePoint("maintenance-expiry-commit");
+                  if (commitPoint) await commitPoint;
+                  deleted = true;
+                });
+                if (!deleted) return { kind: "skipped" as const };
+                // Test-only: the delete committed and the lock is still held.
+                const committed = txnPausePoint("maintenance-expiry-committed");
+                if (committed) await committed;
+                return { kind: "deleted" as const };
+              }, { phase: "maintenance-expiry" });
+              if (outcome.kind !== "done") {
+                noteSkipped(stats, record.id, outcome.kind);
+                continue;
+              }
+              if (outcome.value.kind !== "deleted") { stats.skipped++; continue; }
+              // The committed row must be gone: a row still present after the
+              // commit is not counted as expired. An unreadable read is reported
+              // as a failed item, never as a success.
+              let after: any;
+              try {
+                after = await (databases as any).flair.Memory.get(record.id, {});
+              } catch (err) {
+                stats.errors++;
+                console.error("MemoryMaintenance: expiry outcome unconfirmed (committed row unreadable)", err);
+                continue;
+              }
+              if (after != null) {
+                noteSkipped(stats, record.id, "unconfirmed_delete");
+                continue;
+              }
               // flair#1357 — ephemeral expiry removes the row from what the
               // lexical leg may score.
               noteMemoryDelete(record.id);
@@ -168,32 +292,77 @@ export class MemoryMaintenance extends Resource {
               // selected. A change seen by that read or the confirmation read is
               // a SKIP; a change committed between the confirmation read and the
               // commit is not checked.
+              // flair#2478 slice 3b: the whole read-decide-write runs under the
+              // id's per-id Memory write lock, taken once with no wait. A held
+              // id (or one carrying an outcome-unknown marker) is skipped and
+              // reported, never archived over an owner's write.
               let archivedRow: any;
-              await withOwnedTransaction(ctx, async (c) => {
-                const stored = await (databases as any).flair.Memory.get(record.id, c);
-                if (!isDeepStrictEqual(stored, record)) return;
-                const pause = txnPausePoint("maintenance-archive");
-                if (pause) await pause;
-                const confirmed = await (databases as any).flair.Memory.get(record.id, {});
-                if (!isDeepStrictEqual(confirmed, stored)) return;
-                // flair#2470: the archive flip is written as an INCREMENTAL update of
-                // exactly `archived` and
-                // `archivedAt` — never a full-row put of the row read above. A
-                // full-row write would carry every field the read saw and could
-                // revert an owner PUT that started earlier and commits after this
-                // one (Harper orders the two by transaction timestamp) while that
-                // PUT still answered 200. The merged row marks a non-skipped
-                // operation and supplies the lexical-index note below.
-                const archivePatch = { archived: true, archivedAt: now.toISOString() };
-                archivedRow = { ...stored, ...archivePatch };
-                stripUndeclaredMemoryAttributes(archivedRow);
-                // A1'' item 2 (0c): the archive write and its pointer delete
-                // share ONE OWNED transaction; a failed pointer delete cannot
-                // still commit the archived row.
-                await (databases as any).flair.Memory.update(record.id, archivePatch, c);
-                await deletePointerRowOrThrow(record.id, c);
-              });
-              if (!archivedRow) { stats.skipped++; continue; }
+              let archiveBasis: any;
+              let archivePatch: Record<string, unknown> | undefined;
+              const outcome = await withMemoryWriteLockOnce(memoryLockStore(), [record.id], async () => {
+                await withOwnedTransaction(ctx, async (c) => {
+                  const stored = await (databases as any).flair.Memory.get(record.id, c);
+                  if (!isDeepStrictEqual(stored, record)) return;
+                  const pause = txnPausePoint("maintenance-archive");
+                  if (pause) await pause;
+                  const confirmed = await (databases as any).flair.Memory.get(record.id, {});
+                  if (!isDeepStrictEqual(confirmed, stored)) return;
+                  // flair#2470: the archive flip is written as an INCREMENTAL update of
+                  // exactly `archived` and
+                  // `archivedAt` — never a full-row put of the row read above. A
+                  // full-row write would carry every field the read saw and could
+                  // revert an owner PUT that started earlier and commits after this
+                  // one (Harper orders the two by transaction timestamp) while that
+                  // PUT still answered 200. The merged row marks a non-skipped
+                  // operation and supplies the lexical-index note below.
+                  archivePatch = { archived: true, archivedAt: now.toISOString() };
+                  archivedRow = { ...stored, ...archivePatch };
+                  stripUndeclaredMemoryAttributes(archivedRow);
+                  // A1'' item 2 (0c): the archive write and its pointer delete
+                  // share ONE OWNED transaction; a failed pointer delete cannot
+                  // still commit the archived row.
+                  await (databases as any).flair.Memory.update(record.id, archivePatch, c);
+                  await deletePointerRowOrThrow(record.id, c);
+                  archiveBasis = stored;
+                  // Test-only: the update and its pointer delete are staged and
+                  // the lock is still held.
+                  const staged = txnPausePoint("maintenance-archive-staged");
+                  if (staged) await staged;
+                  // Test-only: the last confirmation has passed and the
+                  // transaction has not committed yet.
+                  const commitPoint = txnPausePoint("maintenance-archive-commit");
+                  if (commitPoint) await commitPoint;
+                });
+                if (!archivedRow) return { kind: "skipped" as const };
+                // Test-only: the archive committed and the lock is still held.
+                const committed = txnPausePoint("maintenance-archive-committed");
+                if (committed) await committed;
+                return { kind: "archived" as const };
+              }, { phase: "maintenance-archive" });
+              if (outcome.kind !== "done") {
+                noteSkipped(stats, record.id, outcome.kind);
+                continue;
+              }
+              if (outcome.value.kind !== "archived") { stats.skipped++; continue; }
+              // The committed row must still show the staged archive fields. On
+              // a mismatch the row read now does not show this run's write, so
+              // the archive is unconfirmed; it is reported as skipped. An
+              // unreadable read is reported as a failed item.
+              const verdict = await verifyCommittedFields(
+                (databases as any).flair.Memory,
+                record.id,
+                archiveBasis,
+                archivePatch ?? {},
+              );
+              if (verdict === "unreadable") {
+                stats.errors++;
+                console.error("MemoryMaintenance: archive outcome unconfirmed (committed row unreadable)");
+                continue;
+              }
+              if (verdict === "mismatch") {
+                noteSkipped(stats, record.id, "unconfirmed_archive");
+                continue;
+              }
               // flair#1357 — an `archived` flip changes what the retrieval
               // conditions (`archived not_equal true`) admit, so the lexical
               // index has to see it, not just content writes.
@@ -214,13 +383,37 @@ export class MemoryMaintenance extends Resource {
       // INTO Memory results), but it should not be left behind either. A
       // failed row read or delete is counted and the sweep continues; the
       // incomplete run is reported below (HTTP 500), never silently ignored.
+      // A dry run skips the sweep entirely and reports no orphans.
       const pointerTable = (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
       if (!dryRun && !pointerTable?.search) {
         // Hygiene: a missing sweep table is REPORTED, never silently skipped.
         throw new Error("MemoryHostSource table unavailable (orphan sweep)");
       }
       if (pointerTable?.search && !dryRun) {
-        for await (const ptr of pointerTable.search()) {
+        // Scope the sweep by the same rule as the Memory loop above: a run
+        // that names an agent searches the pointer table by its indexed
+        // `authorId`, so that agent's rows are the rows supplied; a fleet-wide
+        // run scans every row. The in-process check applies the same rule to
+        // each row before the pointed Memory read and every later per-row effect
+        // (count, error, delete). A pointer's owner is the `authorId` the write
+        // path stamped on the row; a pointer with an empty author has no owner
+        // and is outside an owner-targeted run.
+        // How a pointer replaced after this selection is handled, and the bound
+        // on that, is stated at the owned transaction below.
+        const pointerInScope = (pointer: any): boolean => {
+          if (!targetAgent) return true;
+          const author = parseAgentIdValue(pointer?.authorId);
+          return author.kind === "named" && author.agentId === targetAgent;
+        };
+        // A scoped run's pointer search reads only the target agent's rows:
+        // authorId is @indexed in schemas/memory.graphql, so the search is an
+        // indexed condition rather than a table-wide scan filtered in process.
+        // No target means fleet-wide admin maintenance, which scans every row.
+        const pointerSearch = targetAgent
+          ? pointerTable.search({ conditions: [{ attribute: "authorId", comparator: "equals", value: targetAgent }] })
+          : pointerTable.search();
+        for await (const ptr of pointerSearch) {
+          if (!pointerInScope(ptr)) continue;
           const memoryId = ptr?.memoryId;
           if (typeof memoryId !== "string" || memoryId.length === 0) continue;
           try {
@@ -240,10 +433,35 @@ export class MemoryMaintenance extends Resource {
             //
             // Round 22: one orphan's failure must abort only THAT orphan, not
             // the whole sweep — catch it, count stats.errors, and continue (the
-            // item loops above already work this way). stats.orphans counts a
-            // row only AFTER its owned transaction COMMITS (the count moves out
-            // of the callback). Pinned by test/unit/memory-host-source.test.ts
-            // (r22-orphan-continues) — RED if the try/catch is removed.
+            // item loops above already work this way). Pinned by
+            // test/unit-isolated/memory-host-source.test.ts (r22-orphan-continues) — RED
+            // if the try/catch is removed.
+            //
+            // The candidate re-reads and the staged delete run in ONE owned
+            // transaction (`c`); the confirmation reads run inside its callback
+            // but through fresh contexts, so they see committed state. Harper
+            // has no compare-and-delete on a row's contents:
+            // the delete carries no condition on the pointer row it removes.
+            // Harper stamps the transaction's writes with one time,
+            // taken at its first read (the in-transaction Memory re-read below,
+            // before the confirmation reads), and applies a row's writes in the
+            // order of those times:
+            //   - a replacement committed before the confirmation read is SEEN
+            //     by it, and the pointer is skipped;
+            //   - a replacement whose own transaction takes its time after this
+            //     transaction's first read carries a later time, so Harper
+            //     applies it after this delete and it stays stored
+            //     (test/integration/memory-maintenance-owner-scope-2084.test.ts
+            //     commits one at the `maintenance-orphan-commit` pause).
+            // Not covered: a write whose own transaction took its time before
+            // this transaction's first read and commits after the confirmation
+            // read. There is no compare-and-set; per-id serialization is
+            // tracked in flair#2478.
+            //
+            // Harper can skip a staged delete at commit (a newer write wins), so
+            // stats.orphans counts a pointer only when a read AFTER the commit
+            // finds no row for its memoryId; a row found there is counted as
+            // skipped, never as removed.
             let committed = false;
             let skipped = false;
             await withOwnedTransaction(ctx, async (c) => {
@@ -258,10 +476,17 @@ export class MemoryMaintenance extends Resource {
               const ptrConfirmed = await pointerTable.get(memoryId, {});
               if (!isDeepStrictEqual(ptrConfirmed, ptrAgain)) { skipped = true; return; }
               await deletePointerRowOrThrow(memoryId, c);
+              // Held after the final confirmation and the staged delete, before
+              // the commit, so a replacement can commit in that window.
+              const beforeCommit = txnPausePoint("maintenance-orphan-commit");
+              if (beforeCommit) await beforeCommit;
               committed = true;
             });
-            if (committed) stats.orphans++;
-            else if (skipped) stats.skipped++;
+            if (committed) {
+              const afterCommit = await pointerTable.get(memoryId, {});
+              if (afterCommit == null) stats.orphans++;
+              else stats.skipped++;
+            } else if (skipped) stats.skipped++;
           } catch (err) {
             stats.errors++;
             console.error("MemoryMaintenance: orphan sweep failed (continuing)", err);

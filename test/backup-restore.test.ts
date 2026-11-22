@@ -516,11 +516,12 @@ describe("flair backup — non-TTY stdout routes progress to stderr", () => {
     expect(r.stderr).toContain("Backup complete");
     expect(r.stderr).toContain("Agents");
 
-    // Archive must exist at the default path.
+    // Archive must exist at the default path, with its digest sidecar (#2664).
     const backupsDir = join(tmpHome, ".flair", "backups");
-    const files = readdirSync(backupsDir);
-    expect(files.length).toBe(1);
+    const files = readdirSync(backupsDir).sort();
+    expect(files.length).toBe(2);
     expect(files[0]).toMatch(/^flair-backup-/);
+    expect(files[1]).toBe(`${files[0]}.sha256`);
 
     const archive = JSON.parse(readFileSync(join(backupsDir, files[0]), "utf-8"));
     expect(archive.version).toBe(1);
@@ -549,6 +550,7 @@ describe("flair backup — non-TTY stdout routes progress to stderr", () => {
     expect(r.stderr).toContain("Backup complete");
 
     expect(existsSync(outputPath)).toBe(true);
+    expect(existsSync(`${outputPath}.sha256`)).toBe(true);
     const archive = JSON.parse(readFileSync(outputPath, "utf-8"));
     expect(archive.version).toBe(1);
   });

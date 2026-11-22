@@ -2859,8 +2859,13 @@ export function describeAgentIdRuleFinding(rows: Array<{ id?: unknown }>): Agent
       invalidIds.join(", "),
     fixHint:
       "after any needed data migration and registration with `flair agent add <new-id>`, " +
-      "remove the old row with `flair agent remove <id>`, or remove it alone if stale; " +
-      "`flair agent remove` also deletes the agent's Memory and Soul data, but not the key files of an id outside the rule — clean those up manually",
+      "remove the old row with `flair agent remove <id>`, or remove it alone if stale — " +
+      "`flair agent remove` also deletes the agent's Memory and Soul rows, but not the key files of an id outside the rule, so clean those up manually; " +
+      "to maintain that agent's rows, run its own authenticated non-admin maintenance when the stored id " +
+      "can authenticate (the signed TPS-Ed25519 header cannot carry a colon or whitespace); that run deletes " +
+      "the agent's expired ephemeral Memory rows. For an id the header cannot represent, run fleet-wide " +
+      "maintenance, which reaches that agent's rows and also expires and archives other agents' eligible rows — an " +
+      "admin-scoped run needs an id that matches the rule",
   };
 }
 

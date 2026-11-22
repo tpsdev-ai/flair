@@ -225,7 +225,7 @@
   },
   {
     "file": "test/unit/http-bind.test.ts",
-    "scope": "end to end: widen via the CLI, then narrow via the CLI, and the persisted value stays narrow",
+    "scope": "runInit",
     "fingerprint": "process.execPath [cli,\"init\",\"--skip-start\",\"--no-mcp\",\"--port\",\"20991\",\"--http-bind\",bind] ; { cwd: join(import.meta.dir,\"..\",\"..\"),env,encoding: \"utf8\",// flair#1807: the child's OWN deadline,so a hung `flair init` is // reported by the deadline (and named) rather than by bun's timer. timeout: CHILD_DEADLINE_MS,}",
     "kind": "spawn-no-timeout",
     "occurrence": 0,

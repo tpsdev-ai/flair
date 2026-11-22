@@ -7,6 +7,7 @@
 
 import { Resource, databases } from "harper";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
+import { refuseRewrittenAgentId } from "./path-id-rewrite.js";
 
 export class WorkspaceLatest extends Resource {
   // Self-authorize via the Ed25519 agent verify (auth reshape removes the gate's
@@ -37,6 +38,8 @@ export class WorkspaceLatest extends Resource {
         { status: 400, headers: { "Content-Type": "application/json" } },
       );
     }
+    const rewritten = refuseRewrittenAgentId((this as any).getContext?.(), agentId);
+    if (rewritten) return rewritten;
 
     // Auth: internal calls and admins pass unfiltered; a verified agent may only
     // read its own workspace state; anonymous is denied. allowRead() already

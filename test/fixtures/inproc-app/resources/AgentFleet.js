@@ -9,7 +9,7 @@
  *
  * Copy the three helpers at the top — `flair()`, `registerAgent()`,
  * `remember()`/`recall()` — into your own component and you have the whole
- * integration. `test/integration/in-process-agents.test.ts` drives this file
+ * integration. `test/integration-heavy/in-process-agents.test.ts` drives this file
  * and asserts the properties that make it safe: registration lands a complete
  * Principal record, every call is attributed to ONE agent, an agent cannot
  * write as another, and an agent cannot read another's private memories.
@@ -17,6 +17,7 @@
  * Kept as plain JS (no build step) so it loads through the `jsResource` glob
  * exactly as a hand-written application component would.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Resource, server, transaction } from "harper";
 // The in-process call seam. Deep-imported from the installed package the same
 // way an application would — Flair ships `dist/`, and this module has no
@@ -122,13 +123,13 @@ class CallerAbort extends Error {}
  * transaction, and the caller's commit or abort decides it. With `abort`, the
  * caller throws after the write returns, so its transaction aborts.
  */
-async function supersedeInCallerTransaction(agentId, { id, content, durability = "standard", supersedes, abort }) {
+async function supersedeInCallerTransaction(agentId, { id, content, durability = "standard", supersedes, abort, tags, metadata, trigger }) {
   const ctx = agentContext(agentId);
   let written = null;
   try {
     await transaction(ctx, async () => {
       const h = await collectionResource(flair("Memory"), ctx);
-      written = await h.post({ id, agentId, content, durability, supersedes });
+      written = await h.post({ id, agentId, content, durability, supersedes, tags, metadata, trigger });
       if (abort && !(written instanceof Response)) throw new CallerAbort("the caller aborts its transaction after the write");
     });
   } catch (err) {
@@ -193,7 +194,7 @@ async function semanticRecall(agentId, q, limit = 20) {
   return Array.isArray(list) ? list.map(summarise) : list;
 }
 
-/** The same semantic read with NO context — see `recallUnscoped`. */
+/** A SemanticSearch read with `internalContext()`. */
 async function semanticRecallUnscoped(q, limit = 20) {
   const h = await collectionResource(flair("SemanticSearch"), internalContext());
   const r = await h.post({ q, limit });
@@ -340,8 +341,7 @@ async function mcpRpc(sub, rpc, clientId) {
 /**
  * The DELIBERATELY unfiltered read — every agent's private records, by name.
  * `internalContext()` is what an infrastructure sweep asks for on purpose; an
- * application must never reach this verdict, and since it now has to type this
- * function to get there, it cannot reach it by accident.
+ * agent-facing application operation must not reach this verdict.
  */
 async function recallUnscoped() {
   return collect(await flair("Memory").search({ conditions: [] }, internalContext()));
@@ -373,6 +373,58 @@ async function createWithNoContext() {
 async function recallWithRawMissingId() {
   const forgotten = { request: { tpsAgent: undefined, tpsAgentIsAdmin: false } };
   return collect(await flair("Memory").search({ conditions: [] }, forgotten));
+}
+
+// ─── flair#2084 — memory maintenance called in-process with admin authority ──
+//
+// The direct resource call a Harper application makes with no HTTP hop. JSON
+// cannot carry an `undefined` value, so each key named in `undefinedKeys` is
+// added to the request body as an OWN property whose value is `undefined`. The
+// reply carries the body's own keys and which of them hold `undefined`, so the
+// test can check what was sent as well as what came back.
+async function maintainAsAdmin(agentId, body, undefinedKeys) {
+  const request = { ...(body ?? {}) };
+  for (const key of undefinedKeys ?? []) request[key] = undefined;
+  const sent = {
+    ownKeys: Object.keys(request),
+    undefinedKeys: Object.keys(request).filter((key) => request[key] === undefined),
+  };
+  const h = await collectionResource(flair("MemoryMaintenance"), adminContext(agentId));
+  return { sent, reply: await run(() => h.post(request)) };
+}
+
+// ─── flair#2837 — the admin-only gate through Harper's resource lifecycle ────
+//
+// A static get() whose target sets `checkPermission` makes Harper call the
+// resource's allowRead() with the context the call carries; Flair's Admin
+// resource answers allowRead with allowAdmin. Each call runs in the async
+// context captured when this module loaded, outside any request, so a call
+// with no context argument finds no request context in Harper's async storage
+// either. The marker-with-headers context carries a plain-object `headers`,
+// which the resolver still reads as `internal`, so its refusal is the
+// deliberate-internal check's.
+const outsideAnyRequest = AsyncLocalStorage.snapshot();
+
+const ADMIN_GATE_CONTEXTS = {
+  none: () => undefined,
+  internalContext: () => internalContext(),
+  markerWithHeaders: () => ({ ...internalContext(), request: { headers: { "x-probe": "2837" } } }),
+};
+
+async function adminGate(contextKind) {
+  const make = ADMIN_GATE_CONTEXTS[contextKind];
+  if (!make) throw new Error(`no such admin-gate context '${contextKind}'`);
+  return outsideAnyRequest(async () => {
+    const context = make();
+    try {
+      const reply = context === undefined
+        ? await flair("Admin").get({ checkPermission: true })
+        : await flair("Admin").get({ checkPermission: true }, context);
+      return { admitted: true, status: reply instanceof Response ? reply.status : null };
+    } catch (err) {
+      return { admitted: false, statusCode: err?.statusCode ?? null, error: String(err?.message ?? err) };
+    }
+  });
 }
 
 const summarise = (r) => ({ id: r?.id, agentId: r?.agentId, visibility: r?.visibility, content: r?.content });
@@ -415,6 +467,30 @@ export class AgentFleet extends Resource {
         return run(() => registerAgent(body));
       case "remember":
         return run(() => remember(body.agentId, body));
+      case "putAgent":
+        // flair#2696 — an Agent PUT the way an embedding app's provisioning code
+        // calls it: through the Agent resource bound to a trusted internal
+        // context, as a collection resource with NO URL target, so the body
+        // `id` names the row.
+        return run(async () => {
+          const h = await collectionResource(flair("Agent"), internalContext());
+          return h.put(body.record);
+        });
+      case "seedAgent":
+        // flair#2696 — AgentSeed called in-process through a collection
+        // resource. `marker: true` uses internalContext() (the deliberate
+        // trusted internal call); `marker: false` passes an explicit context
+        // that lacks the internal marker.
+        return run(async () => {
+          const ctx = body.marker === true ? internalContext() : { request: {} };
+          const h = await collectionResource(flair("AgentSeed"), ctx);
+          return h.post(body.seed);
+        });
+      case "postMemory":
+        return run(async () => {
+          const h = await collectionResource(flair("Memory"), agentContext(body.agentId));
+          return h.post(body.record);
+        });
       case "supersedeInCallerTransaction":
         return run(() => supersedeInCallerTransaction(body.agentId, body));
       case "supersedeWithCloseStorageRefusal":
@@ -429,6 +505,8 @@ export class AgentFleet extends Resource {
         return run(() => recallByIdTrust(body.agentId, body.id));
       case "deleteById":
         return run(() => deleteById(body.agentId, body.id));
+      case "deletePresenceById":
+        return run(() => flair("Presence").delete(body.id, agentContext(body.agentId)));
       case "updateById":
         return run(() => updateById(body.agentId, body.id, body.content));
       case "semanticRecall":
@@ -449,6 +527,10 @@ export class AgentFleet extends Resource {
         return run(() => createWithNoContext());
       case "recallWithRawMissingId":
         return run(() => recallWithRawMissingId());
+      case "maintainAsAdmin":
+        return run(() => maintainAsAdmin(body.agentId, body.body, body.undefinedKeys));
+      case "adminGate":
+        return run(() => adminGate(body.context));
       default:
         return new Response(JSON.stringify({ error: `unknown op '${op}'` }), { status: 400 });
     }

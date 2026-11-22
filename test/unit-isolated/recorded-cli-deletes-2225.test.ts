@@ -92,7 +92,7 @@ beforeEach(() => {
   const resolveHttpPort = () => { httpResolutions++; return 29926; };
   bindMemory({ api, resolveBaseUrl: () => "https://remote.invalid", resolveOpsPort, resolveHttpPort,
     addSharedCredentialOptions: (cmd: Command) => cmd, addSharedIdentityOption: (cmd: Command) => cmd,
-    resolveSigningAgentId: () => ({ agentId: null, source: "none" }), applyAdminPassFile: () => {},
+    resolveSigningAgentId: () => ({ agentId: null, source: "none" }),
     parseEntitiesOptionOrExit: () => [], ENTITIES_OPTION_DESCRIPTION: "entities",
     resolveEffectiveOpsUrl: () => { throw new Error("unused"); },
     resolveFabricCredentials: () => ({ fabricUser: undefined, fabricPassword: undefined, warnings: [] }),

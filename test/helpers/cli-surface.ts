@@ -33,9 +33,7 @@ function isHiddenCommand(cmd: Command): boolean {
 }
 
 /**
- * Registration-order walk of `root` and every descendant. The implicit
- * commander `help` command is omitted here (it is not registered in cli.ts);
- * it still appears in the HELP section via outputHelp().
+ * Registration-order walk of `root` and every descendant.
  */
 export function walkCliCommands(root: Command): CommandNode[] {
   const out: CommandNode[] = [];

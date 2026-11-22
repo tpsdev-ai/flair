@@ -125,7 +125,7 @@ beforeEach(() => {
   return r;
 };
 
-describe("Memory writes bind the verdict to reviewed content", () => {
+describe("Memory writes guard workflow verdicts", () => {
   test("PUT that echoes stamps while changing content drops the verdict", async () => {
     const result = await makeMemory("stamped").put({
       id: "stamped",

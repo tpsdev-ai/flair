@@ -8,6 +8,7 @@ const versions = new Map<string, any>();
 const locks = new Set<string>();
 let failAppend = false;
 (databasesMock.flair as any).InstructionVersion = {
+  validate() {},
   primaryStore: {
     tryLock: (key: unknown) => { const k = JSON.stringify(key); if (locks.has(k)) return false; locks.add(k); return true; },
     unlock: (key: unknown) => locks.delete(JSON.stringify(key)),

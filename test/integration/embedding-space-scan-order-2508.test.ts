@@ -203,18 +203,7 @@ describe("embedding-space-guard scan ordering inside a real Harper worker (flair
     // Armed before Harper starts, so the first scan to reach the verdict pause
     // parks there; step 3 of the case shows it is the boot pre-warm.
     writeFileSync(join(pauseDir, `arm.${POINT}`), "");
-    const saved = { [TEST_FAULT_INJECTION_ENV]: process.env[TEST_FAULT_INJECTION_ENV], [TEST_PAUSE_DIR_ENV]: process.env[TEST_PAUSE_DIR_ENV] };
-    process.env[TEST_FAULT_INJECTION_ENV] = "1";
-    process.env[TEST_PAUSE_DIR_ENV] = pauseDir;
-    try {
-      harper = await startHarper();
-    } finally {
-      // The spawned Harper has its copy; no later Harper in this process inherits it.
-      for (const [key, value] of Object.entries(saved)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
+    harper = await startHarper({ serverEnv: { [TEST_FAULT_INJECTION_ENV]: "1", [TEST_PAUSE_DIR_ENV]: pauseDir } });
     assertOwnInstance(harper);
   }, 180_000);
 

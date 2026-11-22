@@ -43,8 +43,6 @@ beforeEach(() => {
         auth: req.headers.get("authorization") ?? "",
       });
       if (url.pathname === "/FederationPeers") {
-        // No peers to probe: verify's sync push finds no hub, then lists an
-        // empty peer set and returns without waiting.
         return Response.json({ peers: [] });
       }
       return Response.json({ ok: true });
@@ -112,7 +110,9 @@ describe("federation verify — --admin-pass-file (flair#1910)", () => {
   test("reads the password from an owner-only --admin-pass-file", async () => {
     const { stderr, exitCode } = await runCli(verifyArgs(["--admin-pass-file", passFile(0o600)]));
     expect(stderr).not.toContain(FILE_PASS);
-    expect(exitCode).toBe(0);
+    // The stand-in lists no hub, so the sync step fails the verification
+    // (exit 1); the point here is that the file credential reached the server.
+    expect(exitCode).toBe(1);
     const seen = auths();
     expect(seen.length).toBeGreaterThan(0);
     for (const auth of seen) expect(auth).toBe(basic(FILE_PASS));
@@ -142,7 +142,8 @@ describe("federation verify — --admin-pass-file (flair#1910)", () => {
   test("--admin-pass still authenticates", async () => {
     const { stderr, exitCode } = await runCli(verifyArgs(["--admin-pass", INLINE_PASS]));
     expect(stderr).not.toContain(INLINE_PASS);
-    expect(exitCode).toBe(0);
+    // No hub in the stand-in: the sync step fails the verification (exit 1).
+    expect(exitCode).toBe(1);
     const seen = auths();
     expect(seen.length).toBeGreaterThan(0);
     for (const auth of seen) expect(auth).toBe(basic(INLINE_PASS));

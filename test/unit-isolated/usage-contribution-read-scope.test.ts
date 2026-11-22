@@ -57,6 +57,22 @@ mock.module("harper", () => ({
           memory.set(row.id, { ...row });
           return row.id;
         },
+        // Fake per-key lock for the per-id Memory write lock (flair#2478).
+        primaryStore: (() => {
+          const held = new Set<string>();
+          return {
+            tryLock: (key: unknown) => {
+              const k = JSON.stringify(key);
+              if (held.has(k)) return false;
+              held.add(k);
+              return true;
+            },
+            unlock: (key: unknown) => {
+              held.delete(JSON.stringify(key));
+            },
+            resetReadTxn: () => {},
+          };
+        })(),
         // flair#2470: the count bump is an incremental update of `usageCount`.
         update: async (id: string, patch: Record<string, unknown>) => {
           // A competitor commits between the bump's read and its write.

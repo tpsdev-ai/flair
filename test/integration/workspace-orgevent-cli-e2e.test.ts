@@ -2,33 +2,32 @@
  * workspace-orgevent-cli-e2e.test.ts — real-Harper integration coverage for
  * `flair workspace set` and `flair orgevent` (flair#679).
  *
- * Bug (`flair workspace set`, CONFIRMED against a real spawned Harper below):
- * it sent a bare `POST /WorkspaceState` (collection-level, no id in the URL).
- * WorkspaceState.post() (resources/WorkspaceState.ts) delegates to
- * `super.post(content)` — the Harper-generated table class's OWN post()
- * implementation, which 405s a collection POST with "does not have a post
- * method implemented to handle HTTP method POST" (same restriction
- * resources/Memory.ts documents, already fixed the same way for `soul set`
- * #498 — see test/integration/onboarding-smoke.test.ts, which this file's
- * structure mirrors). Table writes over real HTTP require `PUT /<Table>/<id>`
- * with the id in the URL.
+ * Bug (`flair workspace set`, flair#679): it sent a bare `POST /WorkspaceState`
+ * (collection-level, no id in the URL). WorkspaceState.post()
+ * (resources/WorkspaceState.ts) delegates to `super.post(content)`, the
+ * Harper-generated table class's own post(); through Harper 5.1.x that 405'd a
+ * collection POST with "does not have a post method
+ * implemented to handle HTTP method POST" (`soul set` was moved to PUT the same
+ * way in #498: see test/integration/onboarding-smoke.test.ts, which this file's
+ * structure mirrors). The Harper this repo now pins accepts that request (the "sanity"
+ * test below asserts it, harper#1956). The CLI writes with
+ * `PUT /<Table>/<id>`, the id in the URL, which works on both.
  *
  * CORRECTION to the issue's premise (measured, not assumed — see the "sanity"
  * tests below): `flair orgevent`'s bare `POST /OrgEvent` does NOT currently
  * 405. OrgEvent.post() (resources/OrgEvent.ts) does NOT delegate to
- * `super.post()` — it generates its own id/createdAt and calls
- * `databases.flair.OrgEvent.put(content)` directly, which Harper's REST layer
- * DOES route a real HTTP POST to. So today's shipped `flair orgevent` exits 0
- * and writes successfully. It is still switched to PUT/{id} here because (a)
- * that's what the issue and the fix instructions specify, (b) it makes
- * OrgEvent's write path consistent with every other table resource
- * (WorkspaceState, Memory, Soul) instead of relying on an accident of
+ * `super.post()`. Harper's REST layer routes a real HTTP POST to
+ * OrgEvent.post(), which generates a default id when the body carries none and
+ * stores the event through `_store()`.
+ * So today's shipped `flair orgevent` exits 0 and writes successfully. It is
+ * still switched to PUT/{id} here because (a) that's what the issue and the fix
+ * instructions specify, and (b) it makes the CLI's OrgEvent write the same as
+ * its `flair workspace set` and `soul set` writes instead of relying on an accident of
  * OrgEvent.post()'s specific implementation — a future refactor that made
  * OrgEvent.post() delegate to super.post() (mirroring WorkspaceState.post())
- * would silently reintroduce this exact 405 with zero CLI-side change to
- * notice it, and (c) client-generated `${agentId}-${randomUUID()}` ids avoid
- * the same-millisecond collision risk of post()'s own
- * `${authorId}-${isoTimestamp}` default.
+ * would have reintroduced this 405 on Harper through 5.1.x with zero CLI-side
+ * change to notice it. (Both id paths now carry a random UUID: the CLI's
+ * `${agentId}-${randomUUID()}` and OrgEvent.post()'s own default, flair#2333.)
  *
  * The bug was INVISIBLE to the mock-HTTP-server unit suites
  * (test/unit/workspace-set.test.ts, test/unit/orgevent-cli.test.ts) — a mock
@@ -212,14 +211,15 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     expect(ws.summary).toBe("second write, same ref");
   }, 30_000);
 
-  // UNLIKE WorkspaceState, a bare POST /OrgEvent does NOT 405 today — measured
-  // directly (this test), and confirmed by running the ORIGINAL (pre-fix)
-  // `flair orgevent` CLI against a real spawned Harper: it exits 0 and writes
-  // successfully. See the module doc's "CORRECTION to the issue's premise"
-  // for why OrgEvent.post() (resources/OrgEvent.ts) doesn't hit the same gap
-  // WorkspaceState.post() does, and why this CLI command is still switched to
-  // PUT/{id} despite its current POST path already working.
-  test("sanity: a bare POST /OrgEvent collection write does NOT 405 today (unlike WorkspaceState) — this is why orgevent still needs the PUT fix for FUTURE-proofing, not a currently-broken write", async () => {
+  // A bare POST /OrgEvent does not 405: measured directly (this test), and the
+  // ORIGINAL (pre-fix) `flair orgevent` CLI exited 0 and wrote successfully
+  // against a real spawned Harper. Through Harper 5.1.x this differed from
+  // WorkspaceState (whose post() delegates to super.post() and 405'd); on the
+  // Harper this repo now pins both are accepted. See the module doc's
+  // "CORRECTION to the issue's premise" for why OrgEvent.post()
+  // (resources/OrgEvent.ts) never hit that gap, and why this CLI command still
+  // writes with PUT/{id}.
+  test("sanity: a bare POST /OrgEvent collection write does not 405 (it did not on Harper through 5.1.x either); orgevent writes with PUT for consistency, not to fix a broken write", async () => {
     const res = await fetch(`${harper.httpURL}/OrgEvent`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: adminAuthHeader() },

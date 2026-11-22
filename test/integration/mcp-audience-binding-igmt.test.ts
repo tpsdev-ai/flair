@@ -84,22 +84,16 @@ describe("MCP audience binding (ops-igmt) — executed must-fail", () => {
     publicKeyPem = publicKey;
     privateKeyPem = privateKey;
 
-    const envKeys = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET", "OAUTH_GITHUB_REDIRECT_URI"] as const;
-    const prior = envKeys.map((key) => [key, process.env[key]] as const);
-    process.env.FLAIR_MCP_OAUTH = "true";
-    process.env.FLAIR_MCP_ISSUER = ISSUER;
-    process.env.OAUTH_GITHUB_CLIENT_ID = "audience-binding-client";
-    process.env.OAUTH_GITHUB_CLIENT_SECRET = "audience-binding-secret";
-    process.env.OAUTH_GITHUB_REDIRECT_URI = `${ISSUER}/oauth`;
-
-    try {
-      harper = await startHarper({ cwd: process.cwd() });
-    } finally {
-      for (const [key, value] of prior) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
+    harper = await startHarper({
+      cwd: process.cwd(),
+      serverEnv: {
+        FLAIR_MCP_OAUTH: "true",
+        FLAIR_MCP_ISSUER: ISSUER,
+        OAUTH_GITHUB_CLIENT_ID: "audience-binding-client",
+        OAUTH_GITHUB_CLIENT_SECRET: "audience-binding-secret",
+        OAUTH_GITHUB_REDIRECT_URI: `${ISSUER}/oauth`,
+      },
+    });
 
     // Seed the signing key into the table withMCPAuth verifies against.
     const seed = await adminOp({

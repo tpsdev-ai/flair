@@ -149,16 +149,11 @@ export function register(program: Command): void {
 // another agent's events — the difference from post() is that put() checks-
 // and-rejects a mismatch rather than silently overwriting it.
 //
-// (flair#679, measured against a real spawned Harper): table-backed resources
-// only accept writes via PUT /<Table>/<id> — a bare POST /OrgEvent 405s
-// ("does not have a post method implemented to handle HTTP method POST"),
-// same restriction documented in resources/Memory.ts and already fixed for
-// `soul set` (#498). OrgEvent.ts DOES define a post() method that
-// auto-generates id/createdAt, but Harper's REST layer never routes a real
-// HTTP POST to it — post() is only reachable via in-process resource
-// instantiation, never the wire. put() does NOT default id/createdAt, so the
-// CLI generates and supplies them itself (id convention mirrors flair-client's
-// Memory.write(): `${agentId}-${randomUUID()}`).
+// (flair#679): the CLI writes with PUT /OrgEvent/{id}, as `flair workspace set`
+// and `soul set` (#498) do, rather than a bare POST /OrgEvent, and generates the
+// id itself (`${agentId}-${randomUUID()}`, the convention of flair-client's
+// Memory.write()). A bare POST /OrgEvent is also accepted (the sanity test in
+// test/integration/workspace-orgevent-cli-e2e.test.ts asserts it does not 405).
 
 
 program

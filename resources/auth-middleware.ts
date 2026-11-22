@@ -1,12 +1,14 @@
 import { WRITE_BACK_ATTEMPTS, WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
+import { withMemoryWriteLockOnce } from "./memory-write-lock.js";
 import { server, databases } from "harper";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
-import { hashEmbeddedText } from "./memory-embed-hash.js";
+import { hashEmbeddedText, holdsOwnStaleVector, type StagedVector } from "./memory-embed-hash.js";
 import { MEMORY_EMBEDDING_INPUT_FIELDS, skillEmbedText } from "./skill-write.js";
-import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME, readCredentialedPrincipal, AGENT_LOOKUP_FAILED } from "./agent-auth.js";
+import { agentIsAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME, readCredentialedPrincipal, AGENT_LOOKUP_FAILED } from "./agent-auth.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
+import { BASIC_AUTH_HEADER_RE, parseBasicAuthHeader } from "./basic-auth-header.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord, resolveGuardedRecordById } from "./record-owner-guard.js";
 import { routeWithHarper, type HarperRoute } from "./harper-routing.js";
@@ -24,6 +26,7 @@ import {
   routedResourceAndRemainder,
   routedIdAfterPropertyRule,
   routedResourcePath,
+  whatwgUrlMatchesRawTarget,
 } from "./request-target.js";
 
 // --- Non-admin Memory read: ignore the caller's selection --------------------
@@ -168,10 +171,10 @@ function getAdminPass(): string | null {
 }
 
 // ─── Admin resolution ─────────────────────────────────────────────────────────
-// `isAdmin` (FLAIR_ADMIN_AGENTS env + Agent role==="admin", 60s-cached) now lives
-// in agent-auth.ts as the single source of truth, imported above. During the
-// auth reshape this gate and the per-resource allow* helpers must agree on who's
-// an admin — one implementation guarantees they can't diverge.
+// `agentIsAdmin` (FLAIR_ADMIN_AGENTS env + the Agent row's role === "admin")
+// lives in agent-auth.ts as the single source of truth, imported above. This
+// gate passes it the Agent row it verifies the signature against, exactly as
+// agent-auth.ts's own verifier does, so the two cannot diverge.
 
 // ─── Crypto + replay-guard helpers ────────────────────────────────────────────
 // WINDOW_MS and importEd25519Key live in ./ed25519-auth.ts, and the replay
@@ -181,6 +184,11 @@ function getAdminPass(): string | null {
 // them, and the crypto/decoder logic can't drift.
 
 async function backfillEmbedding(memoryId: string): Promise<void> {
+  let unconfirmed = false;
+  // Whether the attempt that just ended saw its write confirmed on the committed
+  // row, so a failure after the commit is not reported as the outcome of an
+  // earlier attempt.
+  let lastAttemptConfirmed = false;
   try {
     const table = (databases as any).flair.Memory;
     // flair#2484: compute the vector before the owned write transaction opens.
@@ -190,54 +198,157 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // entries skip before the text comparison. For eligible rows, `matchFields`
     // compares every field that selects the text (`content`, `trigger`, `tags`)
     // before staging; the helper confirms the committed row afterward. Drift
-    // observed by either check aborts the attempt; remaining outer attempts
-    // re-read and may recompute. Changes after confirmation and before commit
-    // are not detected by these checks.
+    // observed before commit aborts the attempt; remaining outer attempts
+    // re-read and may recompute.
     //
     // flair#2573: the vector is stamped with the current model id, the space it
     // was computed in, and the embedding-space guard is notified after the write
     // commits with that stamp and the row it replaced, as for any other notified
     // vector write.
+    //
+    // flair#2478 slice 3: the write runs under the id's per-id Memory write lock
+    // shared with the owner verbs (resources/memory-write-lock.ts): one
+    // non-waiting acquisition per attempt of the loop below, taken after that
+    // attempt's vector is computed, so no provider call runs while the id is
+    // locked; a retry acquires it again.
+    // A held id, an id with an unresolved write outcome, or a store with no lock
+    // is skipped and logged, and that attempt writes nothing. After an earlier
+    // attempt of this call committed unconfirmed, every exit that ends the call
+    // without a verified write (a lock miss, a row now gone or already embedded,
+    // a provider that returned no vector, a thrown error, which is logged and not
+    // rethrown) logs the outcome as unconfirmed instead; a later verified write
+    // is logged as written, or, when its write-stamp notification then fails,
+    // as confirmed with that failure named. A skipped backfill is not
+    // retried by this call. The backfill starts only from the post-response hook
+    // at the end of this middleware (the "Embedding backfill" block below),
+    // which a successful HTTP Memory POST, PUT or PATCH reaches when a verified
+    // Ed25519 agent signed it; a valid Basic-admin request returns earlier
+    // (the super_user and Basic branches call nextLayer directly) and starts
+    // none, and neither does a raw or direct table write. So the id's next such
+    // signed write starts another, and a row with a stale or missing stamp is
+    // re-embedded by the embedding-stamp migration.
+    //
+    // Holding the lock, the helper's first read is the committed row: a row
+    // whose text changed, or that has a vector of more than 100 entries, is not
+    // written (a changed text ends this attempt; the next attempt of the loop
+    // below re-reads and re-embeds after the lock is released). The helper
+    // stages the update and confirms the committed row: a change visible at
+    // that confirmation aborts the transaction, writes nothing, and the helper
+    // retries from a fresh read under the same lock. Then it commits and reads
+    // the committed row back (identity, the written fields, and the text the
+    // vector was computed for) before the lock is released. A readable
+    // read-back that does not show them retries from a fresh read: within the
+    // helper's own bound (WRITE_BACK_ATTEMPTS, 3) under the same lock, and,
+    // when that retry finds the text changed, through the next attempt of the
+    // loop below (at most WRITE_BACK_ATTEMPTS attempts, each with its own
+    // acquisition). An unreadable read-back stops without a retry. The
+    // read-back checks only the final committed state of those fields, so a
+    // lock-bypassing write committed and then overwritten inside this write's
+    // window is not detected. An outcome the read-back did not confirm
+    // (unreadable, or the attempts exhausted) is logged as unconfirmed; it does
+    // not mark the id outcome-unknown.
+    //
+    // The backfill writes a row whose vector is missing or has at most 100
+    // entries, whatever stored it. A row holding a longer vector counts as
+    // already embedded and is skipped, except one whose stored vector matches,
+    // within a relative tolerance that accepts a float32 copy of an in-range
+    // component (a non-finite component never matches), the
+    // vector an earlier unconfirmed attempt of this call staged, while its text
+    // is no longer the text that vector was computed from (holdsOwnStaleVector):
+    // the row holds a vector equal to this call's computation for a text it no
+    // longer has, whoever stored it. That row is re-read and re-embedded by the
+    // next attempt of the loop below while one remains, which needs the
+    // read-back that found the mismatch to have been readable. The check
+    // compares vectors, not the stored text hash: a row with an empty
+    // owner stores a null hash, which would match any text. A longer stored
+    // vector that does not match the staged one is skipped like any other
+    // already-embedded row; a non-match says nothing about who stored it.
+    let ownUnconfirmed: StagedVector | undefined;
+    const alreadyEmbedded = (row: any): boolean => row.embedding?.length > 100 && !holdsOwnStaleVector(row, ownUnconfirmed);
+    // After an earlier attempt of this call committed and its read-back did not
+    // confirm it, every exit that ends the call without a verified write logs
+    // the outcome as unconfirmed; an exit that wrote nothing says so for its own
+    // attempt only (flair#2478).
+    const endAfterUnconfirmed = (ended: string): void => {
+      if (unconfirmed) console.warn("[auto-embed] %s: %s; an earlier attempt's vector was not confirmed on the committed row; outcome: unconfirmed", memoryId, ended, { outcome: "unconfirmed" });
+    };
     for (let attempt = 1; attempt <= WRITE_BACK_ATTEMPTS; attempt++) {
+      lastAttemptConfirmed = false;
       const record = await table.get(memoryId, {});
       const text = record ? skillEmbedText(record) : undefined;
-      if (typeof text !== "string" || text.length === 0) return;
-      if (record.embedding?.length > 100) return;
+      if (typeof text !== "string" || text.length === 0) {
+        endAfterUnconfirmed("the row is gone or has no text, so this attempt wrote nothing");
+        return;
+      }
+      if (alreadyEmbedded(record)) {
+        endAfterUnconfirmed("the row now counts as already embedded, so this attempt wrote nothing");
+        return;
+      }
       const embedding = await getEmbedding(text, "document");
-      if (!Array.isArray(embedding) || embedding.length === 0) return;
+      if (!Array.isArray(embedding) || embedding.length === 0) {
+        endAfterUnconfirmed("the provider returned no vector, so this attempt wrote nothing");
+        return;
+      }
       const model = getModelId();
+      // Test-only: inert unless the fault-injection opt-in is armed. The vector
+      // is computed and the id's lock is not yet taken.
+      const entry = txnPausePoint("backfill-embedding-entry");
+      if (entry) await entry;
       // The vector fields of the committed row the update replaces, for the
       // guard notification.
       let replaced: { embedding?: unknown; embeddingModel?: unknown } | null = null;
       try {
-        const outcome = await writeBackCommittedRow(
-          table,
-          memoryId,
-          (row: any) => {
-            const rowText = row ? skillEmbedText(row) : undefined;
-            if (typeof rowText !== "string" || rowText.length === 0) return { skip: true };
-            if (row.embedding?.length > 100) return { skip: true };
-            replaced = { embedding: row.embedding, embeddingModel: row.embeddingModel };
-            // Only `embedding`, its model stamp and its text hash: an incremental
-            // update, never a full-row put of the row read above (flair#2470,
-            // flair#2465). The newly computed hash is of `text`, the text this
-            // vector was computed from (null for an empty owner).
-            return { update: { embedding, embeddingModel: model, embeddedContentHash: hashEmbeddedText(row.agentId, text) ?? null } };
-          },
-          {
-            label: "backfillEmbedding",
-            expectedRow: record,
-            // Compare the text-selecting fields before staging, after the plan's skip checks.
-            matchFields: [...MEMORY_EMBEDDING_INPUT_FIELDS, "tags"],
-            pausePre: () => txnPausePoint("backfill-embedding-pre"),
-            pausePoint: () => txnPausePoint("backfill-embedding"),
-          },
-        );
+        const locked = await withMemoryWriteLockOnce(table.primaryStore, [memoryId], async () => {
+          const written = await writeBackCommittedRow(
+            table,
+            memoryId,
+            (row: any) => {
+              const rowText = row ? skillEmbedText(row) : undefined;
+              if (typeof rowText !== "string" || rowText.length === 0) return { skip: true };
+              if (alreadyEmbedded(row)) return { skip: true };
+              replaced = { embedding: row.embedding, embeddingModel: row.embeddingModel };
+              // Only `embedding`, its model stamp and its text hash: an incremental
+              // update, never a full-row put of the row read above (flair#2470,
+              // flair#2465). The newly computed hash is of `text`, the text this
+              // vector was computed from (null for an empty owner).
+              return { idempotent: true, update: { embedding, embeddingModel: model, embeddedContentHash: hashEmbeddedText(row.agentId, text) ?? null } };
+            },
+            {
+              label: "backfillEmbedding",
+              onUnconfirmed: () => { unconfirmed = true; ownUnconfirmed = { embedding, text }; },
+              expectedRow: record,
+              // Compare the text-selecting fields before staging, after the plan's skip checks.
+              matchFields: [...MEMORY_EMBEDDING_INPUT_FIELDS, "tags"],
+              // After the commit, the committed row must still carry the text this
+              // vector was computed from.
+              verifyAlso: (committed: any) => skillEmbedText(committed) === text,
+              pausePre: () => txnPausePoint("backfill-embedding-pre"),
+              pausePoint: () => txnPausePoint("backfill-embedding"),
+              pauseAfterStage: () => txnPausePoint("backfill-embedding-staged"),
+              pauseBeforeCommit: () => txnPausePoint("backfill-embedding-commit"),
+            },
+          );
+          // Test-only: the update has committed and been read back; the lock is
+          // still held. A plan that skipped wrote nothing, so it does not reach
+          // this point.
+          if (!("skip" in written)) {
+            const committed = txnPausePoint("backfill-embedding-committed");
+            if (committed) await committed;
+          }
+          return written;
+        }, { phase: "auto-embed" });
+        if (locked.kind !== "done") {
+          if (unconfirmed) endAfterUnconfirmed(`skipped; the per-id write lock answered ${locked.kind}, so this attempt wrote nothing`);
+          else console.warn("[auto-embed] %s: skipped; the per-id write lock answered %s, so nothing was written", memoryId, locked.kind);
+          return;
+        }
+        const outcome = locked.value;
         if ("update" in outcome) {
-          // After the commit: the stamp the update stored (an absent one reads as
-          // untrusted and closes the guard) and the row it replaced.
+          lastAttemptConfirmed = true;
           noteWriteStamp(outcome.update.embeddingModel as string | null | undefined, replaced);
           console.log(`[auto-embed] ${memoryId}: ${(outcome.update.embedding as number[]).length}d`);
+        } else if (unconfirmed) {
+          console.warn("[auto-embed] %s: an earlier attempt's vector was not confirmed on the committed row, and the row is now skipped; outcome: unconfirmed", memoryId, { outcome: "unconfirmed" });
         }
         return;
       } catch (err) {
@@ -246,7 +357,11 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
       }
     }
   } catch (err: any) {
-    console.error(`[auto-embed] Failed for ${memoryId}: ${err.message}`);
+    if (lastAttemptConfirmed) {
+      console.error("[auto-embed] %s for %s: the vector is confirmed on the committed row; the embedding-space write-stamp notification failed: %s", "Outcome confirmed", memoryId, err.message, { outcome: "stamp_notification_failed" });
+      return;
+    }
+    console.error("[auto-embed] %s for %s: %s", unconfirmed ? "Outcome unconfirmed" : "Failed", memoryId, err.message, ...(unconfirmed ? [{ outcome: "unconfirmed" }] : err instanceof WriteBackConflictError ? [{ outcome: err.outcome }] : []));
   }
 }
 
@@ -455,7 +570,7 @@ server.http(async (request: any, nextLayer: any) => {
   // Scheme names are case-insensitive (RFC 9110): "basic"/"BASIC"/"Basic" all
   // select the Basic branch below, exactly as "Basic" does. Used for both the
   // /FederationPair public-bypass test and the Basic branch itself.
-  const isBasic = /^Basic /i.test(header);
+  const isBasic = BASIC_AUTH_HEADER_RE.test(header);
   const isA2APath = routedDecisionPath === "/a2a" || routedDecisionPath === "/A2AAdapter" || routedDecisionPath.startsWith("/A2AAdapter/");
   if (!isTpsEd25519 && (
     routedDecisionPath === "/health" ||
@@ -538,10 +653,7 @@ server.http(async (request: any, nextLayer: any) => {
   // Checked BEFORE Ed25519 so admin tools can use simple auth.
   if (isBasic) {
     try {
-      const decoded = Buffer.from(header.slice(6), "base64").toString("utf-8");
-      const colonIdx = decoded.indexOf(":");
-      const user = colonIdx >= 0 ? decoded.slice(0, colonIdx) : decoded;
-      const pass = colonIdx >= 0 ? decoded.slice(colonIdx + 1) : "";
+      const { user, pass } = parseBasicAuthHeader(header)!;
 
       // Path 1: Env-var fast-path (back-compat). Only matches user==="admin"
       // with exact HDB_ADMIN_PASSWORD. Non-match falls through to Path 2.
@@ -661,6 +773,13 @@ server.http(async (request: any, nextLayer: any) => {
   }
 
   const { agentId, tsRaw, nonce, signatureB64 } = parsed;
+
+  // Refuse a signed request whose raw target WHATWG URL parsing would rewrite
+  // before verification, so the signature covers the target exactly as received.
+  if (!whatwgUrlMatchesRawTarget(rawTarget)) {
+    return nonCanonicalRequestTargetRefusal(String(request.method ?? ""));
+  }
+
   const ts = Number(tsRaw);
   const now = Date.now();
 
@@ -704,7 +823,12 @@ server.http(async (request: any, nextLayer: any) => {
 
   request.tpsAgent = agentId;
   (request as any)._tpsAuthVerified = true;
-  request.tpsAgentIsAdmin = await isAdmin(agentId);
+  // The admin decision uses the Agent row the signature was just verified
+  // against, plus the configured admin ids. The marker tells a handler that
+  // tpsAgentIsAdmin already is that decision (agent-auth.ts
+  // annotatedCallerIsAdmin), so no handler re-decides it from another read.
+  request.tpsAgentIsAdmin = agentIsAdmin(agentId, agent);
+  (request as any).tpsAgentAdminFromVerifiedRow = true;
 
   // RESHAPE (auth-rbac) — THE FLIP: per-agent DE-ELEVATION. A cryptographically-
   // verified NON-admin agent resolves to the least-privilege `flair-agent` user,

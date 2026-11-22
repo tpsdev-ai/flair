@@ -42,7 +42,31 @@ export interface MigrationProgress {
   state: MigrationState;
   /** Present when state is "halted" or "failed" — the exact, actionable reason. */
   reason?: string;
+  /**
+   * Rows recorded as unconfirmed (flair#2840): a write this migration made but
+   * could not verify, or a loopback re-embed that answered 503
+   * `write_outcome_unknown`, which can reflect an earlier writer's unresolved
+   * write rather than this migration's. A listed id leaves the count when a
+   * later batch verifies its write, or a later read answers `at-target` (the
+   * row needs no further write from this migration) or `no-row`. A later cycle
+   * starts from the record it reads from the state file, whose id list is
+   * capped, so ids beyond the list are carried only in its count, which no
+   * later batch or read reduces. `unconfirmedIds` carries at most
+   * {@link UNCONFIRMED_IDS_LIMIT} of them; this count is not capped.
+   */
+  rowsUnconfirmed?: number;
+  /** Up to {@link UNCONFIRMED_IDS_LIMIT} unconfirmed row ids, in the order they
+   *  were recorded. Absent when the record names none. */
+  unconfirmedIds?: string[];
 }
+
+/**
+ * How many of a run's unconfirmed row ids are reported. During a run the
+ * runner holds the ids recorded in this run, and the listed ids it carried in,
+ * in a Set; the list written to the progress record and the state file is
+ * capped at this many. The count is not capped (flair#2840).
+ */
+export const UNCONFIRMED_IDS_LIMIT = 100;
 
 /** Table(s) a migration's source-field envelope hash is computed over. */
 export type SourceTable = "Memory" | "Relationship";
@@ -52,6 +76,16 @@ export interface RunBatchResult {
   processed: number;
   /** IDs touched this batch — used by the content-transform gate (old-row envelope + new-row presence). */
   touchedIds: string[];
+  /**
+   * IDs this batch reports as unconfirmed (flair#2840): a write the batch made
+   * but could not verify, or a loopback re-embed that answered 503
+   * `write_outcome_unknown`, which can reflect an earlier writer's unresolved
+   * write. Disjoint from `touchedIds`: a row whose write a later attempt
+   * in the same batch verified belongs in `touchedIds`, not here. The runner
+   * unions these across batches, removing the ids a later batch verifies, into
+   * the progress record.
+   */
+  unconfirmedIds?: string[];
   /**
    * content-transform ONLY: `${table}:${id}` -> hash of that row's
    * SOURCE_FIELDS as they were immediately before this batch superseded it.
@@ -71,6 +105,30 @@ export interface RunBatchResult {
    */
   newRowIds?: string[];
 }
+
+/**
+ * Thrown by a migration's run() on the paths that wrap the failure ending a
+ * batch (flair#2840): the synthetic write-back, the visibility backfill and
+ * embedding-stamp's `.content`-suffix retry read. It carries that batch's
+ * outcomes so far — the rows it touched and the rows it recorded as
+ * unconfirmed — so the runner can merge them into the unconfirmed record even
+ * though no {@link RunBatchResult} is returned. A throw from a path that does
+ * not wrap its batch carries no outcomes.
+ */
+export class BatchOutcomeError extends Error {
+  readonly touchedIds: readonly string[];
+  readonly unconfirmedIds: readonly string[];
+
+  constructor(outcome: { touchedIds: readonly string[]; unconfirmedIds: readonly string[] }, cause: unknown) {
+    super((cause as Error)?.message ?? String(cause), { cause });
+    this.name = "BatchOutcomeError";
+    this.touchedIds = [...outcome.touchedIds];
+    this.unconfirmedIds = [...outcome.unconfirmedIds];
+  }
+}
+
+/** What a re-read of a recorded unconfirmed row shows (flair#2840). */
+export type UnconfirmedVerdict = "at-target" | "no-row" | "pending";
 
 export interface Migration {
   /** Stable, unique identifier — used as the state-file key, lock scope note, and ledger refId. */
@@ -129,4 +187,16 @@ export interface Migration {
    * additive opt-in, never required for correctness of the base gate.
    */
   recheckPending?(limit: number): Promise<{ sampled: number; falsePositives: number }>;
+  /**
+   * OPTIONAL (flair#2840). The runner calls this for each row id a state-file
+   * record lists as unconfirmed, on each cycle that acquires the migration lock
+   * (including one with no pending work), to decide whether the id can be
+   * cleared: `at-target` when this read found the row needs no further write
+   * from this migration, `no-row` when it found no row, `pending` to keep the
+   * id. For visibility backfill, `at-target` means a visibility value is
+   * present, whoever wrote it; an owner's later value supersedes the
+   * unconfirmed write. A read that throws is treated as unknown and also keeps
+   * the id. Omitted by migrations that never report unconfirmed ids.
+   */
+  checkUnconfirmed?(id: string): Promise<UnconfirmedVerdict>;
 }

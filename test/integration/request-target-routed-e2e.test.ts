@@ -138,6 +138,15 @@ const other = mkAgent("rtr-other");
 const admin = mkAgent("rtr-admin");
 const NOW = new Date().toISOString();
 
+/**
+ * (1) The other-owned id containing `/`, with the injected-load-failure marker,
+ * and the caller-owned row its shorter prefix names. Arming the failure for the
+ * full id makes a middleware that decides on the prefix reach the table guard
+ * instead of answering its own named refusal.
+ */
+const ROUTED_VICTIM_ID = `${LOAD_FAILURE_MARKER}-routed/victim`;
+const ROUTED_PREFIX_ID = `${LOAD_FAILURE_MARKER}-routed`;
+
 /** Arm the injected row-load failure for one exact id / disarm it, via the ROOTPATH sentinel. */
 function arm(id: string): void { writeFileSync(join(harper.installDir, ARM_FILE), armFor(id)); }
 function disarm(): void { const p = join(harper.installDir, ARM_FILE); if (existsSync(p)) rmSync(p, { force: true }); }
@@ -206,29 +215,30 @@ const HAS_MODEL = existsSync(join(process.env.FLAIR_MODELS_DIR ?? join(process.c
 
 // A rate-limit budget small enough to spend in a few requests.
 const OAUTH_LIMIT = 5;
-const savedEnv: Record<string, string | undefined> = {};
 
 beforeAll(async () => {
-  for (const k of ["FLAIR_OAUTH_RATE_LIMIT", "FLAIR_RATE_LIMIT", "FLAIR_TRUSTED_PROXY"]) savedEnv[k] = process.env[k];
-  process.env.FLAIR_OAUTH_RATE_LIMIT = String(OAUTH_LIMIT);
-  delete process.env.FLAIR_RATE_LIMIT;
-  delete process.env.FLAIR_TRUSTED_PROXY;
-
   component = componentWithOwnerGuardLoadFailure();
   // Omit the migration trigger from this private copy: its re-embed can give
   // the seeded Memory row (3) a vector the backfill did not write.
   const trigger = join(component.dir, OMITTED_TRIGGER_REL);
   rmSync(trigger, { force: true });
   if (existsSync(trigger)) throw new Error(`could not omit ${trigger}`);
-  harper = await startHarper({ cwd: component.dir });
+  harper = await startHarper({
+    cwd: component.dir,
+    serverEnv: {
+      FLAIR_OAUTH_RATE_LIMIT: String(OAUTH_LIMIT),
+      FLAIR_RATE_LIMIT: "",
+      FLAIR_TRUSTED_PROXY: "",
+    },
+  });
   assertOwnInstance(harper);
   for (const a of [owner, other]) {
     await seed("Agent", { id: a.id, name: a.id, role: "agent", admin: false, publicKey: a.publicKey, createdAt: NOW });
   }
   await seed("Agent", { id: admin.id, name: admin.id, role: "admin", admin: true, publicKey: admin.publicKey, createdAt: NOW });
   // (1) Record id: a caller-owned prefix row and an other-owned slash-id row.
-  await seed("Asset", { id: "rtr-safe", agentId: owner.id, memoryId: "m0", contentType: "image/png", createdAt: NOW });
-  await seed("Asset", { id: "rtr-safe/victim", agentId: other.id, memoryId: "m-victim", contentType: "image/png", createdAt: NOW });
+  await seed("Asset", { id: ROUTED_PREFIX_ID, agentId: owner.id, memoryId: "m0", contentType: "image/png", createdAt: NOW });
+  await seed("Asset", { id: ROUTED_VICTIM_ID, agentId: other.id, memoryId: "m-victim", contentType: "image/png", createdAt: NOW });
   await seed("Asset", { id: "rtr-own/slash", agentId: owner.id, memoryId: "m-own", contentType: "image/png", createdAt: NOW });
   // An other-owned row whose id ends in `/`, the id Harper's RequestTarget reports for a trailing-slash collection target.
   await seed("Asset", { id: "rtr-coll/", agentId: other.id, memoryId: "m-coll", contentType: "image/png", createdAt: NOW });
@@ -239,19 +249,27 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) { disarm(); await stopHarper(harper); }
   if (component) component.cleanup();
-  for (const [k, v] of Object.entries(savedEnv)) {
-    if (v === undefined) delete process.env[k]; else process.env[k] = v;
-  }
 }, HARPER_STOP_BUDGET_MS);
 
 describe("(1) the owner guard decides on the full routed record id", () => {
-  it("a non-owner PATCH of an id containing `/` is refused and leaves the row unchanged", async () => {
-    for (const target of ["/Asset/rtr-safe%2Fvictim", "/Asset/rtr-safe/victim"]) {
-      const res = await signed(owner, "PATCH", target, { memoryId: "m-hijacked" });
-      expect([401, 403]).toContain(res.status); // refused, not applied
-      const row = await readRow("Asset", "rtr-safe/victim", ["id", "agentId", "memoryId"]);
-      expect(row?.agentId, `${target} left owner intact`).toBe(other.id);
-      expect(row?.memoryId, `${target} left value intact`).toBe("m-victim");
+  it("a non-owner PATCH of an id containing `/` is decided by the middleware's stored-owner read on the full id", async () => {
+    // Arm the injected load failure for the EXACT id Harper routes to. A
+    // middleware that read a different id (the caller-owned prefix, say) would
+    // not trigger the failure, so it could not answer the middleware's named
+    // 503 owner_lookup_failed.
+    const before = await readRow("Asset", ROUTED_VICTIM_ID, ["id", "agentId", "memoryId"]);
+    expect(before?.agentId, "the other-owned row was not seeded").toBe(other.id);
+
+    arm(ROUTED_VICTIM_ID);
+    try {
+      for (const target of [`/Asset/${encodeURIComponent(ROUTED_VICTIM_ID)}`, `/Asset/${ROUTED_VICTIM_ID}`]) {
+        const res = await signed(owner, "PATCH", target, { memoryId: "m-hijacked" });
+        expect(res.status, `${target} → ${res.status}: ${res.body.slice(0, 200)}`).toBe(503);
+        expect(JSON.parse(res.body).error, `${target} must answer with the middleware's named refusal`).toBe("owner_lookup_failed");
+        expect(await readRow("Asset", ROUTED_VICTIM_ID, ["id", "agentId", "memoryId"]), `${target} changed the row`).toEqual(before);
+      }
+    } finally {
+      disarm();
     }
   }, 60_000);
 

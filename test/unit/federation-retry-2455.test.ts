@@ -90,7 +90,7 @@ describe("flair#2455 — closed SkipReason union and retry classification", () =
   test("the retryable subset is exactly the reasons the design names", () => {
     const actual: string[] = [...RETRYABLE_SKIP_REASONS].sort();
     expect(actual).toEqual(
-      ["future_timestamp", "merge_error", "merge_target_changed", "unknown_originator_key", "presence_agent_not_replicated"].sort(),
+      ["future_timestamp", "merge_error", "merge_target_busy", "merge_target_changed", "unknown_originator_key", "presence_agent_not_replicated"].sort(),
     );
     // Each retryable reason is marked retryable in the map, and nothing else is.
     for (const reason of [...SKIP_REASONS]) {

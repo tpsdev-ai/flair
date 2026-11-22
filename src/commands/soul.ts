@@ -18,7 +18,6 @@ import { encodeRecordId } from "../lib/record-id-path.js";
 export type SoulCli = {
   api: (...args: any[]) => Promise<any>;
   resolveSigningAgentId: (opts: { agent?: string }, command?: string) => ResolvedSigningIdentity;
-  applyAdminPassFile: (opts: { adminPass?: string; adminPassFile?: string }) => void;
   addSharedCredentialOptions: (cmd: Command) => Command;
 };
 
@@ -35,9 +34,6 @@ function api(...args: any[]): Promise<any> {
 function resolveSigningAgentId(opts: { agent?: string }, command?: string): ResolvedSigningIdentity {
   return cli.resolveSigningAgentId(opts, command);
 }
-function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
-  cli.applyAdminPassFile(opts);
-}
 function addSharedCredentialOptions(cmd: Command): Command {
   return cli.addSharedCredentialOptions(cmd);
 }
@@ -53,7 +49,6 @@ export function register(program: Command): void {
     .option("--url <url>", "Flair base URL (overrides the URL resolved from config; env: FLAIR_URL)")
     .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (opts: any) => {
-      applyAdminPassFile(opts);
       // PUT /Soul/{agentId:key} (upsert by id), matching flair-client's soul.set().
       // The Soul table resource has no POST handler, so a collection POST /Soul
       // 405s; the record must be written by its primary key. (#498)
@@ -92,7 +87,6 @@ export function register(program: Command): void {
     .option("--url <url>", "Flair base URL (overrides the URL resolved from config; env: FLAIR_URL)")
     .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (id: string, opts: any) => {
-      applyAdminPassFile(opts);
       // flair#1183: /Soul reads are verified (any registered agent). Resolve the
       // signer through the canonical seam so soul get honors the SAME precedence
       // as every other family; a null result lets api() fall to admin-pass/floor.
@@ -125,7 +119,6 @@ export function register(program: Command): void {
     .option("--url <url>", "Flair base URL (overrides the URL resolved from config; env: FLAIR_URL)")
     .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (opts: any) => {
-      applyAdminPassFile(opts);
       const { agentId, source } = resolveSigningAgentId(opts, "soul list");
       if (!agentId) {
         console.error(`${render.icons.error} --agent <id> required (or set FLAIR_AGENT_ID)`);
