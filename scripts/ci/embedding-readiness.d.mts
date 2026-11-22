@@ -5,6 +5,12 @@ export const EMBEDDING_RETRY_BACKOFF_MS: number;
 export const MAX_READINESS_ATTEMPTS: number;
 export const PROVIDER_TIMEOUT_STATUS: number;
 export const PROVIDER_TIMEOUT_ERROR: string;
+export const OPS_TIMEOUT_MS: number;
+
+export interface ReadinessConfirmation {
+  ready: boolean;
+  detail?: string;
+}
 
 export interface ReadinessResult {
   elapsedMs: number;
@@ -13,6 +19,7 @@ export interface ReadinessResult {
 
 export interface AwaitEmbeddingReadyOptions {
   attempt: (remainingMs: number) => Promise<Response>;
+  confirm?: (res: Response, remainingMs: number) => Promise<ReadinessConfirmation>;
   label?: string;
   deadlineMs?: number;
   backoffMs?: number;

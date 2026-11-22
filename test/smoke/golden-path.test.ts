@@ -23,8 +23,10 @@ import {
   writeMemory,
   searchMemories,
   bootstrapAgent,
+  INSTANCE_RESOLVE_BUDGET_MS,
   type FlairInstance,
 } from "./helpers/flair-instance.js";
+import { EMBEDDING_READY_DEADLINE_MS, OPS_TIMEOUT_MS } from "../../scripts/ci/embedding-readiness.mjs";
 
 import {
   assertShape,
@@ -49,9 +51,12 @@ const MARKER_CONTENT = `Smoke test marker ${RANDOM}`;
 // per-write 10s client timeout on a cold/loaded CI runner, so the warm-up must
 // be allowed to run well past both the default hook timeout and that 10s abort.
 // flair#3052: the hook covers the whole path, not only the wait — instance
-// resolution (up to 30 s), the warm-up agent create (10 s), its 180 s
-// total-elapsed wait, and its two deletes (10 s each), 240 s worst case.
+// resolution (up to 30 s), the warm-up agent create (10 s, a 401 retry sharing
+// one signal), its 180 s total-elapsed wait, and its two deletes (10 s each),
+// 240 s worst case.
 const SETUP_TIMEOUT_MS = 250_000;
+const WARMUP_WORST_CASE_MS =
+  INSTANCE_RESOLVE_BUDGET_MS + OPS_TIMEOUT_MS * 3 + EMBEDDING_READY_DEADLINE_MS;
 
 beforeAll(async () => {
   flair = await resolveFlairInstance();
@@ -81,6 +86,12 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 
 describe("Golden path: agent + memory + search + bootstrap", () => {
+  test("the setup hook budget covers instance resolution, the 401 fallback ops calls, the wait and both deletes", () => {
+    expect(SETUP_TIMEOUT_MS).toBeGreaterThanOrEqual(WARMUP_WORST_CASE_MS);
+    // Near its bound: the hook must not drift far above the path it covers.
+    expect(SETUP_TIMEOUT_MS - WARMUP_WORST_CASE_MS).toBeLessThanOrEqual(10_000);
+  });
+
   test("Step 1: Create agent", async () => {
     const t0 = performance.now();
 

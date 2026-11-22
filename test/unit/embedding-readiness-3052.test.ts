@@ -181,8 +181,92 @@ describe("embedding readiness waits on total elapsed time (flair#3052)", () => {
 
     const error = await call.then(() => null, (err: Error) => err);
     expect(error?.message).toContain("never became ready");
-    expect(error?.message).toContain("answered after the 100ms client-side wait bound");
+    expect(error?.message).toContain("answered at or after the 100ms client-side wait bound");
     expect(attempts).toBe(1);
+  }, 5_000);
+
+  test("a success exactly at the deadline is not accepted", async () => {
+    const clock = virtualClock();
+    let attempts = 0;
+    const call = awaitEmbeddingReady({
+      label: "unit",
+      deadlineMs: 100,
+      now: clock.now,
+      sleep: clock.sleep,
+      log: () => {},
+      attempt: async () => {
+        attempts += 1;
+        clock.advance(100); // now() === deadline
+        return accepted();
+      },
+    });
+
+    const error = await call.then(() => null, (err: Error) => err);
+    expect(error?.message).toContain("never became ready");
+    expect(error?.message).toContain("at or after the 100ms client-side wait bound");
+    expect(attempts).toBe(1);
+  }, 5_000);
+
+  test("a stalled wall clock cannot extend the bound", async () => {
+    const realNow = Date.now;
+    Date.now = () => 0;
+    try {
+      const call = awaitEmbeddingReady({
+        label: "unit",
+        deadlineMs: 50,
+        sleep: async () => {},
+        log: () => {},
+        attempt: async () => {
+          await new Promise((done) => setTimeout(done, 80));
+          return accepted();
+        },
+      });
+      const error = await call.then(() => null, (err: Error) => err);
+      expect(error?.message).toContain("never became ready");
+    } finally {
+      Date.now = realNow;
+    }
+  }, 5_000);
+
+  test("a backward wall clock cannot extend the bound", async () => {
+    const realNow = Date.now;
+    let calls = 0;
+    Date.now = () => (calls++ === 0 ? 1_000_000 : 0);
+    try {
+      const call = awaitEmbeddingReady({
+        label: "unit",
+        deadlineMs: 50,
+        sleep: async () => {},
+        log: () => {},
+        attempt: async () => {
+          await new Promise((done) => setTimeout(done, 80));
+          return accepted();
+        },
+      });
+      const error = await call.then(() => null, (err: Error) => err);
+      expect(error?.message).toContain("never became ready");
+    } finally {
+      Date.now = realNow;
+    }
+  }, 5_000);
+
+  test("the readiness log line reports the measured duration", async () => {
+    const clock = virtualClock();
+    const lines: string[] = [];
+    const result = await awaitEmbeddingReady({
+      label: "unit",
+      deadlineMs: 5_000,
+      now: clock.now,
+      sleep: clock.sleep,
+      log: (message: string) => lines.push(message),
+      attempt: async () => {
+        clock.advance(1_000);
+        return accepted();
+      },
+    });
+
+    expect(result).toEqual({ elapsedMs: 1_000, attempts: 1 });
+    expect(lines).toEqual(["unit: embedding ready after 1000ms and 1 attempt(s)"]);
   }, 5_000);
 
   test("the attempt loop keeps a hard bound even when the clock never advances", async () => {
@@ -201,6 +285,80 @@ describe("embedding readiness waits on total elapsed time (flair#3052)", () => {
 
     await expect(call).rejects.toThrow("never became ready");
     expect(attempts).toBe(MAX_READINESS_ATTEMPTS);
+  }, 5_000);
+
+  function warmFake(clock: ReturnType<typeof virtualClock>, rowFor: (id: string) => Record<string, unknown>) {
+    let memoryId = "";
+    const fakeFetch = async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body?.operation === "insert" && body?.table === "Agent") {
+        return new Response("inserted", { status: 200 });
+      }
+      if (body?.operation === "delete") return new Response("{}", { status: 200 });
+      if (body?.operation === "search_by_id") {
+        return new Response(JSON.stringify([rowFor(memoryId)]), { status: 200 });
+      }
+      memoryId = String(body.id ?? "");
+      clock.advance(60);
+      return new Response("{}", { status: 200 });
+    };
+    return fakeFetch as typeof fetch;
+  }
+
+  test("a 2xx write whose row stores no vector is not ready", async () => {
+    const clock = virtualClock();
+    const error = await warmInstanceEmbeddings({
+      baseUrl: "http://127.0.0.1:1",
+      opsUrl: "http://127.0.0.1:2",
+      label: "unit warm-up",
+      deadlineMs: 200,
+      backoffMs: 0,
+      maxAttempts: 3,
+      now: clock.now,
+      sleep: clock.sleep,
+      log: () => {},
+      fetchImpl: warmFake(clock, (id) => ({ id, embedding: null, embeddingModel: null })),
+    }).then(() => null, (err: Error) => err);
+
+    expect(error?.message).toContain("never became ready");
+    expect(error?.message).toContain("stored no vector");
+  }, 5_000);
+
+  test("a 2xx write whose row stores no model stamp is not ready", async () => {
+    const clock = virtualClock();
+    const error = await warmInstanceEmbeddings({
+      baseUrl: "http://127.0.0.1:1",
+      opsUrl: "http://127.0.0.1:2",
+      label: "unit warm-up",
+      deadlineMs: 200,
+      backoffMs: 0,
+      maxAttempts: 3,
+      now: clock.now,
+      sleep: clock.sleep,
+      log: () => {},
+      fetchImpl: warmFake(clock, (id) => ({ id, embedding: [0.1, 0.2], embeddingModel: null })),
+    }).then(() => null, (err: Error) => err);
+
+    expect(error?.message).toContain("never became ready");
+    expect(error?.message).toContain("stored no embedding model stamp");
+  }, 5_000);
+
+  test("a row read back with a vector and a stamp is ready", async () => {
+    const clock = virtualClock();
+    const result = await warmInstanceEmbeddings({
+      baseUrl: "http://127.0.0.1:1",
+      opsUrl: "http://127.0.0.1:2",
+      label: "unit warm-up",
+      deadlineMs: 200,
+      backoffMs: 0,
+      now: clock.now,
+      sleep: clock.sleep,
+      log: () => {},
+      fetchImpl: warmFake(clock, (id) => ({ id, embedding: [0.1, 0.2], embeddingModel: "unit-model" })),
+    });
+
+    expect(result.attempts).toBe(1);
+    expect(result.elapsedMs).toBe(60);
   }, 5_000);
 });
 
@@ -232,12 +390,17 @@ describe("the client bound cannot outlive the deadline (flair#3052)", () => {
 
   test("every warm-up Memory fetch carries an AbortSignal", async () => {
     const calls: Array<{ url: string; hasSignal: boolean }> = [];
+    let memoryId = "";
     const fakeFetch = async (url: string | URL | Request, init?: RequestInit) => {
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       if (body?.operation === "insert" && body?.table === "Agent") {
         return new Response("inserted", { status: 200 });
       }
       if (body?.operation === "delete") return new Response("{}", { status: 200 });
+      if (body?.operation === "search_by_id") {
+        return new Response(JSON.stringify([{ id: memoryId, embedding: [0.1, 0.2], embeddingModel: "unit-model" }]), { status: 200 });
+      }
+      memoryId = String(body.id ?? "");
       calls.push({
         url: String(url),
         hasSignal: init?.signal instanceof AbortSignal,
@@ -309,13 +472,18 @@ describe("the client bound cannot outlive the deadline (flair#3052)", () => {
 describe("warm-up cleanup is visible and bounded (flair#3052)", () => {
   test("failed deletes fail the wait and name the memory ids and the agent", async () => {
     const calls: any[] = [];
+    let memoryId = "";
     const fakeFetch = async (_url: string | URL | Request, init?: RequestInit) => {
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       calls.push(body);
       if (body?.operation === "insert" && body?.table === "Agent") {
         return new Response("inserted", { status: 200 });
       }
+      if (body?.operation === "search_by_id") {
+        return new Response(JSON.stringify([{ id: memoryId, embedding: [0.1, 0.2], embeddingModel: "unit-model" }]), { status: 200 });
+      }
       if (body?.operation === "delete") return new Response("cleanup down", { status: 500 });
+      memoryId = String(body.id ?? "");
       return new Response("{}", { status: 200 });
     };
 

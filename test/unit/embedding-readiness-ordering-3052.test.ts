@@ -12,10 +12,11 @@ import { memoryProviderTimeoutResponse } from "../../resources/memory-write-lock
  * A real Harper with a warm model lets both entry paths pass even when the
  * readiness call is removed. These tests run the actual entry files against a
  * fake instance that answers the first warm-up write with the real
- * `503 memory_provider_timeout` and refuses any application write until a
- * warm-up succeeds. The smoke test runs as its own bun process; the CLI script
- * runs as its own bash process with a stand-in CLI that records when each
- * command starts.
+ * `503 memory_provider_timeout`, reports a row read-back only after a vector and
+ * stamp are stored, and refuses the smoke path's application writes until then.
+ * The stand-in CLI records when each command starts instead of sending writes to
+ * the fake instance. The smoke test runs as its own bun process; the CLI script
+ * runs as its own bash process.
  */
 
 const ROOT = join(import.meta.dir, "..", "..");
@@ -27,6 +28,7 @@ interface FakeState {
   afterTimeouts: "success" | "error";
   violations: number;
   warmupWrites: number;
+  warmRows: Map<string, Record<string, unknown>>;
   applicationWrites: Array<{ at: number; content: string }>;
 }
 
@@ -73,6 +75,7 @@ async function startFakeHarper(mode: "retry" | "timeout-then-error"): Promise<{
     afterTimeouts: mode === "retry" ? "success" : "error",
     violations: 0,
     warmupWrites: 0,
+    warmRows: new Map(),
     applicationWrites: [],
   };
   let ops: Server | undefined;
@@ -118,7 +121,11 @@ async function handleOps(req: import("node:http").IncomingMessage, res: import("
   if (body.operation === "upsert") return send(res, 200, '{"upserted":1}');
   if (body.operation === "delete") return send(res, 200, '{"deleted":1}');
   if (body.operation === "search_by_value") return send(res, 200, "[]");
-  if (body.operation === "search_by_id") return send(res, 200, "[]");
+  if (body.operation === "search_by_id") {
+    const ids: string[] = Array.isArray(body.ids) ? body.ids : [];
+    const rows = ids.map((id) => state.warmRows.get(id)).filter(Boolean);
+    return send(res, 200, JSON.stringify(rows));
+  }
   return send(res, 200, "{}");
 }
 
@@ -138,6 +145,8 @@ async function handleHttp(req: import("node:http").IncomingMessage, res: import(
         return send(res, 500, '{"error":"provider_unavailable"}');
       }
       state.warmupWrites += 1;
+      const id = String(body.id ?? "");
+      state.warmRows.set(id, { id, embedding: [0.1, 0.2], embeddingModel: "fake-model" });
       state.readyAt ??= Date.now();
       return send(res, 200, "{}");
     }
@@ -313,6 +322,10 @@ describe("flair#3052 — ordering on the CLI E2E entry path", () => {
       const at = Number(memoryAdd!.split(" ")[1]);
       expect(at).toBeGreaterThanOrEqual(fake.state.readyAt!);
       expect(lines.some((line) => line.startsWith("agent "))).toBe(true);
+      expect(output).toMatch(/Integration Tests \(E2E CLI\): embedding ready after \d+ms and \d+ attempt\(s\)/);
+      expect(readFileSync(join(dir, "summary.md"), "utf8")).toMatch(
+        /- Integration Tests \(E2E CLI\): embedding model ready in \d+ ms after \d+ attempt\(s\)\n/,
+      );
     } finally {
       await fake.stop();
     }

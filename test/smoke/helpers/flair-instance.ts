@@ -40,6 +40,9 @@ export interface FlairInstance {
 // Resolution
 // ---------------------------------------------------------------------------
 
+/** Budget for an instance to answer `/Health` before the smoke path gives up. */
+export const INSTANCE_RESOLVE_BUDGET_MS = 30_000;
+
 function resolvePorts(): { httpPort: number; opsPort: number } {
   if (process.env.FLAIR_TEST_URL) {
     const u = new URL(process.env.FLAIR_TEST_URL);
@@ -67,7 +70,7 @@ export async function resolveFlairInstance(): Promise<FlairInstance> {
   const authHeader = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
   // Wait for Flair to be healthy
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + INSTANCE_RESOLVE_BUDGET_MS;
   let ready = false;
 
   while (Date.now() < deadline) {

@@ -2,14 +2,20 @@
 // Shared embedding-readiness wait for CI lanes (flair#3052).
 //
 // Harper loads the embedding model lazily on the first embed and bounds each
-// provider call at about 20 s, so a cold model answers a lane's first memory
+// provider call at about 20 s, so a cold model can answer a lane's first memory
 // write with `503 memory_provider_timeout` ("nothing was written, retry").
 // Retrying by ATTEMPT COUNT gives up too early: three attempts each end at the
 // server's own bound, so the wait stops at ~62 s no matter how large the
 // per-attempt budget is. This wait is bounded by TOTAL ELAPSED TIME instead,
 // up to EMBEDDING_READY_DEADLINE_MS, and retries only a 503 whose JSON `error`
 // field is `memory_provider_timeout` — a different status or error, or an
-// unparseable body, means the provider is not merely cold and fails at once.
+// unparseable body, indicates the provider is not merely cold and fails at
+// once.
+//
+// READY means a stored embedding, not merely a 2xx write: getEmbedding() can
+// return null on a backend failure and Memory PUT can still succeed without a
+// vector, so the wait reads the warm-up row back and requires a non-empty
+// vector with its embedding-model stamp before it reports ready.
 //
 // Used by test/smoke/helpers/flair-instance.ts (in-process) and by
 // test/e2e-cli.sh (this file run directly under node), so the smoke and CLI
@@ -28,10 +34,15 @@ export const MAX_READINESS_ATTEMPTS = 100;
 export const PROVIDER_TIMEOUT_STATUS = 503;
 export const PROVIDER_TIMEOUT_ERROR = "memory_provider_timeout";
 
-const OPS_TIMEOUT_MS = 10_000;
+export const OPS_TIMEOUT_MS = 10_000;
 
 function defaultSleep(ms) {
   return new Promise((done) => setTimeout(done, ms));
+}
+
+/** Monotonic elapsed-time clock: a wall-clock change cannot stretch the wait. */
+function defaultNow() {
+  return performance.now();
 }
 
 /**
@@ -63,6 +74,8 @@ function neverReady(label, elapsedMs, attempts, lastDetail) {
  * non-timeout answer arrives. `remainingMs` is a CLIENT-SIDE wait bound: the
  * caller applies it to its own request. An in-process timeout cannot preempt a
  * provider that never yields the event loop (resources/memory-write-lock.ts).
+ * An optional `confirm(res, remainingMs)` must approve each 2xx before it
+ * counts as ready; a rejection retries within the deadline.
  *
  * @returns {Promise<{elapsedMs: number, attempts: number}>}
  */
@@ -71,7 +84,7 @@ export async function awaitEmbeddingReady(opts) {
   const deadlineMs = opts.deadlineMs ?? EMBEDDING_READY_DEADLINE_MS;
   const backoffMs = opts.backoffMs ?? EMBEDDING_RETRY_BACKOFF_MS;
   const maxAttempts = opts.maxAttempts ?? MAX_READINESS_ATTEMPTS;
-  const now = opts.now ?? (() => Date.now());
+  const now = opts.now ?? defaultNow;
   const sleep = opts.sleep ?? defaultSleep;
   const log = opts.log ?? ((message) => console.log(message));
 
@@ -90,20 +103,42 @@ export async function awaitEmbeddingReady(opts) {
       res = await opts.attempt(remaining);
     } catch (err) {
       lastDetail = `${err?.message ?? err}`;
-      // AbortSignal.timeout runs on the event loop's monotonic clock while the
-      // deadline uses wall-clock time, so the client bound can fire with time
-      // left on the deadline. Treat either as the deadline being spent rather
-      // than a different answer from the provider; report it as never-ready.
+      // `AbortSignal.timeout` bounds the caller's own request and can fire
+      // just before the monotonic deadline is read. Treat a TimeoutError as
+      // the deadline being spent rather than a different answer from the
+      // provider; report it as never-ready.
       if (err?.name === "TimeoutError" || now() >= deadline) break;
       throw new Error(`${label}: embedding provider call failed: ${lastDetail}`);
     }
 
     if (res.ok) {
-      // Check the clock before success too: an answer that arrives after the
-      // deadline is a late answer, not a ready provider.
-      if (now() > deadline) {
-        lastDetail = `HTTP ${res.status} answered after the ${deadlineMs}ms client-side wait bound`;
+      // Check the clock before success too: an answer that arrives at or after
+      // the deadline is a late answer, not a ready provider.
+      if (now() >= deadline) {
+        lastDetail = `HTTP ${res.status} answered at or after the ${deadlineMs}ms client-side wait bound`;
         break;
+      }
+      // A 2xx write is not readiness by itself: confirm the row the write was
+      // meant to store actually carries a usable, server-stamped embedding.
+      // A row without one is retried within the deadline, then the wait fails
+      // closed naming the reason.
+      if (opts.confirm) {
+        let confirmed;
+        try {
+          confirmed = await opts.confirm(res, Math.max(1, deadline - now()));
+        } catch (err) {
+          confirmed = { ready: false, detail: `read-back failed: ${err?.message ?? err}` };
+        }
+        if (!confirmed?.ready) {
+          lastDetail = confirmed?.detail ?? "read-back did not confirm a stored embedding";
+          const wait = Math.min(backoffMs, Math.max(0, deadline - now()));
+          if (wait > 0) await sleep(wait);
+          continue;
+        }
+        if (now() >= deadline) {
+          lastDetail = `HTTP ${res.status} confirmed at or after the ${deadlineMs}ms client-side wait bound`;
+          break;
+        }
       }
       const elapsedMs = Math.round(now() - startedAt);
       log(`${label}: embedding ready after ${elapsedMs}ms and ${attempts} attempt(s)`);
@@ -142,15 +177,18 @@ export function recordStepSummary(label, result) {
   }
 }
 
-async function opsPost(opsUrl, authHeader, body, fetchImpl = fetch) {
+async function opsPost(opsUrl, authHeader, body, fetchImpl = fetch, timeoutMs = OPS_TIMEOUT_MS) {
   const json = JSON.stringify(body);
   const headers = { "Content-Type": "application/json" };
   if (authHeader) headers.Authorization = authHeader;
+  // One bound covers the credential-less retry as well as the first request,
+  // so a 401 fallback cannot double an operation's cost.
+  const signal = AbortSignal.timeout(Math.max(1, Math.ceil(timeoutMs)));
   const send = (withAuth) => fetchImpl(opsUrl, {
     method: "POST",
     headers: withAuth ? headers : { "Content-Type": "application/json" },
     body: json,
-    signal: AbortSignal.timeout(OPS_TIMEOUT_MS),
+    signal,
   });
   let res = await send(true);
   // A Harper with authorizeLocal accepts a credential-less loopback call; the
@@ -210,9 +248,11 @@ async function deleteWarmResidue(opsUrl, authHeader, agentId, memoryIds, fetchIm
 
 /**
  * Wait for one successful embedding on a real instance, through a throwaway
- * agent and memory row the helper deletes when the wait ends. A failed delete
- * fails the wait and names the rows and agent that remain. Same write path a
- * lane's first memory write takes, so the model is warm before that write runs.
+ * agent and memory row the helper deletes when the wait ends. A 2xx write is
+ * not enough: the row is read back and must carry a non-empty embedding with
+ * its model stamp. A failed delete fails the wait and names the rows and agent
+ * that remain. Same write path a lane's first memory write takes, so the model
+ * is warm before that write runs.
  *
  * @returns {Promise<{elapsedMs: number, attempts: number}>}
  */
@@ -221,6 +261,7 @@ export async function warmInstanceEmbeddings(opts) {
   const label = opts.label ?? "embedding readiness";
   const agentId = await createWarmAgent(opts.opsUrl, opts.authHeader, fetchImpl);
   const memoryIds = [];
+  let pendingMemId;
   let result;
   let readinessError;
   try {
@@ -235,6 +276,7 @@ export async function warmInstanceEmbeddings(opts) {
       attempt: (remainingMs) => {
         const memId = `${agentId}-warmup-${Date.now()}-${randomBytes(4).toString("hex")}`;
         memoryIds.push(memId);
+        pendingMemId = memId;
         return fetchImpl(`${opts.baseUrl}/Memory/${encodeURIComponent(memId)}`, {
           method: "PUT",
           headers: {
@@ -251,9 +293,37 @@ export async function warmInstanceEmbeddings(opts) {
           }),
           // `remainingMs` bounds this client's wait, not the provider call: an
           // in-process timeout cannot preempt a provider that never yields
-          // (resources/memory-write-lock.ts).
-          signal: AbortSignal.timeout(Math.max(1, remainingMs)),
+          // (resources/memory-write-lock.ts). A monotonic clock yields fractional
+          // milliseconds, which `AbortSignal.timeout` rejects.
+          signal: AbortSignal.timeout(Math.max(1, Math.ceil(remainingMs))),
         });
+      },
+      confirm: async (_res, remainingMs) => {
+        const memId = pendingMemId;
+        let text;
+        try {
+          text = await opsPost(opts.opsUrl, opts.authHeader, {
+            operation: "search_by_id", database: "flair", table: "Memory",
+            ids: [memId], get_attributes: ["*"],
+          }, fetchImpl, remainingMs);
+        } catch (err) {
+          return { ready: false, detail: `row ${memId} read-back failed: ${err?.message ?? err}` };
+        }
+        let rows;
+        try {
+          rows = JSON.parse(text);
+        } catch {
+          return { ready: false, detail: `row ${memId} read-back was not JSON: ${text}` };
+        }
+        const row = Array.isArray(rows) ? rows.find((candidate) => candidate?.id === memId) : undefined;
+        if (!row) return { ready: false, detail: `row ${memId} read-back found no stored row` };
+        if (!Array.isArray(row.embedding) || row.embedding.length === 0) {
+          return { ready: false, detail: `row ${memId} stored no vector` };
+        }
+        if (typeof row.embeddingModel !== "string" || row.embeddingModel.length === 0) {
+          return { ready: false, detail: `row ${memId} stored no embedding model stamp` };
+        }
+        return { ready: true };
       },
     });
   } catch (err) {
