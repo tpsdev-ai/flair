@@ -7,11 +7,11 @@ Flair owns **identity**. Flair does **not** own arbitrary secrets. This page dra
 For each registered agent, Flair stores:
 
 - A **public key** in the `Agent` table (server-side; used to verify signed requests).
-- A **private key** at `~/.flair/keys/<agent>.key` on the host that owns that agent — the raw 32-byte Ed25519 seed. Created by `flair init --agent <id>` or `flair agent add <id>`. Mode `0600`.
+- A **private key** at `~/.flair/keys/<agent>.key` on the host that owns that agent — the raw 32-byte Ed25519 seed. Created by `flair init --agent <id>` or `flair agent add <id>` with mode `0600`.
 
-Agents sign every request to Flair with this key. Flair refuses unsigned requests and refuses signatures that don't match the registered public key. The signed payload is `<agentId>:<timestamp>:<nonce>:<METHOD>:<path>` with a 30-second replay window and nonce dedup — replays inside that window are rejected.
+Agents sign requests to Flair with this key. The server verifies signatures against the registered public key. The signed payload is `<agentId>:<timestamp>:<nonce>:<METHOD>:<path+query>` with a 30-second replay window and nonce dedup — replays inside that window are rejected.
 
-**This is the only secret material Flair manages.** Lose the key file and the agent is locked out (`flair agent rotate-key <id>` to issue a new pair).
+Lose the key file and the agent is locked out (`flair agent rotate-key <id>` to issue a new pair).
 
 ## Flair admin password (Harper instance)
 - Fresh local `flair init` writes the supplied or generated admin password to `~/.flair/admin-pass` (mode `0o600`).
@@ -117,7 +117,7 @@ The pattern is identical across CLIs: the CLI config references env var names, y
 
 `claude` reads `ANTHROPIC_API_KEY` from the env. Set it via the wrapper-from-Keychain pattern above; never `claude --api-key sk-ant-...` (writes to shell history).
 
-The flair-mcp server (`@tpsdev-ai/flair-mcp`) reads `FLAIR_AGENT_ID` and (optionally) `FLAIR_KEY_PATH` from its own env block in `.mcp.json`. The Flair private key isn't a "secret" you load from Keychain — it's a key file that already lives at a fixed path with `0600` mode, owned by Flair.
+The flair-mcp server (`@tpsdev-ai/flair-mcp`) reads `FLAIR_AGENT_ID` and (optionally) `FLAIR_KEY_PATH` from its own env block in `.mcp.json`. The Flair private key isn't a "secret" you load from Keychain — it's a key file on the signing host.
 
 ### Gemini CLI
 
@@ -137,10 +137,10 @@ Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). T
 
 ## What to do with the Flair private key itself
 
-`~/.flair/keys/<agent>.key` is the only secret Flair generates. Treat it like an SSH private key:
+Treat `~/.flair/keys/<agent>.key` like an SSH private key:
 
 - **Stays on the host that owns the agent.** If your agent runs on a given host, the key lives on that host. If you spin up the same agent on another machine, **don't copy the key** — register a new agent identity (`flair agent add <id>-on-<other-host>`) on that machine. Different identities, same Flair instance can store memories for both, you decide cross-agent visibility.
-- **`chmod 600` enforced** by `flair agent add`. Don't relax it.
+- **Mode `0600` set at creation** by `flair agent add`. Don't relax it.
 - **Don't check it into git.** `.gitignore` should already exclude `~/.flair/keys/`; if you're ever tempted to share keys for "convenience," rotate first (`flair agent rotate-key <id>`).
 - **Backup separately**, encrypted. The `flair backup` command excludes private keys by default. Roll your own backup of `~/.flair/keys/` via age-encrypted archive if you want offsite recovery.
 
@@ -160,12 +160,6 @@ original path.
   Minting attempts to record a sidecar; sidecar-write failure leaves them report-only.
 
 Unreadable reference rows leave node-shaped files unidentified.
-
-## What about a `flair secret` CLI?
-
-Considered, deferred. Flair could ship a thin wrapper around the OS keyring (`flair secret get/set/list`) — but the OS primitives already work and are universally trusted. Adding a Flair-shaped wrapper would mean we own the bug surface for marginal ergonomic gain. Better path: document the OS primitives well (this page) and stay focused on identity + memory.
-
-If you find yourself wanting one anyway, your agent can call `security find-generic-password` / `secret-tool lookup` / `op read` directly — no Flair involvement needed.
 
 ## Threat model summary
 

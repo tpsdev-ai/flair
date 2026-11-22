@@ -53,8 +53,8 @@ Rules that apply across every type:
 
 ## The validator
 
-`resources/entity-vocab.ts` is the single source of truth — every write path that persists
-an `entities` value validates against it, not a local reimplementation of the grammar.
+`resources/entity-vocab.ts` validates `entities` on Memory, WorkspaceState, and
+OrgEvent POST/PUT.
 
 ```ts
 import { isValidEntity, validateEntities, invalidEntitiesResponse } from "./entity-vocab.js";
@@ -71,7 +71,7 @@ validateEntities(undefined);
 ```
 
 `invalidEntitiesResponse(entities)` is a thin convenience wrapper for Harper resource write
-paths: it returns a ready-to-return `400 { error: "invalid_entities", invalid: [...] }`
+paths: it returns a ready-to-return `400 { error: "invalid_entities", invalid: [...], message: "..." }`
 `Response` when validation fails, or `null` when the field is absent or every entry is valid.
 `WorkspaceState.ts`, `OrgEvent.ts`, and `Memory.ts` all call it early in `post()`/`put()`.
 
@@ -97,8 +97,7 @@ flair memory add --agent flint --entities "repo:tpsdev-ai/flair,issue:tpsdev-ai/
 ```
 
 The CLI validates each value before writing (a malformed value is rejected with the
-`type:value` format and the valid type list); the server re-validates on every write path
-regardless. The CLI's validator is an inlined copy of this module
+`type:value` format and the valid type list). The CLI's validator is an inlined copy of this module
 (`src/lib/entity-vocab-cli.ts` — `src/` can't import across the packaging boundary into
 `resources/`), pinned to it by `test/unit/cli-entities-option.test.ts`; the server-side gate
 remains this module alone.

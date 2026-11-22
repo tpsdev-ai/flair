@@ -301,7 +301,7 @@ uses the token-endpoint URL as its audience, so the pinned `@harperfast/oauth`
         tokenEndpointAudience:
           clientIds:
             - https://chatgpt.com/oauth/client.json
-          expiresAt: '2026-11-01T00:00:00Z'
+          expiresAt: '<future ISO 8601 expiry>'
 ```
 
 Use the exact client ID and an operator-chosen future ISO 8601 `expiresAt`;
@@ -667,17 +667,17 @@ request gets `{"error":"principal_deactivated"}`.
 `flair agent remove bob-the-bot`, also run on the Flair host, asks you to type
 `yes` (or takes `--force`), then:
 
-- searches the agent's `Memory` and `Soul` rows and sends a delete for each one
-  it finds, without checking whether each delete succeeded;
+- scans the agent's `Memory` and `Soul` rows, confirms the Memory purge receipt,
+  checks Soul delete responses, and confirms the scanned Soul rows are gone
+  before deleting the Agent record;
 - sends a delete for the `Agent` record, and stops with an error if the
   operations API rejects it;
 - unless you pass `--keep-keys`, attempts to delete the agent's key files
   (private, public and `.bak`) from the keys directory on the machine it runs
   on, ignoring any failure;
-- prints `Key files deleted.` (with `--keep-keys`,
+- prints `Removed N key file(s).` (with `--keep-keys`,
   `Key files preserved (--keep-keys).`) and then
-  `✅ Agent 'bob-the-bot' removed successfully`, without checking the Memory,
-  Soul and key-file deletions.
+  `✅ Agent 'bob-the-bot' removed successfully`.
 
 Rows the agent owns in other tables, such as its workspace state, are left in
 place.

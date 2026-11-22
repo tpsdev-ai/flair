@@ -17,7 +17,7 @@ fails when a GraphQL `@table` type is missing from this file, so a new table
 cannot land undocumented.
 
 Default REST port is `19926` (`DEFAULT_PORT` in `src/cli.ts`). Override with
-`--port` / `HTTP_PORT`. Sign remote requests as
+`flair init --port <port>`; CLI commands also read `FLAIR_URL`. Sign remote requests as
 `agentId:timestamp:nonce:METHOD:/path?query` and send
 `Authorization: TPS-Ed25519 <agentId>:<ts>:<nonce>:<sig>`. Protocol detail is
 in [SECURITY.md](../SECURITY.md).
@@ -54,7 +54,7 @@ the schema section so the catalog is complete.
 | **Admin Basic** | Harper `HDB_ADMIN_PASSWORD` / `FLAIR_ADMIN_PASSWORD` | Whole-instance operator. Bypasses agent scoping, including `private` memory. Used by the web admin and `n8n-nodes-flair`. |
 | **Operator / internal** | Admin Basic, or a deliberate `internalContext()` call inside the process | Soul mutations, `OrgSkillAssignment` writes and `AgentSeed`. Agent Ed25519 keys — including admin-agent keys — cannot author Soul. |
 | **Federation body-sig** | Ed25519 over the request body + timestamp/nonce; pairing uses a one-time token | `/FederationPair`, `/FederationSync`. Harper role gate is open; the handler is the auth boundary. |
-| **OAuth bearer** | Access token from Flair's AS or `@harperfast/oauth` | `/mcp` only, and only when `FLAIR_MCP_OAUTH=true` plus a public issuer. Off by default (path 404s). |
+| **OAuth bearer** | Access token from `@harperfast/oauth` | Native `/mcp` authentication. Off by default. |
 
 Anonymous HTTP is denied on every agent-facing table (and on `GET /Presence`, which needs a verified reader unless the instance enables the public-roster opt-in). By-id refusal
 status is resource-specific: Memory returns **404** for missing or unreadable rows, while Credential
@@ -156,9 +156,10 @@ principal. A body that names a different owner is rejected or overwritten
 per the table's attribution mode — never trusted.
 
 Federation sync currently pushes **Memory** (non-`private`), **Soul**,
-**Agent**, and **Relationship**. `Message` has a classifier policy for a later
-cross-host slice; it is not in today's spoke push list. Everything else is
-instance-local.
+**Agent**, and **Relationship**. **Presence** send and receive are opt-in via
+`FLAIR_FEDERATION_PRESENCE_SEND` and `FLAIR_FEDERATION_PRESENCE_RECEIVE`.
+`Message` has a classifier policy for a later cross-host slice; it is not in
+today's spoke push list.
 
 ---
 
@@ -202,17 +203,17 @@ does not apply this rule: its `params.agentId` is only an assignee filter.
 | Method | Path | Auth | Read / write |
 |--------|------|------|--------------|
 | GET | `/Agent`, `/Agent/<id>` | Ed25519 | Any verified agent may read principals (discovery). |
-| POST | `/Agent` | Admin Basic | Create principal. Also `POST /AgentSeed` (operator/internal only — not an admin-agent key). |
+| POST | `/Agent` | Admin Basic / Ed25519 admin | Create principal. Also `POST /AgentSeed` (operator/internal only — not an admin-agent key). |
 | PUT | `/Agent/<id>` | Ed25519 admin / Admin Basic | An administrator operation. An administrator (an Ed25519 agent whose record has `role: "admin"` or whose id `FLAIR_ADMIN_AGENTS` names, or Admin Basic) may PUT any existing record. For a request that reaches `Agent.put()`, the target id is checked first: an id outside the agent-id rule is refused 400 before the handler's authorization and existence checks. Authentication, routing and Harper's resource admission (for a missing target, `allowCreate()`, administrators only) can refuse earlier. For a valid id, a PUT from any other verified agent is refused 403: `agent_put_admin_only` when the record exists, Harper's create check (`allowCreate()`, administrators only) when it does not; such an agent updates its own record with PATCH. An unauthenticated request is refused. The PUT is a full replacement of an existing record. The server sets these fields whatever the body says: the id is the URL's; `createdAt`, `publicKey`, `originatorInstanceId` and the receiver federation fields (`_originatorInstanceId`, `_syncedFrom`, `_syncedAt`) are kept from the stored record; `updatedAt` is set by the handler; `role` and `admin` are reconciled (an admin role or `admin: true` sets both, otherwise `admin` is false). Every other field comes from the body, so an ordinary field the body omits (`status` and `role` included) is not kept, and an absent `status` reads as active. An administrator's PUT to a valid id with no record is refused 404 `agent_put_requires_existing` (a body `id` that disagrees with the URL's is refused instead). |
 | PATCH | `/Agent/<id>` | Ed25519 / Admin Basic | Merges the body into the stored record. A verified agent that is not an administrator may PATCH only its own record, may not write `status`, and may not change the record's admin status (403); the admin-status decision compares the `role` of the row it reads with the role that row would have once the body is merged and reconciled. An administrator may PATCH any record. An unauthenticated request is refused. |
-| DELETE | `/Agent/<id>` | Admin Basic | Deprovision. |
+| DELETE | `/Agent/<id>` | Admin Basic / Ed25519 admin | Deprovision. |
 | POST | `/AgentKeyRegister` | Basic admin / Ed25519 agent with the admin annotation | Register an agent key. Under Flair's per-agent registration lock, reads a fresh local, non-deactivated row with `publicKey: "pending"` and, at the confirmation read, requires the committed row to equal the fresh-read snapshot and still be `pending` before commit. The lock serializes registrations for that agent within one Harper process; raw operations-API writes and other processes do not take it. The post-commit read-back detects surviving differences in compared fields or identity and reports the registered key only when the committed row still has the registered key's identity and the staged `publicKey` and `updatedAt`, and the `AgentKeyRegistration` row this attempt wrote under its `registrationId` is present; otherwise it refuses 503 `registration_unavailable` with outcome `unconfirmed`. A change restored before the confirmation read is not observed; a commit-time pending check is a follow-up. Unsupported schemes that reach the handler receive 401 before Flair's `resolveAgentAuth`, body validation and table reads. Harper handles some Authorization values upstream: a Bearer refresh token receives Harper's 404 before any resource runs. Refuses 409 `agent_key_not_pending` (a non-`pending` row points to key rotation), 403 `agent_not_local` / `agent_inactive`, 404 `agent_not_found`, 400 `registration_request_invalid`, 409 `registration_conflict`, 503 `registration_unavailable`. Writes an `AgentKeyRegistration` audit row and an `agent_key_registered` OrgEvent. The audit `keyFingerprint` and the event `detail` carry the key fingerprint, not the key; the audit `agentId` and the event `refId` carry the target agent's id, which the event `summary` names in text. |
 | GET | `/Presence` | Verified reader | Roster. Requires a valid `TPS-Ed25519` agent signature or the admin credential; an anonymous request gets 401. An instance may opt in to a public roster with `PRESENCE_PUBLIC_ROSTER=true`, in which case an unverified reader gets the allowlisted roster with `currentTask`, `flairVersion`, and `harperVersion` as null. Thresholds: [Presence for API consumers](#presence-for-api-consumers). |
 | POST | `/Presence` | Ed25519 | Heartbeat. Agent writes only its own row (403 cross-agent). Stamps `flairVersion` / `harperVersion` on the row. |
 | PUT / DELETE | `/Presence/<id>` | Ed25519 | Own row only. Collection PUT is not a public bypass. |
 | GET | `/Soul`, `/Soul/<id>` | Ed25519 | Any verified agent; unscoped (identity/discovery). |
 | POST / PUT / PATCH / DELETE | `/Soul` | **Operator / internal** | Not Ed25519. Learned Memory text cannot be copied in as Soul. See [docs/auth.md](auth.md#soul-authorship). |
-| POST | `/FeedSouls` | Ed25519 | Soul change feed (verified). |
+| GET (SSE / WebSocket) | `/FeedSouls` | Ed25519 | Soul subscription. |
 
 `Credential` (extra credentials for a principal) requires authenticated HTTP
 access: non-admin by-id reads and writes are limited to the caller's
@@ -246,10 +247,10 @@ registrations; its key field is the fingerprint, not the key.
 | POST | `/FeedMemories` | Ed25519 | Ingest path; `agentId` stamped from the caller (`stamp-strict`). |
 | POST | `/MemoryArchive` | Ed25519 | Basement / restore. Accepts `{ id, action: "basement" \| "restore" }`; a successful ordinary-memory operation returns HTTP 200 with Memory.put()'s write receipt, including `id`, `written`, `deduplicated` and any returned visibility or redaction fields. Read the memory to inspect its archive state. Read/write refusals retain their HTTP status and body; a persisted-row change detected by the archive's re-read returns `409 memory_changed`. |
 | POST | `/MemoryMaintenance` | Ed25519 or admin | Hygiene: expire ephemeral, archive old standard. An agent's own run is scoped to the caller; an admin run with no `agentId` is fleet-wide, and one that names an `agentId` is scoped to that agent. Fleet-wide maintenance expires and archives eligible rows of every agent. A supplied admin `agentId` that is not a conforming string (the agent-id rule `^[a-zA-Z0-9_-]{1,64}$` included) is refused 400 with the rule and a `remedy`: run that agent's own authenticated non-admin maintenance, which reaches its rows, when the stored id can authenticate (the signed TPS-Ed25519 header cannot carry a colon or whitespace); for an id the header cannot represent, run fleet-wide, which reaches that agent's rows and expires or archives every other agent's eligible rows. |
-| POST | `/MemoryReindex` | Admin / verified per handler | Embedding / HNSW rebuild. |
-| POST | `/MemoryConsolidate` | Ed25519 | Dedup / consolidate. |
-| POST | `/MemoryReflect` | Ed25519 | REM distill → MemoryCandidate. |
-| POST | `/MemoryDedupStats` | Admin Basic | Dedup diagnostics. Fleet-wide sweep; `allowCreate` is `allowAdmin`. |
+| POST | `/MemoryReindex` | Admin Basic / Ed25519 admin | Embedding / HNSW rebuild. |
+| POST | `/ConsolidateMemories` | Ed25519 | Dedup / consolidate. |
+| POST | `/ReflectMemories` | Ed25519 | REM distill → MemoryCandidate. |
+| POST | `/MemoryDedupStats` | Admin Basic / Ed25519 admin | Dedup diagnostics. Fleet-wide sweep; `allowCreate` is `allowAdmin`. |
 | POST | `/MemoryPurge` | **Operator / internal** | Not Ed25519, admin-agent keys included. Physical removal of Memory rows by id; a skill-tagged row expands to its whole skill lineage. `removedIds` lists the rows a read after the commit finds gone; a target not stored before the delete fails the call (404). A target still stored after the commit keeps its pointer row. Unconfirmed history cleanup returns 500 `memory_purge_history_cleanup_unconfirmed` before pointer-cleanup failure (500 `memory_purge_pointer_cleanup_failed`) or a still-stored target (409 `memory_purge_unconfirmed`). Does not change `DELETE /Memory/<id>`. An accepted DELETE of a non-reserved skill closes its head; the reserved `using-flair` seed is physically deleted. |
 | POST | `/SkillScan` | Ed25519 | Skill-tag scan on Memory writes. |
 | GET | `/OrgSkillAssignment`, `/OrgSkillAssignment/<id>` | Ed25519 | Any verified agent. Org-scope skill assignments; see the `skills` paragraph in [docs/mcp-clients.md](mcp-clients.md). Not federated. |
@@ -312,12 +313,13 @@ The remedy is `flair upgrade` (the adapter), not a server upgrade alone.
 |--------|------|------|--------------|
 | GET / POST / PUT | `/Relationship` | Ed25519 / Admin Basic | Owner-only for non-admin agents; administrators can read across owners. POST creates; a create that is otherwise admitted, valid and within the rate limit is 409 when its id already exists. PUT upserts. For a verified non-admin agent both stamp the owner from the caller (a body naming another agent is 403); an administrator keeps the owner it supplies. A write that passes validation gets provenance built server-side. |
 | GET / POST / PUT | `/WorkspaceState` | Ed25519 | Owner-only. POST stamps `agentId`; PUT rejects a mismatch. |
-| GET | `/WorkspaceLatest` | Ed25519 | Latest workspace row for the caller. |
+| GET | `/WorkspaceLatest/<agentId>` | Ed25519 | Latest workspace row for the caller. |
 | GET / POST / PUT / PATCH | `/OrgEvent` | Ed25519 / Admin Basic | Any verified agent reads every event. `authorId` for a non-admin agent: POST sets it from the caller, whatever the body says; PUT requires the body to name the caller (403 otherwise, including when it is absent); PATCH leaves the stored value unless the body names one, and refuses a change (403). An administrator (an admin agent key or credentialed Basic admin) may supply `authorId` on any verb; POST defaults it to the administrator's own id. The server assigns an OrgEvent's `createdAt` on create. After the earlier checks, a `createdAt` check reads the stored row under each event's id. A stored row's `createdAt` is authoritative whatever its value (an empty string included): an update that omits it keeps it, and one that names a different value is refused with 409 `created_at_immutable`. An event that reaches the check and is not an object, or whose id is not a non-empty string or a non-empty array of strings, is refused with 400 `invalid_event_id` before any write, as is an administrator's PATCH to the collection (for a non-admin's collection PUT, PATCH or DELETE, if reached, the table guard returns the 403 collection refusal; existing DELETE middleware may refuse earlier). Before validation, an addressed POST binds a missing or `null` body id to the addressed id, and a string or number body id when its text matches the address; any other id type is left unchanged by this step. At the root collection, POST generates an id when the body's id is missing, `null` or empty. At POST id validation, at the root collection or an addressed path whose body id was not bound, a remaining id that is not a non-empty string or a non-empty array of strings receives 400 `invalid_event_id`. |
-| GET / POST | `/OrgEventCatchup` | Ed25519 | Catch-up feed for the caller. `since` is optional (defaults to the per-agent watermark). GET pages; POST acks `{ position }` (advance-on-ack). |
-| GET / POST | `/AgentReadPosition` | Ed25519 | Owner-only watermark (`stream`, default `org-event`). Foundation for light-comms catch-up. |
-| POST | `/OrgEventMaintenance` | Ed25519 / admin | Expire / sweep org events. |
+| GET / POST | `/OrgEventCatchup/<agentId>` | Ed25519 | Catch-up feed for the caller. `since` is optional (defaults to the per-agent watermark). GET pages; POST acks `{ position }` (advance-on-ack). |
+| GET / POST | `/AgentReadPosition/<agentId>` | Ed25519 | Owner-only watermark (`stream`, default `org-event`). Foundation for light-comms catch-up. |
+| POST | `/OrgEventMaintenance` | Admin Basic / Ed25519 admin | Expire / sweep org events. |
 | POST | `/AttentionQuery` | Ed25519 | Cross-table “what touches entity E”. Entity strings: [docs/entity-vocabulary.md](entity-vocabulary.md). |
+| GET | `/TeamDirectory` | Verified active agent | Team directory; filters `id`, `name`, `cursor`, `limit`. |
 
 #### Instruction-change events (Soul and skill)
 
@@ -337,6 +339,7 @@ Instruction events are readable by any verified agent. Three things a reader sho
 | POST | `/FederationPair` | Pairing token + body-sig | Public at the Harper role gate. Handler validates token, signature, anti-replay. Response includes `instance {id, publicKey}` when this hub has an Instance row; `instance` is null if it does not (flair#839). With several rows it answers `409 multiple_instance_rows` before the token is consumed, naming no row (the hub's log names them; flair#1883). The spoke CLI must not store an empty hub key (flair#822). Fabric uses the bootstrap-user triple from `flair federation token`. |
 | POST | `/FederationSync` | Peer body-sig | Public at the role gate. Merge Memory / Soul / Agent / Relationship (and classifier-ready Message). Originator + per-record signature checks. |
 | GET | `/FederationPeers` | Admin Basic | Known peers. |
+| GET | `/FederationRetries` | Admin Basic / Ed25519 admin | Pending, terminal, and malformed retry rows. |
 | GET / write | `/Instance` | Read: Ed25519. Write: admin | Instance row (`flair_…` id, role hub/spoke). |
 | GET / write | `/Peer` | Admin Basic | Pinned peer keys and sync cursors. |
 | GET / write | `/PairingToken` | Admin Basic | One-time tokens; default TTL 1 hour. |
@@ -353,7 +356,7 @@ operator audit trail.
 | GET | `/MessageInbox` | Ed25519 | Inbox for the caller. |
 | POST | `/MessageAck` | Ed25519 | Consume a delivered message. |
 | GET | `/MessageDeadLetter` | Ed25519 | Visible failures for the sender (`deadline`, `inbox_full`, …). |
-| GET / POST | `/MessageSweep` | Ed25519 / admin | Deadline sweep. Messages never arrive at a silent drop. |
+| POST | `/MessageSweep` | Admin / internal | Deadline sweep. |
 
 ### OAuth, MCP, XAA
 
@@ -362,10 +365,10 @@ operator audit trail.
 | GET | `/.well-known/oauth-authorization-server`, `/OAuthMetadata` | Public | RFC 8414. CORS `*`. |
 | GET | `/.well-known/oauth-protected-resource`, `…/mcp` | Public | RFC 9728. |
 | POST | `/OAuthRegister` | `X-Flair-Initial-Access-Token` | DCR. **Off** unless `FLAIR_OAUTH_DCR_TOKEN` is set (32–508 chars). Rate-limited. |
-| GET / POST | `/OAuthAuthorize` | Public (user consent) | Authorization code + PKCE (`S256` required). |
+| GET / POST | `/OAuthAuthorize` | Public consent page; approval requires Basic admin / signed agent | Authorization code + PKCE (`S256` required). |
 | POST | `/OAuthToken` | Public (client + code/assertion) | Token + `jwt-bearer` (XAA). |
 | POST | `/OAuthRevoke` | Public (token) | Revocation. |
-| GET / POST | `/mcp` | OAuth bearer | Curated tools. **Unmounted** until `FLAIR_MCP_OAUTH=true` and an issuer. |
+| POST | `/mcp` | OAuth bearer | Curated tools. **Unmounted** until `FLAIR_MCP_OAUTH=true` and an issuer. |
 | GET / write | `/OAuthClient` | Admin Basic | Durable client rows. |
 | GET / write | `/IdpConfig` | Admin Basic | XAA IdP registration (`flair idp add`). |
 | GET | `/MCPClientMetadata` | Public / handler-gated | CIMD documents for allowed hosts. |
@@ -387,8 +390,8 @@ Reads of the `/Admin*` routes below are admin-only: **Admin Basic**, or a `TPS-E
 | Path | Purpose |
 |------|---------|
 | `/Admin`, `/AdminDashboard` | Server-rendered console |
-| `/AdminPrincipals` | Agents / users: view, promote, disable |
-| `/AdminConnectors` | OAuth clients and sessions |
+| `/AdminPrincipals` | List agents / users; management via `flair principal` |
+| `/AdminConnectors` | List OAuth clients |
 | `/AdminIdp` | IdP configuration |
 | `/AdminMemory` | Browse / search memory as operator |
 | `/AdminMemoryCandidates/{agentId}` | JSON: one agent's MemoryCandidate ids in id order (`limit`, default 200, max 500; `after=<id>` for the ids after that one), used by `flair rem restore` |
@@ -417,6 +420,7 @@ comes from the token `sub`, never from tool arguments.
 | `flair_workspace_set` | `POST /WorkspaceState` |
 | `flair_orgevent` | `POST /OrgEvent` |
 | `attention` | `POST /AttentionQuery` |
+| `team_directory` | `GET /TeamDirectory` |
 | `record_usage` | `POST /RecordUsage` |
 
 The stdio package `@tpsdev-ai/flair-mcp` is a separate HTTP client, not this
@@ -441,6 +445,8 @@ client-writable even if a client sends them. Full comments live in
 | `activityUpdatedAt` | BigInt | When activity/task were asserted |
 | `flairVersion` | String | Serving `@tpsdev-ai/flair` version. Null when redacted or never stamped — see below. |
 | `harperVersion` | String | Serving Harper version. Same redaction. Also null when the server could not resolve Harper's version. |
+| `originatorInstanceId` | String | Local instance on create; preserved on update; verified sender on receipt. |
+| `receivedAt` | BigInt | Local receipt time in Unix ms; stamped on federation receipt. |
 
 ### Presence for API consumers
 
@@ -475,6 +481,7 @@ A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `last
 | `agentId` | String! | Owner; no-forge |
 | `content` | String! | Embedded text (non-skill) |
 | `contentHash` | String | Near-duplicate key |
+| `embeddedContentHash` | String | Hash of the text embedded for this row. |
 | `trigger` | String | Skill “when to use”; skill rows embed from this |
 | `visibility` | String | `shared` \| `private` (durability default if omitted) |
 | `embedding` | [Float] | HNSW, M:16 |
@@ -482,6 +489,10 @@ A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `last
 | `tags` | [String] | |
 | `durability` | String | `permanent` \| `persistent` \| `standard` \| `ephemeral` |
 | `source` | String | |
+| `type` | String | |
+| `instanceToken` | String | Server-stamped row incarnation token. |
+| `writeBackWriteId` | String | |
+| `skillSubjectId` | String | Nullable, server-owned skill subject. |
 | `createdAt` / `updatedAt` | String | |
 | `expiresAt` | String | Ephemeral TTL |
 | `retrievalCount` / `lastRetrieved` | | Search-hit counters (weak signal). Incremented on `MemoryHitStat` and overlaid on Memory reads — search no longer rewrites the Memory row. |
@@ -585,7 +596,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **Instance** | yes | One row per Flair instance (`id`, `publicKey`, `role` hub/spoke, `fabricEndpoint`, `status`) |
 | **PairingToken** | yes | One-time token (`expiresAt`, `consumedBy`) |
 | **Peer** | yes | Pinned peer (`publicKey`, `endpoint`, `status`, `lastSyncAt` / `lastMergeAt`, `lastSyncCursor`, `relayOnly`) |
-| **FederationRetry** | yes | Sender-owned federation retry bookkeeping, shaped for one row per (peer, table, record) refused for a reason a later re-offer could clear (`state`, `attempts`, `firstRefusedAt`, `lastReason`, `resolution`, `bound`). No production sender path creates rows yet; admin-written rows are readable. `@sealed`: a write naming an undeclared field is refused. Admin-only on every operation; excluded from federation policy and the receive mapping. |
+| **FederationRetry** | yes | Sender-owned federation retry bookkeeping, shaped for one row per (peer, table, record) refused for a reason a later re-offer could clear (`state`, `attempts`, `firstRefusedAt`, `lastReason`, `resolution`, `bound`). The sync sender writes and confirms retry rows. `@sealed`: a write naming an undeclared field is refused. Admin-only on every operation; excluded from federation policy and the receive mapping. |
 | **ReplayNonce** | no | `schemas/replay.graphql`. Anti-replay record shared by agent auth (`a:<agentId>:<nonce>`) and federation body signatures (`f:<nonce>`). Local to the instance (`replicate: false`); rows expire after 120 s |
 | **SyncLog** | no | Per-sync audit (`peerId`, `direction`, counts, `skippedReasons`, `status`) |
 
@@ -605,7 +616,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **InstructionVersion** | memory.graphql | yes (read only) | History for single-row Soul resource writes and skill writes through Memory post/put/delete and FeedMemories (excluding `_reindex` and reserved-seed deletes). InstructionVersion resource REST clients cannot write or delete version records; the server appends them, and when a request's close fails it attempts to remove the version that request appended only while that version is still the head, reporting a compensation failure when the removal cannot be confirmed. Soul collection deletes and InstructionVersion REST writes are refused. The administrator operations API (`upsert` / `delete` under admin auth) is the separate raw-table exception described below. The operator's reserved seed row keeps its fixed id and is versioned in place. Skill writers share a subject-type lock, select rows where `archived !== true`, `validTo` is not a nonempty string, and `expiresAt` is absent or a valid future timestamp, and refuse stale create/update targets or predecessors and ambiguous heads. Reads authorize `soul` subjects under Soul's verified-agent rule. Ordinary skill readers require readable stored visibility and current authority: matching subjects, a live skill Memory row owned by the head's owner, or a delete head with null `memoryId`; authority references require nonempty owners and explicit private/shared visibility. Admin/internal keep unfiltered skill reads; unknown subject types deny. `Memory.skillSubjectId` is nullable and server-owned. |
 | **WorkspaceState** | workspace.graphql | yes | Current work (`ref`, `provider`, `phase`, `entities`) |
 | **OrgEvent** | event.graphql | yes | Org-visible event (`authorId`, `kind`, `summary`, `entities`) |
-| **AgentReadPosition** | agent.graphql | no | Per-agent watermark (`agentId`, `stream`, `position`). HTTP via `/AgentReadPosition`, not raw-table REST. |
+| **AgentReadPosition** | agent.graphql | no | Per-agent watermark (`agentId`, `stream`, `position`). HTTP via `/AgentReadPosition/<agentId>`, not raw-table REST. |
 | **AgentKeyRegistration** | agent-key-registration.graphql | yes (admin read only) | Audit log of committed `POST /AgentKeyRegister` calls (`actorId`, `operator`, `agentId`, `instanceId`, `keyFingerprint`, `createdAt`). The Flair resource route refuses every write; the registration operation is its only application writer. The operations API is a separate raw-table trust root. `replicate: true` is declared explicitly to state the database default (a table replicates unless it opts out). |
 | **Message** | message.graphql | yes | Signed envelope (`from`, `to`, `threadId`, `seq`, `state`, `signature`) |
 | **OAuthClient** | oauth.graphql | yes | Registered OAuth clients |
