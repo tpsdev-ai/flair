@@ -48,7 +48,9 @@ const MARKER_CONTENT = `Smoke test marker ${RANDOM}`;
 // The model loads lazily on the first embed call and that load can exceed the
 // per-write 10s client timeout on a cold/loaded CI runner, so the warm-up must
 // be allowed to run well past both the default hook timeout and that 10s abort.
-const WARMUP_TIMEOUT_MS = 120_000;
+// flair#3052: the warm-up itself is bounded by total elapsed time (180 s), so
+// the hook must outlive that bound for its named failure to be reported.
+const WARMUP_TIMEOUT_MS = 200_000;
 
 beforeAll(async () => {
   flair = await resolveFlairInstance();

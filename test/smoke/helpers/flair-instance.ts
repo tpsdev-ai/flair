@@ -11,6 +11,11 @@
 
 import { randomBytes } from "node:crypto";
 import nacl from "tweetnacl";
+import {
+  EMBEDDING_READY_DEADLINE_MS,
+  recordStepSummary,
+  warmInstanceEmbeddings,
+} from "../../../scripts/ci/embedding-readiness.mjs";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -223,11 +228,16 @@ export async function writeMemory(
  * across #1217/#1221/#1222.
  *
  * This helper pays the cold-start cost UP FRONT, on a throwaway agent+memory,
- * with a generous budget and a couple of retries, so the model is hot before
- * the measured Step-2 write ever runs. It exercises the exact same path the
- * timed step does (create agent → PUT /Memory, admin-authed), so it warms
- * precisely what Step 2 needs. It creates and deletes its own throwaway agent,
- * leaving no residue in the instance.
+ * so the model is hot before the measured Step-2 write ever runs. It exercises
+ * the exact same path the timed step does (create agent → PUT /Memory,
+ * admin-authed), so it warms precisely what Step 2 needs. It creates and
+ * deletes its own throwaway agent, leaving no residue in the instance.
+ *
+ * flair#3052: the wait is bounded by TOTAL ELAPSED TIME (the shared helper in
+ * scripts/ci/embedding-readiness.mjs), not by attempt count. Each provider
+ * call ends at the server's own ~20 s bound, so three attempts gave up at ~62 s
+ * however generous the per-attempt budget was. Only a `503
+ * memory_provider_timeout` is retried; any other error fails at once.
  *
  * NOTE: this deliberately does NOT weaken `writeMemory`'s 10s timeout — that
  * timeout is a real client-side guard and stays put. The fix is to ensure the
@@ -235,56 +245,17 @@ export async function writeMemory(
  */
 export async function warmEmbeddingModel(
   flair: FlairInstance,
-  opts?: { timeoutMs?: number; attempts?: number },
+  opts?: { deadlineMs?: number },
 ): Promise<{ elapsedMs: number; attempts: number }> {
-  const timeoutMs = opts?.timeoutMs ?? 90_000;
-  const maxAttempts = opts?.attempts ?? 3;
-
-  // A real throwaway agent so the write is fully valid and reaches the
-  // server-side embedding step (Memory.put → getEmbedding) rather than being
-  // rejected before it. Mirrors Step 1 + Step 2 of the golden path.
-  const warmAgentId = await createAgent(flair.opsUrl, flair.authHeader);
-  const t0 = performance.now();
-  let lastErr: unknown;
-
-  try {
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const memId = `${warmAgentId}-warmup-${Date.now()}-${randomBytes(4).toString("hex")}`;
-      const body = {
-        id: memId,
-        agentId: warmAgentId,
-        content: `embedding warm-up ${memId}`,
-        type: "memory",
-        durability: "ephemeral",
-        createdAt: new Date().toISOString(),
-      };
-      try {
-        // Generous per-attempt budget: this call is EXPECTED to absorb the
-        // cold model load, so it must not use writeMemory's 10s abort.
-        const res = await fetch(`${flair.baseUrl}/Memory/${encodeURIComponent(memId)}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Authorization: flair.authHeader },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(timeoutMs),
-        });
-        if (res.ok) {
-          return { elapsedMs: Math.round(performance.now() - t0), attempts: attempt };
-        }
-        lastErr = new Error(`HTTP ${res.status} ${await res.text().catch(() => "")}`);
-      } catch (err) {
-        lastErr = err;
-      }
-      // Brief backoff before retrying a still-loading model.
-      if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 1000));
-    }
-    throw new Error(
-      `warmEmbeddingModel: embedding model did not become ready within ` +
-      `${maxAttempts} attempt(s) @ ${timeoutMs}ms each: ${String(lastErr)}`,
-    );
-  } finally {
-    // Never let a warm-up leak an agent into the instance, even on failure.
-    await flair.cleanup([warmAgentId]).catch(() => {});
-  }
+  const result = await warmInstanceEmbeddings({
+    baseUrl: flair.baseUrl,
+    opsUrl: flair.opsUrl,
+    authHeader: flair.authHeader,
+    label: "smoke warm-up",
+    deadlineMs: opts?.deadlineMs ?? EMBEDDING_READY_DEADLINE_MS,
+  });
+  recordStepSummary("Smoke Tests (Golden Path)", result);
+  return result;
 }
 
 /**
