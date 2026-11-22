@@ -28,14 +28,22 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
 const ALLOWLIST = JSON.parse(
   readFileSync(join(REPO_ROOT, ".github", "audit-allowlist.json"), "utf8"),
 );
-// The committed allowlist is checked as of the latest date any entry was added (never earlier than
-// 2026-11-02, the date these checks were pinned to), capped at the real date: deterministic while every
-// `added` is in the past, and an `added` after today still fails "added is after today" (flair#3026).
-// Unparseable `added` values are skipped here and reported by the schema check. Expiry against the real
-// date stays the audit gate's job in CI.
-function allowlistAsOf(entries: Array<{ added: string }>, now: number): Date {
-  const added = entries.map((e) => Date.parse(e.added)).filter(Number.isFinite);
-  return new Date(Math.min(now, Math.max(Date.parse("2026-11-02"), ...added)));
+// The committed allowlist is checked as of the latest date it records: any entry's `added` or any
+// over-cap approval's `approvedOn` (never earlier than 2026-11-02, the date these checks were pinned
+// to), capped at the real date: deterministic while every recorded date is in the past, and a date
+// after today still fails "is after today" (flair#3026). Counting `approvedOn` keeps the check stable
+// when the newest-added entry is removed while an approval from that day remains. Unparseable values
+// are skipped here and reported by the schema check. Expiry against the real date stays the audit
+// gate's job in CI.
+function allowlistAsOf(
+  entries: Array<{ added: string; overCapApproval?: { approvedOn?: string } }>,
+  now: number,
+): Date {
+  const recorded = entries
+    .flatMap((e) => [e.added, e.overCapApproval?.approvedOn])
+    .map((d) => (typeof d === "string" ? Date.parse(d) : NaN))
+    .filter(Number.isFinite);
+  return new Date(Math.min(now, Math.max(Date.parse("2026-11-02"), ...recorded)));
 }
 const ALLOWLIST_AS_OF = allowlistAsOf(ALLOWLIST.entries, Date.now());
 const TEST_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8");
