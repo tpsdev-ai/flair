@@ -2,5 +2,5 @@
   The root `overrides` entries move `ip-address` from ^10.5.1 to ^10.7.4 and `fastify`
   from ^5.12.5 to ^5.12.7. An npm install of the `@tpsdev-ai/flair` package packed from
   this change includes no `ip-address`. It still resolves the fastify 5.12.5 that
-  harper 5.3.1's npm-shrinkwrap pins, until flair moves to a harper release whose
-  installed tree resolves fastify 5.12.6 or later. Nothing to do on upgrade.
+  harper's installed tree ships as a bundled copy, until flair moves to a harper
+  release whose installed tree resolves fastify 5.12.6 or later. Nothing to do on upgrade.

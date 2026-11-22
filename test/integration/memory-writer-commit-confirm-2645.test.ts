@@ -34,7 +34,7 @@ import nacl from "tweetnacl";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
-import { componentWithFailingMemoryRead, type FailingComponent } from "../helpers/host-pointer-failing-component";
+import { armMemoryReadFailure, componentWithFailingMemoryRead, memoryReadConsumerStack, type FailingComponent } from "../helpers/host-pointer-failing-component";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
@@ -358,7 +358,7 @@ describe("flair#2645 — Memory writers under a newer full write", () => {
       "memory-reembed-verify",
       () => call(A, "PATCH", memPath(id), { id, embedding: null, embeddingModel: null }),
       async () => {
-        writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), "");
+        armMemoryReadFailure(pauseDir, id, "reembed-verify");
       },
     );
     expect(paused, "the re-embed PATCH was not paused before read-back").toBe(true);
@@ -367,6 +367,8 @@ describe("flair#2645 — Memory writers under a newer full write", () => {
     expect(response.status, text).toBe(503);
     expect(JSON.parse(text).error).toBe("write_outcome_unknown");
     expect(existsSync(join(pauseDir, `arm.memory-get-fail.${id}`)), "the read-back was not the read that failed").toBe(false);
+    expect(memoryReadConsumerStack(pauseDir, id), "the read-back was not the read that consumed the failure")
+      .toMatch(/\bat (?:async )?reembedStoredRow \(/);
     const before = await memoryRow(id);
     expect(before, "the re-embedded row is missing").not.toBeNull();
 
