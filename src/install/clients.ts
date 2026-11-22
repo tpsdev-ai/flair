@@ -777,7 +777,8 @@ const CODEX_FLAIR_SECTION_HEADER_RE = /^\[mcp_servers\.flair(?:\.[^\]]+)?\]\s*(?
  * both "no identity", not an identity (flair#1834 A2 round 3).
  */
 function activeCodexIdentity(section: string): string | null {
-  return codexSectionEnvValue(section, "FLAIR_AGENT_ID");
+  const read = readCodexSectionEnvValue(section, "FLAIR_AGENT_ID");
+  return read.state === "value" ? read.value : null;
 }
 
 /** The `[mcp_servers.flair.env]` keys the wiring comparison reads. Literal
@@ -788,54 +789,189 @@ const CODEX_SECTION_ENV_KEY_RE = {
   FLAIR_URL: /^[ \t]*FLAIR_URL[ \t]*=[ \t]*(.*)$/,
 } as const;
 
-/**
- * The ACTIVE, non-empty value a `[mcp_servers.flair]` section sets for one env
- * key, or null when it sets none. Same line-scan rules as the identity reader
- * (flair#1834 A2 round 3): a commented assignment and an explicit empty string
- * are both "no value", not a value. A shape this reader cannot read (an inline
- * env table, an unterminated string, conflicting duplicate values) is returned
- * as unknown, so a wire rewrites the section instead of claiming it already
- * carries this env.
- */
-function codexSectionEnvValue(
-  section: string,
-  key: keyof typeof CODEX_SECTION_ENV_KEY_RE,
-): string | null {
-  let found: string | null = null;
-  for (const raw of section.split("\n")) {
-    const m = raw.match(CODEX_SECTION_ENV_KEY_RE[key]);
-    if (!m) continue;
-    const rhs = m[1]!.trim();
-    if (rhs === "" || rhs.startsWith("#")) continue; // absent value, or the whole assignment is commented out
-    let value: string;
-    if (rhs.startsWith('"') || rhs.startsWith("'")) {
-      const quote = rhs[0]!;
-      const end = rhs.indexOf(quote, 1);
-      // An unterminated string is unreadable, not a value: read as unknown.
-      if (end === -1) return null;
-      value = rhs.slice(1, end);
-    } else {
-      value = rhs.split(/[\s#]/, 1)[0]!;
-    }
-    if (value === "") continue;
-    // Two different active values are ambiguous: read as unknown, so a wire
-    // rewrites the section rather than no-opping on whichever came first.
-    if (found !== null && found !== value) return null;
-    found = value;
+/** One env value read out of the section: a concrete value, no assignment,
+ *  or a shape the scanner cannot read (which counts as a mismatch). */
+type CodexEnvRead =
+  | { state: "absent" }
+  | { state: "unreadable" }
+  | { state: "value"; value: string };
+
+/** Parse one TOML value from the right-hand side of an env assignment. A
+ *  commented or empty assignment is absent; an unterminated/escaped string is
+ *  unreadable; the rest is the first whitespace/comma/comment-delimited token. */
+function parseCodexTomlValue(rhs: string): CodexEnvRead {
+  if (rhs === "" || rhs.startsWith("#")) return { state: "absent" };
+  if (rhs.startsWith('"') || rhs.startsWith("'")) {
+    const quote = rhs[0]!;
+    const end = rhs.indexOf(quote, 1);
+    // An unterminated string is unreadable, not a value.
+    if (end === -1) return { state: "unreadable" };
+    const value = rhs.slice(1, end);
+    // A basic string with an escape is not decoded here: reading it as the
+    // raw source would compare a different value than Codex sees.
+    if (quote === '"' && value.includes("\\")) return { state: "unreadable" };
+    return value === "" ? { state: "absent" } : { state: "value", value };
   }
-  return found;
+  const value = rhs.split(/[\s#]/, 1)[0]!;
+  return value === "" ? { state: "absent" } : { state: "value", value };
 }
 
-/** flair#3050: does the existing `[mcp_servers.flair]` section carry exactly
- *  the env this wire call would write? The Codex no-op requires the same
- *  FLAIR_URL and FLAIR_AGENT_ID match as the JSON path (`wireJsonMcpCore`); a
- *  differing value is a mismatch, not "already wired". */
+/** One table of a `[mcp_servers.flair...]` section: its header (null for the
+ *  preamble) and the lines under it. */
+interface CodexSectionPart {
+  header: string | null;
+  lines: string[];
+}
+
+/** Split the section text at its table headers, so a scan can be confined to
+ *  the table that actually carries env bindings (`[mcp_servers.flair]` or
+ *  `[mcp_servers.flair.env]`) instead of every subtable (flair#3050 round 3). */
+function splitCodexSectionParts(section: string): CodexSectionPart[] {
+  const parts: CodexSectionPart[] = [];
+  let current: CodexSectionPart = { header: null, lines: [] };
+  for (const line of section.split("\n")) {
+    const m = line.match(/^[ \t]*\[(.*)\][ \t]*(?:#.*)?$/);
+    if (m) {
+      parts.push(current);
+      current = { header: m[1]!.trim(), lines: [] };
+    } else {
+      current.lines.push(line);
+    }
+  }
+  parts.push(current);
+  return parts;
+}
+
+/** Read one env key from a single table body. Two different active values are
+ *  ambiguous; an unreadable assignment anywhere in the table is unknown. */
+function readCodexTableEnvValue(
+  lines: string[],
+  key: keyof typeof CODEX_SECTION_ENV_KEY_RE,
+): CodexEnvRead {
+  let found: string | null = null;
+  let unreadable = false;
+  for (const raw of lines) {
+    const m = raw.match(CODEX_SECTION_ENV_KEY_RE[key]);
+    if (!m) continue;
+    const read = parseCodexTomlValue(m[1]!.trim());
+    if (read.state === "absent") continue;
+    if (read.state === "unreadable") { unreadable = true; continue; }
+    if (found !== null && found !== read.value) return { state: "unreadable" };
+    found = read.value;
+  }
+  if (unreadable) return { state: "unreadable" };
+  return found === null ? { state: "absent" } : { state: "value", value: found };
+}
+
+/** Parse a one-line TOML inline table (`{ key = "value", … }`) into its string
+ *  entries. Returns null for any shape this scanner cannot read (escapes, a
+ *  duplicate key, trailing junk, a nested table). */
+function parseCodexInlineEnvTable(body: string): Map<string, string> | null {
+  const out = new Map<string, string>();
+  let i = 0;
+  const n = body.length;
+  const skipSpace = (): void => { while (i < n && (body[i] === " " || body[i] === "\t")) i++; };
+  for (;;) {
+    skipSpace();
+    if (i >= n) break;
+    let key: string;
+    if (body[i] === '"' || body[i] === "'") {
+      const quote = body[i]!;
+      const end = body.indexOf(quote, i + 1);
+      if (end === -1) return null;
+      key = body.slice(i + 1, end);
+      if (quote === '"' && key.includes("\\")) return null;
+      i = end + 1;
+    } else {
+      const start = i;
+      while (i < n && /[A-Za-z0-9_-]/.test(body[i]!)) i++;
+      if (i === start) return null;
+      key = body.slice(start, i);
+    }
+    skipSpace();
+    if (body[i] !== "=") return null;
+    i++;
+    skipSpace();
+    const value = parseCodexTomlValue(body.slice(i).split(/[,\t}]/, 1)[0]!.trim());
+    if (value.state !== "value") return null;
+    if (out.has(key)) return null;
+    out.set(key, value.value);
+    // Advance past the value itself, then require a comma or the end.
+    if (body[i] === '"' || body[i] === "'") {
+      const end = body.indexOf(body[i]!, i + 1);
+      if (end === -1) return null;
+      i = end + 1;
+    } else {
+      while (i < n && !/[,\t}]/.test(body[i]!)) i++;
+    }
+    skipSpace();
+    if (i >= n) break;
+    if (body[i] !== ",") return null;
+    i++;
+  }
+  return out;
+}
+
+/** An inline `env = { … }` binding in the main `[mcp_servers.flair]` table. */
+interface CodexInlineEnvRead {
+  present: boolean;
+  read: CodexEnvRead;
+}
+
+function readCodexInlineEnvValue(
+  lines: string[],
+  key: keyof typeof CODEX_SECTION_ENV_KEY_RE,
+): CodexInlineEnvRead {
+  const assignments = lines.filter((line) => /^[ \t]*env[ \t]*=/.test(line));
+  if (assignments.length === 0) return { present: false, read: { state: "absent" } };
+  if (assignments.length > 1) return { present: true, read: { state: "unreadable" } };
+  const m = assignments[0]!.match(/^[ \t]*env[ \t]*=[ \t]*\{(.*)\}[ \t]*(?:#.*)?$/);
+  if (!m) return { present: true, read: { state: "unreadable" } };
+  const table = parseCodexInlineEnvTable(m[1]!);
+  if (!table) return { present: true, read: { state: "unreadable" } };
+  const value = table.get(key);
+  return { present: true, read: value === undefined || value === "" ? { state: "absent" } : { state: "value", value } };
+}
+
+/**
+ * The env a `[mcp_servers.flair]` TOML section ACTUALLY binds for one key.
+ * Only the forms Codex reads are scanned: the `[mcp_servers.flair.env]` table
+ * or an inline `env = { … }` in the main table. A sibling subtable such as
+ * `[mcp_servers.flair.extra]` is a DIFFERENT table, so its values are not the
+ * env Codex passes (flair#3050 round 3). Two env sources at once, a second env
+ * table, or an unsupported shape is unreadable, so a wire rewrites rather than
+ * no-opping on a value Codex would not read.
+ */
+function readCodexSectionEnvValue(
+  section: string,
+  key: keyof typeof CODEX_SECTION_ENV_KEY_RE,
+): CodexEnvRead {
+  const parts = splitCodexSectionParts(section);
+  const mainTables = parts.filter((part) => part.header === "mcp_servers.flair");
+  const envTables = parts.filter((part) => part.header === "mcp_servers.flair.env");
+  if (mainTables.length !== 1 || envTables.length > 1) return { state: "unreadable" };
+  const inline = readCodexInlineEnvValue(mainTables[0]!.lines, key);
+  const table = envTables.length === 0
+    ? { state: "absent" as const }
+    : readCodexTableEnvValue(envTables[0]!.lines, key);
+  if (inline.present && envTables.length > 0) return { state: "unreadable" }; // env defined twice
+  if (inline.present) return inline.read;
+  return table;
+}
+
+/** flair#3050: does the existing `[mcp_servers.flair]` section carry the
+ *  FLAIR_AGENT_ID and FLAIR_URL this wire call would write? The Codex no-op
+ *  requires the same match as the JSON path (`wireJsonMcpCore`); a differing
+ *  value, or a shape the scanner cannot read, is a mismatch, not "already
+ *  wired". Other keys and subtables are not compared. */
 function codexFlairSectionEnvMatches(raw: string, env: WireEnv): boolean {
   const section = codexFlairSectionText(raw);
   if (section === null) return false;
+  const agent = readCodexSectionEnvValue(section, "FLAIR_AGENT_ID");
+  const url = readCodexSectionEnvValue(section, "FLAIR_URL");
   return (
-    codexSectionEnvValue(section, "FLAIR_AGENT_ID") === env.FLAIR_AGENT_ID &&
-    codexSectionEnvValue(section, "FLAIR_URL") === env.FLAIR_URL
+    agent.state === "value" && agent.value === env.FLAIR_AGENT_ID &&
+    url.state === "value" && url.value === env.FLAIR_URL
   );
 }
 

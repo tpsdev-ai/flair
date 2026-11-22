@@ -48,6 +48,7 @@ import {
   hookInstallHint,
   parseInstallerHookForm,
   hookSettingsPath,
+  sessionStartHookShapeRefusal,
   repinSessionStartHook,
   SUPPORTED_HARNESSES,
   type Harness,
@@ -400,6 +401,11 @@ export function applyOrRepinSessionStartHook(
   const existing = checkSessionStartHook(homeDir, settingsPath);
   if (existing.present) {
     const harness = hookHarnessFromSettingsPath(existing.path);
+    // flair#3050 round 3: validate the entry's SHAPE before ANY no-op or
+    // pin-finding branch. A foreign-shaped entry used to reach a branch that
+    // returned ok:true (an existing pin finding, or the id already matching).
+    const shapeRefusal = sessionStartHookShapeRefusal(existing.path);
+    if (shapeRefusal) return { applied: false, ok: false, message: shapeRefusal };
     const finding = sessionStartHookPinFindings(homeDir).find(
       (f) => f.reading.target.id === harness,
     );
@@ -409,9 +415,24 @@ export function applyOrRepinSessionStartHook(
     const command = existing.command ?? "";
     // Reuse the existing readers for the identity Flair's entry carries: the
     // strict installer form first, then the pre-#1007 bare form.
-    const wiredAgentId = parseInstallerHookForm(command)?.agentId
-      ?? parseLegacySessionStartHookCommand(command)?.agentId;
-    if (wiredAgentId !== undefined && wiredAgentId !== agentId) {
+    const installer = parseInstallerHookForm(command);
+    const legacy = installer ? null : parseLegacySessionStartHookCommand(command);
+    if (!installer && !legacy) {
+      // A pin finding means the writer can name the shape it refuses; without
+      // one, name the unreadable identity. Both write nothing (flair#3050 r3).
+      if (finding) {
+        const repin = repinSessionStartHookGuarded(homeDir, harness);
+        return { applied: false, ok: repin.ok, message: repin.message };
+      }
+      return {
+        applied: false,
+        ok: false,
+        message: `could not read the agent id from the SessionStart hook in ${existing.path} — left untouched`,
+      };
+    }
+    const wiredAgentId = installer?.agentId ?? legacy!.agentId;
+    const isLegacy = installer === null;
+    if (wiredAgentId !== agentId) {
       if (skip) {
         return {
           applied: false,
@@ -426,12 +447,14 @@ export function applyOrRepinSessionStartHook(
         message: rewire.message,
       };
     }
-    if (wiredAgentId === undefined && !finding) {
-      return {
-        applied: false,
-        ok: false,
-        message: `could not read the agent id from the SessionStart hook in ${existing.path} — left untouched`,
-      };
+    // A legacy unpinned hook is migrated even when its id already matches:
+    // reporting "already wired" would leave it running unpinned.
+    if (isLegacy) {
+      if (skip) {
+        return { applied: false, ok: false, message: `SessionStart hook in ${existing.path} not re-pinned (--skip-hook)` };
+      }
+      const repin = repinSessionStartHookGuarded(homeDir, harness);
+      return { applied: repin.action === "update", ok: repin.ok, message: repin.message };
     }
     if (!finding) {
       return { applied: false, ok: true, message: `SessionStart hook already wired in ${existing.path}` };

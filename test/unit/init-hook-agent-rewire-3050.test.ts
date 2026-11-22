@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { applyOrRepinSessionStartHook } from "../../src/lib/owned-pins.ts";
 import { hookSettingsPath } from "../../src/hook-install.ts";
 import { buildSessionStartHookCommand, SESSION_START_HOOK_MARKER } from "../../src/doctor-client.ts";
-import { mcpServerSpec } from "../../src/lib/mcp-spec.ts";
+import { FLAIR_MCP_PACKAGE, mcpServerSpec } from "../../src/lib/mcp-spec.ts";
 import { tempDir } from "../helpers/temp-dir.ts";
 
 /**
@@ -39,6 +39,16 @@ function writeSettings(settings: unknown): string {
 
 function flairCommand(agentId: string): string {
   return buildSessionStartHookCommand(agentId, undefined, { harness: "claude-code" });
+}
+
+/** The pre-#1007 unpinned shape Flair wrote. */
+function legacyCommand(agentId: string): string {
+  return `FLAIR_AGENT_ID=${agentId} npx -y ${FLAIR_MCP_PACKAGE} flair-session-start`;
+}
+
+/** Every file in the settings directory — a refusal must add NOTHING (no .bak). */
+function settingsDirFiles(): string {
+  return readdirSync(join(home, ".claude")).sort().join(",");
 }
 
 function hookSettings(command: string, groupExtras: Record<string, unknown> = {}): unknown {
@@ -107,6 +117,7 @@ describe("applyOrRepinSessionStartHook — agent rewire", () => {
     expect(result.message).toContain("could not read the agent id");
     expect(result.message).toContain("left untouched");
     expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+    expect(settingsDirFiles()).toBe("settings.json");
   });
 
   it("refuses by name and writes nothing when the Flair entry carries a foreign shape", () => {
@@ -121,5 +132,73 @@ describe("applyOrRepinSessionStartHook — agent rewire", () => {
     expect(result.ok).toBe(false);
     expect(result.message).toContain("carries fields Flair did not write");
     expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+    expect(settingsDirFiles()).toBe("settings.json");
+  });
+
+  it("refuses a foreign shape before the no-op when the id already matches and the pin is current", () => {
+    const settingsPath = writeSettings(
+      hookSettings(flairCommand("agent-a"), { matcher: "*" }),
+    );
+    const before = readFileSync(settingsPath, "utf-8");
+
+    const result = applyOrRepinSessionStartHook(home, "agent-a", false);
+
+    expect(result.applied).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("carries fields Flair did not write");
+    expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+    expect(settingsDirFiles()).toBe("settings.json");
+  });
+
+  it("refuses an unsafe agent id by name and writes nothing (no .bak)", () => {
+    const settingsPath = writeSettings(hookSettings(flairCommand("agent-a")));
+    const before = readFileSync(settingsPath, "utf-8");
+
+    const result = applyOrRepinSessionStartHook(home, "bad'id;echo", false);
+
+    expect(result.applied).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("cannot be safely written");
+    expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+    expect(settingsDirFiles()).toBe("settings.json");
+  });
+
+  it("refuses --skip-hook on a different embedded id, names it, and writes nothing (no .bak)", () => {
+    const settingsPath = writeSettings(hookSettings(flairCommand("agent-a")));
+    const before = readFileSync(settingsPath, "utf-8");
+
+    const result = applyOrRepinSessionStartHook(home, "agent-b", true);
+
+    expect(result.applied).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("names agent 'agent-a'");
+    expect(result.message).toContain("--skip-hook");
+    expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+    expect(settingsDirFiles()).toBe("settings.json");
+  });
+});
+
+describe("applyOrRepinSessionStartHook — the pre-#1007 legacy form is migrated", () => {
+  it("same id: migrates the unpinned legacy command to the pinned installer form", () => {
+    const settingsPath = writeSettings(hookSettings(legacyCommand("agent-a")));
+
+    const result = applyOrRepinSessionStartHook(home, "agent-a", false);
+
+    expect(result.applied).toBe(true);
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain(`pinned the SessionStart hook in ${settingsPath} to ${mcpServerSpec()}`);
+    expect(flairHookCommand(settingsPath)).toBe(flairCommand("agent-a"));
+  });
+
+  it("different id: migrates and re-points to the requested id", () => {
+    const settingsPath = writeSettings(hookSettings(legacyCommand("agent-a")));
+
+    const result = applyOrRepinSessionStartHook(home, "agent-b", false);
+
+    expect(result.applied).toBe(true);
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("agent 'agent-b'");
+    expect(result.message).toContain(`pinned it to ${mcpServerSpec()}`);
+    expect(flairHookCommand(settingsPath)).toBe(flairCommand("agent-b"));
   });
 });

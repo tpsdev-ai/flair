@@ -87,6 +87,7 @@ import {
   isFlairHookCommand,
   isHookCommandValueSafe,
   isSessionStartHookInvocation,
+  parseLegacySessionStartHookCommand,
   readClientMcpBlock,
   sessionStartEnablesActionRecall,
   type ContinuityCaptureHookReport,
@@ -552,6 +553,28 @@ function findHookMatches(config: any): Array<{ groupIndex: number; hookIndex: nu
 }
 
 /**
+ * The named refusal a foreign-shaped Flair SessionStart entry gets, or null
+ * when the single matching entry has exactly the shape Flair writes. Reads
+ * only: a caller that would otherwise report "already wired" can refuse by
+ * name BEFORE its no-op (flair#3050 round 3). A parse error is a refusal too.
+ * No match or several matches return null — those have their own lines.
+ */
+export function sessionStartHookShapeRefusal(path: string): string | null {
+  const read = readSettingsFile(path);
+  if (read.parseError) return `${read.parseError} — refusing to touch a file we can't safely parse; left untouched`;
+  const matches = findHookMatches(read.parsed);
+  if (matches.length !== 1) return null;
+  const group = read.parsed.hooks.SessionStart[matches[0]!.groupIndex];
+  const entry = group?.hooks?.[matches[0]!.hookIndex];
+  const groupKeys = group && typeof group === "object" ? Object.keys(group).sort().join(",") : "";
+  const entryKeys = entry && typeof entry === "object" ? Object.keys(entry).sort().join(",") : "";
+  if (groupKeys !== "hooks" || entryKeys !== "command,type" || entry.type !== "command") {
+    return `SessionStart hook in ${path} carries fields Flair did not write — left untouched`;
+  }
+  return null;
+}
+
+/**
  * The three EXACT installer forms `buildSessionStartHookCommand` emits
  * (flair#1834 PR-H), anchored so the FULL command must match. `<id>`, `<url>`
  * and `<ver>` are the only free variables; everything else — quoting, the
@@ -673,6 +696,161 @@ export interface RepinSessionStartHookOptions {
   agentId?: string;
 }
 
+/** The pure re-pin decision over a parsed settings object. `ok:false` marks a
+ *  named REFUSAL (a parse/shape/identity the writer will not touch); a policy
+ *  hold (an AHEAD pin) keeps ok:true. Nothing here mutates `config`. */
+type SessionStartHookRewrite =
+  | { kind: "skip"; ok: boolean; message: string }
+  | { kind: "hold"; ok: boolean; message: string }
+  | { kind: "noop"; message: string }
+  | { kind: "update"; message: string; groupIndex: number; hookIndex: number; command: string };
+
+function unsafeAgentIdMessage(agentId: string): string {
+  return `agent id '${agentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`;
+}
+
+function decideSessionStartHookRewrite(
+  config: any,
+  path: string,
+  harness: Harness,
+  parseError: string | null,
+  opts?: RepinSessionStartHookOptions,
+): SessionStartHookRewrite {
+  if (parseError) {
+    return { kind: "hold", ok: false, message: `${parseError} — refusing to re-pin a file we can't safely parse; left untouched` };
+  }
+  // flair#1834 PR-H: enumerate EVERY matching hook — two is a HOLD, not a
+  // silent pick of the first (findHookEntry stays first-match for install/
+  // uninstall, which splice ONE entry by index).
+  const matches = findHookMatches(config);
+  if (matches.length === 0) {
+    return { kind: "skip", ok: true, message: `no Flair SessionStart hook in ${path} — nothing to re-pin` };
+  }
+  if (matches.length > 1) {
+    return { kind: "hold", ok: true, message: `${matches.length} Flair SessionStart hooks in ${path} match — re-pinning would change only one of them; left untouched` };
+  }
+  const { groupIndex, hookIndex } = matches[0]!;
+  const group = config.hooks.SessionStart[groupIndex];
+  const entry = group?.hooks?.[hookIndex];
+  // Unsupported hook metadata (anything Flair did not write). installHook
+  // emits exactly `{ hooks: [{ type: "command", command }] }`.
+  const groupKeys = group && typeof group === "object" ? Object.keys(group).sort().join(",") : "";
+  const entryKeys = entry && typeof entry === "object" ? Object.keys(entry).sort().join(",") : "";
+  if (groupKeys !== "hooks" || entryKeys !== "command,type" || entry.type !== "command") {
+    return { kind: "hold", ok: false, message: `SessionStart hook in ${path} carries fields Flair did not write — left untouched` };
+  }
+  const current: string = entry.command ?? "";
+  const requestedAgentId = opts?.agentId;
+  // Strict FULL-command validation against the three installer forms. A
+  // duplicate assignment, an appended shell command or an extra env var
+  // does NOT match a form — it is a HOLD, byte-preserved.
+  const form = parseInstallerHookForm(current);
+  if (!form) {
+    const legacy = parseLegacySessionStartHookCommand(current);
+    if (!legacy) {
+      return { kind: "hold", ok: false, message: `SessionStart hook in ${path} is not one of the installer forms Flair writes — left untouched` };
+    }
+    // flair#3050 round 3: the pre-#1007 bare form is Flair-authored too, so a
+    // re-init MIGRATES it to the current pinned installer form. It used to fall
+    // through to "already wired" while still running unpinned.
+    if (requestedAgentId !== undefined && !isHookCommandValueSafe(requestedAgentId)) {
+      return { kind: "hold", ok: false, message: unsafeAgentIdMessage(requestedAgentId) };
+    }
+    const agentId = requestedAgentId ?? legacy.agentId;
+    // The matched legacy form is unpinned: pin UP to this CLI's spec.
+    const decision = decidePinWrite({
+      pkg: FLAIR_MCP_PACKAGE,
+      entry: `SessionStart hook in ${path}`,
+      existingText: FLAIR_MCP_PACKAGE,
+      runningVersion: flairCliVersion(),
+    });
+    if (decision.action !== "write") {
+      return { kind: "hold", ok: decision.action !== "refuse", message: decision.line! };
+    }
+    const changedId = requestedAgentId !== undefined && requestedAgentId !== legacy.agentId;
+    return {
+      kind: "update",
+      groupIndex,
+      hookIndex,
+      command: buildSessionStartHookCommand(agentId, legacy.flairUrl, { harness }),
+      message: changedId
+        ? `re-pointed the SessionStart hook in ${path} to agent '${requestedAgentId}' and pinned it to ${mcpServerSpec()}`
+        : `pinned the SessionStart hook in ${path} to ${mcpServerSpec()}`,
+    };
+  }
+  if (requestedAgentId !== undefined && form.agentId !== requestedAgentId) {
+    if (!isHookCommandValueSafe(requestedAgentId)) {
+      return { kind: "hold", ok: false, message: unsafeAgentIdMessage(requestedAgentId) };
+    }
+    // Substitute ONLY captured spans: the agent id always, and the pin
+    // when the never-lower guard permits it. Apply right-to-left so the
+    // offsets captured on `current` stay valid. An AHEAD pin is HELD, but the
+    // identity change still lands: the guard's finding reads the CAPTURED
+    // `-p` span, so a decoy inside the id cannot hide a real AHEAD pin.
+    const replacements: Array<[number, number, string]> = [
+      [form.agentIdStart, form.agentIdEnd, requestedAgentId],
+    ];
+    let repinned = false;
+    if (form.pkgSpec !== mcpServerSpec()) {
+      const decision = decidePinWrite({
+        pkg: FLAIR_MCP_PACKAGE,
+        entry: `SessionStart hook in ${path}`,
+        existingText: form.pkgSpec,
+        runningVersion: flairCliVersion(),
+      });
+      if (decision.action === "refuse") {
+        return { kind: "hold", ok: false, message: decision.line! };
+      }
+      if (decision.action === "write") {
+        replacements.push([form.pkgSpecStart, form.pkgSpecEnd, mcpServerSpec()]);
+        repinned = true;
+      }
+    }
+    replacements.sort((a, b) => b[0] - a[0]);
+    let next = current;
+    for (const [start, end, value] of replacements) {
+      next = next.slice(0, start) + value + next.slice(end);
+    }
+    return {
+      kind: "update",
+      groupIndex,
+      hookIndex,
+      command: next,
+      message:
+        `re-pointed the SessionStart hook in ${path} to agent '${requestedAgentId}'` +
+        (repinned ? ` and re-pinned it to ${mcpServerSpec()}` : ""),
+    };
+  }
+  // Rebuild by substituting ONLY the CAPTURED `<ver>` span — identity, URL
+  // and the wire format are preserved by construction. Substituting the
+  // captured OFFSET (not the first substring match) is what keeps a
+  // hand-edited id or URL that CONTAINS the package-spec string from being
+  // rewritten INSTEAD of the pin (flair#1834 PR-H round 2).
+  const next = current.slice(0, form.pkgSpecStart) + mcpServerSpec() + current.slice(form.pkgSpecEnd);
+  if (next === current) {
+    return { kind: "noop", message: `SessionStart hook in ${path} already pinned to ${mcpServerSpec()}` };
+  }
+  // flair#1778 2c-i-a3: this EXPORTED raw writer consults the ONE
+  // never-lower guard itself, so no caller can bypass it — on the in-lock
+  // bytes, inside the critical section.
+  const decision = decidePinWrite({
+    pkg: FLAIR_MCP_PACKAGE,
+    entry: `SessionStart hook in ${path}`,
+    existingText: form.pkgSpec,
+    runningVersion: flairCliVersion(),
+  });
+  if (decision.action !== "write") {
+    return { kind: "hold", ok: decision.action !== "refuse", message: decision.line! };
+  }
+  return {
+    kind: "update",
+    groupIndex,
+    hookIndex,
+    command: next,
+    message: `re-pinned the SessionStart hook in ${path} to ${mcpServerSpec()}`,
+  };
+}
+
 export function repinSessionStartHook(
   homeDir: string,
   harness: Harness,
@@ -690,124 +868,35 @@ export function repinSessionStartHook(
     return skip(true, `no Flair SessionStart hook in ${path} — nothing to re-pin`);
   }
 
-  let refused = false;
-  let outcome: { action: HookRepinResult["action"]; message: string } | null = null;
+  // Decide ONCE before the primitive so a REFUSAL (malformed file, foreign
+  // metadata, an unreadable command, an unsafe id, an unreadable CLI version)
+  // writes NOTHING — not even the in-lock `.bak` the primitive takes before
+  // `decide`. Only an outcome that will write enters the critical section; the
+  // in-lock decision below re-checks the same facts on the bytes it writes.
+  const preRead = readSettingsFile(path);
+  const pre = decideSessionStartHookRewrite(preRead.parsed, path, harness, preRead.parseError, opts);
+  if (pre.kind !== "update") {
+    if (pre.kind === "noop") {
+      return { ok: true, path, harness, action: "noop", message: pre.message, backupPath: null };
+    }
+    return { ok: pre.ok, path, harness, action: pre.kind, message: pre.message, backupPath: null };
+  }
+
+  let outcome: { action: HookRepinResult["action"]; message: string; ok: boolean } | null = null;
   const result = withConfigCriticalSection(
     path,
     (bytes) => {
       const read = parseSettingsBytes(bytes, path);
-      if (read.parseError) {
-        refused = true;
-        outcome = { action: "skip", message: `${read.parseError} — refusing to re-pin a file we can't safely parse; left untouched` };
-        return { hold: outcome.message };
-      }
-      const config = read.parsed ?? {};
-      // flair#1834 PR-H: enumerate EVERY matching hook — two is a HOLD, not a
-      // silent pick of the first (findHookEntry stays first-match for install/
-      // uninstall, which splice ONE entry by index).
-      const matches = findHookMatches(config);
-      if (matches.length === 0) {
-        outcome = { action: "skip", message: `no Flair SessionStart hook in ${path} — nothing to re-pin` };
-        return { hold: outcome.message };
-      }
-      if (matches.length > 1) {
-        outcome = { action: "hold", message: `${matches.length} Flair SessionStart hooks in ${path} match — re-pinning would change only one of them; left untouched` };
-        return { hold: outcome.message };
-      }
-      const { groupIndex, hookIndex } = matches[0]!;
-      const group = config.hooks.SessionStart[groupIndex];
-      const entry = group?.hooks?.[hookIndex];
-      // Unsupported hook metadata (anything Flair did not write). installHook
-      // emits exactly `{ hooks: [{ type: "command", command }] }`.
-      const groupKeys = group && typeof group === "object" ? Object.keys(group).sort().join(",") : "";
-      const entryKeys = entry && typeof entry === "object" ? Object.keys(entry).sort().join(",") : "";
-      if (groupKeys !== "hooks" || entryKeys !== "command,type" || entry.type !== "command") {
-        outcome = { action: "hold", message: `SessionStart hook in ${path} carries fields Flair did not write — left untouched` };
-        return { hold: outcome.message };
-      }
-      const current: string = entry.command ?? "";
-      // Strict FULL-command validation against the three installer forms. A
-      // duplicate assignment, an appended shell command or an extra env var
-      // does NOT match a form — it is a HOLD, byte-preserved.
-      const form = parseInstallerHookForm(current);
-      if (!form) {
-        outcome = { action: "hold", message: `SessionStart hook in ${path} is not one of the installer forms Flair writes — left untouched` };
-        return { hold: outcome.message };
-      }
-      const requestedAgentId = opts?.agentId;
-      if (requestedAgentId !== undefined && form.agentId !== requestedAgentId) {
-        if (!isHookCommandValueSafe(requestedAgentId)) {
-          outcome = {
-            action: "hold",
-            message: `agent id '${requestedAgentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
-          };
-          return { hold: outcome.message };
-        }
-        // Substitute ONLY captured spans: the agent id always, and the pin
-        // when the never-lower guard permits it. Apply right-to-left so the
-        // offsets captured on `current` stay valid.
-        const replacements: Array<[number, number, string]> = [
-          [form.agentIdStart, form.agentIdEnd, requestedAgentId],
-        ];
-        let repinned = false;
-        if (form.pkgSpec !== mcpServerSpec()) {
-          const decision = decidePinWrite({
-            pkg: FLAIR_MCP_PACKAGE,
-            entry: `SessionStart hook in ${path}`,
-            existingText: form.pkgSpec,
-            runningVersion: flairCliVersion(),
-          });
-          if (decision.action === "write") {
-            replacements.push([form.pkgSpecStart, form.pkgSpecEnd, mcpServerSpec()]);
-            repinned = true;
-          }
-        }
-        replacements.sort((a, b) => b[0] - a[0]);
-        let next = current;
-        for (const [start, end, value] of replacements) {
-          next = next.slice(0, start) + value + next.slice(end);
-        }
-        const newConfig = deepClone(config);
-        newConfig.hooks.SessionStart[groupIndex].hooks[hookIndex] = { type: "command", command: next };
-        outcome = {
-          action: "update",
-          message:
-            `re-pointed the SessionStart hook in ${path} to agent '${requestedAgentId}'` +
-            (repinned ? ` and re-pinned it to ${mcpServerSpec()}` : ""),
-        };
-        return { write: encodeConfig(newConfig) };
-      }
-      // Rebuild by substituting ONLY the CAPTURED `<ver>` span — identity, URL
-      // and the wire format are preserved by construction. Substituting the
-      // captured OFFSET (not the first substring match) is what keeps a
-      // hand-edited id or URL that CONTAINS the package-spec string from being
-      // rewritten INSTEAD of the pin (flair#1834 PR-H round 2).
-      const next = current.slice(0, form.pkgSpecStart) + mcpServerSpec() + current.slice(form.pkgSpecEnd);
-      if (next === current) {
-        outcome = { action: "noop", message: `SessionStart hook in ${path} already pinned to ${mcpServerSpec()}` };
-        return { noop: outcome.message };
-      }
-      // flair#1778 2c-i-a3: this EXPORTED raw writer consults the ONE
-      // never-lower guard itself, so no caller can bypass it — on the in-lock
-      // bytes, inside the critical section.
-      // flair#1834 PR-H round 2 (Kern BLOCKING): hand the guard the CAPTURED
-      // span (form.pkgSpec), the exact version the substitution below writes.
-      // Passing the FULL command let a DECOY `<pkg>@<ver>` embedded in the id
-      // or URL be read as the pin: the guard proved the decoy safe while the
-      // substitution lowered the real (AHEAD) pin.
-      const decision = decidePinWrite({
-        pkg: FLAIR_MCP_PACKAGE,
-        entry: `SessionStart hook in ${path}`,
-        existingText: form.pkgSpec,
-        runningVersion: flairCliVersion(),
-      });
-      if (decision.action !== "write") {
-        outcome = { action: "hold", message: decision.line! };
-        return { hold: decision.line! };
-      }
-      const newConfig = deepClone(config);
-      newConfig.hooks.SessionStart[groupIndex].hooks[hookIndex] = { type: "command", command: next };
-      outcome = { action: "update", message: `re-pinned the SessionStart hook in ${path} to ${mcpServerSpec()}` };
+      const decision = decideSessionStartHookRewrite(read.parsed, path, harness, read.parseError, opts);
+      outcome = {
+        action: decision.kind === "update" ? "update" : decision.kind,
+        message: decision.message,
+        ok: decision.kind === "update" || decision.kind === "noop" ? true : decision.ok,
+      };
+      if (decision.kind === "hold" || decision.kind === "skip") return { hold: decision.message };
+      if (decision.kind === "noop") return { noop: decision.message };
+      const newConfig = deepClone(read.parsed ?? {});
+      newConfig.hooks.SessionStart[decision.groupIndex].hooks[decision.hookIndex] = { type: "command", command: decision.command };
       return { write: encodeConfig(newConfig) };
     },
     { backup: (bytes) => backupBytesTo(path, bytes), testHooks },
@@ -818,7 +907,7 @@ export function repinSessionStartHook(
   // "update" is set BEFORE the write, so it must never surface for a status that
   // did not commit it. A refused atomicReplace (nothing written) is a FAILURE,
   // never the stale "re-pinned".
-  const oc = outcome as { action: HookRepinResult["action"]; message: string } | null;
+  const oc = outcome as { action: HookRepinResult["action"]; message: string; ok: boolean } | null;
   switch (result.status) {
     case "written":
       // decide returned `write` and the rename committed — the recorded update.
@@ -834,8 +923,8 @@ export function repinSessionStartHook(
       // decide returned a hold/skip (the recorded outcome) — OR the primitive
       // held on its own before decide ran (an observation change, an unreadable
       // destination), in which case there is no recorded outcome to use. A parse
-      // error is recorded as `refused` and stays a failure (`ok: false`).
-      return { ok: !refused, path, harness, action: oc?.action ?? "skip", message: oc?.message ?? result.message, backupPath: result.backupPath ?? null };
+      // or shape refusal stays a failure (`ok: false`).
+      return { ok: oc?.ok ?? true, path, harness, action: oc?.action ?? "skip", message: oc?.message ?? result.message, backupPath: result.backupPath ?? null };
     default:
       // "refused" — a lock / backup / atomicReplace refusal: NOTHING was written.
       // Never report the pre-write "update"; report a failure with the

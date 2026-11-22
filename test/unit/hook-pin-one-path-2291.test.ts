@@ -212,6 +212,41 @@ describe("flair#2291 — the finding reads the named pin span", () => {
     expect(hook?.status).toBe("fail");
     expect(hook?.detail ?? "").toContain(`pinned to flair-mcp@${STALE}`);
   });
+
+  it("a decoy inside FLAIR_URL does not hide the real -p pin from the finding", async () => {
+    const decoyUrl = `http://127.0.0.1:19926/${FLAIR_MCP_PACKAGE}@${INSTALLED}`;
+    const command = `sh -c 'out=$(FLAIR_AGENT_ID=${AGENT} FLAIR_URL=${decoyUrl} npx -y -p ${FLAIR_MCP_PACKAGE}@${STALE} flair-session-start 2>/dev/null) && printf %s "$out" || true'`;
+    const path = writeHookGroups("claude-code", [[command]]);
+
+    const status = await runCli(statusArgs("claude-code"));
+    expect(status.code).toBe(1);
+    expect(status.out).toContain(`command names older pin flair-mcp@${STALE}`);
+
+    const init = await runCli(initArgs("claude-code"));
+    expect(init.out).toContain(`re-pinned the SessionStart hook in ${path} to ${mcpServerSpec()}`);
+    const after = hookCommands("claude-code")[0]!;
+    // The named `-p` span moved to the installed pin; the URL kept its decoy.
+    expect(after).toContain(`-p ${FLAIR_MCP_PACKAGE}@${INSTALLED} `);
+    expect(after).toContain(`FLAIR_URL=${decoyUrl}`);
+    expect(after).not.toContain(`-p ${FLAIR_MCP_PACKAGE}@${STALE} `);
+  }, CASE_MS);
+
+  it("an AHEAD real pin is never lowered while the decoy id is re-pointed", async () => {
+    const AHEAD = "9.9.9";
+    const decoyId = `${AGENT}:${FLAIR_MCP_PACKAGE}@${STALE}`;
+    const command = installerCommand("claude-code", decoyId, AHEAD);
+    const path = writeHookGroups("claude-code", [[command]]);
+
+    const init = await runCli(initArgs("claude-code"));
+    expect(init.out).toContain(`re-pointed the SessionStart hook in ${path} to agent '${AGENT}'`);
+    expect(init.out).not.toContain("and re-pinned it");
+    const after = hookCommands("claude-code")[0]!;
+    // The id changed; the REAL pin stayed AHEAD (a behind decoy inside the id
+    // must not let the re-point branch lower it).
+    expect(after).toContain(`FLAIR_AGENT_ID=${AGENT} `);
+    expect(after).not.toContain(decoyId);
+    expect(after).toContain(`-p ${FLAIR_MCP_PACKAGE}@${AHEAD} `);
+  }, CASE_MS);
 });
 
 describe("flair#2291 — ambiguous hook shapes are held and reported", () => {
