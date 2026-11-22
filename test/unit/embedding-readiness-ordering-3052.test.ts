@@ -4,6 +4,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import ts from "typescript";
 import { memoryProviderTimeoutResponse } from "../../resources/memory-write-lock.ts";
 
 /**
@@ -17,6 +18,11 @@ import { memoryProviderTimeoutResponse } from "../../resources/memory-write-lock
  * The stand-in CLI records when each command starts instead of sending writes to
  * the fake instance. The smoke test runs as its own bun process; the CLI script
  * runs as its own bash process.
+ *
+ * Two checks need no fake instance: the smoke `beforeAll` must register its
+ * SETUP_TIMEOUT_MS budget (read from the AST, since Bun's 5 s default would
+ * still let the fast hermetic run pass), and the readiness script must run
+ * when it is invoked through a symlinked path.
  */
 
 const ROOT = join(import.meta.dir, "..", "..");
@@ -358,4 +364,42 @@ describe("flair#3052 — ordering on the CLI E2E entry path", () => {
       await fake.stop();
     }
   }, 90_000);
+});
+
+describe("flair#3052 — the smoke setup hook registers its budget", () => {
+  /** Every top-level `beforeAll(...)` call in the golden path, read from the AST. */
+  function beforeAllCalls(): ts.CallExpression[] {
+    const file = join(ROOT, "test", "smoke", "golden-path.test.ts");
+    const sf = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+    const calls: ts.CallExpression[] = [];
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "beforeAll") {
+        calls.push(node);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    return calls;
+  }
+
+  test("beforeAll passes SETUP_TIMEOUT_MS as its second argument", () => {
+    const calls = beforeAllCalls();
+    expect(calls.length).toBe(1);
+    const timeout = calls[0].arguments[1];
+    expect(timeout, "beforeAll registers no timeout, so Bun's 5 s hook default applies").toBeDefined();
+    expect(ts.isIdentifier(timeout!) ? timeout.text : timeout!.getText()).toBe("SETUP_TIMEOUT_MS");
+  });
+});
+
+describe("flair#3052 — the readiness script runs through a symlinked path", () => {
+  test("invoked through a symlink, the entry still runs main() and fails on a bad flag", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-3052-entry-link-"));
+    dirs.push(dir);
+    const link = join(dir, "embedding-readiness.mjs");
+    symlinkSync(join(ROOT, "scripts", "ci", "embedding-readiness.mjs"), link);
+    const result = await run("node", [link, "--deadline-ms", "0"], { ...process.env }, 15_000);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+    expect(result.stderr).toContain("--deadline-ms must be a positive number");
+  }, 20_000);
 });

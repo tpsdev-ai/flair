@@ -75,8 +75,8 @@ echo "--- embedding readiness ---"
 # flair#3052: a test Harper's FIRST embedding can exceed the provider's own
 # ~20 s bound and answer 503 memory_provider_timeout (nothing written), so this
 # wait runs before the first write. The wait is bounded by total elapsed time
-# and by a hard attempt cap (MAX_READINESS_ATTEMPTS), and records its duration
-# in the job's step summary.
+# and by a hard attempt cap (MAX_READINESS_ATTEMPTS), and, when
+# GITHUB_STEP_SUMMARY is set, records its duration in the job's step summary.
 FLAIR_ADMIN_PASS="$ADMIN_PASS" node "${FLAIR_DIR}/scripts/ci/embedding-readiness.mjs" \
   --base-url "http://localhost:${PORT}" \
   --label "Integration Tests (E2E CLI)" \

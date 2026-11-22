@@ -40,8 +40,26 @@ export interface FlairInstance {
 // Resolution
 // ---------------------------------------------------------------------------
 
-/** Budget for an instance to answer `/Health` before the smoke path gives up. */
+/**
+ * Strict monotonic bound on instance resolution: every `/Health` request's
+ * client timeout and every poll sleep is clamped to the time left, and an
+ * answer that arrives at or after the bound is not accepted.
+ */
 export const INSTANCE_RESOLVE_BUDGET_MS = 30_000;
+/** Client timeout of one `/Health` request, before clamping to the time left. */
+export const HEALTH_REQUEST_TIMEOUT_MS = 2_000;
+/** Pause between `/Health` polls, before clamping to the time left. */
+export const HEALTH_POLL_INTERVAL_MS = 500;
+
+/** Seams for the resolution bound's unit test; the smoke path passes none. */
+export interface ResolveFlairInstanceOptions {
+  /** Monotonic milliseconds (default `performance.now()`). */
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  fetchImpl?: typeof fetch;
+  /** Builds each `/Health` request's signal (default `AbortSignal.timeout`). */
+  timeoutSignal?: (ms: number) => AbortSignal;
+}
 
 function resolvePorts(): { httpPort: number; opsPort: number } {
   if (process.env.FLAIR_TEST_URL) {
@@ -61,7 +79,7 @@ function resolvePorts(): { httpPort: number; opsPort: number } {
  *
  * Admin credentials: FLAIR_ADMIN_PASS env > "admin123" (Docker default)
  */
-export async function resolveFlairInstance(): Promise<FlairInstance> {
+export async function resolveFlairInstance(opts: ResolveFlairInstanceOptions = {}): Promise<FlairInstance> {
   const { httpPort, opsPort } = resolvePorts();
   const baseUrl = process.env.FLAIR_TEST_URL ?? `http://127.0.0.1:${httpPort}`;
   const opsUrl = `http://127.0.0.1:${opsPort}`;
@@ -69,23 +87,34 @@ export async function resolveFlairInstance(): Promise<FlairInstance> {
   const adminPass = process.env.FLAIR_ADMIN_PASS ?? "admin123";
   const authHeader = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
-  // Wait for Flair to be healthy
-  const deadline = Date.now() + INSTANCE_RESOLVE_BUDGET_MS;
+  // Wait for Flair to be healthy, within INSTANCE_RESOLVE_BUDGET_MS measured on
+  // a monotonic clock. No request timeout or sleep may end past the deadline.
+  const now = opts.now ?? (() => performance.now());
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const timeoutSignal = opts.timeoutSignal ?? ((ms: number) => AbortSignal.timeout(ms));
+  const deadline = now() + INSTANCE_RESOLVE_BUDGET_MS;
   let ready = false;
 
-  while (Date.now() < deadline) {
+  for (;;) {
+    // Whole milliseconds (Node's AbortSignal.timeout rejects a fraction),
+    // rounded down so the request's timer is never due after the deadline.
+    const requestMs = Math.min(HEALTH_REQUEST_TIMEOUT_MS, Math.floor(deadline - now()));
+    if (requestMs < 1) break;
     try {
-      const res = await fetch(`${baseUrl}/Health`, {
-        signal: AbortSignal.timeout(2000),
+      const res = await fetchImpl(`${baseUrl}/Health`, {
+        signal: timeoutSignal(requestMs),
       });
-      if (res.ok) {
+      if (res.ok && now() < deadline) {
         ready = true;
         break;
       }
     } catch {
       // Not ready yet
     }
-    await new Promise(r => setTimeout(r, 500));
+    const pauseMs = Math.min(HEALTH_POLL_INTERVAL_MS, deadline - now());
+    if (pauseMs <= 0) break;
+    await sleep(pauseMs);
   }
 
   if (!ready) {
@@ -230,19 +259,22 @@ export async function writeMemory(
  * locally where the model is already warm (a warm write is ~3s). Confirmed
  * across #1217/#1221/#1222.
  *
- * This helper pays the cold-start cost UP FRONT, on a throwaway agent+memory,
- * so the model is hot before the measured Step-2 write ever runs. It exercises
- * the exact same path the timed step does (create agent → PUT /Memory,
- * admin-authed), so it warms precisely what Step 2 needs. It deletes its own
- * throwaway agent and reports a failed delete rather than treating it as gone.
+ * This helper pays the cold-start cost UP FRONT, on a throwaway agent+memory:
+ * it returns only after a stored embedding was observed on this instance, before
+ * the measured Step-2 write runs (an observation, not a guarantee the model
+ * stays loaded). It exercises the same server path the timed step does (an
+ * ops-inserted agent, then an admin-authed PUT /Memory). It deletes its own
+ * throwaway rows and agent and reports a failed delete, naming what may remain,
+ * rather than treating it as gone.
  *
  * flair#3052: the wait is bounded by TOTAL ELAPSED TIME (the shared helper in
  * scripts/ci/embedding-readiness.mjs) and by a hard attempt cap
  * (MAX_READINESS_ATTEMPTS), not by an attempt count alone. Each provider call
  * ends at the server's own ~20 s bound, so three attempts gave up at ~62 s
- * however generous the per-attempt budget was. Only a 503 whose JSON error
- * field is `memory_provider_timeout` is retried; any other answer fails at
- * once.
+ * however generous the per-attempt budget was. Among non-2xx Memory responses
+ * only a 503 whose JSON error field is `memory_provider_timeout` is retried;
+ * any other non-2xx answer fails at once. A 2xx whose read-back fails or does
+ * not show a stored vector and model stamp is also retried within the deadline.
  *
  * NOTE: this deliberately does NOT weaken `writeMemory`'s 10s timeout — that
  * timeout is a real client-side guard and stays put. The fix is to ensure the

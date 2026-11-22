@@ -7,24 +7,32 @@
 // Retrying by ATTEMPT COUNT gives up too early: three attempts each end at the
 // server's own bound, so the wait stops at ~62 s no matter how large the
 // per-attempt budget is. This wait is bounded by TOTAL ELAPSED TIME instead,
-// up to EMBEDDING_READY_DEADLINE_MS, and retries only a 503 whose JSON `error`
-// field is `memory_provider_timeout` — a different status or error, or an
-// unparseable body, indicates the provider is not merely cold and fails at
-// once.
+// up to EMBEDDING_READY_DEADLINE_MS, and by a hard attempt cap.
+//
+// Retry policy. Among non-2xx Memory responses, only a 503 whose JSON `error`
+// field is `memory_provider_timeout` is retried; any other non-2xx status or
+// error field, or an unparseable body, fails at once. A 2xx is retried too
+// when the read-back below fails or does not confirm a stored vector and model
+// stamp. A request that throws a client `TimeoutError` ends the wait as
+// never-ready; any other thrown request error fails at once. This is a policy
+// over response shapes; it does not diagnose why the server answered. The
+// operations-API calls (agent create, read-back, deletes) separately retry a
+// 401 once without credentials (see opsPost).
 //
 // READY means a stored embedding, not merely a 2xx write: getEmbedding() can
 // return null on a backend failure and Memory PUT can still succeed without a
-// vector, so the wait reads the warm-up row back and requires a non-empty
-// vector with its embedding-model stamp before it reports ready.
+// vector, so the wait reads the warm-up row back and requires its `embedding`
+// to be a nonempty array and its `embeddingModel` stamp a nonempty string
+// before it reports ready.
 //
 // Used by test/smoke/helpers/flair-instance.ts (in-process) and by
 // test/e2e-cli.sh (this file run directly under node), so the smoke and CLI
 // E2E paths wait through one implementation.
 
 import { randomBytes } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import nacl from "tweetnacl";
 
 export const EMBEDDING_READY_DEADLINE_MS = 180_000;
@@ -46,10 +54,11 @@ function defaultNow() {
 }
 
 /**
- * True only for the cold-model answer the wait exists to absorb: HTTP 503
- * whose JSON `error` field is exactly `memory_provider_timeout`. A 503 that
- * merely mentions the code elsewhere in its body, or whose body is not JSON,
- * is a different answer and is not retried.
+ * True only for the non-2xx response shape the wait retries: HTTP 503 whose
+ * JSON `error` field is exactly `memory_provider_timeout`. The shape is a retry
+ * signal, not proof that the model is cold. A 503 that merely mentions the
+ * code elsewhere in its body, or whose body is not JSON, does not match and is
+ * not retried.
  */
 export function isProviderTimeout(status, bodyText) {
   if (status !== PROVIDER_TIMEOUT_STATUS || typeof bodyText !== "string") return false;
@@ -70,12 +79,14 @@ function neverReady(label, elapsedMs, attempts, lastDetail) {
 }
 
 /**
- * Call `attempt(remainingMs)` until it answers ok, the deadline passes, or a
- * non-timeout answer arrives. `remainingMs` is a CLIENT-SIDE wait bound: the
+ * Call `attempt(remainingMs)` until a 2xx is confirmed, the deadline passes,
+ * the attempt cap is reached, or a non-2xx answer that `isProviderTimeout`
+ * does not match arrives. `remainingMs` is a CLIENT-SIDE wait bound: the
  * caller applies it to its own request. An in-process timeout cannot preempt a
  * provider that never yields the event loop (resources/memory-write-lock.ts).
  * An optional `confirm(res, remainingMs)` must approve each 2xx before it
- * counts as ready; a rejection retries within the deadline.
+ * counts as ready; a rejection or a thrown read-back retries within the
+ * deadline.
  *
  * @returns {Promise<{elapsedMs: number, attempts: number}>}
  */
@@ -119,9 +130,10 @@ export async function awaitEmbeddingReady(opts) {
         break;
       }
       // A 2xx write is not readiness by itself: confirm the row the write was
-      // meant to store actually carries a usable, server-stamped embedding.
-      // A row without one is retried within the deadline, then the wait fails
-      // closed naming the reason.
+      // meant to store carries an `embedding` that is a nonempty array and a
+      // nonempty `embeddingModel` stamp. That is all the check establishes; it
+      // does not test the vector's values. A row without both is retried
+      // within the deadline, then the wait fails closed naming the reason.
       if (opts.confirm) {
         let confirmed;
         try {
@@ -161,8 +173,10 @@ export async function awaitEmbeddingReady(opts) {
 }
 
 /**
- * Record the warm-up duration in the job summary. An absent summary file is a
- * no-op; a configured one that cannot be written fails the caller by name.
+ * Record the warm-up duration in the job summary. An unset (or empty)
+ * GITHUB_STEP_SUMMARY is a no-op. A set path is appended to, and
+ * `appendFileSync` creates the file if it does not exist yet; a set path that
+ * cannot be written fails the caller by name.
  */
 export function recordStepSummary(label, result) {
   const dest = process.env.GITHUB_STEP_SUMMARY;
@@ -177,12 +191,16 @@ export function recordStepSummary(label, result) {
   }
 }
 
-async function opsPost(opsUrl, authHeader, body, fetchImpl = fetch, timeoutMs = OPS_TIMEOUT_MS) {
+/**
+ * POST one operations-API request. A 401 to the credentialed request is retried
+ * once without `Authorization`. One `AbortSignal.timeout(timeoutMs)` is shared
+ * by both requests, so the 401 fallback cannot double an operation's
+ * client-side bound. Exported for its tests.
+ */
+export async function opsPost(opsUrl, authHeader, body, fetchImpl = fetch, timeoutMs = OPS_TIMEOUT_MS) {
   const json = JSON.stringify(body);
   const headers = { "Content-Type": "application/json" };
   if (authHeader) headers.Authorization = authHeader;
-  // One bound covers the credential-less retry as well as the first request,
-  // so a 401 fallback cannot double an operation's cost.
   const signal = AbortSignal.timeout(Math.max(1, Math.ceil(timeoutMs)));
   const send = (withAuth) => fetchImpl(opsUrl, {
     method: "POST",
@@ -247,12 +265,14 @@ async function deleteWarmResidue(opsUrl, authHeader, agentId, memoryIds, fetchIm
 }
 
 /**
- * Wait for one successful embedding on a real instance, through a throwaway
- * agent and memory row the helper deletes when the wait ends. A 2xx write is
- * not enough: the row is read back and must carry a non-empty embedding with
- * its model stamp. A failed delete fails the wait and names the rows and agent
- * that remain. Same write path a lane's first memory write takes, so the model
- * is warm before that write runs.
+ * Wait for one stored embedding on a real instance, through a throwaway agent
+ * and memory rows the helper deletes when the wait ends. A 2xx write is not
+ * enough: the row is read back and its `embedding` must be a nonempty array
+ * with a nonempty `embeddingModel` stamp. A failed delete fails the wait and
+ * names the rows and agent that may remain. The wait exercises the server's
+ * Memory PUT embedding path, so an embedding was observed on this instance
+ * before the lane's next write runs; that is an observation, not a guarantee
+ * the model stays loaded.
  *
  * @returns {Promise<{elapsedMs: number, attempts: number}>}
  */
@@ -344,12 +364,31 @@ function argValue(argv, name) {
   return at === -1 ? undefined : argv[at + 1];
 }
 
-/** Config for the command-line form; credentials come from the environment, never argv. */
+/** A URL carrying a username or password is refused, naming only its origin. */
+function refuseUrlCredentials(name, raw) {
+  const url = new URL(raw);
+  if (url.username !== "" || url.password !== "") {
+    throw new Error(
+      `${name} must not carry a username or password (got ${url.protocol}//${url.host}); ` +
+      `set FLAIR_ADMIN_USER / FLAIR_ADMIN_PASS instead`,
+    );
+  }
+  return url;
+}
+
+/**
+ * Config for the command-line form. Basic-auth credentials come only from
+ * FLAIR_ADMIN_USER and FLAIR_ADMIN_PASS, which default to `admin` / `admin123`
+ * (the test instances' admin) when unset. There are no credential flags, and a
+ * base or ops URL (from --base-url / --ops-url or FLAIR_URL / FLAIR_TEST_URL /
+ * FLAIR_OPS_URL) that carries a username or password is refused.
+ */
 export function warmCliConfig(argv = process.argv.slice(2), env = process.env) {
   const baseUrl = (argValue(argv, "--base-url") ?? env.FLAIR_URL ?? env.FLAIR_TEST_URL ?? "http://127.0.0.1:9926")
     .replace(/\/$/, "");
-  const httpPort = Number(new URL(baseUrl).port || 9926);
+  const httpPort = Number(refuseUrlCredentials("the base URL (--base-url)", baseUrl).port || 9926);
   const opsUrl = argValue(argv, "--ops-url") ?? env.FLAIR_OPS_URL ?? `http://127.0.0.1:${httpPort - 1}`;
+  refuseUrlCredentials("the ops URL (--ops-url)", opsUrl);
   const label = argValue(argv, "--label") ?? "embedding readiness";
   const rawDeadline = argValue(argv, "--deadline-ms");
   const deadlineMs = rawDeadline === undefined ? EMBEDDING_READY_DEADLINE_MS : Number(rawDeadline);
@@ -373,8 +412,22 @@ async function main(argv) {
   recordStepSummary(config.label, result);
 }
 
-const invokedDirectly = process.argv[1] !== undefined
-  && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+/**
+ * True when this file is the process entry. Both sides are compared as real
+ * paths: Node resolves the entry module through symlinks, so comparing the raw
+ * argv path made a run through a symlinked directory (macOS /var -> /private/var)
+ * skip main() and exit 0 without waiting.
+ */
+export function isEntryModule(argv1, moduleUrl = import.meta.url) {
+  if (argv1 === undefined) return false;
+  try {
+    return realpathSync(resolve(argv1)) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+const invokedDirectly = isEntryModule(process.argv[1]);
 
 if (invokedDirectly) {
   main(process.argv.slice(2)).catch((err) => {

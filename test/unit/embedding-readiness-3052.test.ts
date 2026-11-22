@@ -8,8 +8,15 @@ import {
   MAX_READINESS_ATTEMPTS,
   PROVIDER_TIMEOUT_ERROR,
   recordStepSummary,
+  warmCliConfig,
   warmInstanceEmbeddings,
 } from "../../scripts/ci/embedding-readiness.mjs";
+import {
+  HEALTH_POLL_INTERVAL_MS,
+  HEALTH_REQUEST_TIMEOUT_MS,
+  INSTANCE_RESOLVE_BUDGET_MS,
+  resolveFlairInstance,
+} from "../smoke/helpers/flair-instance.ts";
 import {
   MEMORY_PROVIDER_TIMEOUT_ERROR,
   memoryProviderTimeoutResponse,
@@ -19,10 +26,12 @@ import {
  * flair#3052 — the readiness wait is bounded by TOTAL ELAPSED TIME.
  *
  * Each provider call ends at the server's own ~20 s bound, so a fixed attempt
- * count gives up at ~62 s however generous the per-attempt budget is. These
- * cases use a virtual clock: an attempt costs PROVIDER_BOUND_MS, and a retry
- * backoff costs EMBEDDING_RETRY_BACKOFF_MS, so the deadline arithmetic is
- * exercised exactly without waiting in real time.
+ * count gives up at ~62 s however generous the per-attempt budget is. The
+ * deadline-arithmetic cases use a virtual clock: an attempt costs
+ * PROVIDER_BOUND_MS, and a retry backoff costs EMBEDDING_RETRY_BACKOFF_MS, so
+ * that arithmetic is exercised exactly without waiting in real time. The two
+ * wall-clock cases (a stalled and a backward `Date.now()`) wait about 80 ms in
+ * real time against the default monotonic clock.
  */
 
 const PROVIDER_BOUND_MS = 20_000;
@@ -143,7 +152,7 @@ describe("embedding readiness waits on total elapsed time (flair#3052)", () => {
     expect(error?.message).toContain("3 attempt(s)");
   }, 5_000);
 
-  test("a non-timeout answer fails at once, without retrying", async () => {
+  test("an HTTP 500 answer fails at once, without retrying", async () => {
     const clock = virtualClock();
     let attempts = 0;
     const call = awaitEmbeddingReady({
@@ -287,7 +296,11 @@ describe("embedding readiness waits on total elapsed time (flair#3052)", () => {
     expect(attempts).toBe(MAX_READINESS_ATTEMPTS);
   }, 5_000);
 
-  function warmFake(clock: ReturnType<typeof virtualClock>, rowFor: (id: string) => Record<string, unknown>) {
+  function warmFake(
+    clock: ReturnType<typeof virtualClock>,
+    rowFor: (id: string) => Record<string, unknown>,
+    readBackMs = 0,
+  ) {
     let memoryId = "";
     const fakeFetch = async (_url: string | URL | Request, init?: RequestInit) => {
       const body = init?.body ? JSON.parse(String(init.body)) : {};
@@ -296,6 +309,7 @@ describe("embedding readiness waits on total elapsed time (flair#3052)", () => {
       }
       if (body?.operation === "delete") return new Response("{}", { status: 200 });
       if (body?.operation === "search_by_id") {
+        clock.advance(readBackMs);
         return new Response(JSON.stringify([rowFor(memoryId)]), { status: 200 });
       }
       memoryId = String(body.id ?? "");
@@ -343,6 +357,35 @@ describe("embedding readiness waits on total elapsed time (flair#3052)", () => {
     expect(error?.message).toContain("stored no embedding model stamp");
   }, 5_000);
 
+  test("a read-back that confirms the row exactly at the deadline is not ready", async () => {
+    // PUT /Memory answers 2xx at 60 ms; the read-back confirms a stamped vector
+    // but takes 40 ms, so the confirmation lands at now() === deadline.
+    const clock = virtualClock();
+    let readBacks = 0;
+    const base = warmFake(clock, (id) => ({ id, embedding: [0.1, 0.2], embeddingModel: "unit-model" }), 40);
+    const counting = (async (url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body?.operation === "search_by_id") readBacks += 1;
+      return base(url, init);
+    }) as typeof fetch;
+    const error = await warmInstanceEmbeddings({
+      baseUrl: "http://127.0.0.1:1",
+      opsUrl: "http://127.0.0.1:2",
+      label: "unit warm-up",
+      deadlineMs: 100,
+      backoffMs: 0,
+      now: clock.now,
+      sleep: clock.sleep,
+      log: () => {},
+      fetchImpl: counting,
+    }).then(() => null, (err: Error) => err);
+
+    expect(readBacks).toBe(1);
+    expect(clock.elapsed()).toBe(100);
+    expect(error?.message).toContain("never became ready");
+    expect(error?.message).toContain("confirmed at or after the 100ms client-side wait bound");
+  }, 5_000);
+
   test("a row read back with a vector and a stamp is ready", async () => {
     const clock = virtualClock();
     const result = await warmInstanceEmbeddings({
@@ -362,7 +405,7 @@ describe("embedding readiness waits on total elapsed time (flair#3052)", () => {
   }, 5_000);
 });
 
-describe("the client bound cannot outlive the deadline (flair#3052)", () => {
+describe("each attempt's client bound is the time left, rounded up to a whole millisecond (flair#3052)", () => {
   test("attempt receives decreasing remaining values as the deadline approaches", async () => {
     const clock = virtualClock();
     const remaining: number[] = [];
@@ -563,7 +606,7 @@ describe("the job summary claim is enforced (flair#3052)", () => {
     }
   });
 
-  test("an absent summary file is a no-op", () => {
+  test("an unset GITHUB_STEP_SUMMARY is a no-op", () => {
     delete process.env.GITHUB_STEP_SUMMARY;
     expect(recordStepSummary("unit label", { elapsedMs: 1, attempts: 1 })).toBe(false);
   });
@@ -578,4 +621,142 @@ describe("the job summary claim is enforced (flair#3052)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe("the CLI takes credentials only from the environment (flair#3052)", () => {
+  const SECRET = "s3cret-in-url";
+
+  test("a --base-url carrying a username and password is refused without echoing the password", () => {
+    const error = (() => {
+      try {
+        warmCliConfig(["--base-url", `http://admin:${SECRET}@127.0.0.1:9926`], {});
+        return null;
+      } catch (err) {
+        return err as Error;
+      }
+    })();
+    expect(error?.message).toContain("the base URL (--base-url) must not carry a username or password");
+    expect(error?.message).toContain("http://127.0.0.1:9926");
+    expect(error?.message).not.toContain(SECRET);
+  });
+
+  test("a --ops-url carrying only a username is refused", () => {
+    expect(() => warmCliConfig(["--ops-url", "http://admin@127.0.0.1:9925"], {}))
+      .toThrow("the ops URL (--ops-url) must not carry a username or password");
+  });
+
+  test("an environment URL carrying credentials is refused too", () => {
+    expect(() => warmCliConfig([], { FLAIR_URL: `http://admin:${SECRET}@127.0.0.1:9926` }))
+      .toThrow("must not carry a username or password");
+    expect(() => warmCliConfig([], { FLAIR_OPS_URL: `http://admin:${SECRET}@127.0.0.1:9925` }))
+      .toThrow("must not carry a username or password");
+  });
+
+  test("credentials come from FLAIR_ADMIN_USER / FLAIR_ADMIN_PASS, defaulting to admin / admin123", () => {
+    const decode = (header: string) => Buffer.from(header.replace(/^Basic /, ""), "base64").toString("utf8");
+    const fromEnv = warmCliConfig(["--base-url", "http://127.0.0.1:9926"], {
+      FLAIR_ADMIN_USER: "ops-user",
+      FLAIR_ADMIN_PASS: "ops-pass",
+    });
+    expect(decode(fromEnv.authHeader)).toBe("ops-user:ops-pass");
+    expect(fromEnv.opsUrl).toBe("http://127.0.0.1:9925");
+    const defaults = warmCliConfig(["--base-url", "http://127.0.0.1:9926"], {});
+    expect(decode(defaults.authHeader)).toBe("admin:admin123");
+  });
+});
+
+describe("smoke instance resolution is a strict 30 s monotonic bound (flair#3052)", () => {
+  const savedUrl = process.env.FLAIR_TEST_URL;
+  afterEach(() => {
+    if (savedUrl === undefined) delete process.env.FLAIR_TEST_URL;
+    else process.env.FLAIR_TEST_URL = savedUrl;
+  });
+
+  /**
+   * A virtual clock drives the resolver. The fake `/Health` fetch never touches
+   * the network: it costs `costMs(requestedTimeoutMs)` virtual ms and then either
+   * answers or throws, and it records each request's clamped timeout with the
+   * time left when it was requested.
+   */
+  function resolverHarness(answer: (call: number) => { costMs: (timeoutMs: number) => number; ok: boolean | "throw" }) {
+    const clock = virtualClock(5_000);
+    const requests: Array<{ timeoutMs: number; leftMs: number }> = [];
+    const sleeps: number[] = [];
+    let pendingTimeout = 0;
+    let calls = 0;
+    const deadline = 5_000 + INSTANCE_RESOLVE_BUDGET_MS;
+    const fetchImpl = (async (url: string | URL | Request) => {
+      calls += 1;
+      expect(String(url)).toEndWith("/Health");
+      const { costMs, ok } = answer(calls);
+      clock.advance(costMs(pendingTimeout));
+      if (ok === "throw") {
+        const err = new Error("The operation timed out");
+        err.name = "TimeoutError";
+        throw err;
+      }
+      return new Response(ok ? "ok" : "starting", { status: ok ? 200 : 503 });
+    }) as typeof fetch;
+    const run = () => resolveFlairInstance({
+      now: clock.now,
+      sleep: async (ms: number) => { sleeps.push(ms); clock.advance(ms); },
+      fetchImpl,
+      timeoutSignal: (ms: number) => {
+        pendingTimeout = ms;
+        requests.push({ timeoutMs: ms, leftMs: deadline - clock.now() });
+        return new AbortController().signal;
+      },
+    });
+    return { clock, requests, sleeps, run, deadline, calls: () => calls };
+  }
+
+  test("a /Health that hangs until each client timeout gives up exactly at 30 s", async () => {
+    process.env.FLAIR_TEST_URL = "http://127.0.0.1:1";
+    // The first call is refused after 999 ms; every later call hangs until its
+    // own client timeout. The last request starts with 1001 ms left, so an
+    // unclamped 2 s timeout plus a 500 ms pause would end at ~31.5 s.
+    const h = resolverHarness((call) => (call === 1
+      ? { costMs: () => 999, ok: "throw" }
+      : { costMs: (timeoutMs) => timeoutMs, ok: "throw" }));
+    const error = await h.run().then(() => null, (err: Error) => err);
+
+    expect(error?.message).toContain("did not respond within 30s");
+    expect(h.clock.elapsed()).toBe(INSTANCE_RESOLVE_BUDGET_MS);
+    for (const r of h.requests) expect(r.timeoutMs).toBeLessThanOrEqual(Math.min(HEALTH_REQUEST_TIMEOUT_MS, r.leftMs));
+    expect(h.requests.at(-1)).toEqual({ timeoutMs: 1_001, leftMs: 1_001 });
+  }, 5_000);
+
+  test("a pause is clamped to the time left", async () => {
+    process.env.FLAIR_TEST_URL = "http://127.0.0.1:1";
+    // Every call is refused after 300 ms: 37 cycles of 800 ms reach 29.6 s, the
+    // next refusal lands at 29.9 s, and the pause must shrink to 100 ms.
+    const h = resolverHarness(() => ({ costMs: () => 300, ok: "throw" }));
+    const error = await h.run().then(() => null, (err: Error) => err);
+
+    expect(error?.message).toContain("did not respond within 30s");
+    expect(h.clock.elapsed()).toBe(INSTANCE_RESOLVE_BUDGET_MS);
+    expect(h.sleeps.at(-1)).toBe(100);
+    for (const ms of h.sleeps) expect(ms).toBeLessThanOrEqual(HEALTH_POLL_INTERVAL_MS);
+  }, 5_000);
+
+  test("a 200 that arrives at or after the bound is not accepted", async () => {
+    process.env.FLAIR_TEST_URL = "http://127.0.0.1:1";
+    // A fetch that ignores its signal and answers 200 at exactly 30 s.
+    const h = resolverHarness(() => ({ costMs: () => INSTANCE_RESOLVE_BUDGET_MS, ok: true }));
+    const error = await h.run().then(() => null, (err: Error) => err);
+
+    expect(error?.message).toContain("did not respond within 30s");
+    expect(h.calls()).toBe(1);
+    expect(h.clock.elapsed()).toBe(INSTANCE_RESOLVE_BUDGET_MS);
+  }, 5_000);
+
+  test("a 200 inside the bound resolves the instance", async () => {
+    process.env.FLAIR_TEST_URL = "http://127.0.0.1:1";
+    const h = resolverHarness((call) => ({ costMs: () => 100, ok: call >= 3 }));
+    const instance = await h.run();
+
+    expect(instance.baseUrl).toBe("http://127.0.0.1:1");
+    expect(h.calls()).toBe(3);
+    expect(h.clock.elapsed()).toBe(3 * 100 + 2 * HEALTH_POLL_INTERVAL_MS);
+  }, 5_000);
 });

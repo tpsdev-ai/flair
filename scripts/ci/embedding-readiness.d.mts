@@ -54,6 +54,14 @@ export interface WarmCliConfig {
 export function isProviderTimeout(status: number, bodyText: string): boolean;
 export function awaitEmbeddingReady(opts: AwaitEmbeddingReadyOptions): Promise<ReadinessResult>;
 export function recordStepSummary(label: string, result: ReadinessResult): boolean;
+export function opsPost(
+  opsUrl: string,
+  authHeader: string | undefined,
+  body: Record<string, unknown>,
+  fetchImpl?: typeof fetch,
+  timeoutMs?: number,
+): Promise<string>;
 export function createWarmAgent(opsUrl: string, authHeader: string, fetchImpl?: typeof fetch): Promise<string>;
 export function warmInstanceEmbeddings(opts: WarmInstanceOptions): Promise<ReadinessResult>;
 export function warmCliConfig(argv?: string[], env?: NodeJS.ProcessEnv): WarmCliConfig;
+export function isEntryModule(argv1: string | undefined, moduleUrl?: string): boolean;
