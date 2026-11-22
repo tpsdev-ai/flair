@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  recognizeCodexFlairSection,
   codexFlairSectionSpan,
   codexReplacementPreservesBoundary,
   replaceCodexFlairBlock,
@@ -21,9 +22,6 @@ import { FLAIR_MCP_PACKAGE, mcpServerSpec } from "../../src/lib/mcp-spec.ts";
  * path no-ops only when the pin AND FLAIR_AGENT_ID AND FLAIR_URL all match.
  * A second init with a different agent therefore left Codex on the first one.
  *
- * Round 5 replaces the line scanner with a WHITELIST of the exact shape
- * `tomlSnippet` writes. A section in any other shape is refused by name, with
- * the bytes and the backup directory untouched.
  */
 const URL_A = "http://127.0.0.1:19926";
 const ENV_A = { FLAIR_AGENT_ID: "agent-a", FLAIR_URL: URL_A };
@@ -73,6 +71,7 @@ function section(spec: string, agent: string, url: string): string {
 /** A refusal is ok:false, names the file and the hand-edit remedy, and writes
  *  nothing — no bytes change and no `.bak` appears. */
 function expectRefusal(raw: string, res: { ok: boolean; message: string }): void {
+  expect(recognizeCodexFlairSection(raw).kind).toBe("refused");
   expect(res.ok).toBe(false);
   expect(res.message).toContain("~/.codex/config.toml");
   expect(res.message).toContain("not the shape Flair writes");
@@ -480,6 +479,65 @@ describe("Codex shape boundaries", () => {
       expect(result.message).toContain("~/.codex/config.toml");
       expect(result.message).toContain("edit the [mcp_servers.flair] section by hand");
       expect(readFileSync(cfgPath())).toEqual(bytes);
+      expect(readdirSync(join(isoHome, ".codex"))).toEqual(["config.toml"]);
+    });
+  }
+});
+
+describe("Codex fallback definition guard", () => {
+  for (const header of [
+    '[mcp_servers."\\u0066lair"]', '["\\u006dcp_servers".flair]',
+    '[mcp_servers."\\U00000066lair"]', "['mcp_servers'.'flair']",
+    '[ "mcp_servers" . "flair" ]',
+  ]) {
+    for (const ending of ["\n", "\r\n"]) {
+      it(`refuses the alias ${header} with ${JSON.stringify(ending)} lines`, () => {
+        // Alias both headers so the canonical env header cannot cause the refusal.
+        const raw = seed((tomlSnippet(ENV_A)
+          .replace('[mcp_servers.flair]', header)
+          .replace('[mcp_servers.flair.env]', header.slice(0, -1) + '.env]') + "\n").replaceAll("\n", ending));
+        expect((Bun.TOML.parse(raw) as any).mcp_servers.flair.env.FLAIR_AGENT_ID).toBe("agent-a");
+        expectRefusal(raw, wireCodex(ENV_B));
+      });
+    }
+  }
+  for (const raw of [
+    '[mcp_servers]\nflair = { command = "npx" }\n',
+    '[mcp_servers]\n"\\u0066lair" = { command = "npx" }\n',
+    'mcp_servers = { flair = { command = "npx" } }\n',
+    '"\\u006dcp_servers" = { "\\u0066lair" = { command = "npx" } }\n',
+    'mcp_servers.flair.command = "npx"\n',
+    '"mcp_servers"."\\u0066lair".command = "npx"\n',
+  ]) {
+    it(`refuses a parent or dotted assignment ${JSON.stringify(raw)}`, () => {
+      expect((Bun.TOML.parse(raw) as any).mcp_servers.flair.command).toBe("npx");
+      seed(raw);
+      expectRefusal(raw, wireCodex(ENV_B));
+    });
+  }
+  for (const placement of ["before", "after"]) {
+    for (const header of ['[mcp_servers.flair.extra]', '[mcp_servers.flair.env]', '[mcp_servers."\\u0066lair".extra]', '[[mcp_servers.flair.extra]]']) {
+      it(`refuses ${header} ${placement} the main section`, () => {
+        const extra = header + '\nextra = "value"\n\n';
+        const raw = seed(placement === "before"
+          ? extra + tomlSnippet(ENV_A) + "\n"
+          : tomlSnippet(ENV_A) + '\n\n[other]\nx = "v"\n\n' + extra);
+        if (header.endsWith('.env]')) expect(() => Bun.TOML.parse(raw)).toThrow();
+        else {
+          const extra = (Bun.TOML.parse(raw) as any).mcp_servers.flair.extra;
+          expect((Array.isArray(extra) ? extra[0] : extra).extra).toBe("value");
+        }
+        expectRefusal(raw, wireCodex(ENV_B));
+      });
+    }
+  }
+  for (const present of [true, false]) {
+    it(`refuses a corrupted candidate shape on ${present ? "replacement" : "append"}`, () => {
+      const raw = seed(present ? tomlSnippet(ENV_A) + "\n" : '# empty config\n');
+      const res = wireCodex(ENV_B, { beforeShapeCheck: text => text.replace('command = "npx"', 'command = "bad"') });
+      expect(res.ok).toBe(false);
+      expect(res.message).toContain("replacement is not the intended Flair section");
+      expect(readFileSync(cfgPath(), "utf8")).toBe(raw);
       expect(readdirSync(join(isoHome, ".codex"))).toEqual(["config.toml"]);
     });
   }

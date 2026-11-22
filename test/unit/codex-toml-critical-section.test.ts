@@ -3,11 +3,7 @@
  * (boundary) and T5 (byte goldens + backup semantics).
  *
  * Every writer of Codex's ~/.codex/config.toml must go through ONE critical
- * section. T3 pins that boundary at the source; T5 pins that the bytes written
- * are EXACTLY the ones the pure TOML helpers produced before the migration
- * (append / replace / create / remove), plus the `.bak` semantics: a 0600
- * sibling on every call where the file EXISTS (write, no-op and held
- * included), and NONE when the file is first created.
+ * section. T3 checks that boundary; T5 checks emitted bytes and backups.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";

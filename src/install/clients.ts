@@ -241,7 +241,7 @@ export function tomlSnippet(env: WireEnv): string {
  * True when `raw` TOML content already has a `[mcp_servers.flair]` header —
  * the same detection scanCodexFlairBlock (src/doctor-client.ts) uses to
  * decide whether the block is present. Pure string scan; no TOML parser
- * (see the comment on _wireCodex below for why).
+ * for the read-only presence probe.
  */
 export function codexConfigHasFlairSection(raw: string): boolean {
   return /^\[mcp_servers\.flair\]\s*$/m.test(raw);
@@ -249,8 +249,7 @@ export function codexConfigHasFlairSection(raw: string): boolean {
 
 /**
  * Pure merge: append the Flair TOML snippet to existing raw config.toml
- * content. Callers MUST first confirm codexConfigHasFlairSection(raw) is
- * false — appending a second `[mcp_servers.flair]` table would shadow/
+ * content. Init first requires recognizeCodexFlairSection(raw) to be absent — appending a second `[mcp_servers.flair]` table would shadow/
  * duplicate the first (TOML doesn't merge repeated table headers), so this
  * function does not re-check; it just appends safely with a newline
  * separator (mirrors fixClaudeMdBootstrap's separator logic in
@@ -320,7 +319,7 @@ function continuesCodexFlairSection(line: string): boolean {
 }
 
 /** Read and replace the same span; foreign lines cannot license a rewrite. */
-export function recognizeCodexFlairSection(raw: string): CodexFlairShape {
+function locateCodexFlairSection(raw: string): CodexFlairShape {
   const lines = raw.split("\n");
   const starts: number[] = [];
   let offset = 0;
@@ -410,8 +409,51 @@ export function recognizeCodexFlairSection(raw: string): CodexFlairShape {
   return { kind: "recognized", start, end, text: raw.slice(start, end), spec: args[1]!, agentId, url };
 }
 
-/** The strict read path used by the no-op decision: the recognized span, or
- *  null when the section is absent or foreign. */
+function codexOutsideDefinition(raw: string, span?: { start: number; end: number }): boolean {
+  let offset = 0;
+  for (const rawLine of raw.split("\n")) {
+    const line = rawLine.replace(/^\uFEFF/, "").replace(/\r$/, "");
+    const outside = !span || offset < span.start || offset >= span.end;
+    offset += rawLine.length + 1;
+    if (!outside || /^[ \t]*(?:#|$)/.test(line)) continue;
+    const header = line.match(/^[ \t]*\[\[?[ \t]*(.*?)[ \t]*\]\]?[ \t]*(?:#.*)?$/);
+    const key = header?.[1] ?? line.match(/^[ \t]*((?:[^=]+))=/)?.[1];
+    if (!key) continue;
+    const first = key.match(/^[ \t]*("(?:[^"\\]|\\.)*"|'[^']*'|[A-Za-z0-9_-]+)/)?.[1];
+    if (!first) return true;
+    const decoded = first.startsWith('"') || first.startsWith("'")
+      ? readTomlStringArray(`[${first}]`, 0)?.values[0]?.value
+      : first;
+    // Without a table parser, a parent definition or an unreadable key
+    // cannot prove that the Flair entry is absent outside the rewrite span.
+    if (decoded === undefined || decoded === "mcp_servers") {
+      if (!header || decoded !== "mcp_servers") return true;
+      const rest = key.slice(first.length).trim();
+      if (!rest) return true;
+      const second = rest.match(/^\.[ \t]*("(?:[^"\\]|\\.)*"|'[^']*'|[A-Za-z0-9_-]+)/)?.[1];
+      if (!second) return true;
+      const child = second.startsWith('"') || second.startsWith("'")
+        ? readTomlStringArray(`[${second}]`, 0)?.values[0]?.value
+        : second;
+      if (child === undefined || child === "flair") return true;
+    }
+  }
+  return false;
+}
+
+/** Node ships no TOML parser here; refuse possible definitions outside the span. */
+export function recognizeCodexFlairSection(raw: string): CodexFlairShape {
+  const shape = locateCodexFlairSection(raw);
+  if (shape.kind === "absent" && codexOutsideDefinition(raw)) {
+    return { kind: "refused", reason: "a parent or aliased mcp_servers.flair definition may exist" };
+  }
+  if (shape.kind === "recognized" && codexOutsideDefinition(raw, shape)) {
+    return { kind: "refused", reason: "a mcp_servers.flair definition may exist outside the recognized span" };
+  }
+  return shape;
+}
+
+/** Expose the recognized section text. */
 export function codexFlairSectionText(raw: string): string | null {
   const shape = recognizeCodexFlairSection(raw);
   return shape.kind === "recognized" ? shape.text : null;
@@ -457,11 +499,12 @@ type CodexReplaceResult =
 export interface CodexRewriteTestHooks {
   /** TEST-ONLY: corrupt the candidate to exercise the boundary refusal. */
   beforeBoundaryCheck?: (text: string) => string;
+  beforeShapeCheck?: (text: string) => string;
 }
 
 export function replaceCodexFlairBlock(raw: string, env: WireEnv, testHooks?: CodexRewriteTestHooks): CodexReplaceResult {
   const shape = recognizeCodexFlairSection(raw);
-  if (shape.kind === "absent") return { ok: true, text: appendCodexFlairBlock(raw, env) };
+  if (shape.kind === "absent") return validateCodexCandidate(appendCodexFlairBlock(raw, env), env, testHooks);
   if (shape.kind === "refused") return { ok: false, reason: shape.reason };
   const prefix = raw.slice(0, shape.start);
   const suffix = raw.slice(shape.end);
@@ -470,6 +513,16 @@ export function replaceCodexFlairBlock(raw: string, env: WireEnv, testHooks?: Co
   const text = testHooks?.beforeBoundaryCheck?.(candidate) ?? candidate;
   if (!codexReplacementPreservesBoundary(raw, text, shape.start, shape.end, newBlock.length)) {
     return { ok: false, reason: "the bytes around the [mcp_servers.flair] section changed" };
+  }
+  return validateCodexCandidate(text, env, testHooks);
+}
+
+function validateCodexCandidate(candidate: string, env: WireEnv, testHooks?: CodexRewriteTestHooks): CodexReplaceResult {
+  const text = testHooks?.beforeShapeCheck?.(candidate) ?? candidate;
+  const shape = recognizeCodexFlairSection(text);
+  if (shape.kind !== "recognized" || shape.text !== tomlSnippet(env) + "\n" ||
+      shape.agentId !== env.FLAIR_AGENT_ID || shape.url !== env.FLAIR_URL || shape.spec !== mcpServerSpec()) {
+    return { ok: false, reason: "the replacement is not the intended Flair section" };
   }
   return { ok: true, text };
 }
@@ -927,7 +980,6 @@ function activeCodexIdentity(section: string): string | null {
  *  non-literal-regexp SAST surface. */
 const CODEX_SECTION_ENV_KEY_RE = {
   FLAIR_AGENT_ID: /^[ \t]*FLAIR_AGENT_ID[ \t]*=[ \t]*(.*)$/,
-  FLAIR_URL: /^[ \t]*FLAIR_URL[ \t]*=[ \t]*(.*)$/,
 } as const;
 
 /** An env value, no assignment, or an unreadable shape. */
@@ -936,9 +988,6 @@ type CodexEnvRead =
   | { state: "unreadable" }
   | { state: "value"; value: string };
 
-/** Parse one TOML value from the right-hand side of an env assignment. A
- *  commented or empty assignment is absent; an unterminated/escaped string is
- *  unreadable; the rest is the first whitespace/comment-delimited token. */
 function parseCodexTomlValue(rhs: string): CodexEnvRead {
   if (rhs === "" || rhs.startsWith("#")) return { state: "absent" };
   if (rhs.startsWith('"') || rhs.startsWith("'")) {
@@ -946,6 +995,7 @@ function parseCodexTomlValue(rhs: string): CodexEnvRead {
     const end = rhs.indexOf(quote, 1);
     // An unterminated string is unreadable, not a value.
     if (end === -1) return { state: "unreadable" };
+    if (!/^[ \t]*(?:#.*)?$/.test(rhs.slice(end + 1))) return { state: "unreadable" };
     const value = rhs.slice(1, end);
     // A basic string with an escape is not decoded here: reading it as the
     // raw source would compare a different value than Codex sees.
@@ -971,7 +1021,7 @@ function splitCodexSectionParts(section: string): CodexSectionPart[] {
   let current: CodexSectionPart = { header: null, lines: [] };
   for (const line of section.split("\n")) {
     const m = line.match(/^[ \t]*\[(.*)\][ \t]*(?:#.*)?$/);
-    if (m) {
+    if (m && isTomlTableHeaderLine(line)) {
       parts.push(current);
       current = { header: m[1]!.trim(), lines: [] };
     } else {
@@ -982,19 +1032,18 @@ function splitCodexSectionParts(section: string): CodexSectionPart[] {
   return parts;
 }
 
-/** Read one env key from a single table body. A second ACTIVE assignment is
- *  ambiguous even when its value is identical — a TOML parser rejects any
- *  duplicate key, so Codex could not load the file. An unreadable assignment
- *  anywhere in the table is unknown. */
+/** Repeated matched assignments make the pin-only identity unreadable. */
 function readCodexTableEnvValue(
   lines: string[],
   key: keyof typeof CODEX_SECTION_ENV_KEY_RE,
 ): CodexEnvRead {
   let found: string | null = null;
   let unreadable = false;
+  let assignments = 0;
   for (const raw of lines) {
     const m = raw.match(CODEX_SECTION_ENV_KEY_RE[key]);
     if (!m) continue;
+    if (++assignments > 1) return { state: "unreadable" };
     const read = parseCodexTomlValue(m[1]!.trim());
     if (read.state === "absent") continue;
     if (read.state === "unreadable") { unreadable = true; continue; }
@@ -1005,9 +1054,6 @@ function readCodexTableEnvValue(
   return found === null ? { state: "absent" } : { state: "value", value: found };
 }
 
-/** Parse a one-line TOML inline table (`{ key = "value", … }`) into its string
- *  entries. Returns null for any shape this scanner cannot read (escapes, a
- *  duplicate key, trailing junk, a nested table). */
 function parseCodexInlineEnvTable(body: string): Map<string, string> | null {
   const out = new Map<string, string>();
   let i = 0;
@@ -1034,18 +1080,14 @@ function parseCodexInlineEnvTable(body: string): Map<string, string> | null {
     if (body[i] !== "=") return null;
     i++;
     skipSpace();
-    const value = parseCodexTomlValue(body.slice(i).split(/[,\t}]/, 1)[0]!.trim());
-    if (value.state !== "value") return null;
-    if (out.has(key)) return null;
+    const quote = body[i];
+    if (quote !== '"' && quote !== "'") return null;
+    const end = body.indexOf(quote, i + 1);
+    if (end === -1) return null;
+    const value = parseCodexTomlValue(body.slice(i, end + 1));
+    if (value.state !== "value" || out.has(key)) return null;
     out.set(key, value.value);
-    // Advance past the value itself, then require a comma or the end.
-    if (body[i] === '"' || body[i] === "'") {
-      const end = body.indexOf(body[i]!, i + 1);
-      if (end === -1) return null;
-      i = end + 1;
-    } else {
-      while (i < n && !/[,\t}]/.test(body[i]!)) i++;
-    }
+    i = end + 1;
     skipSpace();
     if (i >= n) break;
     if (body[i] !== ",") return null;
@@ -1880,7 +1922,12 @@ function _wireCodex(env: WireEnv, testHooks?: CodexRewriteTestHooks): { ok: bool
         // case): the decision above was consulted with an ABSENT entry, and a
         // `write` here is today's plain append.
         success = `Codex: wired ${display} (restart Codex to pick it up)`;
-        return { write: encodeText(appendCodexFlairBlock(raw, env)) };
+        const appended = replaceCodexFlairBlock(raw, env, testHooks);
+        if (appended.ok === false) {
+          settled = { ok: false, message: codexForeignShapeMessage(display, appended.reason) };
+          return { hold: settled.message };
+        }
+        return { write: encodeText(appended.text) };
       },
       { backupOnWrite: (bytes) => backupBytesTo(path, bytes) },
     );

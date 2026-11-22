@@ -260,7 +260,7 @@ describe("installHook — malformed settings.json fails CLOSED", () => {
     // partial replacement.
     expect(readFileSync(path, "utf-8")).toBe(malformed);
 
-    // A backup was taken BEFORE the parse attempt, and it holds the same
+    // A backup holds the same
     // (malformed) content — recovery insurance regardless of outcome.
     expect(result.backupPath).toBe(hookBackupPath(path));
     expect(existsSync(result.backupPath!)).toBe(true);

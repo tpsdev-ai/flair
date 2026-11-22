@@ -38,6 +38,7 @@ import {
   type ClientId,
   type PiSettingsScan,
 } from "./install/clients.js";
+import { parseInstallerHookForm } from "./lib/session-start-hook-form.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec } from "./lib/mcp-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "./lib/pin-write-guard.js";
 import { withConfigCriticalSection } from "./lib/config-critical-section.js";
@@ -2102,7 +2103,9 @@ export function inspectSessionStartHook(
   const command = found.command;
   const ours = isFlairHookCommand(command);
   const silenced = hookCommandIsSilenced(command);
-  const upgradable = parseLegacySessionStartHookCommand(command) !== null;
+  const legacy = parseLegacySessionStartHookCommand(command);
+  const upgradable = legacy !== null && isHookCommandValueSafe(legacy.agentId) &&
+    (legacy.flairUrl === undefined || isHookCommandValueSafe(legacy.flairUrl));
 
   if (!ours || opts.probe === false) {
     return { path: found.path, present: true, command, ours, silenced, upgradable, execution: null };
@@ -2188,26 +2191,28 @@ export function upgradeSessionStartHookCommand(homeDir: string, settingsPath?: s
           if (!Array.isArray(hooks)) continue;
           for (const hook of hooks) {
             if (typeof hook?.command !== "string" || !hook.command.includes(SESSION_START_HOOK_MARKER)) continue;
-            // Already absorbing its own failures — nothing to repair, whether we
-            // wrote it or the user did. Checked BEFORE the legacy match so a second
-            // run is a clean no-op rather than "that isn't the command we wrote".
-            if (hookCommandIsSilenced(hook.command)) {
-              outcome = { ok: true, path, changed: false, message: `SessionStart hook in ${path} is already current` };
-              return { noop: outcome.message };
-            }
+            const installer = parseInstallerHookForm(hook.command);
             const legacy = parseLegacySessionStartHookCommand(hook.command);
-            if (!legacy) {
+            const source = installer ?? legacy;
+            if (!source) {
               outcome = { ok: false, path, changed: false, message: `the SessionStart hook in ${path} is not the command Flair wrote — leaving it untouched` };
               return { hold: outcome.message };
             }
-            // flair#3050 round 5: validate the EXISTING values with the
-            // builder's own rule before treating the command as Flair-written.
-            if (!isHookCommandValueSafe(legacy.agentId)) {
-              outcome = { ok: false, path, changed: false, message: unsafeAgentIdMessage(legacy.agentId) };
+            if (!isHookCommandValueSafe(source.agentId)) {
+              outcome = { ok: false, path, changed: false, message: unsafeAgentIdMessage(source.agentId) };
               return { hold: outcome.message };
             }
-            if (legacy.flairUrl !== undefined && legacy.flairUrl !== "" && !isHookCommandValueSafe(legacy.flairUrl)) {
-              outcome = { ok: false, path, changed: false, message: unsafeFlairUrlMessage(legacy.flairUrl) };
+            if (source.flairUrl !== undefined && !isHookCommandValueSafe(source.flairUrl)) {
+              outcome = { ok: false, path, changed: false, message: unsafeFlairUrlMessage(source.flairUrl) };
+              return { hold: outcome.message };
+            }
+            // Validate the source before the idempotent return.
+            if (installer && hookCommandIsSilenced(hook.command)) {
+              outcome = { ok: true, path, changed: false, message: `SessionStart hook in ${path} is already current` };
+              return { noop: outcome.message };
+            }
+            if (!legacy) {
+              outcome = { ok: false, path, changed: false, message: `the SessionStart hook in ${path} is not the legacy command Flair wrote — leaving it untouched` };
               return { hold: outcome.message };
             }
             // flair#1778 2c-i-a3: the repair rewrites the entry to a version-
@@ -2239,7 +2244,7 @@ export function upgradeSessionStartHookCommand(homeDir: string, settingsPath?: s
         outcome = { ok: false, path, changed: false, message: `no Flair SessionStart hook found in ${path}` };
         return { hold: outcome.message };
       },
-      { backup: (bytes) => backupBytesTo(path, bytes) },
+      { backupOnWrite: (bytes) => backupBytesTo(path, bytes) },
     );
     if (result.status === "written") {
       return { ok: true, path, changed: true, message: `rewrote the SessionStart hook in ${path} so a failure to resolve stays silent` };

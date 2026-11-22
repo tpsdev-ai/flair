@@ -15,7 +15,7 @@
 // The removal writers are covered here too, to show they carry no version.
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -48,7 +48,7 @@ afterEach(() => {
 
 const settingsPath = () => hookSettingsPath(isoHome, HARNESS);
 
-/** The installer-shape SessionStart command carrying `spec` and `agent`. */
+/** A SessionStart command fixture carrying `spec` and `agent`. */
 function hookCommand(spec: string, agent = AGENT): string {
   return (
     `sh -c 'out=$(FLAIR_AGENT_ID=${agent} FLAIR_URL=${URL} npx -y -p ${spec} ` +
@@ -103,18 +103,26 @@ describe("installHook — the SessionStart pin is never lowered", () => {
     `${FLAIR_MCP_PACKAGE}@^0.55.0`,
     `${FLAIR_MCP_PACKAGE}@latest`,
     `${FLAIR_MCP_PACKAGE}@v0.55.0`,
-    `${FLAIR_MCP_PACKAGE}@1.2.3.4`,
     `${FLAIR_MCP_PACKAGE}@file:../x`,
     `${FLAIR_MCP_PACKAGE}@github:o/r`,
   ]) {
-    it(`range/tag/malformed/unsupported ${spec} → HELD, bytes preserved verbatim`, () => {
+    it(`unsupported source ${spec} → refused, bytes preserved verbatim`, () => {
       const path = writeHook(spec);
       const before = readFileSync(path, "utf-8");
       const res = install();
-      expect(res.message).toContain("holding");
+      expect(res.ok).toBe(false);
+      expect(res.message).toContain("not a command Flair wrote");
       expect(readFileSync(path, "utf-8")).toBe(before);
+      expect(readdirSync(dirname(path))).toEqual(["settings.json"]);
     });
   }
+
+  it("a numeric version outside semver → held by the pin guard", () => {
+    const path = writeHook(`${FLAIR_MCP_PACKAGE}@1.2.3.4`);
+    const before = readFileSync(path, "utf8");
+    expect(install().message).toContain("holding");
+    expect(readFileSync(path, "utf8")).toBe(before);
+  });
 
   it("BEHIND → repinned UP to the running CLI (positive control)", () => {
     writeHook(BEHIND_SPEC);

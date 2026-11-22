@@ -3,8 +3,8 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { applyOrRepinSessionStartHook } from "../../src/lib/owned-pins.ts";
-import { hookSettingsPath, repinSessionStartHook } from "../../src/hook-install.ts";
-import { buildSessionStartHookCommand, SESSION_START_HOOK_MARKER } from "../../src/doctor-client.ts";
+import { hookSettingsPath, repinSessionStartHook, installHook, guardedPinSpan } from "../../src/hook-install.ts";
+import { buildSessionStartHookCommand, SESSION_START_HOOK_MARKER, upgradeSessionStartHookCommand, inspectSessionStartHook } from "../../src/doctor-client.ts";
 import { FLAIR_MCP_PACKAGE, mcpServerSpec } from "../../src/lib/mcp-spec.ts";
 import { tempDir } from "../helpers/temp-dir.ts";
 
@@ -47,7 +47,7 @@ function legacyCommand(agentId: string): string {
   return `FLAIR_AGENT_ID=${agentId} npx -y ${FLAIR_MCP_PACKAGE} flair-session-start`;
 }
 
-/** Every file in the settings directory — a refusal must add NOTHING (no .bak). */
+/** List the settings directory for the refusal assertions below. */
 function settingsDirFiles(): string {
   return readdirSync(join(home, ".claude")).sort().join(",");
 }
@@ -401,4 +401,71 @@ describe("SessionStart source commands", () => {
     expect(readFileSync(settingsPath, "utf8")).toBe(before);
     expect(settingsDirFiles()).toBe("settings.json");
   });
+});
+
+describe("hook install source guards", () => {
+  const commands = [
+    `echo decoy && FLAIR_AGENT_ID=agent-a npx -y -p ${mcpServerSpec()} flair-session-start`,
+    `FLAIR_AGENT_ID=agent-a&& npx -y -p ${mcpServerSpec()} flair-session-start`,
+    `FLAIR_AGENT_ID=bad@id npx -y -p ${mcpServerSpec()} flair-session-start`,
+    `FLAIR_AGENT_ID=agent-a FLAIR_URL=http://bad?query npx -y -p ${mcpServerSpec()} flair-session-start`,
+    legacyCommand("bad@id"),
+    `FLAIR_AGENT_ID=agent-a FLAIR_URL=http://bad?query npx -y ${FLAIR_MCP_PACKAGE} flair-session-start`,
+  ];
+  for (const command of commands) {
+    for (const dryRun of [false, true]) {
+      it(`refuses install source ${JSON.stringify(command)} dryRun=${dryRun}`, () => {
+        const settingsPath = writeSettings(hookSettings(command));
+        const before = readFileSync(settingsPath, "utf8");
+        const files = settingsDirFiles();
+        const result = installHook({ homeDir: home, harness: "claude-code", agentId: "agent-b", flairUrl: "http://localhost:19926", dryRun });
+        expect(result.ok).toBe(false);
+        expect(readFileSync(settingsPath, "utf8")).toBe(before);
+        expect(settingsDirFiles()).toBe(files);
+        expect(result.backupPath).toBeNull();
+      });
+    }
+  }
+  for (const command of [flairCommand("agent-a"), legacyCommand("agent-a")]) {
+    it(`installs over a safe source ${JSON.stringify(command)}`, () => {
+      const settingsPath = writeSettings(hookSettings(command));
+      expect(installHook({ homeDir: home, harness: "claude-code", agentId: "agent-b", flairUrl: "http://localhost:19926" }).ok).toBe(true);
+      expect(flairHookCommand(settingsPath)).toContain("FLAIR_AGENT_ID=agent-b");
+    });
+  }
+});
+
+describe("doctor hook repair source guards", () => {
+  for (const command of [
+    legacyCommand("bad@id"),
+    `FLAIR_AGENT_ID=agent-a FLAIR_URL=http://bad?query npx -y ${FLAIR_MCP_PACKAGE} flair-session-start`,
+    `FLAIR_AGENT_ID=agent-a&& npx -y ${FLAIR_MCP_PACKAGE} flair-session-start`,
+    flairCommand("agent-a").replace("agent-a", "bad@id"),
+    buildSessionStartHookCommand("agent-a", "http://localhost:19926").replace("http://localhost:19926", "http://bad?query"),
+    flairCommand("agent-a") + " && echo extra",
+    "echo flair-session-start || true",
+  ]) {
+    it(`refuses repair and does not offer upgrade for ${JSON.stringify(command)}`, () => {
+      const settingsPath = writeSettings(hookSettings(command));
+      const before = readFileSync(settingsPath, "utf8");
+      const files = settingsDirFiles();
+      expect(inspectSessionStartHook(home, { probe: false }).upgradable).toBe(false);
+      const result = upgradeSessionStartHookCommand(home);
+      expect(result.ok).toBe(false);
+      expect(result.changed).toBe(false);
+      expect(readFileSync(settingsPath, "utf8")).toBe(before);
+      expect(settingsDirFiles()).toBe(files);
+    });
+  }
+  it("offers and repairs a safe legacy source", () => {
+    const settingsPath = writeSettings(hookSettings(legacyCommand("agent-a")));
+    expect(inspectSessionStartHook(home, { probe: false }).upgradable).toBe(true);
+    expect(upgradeSessionStartHookCommand(home).changed).toBe(true);
+    expect(flairHookCommand(settingsPath)).toBe(flairCommand("agent-a"));
+    expect(upgradeSessionStartHookCommand(home).ok).toBe(true);
+  });
+});
+
+it("the install pin reader does not take a pin from a chain", () => {
+  expect(guardedPinSpan(`echo first && FLAIR_AGENT_ID=agent-a npx -y -p ${mcpServerSpec()} flair-session-start`)).toBe(`${FLAIR_MCP_PACKAGE}@unknown`);
 });

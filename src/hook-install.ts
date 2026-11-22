@@ -25,8 +25,8 @@
 // default.
 //
 // Binding review conditions (Sherlock, #719 thread) this module implements:
-//   1. Malformed settings.json fails CLOSED — a backup is taken BEFORE the
-//      parse attempt (whenever the file exists and we're not in --dry-run),
+//   1. Malformed settings.json fails CLOSED — its bytes are backed up before
+//      refusal (outside --dry-run),
 //      and on a parse error we report and refuse to touch the real file:
 //      never truncate, never write a partial replacement.
 //   2. Idempotent merge — parse, add/update ONLY our hook entry (found via
@@ -96,6 +96,8 @@ import {
   type ContinuityHookEvent,
   type ContinuityMutationAction,
 } from "./doctor-client.js";
+import { parseInstallerHookForm, parseUnpinnedInstallerHookForm } from "./lib/session-start-hook-form.js";
+export { parseInstallerHookForm, type InstallerHookForm } from "./lib/session-start-hook-form.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec } from "./lib/mcp-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "./lib/pin-write-guard.js";
 import { withConfigCriticalSection, type ConfigSectionOptions } from "./lib/config-critical-section.js";
@@ -300,6 +302,17 @@ function findHookEntry(config: any): { groupIndex: number; hookIndex: number } |
   return null;
 }
 
+function installSourceRefusal(config: any, path: string): string | null {
+  for (const match of findHookMatches(config)) {
+    const command = config.hooks.SessionStart[match.groupIndex].hooks[match.hookIndex].command;
+    const source = parseInstallerHookForm(command) ?? parseLegacySessionStartHookCommand(command) ?? parseUnpinnedInstallerHookForm(command);
+    if (!source) return `SessionStart hook in ${path} is not a command Flair wrote — left untouched`;
+    if (!isHookCommandValueSafe(source.agentId)) return unsafeAgentIdMessage(source.agentId);
+    if (source.flairUrl !== undefined && !isHookCommandValueSafe(source.flairUrl)) return unsafeFlairUrlMessage(source.flairUrl);
+  }
+  return null;
+}
+
 // ── settings.json read (fail-closed) ────────────────────────────────────────
 
 function readSettingsFile(path: string): ReadSettingsResult {
@@ -441,6 +454,8 @@ export function installHook(opts: InstallHookOptions): HookMutationResult {
         backupPath: null, delta: null,
       };
     }
+    const refusal = installSourceRefusal(read.parsed, path);
+    if (refusal) return { ok: false, path, harness, dryRun, message: refusal, backupPath: null, delta: null };
     const { action, before, after } = computeInstallDelta(read.parsed ?? {}, agentId, flairUrl, harness);
     const delta: HookDelta = { action, path, harness, before, after };
     const message = action === "noop"
@@ -456,6 +471,7 @@ export function installHook(opts: InstallHookOptions): HookMutationResult {
 
   let delta: HookDelta | null = null;
   let parseRefused = false;
+  let sourceRefused = false;
 
   const result = withConfigCriticalSection(
     path,
@@ -467,6 +483,8 @@ export function installHook(opts: InstallHookOptions): HookMutationResult {
           hold: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}.`,
         };
       }
+      const refusal = installSourceRefusal(read.parsed, path);
+      if (refusal) { sourceRefused = true; return { hold: refusal }; }
       const { action, before, after, newConfig } = computeInstallDelta(read.parsed ?? {}, agentId, flairUrl, harness);
       delta = { action, path, harness, before, after };
       if (action === "noop") {
@@ -496,7 +514,10 @@ export function installHook(opts: InstallHookOptions): HookMutationResult {
       if (decision.action !== "write") return { hold: decision.line! };
       return { write: encodeConfig(newConfig) };
     },
-    { backup: (bytes) => backupBytesTo(path, bytes) },
+    {
+      backup: (bytes) => parseSettingsBytes(bytes, path).parseError ? backupBytesTo(path, bytes) : null,
+      backupOnWrite: (bytes) => backupBytesTo(path, bytes),
+    },
   );
 
   const backupPath = result.backupPath ?? null;
@@ -514,7 +535,7 @@ export function installHook(opts: InstallHookOptions): HookMutationResult {
     return { ok: true, path, harness, dryRun, message: result.message, backupPath, delta };
   }
   if (result.status === "held") {
-    return { ok: !parseRefused, path, harness, dryRun, message: result.message, backupPath, delta: parseRefused ? null : delta };
+    return { ok: !parseRefused && !sourceRefused, path, harness, dryRun, message: result.message, backupPath, delta: parseRefused || sourceRefused ? null : delta };
   }
   return { ok: false, path, harness, dryRun, message: result.message, backupPath, delta: null };
 }
@@ -554,12 +575,9 @@ function findHookMatches(config: any): Array<{ groupIndex: number; hookIndex: nu
   return out;
 }
 
-/**
- * The named refusal a foreign-shaped Flair SessionStart entry gets, or null
- * when the single matching entry has exactly the shape Flair writes. Reads
- * only: a caller that would otherwise report "already wired" can refuse by
- * name BEFORE its no-op (flair#3050 round 3). A parse error is a refusal too.
- * No match or several matches return null — those have their own lines.
+/** Check the matching hook's JSON envelope; command validation is separate.
+ * Call before a no-op so foreign metadata cannot report already wired.
+ * No match or several matches return null; callers handle those cases.
  */
 export function sessionStartHookShapeRefusal(path: string): string | null {
   const read = readSettingsFile(path);
@@ -580,82 +598,6 @@ export function sessionStartHookShapeRefusal(path: string): string | null {
 }
 
 /**
- * The three EXACT installer forms `buildSessionStartHookCommand` emits
- * (flair#1834 PR-H), anchored so the FULL command must match. `<id>`, `<url>`
- * and `<ver>` are the only free variables; everything else — quoting, the
- * wrapper, `2>/dev/null`, ordering — is the shape Flair itself wrote.
- *
- * Literal regexes (no composed pattern): each form is a constant. The
- * unanchored SESSION_START_HOOK_INVOCATION_RE stays only for status display.
- * Capture groups: 1 = agent id, 2 = optional URL, 3 = the pinned package span.
- * The `d` flag exposes each group's OFFSET so the re-pin can substitute the
- * CAPTURED `<ver>` span — never the first substring occurrence (round 2).
- *
- * `<ver>` is a SEMVER, not "anything up to the next delimiter": digits and
- * dots with an OPTIONAL pre-release suffix AND an OPTIONAL build suffix
- * (separate groups, flair#1834 PR-H round 4 — one `[-+]` group admitted only
- * ONE of the two, so `0.54.0-rc.1+build.5` matched no form and a stale hook was
- * HELD instead of updated). Each suffix is letters, digits, dots and hyphens.
- * The looser `[^\s"')]+` admitted `;` and `$`, so `…@0.55.0;<cmd>` and
- * `…@0.55.0$X` passed the FORM and were held only by the never-lower guard
- * (round 2).
- */
-const HOOK_BARE_FORM_RE =
-  /^FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?) flair-session-start$/d;
-const HOOK_CLAUDE_FORM_RE =
-  /^sh -c 'out=\$\((?:FLAIR_ACTION_RECALL=1 )?FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?) flair-session-start 2>\/dev\/null\) && printf %s "\$out" \|\| true'$/d;
-const HOOK_CODEX_FORM_RE =
-  /^sh -c 'out=\$\(FLAIR_HOOK_HARNESS=codex FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?) flair-session-start\) && printf %s "\$out" \|\| true'$/d;
-
-export interface InstallerHookForm {
-  /** The form's harness (the bare form is harness-agnostic). */
-  harness: "claude-code" | "codex";
-  agentId: string;
-  flairUrl?: string;
-  /** [start, end) offset of the captured agent id within the FULL command. */
-  agentIdStart: number;
-  agentIdEnd: number;
-  /** The exact `@tpsdev-ai/flair-mcp@<ver>` span (the only part re-pinned). */
-  pkgSpec: string;
-  /** [start, end) offset of `pkgSpec` within the FULL command (the re-pin span). */
-  pkgSpecStart: number;
-  pkgSpecEnd: number;
-}
-
-function formFromMatch(harness: "claude-code" | "codex", m: RegExpMatchArray): InstallerHookForm {
-  const agentSpan = m.indices?.[1];
-  const span = m.indices?.[3];
-  if (!agentSpan || !span) throw new Error("installer hook form matched without group indices");
-  return {
-    harness,
-    agentId: m[1]!,
-    flairUrl: m[2],
-    agentIdStart: agentSpan[0],
-    agentIdEnd: agentSpan[1],
-    pkgSpec: m[3]!,
-    pkgSpecStart: span[0],
-    pkgSpecEnd: span[1],
-  };
-}
-
-/**
- * Match a FULL hook command against the three installer forms, or null. This is
- * the strict replacement for the unanchored substring check: a duplicate
- * `FLAIR_AGENT_ID=`, an appended shell command, or an extra env var does not
- * match any form and is therefore a HOLD.
- */
-export function parseInstallerHookForm(command: string): InstallerHookForm | null {
-  if (typeof command !== "string") return null;
-  let m = command.match(HOOK_CLAUDE_FORM_RE);
-  if (m) return formFromMatch("claude-code", m);
-  m = command.match(HOOK_CODEX_FORM_RE);
-  if (m) return formFromMatch("codex", m);
-  m = command.match(HOOK_BARE_FORM_RE);
-  if (m) return formFromMatch("claude-code", m);
-  return null;
-}
-
-/**
  * The span of an existing hook command whose VERSION the never-lower guard
  * must prove safe — the exact text a rebuild would replace.
  *
@@ -663,13 +605,15 @@ export function parseInstallerHookForm(command: string): InstallerHookForm | nul
  * `-p <pkg>@<ver>` span (`form.pkgSpec`); the id and URL charsets can CONTAIN
  * a `<pkg>@<ver>` string, so decoding the WHOLE command reads the FIRST
  * occurrence — a possible decoy — while the rebuild writes the real pin
- * (flair#1834 PR-H round 2, Kern BLOCKING). A command that is not a form keeps
- * today's whole-command read: there is no captured span to narrow to, and its
- * shape is handled by each writer's own fail-closed path.
+ * (flair#1834 PR-H round 2, Kern BLOCKING). Unsupported commands have an
+ * unknown pin: a pin inside a shell chain cannot authorize replacement.
  */
-function guardedPinSpan(command: string | null): string | null {
+export function guardedPinSpan(command: string | null): string | null {
   if (command === null) return null;
-  return parseInstallerHookForm(command)?.pkgSpec ?? command;
+  const form = parseInstallerHookForm(command);
+  if (form) return form.pkgSpec;
+  if (parseLegacySessionStartHookCommand(command) || parseUnpinnedInstallerHookForm(command)) return FLAIR_MCP_PACKAGE;
+  return `${FLAIR_MCP_PACKAGE}@unknown`;
 }
 
 /**
@@ -689,7 +633,7 @@ function guardedPinSpan(command: string | null): string | null {
  * `add`: wiring a hook is `flair init` / `flair hook install`, an opt-in the
  * upgrade path must not make on the user's behalf. Only rewrites the exact
  * canonical `npx -y -p …` invocation Flair itself writes (pinned or the
- * pre-#1143 unpinned form); a hand-edited command is the user's and is left
+ * pre-#1007 bare unpinned form); a hand-edited command is the user's and is left
  * untouched. Fail-closed on a malformed settings file and backs up before any
  * real write — the same Sherlock conditions installHook implements. Idempotent:
  * a second call is a `noop`.
