@@ -6,4 +6,4 @@
   count is `{ "state": "unknown", "reason": "..." }`, and the snapshot's
   `metadata.json` records `pendingCandidateCount: null`. `flair rem restore`
   now reports an unrecognised operations-API response body as an error
-  instead of as no leftover candidates (#2680).
+  instead of as no leftover candidates (#2680). ([#2683](https://github.com/tpsdev-ai/flair/pull/2683))

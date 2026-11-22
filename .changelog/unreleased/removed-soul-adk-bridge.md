@@ -6,4 +6,4 @@
   `soul_scope_fields_not_writable`.
   A learned-text refusal reports `soul_value_is_learned_content` for a
   non-empty exact value match with stored Memory or MemoryCandidate text for
-  the target agent.
+  the target agent. ([#2918](https://github.com/tpsdev-ai/flair/pull/2918))

@@ -8,4 +8,4 @@
   sent). Failures after a key is loaded (nonce, signing) are final. Otherwise
   the answer is final: a failed HTTP response whose body was read is thrown
   with its status and any error code in that body, and a refused redirect is
-  thrown with its status before any body is read (#2955).
+  thrown with its status before any body is read (#2955). ([#2957](https://github.com/tpsdev-ai/flair/pull/2957))

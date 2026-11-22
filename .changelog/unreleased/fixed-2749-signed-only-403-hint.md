@@ -12,4 +12,4 @@
   A credential-less 403 with an empty body (`Content-Length: 0`), signed-only
   or not, is now handled like one with a body: the keys in the keys directory
   are tried, and if none succeeds the error carries the same hint. In 0.62.0
-  it was reported as a bare `HTTP 403` and no key was tried (#2749).
+  it was reported as a bare `HTTP 403` and no key was tried (#2749). ([#2751](https://github.com/tpsdev-ai/flair/pull/2751))

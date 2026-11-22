@@ -3,4 +3,4 @@
 
   > **Heads-up:** `flair restore`, with or without `--replace`, now refuses the whole archive when any
   > agents, souls or memories row has an id containing `.`, naming that row. It stops before any
-  > request, so nothing is deleted.
+  > request, so nothing is deleted. ([#2969](https://github.com/tpsdev-ai/flair/pull/2969))

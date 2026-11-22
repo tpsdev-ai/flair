@@ -10,4 +10,4 @@
   bound, legacy-unbound (a verdict with no binding, which readers suppress)
   or unpromoted. One failing row refuses the whole selection. `flair restore`
   applies the archive checks before any request; it does not apply the Memory
-  promotion checks (flair#2664).
+  promotion checks (flair#2664). ([#2690](https://github.com/tpsdev-ai/flair/pull/2690), [#2707](https://github.com/tpsdev-ai/flair/pull/2707))
