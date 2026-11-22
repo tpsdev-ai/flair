@@ -369,9 +369,10 @@ export class HealthDetail extends Resource {
       });
       // The count, the names and the table all come from one map keyed by
       // Agent id, so the admin total, names and row set describe the same
-      // agents. A Memory row whose author has no Agent record (the
-      // operator's `skill:using-flair` seed) is kept in a separate list,
-      // never added to `perAgent` as if it were an agent (flair#3051).
+      // agents. A Memory row whose author has no Agent record — the
+      // operator's `skill:using-flair` seed when the operator id was never
+      // registered — is kept in a separate list, never added to `perAgent`
+      // as if it were an agent (flair#3051).
       const perAgentMap = new Map<string, AgentRow>();
       for (const a of agents) {
         if (a.id) perAgentMap.set(a.id, blank(a.id));
@@ -407,10 +408,13 @@ export class HealthDetail extends Resource {
         count: perAgentMap.size,
         names: isAdmin ? agentIds : undefined,
         perAgent,
-        // Non-admins keep the existing Agent-record exposure and never
-        // receive the unregistered author list. An admin gets the list only
-        // after a complete Memory scan; null means the scan did not finish,
-        // so the answer is unknown rather than empty or partial.
+        // A non-admin gets the de-duplicated Agent count — one per distinct
+        // truthy Agent id, so a duplicate collapses and an id-less row is
+        // not counted — and only the perAgent rows it may see: its own row
+        // and rows with memories. It never receives the unregistered author
+        // list. An admin gets that list only after a complete Memory scan;
+        // null means the scan did not finish, so the answer is unknown
+        // rather than empty or partial.
         unregisteredMemoryAuthors: isAdmin
           ? (memoryScanComplete ? unregisteredMemoryAuthors : null)
           : undefined,

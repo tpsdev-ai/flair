@@ -1,7 +1,8 @@
 /**
  * #3051: `flair status` and `flair status deep` report an agent total, names
  * and table from one Agent-id map, and show memory authors without an Agent
- * record (the operator's `skill:using-flair` seed) on a labelled line. With no
+ * record — the operator's `skill:using-flair` seed when the operator id was
+ * never registered — on a labelled line. With no
  * Agent registered, an admin still gets that line; an incomplete Memory scan
  * reports the list unavailable rather than empty or partial.
  *
@@ -262,17 +263,64 @@ test("an incomplete Memory scan reports the author list unavailable, never empty
   expect(failedEarly.memories).toBeNull();
   expect(failedEarly.agents.unregisteredMemoryAuthors).toBeNull();
   const earlyOutput = await statusOutput(failedEarly, []);
-  expect(earlyOutput).toContain("Unregistered memory owners");
-  expect(earlyOutput).toContain("unavailable");
+  expect(earlyOutput).toMatch(/Unregistered memory owners\s+unavailable — memory scan did not complete/);
+  expect(earlyOutput).not.toContain("operator-seed");
 
   memoryScanFailure = "after";
   const failedLate: any = await new HealthDetail().get();
   expect(failedLate.memories).toBeNull();
   expect(failedLate.agents.unregisteredMemoryAuthors).toBeNull();
   const lateOutput = await statusOutput(failedLate, []);
-  expect(lateOutput).toContain("Unregistered memory owners");
-  expect(lateOutput).toContain("unavailable");
+  expect(lateOutput).toMatch(/Unregistered memory owners\s+unavailable — memory scan did not complete/);
   expect(lateOutput).not.toContain("operator-seed");
+});
+
+test("deep status reports the author list unavailable after a failed scan", async () => {
+  memoryScanFailure = "before";
+  const detail: any = await new HealthDetail().get();
+
+  expect(detail.agents.unregisteredMemoryAuthors).toBeNull();
+  const output = await statusOutput(detail, ["deep"]);
+  expect(output).toContain("Unregistered memory owners: unavailable — memory scan did not complete");
+  expect(output).not.toContain("operator-seed");
+});
+
+test("deep status reports the author list unavailable after a scan that yielded a row, and shows no partial author", async () => {
+  memoryScanFailure = "after";
+  const detail: any = await new HealthDetail().get();
+
+  expect(detail.agents.unregisteredMemoryAuthors).toBeNull();
+  const output = await statusOutput(detail, ["deep"]);
+  expect(output).toContain("Unregistered memory owners: unavailable — memory scan did not complete");
+  expect(output).not.toContain("operator-seed");
+});
+
+test("no Agent registered and an incomplete scan: plain status says unavailable and shows no partial author", async () => {
+  agentRows = [];
+  memoryScanFailure = "after";
+  const detail: any = await new HealthDetail().get();
+
+  expect(detail.agents.count).toBe(0);
+  expect(detail.agents.perAgent).toEqual([]);
+  expect(detail.agents.unregisteredMemoryAuthors).toBeNull();
+
+  const output = await statusOutput(detail, []);
+  expect(output).toMatch(/Unregistered memory owners\s+unavailable — memory scan did not complete/);
+  expect(output).not.toContain("operator-seed");
+});
+
+test("no Agent registered and an incomplete scan: deep status says unavailable and shows no partial author", async () => {
+  agentRows = [];
+  memoryScanFailure = "after";
+  const detail: any = await new HealthDetail().get();
+
+  expect(detail.agents.count).toBe(0);
+  expect(detail.agents.perAgent).toEqual([]);
+  expect(detail.agents.unregisteredMemoryAuthors).toBeNull();
+
+  const output = await statusOutput(detail, ["deep"]);
+  expect(output).toContain("Unregistered memory owners: unavailable — memory scan did not complete");
+  expect(output).not.toContain("operator-seed");
 });
 
 test("duplicate-id and missing-id Agent rows: count, names and perAgent are one set", async () => {
