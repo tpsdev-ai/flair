@@ -45,6 +45,7 @@ import { join, resolve } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import type { ProbeComponent } from "../helpers/component-with-replay-probe";
 import { RaceHarness, composeTracedComponent, expectRefused, newAgent } from "../helpers/embedding-writer-race";
+import { armMemoryReadFailure, memoryReadConsumerStack } from "../helpers/host-pointer-failing-component";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
@@ -234,13 +235,15 @@ describe("flair#2478 slice 3b — the feed ingest writer (real Harper)", () => {
     h.arm("feed-ingest-verify");
     const pending = feed(id, "feed v2 read-back fails");
     await h.assertPaused("feed-ingest-verify");
-    writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), "");
+    armMemoryReadFailure(pauseDir, id, "feed-write-back");
     await h.release("feed-ingest-verify");
     const res = await pending;
     const body = await res.json() as any;
     expect(res.status, JSON.stringify(body)).toBe(409);
     expect(body.error).toBe("feed_write_unconfirmed");
     expect(existsSync(join(pauseDir, `arm.memory-get-fail.${id}`)), "the read-back was not the read that failed").toBe(false);
+    expect(memoryReadConsumerStack(pauseDir, id), "the read-back was not the read that consumed the failure")
+      .toMatch(/\bat writeBackCommittedRow \(/);
     const stored = await h.readRow(id);
     expect(stored?.content).toBe("feed v2 read-back fails");
 
@@ -254,12 +257,14 @@ describe("flair#2478 slice 3b — the feed ingest writer (real Harper)", () => {
     h.arm("memory-patch-verify");
     const held = h.signed(owner, "PATCH", memPath(id), { embedding: null, embeddingModel: null });
     await h.assertPaused("memory-patch-verify");
-    writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), "");
+    armMemoryReadFailure(pauseDir, id, "memory-patch-verify");
     await h.release("memory-patch-verify");
     const marked = await held;
     const markedBody = await marked.json() as any;
     expect(marked.status, JSON.stringify(markedBody)).toBe(503);
     expect(markedBody.error).toBe("write_outcome_unknown");
+    expect(memoryReadConsumerStack(pauseDir, id), "the verification read was not the read that consumed the failure")
+      .toMatch(/\bat (?:async )?verifyWrittenRow \(/);
     const before = await h.readRow(id);
 
     await expectRefused(await feed(id, "feed write to the marked id"), "write_outcome_unknown");
@@ -350,11 +355,13 @@ describe("flair#2478 slice 3b — the feed dedup expiry repair (real Harper)", (
     h.arm("feed-dedup-repair-committed");
     const pending = feed(id, text, owner.id, "private");
     await h.assertPaused("feed-dedup-repair-committed");
-    writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), "");
+    armMemoryReadFailure(pauseDir, id, "feed-dedup-repair");
     await h.release("feed-dedup-repair-committed");
     const res = await pending;
     expect(res.status, (await res.clone().text()).slice(0, 300)).toBe(500);
     expect(existsSync(join(pauseDir, `arm.memory-get-fail.${id}`)), "the confirmation read was not the read that failed").toBe(false);
+    expect(memoryReadConsumerStack(pauseDir, id), "the confirmation read was not the read that consumed the failure")
+      .toMatch(/\bat (?:async )?repairDeduplicatedExpiryLocked \(/);
     const stored = await h.readRow(id);
     expect(typeof stored?.expiresAt).toBe("string");
 
