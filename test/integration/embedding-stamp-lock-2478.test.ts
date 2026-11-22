@@ -413,10 +413,17 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
       await handOff(point, next);
     };
     await deleteAt(c2, S_STAGED, S_GATE);
-    // c3: delete after confirmation.
+    // c3: delete after confirmation. The attempt has already confirmed, so it
+    // still commits and reaches its post-commit point; hold it there and
+    // release that point before arming the next row's first point. Arming the
+    // post-commit point before the release keeps the attempt from reaching it
+    // while the next arm is being written.
     await handOff(S_GATE, S_CONFIRMED);
-    await deleteAt(c3, S_CONFIRMED, S_GATE);
+    await deleteAt(c3, S_CONFIRMED, S_COMMITTED);
+    await h.assertPaused(S_COMMITTED);
+    await handOff(S_COMMITTED, S_GATE);
     // c4: delete after commit, before unlock.
+    await h.assertPaused(S_GATE);
     await handOff(S_GATE, S_COMMITTED);
     await deleteAt(c4, S_COMMITTED, S_STAGED);
     for (const id of [c2, c3, c4]) expect(await h.readRow(id), `${id}: a row exists after the delete`).toBeNull();

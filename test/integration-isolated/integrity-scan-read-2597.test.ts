@@ -47,6 +47,25 @@ async function remove(id: string): Promise<void> {
   expect(result.deleted_hashes).toContain(id);
 }
 
+/** The instance's own exact Memory row count (describe_table, exact_count). */
+async function exactMemoryCount(): Promise<number> {
+  const body = await ops({ operation: "describe_table", database: "flair", table: "Memory", exact_count: true });
+  return body.record_count;
+}
+
+/** Wait, within a bound, for the exact count to read `want`; the exact count is
+ *  a live scan, so a read issued right after a write can still show the row's
+ *  prior state and settle on a later read. */
+async function waitForExactCount(want: number, what: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let count = await exactMemoryCount();
+  while (count !== want && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    count = await exactMemoryCount();
+  }
+  expect(count, `${what}: Memory exact count read ${count}, wanted ${want}; rows now: ${JSON.stringify((await ops(searchQuery)).map((row: any) => row.id))}`).toBe(want);
+}
+
 beforeAll(async () => { harper = await startHarper(); }, HARPER_START_BUDGET_MS);
 afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
@@ -98,12 +117,28 @@ async function controlledScan(replaceEveryRead: boolean) {
         }
       } else if (body.operation === "describe_table" && body.table === "Memory" && pendingRecreate) {
         expect(body.exact_count).toBe(true);
-        const count = await res.clone().json() as { record_count: number };
-        expect(count.record_count).toBe(initialRows.length - 1);
+        // The exact count is a live scan, not a snapshot: a read that races the
+        // raw delete can still include the row. Wait for the read this case
+        // depends on — the delete visible to the count — and answer the scan
+        // with that response. Then re-create the row and wait for the count to
+        // show it, so the next attempt starts from a settled table.
+        const afterDelete = initialRows.length - 1;
+        let countRes = res;
+        let count = await countRes.clone().json() as { record_count: number };
+        const deadline = Date.now() + 5_000;
+        while (count.record_count !== afterDelete && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          countRes = await nativeFetch(url, init);
+          expect(countRes.status, String(body.operation)).toBe(200);
+          count = await countRes.clone().json() as { record_count: number };
+        }
+        expect(count.record_count, `the exact count did not observe the raw delete; rows now: ${JSON.stringify((await ops(searchQuery)).map((row: any) => row.id))}`).toBe(afterDelete);
         token = randomUUID();
         tokens.add(token);
         await insert(id, token);
         pendingRecreate = false;
+        await waitForExactCount(initialRows.length, "the re-created row");
+        return countRes;
       }
       return res;
     }) as typeof fetch;
