@@ -280,18 +280,154 @@ export function removeCodexFlairBlock(raw: string): string {
   return joined.replace(/^\n+/, "").replace(/\s+$/, "\n");
 }
 
-/**
- * flair#1135: does the existing `[mcp_servers.flair]` TOML section carry the
- * CURRENT pinned mcpServerSpec()? Pure string scan — no TOML parser needed
- * (same rationale as codexConfigHasFlairSection).
- */
-function codexFlairSectionText(raw: string): string | null {
+/** Recognize the section before deciding whether init may replace it. */
+export type CodexFlairShape =
+  | { kind: "absent" }
+  | { kind: "refused"; reason: string }
+  | {
+      kind: "recognized";
+      start: number;
+      end: number;
+      text: string;
+      spec: string;
+      agentId: string;
+      url: string;
+    };
+
+const CODEX_FLAIR_EXACT_HEADER = "[mcp_servers.flair]";
+const CODEX_FLAIR_ENV_HEADER = "[mcp_servers.flair.env]";
+const CODEX_FLAIR_COMMAND_LINE = 'command = "npx"';
+const CODEX_FLAIR_ARGS_RE = /^args = \["-y", "(@tpsdev-ai\/flair-mcp(?:@[^"\\\s]+)?)"\]$/;
+const CODEX_FLAIR_ENV_LINE_RE = /^(FLAIR_AGENT_ID|FLAIR_URL|FLAIR_CLIENT) = "([^"\\\x00-\x1f\x7f]*)"$/;
+
+function isBlankCodexLine(line: string): boolean {
+  return /^[ \t]*$/.test(line);
+}
+
+/** A complete `[table]` or `[[array-of-tables]]` header, optionally indented
+ *  and followed by a comment. An array element such as `["one", "two"],`
+ *  is NOT a header: it has trailing material and a comma. */
+function isTomlTableHeaderLine(line: string): boolean {
+  const m = line.match(/^[ \t]*(\[\[?)(.*?)(\]\]?)[ \t]*(?:#.*)?$/);
+  if (!m) return false;
+  if (!/^[ \t]*(?:[A-Za-z0-9_-]+|"[^"\\\x00-\x1f\x7f]*"|'[^'\x00-\x1f\x7f]*')(?:[ \t]*\.[ \t]*(?:[A-Za-z0-9_-]+|"[^"\\\x00-\x1f\x7f]*"|'[^'\x00-\x1f\x7f]*'))*[ \t]*$/.test(m[2]!)) return false;
+  return (m[1] === "[[" && m[3] === "]]") || (m[1] === "[" && m[3] === "]");
+}
+
+/** A second table of the same flair section is not a boundary Flair wrote. */
+function continuesCodexFlairSection(line: string): boolean {
+  return /^[ \t]*\[\[?[ \t]*(?:mcp_servers|"mcp_servers"|'mcp_servers')[ \t]*\.[ \t]*(?:flair|"flair"|'flair')[ \t]*(?:\.|\])/.test(line);
+}
+
+/** Read and replace the same span; foreign lines cannot license a rewrite. */
+export function recognizeCodexFlairSection(raw: string): CodexFlairShape {
+  const lines = raw.split("\n");
+  const starts: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    starts.push(offset);
+    offset += line.length + 1;
+  }
+  const headerLines: number[] = [];
+  let foreignHeader = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line === CODEX_FLAIR_EXACT_HEADER) headerLines.push(i);
+    else if (/^[ \t]*\[\[?[ \t]*(?:mcp_servers|"mcp_servers"|'mcp_servers')[ \t]*\.[ \t]*(?:flair|"flair"|'flair')[ \t]*\]/.test(line)) foreignHeader = true;
+  }
+  if (headerLines.length === 0) {
+    return foreignHeader || lines.some(continuesCodexFlairSection)
+      ? { kind: "refused", reason: "the [mcp_servers.flair] header is not the line Flair writes" }
+      : { kind: "absent" };
+  }
+  if (headerLines.length > 1) return { kind: "refused", reason: "more than one [mcp_servers.flair] header" };
+  if (foreignHeader) return { kind: "refused", reason: "another noncanonical [mcp_servers.flair] header appears" };
+
+  const h = headerLines[0]!;
+  // An opening multiline string before the candidate makes its context
+  // ambiguous; refuse rather than rewrite text that may be string content.
+  const beforeHeader = raw.slice(0, starts[h]!);
+  for (const quote of ['"', "'"]) {
+    if (countText(beforeHeader, quote.repeat(3)) % 2 === 1) {
+      return { kind: "refused", reason: "unmatched multiline-string delimiters precede [mcp_servers.flair]" };
+    }
+  }
+  let i = h + 1;
+  const refuse = (reason: string): CodexFlairShape => ({ kind: "refused", reason });
+  const skipBlanks = (): void => { while (i < lines.length && isBlankCodexLine(lines[i]!)) i++; };
+
+  skipBlanks();
+  if (i >= lines.length || lines[i] !== CODEX_FLAIR_COMMAND_LINE) {
+    return refuse("the section does not start with the command line Flair writes");
+  }
+  i++;
+  skipBlanks();
+  if (i >= lines.length) return refuse("the section has no args line");
+  const args = lines[i]!.match(CODEX_FLAIR_ARGS_RE);
+  if (!args) return refuse("the section does not have Flair's single-line args line");
+  i++;
+  skipBlanks();
+  if (i >= lines.length || lines[i] !== CODEX_FLAIR_ENV_HEADER) {
+    return refuse("the section does not have the [mcp_servers.flair.env] header Flair writes");
+  }
+  i++;
+
+  let agentId: string | undefined;
+  let url: string | undefined;
+  let rank = -1;
+  // Blank lines between env keys are inside the span; blank lines AFTER the
+  // last env line are the separator before the next table and are copied
+  // unchanged with the suffix.
+  let spanEndLine = i;
+  const ranks: Record<string, number> = { FLAIR_AGENT_ID: 0, FLAIR_URL: 1, FLAIR_CLIENT: 2 };
+  for (;;) {
+    if (i >= lines.length) break;
+    const line = lines[i]!;
+    if (isBlankCodexLine(line)) { i++; continue; }
+    const m = line.match(CODEX_FLAIR_ENV_LINE_RE);
+    if (!m) break;
+    const key = m[1]!;
+    const value = m[2]!;
+    if (value === "") return refuse("the section contains an empty env value");
+    if (ranks[key]! <= rank) return refuse("the section repeats or reorders an env key");
+    rank = ranks[key]!;
+    if (key === "FLAIR_AGENT_ID") agentId = value;
+    else if (key === "FLAIR_URL") url = value;
+    i++;
+    spanEndLine = i;
+  }
+  if (agentId === undefined || url === undefined) {
+    return refuse("the section does not carry both FLAIR_AGENT_ID and FLAIR_URL");
+  }
+
+  const end = starts[spanEndLine] ?? raw.length;
+  if (i < lines.length) {
+    const boundary = lines[i]!;
+    if (!isTomlTableHeaderLine(boundary)) return refuse("the line after the section is not a table header");
+    if (continuesCodexFlairSection(boundary)) return refuse("another [mcp_servers.flair...] table follows the section");
+  }
+  const start = starts[h]!;
+  return { kind: "recognized", start, end, text: raw.slice(start, end), spec: args[1]!, agentId, url };
+}
+
+/** The strict read path used by the no-op decision: the recognized span, or
+ *  null when the section is absent or foreign. */
+export function codexFlairSectionText(raw: string): string | null {
+  const shape = recognizeCodexFlairSection(raw);
+  return shape.kind === "recognized" ? shape.text : null;
+}
+
+/** The offsets of the recognized span — the same one the write path replaces. */
+export function codexFlairSectionSpan(raw: string): { start: number; end: number } | null {
+  const shape = recognizeCodexFlairSection(raw);
+  return shape.kind === "recognized" ? { start: shape.start, end: shape.end } : null;
+}
+
+/** Pin-only repairs retain their existing reader; init uses the recognizer. */
+function codexPinSectionText(raw: string): string | null {
   const idx = raw.indexOf("[mcp_servers.flair]");
   if (idx === -1) return null;
   const after = raw.slice(idx);
-  // Find the end of the section: the next top-level [header] that is NOT a
-  // sub-table of mcp_servers.flair (e.g. [mcp_servers.flair.env] is part of
-  // the same logical section and must not terminate the scan).
   const nextHeader = after.slice("[mcp_servers.flair]".length).search(/\n\[(?!mcp_servers\.flair\.)/);
   return nextHeader === -1 ? after : after.slice(0, "[mcp_servers.flair]".length + nextHeader);
 }
@@ -304,9 +440,9 @@ export function codexWiringPin(raw: string): string {
   for (const quote of ['"', "'"]) {
     if (countText(before, quote.repeat(3)) % 2 === 1) return unknown;
   }
-  // Match the section the writer replaces, including Flair's subtables.
+  // Read the pin section, including Flair's subtables.
   // Multiline strings in later, unrelated tables cannot change its pin.
-  const section = codexFlairSectionText(raw);
+  const section = codexPinSectionText(raw);
   if (section === null) return unknown;
   const args = codexArgs(section);
   // Only the captured args value may contain multiline string delimiters.
@@ -314,29 +450,37 @@ export function codexWiringPin(raw: string): string {
   if (!args || /"{3}|'{3}/.test(args.outside)) return unknown;
   return args.spec.value;
 }
-function codexFlairSectionHasCurrentPin(raw: string): boolean {
-  return codexWiringPin(raw) === mcpServerSpec();
+type CodexReplaceResult =
+  | { ok: true; text: string }
+  | { ok: false; reason: string };
+
+export interface CodexRewriteTestHooks {
+  /** TEST-ONLY: corrupt the candidate to exercise the boundary refusal. */
+  beforeBoundaryCheck?: (text: string) => string;
 }
 
-/**
- * flair#1135: replace the existing `[mcp_servers.flair]` TOML section with a
- * fresh one carrying the current pin. Preserves everything else in the file.
- */
-function replaceCodexFlairBlock(raw: string, env: WireEnv): string {
-  const idx = raw.indexOf("[mcp_servers.flair]");
-  if (idx === -1) return appendCodexFlairBlock(raw, env);
-  const before = raw.slice(0, idx);
-  const after = raw.slice(idx);
-  // The boundary is any later table header line, INDENTED or not, and an
-  // array-of-tables header too: a TOML parser treats ` [mcp_servers.other]`
-  // as its own table, so matching only `\n[` consumed that table through EOF.
-  // A dotted `mcp_servers.flair.*` subtable continues this section.
-  const nextHeader = after.slice("[mcp_servers.flair]".length).search(/\n[ \t]*\[(?!mcp_servers\.flair\.)/);
-  const rest = nextHeader === -1 ? "" : after.slice("[mcp_servers.flair]".length + nextHeader);
+export function replaceCodexFlairBlock(raw: string, env: WireEnv, testHooks?: CodexRewriteTestHooks): CodexReplaceResult {
+  const shape = recognizeCodexFlairSection(raw);
+  if (shape.kind === "absent") return { ok: true, text: appendCodexFlairBlock(raw, env) };
+  if (shape.kind === "refused") return { ok: false, reason: shape.reason };
+  const prefix = raw.slice(0, shape.start);
+  const suffix = raw.slice(shape.end);
   const newBlock = tomlSnippet(env) + "\n";
-  // Preserve the separator between the new block and whatever follows.
-  const sep = rest.length === 0 ? "" : rest.startsWith("\n") ? "" : "\n";
-  return before + newBlock + sep + rest;
+  const candidate = prefix + newBlock + suffix;
+  const text = testHooks?.beforeBoundaryCheck?.(candidate) ?? candidate;
+  if (!codexReplacementPreservesBoundary(raw, text, shape.start, shape.end, newBlock.length)) {
+    return { ok: false, reason: "the bytes around the [mcp_servers.flair] section changed" };
+  }
+  return { ok: true, text };
+}
+
+/** Check the replacement before the caller can write or back it up. */
+export function codexReplacementPreservesBoundary(
+  raw: string, text: string, start: number, end: number, replacementLength: number,
+): boolean {
+  return text.length === start + replacementLength + raw.length - end &&
+    text.slice(0, start) === raw.slice(0, start) &&
+    text.slice(start + replacementLength) === raw.slice(end);
 }
 
 /** Resolve the display form (~/...) of a config path against the live home. */
@@ -773,28 +917,20 @@ function codexArgs(section: string) {
  */
 const CODEX_FLAIR_SECTION_HEADER_RE = /^\[mcp_servers\.flair(?:\.[^\]]+)?\]\s*(?:#.*)?$/;
 
-/**
- * The ACTIVE, non-empty `FLAIR_AGENT_ID` value a `[mcp_servers.flair]` section
- * configures, or null when it configures none (or configures conflicting
- * values). Decides "no identity" from the value the section actually sets: a
- * commented `# FLAIR_AGENT_ID = "x"` and an explicit `FLAIR_AGENT_ID = ""` are
- * both "no identity", not an identity (flair#1834 A2 round 3).
- */
+/** Read an identity for the pin-only guard; init uses the shape recognizer. */
 function activeCodexIdentity(section: string): string | null {
   const read = readCodexSectionEnvValue(section, "FLAIR_AGENT_ID");
   return read.state === "value" ? read.value : null;
 }
 
-/** The `[mcp_servers.flair.env]` keys the wiring comparison reads. Literal
- *  patterns per key (no dynamic RegExp) so the scanner stays off the
+/** Literal patterns keep the identity scanner off the
  *  non-literal-regexp SAST surface. */
 const CODEX_SECTION_ENV_KEY_RE = {
   FLAIR_AGENT_ID: /^[ \t]*FLAIR_AGENT_ID[ \t]*=[ \t]*(.*)$/,
   FLAIR_URL: /^[ \t]*FLAIR_URL[ \t]*=[ \t]*(.*)$/,
 } as const;
 
-/** One env value read out of the section: a concrete value, no assignment,
- *  or a shape the scanner cannot read (which counts as a mismatch). */
+/** An env value, no assignment, or an unreadable shape. */
 type CodexEnvRead =
   | { state: "absent" }
   | { state: "unreadable" }
@@ -939,16 +1075,8 @@ function readCodexInlineEnvValue(
   return { present: true, read: value === undefined || value === "" ? { state: "absent" } : { state: "value", value } };
 }
 
-/**
- * The env a `[mcp_servers.flair]` TOML section ACTUALLY binds for one key.
- * Only the forms Codex reads are scanned: the `[mcp_servers.flair.env]` table
- * or an inline `env = { … }` in the main table. A sibling subtable such as
- * `[mcp_servers.flair.extra]` is a DIFFERENT table, so its values are not the
- * env Codex passes (flair#3050 round 3). Two env sources at once, a second env
- * table, a duplicated key, or an unsupported shape is unreadable, so a wire
- * treats it as a mismatch — rewriting when the pin guard permits, otherwise
- * holding — rather than no-opping on a value Codex would not read.
- */
+/** Read an env-table or inline-env key for the pin-only identity guard.
+ *  A sibling subtable is not the env table; duplicate sources are unreadable. */
 function readCodexSectionEnvValue(
   section: string,
   key: keyof typeof CODEX_SECTION_ENV_KEY_RE,
@@ -966,19 +1094,21 @@ function readCodexSectionEnvValue(
   return table;
 }
 
-/** flair#3050: does the existing `[mcp_servers.flair]` section carry the
- *  FLAIR_AGENT_ID and FLAIR_URL this wire call would write? The Codex no-op
- *  requires the same match as the JSON path (`wireJsonMcpCore`); a differing
- *  value, or a shape the scanner cannot read, is a mismatch, not "already
- *  wired". Other keys and subtables are not compared. */
+/** Compare identity and URL on the recognized span. */
 function codexFlairSectionEnvMatches(raw: string, env: WireEnv): boolean {
-  const section = codexFlairSectionText(raw);
-  if (section === null) return false;
-  const agent = readCodexSectionEnvValue(section, "FLAIR_AGENT_ID");
-  const url = readCodexSectionEnvValue(section, "FLAIR_URL");
+  const shape = recognizeCodexFlairSection(raw);
   return (
-    agent.state === "value" && agent.value === env.FLAIR_AGENT_ID &&
-    url.state === "value" && url.value === env.FLAIR_URL
+    shape.kind === "recognized" &&
+    shape.agentId === env.FLAIR_AGENT_ID &&
+    shape.url === env.FLAIR_URL
+  );
+}
+
+function codexForeignShapeMessage(display: string, reason: string): string {
+  return (
+    `Codex: refusing to rewrite ${display} — the [mcp_servers.flair] section is not ` +
+    `the shape Flair writes (${reason}); edit the [mcp_servers.flair] section by hand, ` +
+    `or remove it and re-run flair init.`
   );
 }
 
@@ -1688,24 +1818,9 @@ export function claudeCodeMcpEntry(env: WireEnv) {
   return flairMcpEntry(env, { stdioType: true });
 }
 
-function _wireCodex(env: WireEnv): { ok: boolean; message: string } {
-  // Codex uses TOML with a [mcp_servers.flair] table. We don't carry a TOML
-  // parser, but appending a new top-level table at EOF is safe TOML when the
-  // exact header isn't already present (flair#727) — so an existing file only
-  // forces the manual-print fallback when it's genuinely unreadable/
-  // unwritable (permissions, I/O error), never merely "exists".
-  //
-  // flair#1135: the "already wired" check is now version-aware — a section
-  // with a stale pin triggers a re-write instead of a no-op.
-  // flair#3050: it is also env-aware — a section whose pin is current but
-  // whose FLAIR_AGENT_ID / FLAIR_URL differ is rewired, matching the JSON
-  // path's no-op condition (pin AND both env values).
-  //
-  // flair#1778 2c-i-d2: ONE critical section — observe → decide on the IN-LOCK
-  // TEXT → write via temp + fsync + rename (the primitive), with a 0600 `.bak`
-  // of the in-lock bytes. The three former write arms (append / replace /
-  // create) are ONE decide with three outcomes; the pure TOML helpers are
-  // unchanged, so the bytes written are exactly today's.
+function _wireCodex(env: WireEnv, testHooks?: CodexRewriteTestHooks): { ok: boolean; message: string } {
+  // One critical section keeps the shape decision and replacement on the
+  // same in-lock bytes; defer backup until a write is accepted.
   const path = codexConfigPath();
   const display = "~/.codex/config.toml";
   // Parent creation stays OUTSIDE the primitive (it needs the resolved parent
@@ -1718,15 +1833,21 @@ function _wireCodex(env: WireEnv): { ok: boolean; message: string } {
       path,
       (bytes) => {
         const raw = decodeText(bytes);
-        const hasSection = codexConfigHasFlairSection(raw);
-        // flair#1778 2c-i-a2 (fix round): the decision runs FIRST, on EVERY
-        // path below — including the section-absent append and the absent-file
-        // create, which used to be written unguarded. Nothing is written until
-        // the decision says `write`; an unreadable running version REFUSES.
+        if (bytes !== null && !Buffer.from(bytes).equals(Buffer.from(raw, "utf8"))) {
+          settled = { ok: false, message: codexForeignShapeMessage(display, "the file is not lossless UTF-8") };
+          return { hold: settled.message };
+        }
+        const shape = recognizeCodexFlairSection(raw);
+        if (shape.kind === "refused") {
+          settled = { ok: false, message: codexForeignShapeMessage(display, shape.reason) };
+          return { hold: settled.message };
+        }
+        const hasSection = shape.kind === "recognized";
+        // The pin guard decides before a no-op, replacement or append.
         const decision = decidePinWrite({
           pkg: FLAIR_MCP_PACKAGE,
           entry: `Codex config ${display}`,
-          existingText: hasSection ? codexWiringPin(raw) : null,
+          existingText: hasSection ? shape.spec : null,
           runningVersion: flairCliVersion(),
         });
         if (decision.action !== "write") {
@@ -1738,7 +1859,7 @@ function _wireCodex(env: WireEnv): { ok: boolean; message: string } {
           // idempotent no-op; otherwise (BEHIND or equal) replace it. flair#3050:
           // a current pin with a different agent id or URL still rewrites, or
           // `flair init --agent <next>` would leave Codex on the old agent.
-          const pinCurrent = codexFlairSectionHasCurrentPin(raw);
+          const pinCurrent = shape.spec === mcpServerSpec();
           if (pinCurrent && codexFlairSectionEnvMatches(raw, env)) {
             settled = { ok: true, message: `Codex: already wired in ${display}` };
             return { noop: settled.message };
@@ -1748,7 +1869,12 @@ function _wireCodex(env: WireEnv): { ok: boolean; message: string } {
           success = pinCurrent
             ? `Codex: wired ${display} (restart Codex to pick it up)`
             : `Codex: refreshed pin in ${display} (restart Codex to pick it up)`;
-          return { write: encodeText(replaceCodexFlairBlock(raw, env)) };
+          const replaced = replaceCodexFlairBlock(raw, env, testHooks);
+          if (replaced.ok === false) {
+            settled = { ok: false, message: codexForeignShapeMessage(display, replaced.reason) };
+            return { hold: settled.message };
+          }
+          return { write: encodeText(replaced.text) };
         }
         // Section absent (or file absent, where raw === "" IS the create
         // case): the decision above was consulted with an ABSENT entry, and a
@@ -1756,7 +1882,7 @@ function _wireCodex(env: WireEnv): { ok: boolean; message: string } {
         success = `Codex: wired ${display} (restart Codex to pick it up)`;
         return { write: encodeText(appendCodexFlairBlock(raw, env)) };
       },
-      { backup: (bytes) => backupBytesTo(path, bytes) },
+      { backupOnWrite: (bytes) => backupBytesTo(path, bytes) },
     );
     if (result.status === "written") return { ok: true, message: success! };
     const s = settled as { ok: boolean; message: string } | null;
@@ -2207,9 +2333,10 @@ export function wireClaudeCode(
 }
 
 export function wireCodex(
-  env: WireEnv
+  env: WireEnv,
+  testHooks?: CodexRewriteTestHooks,
 ): { ok: boolean; message: string } {
-  return _wireCodex(env);
+  return _wireCodex(env, testHooks);
 }
 
 export function wireGemini(

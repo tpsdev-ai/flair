@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { codexWiringPin, decideCodexPinOnly, repinCodexPin, wireCodex } from "../../src/install/clients.ts";
 import { withHome } from "../../src/lib/home.ts";
@@ -55,10 +55,16 @@ for (const [label, raw] of held) {
     });
   });
 
-  test(`Codex operand guard preserves bytes during full wiring: ${label}`, () => {
+  test(`Codex full wiring refuses a foreign shape: ${label}`, () => {
     fixture(raw, (path) => {
-      expect(wireCodex(env).message).toContain("holding");
+      // flair#3050 round 5: the init writer recognizes only the exact shape
+      // tomlSnippet writes; this operand is not it, so it is refused by name
+      // rather than rewritten. The pin-only reader above stays a hold.
+      const result = wireCodex(env);
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("not the shape Flair writes");
       expect(readFileSync(path, "utf8")).toBe(raw);
+      expect(existsSync(`${path}.bak`)).toBe(false);
     });
   });
 }

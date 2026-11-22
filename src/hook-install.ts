@@ -89,6 +89,8 @@ import {
   isSessionStartHookInvocation,
   parseLegacySessionStartHookCommand,
   readClientMcpBlock,
+  unsafeAgentIdMessage,
+  unsafeFlairUrlMessage,
   sessionStartEnablesActionRecall,
   type ContinuityCaptureHookReport,
   type ContinuityHookEvent,
@@ -708,14 +710,6 @@ type SessionStartHookRewrite =
   | { kind: "noop"; message: string }
   | { kind: "update"; message: string; groupIndex: number; hookIndex: number; command: string };
 
-function unsafeAgentIdMessage(agentId: string): string {
-  return `agent id '${agentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`;
-}
-
-function unsafeFlairUrlMessage(flairUrl: string): string {
-  return `Flair URL '${flairUrl}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`;
-}
-
 function decideSessionStartHookRewrite(
   config: any,
   path: string,
@@ -768,12 +762,9 @@ function decideSessionStartHookRewrite(
       return { kind: "hold", ok: false, message: unsafeAgentIdMessage(requestedAgentId) };
     }
     const agentId = requestedAgentId ?? legacy.agentId;
-    // The legacy shape admits characters the builder refuses to interpolate
-    // (a `?` in a URL, a `;` in an id). Validate the values we KEEP with the
-    // builder's own rule: rebuild is unconditional here, so an unsafe value
-    // must be a named refusal, never a throw after the precheck.
-    if (!isHookCommandValueSafe(agentId)) {
-      return { kind: "hold", ok: false, message: unsafeAgentIdMessage(agentId) };
+    // Validate the source even when a requested id would replace it.
+    if (!isHookCommandValueSafe(legacy.agentId)) {
+      return { kind: "hold", ok: false, message: unsafeAgentIdMessage(legacy.agentId) };
     }
     if (legacy.flairUrl !== undefined && legacy.flairUrl !== "" && !isHookCommandValueSafe(legacy.flairUrl)) {
       return { kind: "hold", ok: false, message: unsafeFlairUrlMessage(legacy.flairUrl) };
@@ -799,15 +790,23 @@ function decideSessionStartHookRewrite(
         : `pinned the SessionStart hook in ${path} to ${mcpServerSpec()}`,
     };
   }
+  // flair#3050 round 5: validate the EXISTING installer-form values with the
+  // builder's own rule before treating the command as Flair-written. A re-pin
+  // writes the command back, so an unsafe value is a named refusal.
+  if (!isHookCommandValueSafe(form.agentId)) {
+    return { kind: "hold", ok: false, message: unsafeAgentIdMessage(form.agentId) };
+  }
+  if (form.flairUrl !== undefined && form.flairUrl !== "" && !isHookCommandValueSafe(form.flairUrl)) {
+    return { kind: "hold", ok: false, message: unsafeFlairUrlMessage(form.flairUrl) };
+  }
   if (requestedAgentId !== undefined && form.agentId !== requestedAgentId) {
     if (!isHookCommandValueSafe(requestedAgentId)) {
       return { kind: "hold", ok: false, message: unsafeAgentIdMessage(requestedAgentId) };
     }
     // Substitute ONLY captured spans: the agent id always, and the pin
     // when the never-lower guard permits it. Apply right-to-left so the
-    // offsets captured on `current` stay valid. An AHEAD pin is HELD, but the
-    // identity change still lands: the guard's finding reads the CAPTURED
-    // `-p` span, so a decoy inside the id cannot hide a real AHEAD pin.
+    // offsets captured on `current` stay valid. Read the captured pin span
+    // so the guard proves the version that this substitution would replace.
     const replacements: Array<[number, number, string]> = [
       [form.agentIdStart, form.agentIdEnd, requestedAgentId],
     ];
@@ -891,10 +890,10 @@ export function repinSessionStartHook(
 
   // Decide ONCE before the primitive so a REFUSAL (malformed file, foreign
   // metadata, an unreadable command, an unsafe id, an unreadable CLI version)
-  // writes NOTHING — not even a `.bak`; the in-lock backup runs only after the
-  // in-lock decision says write. Only an outcome that will write enters the
-  // critical section; the in-lock decision below re-checks the same facts on
-  // the bytes it writes.
+  // writes NOTHING — not even a `.bak`. A precheck outcome that will write
+  // enters the critical section; the in-lock decision re-checks the same facts
+  // on the bytes it writes and can still refuse, in which case
+  // `backupOnWrite` takes no backup.
   const preRead = readSettingsFile(path);
   const pre = decideSessionStartHookRewrite(preRead.parsed, path, harness, preRead.parseError, opts);
   if (pre.kind !== "update") {

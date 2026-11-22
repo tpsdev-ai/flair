@@ -219,16 +219,78 @@ describe("applyOrRepinSessionStartHook — the pre-#1007 legacy form is migrated
   });
 
   it("refuses a legacy agent id the builder cannot interpolate, writes nothing (no .bak)", () => {
-    const command = `FLAIR_AGENT_ID=agent;x npx -y ${FLAIR_MCP_PACKAGE} flair-session-start`;
+    const command = `FLAIR_AGENT_ID=agent?x npx -y ${FLAIR_MCP_PACKAGE} flair-session-start`;
     const settingsPath = writeSettings(hookSettings(command));
     const before = readFileSync(settingsPath, "utf-8");
 
-    const result = applyOrRepinSessionStartHook(home, "agent;x", false);
+    const result = applyOrRepinSessionStartHook(home, "agent?x", false);
 
     expect(result.applied).toBe(false);
     expect(result.ok).toBe(false);
     expect(result.message).toContain("agent id");
     expect(result.message).toContain("cannot be safely written");
+    expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+    expect(settingsDirFiles()).toBe("settings.json");
+  });
+
+  it("refuses a chained legacy command by name, writes nothing (no .bak)", () => {
+    // The chain is attached to the value, so a loose `[^\s'"]+` would read it
+    // as the agent id. It is not Flair's bare shape either way.
+    const command = `FLAIR_AGENT_ID=agent-a&& npx -y ${FLAIR_MCP_PACKAGE} flair-session-start`;
+    const settingsPath = writeSettings(hookSettings(command));
+    const before = readFileSync(settingsPath, "utf-8");
+
+    const result = applyOrRepinSessionStartHook(home, "agent-a", false);
+
+    expect(result.applied).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("could not read the agent id");
+    expect(result.message).toContain("left untouched");
+    expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+    expect(settingsDirFiles()).toBe("settings.json");
+  });
+
+  it("refuses an installer URL the builder cannot interpolate, writes nothing (no .bak)", () => {
+    const command = `FLAIR_AGENT_ID=agent-a FLAIR_URL=http://127.0.0.1:1234?x=1 npx -y -p ${mcpServerSpec()} ${SESSION_START_HOOK_MARKER}`;
+    const settingsPath = writeSettings(hookSettings(command));
+    const before = readFileSync(settingsPath, "utf-8");
+
+    const result = applyOrRepinSessionStartHook(home, "agent-a", false);
+
+    expect(result.applied).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("Flair URL");
+    expect(result.message).toContain("cannot be safely written");
+    expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+    expect(settingsDirFiles()).toBe("settings.json");
+  });
+
+  it("refuses an installer agent id the builder cannot interpolate, writes nothing (no .bak)", () => {
+    const command = `FLAIR_AGENT_ID=agent?x npx -y -p ${mcpServerSpec()} ${SESSION_START_HOOK_MARKER}`;
+    const settingsPath = writeSettings(hookSettings(command));
+    const before = readFileSync(settingsPath, "utf-8");
+
+    const result = applyOrRepinSessionStartHook(home, "agent?x", false);
+
+    expect(result.applied).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("agent id");
+    expect(result.message).toContain("cannot be safely written");
+    expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+    expect(settingsDirFiles()).toBe("settings.json");
+  });
+
+  it("refuses an installer command extended with another command, writes nothing (no .bak)", () => {
+    const command = `FLAIR_AGENT_ID=agent-a npx -y -p ${mcpServerSpec()} ${SESSION_START_HOOK_MARKER}; echo extra`;
+    const settingsPath = writeSettings(hookSettings(command));
+    const before = readFileSync(settingsPath, "utf-8");
+
+    const result = applyOrRepinSessionStartHook(home, "agent-a", false);
+
+    expect(result.applied).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("could not read the agent id");
+    expect(result.message).toContain("left untouched");
     expect(readFileSync(settingsPath, "utf-8")).toBe(before);
     expect(settingsDirFiles()).toBe("settings.json");
   });
@@ -291,6 +353,52 @@ describe("repinSessionStartHook — a refusal after the precheck takes no backup
     expect(result.message).toContain("refusing to re-pin");
     expect(result.backupPath).toBeNull();
     expect(readFileSync(settingsPath, "utf-8")).toBe(malformed);
+    expect(settingsDirFiles()).toBe("settings.json");
+  });
+});
+
+
+describe("SessionStart source commands", () => {
+  for (const form of ["legacy", "installer"]) {
+    const commandFor = (agent: string, url?: string) =>
+      `FLAIR_AGENT_ID=${agent}${url ? ` FLAIR_URL=${url}` : ""} npx -y ${form === "legacy" ? FLAIR_MCP_PACKAGE : `-p ${mcpServerSpec()}`} ${SESSION_START_HOOK_MARKER}`;
+    for (const extension of [" && echo extra", "; echo extra", " | echo extra", " echo extra"]) {
+      it(`refuses an extended ${form} command: ${extension}`, () => {
+        const settingsPath = writeSettings(hookSettings(commandFor("agent-a") + extension));
+        const before = readFileSync(settingsPath, "utf8");
+        for (const result of [
+          applyOrRepinSessionStartHook(home, "agent-b", false),
+          repinSessionStartHook(home, "claude-code", undefined, { agentId: "agent-b" }),
+        ]) {
+          expect(result.ok).toBe(false);
+          expect(result.message).toContain(settingsPath);
+        }
+        expect(readFileSync(settingsPath, "utf8")).toBe(before);
+        expect(settingsDirFiles()).toBe("settings.json");
+      });
+    }
+    for (const [agent, url] of [["agent?x", undefined], ["agent-a", "http://127.0.0.1:1234?x=1"]]) {
+      it(`refuses unsafe existing ${form} values before a different requested id`, () => {
+        const settingsPath = writeSettings(hookSettings(commandFor(agent!, url)));
+        const before = readFileSync(settingsPath, "utf8");
+        for (const result of [
+          applyOrRepinSessionStartHook(home, "agent-b", false),
+          repinSessionStartHook(home, "claude-code", undefined, { agentId: "agent-b" }),
+        ]) {
+          expect(result.ok).toBe(false);
+          expect(result.message).toContain("cannot be safely written");
+        }
+        expect(readFileSync(settingsPath, "utf8")).toBe(before);
+        expect(settingsDirFiles()).toBe("settings.json");
+      });
+    }
+  }
+  it("refuses a legacy chain attached to its source assignment", () => {
+    const settingsPath = writeSettings(hookSettings(legacyCommand("agent-a&&")));
+    const before = readFileSync(settingsPath, "utf8");
+    expect(applyOrRepinSessionStartHook(home, "agent-b", false).ok).toBe(false);
+    expect(repinSessionStartHook(home, "claude-code", undefined, { agentId: "agent-b" }).ok).toBe(false);
+    expect(readFileSync(settingsPath, "utf8")).toBe(before);
     expect(settingsDirFiles()).toBe("settings.json");
   });
 });

@@ -139,14 +139,14 @@ describe("T5 — byte goldens (the helpers' output, unchanged)", () => {
     expect(readFileSync(bakPath(), "utf-8")).toBe(before);
   });
 
-  it("ALREADY (current pin) is a no-op on the bytes but takes a backup", () => {
+  it("ALREADY (current pin) preserves bytes without a backup", () => {
     seed(OTHER + "\n" + goldenBlock(ENV) + "\n");
     const before = readFileSync(cfgPath(), "utf-8");
     const r = wireCodex(ENV);
     expect(r.ok).toBe(true);
     expect(r.message).toBe("Codex: already wired in ~/.codex/config.toml");
     expect(readFileSync(cfgPath(), "utf-8")).toBe(before);
-    expect(existsSync(bakPath())).toBe(true);
+    expect(existsSync(bakPath())).toBe(false);
   });
 
   it("REMOVE (unwire) writes exactly removeCodexFlairBlock's output", () => {

@@ -76,6 +76,7 @@ function staleBaseline(): string {
     `FLAIR_AGENT_ID = "codexbot"`,
     `FLAIR_URL = "http://127.0.0.1:19926"`,
     ``,
+    `[pad]`,
     `# ${PAD}`,
     ``,
   ].join("\n");

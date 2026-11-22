@@ -8,14 +8,13 @@ import { nodeBin } from "../helpers/node-runtime.ts";
 import { tempDir } from "../helpers/temp-dir.ts";
 
 /**
- * flair#3050 — end to end through the built CLI: two `flair init --agent`
- * runs against the same HOME must leave EVERY wired client on the second
- * agent. Codex used to keep the first one because its no-op compared only the
- * flair-mcp pin, while Claude Code's JSON entry was rewritten.
+ * flair#3050 — two built-CLI init runs rewire the fixture's Claude Code and
+ * Codex configs and hooks to the second agent.
  *
- * HOME-isolated: the fixture HOME is a temp dir and every flair/Harper env
- * var is dropped, so a real ~/.claude.json or ~/.codex/config.toml is never
- * read or written. `--skip-start` plus a pre-seeded harper-config.yaml keeps
+ * HOME-isolated: the fixture HOME is a temp dir and inherited Flair/Harper
+ * env vars are dropped, so a real ~/.claude.json or ~/.codex/config.toml is
+ * never read or written; the fixture supplies its own FLAIR_ADMIN_PASS
+ * credential. `--skip-start` plus a pre-seeded harper-config.yaml keeps
  * the run to local config writes (no Harper install, start, or network call).
  */
 
@@ -134,3 +133,17 @@ test("a second init with a new agent rewires both Claude Code and Codex", () => 
 }, 90_000);
 
 beforeAll(() => ensureCliBuild(), 120_000);
+
+
+test("init fixture drops inherited deployment variables and supplies its credential", () => {
+  const previous = process.env.FLAIR_INHERITED_FIXTURE;
+  process.env.FLAIR_INHERITED_FIXTURE = "inherited";
+  try {
+    const env = childEnv("fixture-home");
+    expect(env.FLAIR_INHERITED_FIXTURE).toBeUndefined();
+    expect(env.FLAIR_ADMIN_PASS).toBe(ADMIN_PASS);
+  } finally {
+    if (previous === undefined) delete process.env.FLAIR_INHERITED_FIXTURE;
+    else process.env.FLAIR_INHERITED_FIXTURE = previous;
+  }
+});

@@ -30,10 +30,13 @@ import {
   fixSessionStartHook,
   hookHarnessFromSettingsPath,
   isFlairHookCommand,
+  isHookCommandValueSafe,
   parseLegacySessionStartHookCommand,
   SESSION_START_HOOK_INVOCATION_RE,
   readClientMcpBlock,
   sessionStartHookHint,
+  unsafeAgentIdMessage,
+  unsafeFlairUrlMessage,
   type ApplyOrReportResult,
 } from "../doctor-client.js";
 import {
@@ -433,7 +436,17 @@ export function applyOrRepinSessionStartHook(
         message: `could not read the agent id from the SessionStart hook in ${existing.path} — left untouched`,
       };
     }
-    const wiredAgentId = installer?.agentId ?? legacy!.agentId;
+    const wiredAgentId = installer ? installer.agentId : legacy!.agentId;
+    const wiredUrl = installer ? installer.flairUrl : legacy!.flairUrl;
+    // flair#3050 round 5: validate the EXISTING values of either form with the
+    // builder's own rule before any no-op or re-point treats it as written by
+    // Flair. An unsafe id or URL is a named refusal, not "already wired".
+    if (!isHookCommandValueSafe(wiredAgentId)) {
+      return { applied: false, ok: false, message: unsafeAgentIdMessage(wiredAgentId) };
+    }
+    if (wiredUrl !== undefined && wiredUrl !== "" && !isHookCommandValueSafe(wiredUrl)) {
+      return { applied: false, ok: false, message: unsafeFlairUrlMessage(wiredUrl) };
+    }
     const isLegacy = installer === null;
     if (wiredAgentId !== agentId) {
       if (skip) {

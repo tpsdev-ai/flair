@@ -1,9 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { wireCodex } from "../../src/install/clients.ts";
+import {
+  codexFlairSectionSpan,
+  codexReplacementPreservesBoundary,
+  replaceCodexFlairBlock,
+  codexFlairSectionText,
+  tomlSnippet,
+  wireCodex,
+} from "../../src/install/clients.ts";
 import { FLAIR_MCP_PACKAGE, mcpServerSpec } from "../../src/lib/mcp-spec.ts";
 
 /**
@@ -13,6 +20,10 @@ import { FLAIR_MCP_PACKAGE, mcpServerSpec } from "../../src/lib/mcp-spec.ts";
  * current pin as "already wired" without looking at its env, while the JSON
  * path no-ops only when the pin AND FLAIR_AGENT_ID AND FLAIR_URL all match.
  * A second init with a different agent therefore left Codex on the first one.
+ *
+ * Round 5 replaces the line scanner with a WHITELIST of the exact shape
+ * `tomlSnippet` writes. A section in any other shape is refused by name, with
+ * the bytes and the backup directory untouched.
  */
 const URL_A = "http://127.0.0.1:19926";
 const ENV_A = { FLAIR_AGENT_ID: "agent-a", FLAIR_URL: URL_A };
@@ -59,6 +70,21 @@ function section(spec: string, agent: string, url: string): string {
   ].join("\n");
 }
 
+/** A refusal is ok:false, names the file and the hand-edit remedy, and writes
+ *  nothing — no bytes change and no `.bak` appears. */
+function expectRefusal(raw: string, res: { ok: boolean; message: string }): void {
+  expect(res.ok).toBe(false);
+  expect(res.message).toContain("~/.codex/config.toml");
+  expect(res.message).toContain("not the shape Flair writes");
+  expect(res.message).toContain("edit the [mcp_servers.flair] section by hand, or remove it and re-run flair init");
+  expect(readFileSync(cfgPath(), "utf-8")).toBe(raw);
+  expect(existsSync(`${cfgPath()}.bak`)).toBe(false);
+  expect(readdirSync(join(isoHome, ".codex")).sort().join(",")).toBe("config.toml");
+  expect(codexFlairSectionText(raw)).toBeNull();
+  expect(codexFlairSectionSpan(raw)).toBeNull();
+  expect(replaceCodexFlairBlock(raw, ENV_B).ok).toBe(false);
+}
+
 describe("flair#3050 — Codex env is part of the already-wired check", () => {
   it("current pin + agent-a, called with agent-b → rewrites the env and reports wired", () => {
     seed(section(mcpServerSpec(), "agent-a", URL_A));
@@ -93,7 +119,7 @@ describe("flair#3050 — Codex env is part of the already-wired check", () => {
     expect(readFileSync(cfgPath(), "utf-8")).toBe(before);
   });
 
-  it("a pin the guard refuses to lower stays refused even when the agent differs", () => {
+  it("a pin the guard refuses to lower stays held even when the agent differs", () => {
     const ahead = `${FLAIR_MCP_PACKAGE}@9.9.9`;
     const before = seed(section(ahead, "agent-a", URL_A));
     const res = wireCodex(ENV_B);
@@ -101,66 +127,6 @@ describe("flair#3050 — Codex env is part of the already-wired check", () => {
     expect(res.message).toContain("holding");
     expect(res.message).toContain("AHEAD");
     expect(readFileSync(cfgPath(), "utf-8")).toBe(before);
-  });
-
-  it("an unreadable env value is a mismatch, never a false already-wired", () => {
-    const before = seed([
-      "[mcp_servers.flair]",
-      'command = "npx"',
-      `args = ["-y", "${mcpServerSpec()}"]`,
-      "",
-      "[mcp_servers.flair.env]",
-      'FLAIR_AGENT_ID = "agent-a',
-      `FLAIR_URL = "${URL_A}"`,
-      "",
-    ].join("\n"));
-    const res = wireCodex(ENV_A);
-    expect(res.message).toBe("Codex: wired ~/.codex/config.toml (restart Codex to pick it up)");
-    const toml = readFileSync(cfgPath(), "utf-8");
-    expect(toml).not.toBe(before);
-    expect(toml).toContain('FLAIR_AGENT_ID = "agent-a"');
-  });
-
-  it("conflicting duplicate agent values in the env table are ambiguous → rewrite", () => {
-    seed([
-      "[mcp_servers.flair]",
-      'command = "npx"',
-      `args = ["-y", "${mcpServerSpec()}"]`,
-      "",
-      "[mcp_servers.flair.env]",
-      'FLAIR_AGENT_ID = "agent-b"',
-      `FLAIR_URL = "${URL_A}"`,
-      'FLAIR_AGENT_ID = "agent-c"',
-      "",
-    ].join("\n"));
-    const res = wireCodex(ENV_B);
-    expect(res.message).toBe("Codex: wired ~/.codex/config.toml (restart Codex to pick it up)");
-    const toml = readFileSync(cfgPath(), "utf-8");
-    expect(toml.match(/^FLAIR_AGENT_ID/gm)?.length).toBe(1);
-    expect(toml).toContain('FLAIR_AGENT_ID = "agent-b"');
-  });
-
-  it("an identical duplicate env assignment is a mismatch: a real parser rejects the file", () => {
-    const raw = seed([
-      "[mcp_servers.flair]",
-      'command = "npx"',
-      `args = ["-y", "${mcpServerSpec()}"]`,
-      "",
-      "[mcp_servers.flair.env]",
-      `FLAIR_AGENT_ID = "${ENV_A.FLAIR_AGENT_ID}"`,
-      `FLAIR_URL = "${URL_A}"`,
-      `FLAIR_AGENT_ID = "${ENV_A.FLAIR_AGENT_ID}"`,
-      "",
-    ].join("\n"));
-    // The fixture is what it claims: Bun's TOML parser rejects a duplicate key.
-    expect(() => Bun.TOML.parse(raw)).toThrow();
-
-    const res = wireCodex(ENV_A);
-    expect(res.message).toBe("Codex: wired ~/.codex/config.toml (restart Codex to pick it up)");
-    const toml = readFileSync(cfgPath(), "utf-8");
-    expect(toml.match(/^FLAIR_AGENT_ID/gm)?.length).toBe(1);
-    const after = Bun.TOML.parse(toml) as any;
-    expect(after.mcp_servers.flair.env.FLAIR_AGENT_ID).toBe(ENV_A.FLAIR_AGENT_ID);
   });
 
   it("an indented sibling table after the Flair section survives the replace", () => {
@@ -193,8 +159,96 @@ describe("flair#3050 — Codex env is part of the already-wired check", () => {
   });
 });
 
-describe("flair#3050 round 3 — the comparison reads the env table Codex reads", () => {
-  it("matching values only in [mcp_servers.flair.extra] and no env table → rewrite, not already wired", () => {
+describe("flair#3050 round 5 — a foreign shape is refused, never rewritten", () => {
+  it("an empty FLAIR_AGENT_ID after a matching assignment is refused", () => {
+    const raw = seed([
+      "[mcp_servers.flair]",
+      'command = "npx"',
+      `args = ["-y", "${mcpServerSpec()}"]`,
+      "",
+      "[mcp_servers.flair.env]",
+      'FLAIR_AGENT_ID = "agent-a"',
+      `FLAIR_URL = "${URL_A}"`,
+      'FLAIR_AGENT_ID = ""',
+      "",
+    ].join("\n"));
+    expectRefusal(raw, wireCodex(ENV_A));
+  });
+
+  it("trailing material after a closing quote (`\"agent-a\"junk`) is refused", () => {
+    const raw = seed([
+      "[mcp_servers.flair]",
+      'command = "npx"',
+      `args = ["-y", "${mcpServerSpec()}"]`,
+      "",
+      "[mcp_servers.flair.env]",
+      `FLAIR_AGENT_ID = "agent-a"junk`,
+      `FLAIR_URL = "${URL_A}"`,
+      "",
+    ].join("\n"));
+    // The fixture is what it claims: a real parser rejects it.
+    expect(() => Bun.TOML.parse(raw)).toThrow();
+    expectRefusal(raw, wireCodex(ENV_A));
+  });
+
+  it("an unterminated env value is refused", () => {
+    const raw = seed([
+      "[mcp_servers.flair]",
+      'command = "npx"',
+      `args = ["-y", "${mcpServerSpec()}"]`,
+      "",
+      "[mcp_servers.flair.env]",
+      'FLAIR_AGENT_ID = "agent-a',
+      `FLAIR_URL = "${URL_A}"`,
+      "",
+    ].join("\n"));
+    expectRefusal(raw, wireCodex(ENV_A));
+  });
+
+  it("conflicting duplicate agent values are refused", () => {
+    const raw = seed([
+      "[mcp_servers.flair]",
+      'command = "npx"',
+      `args = ["-y", "${mcpServerSpec()}"]`,
+      "",
+      "[mcp_servers.flair.env]",
+      'FLAIR_AGENT_ID = "agent-b"',
+      `FLAIR_URL = "${URL_A}"`,
+      'FLAIR_AGENT_ID = "agent-c"',
+      "",
+    ].join("\n"));
+    expectRefusal(raw, wireCodex(ENV_B));
+  });
+
+  it("an identical duplicate env assignment is refused: a real parser rejects the file", () => {
+    const raw = seed([
+      "[mcp_servers.flair]",
+      'command = "npx"',
+      `args = ["-y", "${mcpServerSpec()}"]`,
+      "",
+      "[mcp_servers.flair.env]",
+      `FLAIR_AGENT_ID = "${ENV_A.FLAIR_AGENT_ID}"`,
+      `FLAIR_URL = "${URL_A}"`,
+      `FLAIR_AGENT_ID = "${ENV_A.FLAIR_AGENT_ID}"`,
+      "",
+    ].join("\n"));
+    // The fixture is what it claims: Bun's TOML parser rejects a duplicate key.
+    expect(() => Bun.TOML.parse(raw)).toThrow();
+    expectRefusal(raw, wireCodex(ENV_A));
+  });
+
+  it("an inline env table is refused: Flair writes the env table form", () => {
+    const raw = seed([
+      "[mcp_servers.flair]",
+      'command = "npx"',
+      `args = ["-y", "${mcpServerSpec()}"]`,
+      `env = { FLAIR_AGENT_ID = "${ENV_A.FLAIR_AGENT_ID}", FLAIR_URL = "${URL_A}" }`,
+      "",
+    ].join("\n"));
+    expectRefusal(raw, wireCodex(ENV_A));
+  });
+
+  it("matching values only in [mcp_servers.flair.extra] and no env table are refused", () => {
     const raw = seed([
       "[other_server]",
       'command = "echo"',
@@ -208,53 +262,225 @@ describe("flair#3050 round 3 — the comparison reads the env table Codex reads"
       `FLAIR_URL = "${URL_A}"`,
       "",
     ].join("\n"));
-    // The fixture is what it claims: a real TOML parser sees the values in
-    // `extra` and no `env` table at all.
-    const before = Bun.TOML.parse(raw) as any;
-    expect(before.mcp_servers.flair.extra.FLAIR_AGENT_ID).toBe(ENV_A.FLAIR_AGENT_ID);
-    expect(before.mcp_servers.flair.extra.FLAIR_URL).toBe(URL_A);
-    expect(before.mcp_servers.flair.env).toBeUndefined();
-
-    const res = wireCodex(ENV_A);
-    expect(res.message).toBe("Codex: wired ~/.codex/config.toml (restart Codex to pick it up)");
-    const toml = readFileSync(cfgPath(), "utf-8");
-    const after = Bun.TOML.parse(toml) as any;
-    expect(after.mcp_servers.flair.env.FLAIR_AGENT_ID).toBe(ENV_A.FLAIR_AGENT_ID);
-    expect(after.mcp_servers.flair.env.FLAIR_URL).toBe(URL_A);
-    expect(after.mcp_servers.flair.extra).toBeUndefined();
-    expect(after.other_server.command).toBe("echo");
+    expectRefusal(raw, wireCodex(ENV_A));
   });
 
-  it("inline env with agent-a, wired for agent-b → rewritten (real TOML parse)", () => {
+  it("a multiline array inside the flair section is refused", () => {
+    const raw = seed([
+      "[mcp_servers.flair]",
+      'command = "npx"',
+      "args = [",
+      '  "-y",',
+      `  "${mcpServerSpec()}",`,
+      "]",
+      "",
+      "[mcp_servers.flair.env]",
+      `FLAIR_AGENT_ID = "${ENV_A.FLAIR_AGENT_ID}"`,
+      `FLAIR_URL = "${URL_A}"`,
+      "",
+    ].join("\n"));
+    expectRefusal(raw, wireCodex(ENV_B));
+  });
+
+  it("a multiline array in ANOTHER table after the section is preserved byte-for-byte", () => {
     const raw = seed([
       "[mcp_servers.flair]",
       'command = "npx"',
       `args = ["-y", "${mcpServerSpec()}"]`,
-      `env = { FLAIR_AGENT_ID = "${ENV_A.FLAIR_AGENT_ID}", FLAIR_URL = "${URL_A}" }`,
+      "",
+      "[mcp_servers.flair.env]",
+      'FLAIR_AGENT_ID = "agent-a"',
+      `FLAIR_URL = "${URL_A}"`,
+      "",
+      "[other]",
+      "data = [",
+      '  ["one", "two"],',
+      '  ["three", "four"],',
+      "]",
       "",
     ].join("\n"));
-    const before = Bun.TOML.parse(raw) as any;
-    expect(before.mcp_servers.flair.env.FLAIR_AGENT_ID).toBe(ENV_A.FLAIR_AGENT_ID);
-
+    const suffix = raw.slice(raw.indexOf("[other]"));
     const res = wireCodex(ENV_B);
-    expect(res.message).toBe("Codex: wired ~/.codex/config.toml (restart Codex to pick it up)");
+    expect(res.ok).toBe(true);
     const toml = readFileSync(cfgPath(), "utf-8");
-    expect(toml).not.toBe(raw);
-    const after = Bun.TOML.parse(toml) as any;
-    expect(after.mcp_servers.flair.env.FLAIR_AGENT_ID).toBe("agent-b");
-    expect(after.mcp_servers.flair.env.FLAIR_URL).toBe(URL_A);
+    expect(toml).toContain('FLAIR_AGENT_ID = "agent-b"');
+    expect(toml.endsWith(suffix)).toBe(true);
+    expect((Bun.TOML.parse(toml) as any).other.data).toEqual([["one", "two"], ["three", "four"]]);
   });
 
-  it("inline env already carrying the same values → already wired, bytes unchanged", () => {
+  it("an indented array-of-tables sibling after the section is preserved byte-for-byte", () => {
     const raw = seed([
       "[mcp_servers.flair]",
       'command = "npx"',
       `args = ["-y", "${mcpServerSpec()}"]`,
-      `env = { FLAIR_AGENT_ID = "${ENV_A.FLAIR_AGENT_ID}", FLAIR_URL = "${URL_A}" }`,
+      "",
+      "[mcp_servers.flair.env]",
+      'FLAIR_AGENT_ID = "agent-a"',
+      `FLAIR_URL = "${URL_A}"`,
+      "",
+      "  [[mcp_servers.other]]",
+      '  name = "x"',
       "",
     ].join("\n"));
-    const res = wireCodex(ENV_A);
-    expect(res.message).toBe("Codex: already wired in ~/.codex/config.toml");
-    expect(readFileSync(cfgPath(), "utf-8")).toBe(raw);
+    const suffix = raw.slice(raw.indexOf("  [[mcp_servers.other]]"));
+    const res = wireCodex(ENV_B);
+    expect(res.ok).toBe(true);
+    const toml = readFileSync(cfgPath(), "utf-8");
+    expect(toml).toContain('FLAIR_AGENT_ID = "agent-b"');
+    expect(toml.endsWith(suffix)).toBe(true);
+    expect((Bun.TOML.parse(toml) as any).mcp_servers.other[0].name).toBe("x");
   });
+});
+
+describe("flair#3050 round 5 — one span for the read and the write path", () => {
+  const fixtures: Array<[string, string]> = [
+    ["canonical section at EOF", [
+      "[mcp_servers.flair]",
+      'command = "npx"',
+      `args = ["-y", "${mcpServerSpec()}"]`,
+      "",
+      "[mcp_servers.flair.env]",
+      'FLAIR_AGENT_ID = "agent-a"',
+      `FLAIR_URL = "${URL_A}"`,
+      "",
+    ].join("\n")],
+    ["sibling table after the section", [
+      "[mcp_servers.flair]",
+      'command = "npx"',
+      `args = ["-y", "${mcpServerSpec()}"]`,
+      "",
+      "[mcp_servers.flair.env]",
+      'FLAIR_AGENT_ID = "agent-a"',
+      `FLAIR_URL = "${URL_A}"`,
+      "",
+      "[other]",
+      'k = "v"',
+      "",
+    ].join("\n")],
+    ["array-of-tables sibling after the section", [
+      "[mcp_servers.flair]",
+      'command = "npx"',
+      `args = ["-y", "${mcpServerSpec()}"]`,
+      "",
+      "[mcp_servers.flair.env]",
+      'FLAIR_AGENT_ID = "agent-a"',
+      `FLAIR_URL = "${URL_A}"`,
+      "",
+      "  [[mcp_servers.other]]",
+      '  name = "x"',
+      "",
+    ].join("\n")],
+  ];
+
+  for (const [label, raw] of fixtures) {
+    it(`read and write agree on the span: ${label}`, () => {
+      seed(raw);
+      const span = codexFlairSectionSpan(raw);
+      expect(span).not.toBeNull();
+      expect(codexFlairSectionText(raw)).toBe(raw.slice(span!.start, span!.end));
+
+      const replacement = replaceCodexFlairBlock(raw, ENV_B);
+      expect(replacement.ok).toBe(true);
+      const res = wireCodex(ENV_B);
+      expect(res.ok).toBe(true);
+      const expected = raw.slice(0, span!.start) + tomlSnippet(ENV_B) + "\n" + raw.slice(span!.end);
+      expect(replacement).toEqual({ ok: true, text: expected });
+      expect(readFileSync(cfgPath(), "utf-8")).toBe(expected);
+    });
+  }
+});
+
+
+describe("Codex shape boundaries", () => {
+  for (const header of [
+    " [mcp_servers.flair]", "[mcp_servers.flair] ", "[mcp_servers.flair] # edited",
+    '[mcp_servers."flair"]', '["mcp_servers".flair]', "[[mcp_servers.flair]]",
+    "[mcp_servers.flair.env]",
+  ]) {
+    it(`refuses a noncanonical header: ${header}`, () => {
+      const raw = seed(tomlSnippet(ENV_A).replace("[mcp_servers.flair]", header) + "\n");
+      expectRefusal(raw, wireCodex(ENV_B));
+    });
+  }
+
+  for (const line of [
+    'EXTRA = "value"', '# edited', 'FLAIR_URL = ""',
+    '[mcp_servers."flair".extra]',
+    'FLAIR_AGENT_ID = "agent-a"junk', 'FLAIR_AGENT_ID = "agent-a"',
+    'data = [\n  ["one", "two"],\n]', '  ["one", "two"],',
+    'FLAIR_CLIENT = "client\tname"',
+  ]) {
+    it(`refuses an extra env line: ${JSON.stringify(line)}`, () => {
+      const raw = seed(tomlSnippet(ENV_A) + "\n" + line + "\n");
+      expectRefusal(raw, wireCodex(ENV_B));
+    });
+  }
+
+  for (const boundary of ["[]", "[[]]", "[ = ]", '["one", "two"]']) {
+    it(`refuses an invalid table boundary: ${boundary}`, () => {
+      const raw = seed(tomlSnippet(ENV_A) + "\n\n" + boundary + "\n");
+      expectRefusal(raw, wireCodex(ENV_B));
+    });
+  }
+
+  it("rewrites a recognized section without a final newline", () => {
+    const raw = seed(tomlSnippet(ENV_A));
+    const span = codexFlairSectionSpan(raw)!;
+    expect(span.end).toBe(raw.length);
+    expect(codexFlairSectionText(raw)).toBe(raw);
+    const replacement = replaceCodexFlairBlock(raw, ENV_B);
+    expect(replacement).toEqual({ ok: true, text: tomlSnippet(ENV_B) + "\n" });
+    expect(wireCodex(ENV_B).ok).toBe(true);
+    expect(readFileSync(cfgPath(), "utf8")).toBe(tomlSnippet(ENV_B) + "\n");
+  });
+
+  it("checks prefix and suffix identity before accepting a replacement", () => {
+    const prefix = '# unicode: é\n[other]\nx = "before"\n\n';
+    const suffix = '\n  [[items]]\nname = "after"\n';
+    const raw = prefix + tomlSnippet(ENV_A) + "\n" + suffix;
+    const span = codexFlairSectionSpan(raw)!;
+    const block = tomlSnippet(ENV_B) + "\n";
+    const text = raw.slice(0, span.start) + block + raw.slice(span.end);
+    const intact = (candidate: string) => codexReplacementPreservesBoundary(raw, candidate, span.start, span.end, block.length);
+    expect(intact(text)).toBe(true);
+    expect(intact(text.replace("before", "BEFORE"))).toBe(false);
+    expect(intact(text.replace("after", "AFTER"))).toBe(false);
+    expect(intact(text + " ")).toBe(false);
+    seed(raw);
+    expect(wireCodex(ENV_B).ok).toBe(true);
+    expect(readFileSync(cfgPath(), "utf8")).toBe(text);
+  });
+
+  for (const side of ["prefix", "suffix"]) {
+    it(`refuses a candidate that changes its ${side} before backup or write`, () => {
+      const raw = seed('# before\n' + tomlSnippet(ENV_A) + '\n\n[other]\nvalue = "after"\n');
+      const result = wireCodex(ENV_B, {
+        beforeBoundaryCheck: (text) => side === "prefix"
+          ? text.replace("before", "BEFORE")
+          : text.replace("after", "AFTER"),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("the bytes around the [mcp_servers.flair] section changed");
+      expect(readFileSync(cfgPath(), "utf8")).toBe(raw);
+      expect(readdirSync(join(isoHome, ".codex"))).toEqual(["config.toml"]);
+    });
+  }
+
+  for (const side of ["prefix", "suffix"]) {
+    it(`refuses lossy UTF-8 in the ${side} without a backup`, () => {
+      const text = tomlSnippet(ENV_A) + "\n";
+      const invalid = Buffer.from([0xff]);
+      const bytes = side === "prefix"
+        ? Buffer.concat([Buffer.from("# "), invalid, Buffer.from("\n" + text)])
+        : Buffer.concat([Buffer.from(text + '\n[other]\nx = "'), invalid, Buffer.from('"\n')]);
+      seed("");
+      writeFileSync(cfgPath(), bytes);
+      const result = wireCodex(ENV_B);
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("~/.codex/config.toml");
+      expect(result.message).toContain("edit the [mcp_servers.flair] section by hand");
+      expect(readFileSync(cfgPath())).toEqual(bytes);
+      expect(readdirSync(join(isoHome, ".codex"))).toEqual(["config.toml"]);
+    });
+  }
 });

@@ -66,8 +66,8 @@ const install = () => installHook({ homeDir: isoHome, harness: "claude-code", ag
 
 // ── the guard must read the CAPTURED span, not a decoy in the id ────────────
 
-describe("flair#1834 PR-H round 2 — repinSessionStartHook: the guard reads the captured span", () => {
-  it("decoy BEHIND in the id + real pin AHEAD → HOLD, bytes identical (never lowered)", () => {
+describe("flair#1834 PR-H round 2 — repinSessionStartHook: unsafe source ids are refused", () => {
+  it("decoy BEHIND in the id + real pin AHEAD → source refusal", () => {
     const id = `ghost@${FLAIR_MCP_PACKAGE}@${STALE_VER}`;
     const before = claudeCmd(`FLAIR_AGENT_ID=${id}`, AHEAD_VER);
     writeHook(before);
@@ -76,21 +76,23 @@ describe("flair#1834 PR-H round 2 — repinSessionStartHook: the guard reads the
     const res = repinSessionStartHook(isoHome, "claude-code");
 
     expect(res.action).toBe("hold");
-    expect(res.message).toContain("holding");
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain("cannot be safely written");
     expect(readFileSync(hookSettingsPath(isoHome, "claude-code"), "utf-8")).toBe(original);
     expect(readHookCommand()).toContain(`-p ${FLAIR_MCP_PACKAGE}@${AHEAD_VER} `);
   });
 
-  it("MIRROR: decoy AHEAD in the id + real pin stale → the re-pin SUCCEEDS (id byte-identical)", () => {
+  it("decoy AHEAD in the id + real pin stale → source refusal", () => {
     const id = `ghost@${FLAIR_MCP_PACKAGE}@${AHEAD_VER}`;
     const before = claudeCmd(`FLAIR_AGENT_ID=${id}`, STALE_VER);
     writeHook(before);
 
     const res = repinSessionStartHook(isoHome, "claude-code");
 
-    expect(res.action).toBe("update");
-    // Only the real `-p` pin moved; the identity is byte-identical.
-    expect(readHookCommand()).toBe(claudeCmd(`FLAIR_AGENT_ID=${id}`, CURRENT_VER));
+    expect(res.action).toBe("hold");
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain("cannot be safely written");
+    expect(readHookCommand()).toBe(before);
     expect(readHookCommand()).toContain(`FLAIR_AGENT_ID=${id} `);
   });
 });

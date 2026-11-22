@@ -45,9 +45,10 @@
  * a file exists: `opts.backup` runs BEFORE `decide` on every call that reaches
  * the read — including calls whose decision ends up noop or held; the churn is
  * the price of backing up before parsing. `opts.backupOnWrite` runs only after
- * `decide` returns a write, so a decision that does not write (hold or noop)
- * leaves no backup. Either is skipped where the read is skipped: an absent
- * destination, or a non-regular one (refused above).
+ * `decide` returns a write, so on its own it leaves no backup for a decision
+ * that does not write (hold or noop); a caller that also passes `opts.backup`
+ * has already backed up first. Either is skipped where the read is skipped: an
+ * absent destination, or a non-regular one (refused above).
  *   6. FRESH-ATTEMPT PROTOCOL: another cooperative writer's committed
  *      replacement changes the target inode, so a waiting writer's in-lock
  *      comparison FAILS and it is HELD — by design, never waived. The
@@ -852,7 +853,8 @@ export function withConfigCriticalSection(
 
       // 5. WRITE. Take the post-decision backup, then stage under the SAME lock
       //    before replacing the target. A held/refused/noop decision above
-      //    returned already, so it leaves no backup.
+      //    returned already, so this hook takes no backup; a caller that also
+      //    passed `opts.backup` has already backed up first.
       let stageCleanup: (() => void) | undefined;
       if (opts.backupOnWrite && bytes !== null) {
         try {

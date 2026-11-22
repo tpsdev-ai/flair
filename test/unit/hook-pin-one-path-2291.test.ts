@@ -189,7 +189,7 @@ describe("flair#2291 — init --skip-hook writes no hook", () => {
 describe("flair#2291 — the finding reads the named pin span", () => {
   const DECOY_AGENT = `${AGENT}:${FLAIR_MCP_PACKAGE}@${INSTALLED}`;
 
-  it("hook status reports the named stale pin; init re-pins and replaces the decoy agent id", async () => {
+  it("hook status reports the named stale pin; init refuses the unsafe source id", async () => {
     const command = installerCommand("claude-code", DECOY_AGENT, STALE);
     expect(command.indexOf(`${FLAIR_MCP_PACKAGE}@${INSTALLED}`)).toBeGreaterThan(-1);
     expect(command.indexOf(`${FLAIR_MCP_PACKAGE}@${INSTALLED}`)).toBeLessThan(command.indexOf(`${FLAIR_MCP_PACKAGE}@${STALE}`));
@@ -200,9 +200,8 @@ describe("flair#2291 — the finding reads the named pin span", () => {
     expect(status.out).toContain(`command names older pin flair-mcp@${STALE}`);
 
     const init = await runCli(initArgs("claude-code"));
-    expect(init.out).toContain(`re-pointed the SessionStart hook in ${path} to agent '${AGENT}'`);
-    expect(init.out).toContain(`and re-pinned it to ${mcpServerSpec()}`);
-    expect(hookCommands("claude-code")).toEqual([installerCommand("claude-code", AGENT, INSTALLED)]);
+    expect(init.out).toContain("cannot be safely written");
+    expect(hookCommands("claude-code")).toEqual([command]);
   }, CASE_MS);
 
   it("the doctor catalog fails on the named stale pin", () => {
@@ -223,29 +222,19 @@ describe("flair#2291 — the finding reads the named pin span", () => {
     expect(status.out).toContain(`command names older pin flair-mcp@${STALE}`);
 
     const init = await runCli(initArgs("claude-code"));
-    expect(init.out).toContain(`re-pinned the SessionStart hook in ${path} to ${mcpServerSpec()}`);
-    const after = hookCommands("claude-code")[0]!;
-    // The named `-p` span moved to the installed pin; the URL kept its decoy.
-    expect(after).toContain(`-p ${FLAIR_MCP_PACKAGE}@${INSTALLED} `);
-    expect(after).toContain(`FLAIR_URL=${decoyUrl}`);
-    expect(after).not.toContain(`-p ${FLAIR_MCP_PACKAGE}@${STALE} `);
+    expect(init.out).toContain("cannot be safely written");
+    expect(hookCommands("claude-code")).toEqual([command]);
   }, CASE_MS);
 
-  it("an AHEAD real pin is never lowered while the decoy id is re-pointed", async () => {
+  it("an AHEAD real pin stays held when a safe source id is re-pointed", async () => {
     const AHEAD = "9.9.9";
-    const decoyId = `${AGENT}:${FLAIR_MCP_PACKAGE}@${STALE}`;
-    const command = installerCommand("claude-code", decoyId, AHEAD);
+    const command = installerCommand("claude-code", "agent-c", AHEAD);
     const path = writeHookGroups("claude-code", [[command]]);
 
     const init = await runCli(initArgs("claude-code"));
     expect(init.out).toContain(`re-pointed the SessionStart hook in ${path} to agent '${AGENT}'`);
     expect(init.out).not.toContain("and re-pinned it");
-    const after = hookCommands("claude-code")[0]!;
-    // The id changed; the REAL pin stayed AHEAD (a behind decoy inside the id
-    // must not let the re-point branch lower it).
-    expect(after).toContain(`FLAIR_AGENT_ID=${AGENT} `);
-    expect(after).not.toContain(decoyId);
-    expect(after).toContain(`-p ${FLAIR_MCP_PACKAGE}@${AHEAD} `);
+    expect(hookCommands("claude-code")).toEqual([installerCommand("claude-code", AGENT, AHEAD)]);
   }, CASE_MS);
 });
 

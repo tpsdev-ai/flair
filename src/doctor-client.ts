@@ -141,6 +141,14 @@ export function isHookCommandValueSafe(value: string): boolean {
   return typeof value === "string" && HOOK_VALUE_SAFE_RE.test(value);
 }
 
+export function unsafeAgentIdMessage(agentId: string): string {
+  return `agent id '${agentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`;
+}
+
+export function unsafeFlairUrlMessage(flairUrl: string): string {
+  return `Flair URL '${flairUrl}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`;
+}
+
 /**
  * Build the exact `command` string to register as a SessionStart hook.
  * Throws (rather than emitting a quoted approximation) when a value cannot be
@@ -281,18 +289,19 @@ export function hookCommandDiscardsStderr(command: string): boolean {
   return command.includes("2>/dev/null") || command.includes("2>&-");
 }
 
-/**
- * The EXACT unwrapped shape Flair wrote before #1007. Recognising it precisely
- * (not "anything containing the marker") is what lets `flair doctor --fix`
- * upgrade a hook we know we authored while never rewriting one a user placed
- * or edited themselves.
- */
+/** Match the bare legacy structure before a repair validates its values.
+ *  The marker alone cannot show that a command is safe to rebuild. */
 const LEGACY_SESSION_START_HOOK_RE =
   /^FLAIR_AGENT_ID=([^\s'"]+)(?: FLAIR_URL=([^\s'"]+))? npx -y @tpsdev-ai\/flair-mcp flair-session-start$/;
 
 export function parseLegacySessionStartHookCommand(command: string): { agentId: string; flairUrl?: string } | null {
   if (typeof command !== "string") return null;
-  const m = command.trim().match(LEGACY_SESSION_START_HOOK_RE);
+  const trimmed = command.trim();
+  // flair#3050 round 5: a chained or extended command (`&&`, `;`, `|`, a
+  // substitution or redirection) is not the bare shape Flair wrote, even when
+  // the chain is attached to a value (`FLAIR_AGENT_ID=agent-a&& npx ...`).
+  if (/[;&|`$()<>]/.test(trimmed)) return null;
+  const m = trimmed.match(LEGACY_SESSION_START_HOOK_RE);
   if (!m) return null;
   return { agentId: m[1]!, flairUrl: m[2] };
 }
@@ -2189,6 +2198,16 @@ export function upgradeSessionStartHookCommand(homeDir: string, settingsPath?: s
             const legacy = parseLegacySessionStartHookCommand(hook.command);
             if (!legacy) {
               outcome = { ok: false, path, changed: false, message: `the SessionStart hook in ${path} is not the command Flair wrote — leaving it untouched` };
+              return { hold: outcome.message };
+            }
+            // flair#3050 round 5: validate the EXISTING values with the
+            // builder's own rule before treating the command as Flair-written.
+            if (!isHookCommandValueSafe(legacy.agentId)) {
+              outcome = { ok: false, path, changed: false, message: unsafeAgentIdMessage(legacy.agentId) };
+              return { hold: outcome.message };
+            }
+            if (legacy.flairUrl !== undefined && legacy.flairUrl !== "" && !isHookCommandValueSafe(legacy.flairUrl)) {
+              outcome = { ok: false, path, changed: false, message: unsafeFlairUrlMessage(legacy.flairUrl) };
               return { hold: outcome.message };
             }
             // flair#1778 2c-i-a3: the repair rewrites the entry to a version-

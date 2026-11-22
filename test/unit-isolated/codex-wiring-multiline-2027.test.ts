@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { clientConfigPath, wireCodex } from "../../src/install/clients.ts";
 import { withHome } from "../../src/lib/home.ts";
@@ -76,6 +76,16 @@ function expectHold(before: string): void {
   });
 }
 
+function expectRefusal(before: string): void {
+  withConfig(before, (path) => {
+    const result = wireCodex(env);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("not the shape Flair writes");
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(existsSync(`${path}.bak`)).toBe(false);
+  });
+}
+
 for (const quote of ['"', "'"]) {
   const fence = quote.repeat(3);
   const later = [
@@ -115,9 +125,10 @@ for (const quote of ['"', "'"]) {
     });
   });
 
-  test(`wireCodex holds a fake header inside an earlier ${fence} string`, () => {
+  test(`wireCodex refuses a fake header inside an earlier ${fence} string`, () => {
     // The closing fence is beyond a fake unrelated header, outside the
-    // candidate Flair section. Only the before-header check sees the opening.
+    // candidate Flair section. Only the before-header check sees the opening,
+    // so the header is not a table a parser would read: foreign, refused.
     const before = [
       "[other.tool]",
       `note = ${fence}`,
@@ -126,20 +137,20 @@ for (const quote of ['"', "'"]) {
       fence,
       "",
     ].join("\n");
-    expectHold(before);
+    expectRefusal(before);
   });
 
-  test(`wireCodex holds a ${fence} string in the Flair table`, () => {
+  test(`wireCodex refuses a ${fence} string in the Flair table`, () => {
     const before = block(STALE_SPEC).replace(
       "[mcp_servers.flair.env]",
       `note = ${fence}\nkeep this text\n${fence}\n[mcp_servers.flair.env]`,
     );
-    expectHold(before);
+    expectRefusal(before);
   });
 
-  test(`wireCodex holds a ${fence} string in a Flair subtable`, () => {
+  test(`wireCodex refuses a ${fence} string in a Flair subtable`, () => {
     const before = block(STALE_SPEC) + `note = ${fence}\nkeep this text\n${fence}\n`;
-    expectHold(before);
+    expectRefusal(before);
   });
 
   for (const version of [AHEAD_VERSION, "unknown"]) {
