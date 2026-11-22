@@ -15,9 +15,10 @@ import { tempDir } from "../helpers/temp-dir.ts";
  * `flair init` applies this leg through `applyOrRepinSessionStartHook`
  * (src/lib/owned-pins.ts); a present hook used to report "already wired"
  * without reading the FLAIR_AGENT_ID it embeds. The unit cases pin the writer's
- * boundaries: the requested id is written, a same-id apply is a byte-level
- * no-op, and an entry Flair cannot identify or a shape it did not write is a
- * named refusal that writes nothing.
+ * boundaries: the requested id is written, a same-id apply on the current
+ * installer form is a byte-level no-op, a legacy unpinned hook is migrated, and
+ * an entry Flair cannot identify or a shape it did not write is a named
+ * refusal that writes nothing (no backup either).
  */
 
 let home: string;
