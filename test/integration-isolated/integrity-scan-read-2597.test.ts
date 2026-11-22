@@ -176,7 +176,13 @@ async function controlledScan(
 }
 
 test("a Memory exact count that never converges fails naming the rows present", async () => {
-  await expect(waitForExactCount(-1, "an impossible count", 50)).rejects.toThrow(/rows now: \[/);
+  const present = `integrity-2597-present-${randomUUID()}`;
+  await insert(present, randomUUID());
+  try {
+    await expect(waitForExactCount(-1, "an impossible count", 50)).rejects.toThrow(new RegExp(`rows now: \\[[^\\]]*"${present}"`));
+  } finally {
+    await remove(present);
+  }
   await expect(controlledScan(false, { afterDeleteCount: -1, retryMs: 50 })).rejects.toThrow(
     /the exact count did not observe the raw delete; rows now: \[/,
   );
