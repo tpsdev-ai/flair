@@ -16,7 +16,7 @@ process.env.FLAIR_MCP_OAUTH = "true";
 process.env.FLAIR_MCP_ISSUER = "https://provider-readiness.flair.test";
 
 mock.module("harper", () => ({ Resource: class {}, server: {}, databases: {}, logger: { info() {}, warn() {}, error() {} } }));
-const { handleApplication, OAuthResource } = await import("@harperfast/oauth");
+const { handleApplication, OAuthResource, withMCPAuth } = await import("@harperfast/oauth");
 const { MCPKeyStore, resetMCPKeysTableCache } = await import("../../node_modules/@harperfast/oauth/dist/lib/mcp/keyStore.js");
 const { signAccessToken } = await import("../../node_modules/@harperfast/oauth/dist/lib/mcp/tokenIssuer.js");
 const { registerMcpOAuthRoute, mcpRouteState } = await import("../../resources/mcp-oauth.ts");
@@ -66,7 +66,7 @@ async function fixture() {
     mcpHandler: async () => { reached++; return { status: 200 }; },
   });
   const request = () => ({ pathname: "/mcp", headers: { authorization: `Bearer ${token}` } });
-  return { configure, resources, request: () => guarded(request()), reached: () => reached, rows, key };
+  return { configure, resources, request: (input = request()) => guarded(input), reached: () => reached, rows, key };
 }
 
 const providers = { github: { provider: "github", clientId: "client", clientSecret: "secret", redirectUri: `${process.env.FLAIR_MCP_ISSUER}/oauth` } };
@@ -96,6 +96,32 @@ test("no provider denies a valid token against a persisted key; provider removal
   expect(removed.body).toContain("not serving an MCP authorization configuration");
   expect(f.reached()).toBe(1);
   expect(f.rows.has(f.key.kid)).toBe(true);
+});
+
+test("public 503 mirrors wrapper denial CORS headers and configured responses stay unchanged", async () => {
+  const f = await fixture();
+  const wrapper = withMCPAuth(async () => ({ status: 200 }));
+  for (const origin of [undefined, "https://browser.flair.test", "https://other-browser.flair.test"]) {
+    const request: any = { method: "GET", pathname: "/mcp", headers: origin ? { origin } : {} };
+    await f.configure({});
+    const denial = await wrapper(request, () => {});
+    expect(denial.status).toBe(401);
+    const corsHeaders = Object.fromEntries(Object.entries(denial.headers!).filter(([name]) => name.startsWith("Access-Control-")));
+    expect(corsHeaders).toEqual({
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Expose-Headers": "WWW-Authenticate",
+    });
+    const unavailable = await f.request(request);
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.headers).toEqual({
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      ...corsHeaders,
+    });
+    await f.configure(providers);
+    expect(await f.request(request)).toEqual(await wrapper(request, () => {}));
+    expect(await f.request()).toEqual({ status: 200 });
+  }
 });
 
 test("disabled MCP refuses a previously valid token with the provider still configured", async () => {

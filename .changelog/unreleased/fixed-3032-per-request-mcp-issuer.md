@@ -5,3 +5,4 @@
   When `FLAIR_MCP_ISSUER` is set and the configuration is missing or disabled,
   the remedy names a valid OAuth provider (client ID, client secret and
   redirect URI) alongside `FLAIR_MCP_OAUTH` and `FLAIR_MCP_ISSUER`.
+  The 503 response carries the OAuth wrapper's denial CORS headers.

@@ -45,6 +45,12 @@ import { MULTI_WORKER_GUARD_HTTP_NAME } from "./multi-worker-guard.js";
  */
 const OAUTH_COMPONENT_KEY = "@harperfast/oauth";
 
+// Mirrors withMCPAuth denial CORS headers in @harperfast/oauth 2.9.0.
+const MCP_DENIAL_CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Expose-Headers": "WWW-Authenticate",
+};
+
 /**
  * A plain record in this realm or another. Harper runs this module in a VM,
  * so `config` can be a host-realm object whose prototype is not this realm's
@@ -696,7 +702,7 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
         // remedy but no resolved issuer value.
         return {
           status: 503,
-          headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+          headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...MCP_DENIAL_CORS_HEADERS },
           body: JSON.stringify({ error: check.code, error_description: check.reason }),
         };
       }
