@@ -1143,22 +1143,48 @@ function codexFlairSectionEnvMatches(raw: string, env: WireEnv): boolean {
   );
 }
 
-/** The refusal reason for a triple-quoted string before the Flair header. Removing the section does not
- *  clear it (the string stays), so its message names a different remedy. */
+/** The refusal reason for triple-quote delimiter text before the Flair header (a raw-text rule:
+ *  the text may sit in a comment or a string). Removing the section does not clear it. */
 export const CODEX_PRE_HEADER_DELIMITER_REASON = "multiline-string delimiters precede [mcp_servers.flair]";
+/** Refusal reasons where the mcp_servers.flair definition is not (only) the
+ *  [mcp_servers.flair] section, so removing that section does not clear the refusal. */
+export const CODEX_OUTSIDE_DEFINITION_REASONS: ReadonlySet<string> = new Set([
+  "the [mcp_servers.flair] header is not the line Flair writes",
+  "a parent or aliased mcp_servers.flair definition may exist",
+  "a mcp_servers.flair definition may exist outside the recognized span",
+]);
+/** The refusal reason for a file whose bytes do not round-trip as UTF-8. */
+export const CODEX_LOSSY_BYTES_REASON = "the file is not lossless UTF-8";
 
-function codexForeignShapeMessage(display: string, reason: string): string {
+/** The refusal message, with the remedy that can clear this reason. */
+export function codexForeignShapeMessage(display: string, reason: string): string {
+  const head = `Codex: refusing to rewrite ${display}`;
   if (reason === CODEX_PRE_HEADER_DELIMITER_REASON) {
     return (
-      `Codex: refusing to rewrite ${display} — the [mcp_servers.flair] section is not ` +
-      `the shape Flair writes (${reason}); a triple-quoted string before the section makes its ` +
-      `context ambiguous, so removing the section alone does not let flair init wire Codex. ` +
-      `Remove or rewrite the triple-quoted strings that appear before [mcp_servers.flair], ` +
-      `or configure the section by hand.`
+      `${head} (${reason}): the text before [mcp_servers.flair] contains a triple-quote delimiter ` +
+      `(""" or \'\'\'), which may be in a comment. Flair refuses rather than decide whether the section ` +
+      `sits inside a multiline string, so removing the section alone does not clear this. Remove or ` +
+      `rewrite that delimiter text, or configure the section by hand.`
+    );
+  }
+  if (CODEX_OUTSIDE_DEFINITION_REASONS.has(reason)) {
+    return (
+      `${head} — the mcp_servers.flair definition is not the shape Flair writes (${reason}). ` +
+      `Flair can rule out a second definition only when mcp_servers appears as [mcp_servers.<name>] ` +
+      `table headers and Flair's own section. Remove or rewrite anything else that can define ` +
+      `mcp_servers.flair — an [mcp_servers] table (move its entries into [mcp_servers.<name>] tables), ` +
+      `a dotted or inline mcp_servers key, a quoted or spaced mcp_servers.flair header, or an extra ` +
+      `[mcp_servers.flair.<name>] table — then re-run flair init, or configure Codex by hand.`
+    );
+  }
+  if (reason === CODEX_LOSSY_BYTES_REASON) {
+    return (
+      `${head} (${reason}): Flair edits only files whose bytes round-trip as UTF-8. Re-save the ` +
+      `file as UTF-8 and re-run flair init, or configure Codex by hand.`
     );
   }
   return (
-    `Codex: refusing to rewrite ${display} — the [mcp_servers.flair] section is not ` +
+    `${head} — the [mcp_servers.flair] section is not ` +
     `the shape Flair writes (${reason}); edit the [mcp_servers.flair] section by hand, ` +
     `or remove it and re-run flair init.`
   );
@@ -1886,7 +1912,7 @@ function _wireCodex(env: WireEnv, testHooks?: CodexRewriteTestHooks): { ok: bool
       (bytes) => {
         const raw = decodeText(bytes);
         if (bytes !== null && !Buffer.from(bytes).equals(Buffer.from(raw, "utf8"))) {
-          settled = { ok: false, message: codexForeignShapeMessage(display, "the file is not lossless UTF-8") };
+          settled = { ok: false, message: codexForeignShapeMessage(display, CODEX_LOSSY_BYTES_REASON) };
           return { hold: settled.message };
         }
         const shape = recognizeCodexFlairSection(raw);

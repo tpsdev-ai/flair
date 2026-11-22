@@ -633,8 +633,9 @@ export function guardedPinSpan(command: string | null): string | null {
  * `add`: wiring a hook is `flair init` / `flair hook install`, an opt-in the
  * upgrade path must not make on the user's behalf. Only rewrites the exact
  * canonical `npx -y -p …` invocation Flair itself writes (pinned or the
- * pre-#1007 bare unpinned form); a hand-edited command is the user's and is left
- * untouched. Fail-closed on a malformed settings file and backs up before any
+ * pre-#1007 bare unpinned form); a command outside those recognized forms is the
+ * user's and is left untouched. An edit that keeps a recognized form (for example a
+ * changed agent id) is still matched and can be rewritten. Fail-closed on a malformed settings file and backs up before any
  * real write — the same Sherlock conditions installHook implements. Idempotent:
  * a second call is a `noop`.
  */
