@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { CODEX_WIRING_CONDITIONS, clientConfigPath, recognizeCodexFlairSection, wireCodex } from "../../src/install/clients.ts";
+import { clientConfigPath, recognizeCodexFlairSection, wireCodex } from "../../src/install/clients.ts";
+import { expectCodexConditionClauses } from "../helpers/codex-wiring-conditions.ts";
 import { withHome } from "../../src/lib/home.ts";
 import {
   FLAIR_MCP_PACKAGE,
@@ -82,7 +83,7 @@ function expectRefusal(before: string): void {
     expect(result.ok).toBe(false);
     const shape = recognizeCodexFlairSection(before);
     if (shape.kind === "refused") expect(result.message).toContain(`(${shape.reason})`);
-    expect(result.message).toContain(CODEX_WIRING_CONDITIONS);
+    expectCodexConditionClauses(result.message);
     expect(readFileSync(path, "utf8")).toBe(before);
     expect(existsSync(`${path}.bak`)).toBe(false);
   });

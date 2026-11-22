@@ -7,7 +7,6 @@ import {
   CODEX_APPEND_DELIMITER_REASON,
   CODEX_LOSSY_BYTES_REASON,
   CODEX_PRE_HEADER_DELIMITER_REASON,
-  CODEX_WIRING_CONDITIONS,
   recognizeCodexFlairSection,
   codexFlairSectionSpan,
   codexReplacementPreservesBoundary,
@@ -17,6 +16,7 @@ import {
   tomlSnippet,
   wireCodex,
 } from "../../src/install/clients.ts";
+import { expectCodexConditionClauses } from "../helpers/codex-wiring-conditions.ts";
 import { FLAIR_MCP_PACKAGE, mcpServerSpec } from "../../src/lib/mcp-spec.ts";
 
 /**
@@ -73,7 +73,7 @@ function section(spec: string, agent: string, url: string): string {
   ].join("\n");
 }
 
-/** A refusal is ok:false, names the file, the reason and every condition a re-run needs, and
+/** A refusal is ok:false, names the file, the reason and every config-content condition a re-run needs, and
  *  writes nothing — no bytes change and no `.bak` appears. The recognizer refuses the file, or
  *  (no section) the append does. */
 function expectRefusal(raw: string, res: { ok: boolean; message: string }): void {
@@ -84,7 +84,7 @@ function expectRefusal(raw: string, res: { ok: boolean; message: string }): void
   expect(res.ok).toBe(false);
   expect(res.message).toContain("~/.codex/config.toml");
   expect(res.message).toContain(`(${reason})`);
-  expect(res.message).toContain(CODEX_WIRING_CONDITIONS);
+  expectCodexConditionClauses(res.message);
   expect(readFileSync(cfgPath(), "utf-8")).toBe(raw);
   expect(existsSync(`${cfgPath()}.bak`)).toBe(false);
   expect(readdirSync(join(isoHome, ".codex")).sort().join(",")).toBe("config.toml");
@@ -487,7 +487,7 @@ describe("Codex shape boundaries", () => {
       expect(result.ok).toBe(false);
       expect(result.message).toContain("~/.codex/config.toml");
       expect(result.message).toContain(`(${CODEX_LOSSY_BYTES_REASON})`);
-      expect(result.message).toContain(CODEX_WIRING_CONDITIONS);
+      expectCodexConditionClauses(result.message);
       expect(readFileSync(cfgPath())).toEqual(bytes);
       expect(readdirSync(join(isoHome, ".codex"))).toEqual(["config.toml"]);
     });

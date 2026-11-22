@@ -1158,12 +1158,14 @@ export const CODEX_APPEND_DELIMITER_REASON =
 export const CODEX_LOSSY_BYTES_REASON = "the file is not lossless UTF-8";
 
 /**
- * Every condition Flair needs before it writes Codex's config. A refusal names the reason it found,
- * then lists all of them, because one file can fail several and fixing only the named one may not
- * be enough (for example, removing a malformed section leaves delimiter text the append then meets).
+ * The config-content conditions Flair needs before it writes Codex's config. A refusal names the
+ * reason it found, then lists all of them, because one file can fail several and fixing only the
+ * named one may not be enough (for example, removing a malformed section leaves delimiter text the
+ * append then meets). They are about the file's content only: the pin guard and the write itself
+ * are separate checks that can still stop wiring.
  */
 export const CODEX_WIRING_CONDITIONS =
-  "Flair wires Codex only when all of these hold: " +
+  "Flair edits Codex's config only when its content meets all of these conditions: " +
   "(1) the file is UTF-8 whose bytes round-trip; " +
   "(2) nothing but Flair's exact [mcp_servers.flair] section, or nothing at all, defines mcp_servers.flair: " +
   "no [mcp_servers] table (put its entries in [mcp_servers.<name>] tables), no dotted or inline mcp_servers key, " +
@@ -1172,9 +1174,11 @@ export const CODEX_WIRING_CONDITIONS =
   "and with no section none appears anywhere, because Flair appends the section at the end of the file; " +
   "(4) an existing [mcp_servers.flair] section is exactly the shape Flair writes: edit it, or remove it and " +
   "its [mcp_servers.flair.*] tables so Flair appends a fresh one. " +
-  "Fix whichever do not hold and re-run flair init, or configure Codex by hand.";
+  "Fix whichever do not hold and re-run flair init, or configure Codex by hand. " +
+  "These cover the file's content only: the pin guard (for example, an existing pin newer than this " +
+  "flair) and a failed write can still stop wiring.";
 
-/** The refusal message: the reason found, then every condition a re-run needs. */
+/** The refusal message: the reason found, then the config-content conditions a re-run needs. */
 export function codexForeignShapeMessage(display: string, reason: string): string {
   return `Codex: refusing to rewrite ${display} (${reason}). ${CODEX_WIRING_CONDITIONS}`;
 }

@@ -62,7 +62,7 @@ for (const [label, raw] of held) {
       // rather than rewritten. The pin-only reader above stays a hold.
       const result = wireCodex(env);
       expect(result.ok).toBe(false);
-      expect(result.message).toContain("Flair wires Codex only when all of these hold");
+      expect(result.message).toContain("Flair edits Codex's config only when its content meets all of these conditions:");
       expect(readFileSync(path, "utf8")).toBe(raw);
       expect(existsSync(`${path}.bak`)).toBe(false);
     });
