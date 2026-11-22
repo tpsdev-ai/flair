@@ -423,8 +423,15 @@ describe("flair#2194: MCP on with NO provider configured — fail-closed discove
       }
       // /mcp is still mounted by flair; with no live MCP config it answers the
       // named unavailable refusal.
-      const mcpRes = await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) });
+      const mcpRes = await fetch(`${harper.httpURL}/mcp`, {
+        headers: { Origin: "https://browser.flair.test" },
+        signal: AbortSignal.timeout(10_000),
+      });
       expect(mcpRes.status).toBe(503);
+      // On the wire, the 503 carries the two CORS headers withMCPAuth puts on its
+      // denials, so a cross-origin browser can read the refusal.
+      expect(mcpRes.headers.get("access-control-allow-origin")).toBe("*");
+      expect(mcpRes.headers.get("access-control-expose-headers")).toBe("WWW-Authenticate");
       const mcpBody = await mcpRes.text();
       expect(mcpBody).toContain("not serving an MCP authorization configuration");
       // Both FLAIR_MCP_* variables are set here; the cause is the missing
