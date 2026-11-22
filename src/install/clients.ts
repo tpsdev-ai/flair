@@ -771,14 +771,39 @@ const CODEX_FLAIR_SECTION_HEADER_RE = /^\[mcp_servers\.flair(?:\.[^\]]+)?\]\s*(?
 
 /**
  * The ACTIVE, non-empty `FLAIR_AGENT_ID` value a `[mcp_servers.flair]` section
- * configures, or null when it configures none. Decides "no identity" from the
- * value the section actually sets: a commented `# FLAIR_AGENT_ID = "x"` and an
- * explicit `FLAIR_AGENT_ID = ""` are both "no identity", not an identity
- * (flair#1834 A2 round 3).
+ * configures, or null when it configures none (or configures conflicting
+ * values). Decides "no identity" from the value the section actually sets: a
+ * commented `# FLAIR_AGENT_ID = "x"` and an explicit `FLAIR_AGENT_ID = ""` are
+ * both "no identity", not an identity (flair#1834 A2 round 3).
  */
 function activeCodexIdentity(section: string): string | null {
+  return codexSectionEnvValue(section, "FLAIR_AGENT_ID");
+}
+
+/** The `[mcp_servers.flair.env]` keys the wiring comparison reads. Literal
+ *  patterns per key (no dynamic RegExp) so the scanner stays off the
+ *  non-literal-regexp SAST surface. */
+const CODEX_SECTION_ENV_KEY_RE = {
+  FLAIR_AGENT_ID: /^[ \t]*FLAIR_AGENT_ID[ \t]*=[ \t]*(.*)$/,
+  FLAIR_URL: /^[ \t]*FLAIR_URL[ \t]*=[ \t]*(.*)$/,
+} as const;
+
+/**
+ * The ACTIVE, non-empty value a `[mcp_servers.flair]` section sets for one env
+ * key, or null when it sets none. Same line-scan rules as the identity reader
+ * (flair#1834 A2 round 3): a commented assignment and an explicit empty string
+ * are both "no value", not a value. A shape this reader cannot read (an inline
+ * env table, an unterminated string, conflicting duplicate values) is returned
+ * as unknown, so a wire rewrites the section instead of claiming it already
+ * carries this env.
+ */
+function codexSectionEnvValue(
+  section: string,
+  key: keyof typeof CODEX_SECTION_ENV_KEY_RE,
+): string | null {
+  let found: string | null = null;
   for (const raw of section.split("\n")) {
-    const m = raw.match(/^[ \t]*FLAIR_AGENT_ID[ \t]*=[ \t]*(.*)$/);
+    const m = raw.match(CODEX_SECTION_ENV_KEY_RE[key]);
     if (!m) continue;
     const rhs = m[1]!.trim();
     if (rhs === "" || rhs.startsWith("#")) continue; // absent value, or the whole assignment is commented out
@@ -786,13 +811,32 @@ function activeCodexIdentity(section: string): string | null {
     if (rhs.startsWith('"') || rhs.startsWith("'")) {
       const quote = rhs[0]!;
       const end = rhs.indexOf(quote, 1);
-      value = end === -1 ? rhs.slice(1) : rhs.slice(1, end);
+      // An unterminated string is unreadable, not a value: read as unknown.
+      if (end === -1) return null;
+      value = rhs.slice(1, end);
     } else {
       value = rhs.split(/[\s#]/, 1)[0]!;
     }
-    if (value !== "") return value;
+    if (value === "") continue;
+    // Two different active values are ambiguous: read as unknown, so a wire
+    // rewrites the section rather than no-opping on whichever came first.
+    if (found !== null && found !== value) return null;
+    found = value;
   }
-  return null;
+  return found;
+}
+
+/** flair#3050: does the existing `[mcp_servers.flair]` section carry exactly
+ *  the env this wire call would write? The Codex no-op requires the same
+ *  FLAIR_URL and FLAIR_AGENT_ID match as the JSON path (`wireJsonMcpCore`); a
+ *  differing value is a mismatch, not "already wired". */
+function codexFlairSectionEnvMatches(raw: string, env: WireEnv): boolean {
+  const section = codexFlairSectionText(raw);
+  if (section === null) return false;
+  return (
+    codexSectionEnvValue(section, "FLAIR_AGENT_ID") === env.FLAIR_AGENT_ID &&
+    codexSectionEnvValue(section, "FLAIR_URL") === env.FLAIR_URL
+  );
 }
 
 /**
@@ -1510,6 +1554,9 @@ function _wireCodex(env: WireEnv): { ok: boolean; message: string } {
   //
   // flair#1135: the "already wired" check is now version-aware — a section
   // with a stale pin triggers a re-write instead of a no-op.
+  // flair#3050: it is also env-aware — a section whose pin is current but
+  // whose FLAIR_AGENT_ID / FLAIR_URL differ is rewired, matching the JSON
+  // path's no-op condition (pin AND both env values).
   //
   // flair#1778 2c-i-d2: ONE critical section — observe → decide on the IN-LOCK
   // TEXT → write via temp + fsync + rename (the primitive), with a 0600 `.bak`
@@ -1544,13 +1591,20 @@ function _wireCodex(env: WireEnv): { ok: boolean; message: string } {
           return { hold: decision.line! };
         }
         if (hasSection) {
-          // A pinned section that already carries the current spec is an
-          // idempotent no-op; otherwise (BEHIND or equal) replace it.
-          if (codexFlairSectionHasCurrentPin(raw)) {
+          // A section with the current pin AND this call's env is an
+          // idempotent no-op; otherwise (BEHIND or equal) replace it. flair#3050:
+          // a current pin with a different agent id or URL still rewrites, or
+          // `flair init --agent <next>` would leave Codex on the old agent.
+          const pinCurrent = codexFlairSectionHasCurrentPin(raw);
+          if (pinCurrent && codexFlairSectionEnvMatches(raw, env)) {
             settled = { ok: true, message: `Codex: already wired in ${display}` };
             return { noop: settled.message };
           }
-          success = `Codex: refreshed pin in ${display} (restart Codex to pick it up)`;
+          // Same semantics as the JSON path: an env-only change was never a
+          // pin refresh, so it reports "wired", not "refreshed pin".
+          success = pinCurrent
+            ? `Codex: wired ${display} (restart Codex to pick it up)`
+            : `Codex: refreshed pin in ${display} (restart Codex to pick it up)`;
           return { write: encodeText(replaceCodexFlairBlock(raw, env)) };
         }
         // Section absent (or file absent, where raw === "" IS the create

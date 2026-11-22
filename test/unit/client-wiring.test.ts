@@ -124,10 +124,10 @@ describe("client wiring (FIX 4: 'wired' means a file was written)", () => {
     expect(toml).toContain(`FLAIR_URL = "${ENV.FLAIR_URL}"`);
   });
 
-  it("Codex: skip-when-present — reports already-wired (ok:true, no write) when [mcp_servers.flair] already exists, and doesn't touch the file", () => {
+  it("Codex: skip-when-present — reports already-wired (ok:true, no write) when [mcp_servers.flair] already carries the current pin and env, and doesn't touch the file", () => {
     const cfgPath = join(isoHome, ".codex", "config.toml");
     mkdirSync(join(isoHome, ".codex"), { recursive: true });
-    const existingToml = tomlSnippet({ FLAIR_AGENT_ID: "someoneelse", FLAIR_URL: "http://127.0.0.1:1111" }) + "\n";
+    const existingToml = tomlSnippet(ENV) + "\n";
     writeFileSync(cfgPath, existingToml);
     const res = wireCodex(ENV);
     expect(res.ok).toBe(true);

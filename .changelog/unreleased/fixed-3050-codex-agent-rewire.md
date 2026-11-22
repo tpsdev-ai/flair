@@ -1,0 +1,1 @@
+- **Codex is rewired when `flair init --agent` changes `FLAIR_AGENT_ID` or `FLAIR_URL`.** The Codex "already wired" check now requires the current flair-mcp pin and both env values to match, as the JSON clients already did, so a second init with a new agent no longer leaves Codex on the first one.
