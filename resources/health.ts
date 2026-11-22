@@ -411,9 +411,9 @@ export class HealthDetail extends Resource {
         // A non-admin gets the de-duplicated Agent count — one per distinct
         // truthy Agent id, so a duplicate collapses and an id-less row is
         // not counted — and only the perAgent rows it may see: its own row
-        // and rows with memories. It never receives the unregistered author
-        // list. An admin gets that list only after a complete Memory scan;
-        // null means the scan did not finish, so the answer is unknown
+        // and rows with memories. unregisteredMemoryAuthors is undefined for
+        // a non-admin. An admin gets that list only after a complete Memory
+        // scan; null means the scan did not finish, so the answer is unknown
         // rather than empty or partial.
         unregisteredMemoryAuthors: isAdmin
           ? (memoryScanComplete ? unregisteredMemoryAuthors : null)
