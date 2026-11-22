@@ -14,7 +14,9 @@
 //     validator must refuse; a `graph-heal` action with `corrupt: true`
 //     activates the installed hook for the rows built inside THAT call only
 //     (async-scoped, so a graph-heal run the boot migration cycle makes at the
-//     same moment is left alone), and returns the ids of the rows it corrupted;
+//     same moment is left alone: test/unit-isolated/
+//     graph-heal-fault-scope-3064.test.ts), and returns the ids of the rows it
+//     corrupted;
 //   - wraps the OrgEvent table's own `put`, so every row a staging call receives
 //     is appended to <ROOTPATH>/org-event-write-fault-3002/staged.jsonl before
 //     the original put runs. The probe's `staged` action reads that file

@@ -11,12 +11,13 @@
 // The staging call is observed through a wrapper on the OrgEvent table's put;
 // it appends every row handed to staging to a file under ROOTPATH.
 //
-// This instance's own boot migration cycle (resources/migration-boot.ts) also
-// runs graph-heal once beforeAll's canary row exists: the migration's own
-// writeGraphHealEvent and the runner's writeLedgerEvent each store a refId
-// "graph-heal" OrgEvent, and with the embedding model present (as in CI) that
-// cycle lands while these tests run. The invalid case therefore asserts on the
-// row ITS call built, never on a count of refId "graph-heal" rows.
+// The boot migration cycle can write graph-heal OrgEvents while these cases
+// run (resources/migration-boot.ts: the migration's own writeGraphHealEvent and
+// the runner's writeLedgerEvent each store a refId "graph-heal" row). Observed
+// once in an 18-run sweep: a ledger row written between the invalid case's two
+// reads. The invalid case therefore asserts on the row ITS call built, never on
+// a count of refId "graph-heal" rows. The probe confines the fault to rows built
+// inside its own call (test/unit-isolated/graph-heal-fault-scope-3064.test.ts).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -170,9 +171,10 @@ describe("flair#3002 — the graph-heal event writer against the real OrgEvent t
     // invalid (non-string summary) row.
     const invalid = (await staged()).filter((row) => row.summaryType !== "string");
     expect(invalid, "the invalid row must not reach staging").toHaveLength(0);
-    // Stored: the row this call built is absent. A row under the same id can
-    // only be the boot cycle's own heal event written in the same millisecond,
-    // which carries the writer's real summary, never the invalid one.
+    // Stored: a stored row at the faulted ID must have a summary beginning
+    // `HNSW graph-heal: recall `; absence also passes. (The ID is built from the
+    // heal's millisecond timestamp, so a heal outside this call can share it;
+    // this check does not tell which call stored a row.)
     for (const row of await eventsById(badId as string)) {
       expect(row.summary, "the invalid row must not be stored").toMatch(/^HNSW graph-heal: recall /);
     }
