@@ -864,9 +864,12 @@ describe("the job summary claim is enforced (flair#3052)", () => {
     }
   });
 
-  test("an unset GITHUB_STEP_SUMMARY is a no-op", () => {
+  test("an unset or empty GITHUB_STEP_SUMMARY is a no-op", () => {
     delete process.env.GITHUB_STEP_SUMMARY;
     expect(recordStepSummary("unit label", { elapsedMs: 1, attempts: 1 })).toBe(false);
+    process.env.GITHUB_STEP_SUMMARY = "";
+    expect(recordStepSummary("unit label", { elapsedMs: 1, attempts: 1 })).toBe(false);
+    delete process.env.GITHUB_STEP_SUMMARY;
   });
 
   test("a supplied summary path that cannot be written fails by name", () => {
