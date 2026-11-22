@@ -323,6 +323,17 @@ test("no Agent registered and an incomplete scan: deep status says unavailable a
   expect(output).not.toContain("operator-seed");
 });
 
+test("a completed scan with every author registered: the list is empty and neither renderer prints the line", async () => {
+  memoryRows = [
+    { id: "m-1", agentId: "agent-a", createdAt: new Date(NOW - 1000).toISOString(), embeddingModel: "fixture-model" },
+  ];
+  const detail: any = await new HealthDetail().get();
+
+  expect(detail.agents.unregisteredMemoryAuthors).toEqual([]);
+  expect(await statusOutput(detail, [])).not.toContain("Unregistered memory owners");
+  expect(await statusOutput(detail, ["deep"])).not.toContain("Unregistered memory owners");
+});
+
 test("duplicate-id and missing-id Agent rows: count, names and perAgent are one set", async () => {
   agentRows = [{ id: "agent-a" }, { id: "agent-a" }, {}];
   memoryRows = [];
