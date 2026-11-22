@@ -12,6 +12,11 @@
  * The ops 401 fallback is tested here too, on a second local server: a 401 to
  * the credentialed request is retried once without `Authorization`, and both
  * legs share one `AbortSignal.timeout`.
+ *
+ * Smoke instance resolution's whole-millisecond request timeouts run under
+ * Node's real `AbortSignal.timeout`, which rejects a fraction (Bun's accepts
+ * one): a fraction reaching it would throw inside the resolver's catch and the
+ * `/Health` request would silently never be sent.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
@@ -286,4 +291,54 @@ describe("flair#3052 — the ops 401 fallback shares one client bound", () => {
     expect(text).toContain("inserted");
     expect(opsRequests.map((r) => r.authorized)).toEqual([true, false]);
   }, 10_000);
+});
+
+describe("flair#3052 — smoke instance resolution under Node's real AbortSignal.timeout", () => {
+  test("Node: a fractional time left still sends the request, with a whole-millisecond timeout", async () => {
+    // A virtual clock with no signal seam, so the resolver builds each signal
+    // with the real AbortSignal.timeout (recorded on the way through). The first
+    // /Health call is refused after 999.4 ms, every later one hangs until its own
+    // timeout, and the 13th request starts with 1000.6 ms left.
+    const resolverUrl = pathToFileURL(`${ROOT}test/smoke/helpers/flair-instance.ts`).href;
+    const script = `
+      import { resolveFlairInstance } from ${JSON.stringify(resolverUrl)};
+      const timeouts = [];
+      const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+      AbortSignal.timeout = (ms) => { timeouts.push(ms); return realTimeout(ms); };
+      let t = 5000;
+      let calls = 0;
+      const sleeps = [];
+      process.env.FLAIR_TEST_URL = "http://127.0.0.1:1";
+      let message = "resolved";
+      try {
+        await resolveFlairInstance({
+          now: () => t,
+          sleep: async (ms) => { sleeps.push(ms); t += ms; },
+          fetchImpl: async () => {
+            calls += 1;
+            t += calls === 1 ? 999.4 : timeouts.at(-1);
+            const err = new Error("The operation timed out");
+            err.name = "TimeoutError";
+            throw err;
+          },
+        });
+      } catch (err) {
+        message = err.message;
+      }
+      console.log(JSON.stringify({
+        runtime: process.versions.bun ? "bun" : "node",
+        calls, timeouts, sleeps, elapsed: t - 5000, message,
+      }));
+    `;
+    const result = await runNode(["--input-type=module", "-e", script], { ...process.env });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const out = JSON.parse(result.stdout.trim().split("\n").at(-1)!);
+
+    expect(out.runtime).toBe("node");
+    expect(out.message).toContain("did not respond within 30s");
+    expect(out.calls).toBe(13);
+    expect(out.timeouts).toEqual([...Array(12).fill(2_000), 1_000]);
+    expect(out.sleeps).toEqual(Array(12).fill(500));
+    expect(out.elapsed).toBeCloseTo(29_999.4, 6);
+  }, 20_000);
 });

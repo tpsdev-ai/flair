@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
 import { memoryProviderTimeoutResponse } from "../../resources/memory-write-lock.ts";
+import { warmEmbeddingModel, type FlairInstance } from "../smoke/helpers/flair-instance.ts";
 
 /**
  * flair#3052 — ordering on both entry paths, hermetic.
@@ -23,6 +24,11 @@ import { memoryProviderTimeoutResponse } from "../../resources/memory-write-lock
  * SETUP_TIMEOUT_MS budget (read from the AST, since Bun's 5 s default would
  * still let the fast hermetic run pass), and the readiness script must run
  * when it is invoked through a symlinked path.
+ *
+ * Both callers that record the step summary (the CLI entry's `main()` and the
+ * smoke helper's `warmEmbeddingModel`) are also run against a fake whose
+ * deletes fail after readiness is confirmed: the wait logs its success, the
+ * warm-up fails naming what may remain, and no summary line is written.
  */
 
 const ROOT = join(import.meta.dir, "..", "..");
@@ -36,6 +42,8 @@ interface FakeState {
   warmupWrites: number;
   warmRows: Map<string, Record<string, unknown>>;
   applicationWrites: Array<{ at: number; content: string }>;
+  /** Every operations-API delete answers HTTP 500. */
+  deletesFail: boolean;
 }
 
 function readJson(req: import("node:http").IncomingMessage): Promise<any> {
@@ -71,7 +79,7 @@ function close(server: Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-async function startFakeHarper(mode: "retry" | "timeout-then-error"): Promise<{
+async function startFakeHarper(mode: "retry" | "timeout-then-error", opts: { deletesFail?: boolean } = {}): Promise<{
   httpPort: number;
   state: FakeState;
   stop: () => Promise<void>;
@@ -83,6 +91,7 @@ async function startFakeHarper(mode: "retry" | "timeout-then-error"): Promise<{
     warmupWrites: 0,
     warmRows: new Map(),
     applicationWrites: [],
+    deletesFail: opts.deletesFail ?? false,
   };
   let ops: Server | undefined;
   let http: Server | undefined;
@@ -125,7 +134,9 @@ async function handleOps(req: import("node:http").IncomingMessage, res: import("
   const body = await readJson(req);
   if (body.operation === "insert") return send(res, 200, '{"inserted":1}');
   if (body.operation === "upsert") return send(res, 200, '{"upserted":1}');
-  if (body.operation === "delete") return send(res, 200, '{"deleted":1}');
+  if (body.operation === "delete") {
+    return state.deletesFail ? send(res, 500, '{"error":"delete_unavailable"}') : send(res, 200, '{"deleted":1}');
+  }
   if (body.operation === "search_by_value") return send(res, 200, "[]");
   if (body.operation === "search_by_id") {
     const ids: string[] = Array.isArray(body.ids) ? body.ids : [];
@@ -327,7 +338,9 @@ describe("flair#3052 — ordering on the CLI E2E entry path", () => {
       expect(memoryAdd, lines.join("\n")).toBeTruthy();
       const at = Number(memoryAdd!.split(" ")[1]);
       expect(at).toBeGreaterThanOrEqual(fake.state.readyAt!);
-      expect(lines.some((line) => line.startsWith("agent "))).toBe(true);
+      const agentAdd = lines.find((line) => line.startsWith("agent "));
+      expect(agentAdd, lines.join("\n")).toBeTruthy();
+      expect(Number(agentAdd!.split(" ")[1])).toBeGreaterThanOrEqual(fake.state.readyAt!);
       expect(output).toMatch(/Integration Tests \(E2E CLI\): embedding ready after \d+ms and \d+ attempt\(s\)/);
       expect(readFileSync(join(dir, "summary.md"), "utf8")).toMatch(
         /- Integration Tests \(E2E CLI\): embedding model ready in \d+ ms after \d+ attempt\(s\)\n/,
@@ -402,4 +415,66 @@ describe("flair#3052 — the readiness script runs through a symlinked path", ()
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
     expect(result.stderr).toContain("--deadline-ms must be a positive number");
   }, 20_000);
+});
+
+describe("flair#3052 — the step summary is written only when readiness is confirmed and its cleanup succeeds", () => {
+  test("CLI entry: confirmed readiness with failed deletes logs the wait, fails naming what may remain, and writes no summary", async () => {
+    const fake = await startFakeHarper("retry", { deletesFail: true });
+    const dir = mkdtempSync(join(tmpdir(), "flair-3052-cli-cleanup-"));
+    dirs.push(dir);
+    const summary = join(dir, "summary.md");
+    try {
+      const result = await run("node", [
+        join(ROOT, "scripts", "ci", "embedding-readiness.mjs"),
+        "--base-url", `http://127.0.0.1:${fake.httpPort}`,
+        "--label", "cleanup-failure CLI",
+        "--deadline-ms", "5000",
+      ], {
+        ...process.env,
+        FLAIR_ADMIN_USER: "admin",
+        FLAIR_ADMIN_PASS: "admin123",
+        GITHUB_STEP_SUMMARY: summary,
+      }, 30_000);
+      const output = `${result.stdout}\n${result.stderr}`;
+
+      expect(result.status, output).toBe(1);
+      expect(fake.state.readyAt, output).toBeTruthy();
+      expect(result.stdout).toMatch(/cleanup-failure CLI: embedding ready after \d+ms and \d+ attempt\(s\)/);
+      expect(result.stderr).toContain("cleanup-failure CLI: embedding warm-up cleanup failed; these rows may remain");
+      expect(result.stderr).toMatch(/Memory \[embedding-warmup-/);
+      expect(result.stderr).toMatch(/Agent \[embedding-warmup-/);
+      expect(readIfExists(summary)).toBe("");
+    } finally {
+      await fake.stop();
+    }
+  }, 40_000);
+
+  test("smoke caller: confirmed readiness with failed deletes rejects and writes no summary", async () => {
+    const fake = await startFakeHarper("retry", { deletesFail: true });
+    const dir = mkdtempSync(join(tmpdir(), "flair-3052-smoke-cleanup-"));
+    dirs.push(dir);
+    const summary = join(dir, "summary.md");
+    const savedSummary = process.env.GITHUB_STEP_SUMMARY;
+    process.env.GITHUB_STEP_SUMMARY = summary;
+    try {
+      const flair: FlairInstance = {
+        baseUrl: `http://127.0.0.1:${fake.httpPort}`,
+        opsUrl: `http://127.0.0.1:${fake.httpPort - 1}`,
+        adminUser: "admin",
+        adminPass: "admin123",
+        authHeader: `Basic ${Buffer.from("admin:admin123").toString("base64")}`,
+        cleanup: async () => {},
+      };
+      const error = await warmEmbeddingModel(flair, { deadlineMs: 5_000 }).then(() => null, (err: Error) => err);
+
+      expect(fake.state.readyAt).toBeTruthy();
+      expect(error?.message).toContain("smoke warm-up: embedding warm-up cleanup failed; these rows may remain");
+      expect(error?.message).toMatch(/Agent \[embedding-warmup-/);
+      expect(readIfExists(summary)).toBe("");
+    } finally {
+      if (savedSummary === undefined) delete process.env.GITHUB_STEP_SUMMARY;
+      else process.env.GITHUB_STEP_SUMMARY = savedSummary;
+      await fake.stop();
+    }
+  }, 30_000);
 });

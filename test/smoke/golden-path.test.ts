@@ -51,11 +51,12 @@ const MARKER_CONTENT = `Smoke test marker ${RANDOM}`;
 // per-write 10s client timeout on a cold/loaded CI runner, so the warm-up must
 // be allowed to run well past both the default hook timeout and that 10s abort.
 // flair#3052: the hook covers the whole setup path, not only the wait. Its
-// client-side bounds sum to 240 s: instance resolution (a strict 30 s monotonic
-// bound), the warm-up agent create (one 10 s bound shared with its 401 retry),
-// the 180 s total-elapsed wait, and the two deletes (10 s each, likewise
-// shared). The 250 s hook leaves 10 s for request processing and for rounding
-// a fractional remaining time up to a whole millisecond.
+// client-side bounds sum to 240 s: instance resolution (a 30 s client-side
+// timeout and acceptance policy on a monotonic clock), the warm-up agent create
+// (one 10 s bound shared with its 401 retry), the 180 s total-elapsed wait, and
+// the two deletes (10 s each, likewise shared). The 250 s hook leaves 10 s for
+// request processing and for rounding a fractional remaining time up to a whole
+// millisecond.
 const SETUP_TIMEOUT_MS = 250_000;
 const SETUP_CLIENT_BOUNDS_MS =
   INSTANCE_RESOLVE_BUDGET_MS + OPS_TIMEOUT_MS * 3 + EMBEDDING_READY_DEADLINE_MS;

@@ -41,9 +41,11 @@ export interface FlairInstance {
 // ---------------------------------------------------------------------------
 
 /**
- * Strict monotonic bound on instance resolution: every `/Health` request's
- * client timeout and every poll sleep is clamped to the time left, and an
- * answer that arrives at or after the bound is not accepted.
+ * Client-side timeout and acceptance policy for instance resolution, measured
+ * on a monotonic clock: every `/Health` request's client timeout and every poll
+ * sleep is clamped to the time left, and an answer that arrives at or after the
+ * bound is not accepted (a fetch or sleep that ignores its timer can still
+ * settle later).
  */
 export const INSTANCE_RESOLVE_BUDGET_MS = 30_000;
 /** Client timeout of one `/Health` request, before clamping to the time left. */
@@ -59,6 +61,8 @@ export interface ResolveFlairInstanceOptions {
   fetchImpl?: typeof fetch;
   /** Builds each `/Health` request's signal (default `AbortSignal.timeout`). */
   timeoutSignal?: (ms: number) => AbortSignal;
+  /** Resolution budget (default `INSTANCE_RESOLVE_BUDGET_MS`), so the default clock can be tested in real time. */
+  budgetMs?: number;
 }
 
 function resolvePorts(): { httpPort: number; opsPort: number } {
@@ -96,7 +100,8 @@ export async function resolveFlairInstance(opts: ResolveFlairInstanceOptions = {
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const fetchImpl = opts.fetchImpl ?? fetch;
   const timeoutSignal = opts.timeoutSignal ?? ((ms: number) => AbortSignal.timeout(ms));
-  const deadline = now() + INSTANCE_RESOLVE_BUDGET_MS;
+  const budgetMs = opts.budgetMs ?? INSTANCE_RESOLVE_BUDGET_MS;
+  const deadline = now() + budgetMs;
   let ready = false;
 
   for (;;) {
@@ -115,14 +120,17 @@ export async function resolveFlairInstance(opts: ResolveFlairInstanceOptions = {
     } catch {
       // Not ready yet
     }
-    const pauseMs = Math.min(HEALTH_POLL_INTERVAL_MS, deadline - now());
-    if (pauseMs <= 0) break;
+    // Whole milliseconds for the pause too: a timer may round a fractional
+    // delay up (Node makes any delay under 1 ms a 1 ms timer), which would fall
+    // due after the deadline, so under 1 ms left ends the wait without a sleep.
+    const pauseMs = Math.min(HEALTH_POLL_INTERVAL_MS, Math.floor(deadline - now()));
+    if (pauseMs < 1) break;
     await sleep(pauseMs);
   }
 
   if (!ready) {
     throw new Error(
-      `Flair instance at ${baseUrl} did not respond within 30s. ` +
+      `Flair instance at ${baseUrl} did not respond within ${budgetMs / 1000}s. ` +
       `Ensure a Flair instance is running (local: 'flair serve', Docker: see CI workflow). ` +
       `Or set FLAIR_TEST_URL to an existing instance.`,
     );
