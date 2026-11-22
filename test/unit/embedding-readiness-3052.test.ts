@@ -407,6 +407,96 @@ describe("embedding readiness waits on total elapsed time (flair#3052)", () => {
     expect(result.attempts).toBe(1);
     expect(result.elapsedMs).toBe(60);
   }, 5_000);
+
+  // A 2xx whose read-back does not confirm a stored, stamped vector is retried
+  // within the deadline: these cases fail if an unconfirmed 2xx ends the wait.
+  function countingWrites(inner: typeof fetch) {
+    const counts = { puts: 0 };
+    const wrapped = (async (url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (!body?.operation) counts.puts++;
+      return inner(url, init);
+    }) as typeof fetch;
+    return { wrapped, counts };
+  }
+
+  test("a first read-back with no vector is retried, and a later stamped read-back is ready", async () => {
+    const clock = virtualClock();
+    let readBacks = 0;
+    const { wrapped, counts } = countingWrites(warmFake(clock, (id) => {
+      readBacks++;
+      return readBacks === 1
+        ? { id, embedding: null, embeddingModel: null }
+        : { id, embedding: [0.1, 0.2], embeddingModel: "unit-model" };
+    }));
+    const result = await warmInstanceEmbeddings({
+      baseUrl: "http://127.0.0.1:1",
+      opsUrl: "http://127.0.0.1:2",
+      label: "unit warm-up",
+      deadlineMs: 1_000,
+      backoffMs: 0,
+      maxAttempts: 3,
+      now: clock.now,
+      sleep: clock.sleep,
+      log: () => {},
+      fetchImpl: wrapped,
+    });
+
+    expect(counts.puts).toBe(2);
+    expect(result.attempts).toBe(2);
+  }, 5_000);
+
+  test("a first read-back that fails is retried, and a later stamped read-back is ready", async () => {
+    const clock = virtualClock();
+    let readBacks = 0;
+    const base = warmFake(clock, (id) => ({ id, embedding: [0.1, 0.2], embeddingModel: "unit-model" }));
+    const failingFirst = (async (url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body?.operation === "search_by_id" && ++readBacks === 1) throw new TypeError("fetch failed: read-back reset");
+      return base(url, init);
+    }) as typeof fetch;
+    const { wrapped, counts } = countingWrites(failingFirst);
+    const result = await warmInstanceEmbeddings({
+      baseUrl: "http://127.0.0.1:1",
+      opsUrl: "http://127.0.0.1:2",
+      label: "unit warm-up",
+      deadlineMs: 1_000,
+      backoffMs: 0,
+      maxAttempts: 3,
+      now: clock.now,
+      sleep: clock.sleep,
+      log: () => {},
+      fetchImpl: wrapped,
+    });
+
+    expect(counts.puts).toBe(2);
+    expect(result.attempts).toBe(2);
+  }, 5_000);
+
+  test("a read-back that fails on every attempt ends never-ready, naming the read-back failure", async () => {
+    const clock = virtualClock();
+    const base = warmFake(clock, (id) => ({ id, embedding: [0.1, 0.2], embeddingModel: "unit-model" }));
+    const alwaysFailing = (async (url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body?.operation === "search_by_id") throw new TypeError("fetch failed: read-back reset");
+      return base(url, init);
+    }) as typeof fetch;
+    const error = await warmInstanceEmbeddings({
+      baseUrl: "http://127.0.0.1:1",
+      opsUrl: "http://127.0.0.1:2",
+      label: "unit warm-up",
+      deadlineMs: 1_000,
+      backoffMs: 0,
+      maxAttempts: 3,
+      now: clock.now,
+      sleep: clock.sleep,
+      log: () => {},
+      fetchImpl: alwaysFailing,
+    }).then(() => null, (err: Error) => err);
+
+    expect(error?.message).toContain("never became ready");
+    expect(error?.message).toContain("read-back failed");
+  }, 5_000);
 });
 
 describe("each attempt's client bound is the time left, rounded up to a whole millisecond (flair#3052)", () => {
