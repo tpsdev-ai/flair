@@ -30,6 +30,7 @@ import {
   fixSessionStartHook,
   hookHarnessFromSettingsPath,
   isFlairHookCommand,
+  parseLegacySessionStartHookCommand,
   SESSION_START_HOOK_INVOCATION_RE,
   readClientMcpBlock,
   sessionStartHookHint,
@@ -402,11 +403,38 @@ export function applyOrRepinSessionStartHook(
     const finding = sessionStartHookPinFindings(homeDir).find(
       (f) => f.reading.target.id === harness,
     );
+    if (finding?.reading.held) {
+      return { applied: false, ok: false, message: finding.reading.held };
+    }
+    const command = existing.command ?? "";
+    // Reuse the existing readers for the identity Flair's entry carries: the
+    // strict installer form first, then the pre-#1007 bare form.
+    const wiredAgentId = parseInstallerHookForm(command)?.agentId
+      ?? parseLegacySessionStartHookCommand(command)?.agentId;
+    if (wiredAgentId !== undefined && wiredAgentId !== agentId) {
+      if (skip) {
+        return {
+          applied: false,
+          ok: false,
+          message: `SessionStart hook in ${existing.path} names agent '${wiredAgentId}' (--skip-hook)`,
+        };
+      }
+      const rewire = repinSessionStartHook(homeDir, harness, undefined, { agentId });
+      return {
+        applied: rewire.action === "update",
+        ok: rewire.ok && rewire.action === "update",
+        message: rewire.message,
+      };
+    }
+    if (wiredAgentId === undefined && !finding) {
+      return {
+        applied: false,
+        ok: false,
+        message: `could not read the agent id from the SessionStart hook in ${existing.path} — left untouched`,
+      };
+    }
     if (!finding) {
       return { applied: false, ok: true, message: `SessionStart hook already wired in ${existing.path}` };
-    }
-    if (finding.reading.held) {
-      return { applied: false, ok: false, message: finding.reading.held };
     }
     if (skip) {
       return { applied: false, ok: false, message: `SessionStart hook in ${existing.path} not re-pinned (--skip-hook)` };

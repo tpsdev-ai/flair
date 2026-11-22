@@ -584,6 +584,9 @@ export interface InstallerHookForm {
   harness: "claude-code" | "codex";
   agentId: string;
   flairUrl?: string;
+  /** [start, end) offset of the captured agent id within the FULL command. */
+  agentIdStart: number;
+  agentIdEnd: number;
   /** The exact `@tpsdev-ai/flair-mcp@<ver>` span (the only part re-pinned). */
   pkgSpec: string;
   /** [start, end) offset of `pkgSpec` within the FULL command (the re-pin span). */
@@ -592,9 +595,19 @@ export interface InstallerHookForm {
 }
 
 function formFromMatch(harness: "claude-code" | "codex", m: RegExpMatchArray): InstallerHookForm {
+  const agentSpan = m.indices?.[1];
   const span = m.indices?.[3];
-  if (!span) throw new Error("installer hook form matched without group indices");
-  return { harness, agentId: m[1]!, flairUrl: m[2], pkgSpec: m[3]!, pkgSpecStart: span[0], pkgSpecEnd: span[1] };
+  if (!agentSpan || !span) throw new Error("installer hook form matched without group indices");
+  return {
+    harness,
+    agentId: m[1]!,
+    flairUrl: m[2],
+    agentIdStart: agentSpan[0],
+    agentIdEnd: agentSpan[1],
+    pkgSpec: m[3]!,
+    pkgSpecStart: span[0],
+    pkgSpecEnd: span[1],
+  };
 }
 
 /**
@@ -634,7 +647,8 @@ function guardedPinSpan(command: string | null): string | null {
 /**
  * Re-pin an ALREADY-WIRED Flair SessionStart hook to the current
  * mcpServerSpec(), preserving the agent id and Flair URL the entry already
- * carries.
+ * carries. An explicit `agentId` option re-points the captured id instead
+ * (flair#3050); without it the identity is preserved.
  *
  * This is `flair upgrade`'s hook counterpart to refreshing the MCP client
  * pins (flair#1516). `flair upgrade` re-pins every wired client's MCP block
@@ -652,10 +666,18 @@ function guardedPinSpan(command: string | null): string | null {
  * real write — the same Sherlock conditions installHook implements. Idempotent:
  * a second call is a `noop`.
  */
+export interface RepinSessionStartHookOptions {
+  /** flair#3050: rewrite the hook's captured FLAIR_AGENT_ID to this id. The
+   *  pin is re-pinned only when the never-lower guard permits it; absent, the
+   *  original contract (preserve the identity the entry carries) holds. */
+  agentId?: string;
+}
+
 export function repinSessionStartHook(
   homeDir: string,
   harness: Harness,
   testHooks?: ConfigSectionOptions["testHooks"],
+  opts?: RepinSessionStartHookOptions,
 ): HookRepinResult {
   const path = hookSettingsPath(homeDir, harness);
   const skip = (ok: boolean, message: string): HookRepinResult => ({ ok, path, harness, action: "skip", message, backupPath: null });
@@ -711,6 +733,49 @@ export function repinSessionStartHook(
       if (!form) {
         outcome = { action: "hold", message: `SessionStart hook in ${path} is not one of the installer forms Flair writes — left untouched` };
         return { hold: outcome.message };
+      }
+      const requestedAgentId = opts?.agentId;
+      if (requestedAgentId !== undefined && form.agentId !== requestedAgentId) {
+        if (!isHookCommandValueSafe(requestedAgentId)) {
+          outcome = {
+            action: "hold",
+            message: `agent id '${requestedAgentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
+          };
+          return { hold: outcome.message };
+        }
+        // Substitute ONLY captured spans: the agent id always, and the pin
+        // when the never-lower guard permits it. Apply right-to-left so the
+        // offsets captured on `current` stay valid.
+        const replacements: Array<[number, number, string]> = [
+          [form.agentIdStart, form.agentIdEnd, requestedAgentId],
+        ];
+        let repinned = false;
+        if (form.pkgSpec !== mcpServerSpec()) {
+          const decision = decidePinWrite({
+            pkg: FLAIR_MCP_PACKAGE,
+            entry: `SessionStart hook in ${path}`,
+            existingText: form.pkgSpec,
+            runningVersion: flairCliVersion(),
+          });
+          if (decision.action === "write") {
+            replacements.push([form.pkgSpecStart, form.pkgSpecEnd, mcpServerSpec()]);
+            repinned = true;
+          }
+        }
+        replacements.sort((a, b) => b[0] - a[0]);
+        let next = current;
+        for (const [start, end, value] of replacements) {
+          next = next.slice(0, start) + value + next.slice(end);
+        }
+        const newConfig = deepClone(config);
+        newConfig.hooks.SessionStart[groupIndex].hooks[hookIndex] = { type: "command", command: next };
+        outcome = {
+          action: "update",
+          message:
+            `re-pointed the SessionStart hook in ${path} to agent '${requestedAgentId}'` +
+            (repinned ? ` and re-pinned it to ${mcpServerSpec()}` : ""),
+        };
+        return { write: encodeConfig(newConfig) };
       }
       // Rebuild by substituting ONLY the CAPTURED `<ver>` span — identity, URL
       // and the wire format are preserved by construction. Substituting the

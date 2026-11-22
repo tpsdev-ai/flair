@@ -62,7 +62,7 @@ function runInit(home: string, agent: string) {
       CLI, "init", "--skip-start",
       "--agent", agent,
       "--client", "all",
-      "--skip-soul", "--skip-smoke", "--skip-claude-md", "--skip-hook",
+      "--skip-soul", "--skip-smoke", "--skip-claude-md",
       "--port", HTTP_PORT, "--ops-port", OPS_PORT,
     ],
     {
@@ -85,6 +85,25 @@ function codexAgent(home: string): string | undefined {
   return toml.match(/^FLAIR_AGENT_ID\s*=\s*"([^"]*)"/m)?.[1];
 }
 
+function hookAgent(home: string, settingsPath: string): string | undefined {
+  const config = JSON.parse(readFileSync(settingsPath, "utf-8"));
+  const commands = (config.hooks?.SessionStart ?? []).flatMap((group: any) =>
+    (group?.hooks ?? []).map((hook: any) => hook?.command)
+  );
+  const command = commands.find(
+    (value: unknown) => typeof value === "string" && value.includes("flair-session-start"),
+  );
+  return typeof command === "string" ? command.match(/FLAIR_AGENT_ID=([^\s'"]+)/)?.[1] : undefined;
+}
+
+function claudeHookAgent(home: string): string | undefined {
+  return hookAgent(home, join(home, ".claude", "settings.json"));
+}
+
+function codexHookAgent(home: string): string | undefined {
+  return hookAgent(home, join(home, ".codex", "hooks.json"));
+}
+
 test("a second init with a new agent rewires both Claude Code and Codex", () => {
   const { home } = fixture();
 
@@ -93,6 +112,8 @@ test("a second init with a new agent rewires both Claude Code and Codex", () => 
   expect(first.status, first.stdout + first.stderr).toBe(0);
   expect(claudeAgent(home)).toBe("agent-a");
   expect(codexAgent(home)).toBe("agent-a");
+  expect(claudeHookAgent(home)).toBe("agent-a");
+  expect(codexHookAgent(home)).toBe("agent-a");
 
   const second = runInit(home, "agent-b");
   expect(second.error).toBeUndefined();
@@ -100,8 +121,13 @@ test("a second init with a new agent rewires both Claude Code and Codex", () => 
   // Both clients were rewritten in this run — Codex is not a pin-only no-op.
   expect(second.stdout).toContain("Codex: wired ~/.codex/config.toml");
   expect(second.stdout).not.toContain("Codex: already wired");
+  // Both SessionStart hooks moved with the clients; a presence-only no-op
+  // would leave them bootstrapping the first agent.
+  expect(second.stdout).toContain("re-pointed the SessionStart hook");
   expect(claudeAgent(home)).toBe("agent-b");
   expect(codexAgent(home)).toBe("agent-b");
+  expect(claudeHookAgent(home)).toBe("agent-b");
+  expect(codexHookAgent(home)).toBe("agent-b");
   const toml = readFileSync(join(home, ".codex", "config.toml"), "utf-8");
   expect(toml).not.toContain('FLAIR_AGENT_ID = "agent-a"');
   expect(toml.match(/^FLAIR_AGENT_ID/gm)?.length).toBe(1);

@@ -189,7 +189,7 @@ describe("flair#2291 — init --skip-hook writes no hook", () => {
 describe("flair#2291 — the finding reads the named pin span", () => {
   const DECOY_AGENT = `${AGENT}:${FLAIR_MCP_PACKAGE}@${INSTALLED}`;
 
-  it("hook status reports the named stale pin; init re-pins and keeps the agent id", async () => {
+  it("hook status reports the named stale pin; init re-pins and replaces the decoy agent id", async () => {
     const command = installerCommand("claude-code", DECOY_AGENT, STALE);
     expect(command.indexOf(`${FLAIR_MCP_PACKAGE}@${INSTALLED}`)).toBeGreaterThan(-1);
     expect(command.indexOf(`${FLAIR_MCP_PACKAGE}@${INSTALLED}`)).toBeLessThan(command.indexOf(`${FLAIR_MCP_PACKAGE}@${STALE}`));
@@ -200,8 +200,9 @@ describe("flair#2291 — the finding reads the named pin span", () => {
     expect(status.out).toContain(`command names older pin flair-mcp@${STALE}`);
 
     const init = await runCli(initArgs("claude-code"));
-    expect(init.out).toContain(`re-pinned the SessionStart hook in ${path}`);
-    expect(hookCommands("claude-code")).toEqual([installerCommand("claude-code", DECOY_AGENT, INSTALLED)]);
+    expect(init.out).toContain(`re-pointed the SessionStart hook in ${path} to agent '${AGENT}'`);
+    expect(init.out).toContain(`and re-pinned it to ${mcpServerSpec()}`);
+    expect(hookCommands("claude-code")).toEqual([installerCommand("claude-code", AGENT, INSTALLED)]);
   }, CASE_MS);
 
   it("the doctor catalog fails on the named stale pin", () => {
