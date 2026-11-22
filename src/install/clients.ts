@@ -501,7 +501,11 @@ export interface CodexRewriteTestHooks {
 
 export function replaceCodexFlairBlock(raw: string, env: WireEnv, testHooks?: CodexRewriteTestHooks): CodexReplaceResult {
   const shape = recognizeCodexFlairSection(raw);
-  if (shape.kind === "absent") return validateCodexCandidate(appendCodexFlairBlock(raw, env), env, testHooks);
+  if (shape.kind === "absent") {
+    // The append lands after every byte of the file, so any delimiter text would precede the section.
+    if (raw.includes('"""') || raw.includes("'''")) return { ok: false, reason: CODEX_APPEND_DELIMITER_REASON };
+    return validateCodexCandidate(appendCodexFlairBlock(raw, env), env, testHooks);
+  }
   if (shape.kind === "refused") return { ok: false, reason: shape.reason };
   const prefix = raw.slice(0, shape.start);
   const suffix = raw.slice(shape.end);
@@ -1144,50 +1148,35 @@ function codexFlairSectionEnvMatches(raw: string, env: WireEnv): boolean {
 }
 
 /** The refusal reason for triple-quote delimiter text before the Flair header (a raw-text rule:
- *  the text may sit in a comment or a string). Removing the section does not clear it. */
+ *  the text may sit in a comment or a string). */
 export const CODEX_PRE_HEADER_DELIMITER_REASON = "multiline-string delimiters precede [mcp_servers.flair]";
-/** Refusal reasons where the mcp_servers.flair definition is not (only) the
- *  [mcp_servers.flair] section, so removing that section does not clear the refusal. */
-export const CODEX_OUTSIDE_DEFINITION_REASONS: ReadonlySet<string> = new Set([
-  "the [mcp_servers.flair] header is not the line Flair writes",
-  "a parent or aliased mcp_servers.flair definition may exist",
-  "a mcp_servers.flair definition may exist outside the recognized span",
-]);
+/** The refusal reason when no section exists and the file holds triple-quote delimiter text: the
+ *  append would place Flair's section after it. */
+export const CODEX_APPEND_DELIMITER_REASON =
+  "multiline-string delimiters appear in the file, and Flair would append [mcp_servers.flair] after them";
 /** The refusal reason for a file whose bytes do not round-trip as UTF-8. */
 export const CODEX_LOSSY_BYTES_REASON = "the file is not lossless UTF-8";
 
-/** The refusal message, with the remedy that can clear this reason. */
+/**
+ * Every condition Flair needs before it writes Codex's config. A refusal names the reason it found,
+ * then lists all of them, because one file can fail several and fixing only the named one may not
+ * be enough (for example, removing a malformed section leaves delimiter text the append then meets).
+ */
+export const CODEX_WIRING_CONDITIONS =
+  "Flair wires Codex only when all of these hold: " +
+  "(1) the file is UTF-8 whose bytes round-trip; " +
+  "(2) nothing but Flair's exact [mcp_servers.flair] section, or nothing at all, defines mcp_servers.flair: " +
+  "no [mcp_servers] table (put its entries in [mcp_servers.<name>] tables), no dotted or inline mcp_servers key, " +
+  "no quoted or spaced mcp_servers.flair header, no extra [mcp_servers.flair.<name>] table; " +
+  "(3) no triple-quote delimiter text (\"\"\" or \'\'\'), even in a comment, comes before [mcp_servers.flair], " +
+  "and with no section none appears anywhere, because Flair appends the section at the end of the file; " +
+  "(4) an existing [mcp_servers.flair] section is exactly the shape Flair writes: edit it, or remove it and " +
+  "its [mcp_servers.flair.*] tables so Flair appends a fresh one. " +
+  "Fix whichever do not hold and re-run flair init, or configure Codex by hand.";
+
+/** The refusal message: the reason found, then every condition a re-run needs. */
 export function codexForeignShapeMessage(display: string, reason: string): string {
-  const head = `Codex: refusing to rewrite ${display}`;
-  if (reason === CODEX_PRE_HEADER_DELIMITER_REASON) {
-    return (
-      `${head} (${reason}): the text before [mcp_servers.flair] contains a triple-quote delimiter ` +
-      `(""" or \'\'\'), which may be in a comment. Flair refuses rather than decide whether the section ` +
-      `sits inside a multiline string, so removing the section alone does not clear this. Remove or ` +
-      `rewrite that delimiter text, or configure the section by hand.`
-    );
-  }
-  if (CODEX_OUTSIDE_DEFINITION_REASONS.has(reason)) {
-    return (
-      `${head} — the mcp_servers.flair definition is not the shape Flair writes (${reason}). ` +
-      `Flair can rule out a second definition only when mcp_servers appears as [mcp_servers.<name>] ` +
-      `table headers and Flair's own section. Remove or rewrite anything else that can define ` +
-      `mcp_servers.flair — an [mcp_servers] table (move its entries into [mcp_servers.<name>] tables), ` +
-      `a dotted or inline mcp_servers key, a quoted or spaced mcp_servers.flair header, or an extra ` +
-      `[mcp_servers.flair.<name>] table — then re-run flair init, or configure Codex by hand.`
-    );
-  }
-  if (reason === CODEX_LOSSY_BYTES_REASON) {
-    return (
-      `${head} (${reason}): Flair edits only files whose bytes round-trip as UTF-8. Re-save the ` +
-      `file as UTF-8 and re-run flair init, or configure Codex by hand.`
-    );
-  }
-  return (
-    `${head} — the [mcp_servers.flair] section is not ` +
-    `the shape Flair writes (${reason}); edit the [mcp_servers.flair] section by hand, ` +
-    `or remove it and re-run flair init.`
-  );
+  return `Codex: refusing to rewrite ${display} (${reason}). ${CODEX_WIRING_CONDITIONS}`;
 }
 
 /**

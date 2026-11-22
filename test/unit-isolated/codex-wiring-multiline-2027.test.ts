@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { CODEX_PRE_HEADER_DELIMITER_REASON, clientConfigPath, recognizeCodexFlairSection, wireCodex } from "../../src/install/clients.ts";
+import { CODEX_WIRING_CONDITIONS, clientConfigPath, recognizeCodexFlairSection, wireCodex } from "../../src/install/clients.ts";
 import { withHome } from "../../src/lib/home.ts";
 import {
   FLAIR_MCP_PACKAGE,
@@ -81,13 +81,8 @@ function expectRefusal(before: string): void {
     const result = wireCodex(env);
     expect(result.ok).toBe(false);
     const shape = recognizeCodexFlairSection(before);
-    if (shape.kind === "refused" && shape.reason === CODEX_PRE_HEADER_DELIMITER_REASON) {
-      // The raw-text delimiter rule makes no shape claim; its remedy is the delimiter text.
-      expect(result.message).toContain("Remove or rewrite that delimiter text");
-      expect(result.message).not.toContain("not the shape Flair writes");
-    } else {
-      expect(result.message).toContain("not the shape Flair writes");
-    }
+    if (shape.kind === "refused") expect(result.message).toContain(`(${shape.reason})`);
+    expect(result.message).toContain(CODEX_WIRING_CONDITIONS);
     expect(readFileSync(path, "utf8")).toBe(before);
     expect(existsSync(`${path}.bak`)).toBe(false);
   });

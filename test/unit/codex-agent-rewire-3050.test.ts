@@ -4,12 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  CODEX_OUTSIDE_DEFINITION_REASONS,
+  CODEX_APPEND_DELIMITER_REASON,
+  CODEX_LOSSY_BYTES_REASON,
   CODEX_PRE_HEADER_DELIMITER_REASON,
+  CODEX_WIRING_CONDITIONS,
   recognizeCodexFlairSection,
   codexFlairSectionSpan,
   codexReplacementPreservesBoundary,
   replaceCodexFlairBlock,
+  removeCodexFlairBlock,
   codexFlairSectionText,
   tomlSnippet,
   wireCodex,
@@ -70,31 +73,18 @@ function section(spec: string, agent: string, url: string): string {
   ].join("\n");
 }
 
-/** A refusal is ok:false, names the file and the hand-edit remedy, and writes
- *  nothing — no bytes change and no `.bak` appears. */
+/** A refusal is ok:false, names the file, the reason and every condition a re-run needs, and
+ *  writes nothing — no bytes change and no `.bak` appears. The recognizer refuses the file, or
+ *  (no section) the append does. */
 function expectRefusal(raw: string, res: { ok: boolean; message: string }): void {
   const shape = recognizeCodexFlairSection(raw);
-  expect(shape.kind).toBe("refused");
+  const replaced = replaceCodexFlairBlock(raw, ENV_B);
+  expect(shape.kind === "refused" || (shape.kind === "absent" && replaced.ok === false)).toBe(true);
+  const reason = shape.kind === "refused" ? shape.reason : replaced.ok === false ? replaced.reason : "";
   expect(res.ok).toBe(false);
   expect(res.message).toContain("~/.codex/config.toml");
-  const reason = shape.kind === "refused" ? shape.reason : "";
-  if (reason === CODEX_PRE_HEADER_DELIMITER_REASON) {
-    // A raw-text rule: the remedy is the delimiter text, not the section, and no shape claim is made.
-    expect(res.message).toContain("contains a triple-quote delimiter");
-    expect(res.message).toContain("which may be in a comment");
-    expect(res.message).toContain("Remove or rewrite that delimiter text");
-    expect(res.message).not.toContain("not the shape Flair writes");
-    expect(res.message).not.toContain("remove it and re-run flair init");
-  } else if (CODEX_OUTSIDE_DEFINITION_REASONS.has(reason)) {
-    // Removing Flair's section would leave the other definition, so that remedy is not offered.
-    expect(res.message).toContain("the mcp_servers.flair definition is not the shape Flair writes");
-    expect(res.message).toContain("Remove or rewrite anything else that can define mcp_servers.flair");
-    expect(res.message).toContain("an [mcp_servers] table (move its entries into [mcp_servers.<name>] tables)");
-    expect(res.message).not.toContain("remove it and re-run flair init");
-  } else {
-    expect(res.message).toContain("not the shape Flair writes");
-    expect(res.message).toContain("edit the [mcp_servers.flair] section by hand, or remove it and re-run flair init");
-  }
+  expect(res.message).toContain(`(${reason})`);
+  expect(res.message).toContain(CODEX_WIRING_CONDITIONS);
   expect(readFileSync(cfgPath(), "utf-8")).toBe(raw);
   expect(existsSync(`${cfgPath()}.bak`)).toBe(false);
   expect(readdirSync(join(isoHome, ".codex")).sort().join(",")).toBe("config.toml");
@@ -496,9 +486,8 @@ describe("Codex shape boundaries", () => {
       const result = wireCodex(ENV_B);
       expect(result.ok).toBe(false);
       expect(result.message).toContain("~/.codex/config.toml");
-      // A lossy file is not a section problem: the remedy is re-saving it as UTF-8.
-      expect(result.message).toContain("Re-save the file as UTF-8 and re-run flair init");
-      expect(result.message).not.toContain("edit the [mcp_servers.flair] section by hand");
+      expect(result.message).toContain(`(${CODEX_LOSSY_BYTES_REASON})`);
+      expect(result.message).toContain(CODEX_WIRING_CONDITIONS);
       expect(readFileSync(cfgPath())).toEqual(bytes);
       expect(readdirSync(join(isoHome, ".codex"))).toEqual(["config.toml"]);
     });
@@ -604,8 +593,42 @@ describe("Codex fallback definition guard", () => {
   it("an empty [mcp_servers] table alone is still refused, so the remedy names removing the table", () => {
     const raw = seed("[mcp_servers]\n");
     const res = wireCodex(ENV_B);
-    expect(res.message).toContain("an [mcp_servers] table (move its entries into [mcp_servers.<name>] tables)");
+    expect(res.message).toContain("no [mcp_servers] table (put its entries in [mcp_servers.<name>] tables)");
     expectRefusal(raw, res);
+  });
+  // With no section, the append lands after every byte, so delimiter text anywhere refuses it.
+  for (const quote of ['"""', "'''"]) {
+    it(`no section and a closed ${quote} string: refused with the append reason; rewriting the string lets init wire Codex`, () => {
+      const raw = seed(`description = ${quote}text${quote}\n`);
+      const res = wireCodex(ENV_B);
+      expect(res.message).toContain(`(${CODEX_APPEND_DELIMITER_REASON})`);
+      expect(res.message).not.toContain("the replacement is not the intended Flair section");
+      expectRefusal(raw, res);
+      seed('description = "text"\n');
+      expect(wireCodex(ENV_B).ok).toBe(true);
+      expect((Bun.TOML.parse(readFileSync(cfgPath(), "utf8")) as any).mcp_servers.flair.env.FLAIR_AGENT_ID).toBe("agent-b");
+    });
+  }
+  it("a spaced header after a delimiter: fixing both conditions the message lists lets init wire Codex", () => {
+    const raw = seed('description = """text"""\n' + tomlSnippet(ENV_A).replace("[mcp_servers.flair]", "[ mcp_servers.flair ]").replace("[mcp_servers.flair.env]", "[ mcp_servers.flair.env ]") + "\n");
+    expectRefusal(raw, wireCodex(ENV_B));
+    seed('description = "text"\n' + tomlSnippet(ENV_A) + "\n");
+    expect(wireCodex(ENV_B).ok).toBe(true);
+  });
+  it("a malformed section and a later delimiter: removing only the section is not enough, and the message says why", () => {
+    const later = '\n[other.tool]\nnote = """\nx\n"""\n';
+    const raw = seed(tomlSnippet(ENV_A).replace(/args = \["-y", "([^"]+)"\]/, "args = ['-y', '$1']") + "\n" + later);
+    expect((Bun.TOML.parse(raw) as any).mcp_servers.flair.args[0]).toBe("-y");
+    const first = wireCodex(ENV_B);
+    expectRefusal(raw, first);
+    // Condition (3) in the message covers what removing the section exposes.
+    expect(first.message).toContain("and with no section none appears anywhere, because Flair appends the section at the end of the file");
+    const sectionRemoved = seed(removeCodexFlairBlock(raw));
+    const second = wireCodex(ENV_B);
+    expect(second.message).toContain(`(${CODEX_APPEND_DELIMITER_REASON})`);
+    expectRefusal(sectionRemoved, second);
+    seed('[other.tool]\nnote = "x"\n');
+    expect(wireCodex(ENV_B).ok).toBe(true);
   });
   it("a triple-quote delimiter in a comment before the section is refused by the raw-text rule; removing that text lets init wire Codex", () => {
     const raw = seed('# literal delimiter text: """\n' + tomlSnippet(ENV_A) + "\n");

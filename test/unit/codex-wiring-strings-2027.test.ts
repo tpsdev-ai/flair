@@ -64,8 +64,8 @@ for (const [label, args] of forms) {
       } else {
         // flair#3050 round 5: only the exact tomlSnippet shape is rewritten.
         expect(result.ok).toBe(false);
-        expect(result.message).toContain("not the shape Flair writes");
-        expect(result.message).toContain("edit the [mcp_servers.flair] section by hand, or remove it and re-run flair init");
+        expect(result.message).toContain("Flair wires Codex only when all of these hold");
+        expect(result.message).toContain("(4) an existing [mcp_servers.flair] section is exactly the shape Flair writes: edit it, or remove it");
         expect(readFileSync(path, "utf8")).toBe(raw);
         expect(existsSync(`${path}.bak`)).toBe(false);
       }
@@ -111,7 +111,7 @@ for (const [label, args] of forms) {
           expect(existsSync(`${path}.bak`)).toBe(false);
         } else {
           expect(result.ok).toBe(false);
-          expect(result.message).toContain("not the shape Flair writes");
+          expect(result.message).toContain("Flair wires Codex only when all of these hold");
           expect(readFileSync(path, "utf8")).toBe(raw);
           expect(existsSync(`${path}.bak`)).toBe(false);
         }
@@ -160,7 +160,7 @@ for (const [label, raw] of [
       expect(readOwnedPins(home).find((f) => f.target.id === "codex")?.pin).toBe("unknown");
       const refused = wireCodex(env);
       expect(refused.ok).toBe(false);
-      expect(refused.message).toContain("not the shape Flair writes");
+      expect(refused.message).toContain("Flair wires Codex only when all of these hold");
       const doctor = offlineDoctor(home);
       expect(doctor(["--fix", "--dry-run"])).not.toContain("Would re-pin the MCP server block");
       expect(doctor(["--fix"])).not.toContain("re-pinned Codex");
