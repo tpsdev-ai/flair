@@ -74,8 +74,9 @@ done
 echo "--- embedding readiness ---"
 # flair#3052: a test Harper's FIRST embedding can exceed the provider's own
 # ~20 s bound and answer 503 memory_provider_timeout (nothing written), so this
-# wait runs before the first write. The wait is bounded by total elapsed time
-# and by a hard attempt cap (MAX_READINESS_ATTEMPTS), and, on success
+# wait runs before the first write. Elapsed time and a hard attempt cap
+# (MAX_READINESS_ATTEMPTS) govern its retries and acceptance (a client-side
+# policy: an in-flight request or sleep can settle later), and, on success
 # (readiness confirmed and its cleanup done), records its duration in the job's
 # step summary when GITHUB_STEP_SUMMARY is set.
 FLAIR_ADMIN_PASS="$ADMIN_PASS" node "${FLAIR_DIR}/scripts/ci/embedding-readiness.mjs" \

@@ -23,10 +23,13 @@ import {
 } from "../../resources/memory-write-lock.ts";
 
 /**
- * flair#3052 — the readiness wait is bounded by TOTAL ELAPSED TIME.
+ * flair#3052 — elapsed time and an attempt cap govern the readiness wait's
+ * retries and acceptance (a client-side policy: an in-flight request or sleep
+ * can still settle after the deadline, and its answer is then refused).
  *
- * Each provider call ends at the server's own ~20 s bound, so a fixed attempt
- * count gives up at ~62 s however generous the per-attempt budget is. The
+ * Three calls that each time out at the default provider bound, plus two retry
+ * pauses, take about 62 s, so a fixed attempt count gives up there however
+ * generous the per-attempt budget is. The
  * deadline-arithmetic cases use a virtual clock: an attempt costs
  * PROVIDER_BOUND_MS, and a retry backoff costs EMBEDDING_RETRY_BACKOFF_MS, so
  * that arithmetic is exercised exactly without waiting in real time. The

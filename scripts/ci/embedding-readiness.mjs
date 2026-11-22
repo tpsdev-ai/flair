@@ -4,10 +4,14 @@
 // Harper loads the embedding model lazily on the first embed and bounds each
 // provider call at about 20 s, so a cold model can answer a lane's first memory
 // write with `503 memory_provider_timeout` ("nothing was written, retry").
-// Retrying by ATTEMPT COUNT gives up too early: three attempts each end at the
-// server's own bound, so the wait stops at ~62 s no matter how large the
-// per-attempt budget is. This wait is bounded by TOTAL ELAPSED TIME instead,
-// up to EMBEDDING_READY_DEADLINE_MS, and by a hard attempt cap.
+// Retrying by ATTEMPT COUNT gives up too early: three calls that each time out
+// at the default provider bound, plus two retry pauses, take about 62 s, no
+// matter how large the per-attempt budget is. Here elapsed time and a hard
+// attempt cap govern retries and acceptance instead: the configured deadline
+// is EMBEDDING_READY_DEADLINE_MS (the CLI can override it with --deadline-ms),
+// measured on a monotonic clock. This is a client-side policy: an in-flight
+// request or sleep can still settle after the deadline, and its answer is then
+// refused.
 //
 // Retry policy. Among non-2xx Memory responses, only a 503 whose JSON `error`
 // field is `memory_provider_timeout` is retried; any other non-2xx status or

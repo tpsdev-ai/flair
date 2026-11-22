@@ -278,11 +278,13 @@ export async function writeMemory(
  * throwaway rows and agent and reports a failed delete, naming what may remain,
  * rather than treating it as gone.
  *
- * flair#3052: the wait is bounded by TOTAL ELAPSED TIME (the shared helper in
- * scripts/ci/embedding-readiness.mjs) and by a hard attempt cap
- * (MAX_READINESS_ATTEMPTS), not by an attempt count alone. Each provider call
- * ends at the server's own ~20 s bound, so three attempts gave up at ~62 s
- * however generous the per-attempt budget was. Among non-2xx Memory responses
+ * flair#3052: elapsed time (the shared helper in
+ * scripts/ci/embedding-readiness.mjs) and a hard attempt cap
+ * (MAX_READINESS_ATTEMPTS) govern retries and acceptance, not an attempt count
+ * alone: three calls that each time out at the default provider bound, plus two
+ * retry pauses, take about 62 s however generous the per-attempt budget was.
+ * This is a client-side policy; an in-flight request or sleep can still settle
+ * after the deadline, and its answer is then refused. Among non-2xx Memory responses
  * only a 503 whose JSON error field is `memory_provider_timeout` is retried;
  * any other non-2xx answer fails at once. A 2xx whose read-back fails or does
  * not show a stored vector and model stamp is also retried within the deadline.
