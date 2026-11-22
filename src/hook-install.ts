@@ -568,6 +568,9 @@ export function sessionStartHookShapeRefusal(path: string): string | null {
   const entry = group?.hooks?.[matches[0]!.hookIndex];
   const groupKeys = group && typeof group === "object" ? Object.keys(group).sort().join(",") : "";
   const entryKeys = entry && typeof entry === "object" ? Object.keys(entry).sort().join(",") : "";
+  if (!Array.isArray(group?.hooks) || group.hooks.length !== 1) {
+    return `SessionStart hook group in ${path} holds more than the one entry Flair writes — left untouched`;
+  }
   if (groupKeys !== "hooks" || entryKeys !== "command,type" || entry.type !== "command") {
     return `SessionStart hook in ${path} carries fields Flair did not write — left untouched`;
   }
@@ -709,6 +712,10 @@ function unsafeAgentIdMessage(agentId: string): string {
   return `agent id '${agentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`;
 }
 
+function unsafeFlairUrlMessage(flairUrl: string): string {
+  return `Flair URL '${flairUrl}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`;
+}
+
 function decideSessionStartHookRewrite(
   config: any,
   path: string,
@@ -732,10 +739,14 @@ function decideSessionStartHookRewrite(
   const { groupIndex, hookIndex } = matches[0]!;
   const group = config.hooks.SessionStart[groupIndex];
   const entry = group?.hooks?.[hookIndex];
-  // Unsupported hook metadata (anything Flair did not write). installHook
-  // emits exactly `{ hooks: [{ type: "command", command }] }`.
+  // Unsupported hook metadata (anything Flair did not write), including a
+  // GROUP that holds another hook: the writer emits exactly
+  // `{ hooks: [{ type: "command", command }] }`.
   const groupKeys = group && typeof group === "object" ? Object.keys(group).sort().join(",") : "";
   const entryKeys = entry && typeof entry === "object" ? Object.keys(entry).sort().join(",") : "";
+  if (!Array.isArray(group?.hooks) || group.hooks.length !== 1) {
+    return { kind: "hold", ok: false, message: `SessionStart hook group in ${path} holds more than the one entry Flair writes — left untouched` };
+  }
   if (groupKeys !== "hooks" || entryKeys !== "command,type" || entry.type !== "command") {
     return { kind: "hold", ok: false, message: `SessionStart hook in ${path} carries fields Flair did not write — left untouched` };
   }
@@ -757,6 +768,16 @@ function decideSessionStartHookRewrite(
       return { kind: "hold", ok: false, message: unsafeAgentIdMessage(requestedAgentId) };
     }
     const agentId = requestedAgentId ?? legacy.agentId;
+    // The legacy shape admits characters the builder refuses to interpolate
+    // (a `?` in a URL, a `;` in an id). Validate the values we KEEP with the
+    // builder's own rule: rebuild is unconditional here, so an unsafe value
+    // must be a named refusal, never a throw after the precheck.
+    if (!isHookCommandValueSafe(agentId)) {
+      return { kind: "hold", ok: false, message: unsafeAgentIdMessage(agentId) };
+    }
+    if (legacy.flairUrl !== undefined && legacy.flairUrl !== "" && !isHookCommandValueSafe(legacy.flairUrl)) {
+      return { kind: "hold", ok: false, message: unsafeFlairUrlMessage(legacy.flairUrl) };
+    }
     // The matched legacy form is unpinned: pin UP to this CLI's spec.
     const decision = decidePinWrite({
       pkg: FLAIR_MCP_PACKAGE,
@@ -870,9 +891,10 @@ export function repinSessionStartHook(
 
   // Decide ONCE before the primitive so a REFUSAL (malformed file, foreign
   // metadata, an unreadable command, an unsafe id, an unreadable CLI version)
-  // writes NOTHING — not even the in-lock `.bak` the primitive takes before
-  // `decide`. Only an outcome that will write enters the critical section; the
-  // in-lock decision below re-checks the same facts on the bytes it writes.
+  // writes NOTHING — not even a `.bak`; the in-lock backup runs only after the
+  // in-lock decision says write. Only an outcome that will write enters the
+  // critical section; the in-lock decision below re-checks the same facts on
+  // the bytes it writes.
   const preRead = readSettingsFile(path);
   const pre = decideSessionStartHookRewrite(preRead.parsed, path, harness, preRead.parseError, opts);
   if (pre.kind !== "update") {
@@ -899,7 +921,7 @@ export function repinSessionStartHook(
       newConfig.hooks.SessionStart[decision.groupIndex].hooks[decision.hookIndex] = { type: "command", command: decision.command };
       return { write: encodeConfig(newConfig) };
     },
-    { backup: (bytes) => backupBytesTo(path, bytes), testHooks },
+    { backupOnWrite: (bytes) => backupBytesTo(path, bytes), testHooks },
   );
 
   // flair#1834 PR-H round 4 (CodeRabbit MAJOR): map result.status FIRST. A decided

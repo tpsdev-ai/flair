@@ -420,8 +420,11 @@ export function applyOrRepinSessionStartHook(
     if (!installer && !legacy) {
       // A pin finding means the writer can name the shape it refuses; without
       // one, name the unreadable identity. Both write nothing (flair#3050 r3).
+      // Call the RAW writer, not the guarded refresh: its pre-lock check names
+      // a non-installer command as a refusal, while the guarded path reports a
+      // tag/range/unknown pin as a policy hold with ok:true.
       if (finding) {
-        const repin = repinSessionStartHookGuarded(homeDir, harness);
+        const repin = repinSessionStartHook(homeDir, harness);
         return { applied: false, ok: repin.ok, message: repin.message };
       }
       return {

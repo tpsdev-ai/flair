@@ -3,7 +3,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { applyOrRepinSessionStartHook } from "../../src/lib/owned-pins.ts";
-import { hookSettingsPath } from "../../src/hook-install.ts";
+import { hookSettingsPath, repinSessionStartHook } from "../../src/hook-install.ts";
 import { buildSessionStartHookCommand, SESSION_START_HOOK_MARKER } from "../../src/doctor-client.ts";
 import { FLAIR_MCP_PACKAGE, mcpServerSpec } from "../../src/lib/mcp-spec.ts";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -201,5 +201,96 @@ describe("applyOrRepinSessionStartHook — the pre-#1007 legacy form is migrated
     expect(result.message).toContain("agent 'agent-b'");
     expect(result.message).toContain(`pinned it to ${mcpServerSpec()}`);
     expect(flairHookCommand(settingsPath)).toBe(flairCommand("agent-b"));
+  });
+
+  it("refuses a legacy URL the builder cannot interpolate, writes nothing (no .bak)", () => {
+    const command = `FLAIR_AGENT_ID=agent-a FLAIR_URL=http://127.0.0.1:1234?x=1 npx -y ${FLAIR_MCP_PACKAGE} flair-session-start`;
+    const settingsPath = writeSettings(hookSettings(command));
+    const before = readFileSync(settingsPath, "utf-8");
+
+    const result = applyOrRepinSessionStartHook(home, "agent-a", false);
+
+    expect(result.applied).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("Flair URL");
+    expect(result.message).toContain("cannot be safely written");
+    expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+    expect(settingsDirFiles()).toBe("settings.json");
+  });
+
+  it("refuses a legacy agent id the builder cannot interpolate, writes nothing (no .bak)", () => {
+    const command = `FLAIR_AGENT_ID=agent;x npx -y ${FLAIR_MCP_PACKAGE} flair-session-start`;
+    const settingsPath = writeSettings(hookSettings(command));
+    const before = readFileSync(settingsPath, "utf-8");
+
+    const result = applyOrRepinSessionStartHook(home, "agent;x", false);
+
+    expect(result.applied).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("agent id");
+    expect(result.message).toContain("cannot be safely written");
+    expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+    expect(settingsDirFiles()).toBe("settings.json");
+  });
+});
+
+describe("applyOrRepinSessionStartHook — the group shape and a non-installer pin", () => {
+  it("refuses a group holding a second hook even when the id matches (no .bak)", () => {
+    const settingsPath = writeSettings({
+      theme: "dark",
+      hooks: {
+        SessionStart: [
+          { hooks: [{ type: "command", command: flairCommand("agent-a") }, { type: "command", command: "unrelated-session-hook" }] },
+        ],
+      },
+    });
+    const before = readFileSync(settingsPath, "utf-8");
+
+    const result = applyOrRepinSessionStartHook(home, "agent-a", false);
+
+    expect(result.applied).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("holds more than the one entry");
+    expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+    expect(settingsDirFiles()).toBe("settings.json");
+  });
+
+  for (const tag of ["@latest", "@^0.62.0"]) {
+    it(`refuses a non-installer hook pinned with ${tag} by name (no .bak)`, () => {
+      const command = `FLAIR_AGENT_ID=agent-a npx -y -p ${FLAIR_MCP_PACKAGE}${tag} ${SESSION_START_HOOK_MARKER}`;
+      const settingsPath = writeSettings(hookSettings(command));
+      const before = readFileSync(settingsPath, "utf-8");
+
+      const result = applyOrRepinSessionStartHook(home, "agent-a", false);
+
+      expect(result.applied).toBe(false);
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("not one of the installer forms");
+      expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+      expect(settingsDirFiles()).toBe("settings.json");
+    });
+  }
+});
+
+describe("repinSessionStartHook — a refusal after the precheck takes no backup", () => {
+  it("a file changed between the precheck and the lock is refused, no .bak, file unchanged", () => {
+    const settingsPath = writeSettings(hookSettings(flairCommand("agent-a")));
+    const malformed = "{ not valid json, changed after the precheck";
+    let mutated = false;
+
+    const result = repinSessionStartHook(
+      home,
+      "claude-code",
+      { afterPreObserve: () => { if (!mutated) { mutated = true; writeFileSync(settingsPath, malformed); } } },
+      { agentId: "agent-b" },
+    );
+
+    expect(mutated).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(result.action).toBe("hold");
+    expect(result.message).toContain("refusing to re-pin");
+    expect(result.backupPath).toBeNull();
+    expect(readFileSync(settingsPath, "utf-8")).toBe(malformed);
+    expect(settingsDirFiles()).toBe("settings.json");
   });
 });

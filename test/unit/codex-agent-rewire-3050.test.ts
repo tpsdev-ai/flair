@@ -69,7 +69,7 @@ describe("flair#3050 — Codex env is part of the already-wired check", () => {
     expect(toml).toContain('FLAIR_AGENT_ID = "agent-b"');
     expect(toml).not.toContain('FLAIR_AGENT_ID = "agent-a"');
     expect(toml.match(/^FLAIR_AGENT_ID/gm)?.length).toBe(1);
-    // Siblings survive the section replace.
+    // The sibling table BEFORE the Flair section survives the replace.
     expect(toml).toContain("[other_server]");
     expect(toml).toContain('command = "echo"');
   });
@@ -138,6 +138,58 @@ describe("flair#3050 — Codex env is part of the already-wired check", () => {
     const toml = readFileSync(cfgPath(), "utf-8");
     expect(toml.match(/^FLAIR_AGENT_ID/gm)?.length).toBe(1);
     expect(toml).toContain('FLAIR_AGENT_ID = "agent-b"');
+  });
+
+  it("an identical duplicate env assignment is a mismatch: a real parser rejects the file", () => {
+    const raw = seed([
+      "[mcp_servers.flair]",
+      'command = "npx"',
+      `args = ["-y", "${mcpServerSpec()}"]`,
+      "",
+      "[mcp_servers.flair.env]",
+      `FLAIR_AGENT_ID = "${ENV_A.FLAIR_AGENT_ID}"`,
+      `FLAIR_URL = "${URL_A}"`,
+      `FLAIR_AGENT_ID = "${ENV_A.FLAIR_AGENT_ID}"`,
+      "",
+    ].join("\n"));
+    // The fixture is what it claims: Bun's TOML parser rejects a duplicate key.
+    expect(() => Bun.TOML.parse(raw)).toThrow();
+
+    const res = wireCodex(ENV_A);
+    expect(res.message).toBe("Codex: wired ~/.codex/config.toml (restart Codex to pick it up)");
+    const toml = readFileSync(cfgPath(), "utf-8");
+    expect(toml.match(/^FLAIR_AGENT_ID/gm)?.length).toBe(1);
+    const after = Bun.TOML.parse(toml) as any;
+    expect(after.mcp_servers.flair.env.FLAIR_AGENT_ID).toBe(ENV_A.FLAIR_AGENT_ID);
+  });
+
+  it("an indented sibling table after the Flair section survives the replace", () => {
+    const raw = seed([
+      "[mcp_servers.flair]",
+      'command = "npx"',
+      `args = ["-y", "${mcpServerSpec()}"]`,
+      "",
+      "[mcp_servers.flair.env]",
+      `FLAIR_AGENT_ID = "${ENV_A.FLAIR_AGENT_ID}"`,
+      `FLAIR_URL = "${URL_A}"`,
+      "",
+      "  [mcp_servers.other]",
+      '  command = "echo"',
+      '  args = ["hello"]',
+      "",
+    ].join("\n"));
+    // A real TOML parser reads the indented header as its own table.
+    const before = Bun.TOML.parse(raw) as any;
+    expect(before.mcp_servers.other.command).toBe("echo");
+
+    const res = wireCodex(ENV_B);
+    expect(res.message).toBe("Codex: wired ~/.codex/config.toml (restart Codex to pick it up)");
+    const toml = readFileSync(cfgPath(), "utf-8");
+    const after = Bun.TOML.parse(toml) as any;
+    expect(after.mcp_servers.flair.env.FLAIR_AGENT_ID).toBe(ENV_B.FLAIR_AGENT_ID);
+    expect(after.mcp_servers.other.command).toBe("echo");
+    expect(after.mcp_servers.other.args).toEqual(["hello"]);
+    expect(toml).toContain('\n  [mcp_servers.other]\n  command = "echo"\n  args = ["hello"]\n');
   });
 });
 

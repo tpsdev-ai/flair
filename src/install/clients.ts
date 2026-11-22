@@ -327,7 +327,11 @@ function replaceCodexFlairBlock(raw: string, env: WireEnv): string {
   if (idx === -1) return appendCodexFlairBlock(raw, env);
   const before = raw.slice(0, idx);
   const after = raw.slice(idx);
-  const nextHeader = after.slice("[mcp_servers.flair]".length).search(/\n\[(?!mcp_servers\.flair\.)/);
+  // The boundary is any later table header line, INDENTED or not, and an
+  // array-of-tables header too: a TOML parser treats ` [mcp_servers.other]`
+  // as its own table, so matching only `\n[` consumed that table through EOF.
+  // A dotted `mcp_servers.flair.*` subtable continues this section.
+  const nextHeader = after.slice("[mcp_servers.flair]".length).search(/\n[ \t]*\[(?!mcp_servers\.flair\.)/);
   const rest = nextHeader === -1 ? "" : after.slice("[mcp_servers.flair]".length + nextHeader);
   const newBlock = tomlSnippet(env) + "\n";
   // Preserve the separator between the new block and whatever follows.
@@ -798,7 +802,7 @@ type CodexEnvRead =
 
 /** Parse one TOML value from the right-hand side of an env assignment. A
  *  commented or empty assignment is absent; an unterminated/escaped string is
- *  unreadable; the rest is the first whitespace/comma/comment-delimited token. */
+ *  unreadable; the rest is the first whitespace/comment-delimited token. */
 function parseCodexTomlValue(rhs: string): CodexEnvRead {
   if (rhs === "" || rhs.startsWith("#")) return { state: "absent" };
   if (rhs.startsWith('"') || rhs.startsWith("'")) {
@@ -842,8 +846,10 @@ function splitCodexSectionParts(section: string): CodexSectionPart[] {
   return parts;
 }
 
-/** Read one env key from a single table body. Two different active values are
- *  ambiguous; an unreadable assignment anywhere in the table is unknown. */
+/** Read one env key from a single table body. A second ACTIVE assignment is
+ *  ambiguous even when its value is identical — a TOML parser rejects any
+ *  duplicate key, so Codex could not load the file. An unreadable assignment
+ *  anywhere in the table is unknown. */
 function readCodexTableEnvValue(
   lines: string[],
   key: keyof typeof CODEX_SECTION_ENV_KEY_RE,
@@ -856,7 +862,7 @@ function readCodexTableEnvValue(
     const read = parseCodexTomlValue(m[1]!.trim());
     if (read.state === "absent") continue;
     if (read.state === "unreadable") { unreadable = true; continue; }
-    if (found !== null && found !== read.value) return { state: "unreadable" };
+    if (found !== null) return { state: "unreadable" };
     found = read.value;
   }
   if (unreadable) return { state: "unreadable" };
@@ -939,8 +945,9 @@ function readCodexInlineEnvValue(
  * or an inline `env = { … }` in the main table. A sibling subtable such as
  * `[mcp_servers.flair.extra]` is a DIFFERENT table, so its values are not the
  * env Codex passes (flair#3050 round 3). Two env sources at once, a second env
- * table, or an unsupported shape is unreadable, so a wire rewrites rather than
- * no-opping on a value Codex would not read.
+ * table, a duplicated key, or an unsupported shape is unreadable, so a wire
+ * treats it as a mismatch — rewriting when the pin guard permits, otherwise
+ * holding — rather than no-opping on a value Codex would not read.
  */
 function readCodexSectionEnvValue(
   section: string,
