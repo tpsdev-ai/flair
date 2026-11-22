@@ -6,6 +6,7 @@ import {
   awaitEmbeddingReady,
   isProviderTimeout,
   MAX_READINESS_ATTEMPTS,
+  OPS_TIMEOUT_MS,
   PROVIDER_TIMEOUT_ERROR,
   recordStepSummary,
   warmCliConfig,
@@ -497,6 +498,135 @@ describe("embedding readiness waits on total elapsed time (flair#3052)", () => {
     expect(error?.message).toContain("never became ready");
     expect(error?.message).toContain("read-back failed");
   }, 5_000);
+
+  // awaitEmbeddingReady's own catch: a confirm that throws (rather than
+  // resolving not-ready, as warmInstanceEmbeddings' read-back does) is retried.
+  test("awaitEmbeddingReady retries a thrown read-back, and a read-back that always throws ends never-ready naming it", async () => {
+    const clock = virtualClock();
+    let confirms = 0;
+    const result = await awaitEmbeddingReady({
+      label: "unit",
+      deadlineMs: 1_000,
+      backoffMs: 0,
+      now: clock.now,
+      sleep: clock.sleep,
+      log: () => {},
+      attempt: async () => { clock.advance(10); return accepted(); },
+      confirm: async () => {
+        confirms++;
+        if (confirms === 1) throw new Error("read-back exploded");
+        return { ready: true };
+      },
+    });
+    expect(result.attempts).toBe(2);
+    expect(confirms).toBe(2);
+
+    const clock2 = virtualClock();
+    const error = await awaitEmbeddingReady({
+      label: "unit",
+      deadlineMs: 1_000,
+      backoffMs: 0,
+      maxAttempts: 3,
+      now: clock2.now,
+      sleep: clock2.sleep,
+      log: () => {},
+      attempt: async () => { clock2.advance(10); return accepted(); },
+      confirm: async () => { throw new Error("read-back exploded"); },
+    }).then(() => null, (err: Error) => err);
+    expect(error?.message).toContain("never became ready");
+    expect(error?.message).toContain("read-back failed: read-back exploded");
+  }, 5_000);
+
+  for (const [what, empty, detail] of [
+    ["an empty vector", { embedding: [], embeddingModel: "unit-model" }, "stored no vector"],
+    ["an empty model stamp", { embedding: [0.1, 0.2], embeddingModel: "" }, "stored no embedding model stamp"],
+  ] as const) {
+    test(`a read-back with ${what} is not ready: it is retried, and when it persists the wait ends never-ready`, async () => {
+      const clock = virtualClock();
+      let readBacks = 0;
+      const { wrapped, counts } = countingWrites(warmFake(clock, (id) => {
+        readBacks++;
+        return readBacks === 1 ? { id, ...empty } : { id, embedding: [0.1, 0.2], embeddingModel: "unit-model" };
+      }));
+      const result = await warmInstanceEmbeddings({
+        baseUrl: "http://127.0.0.1:1",
+        opsUrl: "http://127.0.0.1:2",
+        label: "unit warm-up",
+        deadlineMs: 1_000,
+        backoffMs: 0,
+        now: clock.now,
+        sleep: clock.sleep,
+        log: () => {},
+        fetchImpl: wrapped,
+      });
+      expect(counts.puts).toBe(2);
+      expect(result.attempts).toBe(2);
+
+      const clock2 = virtualClock();
+      const error = await warmInstanceEmbeddings({
+        baseUrl: "http://127.0.0.1:1",
+        opsUrl: "http://127.0.0.1:2",
+        label: "unit warm-up",
+        deadlineMs: 1_000,
+        backoffMs: 0,
+        maxAttempts: 3,
+        now: clock2.now,
+        sleep: clock2.sleep,
+        log: () => {},
+        fetchImpl: warmFake(clock2, (id) => ({ id, ...empty })),
+      }).then(() => null, (err: Error) => err);
+      expect(error?.message).toContain("never became ready");
+      expect(error?.message).toContain(detail);
+    }, 5_000);
+  }
+
+  test("each warm-up PUT and read-back gets the time left as its AbortSignal bound, rounded up to a whole millisecond", async () => {
+    // A fractional clock: every bound below would be fractional without the rounding.
+    const clock = virtualClock(1_000_000.25);
+    let memoryId = "";
+    let readBacks = 0;
+    const bounds: number[] = [];
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    AbortSignal.timeout = ((ms: number) => {
+      bounds.push(ms);
+      return realTimeout(ms);
+    }) as typeof AbortSignal.timeout;
+    const fakeFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body?.operation === "insert" && body?.table === "Agent") return new Response("inserted", { status: 200 });
+      if (body?.operation === "delete") return new Response("{}", { status: 200 });
+      if (body?.operation === "search_by_id") {
+        readBacks++;
+        clock.advance(20.25);
+        const row = readBacks === 1
+          ? { id: memoryId, embedding: null, embeddingModel: null }
+          : { id: memoryId, embedding: [0.1, 0.2], embeddingModel: "unit-model" };
+        return new Response(JSON.stringify([row]), { status: 200 });
+      }
+      memoryId = String(body.id ?? "");
+      clock.advance(60.5);
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      await warmInstanceEmbeddings({
+        baseUrl: "http://127.0.0.1:1",
+        opsUrl: "http://127.0.0.1:2",
+        label: "unit warm-up",
+        deadlineMs: 1_000,
+        backoffMs: 0,
+        now: clock.now,
+        sleep: clock.sleep,
+        log: () => {},
+        fetchImpl: fakeFetch,
+      });
+    } finally {
+      AbortSignal.timeout = realTimeout;
+    }
+    // agent insert (fixed ops bound), PUT 1, read-back 1, PUT 2, read-back 2, then the two cleanup deletes.
+    // Time left: 1000; 1000 - 60.5 = 939.5; 939.5 - 20.25 = 919.25; 919.25 - 60.5 = 858.75.
+    expect(bounds).toEqual([OPS_TIMEOUT_MS, 1_000, 940, 920, 859, OPS_TIMEOUT_MS, OPS_TIMEOUT_MS]);
+    for (const ms of bounds) expect(Number.isInteger(ms)).toBe(true);
+  }, 5_000);
 });
 
 describe("each attempt's client bound is the time left, rounded up to a whole millisecond (flair#3052)", () => {
@@ -766,6 +896,17 @@ describe("the CLI takes credentials only from the environment (flair#3052)", () 
     expect(error?.message).toContain("the base URL (--base-url) must not carry a username or password");
     expect(error?.message).toContain("http://127.0.0.1:9926");
     expect(error?.message).not.toContain(SECRET);
+  });
+
+  test("a --base-url or FLAIR_OPS_URL carrying only a password is refused without echoing it", () => {
+    for (const run of [
+      () => warmCliConfig(["--base-url", `http://:${SECRET}@127.0.0.1:9926`], {}),
+      () => warmCliConfig([], { FLAIR_OPS_URL: `http://:${SECRET}@127.0.0.1:9925` }),
+    ]) {
+      const error = (() => { try { run(); return null; } catch (err) { return err as Error; } })();
+      expect(error?.message).toContain("must not carry a username or password");
+      expect(error?.message).not.toContain(SECRET);
+    }
   });
 
   test("a --ops-url carrying only a username is refused", () => {
