@@ -46,7 +46,7 @@ Default port is `19926`. Override during init:
 flair init --port 8000
 ```
 
-Re-run `flair init --port <port>` to change it; Harper's saved port takes precedence over `~/.flair/config.yaml`.
+Choose the port at initial setup with `--port`. Editing `~/.flair/config.yaml` does not override Harper's saved port. Changing an existing instance also requires updating its service configuration; re-running init does not update an existing pass-file plist's port settings.
 
 ### MQTT
 
