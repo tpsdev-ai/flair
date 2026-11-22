@@ -167,7 +167,7 @@ async function controlledScan(
     if (shimError !== undefined) {
       // Best effort: the shim may have failed after its raw delete; never let cleanup mask its error.
       await ops({ operation: "delete", database: "flair", table: "Memory", hash_values: [id] }).catch(() => {});
-    } else if (!pendingRecreate) {
+    } else {
       await remove(id);
     }
   }
