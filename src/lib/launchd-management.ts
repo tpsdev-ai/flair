@@ -385,6 +385,8 @@ export function diagnoseLaunchdNodePath(
 export interface LaunchctlJobState {
   /** launchd knows this label. False when `launchctl list <label>` could not find it. */
   registered: boolean;
+  /** False when the lookup itself failed; `registered` is then NOT evidence that the job is absent. */
+  readable: boolean;
   /** The job's running process, or null when launchd reports no PID (job not running). */
   pid: number | null;
   /** The job's last exit status, or null when launchd reported none. */
@@ -417,11 +419,15 @@ export function readLaunchctlJobState(label: string, list: LaunchctlLister): Lau
   try {
     res = list(label);
   } catch {
-    return { registered: false, pid: null, lastExitStatus: null };
+    return { registered: false, readable: false, pid: null, lastExitStatus: null };
   }
-  if (res.code !== 0) return { registered: false, pid: null, lastExitStatus: null };
+  // 113 is launchd's "service not found": an ANSWER that the job is not
+  // loaded. Any other non-zero code is a failed lookup, which must not be read
+  // as "not loaded" by a caller that acts on the answer (flair#3067).
+  if (res.code === 113) return { registered: false, readable: true, pid: null, lastExitStatus: null };
+  if (res.code !== 0) return { registered: false, readable: false, pid: null, lastExitStatus: null };
   const { pid, lastExitStatus } = parseLaunchctlList(res.stdout);
-  return { registered: true, pid, lastExitStatus };
+  return { registered: true, readable: true, pid, lastExitStatus };
 }
 
 /**
@@ -487,6 +493,13 @@ export interface LaunchdManagement {
   state: LaunchdManagementState;
   /** The label examined, when there was one. */
   label?: string;
+  /**
+   * Whether `launchctl list` reports the job loaded, when the question was
+   * asked. `not-loaded` is a fresh `flair init`'s state: the plist exists but
+   * the job was never loaded, so an unload cannot stop the process init
+   * started directly. `unknown` is a failed lookup and licenses nothing.
+   */
+  jobLoaded?: "loaded" | "not-loaded" | "unknown";
   /** One line of evidence for the verdict. Present for every state. */
   detail: string;
   /** Commands that restore management. Present for "detached" (and "unverified"). */
@@ -580,10 +593,11 @@ export function assessLaunchdManagement(input: AssessLaunchdManagementInput): La
     return { state: "not-applicable", detail: `${platform} does not use launchd` };
   }
   if (!plistExists(plistPath)) {
-    return { state: "no-service", detail: `no launchd service is registered for this instance (${plistPath})` };
+    return { state: "no-service", jobLoaded: "not-loaded", detail: `no launchd service is registered for this instance (${plistPath})` };
   }
 
   const job = readLaunchctlJobState(label, list);
+  const jobLoaded: "loaded" | "not-loaded" | "unknown" = !job.readable ? "unknown" : job.registered ? "loaded" : "not-loaded";
   const diagnose = input.diagnose ?? ((p: string) => diagnoseLaunchdPlistPaths(p));
   const detachedRemedy = (): { remedy: string[]; because: string } => {
     const stale = diagnose(plistPath);
@@ -601,6 +615,7 @@ export function assessLaunchdManagement(input: AssessLaunchdManagementInput): La
     return {
       state: "detached",
       label,
+      jobLoaded,
       detail: `the launchd service ${label} is registered on disk but not loaded, so launchd is not managing this instance.${because}`,
       remedy,
     };
@@ -614,6 +629,7 @@ export function assessLaunchdManagement(input: AssessLaunchdManagementInput): La
     return {
       state: "detached",
       label,
+      jobLoaded,
       detail: `the launchd job ${label} is loaded but not running, so whatever is serving this instance was not started by launchd.${exit}${because}`,
       remedy,
     };
@@ -624,6 +640,7 @@ export function assessLaunchdManagement(input: AssessLaunchdManagementInput): La
     return {
       state: "detached",
       label,
+      jobLoaded,
       detail:
         `this instance is served by process ${instancePid}, but launchd's job ${label} is process ${job.pid} — ` +
         `the running instance is not the one launchd manages.${because}`,
@@ -641,6 +658,7 @@ export function assessLaunchdManagement(input: AssessLaunchdManagementInput): La
     return {
       state: "unverified",
       label,
+      jobLoaded,
       detail:
         `launchd job ${label} is running as process ${job.pid}, but the process serving this instance could not be ` +
         "identified (no live hdb.pid, and no listener found on its port), so launchd management is NOT verified",
@@ -653,6 +671,7 @@ export function assessLaunchdManagement(input: AssessLaunchdManagementInput): La
   return {
     state: "managed",
     label,
+    jobLoaded,
     detail: `launchd job ${label} is running as process ${job.pid}`,
     launchdPid: job.pid,
     servingPid: instancePid,

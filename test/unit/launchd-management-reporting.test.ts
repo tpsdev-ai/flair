@@ -304,15 +304,15 @@ describe("flair#1022 — parseLaunchctlList / readLaunchctlJobState", () => {
     expect(parseLaunchctlList(listLoadedNotRunning("x", 19968))).toEqual({ pid: null, lastExitStatus: 19968 });
   });
 
-  test("a nonzero exit from launchctl means the label is not registered", () => {
+  test("launchd's 113 exit means the label is not registered", () => {
     expect(readLaunchctlJobState("x", unregisteredLister)).toEqual({
-      registered: false, pid: null, lastExitStatus: null,
+      registered: false, readable: true, pid: null, lastExitStatus: null,
     });
   });
 
-  test("a lister that throws is not registered rather than an exception", () => {
+  test("a lister that throws is an unreadable lookup, not an absent job", () => {
     expect(readLaunchctlJobState("x", () => { throw new Error("launchctl missing"); })).toEqual({
-      registered: false, pid: null, lastExitStatus: null,
+      registered: false, readable: false, pid: null, lastExitStatus: null,
     });
   });
 });
