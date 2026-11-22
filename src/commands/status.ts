@@ -607,30 +607,34 @@ const statusCmd = program
     const bm25Line = formatBm25StatusLine(healthData?.bm25);
     if (bm25Line) console.log(render.kv("BM25 index", bm25Line));
 
-    if (agents && agents.count > 0) {
-      console.log(`\n${render.wrap(render.c.bold, "Agents")}`);
-      const nameStr = agents.names?.length > 0 ? ` ${render.wrap(render.c.dim, "—")} ${agents.names.join(render.wrap(render.c.dim, ", "))}` : "";
-      console.log(render.kv("Total", `${render.wrap(render.c.bold, String(agents.count))}${nameStr}`));
-      if (Array.isArray(agents.perAgent) && agents.perAgent.length > 0) {
-        const hasDeep = agents.perAgent.some(
-          (r: any) => typeof r.hashFallback === "number" || typeof r.writes24h === "number",
-        );
-        const cols: render.TableColumn[] = hasDeep
-          ? [
-              { label: "id", key: "id" },
-              { label: "memories", key: "memoryCount", align: "right" },
-              { label: "hash_fb", key: "hashFallback", align: "right", format: (v) => (typeof v === "number" ? String(v) : "—") },
-              { label: "24h", key: "writes24h", align: "right", format: (v) => (typeof v === "number" ? String(v) : "—") },
-              { label: "last_write", key: "lastWriteAt", format: (v) => render.relativeTime(v as string | null) },
-            ]
-          : [
-              { label: "id", key: "id" },
-              { label: "memories", key: "memoryCount", align: "right" },
-              { label: "last_write", key: "lastWriteAt", format: (v) => render.relativeTime(v as string | null) },
-            ];
-        console.log(render.table(cols, agents.perAgent as Array<Record<string, unknown>>));
+    if (agents) {
+      if (agents.count > 0) {
+        console.log(`\n${render.wrap(render.c.bold, "Agents")}`);
+        const nameStr = agents.names?.length > 0 ? ` ${render.wrap(render.c.dim, "—")} ${agents.names.join(render.wrap(render.c.dim, ", "))}` : "";
+        console.log(render.kv("Total", `${render.wrap(render.c.bold, String(agents.count))}${nameStr}`));
+        if (Array.isArray(agents.perAgent) && agents.perAgent.length > 0) {
+          const hasDeep = agents.perAgent.some(
+            (r: any) => typeof r.hashFallback === "number" || typeof r.writes24h === "number",
+          );
+          const cols: render.TableColumn[] = hasDeep
+            ? [
+                { label: "id", key: "id" },
+                { label: "memories", key: "memoryCount", align: "right" },
+                { label: "hash_fb", key: "hashFallback", align: "right", format: (v) => (typeof v === "number" ? String(v) : "—") },
+                { label: "24h", key: "writes24h", align: "right", format: (v) => (typeof v === "number" ? String(v) : "—") },
+                { label: "last_write", key: "lastWriteAt", format: (v) => render.relativeTime(v as string | null) },
+              ]
+            : [
+                { label: "id", key: "id" },
+                { label: "memories", key: "memoryCount", align: "right" },
+                { label: "last_write", key: "lastWriteAt", format: (v) => render.relativeTime(v as string | null) },
+              ];
+          console.log(render.table(cols, agents.perAgent as Array<Record<string, unknown>>));
+        }
       }
-      if (Array.isArray(agents.unregisteredMemoryAuthors) && agents.unregisteredMemoryAuthors.length > 0) {
+      if (agents.unregisteredMemoryAuthors === null) {
+        console.log(render.kv("Unregistered memory owners", render.wrap(render.c.dim, "unavailable — memory scan did not complete")));
+      } else if (Array.isArray(agents.unregisteredMemoryAuthors) && agents.unregisteredMemoryAuthors.length > 0) {
         const owners = agents.unregisteredMemoryAuthors.map(
           (r: any) => `${r.id} (${r.memoryCount} ${r.memoryCount === 1 ? "memory" : "memories"})`,
         );
@@ -1070,24 +1074,28 @@ statusCmd
     if (bm25DeepLine) console.log(`BM25 index:   ${bm25DeepLine}`);
 
     const agents = healthData?.agents;
-    if (agents && agents.count > 0) {
-      console.log("\n═══ Agents ═══════════════════════════════════════");
-      console.log(`Total:        ${agents.count}`);
-      if (Array.isArray(agents.names) && agents.names.length > 0) {
-        console.log(`Names:        ${agents.names.join(", ")}`);
-      }
-      if (Array.isArray(agents.perAgent) && agents.perAgent.length > 0) {
-        const idW = Math.max(2, ...agents.perAgent.map((r: any) => (r.id ?? "").length));
-        console.log(`\n  ${"id".padEnd(idW)}  memories  hash_fb  24h  last_write`);
-        for (const r of agents.perAgent) {
-          const fb = typeof r.hashFallback === "number" ? String(r.hashFallback) : "—";
-          const w24 = typeof r.writes24h === "number" ? String(r.writes24h) : "—";
-          console.log(
-            `  ${(r.id ?? "").padEnd(idW)}  ${String(r.memoryCount).padStart(8)}  ${fb.padStart(7)}  ${w24.padStart(3)}  ${relativeTime(r.lastWriteAt)}`,
-          );
+    if (agents) {
+      if (agents.count > 0) {
+        console.log("\n═══ Agents ═══════════════════════════════════════");
+        console.log(`Total:        ${agents.count}`);
+        if (Array.isArray(agents.names) && agents.names.length > 0) {
+          console.log(`Names:        ${agents.names.join(", ")}`);
+        }
+        if (Array.isArray(agents.perAgent) && agents.perAgent.length > 0) {
+          const idW = Math.max(2, ...agents.perAgent.map((r: any) => (r.id ?? "").length));
+          console.log(`\n  ${"id".padEnd(idW)}  memories  hash_fb  24h  last_write`);
+          for (const r of agents.perAgent) {
+            const fb = typeof r.hashFallback === "number" ? String(r.hashFallback) : "—";
+            const w24 = typeof r.writes24h === "number" ? String(r.writes24h) : "—";
+            console.log(
+              `  ${(r.id ?? "").padEnd(idW)}  ${String(r.memoryCount).padStart(8)}  ${fb.padStart(7)}  ${w24.padStart(3)}  ${relativeTime(r.lastWriteAt)}`,
+            );
+          }
         }
       }
-      if (Array.isArray(agents.unregisteredMemoryAuthors) && agents.unregisteredMemoryAuthors.length > 0) {
+      if (agents.unregisteredMemoryAuthors === null) {
+        console.log("Unregistered memory owners: unavailable — memory scan did not complete");
+      } else if (Array.isArray(agents.unregisteredMemoryAuthors) && agents.unregisteredMemoryAuthors.length > 0) {
         const owners = agents.unregisteredMemoryAuthors.map(
           (r: any) => `${r.id} (${r.memoryCount} ${r.memoryCount === 1 ? "memory" : "memories"})`,
         );

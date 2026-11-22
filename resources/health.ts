@@ -209,6 +209,9 @@ export class HealthDetail extends Resource {
     // corpus is one space and still outstanding against getModelId().
     let mixedEmbeddingSpaces = false;
     let memoryScanOk = false;
+    // Set only when the Memory scan finished without throwing. A failed or
+    // partial scan leaves it false so derived lists are reported unavailable.
+    let memoryScanComplete = false;
     let memoryModelCounts: Record<string, number> = {};
 
     // flair#1326: same search-ready signal as public /Health. HealthDetail
@@ -341,6 +344,7 @@ export class HealthDetail extends Resource {
       memoryScanOk = true;
       memoryModelCounts = modelCounts;
       if (distinctSpaces.size > 1) mixedEmbeddingSpaces = true;
+      memoryScanComplete = true;
     } catch { stats.memories = null; }
 
     // ── Agent stats ──
@@ -363,11 +367,11 @@ export class HealthDetail extends Resource {
       const blank = (id: string): AgentRow => ({
         id, memoryCount: 0, hashFallback: 0, writes24h: 0, lastWriteAt: null, usageCount: 0,
       });
-      // The count, the names and the table all come from the Agent records,
-      // so the admin total, names and row set describe the same agents. A
-      // Memory row whose author has no Agent record (the operator's
-      // `skill:using-flair` seed) is kept in a separate list, never added to
-      // `perAgent` as if it were an agent (flair#3051).
+      // The count, the names and the table all come from one map keyed by
+      // Agent id, so the admin total, names and row set describe the same
+      // agents. A Memory row whose author has no Agent record (the
+      // operator's `skill:using-flair` seed) is kept in a separate list,
+      // never added to `perAgent` as if it were an agent (flair#3051).
       const perAgentMap = new Map<string, AgentRow>();
       for (const a of agents) {
         if (a.id) perAgentMap.set(a.id, blank(a.id));
@@ -391,6 +395,7 @@ export class HealthDetail extends Resource {
         if (known) perAgentMap.set(m.agentId, row);
         else unregisteredMap.set(m.agentId, row);
       }
+      const agentIds = Array.from(perAgentMap.keys());
       const perAgentFull = Array.from(perAgentMap.values()).sort((a, b) => b.memoryCount - a.memoryCount);
       const perAgent = isAdmin
         ? perAgentFull
@@ -399,12 +404,16 @@ export class HealthDetail extends Resource {
         .sort((a, b) => b.memoryCount - a.memoryCount)
         .map((r) => ({ id: r.id, memoryCount: r.memoryCount }));
       stats.agents = {
-        count: agents.length,
-        names: isAdmin ? agents.map((a: any) => a.id).filter(Boolean) : undefined,
+        count: perAgentMap.size,
+        names: isAdmin ? agentIds : undefined,
         perAgent,
         // Non-admins keep the existing Agent-record exposure and never
-        // receive the unregistered author list.
-        unregisteredMemoryAuthors: isAdmin ? unregisteredMemoryAuthors : undefined,
+        // receive the unregistered author list. An admin gets the list only
+        // after a complete Memory scan; null means the scan did not finish,
+        // so the answer is unknown rather than empty or partial.
+        unregisteredMemoryAuthors: isAdmin
+          ? (memoryScanComplete ? unregisteredMemoryAuthors : null)
+          : undefined,
       };
     } catch { stats.agents = null; }
 

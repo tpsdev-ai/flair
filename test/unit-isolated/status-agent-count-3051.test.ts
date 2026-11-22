@@ -1,7 +1,9 @@
 /**
- * #3051: `flair status` reports an agent total, names and table from the SAME
- * Agent records, and shows memories whose author has no Agent record (the
- * operator's `skill:using-flair` seed) on its own labelled line.
+ * #3051: `flair status` and `flair status deep` report an agent total, names
+ * and table from one Agent-id map, and show memory authors without an Agent
+ * record (the operator's `skill:using-flair` seed) on a labelled line. With no
+ * Agent registered, an admin still gets that line; an incomplete Memory scan
+ * reports the list unavailable rather than empty or partial.
  *
  * These cases drive the REAL HealthDetail aggregation and the REAL status
  * action. Runtime I/O is mocked: no Harper, HOME files, network or service
@@ -13,6 +15,7 @@ const NOW = Date.parse("2026-11-22T12:00:00Z");
 const HOME = "/fixture/flair-3051";
 let agentRows: Array<Record<string, unknown>> = [];
 let memoryRows: Array<Record<string, unknown>> = [];
+let memoryScanFailure: "before" | "after" | null = null;
 let authVerdict: Record<string, unknown> = { kind: "internal" };
 const originalTransaction = (globalThis as any).transaction;
 
@@ -37,7 +40,11 @@ mock.module("harper", () => ({
   Resource: class {},
   databases: { flair: {
     Memory: {
-      search: async function* () { yield* memoryRows; },
+      search: async function* () {
+        if (memoryScanFailure === "before") throw new Error("fixture memory scan failed");
+        yield* memoryRows;
+        if (memoryScanFailure === "after") throw new Error("fixture memory scan failed");
+      },
     },
     Agent: {
       search: async function* () { yield* agentRows; },
@@ -111,6 +118,7 @@ beforeEach(() => {
   memoryRows = [
     { id: "skill:using-flair", agentId: "operator-seed", createdAt: new Date(NOW - 1000).toISOString(), embeddingModel: "fixture-model" },
   ];
+  memoryScanFailure = null;
   authVerdict = { kind: "internal" };
   setSystemTime(NOW);
   spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network access"));
@@ -205,4 +213,76 @@ test("a non-admin caller sees no seed line and no other zero-memory agent", asyn
   expect(output).not.toContain("agent-b");
   expect(output).not.toContain("operator-seed");
   expect(output).not.toContain("Unregistered memory owners");
+});
+
+test("no Agent registered: plain status still renders the seed author line", async () => {
+  agentRows = [];
+  const detail: any = await new HealthDetail().get();
+
+  expect(detail.agents.count).toBe(0);
+  expect(detail.agents.names).toEqual([]);
+  expect(detail.agents.perAgent).toEqual([]);
+  expect(detail.agents.unregisteredMemoryAuthors).toEqual([{ id: "operator-seed", memoryCount: 1 }]);
+
+  const output = await statusOutput(detail, []);
+  expect(output).toContain("Unregistered memory owners");
+  expect(output).toContain("operator-seed (1 memory)");
+  expect(output).not.toMatch(/operator-seed\s+1\b/);
+});
+
+test("no Agent registered: deep status still renders the seed author line", async () => {
+  agentRows = [];
+  const detail: any = await new HealthDetail().get();
+
+  expect(detail.agents.count).toBe(0);
+
+  const output = await statusOutput(detail, ["deep"]);
+  expect(output).toContain("Unregistered memory owners");
+  expect(output).toContain("operator-seed (1 memory)");
+  expect(output).not.toMatch(/operator-seed\s+1\b/);
+});
+
+test("deep status prints the labelled seed line and no seed agent row", async () => {
+  const detail: any = await new HealthDetail().get();
+
+  expect(detail.agents.unregisteredMemoryAuthors).toEqual([{ id: "operator-seed", memoryCount: 1 }]);
+
+  const output = await statusOutput(detail, ["deep"]);
+  expect(output).toContain("Names:        agent-a");
+  expect(output).toContain("Unregistered memory owners");
+  expect(output).toContain("operator-seed (1 memory)");
+  expect(output).not.toMatch(/operator-seed\s+1\b/);
+});
+
+test("an incomplete Memory scan reports the author list unavailable, never empty or partial", async () => {
+  agentRows = [{ id: "agent-a" }];
+
+  memoryScanFailure = "before";
+  const failedEarly: any = await new HealthDetail().get();
+  expect(failedEarly.memories).toBeNull();
+  expect(failedEarly.agents.unregisteredMemoryAuthors).toBeNull();
+  const earlyOutput = await statusOutput(failedEarly, []);
+  expect(earlyOutput).toContain("Unregistered memory owners");
+  expect(earlyOutput).toContain("unavailable");
+
+  memoryScanFailure = "after";
+  const failedLate: any = await new HealthDetail().get();
+  expect(failedLate.memories).toBeNull();
+  expect(failedLate.agents.unregisteredMemoryAuthors).toBeNull();
+  const lateOutput = await statusOutput(failedLate, []);
+  expect(lateOutput).toContain("Unregistered memory owners");
+  expect(lateOutput).toContain("unavailable");
+  expect(lateOutput).not.toContain("operator-seed");
+});
+
+test("duplicate-id and missing-id Agent rows: count, names and perAgent are one set", async () => {
+  agentRows = [{ id: "agent-a" }, { id: "agent-a" }, {}];
+  memoryRows = [];
+  const detail: any = await new HealthDetail().get();
+
+  expect(detail.agents.count).toBe(1);
+  expect(detail.agents.names).toEqual(["agent-a"]);
+  expect(detail.agents.perAgent.map((r: any) => r.id)).toEqual(["agent-a"]);
+  expect(detail.agents.count).toBe(detail.agents.names.length);
+  expect(detail.agents.count).toBe(detail.agents.perAgent.length);
 });
