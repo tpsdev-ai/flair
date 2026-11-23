@@ -7,19 +7,23 @@ import {
   SEED_ASSIGNMENT_ID,
   SEED_REQUEST_TIMEOUT_MS,
   SEED_SKILL_ID,
+  SEED_SKILL_WRITE_RETRY_BACKOFF_MS,
   SEED_SKILL_WRITE_TIMEOUT_MS,
   seedAssignmentProblems,
   seedRowProblems,
   skillSeedRestIo,
   type SeedAssignment,
+  type SeedClock,
   type SeedCurrent,
   type SeedRead,
   type SeedRowShape,
+  type SeedWrite,
   type SkillSeedIo,
   type SkillSeedRestOptions,
 } from "../../src/lib/skill-seed.js";
 import { USING_FLAIR_SKILL_CONTENT, usingFlairSkillHash } from "../../src/lib/using-flair-skill.js";
 import { SEED_SKILL_ROW_ID } from "../../resources/seed-ids.js";
+import { memoryProviderTimeoutResponse, writeOutcomeUnknownResponse } from "../../resources/memory-write-lock.js";
 
 const CURRENT = "the current shipped text";
 const CURRENT_HASH = usingFlairSkillHash(CURRENT);
@@ -47,6 +51,8 @@ const seedAssignment = (extra: Partial<SeedAssignment> = {}): SeedAssignment => 
 
 interface Fake extends SkillSeedIo {
   calls: { putRow: number; putAssignment: number };
+  /** The `timeoutMs` each skill-row write was given. */
+  rowBudgets: Array<number | undefined>;
 }
 
 /**
@@ -60,29 +66,32 @@ function fakeIo(opts: {
   row: SeedRead<SeedRowShape>;
   assignment?: SeedRead<SeedAssignment>;
   operatorAgent?: SeedRead<unknown>;
-  putRow?: () => { ok: boolean; detail?: string; rowAfter?: SeedRead<SeedRowShape> };
-  putAssignment?: () => { ok: boolean; detail?: string; assignmentAfter?: SeedRead<SeedAssignment> };
+  putRow?: () => SeedWrite & { rowAfter?: SeedRead<SeedRowShape> };
+  putAssignment?: () => SeedWrite & { assignmentAfter?: SeedRead<SeedAssignment> };
 }): Fake {
   const calls = { putRow: 0, putAssignment: 0 };
+  const rowBudgets: Array<number | undefined> = [];
   let row: SeedRead<SeedRowShape> = opts.row;
   let assignment: SeedRead<SeedAssignment> = opts.assignment ?? { ok: true, row: seedAssignment() };
   const io: Fake = {
     calls,
+    rowBudgets,
     operator: OPERATOR,
     readRow: async () => row,
     readAssignment: async () => assignment,
     readOperatorAgent: async () => opts.operatorAgent ?? { ok: true, row: null },
-    putRow: async () => {
+    putRow: async (timeoutMs?: number) => {
       calls.putRow += 1;
+      rowBudgets.push(timeoutMs);
       const outcome = opts.putRow?.() ?? { ok: true };
       if (outcome.ok) row = outcome.rowAfter ?? { ok: true, row: liveRow(CURRENT) };
-      return outcome.ok ? { ok: true } : { ok: false, detail: outcome.detail ?? "HTTP 500" };
+      return outcome.ok ? { ok: true } : { ok: false, detail: outcome.detail ?? "HTTP 500", status: outcome.status, code: outcome.code };
     },
     putAssignment: async () => {
       calls.putAssignment += 1;
       const outcome = opts.putAssignment?.() ?? { ok: true };
       if (outcome.ok) assignment = outcome.assignmentAfter ?? { ok: true, row: seedAssignment() };
-      return outcome.ok ? { ok: true } : { ok: false, detail: outcome.detail ?? "HTTP 500" };
+      return outcome.ok ? { ok: true } : { ok: false, detail: outcome.detail ?? "HTTP 500", status: outcome.status, code: outcome.code };
     },
   };
   return io;
@@ -344,6 +353,156 @@ describe("runSkillSeed — rows outside the seed's required shape are refused", 
   });
 });
 
+// ─── A skill-row write refused with 503 memory_provider_timeout ──────────────
+// The server states nothing was written, so the seed runs its pass again while
+// the skill-write bound leaves time. The clock is a fake, so no test waits.
+
+const PROVIDER_TIMEOUT: SeedWrite = {
+  ok: false,
+  detail: 'HTTP 503: {"error":"memory_provider_timeout"}',
+  status: 503,
+  code: "memory_provider_timeout",
+};
+
+/** How long the instance takes to refuse one write in these tests. */
+const REFUSAL_AFTER_MS = 28_000;
+
+/** A fake clock: `pause` records each wait and moves time forward by it. */
+function fakeClock(): SeedClock & { t: number; waits: number[] } {
+  const clock = {
+    t: 0,
+    waits: [] as number[],
+    now: () => clock.t,
+    pause: async (ms: number) => {
+      clock.waits.push(ms);
+      clock.t += ms;
+    },
+  };
+  return clock;
+}
+
+describe("runSkillSeed — a skill-row write refused with 503 memory_provider_timeout", () => {
+  it("retries after one timeout, writes the row once, then writes the assignment", async () => {
+    const clock = fakeClock();
+    let attempts = 0;
+    let written = 0;
+    const io = fakeIo({
+      row: { ok: true, row: null },
+      assignment: { ok: true, row: null },
+      putRow: () => {
+        if (++attempts === 1) {
+          clock.t += REFUSAL_AFTER_MS;
+          return PROVIDER_TIMEOUT;
+        }
+        written++;
+        return { ok: true };
+      },
+    });
+    const out = await runSkillSeed(io, current, clock);
+    expect(out).toMatchObject({ kind: "ok", action: "create", skillId: SEED_SKILL_ID, assignmentId: SEED_ASSIGNMENT_ID });
+    expect(written).toBe(1);
+    expect(io.calls).toEqual({ putRow: 2, putAssignment: 1 });
+    expect(clock.waits).toEqual([SEED_SKILL_WRITE_RETRY_BACKOFF_MS]);
+    // The second attempt waits at most what is left of the bound.
+    expect(io.rowBudgets).toEqual([
+      SEED_SKILL_WRITE_TIMEOUT_MS,
+      SEED_SKILL_WRITE_TIMEOUT_MS - REFUSAL_AFTER_MS - SEED_SKILL_WRITE_RETRY_BACKOFF_MS,
+    ]);
+  }, 5_000);
+
+  it("retries until the 180 s skill-write bound leaves no time, then refuses with the attempts and the time spent", async () => {
+    // The stub stops refusing after 50 calls, so a retry loop without a bound
+    // ends in success instead of hanging.
+    const clock = fakeClock();
+    let attempts = 0;
+    const io = fakeIo({
+      row: { ok: true, row: null },
+      assignment: { ok: true, row: null },
+      putRow: () => {
+        if (++attempts > 50) return { ok: true };
+        clock.t += REFUSAL_AFTER_MS;
+        return PROVIDER_TIMEOUT;
+      },
+    });
+    const out = await runSkillSeed(io, current, clock);
+    expect(SEED_SKILL_WRITE_TIMEOUT_MS).toBe(180_000);
+    expect(SEED_SKILL_WRITE_RETRY_BACKOFF_MS).toBe(2_000);
+    // 28 s per refusal plus a 2 s wait: the sixth refusal comes at 178 s, and
+    // another 2 s wait would reach the bound.
+    expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
+    const message = (out as { message: string }).message;
+    expect(message).toContain("memory_provider_timeout on 6 attempts over 178 s");
+    expect(message).toContain("the 180 s bound on that write leaves no time for another");
+    expect(message).toContain("the org assignment was not written. Re-run 'flair init'");
+    expect(io.calls).toEqual({ putRow: 6, putAssignment: 0 });
+    expect(io.rowBudgets).toEqual([180_000, 150_000, 120_000, 90_000, 60_000, 30_000]);
+    expect(clock.waits).toEqual([2_000, 2_000, 2_000, 2_000, 2_000]);
+    expect(clock.t).toBe(178_000);
+  }, 5_000);
+
+  const otherFailures: Array<[string, SeedWrite]> = [
+    ["HTTP 500 with the timeout code", { ok: false, detail: "HTTP 500", status: 500, code: "memory_provider_timeout" }],
+    ["HTTP 503 memory_busy", { ok: false, detail: "HTTP 503", status: 503, code: "memory_busy" }],
+    ["HTTP 503 write_outcome_unknown", { ok: false, detail: "HTTP 503", status: 503, code: "write_outcome_unknown" }],
+    ["HTTP 503 without a code", { ok: false, detail: "HTTP 503", status: 503 }],
+    ["a transport failure", { ok: false, detail: "the request failed: connection refused" }],
+  ];
+  for (const [label, failure] of otherFailures) {
+    it(`refuses ${label} after one attempt`, async () => {
+      const clock = fakeClock();
+      const io = fakeIo({ row: { ok: true, row: null }, putRow: () => failure });
+      const out = await runSkillSeed(io, current, clock);
+      expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
+      expect((out as { message: string }).message).not.toContain("attempts");
+      expect(io.calls).toEqual({ putRow: 1, putAssignment: 0 });
+      expect(clock.waits).toEqual([]);
+    }, 5_000);
+  }
+
+  it("does not retry the assignment write on the timeout code", async () => {
+    const clock = fakeClock();
+    const io = fakeIo({ row: { ok: true, row: liveRow(CURRENT) }, assignment: { ok: true, row: null }, putAssignment: () => PROVIDER_TIMEOUT });
+    expect(await runSkillSeed(io, current, clock)).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
+    expect(io.calls).toEqual({ putRow: 0, putAssignment: 1 });
+    expect(clock.waits).toEqual([]);
+  }, 5_000);
+
+  it("re-reads before the retry: a row another principal holds by then is refused, not overwritten", async () => {
+    const clock = fakeClock();
+    const io = fakeIo({ row: { ok: true, row: null }, assignment: { ok: true, row: null }, putRow: () => PROVIDER_TIMEOUT });
+    const pause = clock.pause;
+    clock.pause = async (ms) => {
+      await pause(ms);
+      io.readRow = async () => ({ ok: true, row: liveRow(CURRENT, { agentId: "agent-a" }) });
+    };
+    const out = await runSkillSeed(io, current, clock);
+    expect(out).toMatchObject({ kind: "refused", error: "skill_seed_row_foreign_owner" });
+    expect(io.calls).toEqual({ putRow: 1, putAssignment: 0 });
+  }, 5_000);
+
+  it("refuses without another write when the bound passes while a retried pass re-reads", async () => {
+    const clock = fakeClock();
+    const io = fakeIo({
+      row: { ok: true, row: null },
+      assignment: { ok: true, row: null },
+      putRow: () => {
+        clock.t += REFUSAL_AFTER_MS;
+        return PROVIDER_TIMEOUT;
+      },
+    });
+    let reads = 0;
+    const readRow = io.readRow;
+    io.readRow = async () => {
+      if (++reads === 2) clock.t += SEED_SKILL_WRITE_TIMEOUT_MS;
+      return readRow();
+    };
+    const out = await runSkillSeed(io, current, clock);
+    expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
+    expect((out as { message: string }).message).toContain("passed while the seed re-read the instance");
+    expect(io.calls).toEqual({ putRow: 1, putAssignment: 0 });
+  }, 5_000);
+});
+
 // ─── The REST seam against a slow instance ───────────────────────────────────
 // The instance embeds a skill row as it writes it, and the first embed waits
 // for the embedding model to become ready. This may require a download after
@@ -474,4 +633,65 @@ describe("skillSeedRestIo — a slow first skill-row write", () => {
     expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
     expect((out as { message: string }).message).toContain(`"${SEED_ASSIGNMENT_ID}" org assignment failed (no answer within`);
   });
+});
+
+describe("skillSeedRestIo — the instance's 503 refusals of the skill-row write", () => {
+  /** A `slowInstance` whose next Memory PUTs answer `refusals` in order, after `delayMs`, writing nothing. */
+  function refusingInstance(refusals: Array<() => Response>, delayMs = 0): SlowInstance {
+    const instance = slowInstance();
+    const inner = instance.fetch;
+    instance.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const isMemoryPut = (init?.method ?? "GET") === "PUT" && new URL(String(input)).pathname.startsWith("/Memory/");
+      const refusal = isMemoryPut ? refusals.shift() : undefined;
+      if (!refusal) return inner(input, init);
+      instance.puts.push(`Memory/${SEED_SKILL_ID}`);
+      if (delayMs > 0) await Bun.sleep(delayMs);
+      return refusal();
+    }) as typeof fetch;
+    return instance;
+  }
+
+  it("retries the server's memory_provider_timeout refusal, then seeds both rows", async () => {
+    const instance = refusingInstance([memoryProviderTimeoutResponse]);
+    const clock = fakeClock();
+    const out = await runSkillSeed(skillSeedRestIo(restOptions(instance), current), current, clock);
+    expect(out).toMatchObject({ kind: "ok", action: "create", assignmentId: SEED_ASSIGNMENT_ID });
+    expect(instance.puts).toEqual([`Memory/${SEED_SKILL_ID}`, `Memory/${SEED_SKILL_ID}`, `OrgSkillAssignment/${SEED_ASSIGNMENT_ID}`]);
+    expect(instance.rows.get(`Memory/${SEED_SKILL_ID}`)).toMatchObject({ content: CURRENT, agentId: "admin" });
+    expect(clock.waits).toEqual([SEED_SKILL_WRITE_RETRY_BACKOFF_MS]);
+  }, 5_000);
+
+  it("refuses once the io's own skill-write bound leaves no time for another attempt", async () => {
+    const instance = refusingInstance(Array.from({ length: 50 }, () => memoryProviderTimeoutResponse));
+    const clock = fakeClock();
+    const io = skillSeedRestIo(restOptions(instance, { skillWriteTimeoutMs: 10_000 }), current);
+    const out = await runSkillSeed(io, current, clock);
+    // The refusals take no fake time: attempts at 0, 2, 4, 6 and 8 s, and a
+    // 2 s wait after the fifth would reach the 10 s bound.
+    expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
+    expect((out as { message: string }).message).toContain("on 5 attempts over 8 s, and the 10 s bound");
+    expect(instance.puts).toEqual(Array.from({ length: 5 }, () => `Memory/${SEED_SKILL_ID}`));
+  }, 5_000);
+
+  it("refuses the server's write_outcome_unknown refusal after one PUT", async () => {
+    const instance = refusingInstance([writeOutcomeUnknownResponse]);
+    const clock = fakeClock();
+    const out = await runSkillSeed(skillSeedRestIo(restOptions(instance), current), current, clock);
+    expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
+    expect(instance.puts).toEqual([`Memory/${SEED_SKILL_ID}`]);
+    expect(clock.waits).toEqual([]);
+  }, 5_000);
+
+  it("says what it is waiting on once, across two slow attempts", async () => {
+    const instance = refusingInstance([memoryProviderTimeoutResponse], 80);
+    instance.delays.memoryPut = 80;
+    const notices: string[] = [];
+    const io = skillSeedRestIo(
+      restOptions(instance, { skillWriteNoticeMs: 20, notify: (line) => notices.push(line) }),
+      current,
+    );
+    expect(await runSkillSeed(io, current, fakeClock())).toMatchObject({ kind: "ok", action: "create" });
+    expect(instance.puts).toEqual([`Memory/${SEED_SKILL_ID}`, `Memory/${SEED_SKILL_ID}`, `OrgSkillAssignment/${SEED_ASSIGNMENT_ID}`]);
+    expect(notices).toHaveLength(1);
+  }, 5_000);
 });

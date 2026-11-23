@@ -69,7 +69,8 @@ export const SEED_ASSIGNMENT_PRIORITY = "standard";
 export const SEED_REQUEST_TIMEOUT_MS = 15_000;
 
 /**
- * The bound on the skill row's write. The instance embeds a skill row as it
+ * The bound on the skill row's write, counted from its first attempt (see
+ * runSkillSeed for the retries it bounds). The instance embeds a skill row as it
  * writes it (`Memory.put` awaits `getEmbedding`), and the first embed awaits
  * the embedding model's readiness: the model may need to download (~80 MB) or
  * load in the background, and Harper can report healthy before that ends. So
@@ -82,6 +83,17 @@ export const SEED_SKILL_WRITE_TIMEOUT_MS = 180_000;
 
 /** How long the skill row's write runs before init says what it is waiting on. */
 export const SEED_SKILL_WRITE_NOTICE_MS = 5_000;
+
+/**
+ * The wait before the seed tries the skill row's write again after the
+ * instance refused it with 503 `memory_provider_timeout`, which states nothing
+ * was written. The seed tries again only while {@link SEED_SKILL_WRITE_TIMEOUT_MS},
+ * counted from the first attempt, leaves time for this wait.
+ */
+export const SEED_SKILL_WRITE_RETRY_BACKOFF_MS = 2_000;
+
+/** The server's error code for an embedding call that outlasted its bound. */
+const MEMORY_PROVIDER_TIMEOUT = "memory_provider_timeout";
 
 export type SeedAction = "create" | "unchanged" | "replace" | "keep";
 
@@ -109,8 +121,11 @@ export interface SeedAssignment {
 /** A read result. `ok:false` means the read FAILED — never "the row is absent". */
 export type SeedRead<T> = { ok: boolean; row?: T | null; detail?: string };
 
-/** A write result. `ok:false` carries what failed. */
-export type SeedWrite = { ok: boolean; detail?: string };
+/**
+ * A write result. `ok:false` carries what failed; an HTTP refusal also carries
+ * its status and the body's `error` code, when it has one.
+ */
+export type SeedWrite = { ok: boolean; detail?: string; status?: number; code?: string };
 
 export interface SkillSeedIo {
   /** The operator principal the writes run as: the Basic administrator's username. */
@@ -119,9 +134,23 @@ export interface SkillSeedIo {
   readAssignment(): Promise<SeedRead<SeedAssignment>>;
   /** The Agent record whose id equals `operator`; `row: null` when there is none. */
   readOperatorAgent(): Promise<SeedRead<unknown>>;
-  putRow(): Promise<SeedWrite>;
+  /** Write the skill row, waiting at most `timeoutMs` (default: the io's own bound). */
+  putRow(timeoutMs?: number): Promise<SeedWrite>;
   putAssignment(): Promise<SeedWrite>;
+  /** The bound on the skill row's write, across its attempts; default {@link SEED_SKILL_WRITE_TIMEOUT_MS}. */
+  skillWriteTimeoutMs?: number;
 }
+
+/** The clock the seed's retries read and wait on. Overridable for tests. */
+export interface SeedClock {
+  now(): number;
+  pause(ms: number): Promise<void>;
+}
+
+const REAL_CLOCK: SeedClock = {
+  now: () => Date.now(),
+  pause: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
 
 export type SkillSeedOutcome =
   | { kind: "ok"; action: SeedAction; skillId: string; assignmentId: string; message: string }
@@ -210,8 +239,46 @@ const ASSIGNMENT_REMEDY =
   `Inspect it (GET ${ASSIGNMENT_PATH}), correct or delete it with the operator's Basic credentials, ` +
   "then re-run 'flair init'";
 
-/** Apply the seed rule over `io`. Preflight reads and checks pass before either write. */
-export async function runSkillSeed(io: SkillSeedIo, current: SeedCurrent): Promise<SkillSeedOutcome> {
+/**
+ * Apply the seed rule over `io`. Preflight reads and checks pass before either
+ * write. When the instance refuses the skill row's write with 503
+ * `memory_provider_timeout`, the seed waits {@link SEED_SKILL_WRITE_RETRY_BACKOFF_MS}
+ * and runs the whole pass again, reads and checks included, while the io's
+ * skill-write bound, counted from the first attempt, leaves time for that wait.
+ * Each attempt's write waits at most the time left in that bound.
+ */
+export async function runSkillSeed(
+  io: SkillSeedIo,
+  current: SeedCurrent,
+  clock: SeedClock = REAL_CLOCK,
+): Promise<SkillSeedOutcome> {
+  const boundMs = io.skillWriteTimeoutMs ?? SEED_SKILL_WRITE_TIMEOUT_MS;
+  let firstWriteAt: number | undefined;
+  const rowWriteBudget = (): number => {
+    firstWriteAt ??= clock.now();
+    return firstWriteAt + boundMs - clock.now();
+  };
+  for (let attempt = 1; ; attempt++) {
+    const outcome = await seedPass(io, current, rowWriteBudget);
+    if (outcome.kind !== "provider_timeout") return outcome;
+    const elapsedMs = clock.now() - (firstWriteAt ?? clock.now());
+    if (elapsedMs + SEED_SKILL_WRITE_RETRY_BACKOFF_MS >= boundMs) {
+      return refused(
+        "skill_seed_write_failed",
+        `writing the "${SEED_SKILL_ID}" skill row was refused with 503 memory_provider_timeout on ${attempt} ` +
+          `attempts over ${seconds(elapsedMs)}, and the ${seconds(boundMs)} bound on that write leaves no time for ` +
+          `another (last: ${outcome.detail}); the org assignment was not written. Re-run 'flair init'`,
+      );
+    }
+    await clock.pause(SEED_SKILL_WRITE_RETRY_BACKOFF_MS);
+  }
+}
+
+async function seedPass(
+  io: SkillSeedIo,
+  current: SeedCurrent,
+  rowWriteBudget: () => number,
+): Promise<SkillSeedOutcome | { kind: "provider_timeout"; detail: string }> {
   const rowRead = await io.readRow();
   if (!rowRead.ok) {
     return refused(
@@ -284,8 +351,20 @@ export async function runSkillSeed(io: SkillSeedIo, current: SeedCurrent): Promi
 
   const action = decideSkillSeed(storedContent, current.content, current.hashes);
   if (action === "create" || action === "replace") {
-    const write = await io.putRow();
+    // Only a retried pass can find no time left: its reads ran after the wait.
+    const budgetMs = rowWriteBudget();
+    if (budgetMs <= 0) {
+      return refused(
+        "skill_seed_write_failed",
+        `the bound on writing the "${SEED_SKILL_ID}" skill row passed while the seed re-read the instance after a 503 ` +
+          "memory_provider_timeout; the org assignment was not written. Re-run 'flair init'",
+      );
+    }
+    const write = await io.putRow(budgetMs);
     if (!write.ok) {
+      if (write.status === 503 && write.code === MEMORY_PROVIDER_TIMEOUT) {
+        return { kind: "provider_timeout", detail: write.detail ?? "no detail" };
+      }
       return refused(
         "skill_seed_write_failed",
         `writing the "${SEED_SKILL_ID}" skill row failed (${write.detail ?? "no detail"}); the org assignment was not ` +
@@ -380,6 +459,16 @@ function isTimeout(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { name?: unknown }).name === "TimeoutError";
 }
 
+/** The string `error` field of a JSON object body, or undefined. */
+function errorCodeOf(text: string): string | undefined {
+  try {
+    const body = JSON.parse(text);
+    return body && typeof body === "object" && typeof body.error === "string" ? body.error : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function seconds(ms: number): string {
   return `${Math.round(ms / 100) / 10} s`;
 }
@@ -457,7 +546,12 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      return { ok: false, detail: `HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}` };
+      return {
+        ok: false,
+        detail: `HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`,
+        status: res.status,
+        code: errorCodeOf(text),
+      };
     }
     return { ok: true };
   };
@@ -468,8 +562,11 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
   // instance, which may still land it. The id is fixed, so a re-run updates
   // that row rather than adding one; a re-run started while the first write is
   // still pending can send a second PUT to the same id.
-  const putRow = async (): Promise<SeedWrite> => {
+  let noticed = false;
+  const putRow = async (timeoutMs: number = skillWriteMs): Promise<SeedWrite> => {
     const notice = setTimeout(() => {
+      if (noticed) return;
+      noticed = true;
       opts.notify?.(
         `using-flair skill: still writing "${SEED_SKILL_ID}" — the instance embeds a skill row as it writes it, ` +
           `and it may need to download (~80 MB) or load the embedding model first; waiting up to ${seconds(skillWriteMs)}`,
@@ -477,7 +574,7 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
     }, skillNoticeMs);
     (notice as unknown as { unref?: () => void }).unref?.();
     try {
-      return await putById("Memory", SEED_SKILL_ID, seedSkillBody(opts.user, current), skillWriteMs, (ms) =>
+      return await putById("Memory", SEED_SKILL_ID, seedSkillBody(opts.user, current), timeoutMs, (ms) =>
         `no answer within ${seconds(ms)} — the instance embeds a skill row as it writes it, so this write also ` +
         `waits for its embedding model, which may need to download or load; 'flair doctor' reports embeddings. The write may ` +
         `still land; the id is fixed, so a re-run updates that row rather than adding one`,
@@ -493,6 +590,7 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
     readAssignment: () => readById<SeedAssignment>("OrgSkillAssignment", SEED_ASSIGNMENT_ID),
     readOperatorAgent: () => readById<unknown>("Agent", opts.user),
     putRow,
+    skillWriteTimeoutMs: skillWriteMs,
     putAssignment: () =>
       putById(
         "OrgSkillAssignment",
