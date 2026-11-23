@@ -1,12 +1,12 @@
 /**
  * The embedding-model files a running process holds. On Linux, the files in
  * its memory map (/proc/<pid>/maps; harper-fabric-embeddings maps the model it
- * loads). On macOS, its open files (lsof), which do not show a mapping.
+ * loads). On macOS, its open files (lsof).
  */
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-/** The embedding model the test lanes pre-fetch (scripts/ci/fetch-model.sh). */
+/** The embedding model's file name. */
 export const EMBEDDING_MODEL_FILE = "nomic-embed-text-v1.5.Q4_K_M.gguf";
 
 export function mappedModelFiles(pid: number): string[] {

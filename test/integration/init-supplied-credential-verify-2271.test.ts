@@ -8,7 +8,7 @@ import { HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { EMBEDDING_MODEL_FILE, mappedModelFiles } from "../helpers/mapped-model-files.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
-/** The model the CI lanes pre-fetch; else <repo>/models (the harper-lifecycle default). */
+/** The outer FLAIR_MODELS_DIR, else <repo>/models. */
 const MODELS_DIR = process.env.FLAIR_MODELS_DIR ?? join(REPO_ROOT, "models");
 const CLI = join(REPO_ROOT, "dist", "cli.js");
 const SKIP_EXTRAS = [
@@ -171,8 +171,8 @@ describe.skipIf(process.platform !== "linux")("flair#2271 — supplied credentia
     symlinkSync(dataDir, join(home, ".flair", "data"));
     const r = await runInit(["--data-dir", dataDir, "--port", String(httpPort), "--ops-port", String(opsPort), ...SKIP_EXTRAS]);
     expect(r.code, r.out).toBe(0);
-    // The init child resolved the pre-fetched model: its Harper has that file
-    // mapped (Linux) or open (macOS).
+    // The Harper this init started has the model under MODELS_DIR mapped (Linux)
+    // or open (macOS).
     expect(mappedModelFiles(harperPid())).toEqual([realpathSync(join(MODELS_DIR, EMBEDDING_MODEL_FILE))]);
     expect(existsSync(adminPassPath)).toBe(true);
     installedPassword = readFileSync(adminPassPath, "utf8").trim();

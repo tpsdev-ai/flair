@@ -357,7 +357,7 @@ describe("runSkillSeed — rows outside the seed's required shape are refused", 
 
 // ─── A skill-row write refused with 503 memory_provider_timeout ──────────────
 // The server states nothing was written, so the seed runs its pass again while
-// the skill-write bound leaves time. The clock is a fake, so no test waits.
+// the skill-write bound leaves time. The clock is a fake.
 
 const PROVIDER_TIMEOUT: SeedWrite = {
   ok: false,

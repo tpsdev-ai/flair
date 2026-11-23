@@ -1,13 +1,11 @@
 /**
  * using-flair-seed-provider-retry.test.ts — the using-flair seed against a real
- * Harper whose embedding provider stalls on the first call for the skill row.
- *
- * The instance declares a short memory-write-lock provider bound and a
- * test-only provider delay above that bound, both under the fault-injection
- * gate. A skill row embeds its trigger (flair#1542), and the delay matches only
- * the shipped trigger, so the seed's first PUT is refused
- * `503 memory_provider_timeout` with nothing written; the second call is not
- * delayed, and the seed writes the skill row and its org assignment.
+ * Harper with a test-only embedding provider delay above its memory-write-lock
+ * provider bound, both under the fault-injection gate. The delay matches the
+ * shipped trigger, which a skill row embeds (flair#1542). The test asserts that
+ * the seed's first PUT is refused `503 memory_provider_timeout`, that every PUT
+ * before the last is that refusal and the last succeeds, and that the skill row
+ * and its org assignment are committed.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
@@ -17,7 +15,7 @@ import { currentSeed, runSkillSeed, SEED_ASSIGNMENT_ID, SEED_SKILL_ID, skillSeed
 import { USING_FLAIR_SKILL_CONTENT, USING_FLAIR_SKILL_TRIGGER } from "../../src/lib/using-flair-skill.ts";
 
 const WARMUP_AGENT_ID = "agent-warmup";
-// A bound a warm embed meets on a loaded runner, and a delay well above it.
+// The provider bound, and a test-only delay above it.
 const PROVIDER_BOUND_MS = 2_000;
 const PROVIDER_DELAY_MS = 5_000;
 /** The shipped trigger, the text a skill row embeds. */
@@ -63,11 +61,9 @@ async function rowsById(h: HarperInstance, table: string, id: string): Promise<a
 }
 
 /**
- * Load the embedding model before the seed, so the short provider bound is not
- * spent on a first-call model load. A POST that names no id takes no per-id
- * write lock, so its embedding is not held to that bound and waits for the
- * model. Each attempt writes a row for another agent and reads back the id the
- * POST returned; the first row stored with a vector ends it.
+ * Before the seed, commit a row with a vector: each attempt POSTs a row for
+ * another agent without an id, reads back the id the POST returned, and ends
+ * when that row is stored with a vector.
  */
 async function warmEmbeddingModel(h: HarperInstance): Promise<void> {
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -134,8 +130,6 @@ describe("the using-flair seed retries a real provider-timeout refusal", () => {
     );
 
     expect(outcome).toMatchObject({ kind: "ok", action: "create", skillId: SEED_SKILL_ID, assignmentId: SEED_ASSIGNMENT_ID });
-    // The delay fires once; a retry slowed past the bound would be refused the
-    // same way, so every PUT before the last is the timeout refusal.
     expect(memoryPuts.length).toBeGreaterThanOrEqual(2);
     for (const put of memoryPuts.slice(0, -1)) expect(put).toEqual({ status: 503, error: "memory_provider_timeout" });
     const last = memoryPuts[memoryPuts.length - 1];
