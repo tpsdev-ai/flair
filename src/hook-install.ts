@@ -631,9 +631,8 @@ export function guardedPinSpan(command: string | null): string | null {
  *
  * NEVER adds a hook — a home with no Flair hook is a clean `skip`, not an
  * `add`: wiring a hook is `flair init` / `flair hook install`, an opt-in the
- * upgrade path must not make on the user's behalf. Only rewrites two command
- * forms: the installer's pinned `npx -y -p …` invocation and the pre-#1007 bare
- * unpinned form. A command in any other form (the older unpinned `-p` form
+ * upgrade path must not make on the user's behalf. Only rewrites the recognized
+ * pinned installer forms and the pre-#1007 bare form. A command in any other form (the older unpinned `-p` form
  * included) is left untouched. An edit that keeps a recognized form (for example a
  * changed agent id) is still matched and can be rewritten. Fail-closed on a malformed settings file and backs up before any
  * real write — the same Sherlock conditions installHook implements. Idempotent:

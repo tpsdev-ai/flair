@@ -49,7 +49,9 @@ function fixture(raw: string, check: (home: string, path: string) => void): void
 
 for (const [label, args] of forms) {
   const canonical = label === "basic";
-  test(`B1 ${canonical ? "wireCodex refreshes" : "wireCodex refuses"} ${label} and reports the real pin`, () => {
+  test(canonical
+    ? `B1 wireCodex refreshes ${label} and reports the real pin`
+    : `B1 pin readers report the real pin; wireCodex refuses the noncanonical ${label} form`, () => {
     const raw = config(args(old));
     fixture(raw, (home, path) => {
       expect(readClientMcpBlock("codex", home).present).toBe(true);

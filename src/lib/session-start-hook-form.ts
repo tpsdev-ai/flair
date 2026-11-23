@@ -1,6 +1,7 @@
 /**
  * Installer forms (flair#1834 PR-H), anchored so the full command must match. `<id>`, `<url>`
- * and `<ver>` are the only free variables; everything else — quoting, the
+ * and `<ver>` are the free variables, plus the Claude form's optional `FLAIR_ACTION_RECALL=1`;
+ * everything else — quoting, the
  * wrapper, `2>/dev/null`, ordering — is the shape Flair itself wrote.
  *
  * Literal regexes (no composed pattern): each form is a constant.
