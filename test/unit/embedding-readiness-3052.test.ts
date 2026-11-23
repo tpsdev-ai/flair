@@ -734,6 +734,28 @@ describe("each attempt's client bound is the time left, rounded up to a whole mi
     await expect(call).rejects.toThrow("embedding provider call failed: connection refused");
     expect(attempts).toBe(1);
   }, 5_000);
+
+  test("a non-timeout PUT error thrown at the deadline ends never-ready, not as a provider failure", async () => {
+    const clock = virtualClock();
+    let attempts = 0;
+    const error = await awaitEmbeddingReady({
+      label: "unit",
+      deadlineMs: 100,
+      now: clock.now,
+      sleep: clock.sleep,
+      log: () => {},
+      attempt: async () => {
+        attempts += 1;
+        clock.advance(100);
+        throw new TypeError("fetch failed: socket hang up");
+      },
+    }).then(() => null, (err: Error) => err);
+
+    expect(error?.message).toContain("never became ready");
+    expect(error?.message).toContain("socket hang up");
+    expect(error?.message).not.toContain("embedding provider call failed");
+    expect(attempts).toBe(1);
+  }, 5_000);
 });
 
 describe("warm-up cleanup is visible and bounded (flair#3052)", () => {
