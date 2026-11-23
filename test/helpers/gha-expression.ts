@@ -1,16 +1,16 @@
 /**
- * gha-expression.ts — evaluate the GitHub Actions expressions our workflows use,
- * so a workflow test can ask what a job condition, a matrix or an env binding
+ * gha-expression.ts — evaluate GitHub Actions expressions in tests, so a
+ * workflow test can ask what a job condition, a matrix or an env binding
  * resolves to for one event, instead of matching the expression's text.
  *
- * Covers what the CI workflows use: string ('' escapes a quote), number,
- * boolean and null literals; dotted and indexed property paths (an absent
- * property is null, as on GitHub); `!`, `==`, `!=`, `&&` and `||` (which return
- * an operand, as on GitHub); parentheses; and startsWith, endsWith, contains,
- * format, fromJSON, toJSON, always, success, failure and cancelled. The status
- * functions answer as if every needed job succeeded. Any other construct
- * throws, so a workflow that starts using one fails its test instead of being
- * evaluated wrongly.
+ * Supported: string ('' escapes a quote), number, boolean and null literals;
+ * dotted and indexed property paths (an absent property is null, as on
+ * GitHub); `!`, `==`, `!=`, `&&` and `||` (which return an operand, as on
+ * GitHub); parentheses; and startsWith, endsWith, contains, format, fromJSON,
+ * toJSON, always, success, failure and cancelled. The status functions read
+ * the `needs` results in the context: success() is true when no needed job
+ * has a result other than success, failure() when one failed. Anything else,
+ * hashFiles() included, throws when a test evaluates it.
  */
 
 export type Context = Record<string, unknown>;
@@ -89,11 +89,22 @@ const FUNCTIONS: Record<string, (...args: unknown[]) => unknown> = {
   format: (fmt, ...args) => toText(fmt).replace(/\{(\d+)\}/g, (_, n: string) => toText(args[Number(n)])),
   fromjson: (s) => JSON.parse(toText(s)),
   tojson: (v) => JSON.stringify(v, null, 2),
-  always: () => true,
-  success: () => true,
-  failure: () => false,
-  cancelled: () => false,
 };
+
+/** The status functions, which read the needed jobs' results from the context. */
+function needResults(ctx: Context): unknown[] {
+  const needs = ctx.needs;
+  if (needs === null || typeof needs !== "object") return [];
+  return Object.values(needs as Record<string, unknown>).map((need) =>
+    need !== null && typeof need === "object" ? (need as { result?: unknown }).result ?? "success" : "success");
+}
+const STATUS_FUNCTIONS: Record<string, (ctx: Context) => boolean> = {
+  always: () => true,
+  success: (ctx) => needResults(ctx).every((result) => result === "success"),
+  failure: (ctx) => needResults(ctx).some((result) => result === "failure"),
+  cancelled: (ctx) => needResults(ctx).some((result) => result === "cancelled"),
+};
+const STATUS_CALL = /\b(always|success|failure|cancelled)\s*\(/i;
 
 class Parser {
   private pos = 0;
@@ -152,6 +163,8 @@ class Parser {
     if (t.text === "false") return false;
     if (t.text === "null") return null;
     if (this.peek("(")) {
+      const status = STATUS_FUNCTIONS[t.text.toLowerCase()];
+      if (status) { this.pos++; this.expect(")"); return status(this.ctx); }
       const fn = FUNCTIONS[t.text.toLowerCase()];
       if (!fn) throw new Error(`unsupported function ${t.text}() in: ${this.src}`);
       this.pos++;
@@ -205,11 +218,18 @@ export function evaluateValue(value: unknown, ctx: Context): unknown {
   return value.replace(/\$\{\{([\s\S]*?)\}\}/g, (_, body: string) => toText(evaluate(body, ctx)));
 }
 
-/** A job or step `if:`. Absent means success(), which is true when every needed job succeeded. */
+/**
+ * A job or step `if:`. As on GitHub, a condition with no status function runs
+ * as `success() && (condition)`, and an absent one as `success()`: a job whose
+ * needed job did not succeed is skipped unless its condition calls always(),
+ * failure() or cancelled().
+ */
 export function evaluateIf(condition: unknown, ctx: Context): boolean {
-  if (condition === undefined) return true;
-  if (typeof condition === "boolean") return condition;
+  if (condition === undefined) return STATUS_FUNCTIONS.success(ctx);
+  if (typeof condition === "boolean") return STATUS_FUNCTIONS.success(ctx) && condition;
   const text = String(condition);
   const wrapped = /^\s*\$\{\{([\s\S]*)\}\}\s*$/.exec(text);
-  return truthy(evaluate(wrapped ? wrapped[1] : text, ctx));
+  const body = wrapped ? wrapped[1] : text;
+  const value = truthy(evaluate(body, ctx));
+  return STATUS_CALL.test(body) ? value : STATUS_FUNCTIONS.success(ctx) && value;
 }

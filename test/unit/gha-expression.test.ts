@@ -47,14 +47,21 @@ describe("functions", () => {
     expect(evaluate("fromJSON('[\"22\", \"24\", \"26\"]')", ctx)).toEqual(["22", "24", "26"]);
   });
 
-  test("status functions answer as if every needed job succeeded", () => {
+  test("status functions read the needed jobs' results", () => {
     expect(evaluate("always()", ctx)).toBe(true);
     expect(evaluate("success()", ctx)).toBe(true);
     expect(evaluate("failure()", ctx)).toBe(false);
     expect(evaluate("cancelled()", ctx)).toBe(false);
+    const failed = { ...ctx, needs: { build: { result: "success" }, lint: { result: "failure" } } };
+    expect(evaluate("always()", failed)).toBe(true);
+    expect(evaluate("success()", failed)).toBe(false);
+    expect(evaluate("failure()", failed)).toBe(true);
+    const cancelled = { ...ctx, needs: { build: { result: "cancelled" } } };
+    expect(evaluate("cancelled()", cancelled)).toBe(true);
+    expect(evaluate("success()", { ...ctx, needs: { build: { result: "skipped" } } })).toBe(false);
   });
 
-  test("any other construct throws instead of evaluating", () => {
+  test("an unsupported construct throws when evaluated", () => {
     expect(() => evaluate("hashFiles('bun.lock')", ctx)).toThrow("unsupported function hashFiles()");
     expect(() => evaluate("1 < 2", ctx)).toThrow("unsupported character '<'");
     expect(() => evaluate("'open", ctx)).toThrow("unterminated string");
@@ -74,5 +81,14 @@ describe("workflow values and conditions", () => {
     expect(evaluateIf("github.event_name == 'merge_group'", ctx)).toBe(true);
     expect(evaluateIf("${{ github.event_name == 'pull_request' }}", ctx)).toBe(false);
     expect(evaluateIf("startsWith(github.head_ref, 'release/v')", ctx)).toBe(false);
+  });
+
+  test("a condition without a status function is skipped when a needed job failed; always() still runs", () => {
+    const failed = { ...ctx, needs: { build: { result: "failure" } } };
+    expect(evaluateIf(undefined, failed)).toBe(false);
+    expect(evaluateIf("github.event_name == 'merge_group'", failed)).toBe(false);
+    expect(evaluateIf("always()", failed)).toBe(true);
+    expect(evaluateIf("${{ always() && github.event_name == 'merge_group' }}", failed)).toBe(true);
+    expect(evaluateIf("failure()", failed)).toBe(true);
   });
 });

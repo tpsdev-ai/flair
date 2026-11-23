@@ -12,9 +12,10 @@ name: CI
 # also completes into that trigger; the guard's `event == 'push'` skips it.
 
 # Explicit least privilege: an absent top-level block inherits the repository
-# default, which is not "no write". Every job here reads the repo; the jobs
-# that need more declare it locally: sast-codeql (security-events: write) and
-# docs-freshness (pull-requests: read, to read a queued PR's author).
+# default, which is not "no write". The top-level contents: read applies to
+# jobs without a permissions block of their own. Two jobs have one:
+# sast-codeql (security-events: write) and docs-freshness (contents: read and
+# pull-requests: read, to read a queued PR's author).
 permissions:
   contents: read
 
@@ -2316,9 +2317,13 @@ jobs:
     steps:
       # fetch-depth: 0 pulls full history + tags so the CHANGELOG check can count
       # feat/fix commits since the last v* tag. The other checks are file-only.
+      # persist-credentials: false keeps this job's token (which can read PRs)
+      # out of .git/config, where the later steps that run the PR's code could
+      # read it.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       # Merge queue: a merge_group event carries no pull_request payload, so
       # the PR author login the Renovate waiver (flair#2872) reads would be
       # empty and a Renovate fix(deps) PR that relies on the waiver would fail

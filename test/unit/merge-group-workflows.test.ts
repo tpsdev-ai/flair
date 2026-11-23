@@ -20,9 +20,9 @@ import { runGate, SEED_INTRODUCTION_BASE } from "../../scripts/ci/check-cli-spaw
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const WORKFLOWS = join(REPO_ROOT, ".github", "workflows");
 
-type Step = { id?: string; name?: string; if?: unknown; run?: string; uses?: string; env?: Record<string, string> };
-type Job = { name?: string; needs?: string | string[]; if?: unknown; permissions?: unknown; strategy?: { matrix?: Record<string, unknown> }; steps?: Step[] };
-type Workflow = { name: string; on: Record<string, unknown>; concurrency?: { group: string; "cancel-in-progress": unknown }; jobs: Record<string, Job> };
+type Step = { id?: string; name?: string; if?: unknown; run?: string; uses?: string; with?: Record<string, unknown>; env?: Record<string, string> };
+type Job = { name?: string; needs?: string | string[]; if?: unknown; env?: Record<string, string>; permissions?: unknown; strategy?: { matrix?: Record<string, unknown> }; steps?: Step[] };
+type Workflow = { name: string; on: Record<string, unknown>; env?: Record<string, string>; concurrency?: { group: string; "cancel-in-progress": unknown }; jobs: Record<string, Job> };
 
 const workflow = (file: string) => load(readFileSync(join(WORKFLOWS, file), "utf8")) as Workflow;
 
@@ -104,7 +104,7 @@ describe("merge_group trigger", () => {
 });
 
 describe("token permissions", () => {
-  test("test.yml reads the repo by default and only sast-codeql and docs-freshness declare their own permissions", () => {
+  test("test.yml grants contents: read at the top, and sast-codeql and docs-freshness are the jobs with their own permissions", () => {
     const doc = load(readFileSync(join(WORKFLOWS, "test.yml"), "utf8")) as Workflow & { permissions?: unknown };
     expect(doc.permissions).toEqual({ contents: "read" });
     const own = Object.entries(doc.jobs).filter(([, job]) => job.permissions !== undefined).map(([id]) => id).sort();
@@ -154,21 +154,31 @@ describe("Node matrices and their aggregate gates on merge_group", () => {
   });
 
   test.each([
-    ["test-unit", "Unit Tests"],
-    ["test-integration", "Integration Tests"],
-    ["typecheck", "Type Check"],
-  ])("the %s gate (%s) fails when a leg did not succeed", (id, gateName) => {
+    ["Unit Tests", ["custody-denial-root", "test-darwin-gated", "test-unit"]],
+    ["Integration Tests", ["test-integration"]],
+    ["Type Check", ["typecheck"]],
+    ["Install-from-tarball smoke", ["pack-smoke"]],
+  ])("the %s gate still runs, and fails, when any job it needs did not succeed", (gateName, expectedNeeds) => {
     const doc = workflow("test.yml");
     const [, gate] = jobNamed(doc, gateName);
+    expect([...needsOf(gate)].sort()).toEqual(expectedNeeds);
     const script = gate.steps?.[0]?.run;
     if (typeof script !== "string") throw new Error(`${gateName} has no run step`);
-    const run = (failed: string | null) => {
+    const outcome = (failed: string | null, result = "failure") => {
       const ctx = eventContext("merge_group");
-      ctx.needs = Object.fromEntries(needsOf(gate).map((need) => [need, { result: need === failed ? "failure" : "success" }]));
-      return spawnSync("bash", ["-e", shellScript(String(evaluateValue(script, ctx)))], { encoding: "utf8" }).status;
+      ctx.needs = Object.fromEntries(needsOf(gate).map((need) => [need, { result: need === failed ? result : "success" }]));
+      const runs = evaluateIf(gate.if, ctx);
+      const status = spawnSync("bash", ["-e", shellScript(String(evaluateValue(script, ctx)))], { encoding: "utf8" }).status;
+      return { runs, status };
     };
-    expect(run(null)).toBe(0);
-    expect(run(id)).not.toBe(0);
+    expect(outcome(null)).toEqual({ runs: true, status: 0 });
+    for (const need of needsOf(gate)) {
+      for (const result of ["failure", "cancelled", "skipped"]) {
+        const { runs, status } = outcome(need, result);
+        expect({ need, result, runs }).toEqual({ need, result, runs: true });
+        expect(status).not.toBe(0);
+      }
+    }
   });
 });
 
@@ -201,9 +211,20 @@ describe("docs-freshness on merge_group", () => {
 
   test("reads PRs with pull-requests: read and hands the token only to the queued-PR lookup", () => {
     expect(job().permissions).toEqual({ contents: "read", "pull-requests": "read" });
-    const tokenSteps = (job().steps ?? []).filter((step) => step.env && Object.hasOwn(step.env, "GH_TOKEN"));
-    expect(tokenSteps.map((step) => step.id)).toEqual(["queued-pr"]);
+    // A token can reach a step through the workflow or job env, a step's env or
+    // inputs (`with:`), or the checkout's persisted credentials in .git/config.
+    const TOKEN = /github\.token|secrets\.GITHUB_TOKEN|\bGH_TOKEN\b|\bGITHUB_TOKEN\b/;
+    expect(JSON.stringify(workflow("test.yml").env ?? {})).not.toMatch(TOKEN);
+    expect(JSON.stringify(job().env ?? {})).not.toMatch(TOKEN);
+    const steps = job().steps ?? [];
+    const tokenSteps = steps.filter((step) => TOKEN.test(JSON.stringify({ env: step.env, with: step.with, run: step.run })));
+    // toStrictEqual, not toEqual: toEqual ignores undefined array items, so a
+    // token on a step without an id would compare equal.
+    expect(tokenSteps.map((step) => step.id ?? step.name ?? step.uses ?? step.run)).toStrictEqual(["queued-pr"]);
     expect(tokenSteps[0].env?.GH_TOKEN).toBe("${{ github.token }}");
+    const checkout = steps.filter((step) => typeof step.uses === "string" && step.uses.startsWith("actions/checkout@"));
+    expect(checkout).toHaveLength(1);
+    expect(checkout[0].with?.["persist-credentials"]).toBe(false);
   });
 
   test("the lookup runs only on merge_group, before any step that runs the PR's code", () => {
