@@ -17,8 +17,9 @@
 // field is `memory_provider_timeout` is retried; any other non-2xx status or
 // error field, or an unparseable body, fails at once. A 2xx is retried too
 // when the read-back below fails or does not confirm a stored vector and model
-// stamp. A request that throws a client `TimeoutError` ends the wait as
-// never-ready; any other thrown request error fails at once. This is a policy
+// stamp. A Memory PUT that throws a client `TimeoutError`, or throws at or after
+// the deadline, ends the wait as never-ready; any other thrown PUT error fails at
+// once. A read-back that fails or throws is retried while time remains. This is a policy
 // over response shapes; it does not diagnose why the server answered. The
 // operations-API calls (agent create, read-back, deletes) separately retry a
 // 401 once without credentials (see opsPost).
