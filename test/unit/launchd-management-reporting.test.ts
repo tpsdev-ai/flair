@@ -255,6 +255,22 @@ describe("flair#1022 — assessLaunchdManagement distinguishes healthy from mana
     expect(isDetached(m)).toBe(false);
   });
 
+  test("no-service does not answer the loaded-state question, and never consults launchctl", () => {
+    // The field describes whether `launchctl list` reports the job loaded. With
+    // no plist there is no job to ask about, so no answer may be asserted.
+    let consulted = 0;
+    const m = assessLaunchdManagement({
+      ...base,
+      platform: "darwin",
+      instancePid: null,
+      plistExists: () => false,
+      list: () => { consulted++; return { code: 113, stdout: "" }; },
+    });
+    expect(m.state).toBe("no-service");
+    expect("jobLoaded" in m).toBe(false);
+    expect(consulted).toBe(0);
+  });
+
   test("a detached verdict carries the plist diagnosis as its cause when there is one", () => {
     const m = assessLaunchdManagement({
       ...base,

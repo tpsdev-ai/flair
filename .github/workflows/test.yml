@@ -470,6 +470,8 @@ jobs:
         run: bun test test/integration/using-flair-seed-2141.test.ts test/integration/using-flair-seed-reserved-2141.test.ts
       - name: Real-launchd doctor --fix integration (flair#1581)
         run: bun test test/integration/doctor-fix-launchd-darwin.test.ts
+      - name: Real-launchd stop when the job is not loaded (flair#3067)
+        run: bun test test/integration/stop-unloaded-launchd-darwin-3067.test.ts
 
   # flair#1671 slice 1 + flair#1683. The darwin-gated job above proves the
   # #1573 adoption path works on a clean host. It does NOT prove the path

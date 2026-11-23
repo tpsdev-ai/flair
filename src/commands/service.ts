@@ -10,7 +10,7 @@ import { Command } from "commander";
 import { DEFAULT_ADMIN_USER, defaultAdminPassPath, readAdminPassFileSecure } from "../lib/auth-resolve.js";
 import { seedUsingFlairSkill } from "../lib/skill-seed.js";
 import { reconcilePendingSkillSeed, skillSeedPendingPath } from "../lib/skill-seed-pending.js";
-import { classifyDaemonState } from "../lib/daemon-liveness.js";
+import { classifyDaemonState, healthIndicatesListener } from "../lib/daemon-liveness.js";
 import { decideStartOnUnknown, probePortListening } from "../lib/stop-start-recovery.js";
 import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning, renderManagedStartUnconfirmed, type ManagedStartConfirmation } from "../lib/launchd-management.js";
 import {
@@ -265,9 +265,10 @@ async function seedAfterStart(dataDir: string, port: number): Promise<void> {
  *
  * A fresh `flair init` writes the plist but starts Flair directly, so the job
  * an unload would target does not exist; the recorded process still runs.
- * Reuses the five-state liveness machine for identity: only a VERIFIED pid is
- * signalled, and it is stopped with the same bounded wait as every other stop.
- * Refuses, without signalling, when the evidence is absent or not Flair's.
+ * Reuses the five-state liveness machine for identity: a VERIFIED pid is
+ * signalled, and the stop waits for it with waitForProcessExit(pid,
+ * STARTUP_TIMEOUT_MS) (60 s). Refuses, without signalling, when the evidence
+ * is absent or not Flair's.
  */
 async function stopDirectlyStartedFlair(port: number, dataDir: string, label: string): Promise<void> {
   const evidence = await gatherDaemonEvidence(port, dataDir);
@@ -294,8 +295,19 @@ async function stopDirectlyStartedFlair(port: number, dataDir: string, label: st
       console.error("   Nothing was signalled. Start Flair with: flair start");
       process.exit(1);
     default: {
-      const recorded = evidence.pidfile?.kind === "present" ? `pid ${evidence.pidfile.pid}` : "the process serving the port";
-      console.error(`❌ flair stop: refusing to signal ${recorded} for ${dataDir} — it is not verifiably Flair's, and the launchd job ${label} is not loaded. ${state.detail}`);
+      // Name the process this refusal is about, from what was actually read:
+      // a pidfile pid, else the sidecar's last-known pid, else the port's
+      // listener only when a listener answered, else no identification at all.
+      const recorded =
+        evidence.pidfile?.kind === "present" ? `pid ${evidence.pidfile.pid}`
+          : evidence.lastKnownPid !== undefined ? `pid ${evidence.lastKnownPid}`
+            : healthIndicatesListener(evidence.health) ? "the process serving the port"
+              : null;
+      if (recorded === null) {
+        console.error(`❌ flair stop: refusing to stop ${dataDir} — no Flair process could be identified, and the launchd job ${label} is not loaded. ${state.detail}`);
+      } else {
+        console.error(`❌ flair stop: refusing to signal ${recorded} for ${dataDir} — it is not verifiably Flair's, and the launchd job ${label} is not loaded. ${state.detail}`);
+      }
       console.error("   Nothing was signalled. Inspect it with: flair doctor");
       process.exit(1);
     }

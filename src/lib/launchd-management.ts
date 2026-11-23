@@ -593,7 +593,7 @@ export function assessLaunchdManagement(input: AssessLaunchdManagementInput): La
     return { state: "not-applicable", detail: `${platform} does not use launchd` };
   }
   if (!plistExists(plistPath)) {
-    return { state: "no-service", jobLoaded: "not-loaded", detail: `no launchd service is registered for this instance (${plistPath})` };
+    return { state: "no-service", detail: `no launchd service is registered for this instance (${plistPath})` };
   }
 
   const job = readLaunchctlJobState(label, list);
