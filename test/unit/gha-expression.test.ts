@@ -13,7 +13,7 @@ const ctx = {
 };
 
 describe("operators", () => {
-  test("|| and && return an operand, as GitHub does", () => {
+  test("|| and && return an operand", () => {
     expect(evaluate("github.event.pull_request.base.sha || github.event.merge_group.base_sha", ctx)).toBe("abc");
     expect(evaluate("github.event_name == 'pull_request' && 'pr' || 'other'", ctx)).toBe("other");
     expect(evaluate("'' || null", ctx)).toBeNull();
@@ -90,5 +90,13 @@ describe("workflow values and conditions", () => {
     expect(evaluateIf("always()", failed)).toBe(true);
     expect(evaluateIf("${{ always() && github.event_name == 'merge_group' }}", failed)).toBe(true);
     expect(evaluateIf("failure()", failed)).toBe(true);
+  });
+
+  test("a status-function name inside a string literal is not a call", () => {
+    const failed = { ...ctx, needs: { build: { result: "failure" } } };
+    const passed = { ...ctx, github: { ...ctx.github, event_name: "always()" } };
+    expect(evaluateIf("github.event_name == 'always()'", failed)).toBe(false);
+    expect(evaluateIf("github.event_name == 'always()'", passed)).toBe(true);
+    expect(evaluateIf("${{ contains('failure()', 'x') || github.event_name == 'merge_group' }}", failed)).toBe(false);
   });
 });

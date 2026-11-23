@@ -2,9 +2,11 @@
 // checks. GitHub runs a merge-queue group as a `merge_group` event on a
 // gh-readonly-queue/main/* commit, and the queue waits for the required checks
 // to report there. These tests evaluate the committed workflows for that event
-// (test/helpers/gha-expression.ts) and fail when a trigger, a required job, a
-// Node matrix leg, a gate, a concurrency group or a base binding stops working
-// on it.
+// (test/helpers/gha-expression.ts). They fail when a trigger is removed, a
+// required job or a job it needs is skipped or checks out a ref of its own, a
+// Node matrix loses a leg, an aggregate gate stops failing on a failed need,
+// two queue runs share a concurrency group, or a base binding loses its
+// merge-group value.
 
 import { describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -48,7 +50,7 @@ const HEAD_SHA = "2222222222222222222222222222222222222222";
 const RUN_ID = "4242";
 
 /** The contexts a job sees for one event. `needs` and `steps` start empty: a skipped job has no outputs. */
-function eventContext(event: "merge_group" | "pull_request" | "push" | "workflow_dispatch", opts: { workflow?: string; headRef?: string } = {}): Context {
+function eventContext(event: "merge_group" | "pull_request" | "push" | "workflow_dispatch", opts: { workflow?: string; headRef?: string; runId?: string } = {}): Context {
   const payload: Record<string, unknown> = {
     merge_group: { head_ref: `refs/heads/gh-readonly-queue/main/pr-3079-${BASE_SHA}`, head_sha: HEAD_SHA, base_sha: BASE_SHA, base_ref: "refs/heads/main" },
     pull_request: { number: 3079, base: { sha: "3333333333333333333333333333333333333333" }, user: { login: "human-a" } },
@@ -58,7 +60,7 @@ function eventContext(event: "merge_group" | "pull_request" | "push" | "workflow
     github: {
       event_name: event,
       workflow: opts.workflow ?? "CI",
-      run_id: RUN_ID,
+      run_id: opts.runId ?? RUN_ID,
       head_ref: event === "pull_request" ? (opts.headRef ?? "feature/x") : "",
       base_ref: event === "pull_request" ? "main" : "",
       token: "TOKEN",
@@ -122,6 +124,20 @@ describe("required checks run on the merge-queue commit", () => {
       const ctx = eventContext("merge_group", { workflow: doc.name });
       const skipped = needsClosure(doc, id).filter((job) => !evaluateIf(doc.jobs[job].if, ctx));
       expect(skipped).toEqual([]);
+    },
+  );
+
+  test.each(REQUIRED_ACTIONS_CHECKS)(
+    "%s: %s and every job it needs check out the event's own commit (no ref or repository override)",
+    (file, check) => {
+      const doc = workflow(file);
+      const [id] = jobNamed(doc, check);
+      const overrides = needsClosure(doc, id).flatMap((job) =>
+        (doc.jobs[job].steps ?? [])
+          .filter((step) => typeof step.uses === "string" && step.uses.startsWith("actions/checkout@"))
+          .filter((step) => step.with !== undefined && ("ref" in step.with || "repository" in step.with))
+          .map((step) => `${job}: ${JSON.stringify(step.with)}`));
+      expect(overrides).toStrictEqual([]);
     },
   );
 
@@ -189,6 +205,9 @@ describe("concurrency on merge_group", () => {
     const pr = eventContext("pull_request", { workflow: doc.name });
     expect(evaluateValue(doc.concurrency?.group, queue)).toBe(`${doc.name}-${RUN_ID}`);
     expect(evaluateValue(doc.concurrency?.["cancel-in-progress"], queue)).toBe(false);
+    const other = eventContext("merge_group", { workflow: doc.name, runId: "5151" });
+    expect(evaluateValue(doc.concurrency?.group, other)).toBe(`${doc.name}-5151`);
+    expect(evaluateValue(doc.concurrency?.group, other)).not.toBe(evaluateValue(doc.concurrency?.group, queue));
     expect(evaluateValue(doc.concurrency?.group, pr)).toBe(`${doc.name}-pr-3079`);
     expect(evaluateValue(doc.concurrency?.["cancel-in-progress"], pr)).toBe(true);
   });
@@ -209,10 +228,12 @@ describe("the advisory launchd lane on merge_group", () => {
 describe("docs-freshness on merge_group", () => {
   const job = () => workflow("test.yml").jobs["docs-freshness"];
 
-  test("reads PRs with pull-requests: read and hands the token only to the queued-PR lookup", () => {
+  test("reads PRs with pull-requests: read; only the queued-PR lookup names the token directly, and the checkout does not persist it", () => {
     expect(job().permissions).toEqual({ contents: "read", "pull-requests": "read" });
-    // A token can reach a step through the workflow or job env, a step's env or
-    // inputs (`with:`), or the checkout's persisted credentials in .git/config.
+    // Checks the direct references (github.token, secrets.GITHUB_TOKEN, GH_TOKEN,
+    // GITHUB_TOKEN) in the workflow and job env and in each step's env, inputs
+    // (`with:`) and script, plus the checkout's persist-credentials setting.
+    // Indirect forms such as github['token'] or toJSON(github) are not matched.
     const TOKEN = /github\.token|secrets\.GITHUB_TOKEN|\bGH_TOKEN\b|\bGITHUB_TOKEN\b/;
     expect(JSON.stringify(workflow("test.yml").env ?? {})).not.toMatch(TOKEN);
     expect(JSON.stringify(job().env ?? {})).not.toMatch(TOKEN);
@@ -227,12 +248,11 @@ describe("docs-freshness on merge_group", () => {
     expect(checkout[0].with?.["persist-credentials"]).toBe(false);
   });
 
-  test("the lookup runs only on merge_group, before any step that runs the PR's code", () => {
+  test("the lookup runs only on merge_group, as the step right after the checkout", () => {
     const steps = job().steps ?? [];
     const lookup = steps.findIndex((step) => step.id === "queued-pr");
-    const firstPrCode = steps.findIndex((step) => typeof step.run === "string" && /\bbun (install|run)\b|\bnode scripts\//.test(step.run));
-    expect(lookup).toBeGreaterThan(0);
-    expect(lookup).toBeLessThan(firstPrCode);
+    expect(lookup).toBe(1);
+    expect(String(steps[0].uses)).toStartWith("actions/checkout@");
     expect(evaluateIf(steps[lookup].if, eventContext("merge_group"))).toBe(true);
     expect(evaluateIf(steps[lookup].if, eventContext("pull_request"))).toBe(false);
     expect(evaluateIf(steps[lookup].if, eventContext("push"))).toBe(false);

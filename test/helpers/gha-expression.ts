@@ -4,13 +4,13 @@
  * resolves to for one event, instead of matching the expression's text.
  *
  * Supported: string ('' escapes a quote), number, boolean and null literals;
- * dotted and indexed property paths (an absent property is null, as on
- * GitHub); `!`, `==`, `!=`, `&&` and `||` (which return an operand, as on
- * GitHub); parentheses; and startsWith, endsWith, contains, format, fromJSON,
- * toJSON, always, success, failure and cancelled. The status functions read
- * the `needs` results in the context: success() is true when no needed job
- * has a result other than success, failure() when one failed. Anything else,
- * hashFiles() included, throws when a test evaluates it.
+ * dotted and indexed property paths (an absent property is null); `!`, `==`,
+ * `!=`, `&&` and `||` (which return an operand); parentheses; and startsWith,
+ * endsWith, contains, format, fromJSON, toJSON, always, success, failure and
+ * cancelled. The status functions read the `needs` results in the context:
+ * success() is true when no needed job has a result other than success,
+ * failure() when one failed. Anything else, hashFiles() included, throws when
+ * a test evaluates it.
  */
 
 export type Context = Record<string, unknown>;
@@ -104,10 +104,11 @@ const STATUS_FUNCTIONS: Record<string, (ctx: Context) => boolean> = {
   failure: (ctx) => needResults(ctx).some((result) => result === "failure"),
   cancelled: (ctx) => needResults(ctx).some((result) => result === "cancelled"),
 };
-const STATUS_CALL = /\b(always|success|failure|cancelled)\s*\(/i;
 
 class Parser {
   private pos = 0;
+  /** Set when the expression calls a status function (a call token, not text inside a string). */
+  statusCalled = false;
   constructor(private readonly tokens: Token[], private readonly ctx: Context, private readonly src: string) {}
 
   parse(): unknown {
@@ -164,7 +165,7 @@ class Parser {
     if (t.text === "null") return null;
     if (this.peek("(")) {
       const status = STATUS_FUNCTIONS[t.text.toLowerCase()];
-      if (status) { this.pos++; this.expect(")"); return status(this.ctx); }
+      if (status) { this.pos++; this.expect(")"); this.statusCalled = true; return status(this.ctx); }
       const fn = FUNCTIONS[t.text.toLowerCase()];
       if (!fn) throw new Error(`unsupported function ${t.text}() in: ${this.src}`);
       this.pos++;
@@ -219,10 +220,10 @@ export function evaluateValue(value: unknown, ctx: Context): unknown {
 }
 
 /**
- * A job or step `if:`. As on GitHub, a condition with no status function runs
- * as `success() && (condition)`, and an absent one as `success()`: a job whose
- * needed job did not succeed is skipped unless its condition calls always(),
- * failure() or cancelled().
+ * A job or step `if:`. A condition that calls no status function (always(),
+ * success(), failure() or cancelled(), as call tokens; the same text inside a
+ * string literal does not count) is evaluated as `success() && (condition)`,
+ * and an absent one as `success()`.
  */
 export function evaluateIf(condition: unknown, ctx: Context): boolean {
   if (condition === undefined) return STATUS_FUNCTIONS.success(ctx);
@@ -230,6 +231,7 @@ export function evaluateIf(condition: unknown, ctx: Context): boolean {
   const text = String(condition);
   const wrapped = /^\s*\$\{\{([\s\S]*)\}\}\s*$/.exec(text);
   const body = wrapped ? wrapped[1] : text;
-  const value = truthy(evaluate(body, ctx));
-  return STATUS_CALL.test(body) ? value : STATUS_FUNCTIONS.success(ctx) && value;
+  const parser = new Parser(tokenize(body), ctx, body);
+  const value = truthy(parser.parse());
+  return parser.statusCalled ? value : STATUS_FUNCTIONS.success(ctx) && value;
 }

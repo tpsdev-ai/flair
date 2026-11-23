@@ -2332,7 +2332,7 @@ jobs:
       # on any other ref. It takes the number from that GitHub-generated ref
       # and the login from the API, never from commit metadata, and stops the
       # job when the API call fails or returns no valid login (a null author
-      # included). It runs before any step that executes the PR's code.
+      # included). It runs right after the checkout, before any other step.
       - name: Resolve the queued pull request's author (merge queue only)
         id: queued-pr
         if: github.event_name == 'merge_group'
