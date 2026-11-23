@@ -244,6 +244,41 @@ describe("flair#3068 — memory.get() rejects on an error response", () => {
   });
 });
 
+describe("flair#3068 — memory.search() rejects on an error response", () => {
+  function searchStub(searchImpl: () => any) {
+    return fakeResourceEntry(
+      class MemoryStub {
+        async search() {
+          return searchImpl();
+        }
+      },
+    );
+  }
+
+  it("rejects a 503 Response with the error and its status", async () => {
+    const server = fakeServer({
+      Memory: searchStub(() => new Response(JSON.stringify({ error: "unavailable" }), { status: 503 })),
+    });
+    await expect(new Flair(server).as("planner").memory.search()).rejects.toThrow(/unavailable.*HTTP 503/);
+  });
+
+  it("rejects an { error, status } object instead of resolving to it", async () => {
+    const server = fakeServer({
+      Memory: searchStub(() => ({ error: "bad", status: 500 })),
+    });
+    await expect(new Flair(server).as("planner").memory.search()).rejects.toThrow(/bad.*HTTP 500/);
+  });
+
+  it("rejects when the search read throws", async () => {
+    const server = fakeServer({
+      Memory: searchStub(() => {
+        throw new Error("storage unavailable");
+      }),
+    });
+    await expect(new Flair(server).as("planner").memory.search()).rejects.toThrow(/storage unavailable/);
+  });
+});
+
 // ─── flair#3068 — the search limit has two halves ───────────────────────────
 //
 // `memory.search({ limit })` forwards the limit to the resource query AND caps
