@@ -497,6 +497,10 @@ describe("Codex shape boundaries", () => {
 // The fixture checks below use the runtime's own TOML parser as an oracle. The Bun version the repo
 // pins (packageManager) decodes no \U escapes and accepts a redefined table, so each check runs only
 // where the parser implements that part of TOML 1.0; the refusal itself is asserted on every runtime.
+// Bun 1.3.10 (CI's pin) rejects TOML 1.0's one or two extra quotes before a multiline closer; later Bun accepts them.
+const TOML_ACCEPTS_EXTRA_CLOSING_QUOTES = (() => {
+  try { return (Bun.TOML.parse('x = """a""""') as any).x === 'a"'; } catch { return false; }
+})();
 const TOML_DECODES_U_ESCAPES = (() => {
   try { return (Bun.TOML.parse('a = "\\U00000066"') as any).a === "f"; } catch { return false; }
 })();
@@ -613,16 +617,18 @@ describe("Codex fallback definition guard", () => {
   });
   // A value Flair cannot write into the section's env lines is refused by name before the file is read,
   // not with the config-content conditions (the file is not what is wrong).
-  for (const [name, env] of [
-    ["an agent id with a quote", { FLAIR_AGENT_ID: 'agent"x', FLAIR_URL: URL_A }],
-    ["an agent id with a backslash", { FLAIR_AGENT_ID: "agent\\x", FLAIR_URL: URL_A }],
-    ["a URL with a control character", { FLAIR_AGENT_ID: "agent-b", FLAIR_URL: URL_A + "\u0001" }],
+  for (const [name, env, key, why] of [
+    ["an agent id with a quote", { FLAIR_AGENT_ID: 'agent"x', FLAIR_URL: URL_A }, "FLAIR_AGENT_ID", "contains a quote, backslash or control character"],
+    ["an agent id with a backslash", { FLAIR_AGENT_ID: "agent\\x", FLAIR_URL: URL_A }, "FLAIR_AGENT_ID", "contains a quote, backslash or control character"],
+    ["a URL with a control character", { FLAIR_AGENT_ID: "agent-b", FLAIR_URL: URL_A + "\u0001" }, "FLAIR_URL", "contains a quote, backslash or control character"],
+    ["an empty agent id", { FLAIR_AGENT_ID: "", FLAIR_URL: URL_A }, "FLAIR_AGENT_ID", "is empty"],
+    ["an empty URL", { FLAIR_AGENT_ID: "agent-b", FLAIR_URL: "" }, "FLAIR_URL", "is empty"],
   ] as const) {
     it(`refuses ${name} by name, before reading the file`, () => {
       const raw = seed(tomlSnippet(ENV_A) + "\n");
       const res = wireCodex(env);
       expect(res.ok).toBe(false);
-      expect(res.message).toContain("contains a quote, backslash or control character");
+      expect(res.message).toContain(`the ${key} value ${why}`);
       expect(res.message).not.toContain("Flair edits Codex's config only when");
       expect(readFileSync(cfgPath(), "utf8")).toBe(raw);
       expect(existsSync(`${cfgPath()}.bak`)).toBe(false);
@@ -641,6 +647,48 @@ describe("Codex fallback definition guard", () => {
     expect(readdirSync(cfgPath())).toEqual([]);
     expect(existsSync(`${cfgPath()}.bak`)).toBe(false);
   });
+  // TOML allows one or two quotes right before a multiline closer; the scan treats them as content.
+  for (const [what, value] of [
+    ["a basic string closed by four quotes", 'x = """a""""\n'],
+    ["a basic string closed by five quotes", 'x = """a"""""\n'],
+    ["a literal string closed by four quotes", "x = '''a''''\n"],
+    ["a literal string closed by five quotes", "x = '''a'''''\n"],
+  ] as const) {
+    it(`wires after a section followed by ${what}`, () => {
+      const raw = seed(tomlSnippet(ENV_A) + "\n\n[other]\n" + value);
+      if (TOML_ACCEPTS_EXTRA_CLOSING_QUOTES) expect((Bun.TOML.parse(raw) as any).other.x).toBeTruthy();
+      expect(wireCodex(ENV_B).ok).toBe(true);
+    });
+  }
+  for (const quote of ['"', "'"]) {
+    it(`a ${quote}-quoted four-quote closer cannot hide a later Flair subtable from the scan`, () => {
+      const f = quote.repeat(3);
+      const raw = seed(tomlSnippet(ENV_A) + `\n\n[other]\nx = ${f}a${f}${quote} # ${quote} [\n\n[mcp_servers.flair.extra]\nextra = "value"\n\n[tail]\ny = ${f}b${f}${quote} # ${quote} ]\n`);
+      if (TOML_ACCEPTS_EXTRA_CLOSING_QUOTES) expect((Bun.TOML.parse(raw) as any).mcp_servers.flair.extra.extra).toBe("value");
+      expectRefusal(raw, wireCodex(ENV_B));
+    });
+  }
+  for (const [what, inner] of [
+    ["an array-of-tables Flair header", "[[mcp_servers.flair]]"],
+    ["an escaped mcp_servers key", '"\\u006dcp_servers".flair.command = "x"'],
+  ] as const) {
+    it(`refuses multiline-string text holding ${what}`, () => {
+      const raw = seed(tomlSnippet(ENV_A) + `\n\n[other.tool]\nnote = """\n${inner}\n"""\n`);
+      expect((Bun.TOML.parse(raw) as any).other.tool.note).toContain("cp_servers");
+      expectRefusal(raw, wireCodex(ENV_B));
+    });
+  }
+  for (const [what, raw] of [
+    ["a bare word", "[other]\nbareword\n"],
+    ["an unclosed string value", '[other]\nx = "unclosed\n'],
+    ["a closer with no opener", "[other]\nx = ]\n"],
+    ["an unclosed string inside a multiline array", '[other]\nitems = [\n  "unclosed\n]\n'],
+  ] as const) {
+    it(`refuses a file with ${what} outside the section (the scan cannot read it)`, () => {
+      seed(raw);
+      expectRefusal(raw, wireCodex(ENV_B));
+    });
+  }
   // The remedy each refusal names is one that clears it: follow it, re-run, and the wiring succeeds.
   for (const [what, raw, repaired] of [
     ["an inline flair entry in [mcp_servers]", '[mcp_servers]\nflair = { command = "npx" }\n', ""],

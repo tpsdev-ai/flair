@@ -434,6 +434,11 @@ function codexScanValue(fragment: string, state: CodexValueState): CodexValueSta
       const close = inStr === '"""' ? codexBasicMultilineClose(fragment, i) : fragment.indexOf("\'\'\'", i);
       if (close === -1) return { depth, inStr };
       i = close + 3;
+      // TOML lets one or two quote characters sit right before the closing delimiter (`""""`, `"""""`):
+      // they are content, and the delimiter is the last three. Six in a row is not valid TOML.
+      const q = inStr[0]!;
+      for (let n = 0; n < 2 && fragment[i] === q; n++) i++;
+      if (fragment[i] === q) return null;
       inStr = null;
       continue;
     }
@@ -464,6 +469,19 @@ function codexScanValue(fragment: string, state: CodexValueState): CodexValueSta
   return { depth, inStr };
 }
 
+/** A line that reads as a `[header]` / `[[header]]` or a `key = value` whose first key decodes to mcp_servers. */
+function codexLineNamesMcpServers(line: string): boolean {
+  const header = line.match(/^[ \t]*\[\[?[ \t]*(.*?)[ \t]*\]\]?[ \t]*(?:#.*)?$/);
+  const key = header?.[1] ?? line.match(CODEX_TOML_KEY_LINE_RE)?.[1];
+  if (key === undefined) return false;
+  const first = key.match(/^[ \t]*("(?:[^"\\]|\\.)*"|'[^']*'|[A-Za-z0-9_-]+)/)?.[1];
+  if (!first) return false;
+  const decoded = first.startsWith('"') || first.startsWith("'")
+    ? readTomlStringArray(`[${first}]`, 0)?.values[0]?.value
+    : first;
+  return decoded === "mcp_servers";
+}
+
 function codexOutsideDefinition(raw: string, span?: { start: number; end: number }): boolean {
   let offset = 0;
   // Lines inside a value spread over lines (a multiline array or string) are value text, not keys.
@@ -474,9 +492,10 @@ function codexOutsideDefinition(raw: string, span?: { start: number; end: number
     offset += rawLine.length + 1;
     if (!outside) continue;
     if (state.depth > 0 || state.inStr !== null) {
-      // Kept from the line-based scan: text inside a multiline string that reads as an mcp_servers
-      // key or header still refuses, in case the string boundary was misread.
-      if (state.inStr !== null && /^[ \t]*\[?[ \t]*["']?mcp_servers/.test(line)) return true;
+      // Kept from the line-based scan: a line inside a multiline string that reads as a header or a
+      // `key = value` whose first key decodes to mcp_servers still refuses, in case the string boundary
+      // was misread.
+      if (state.inStr !== null && codexLineNamesMcpServers(line)) return true;
       const next = codexScanValue(line, state);
       if (next === null) return true;
       state = next;
@@ -1970,11 +1989,16 @@ export function claudeCodeMcpEntry(env: WireEnv) {
 }
 
 /**
- * A value Flair cannot write into the Codex section's basic-string env lines (a quote, a backslash or a
- * control character): refused before the file is read, by name, so the refusal is about the value and
- * not about the file's content.
+ * A requested value Flair does not write into the Codex section: an empty agent id or URL, or any value
+ * holding a quote, a backslash or a control character. Refused before the file is read, by name, so the
+ * refusal is about the value and not about the file's content.
  */
 export function codexEnvValueRefusal(env: WireEnv, display: string): string | null {
+  for (const [name, value] of [["FLAIR_AGENT_ID", env.FLAIR_AGENT_ID], ["FLAIR_URL", env.FLAIR_URL]] as const) {
+    if (value === "") {
+      return `Codex: refusing to write ${display}: the ${name} value is empty; Flair writes only a non-empty ${name}.`;
+    }
+  }
   for (const [name, value] of [["FLAIR_AGENT_ID", env.FLAIR_AGENT_ID], ["FLAIR_URL", env.FLAIR_URL], ["FLAIR_CLIENT", env.FLAIR_CLIENT]] as const) {
     if (value !== undefined && /["\\\x00-\x1f\x7f]/.test(value)) {
       return `Codex: refusing to write ${display}: the ${name} value contains a quote, backslash or control character, ` +
