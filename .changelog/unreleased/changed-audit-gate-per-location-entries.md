@@ -9,4 +9,4 @@
   `overrides`.
   Every required entry field must be a string (and `sources` a non-empty array): an object or array
   in, say, `introducedBy` is refused rather than read as present. A malformed allowlist fails the
-  run before any advisory is matched against it.
+  run before any advisory is matched against it. ([#2892](https://github.com/tpsdev-ai/flair/pull/2892))

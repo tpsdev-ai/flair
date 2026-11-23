@@ -4,5 +4,4 @@
   once the target exists a concurrent reader sees the old file or the new one,
   never a truncated or half-written one (before the first rename there is no
   file to read). If a step after the temporary file is created fails, the write
-  attempts to remove that file and rethrows. Two concurrent writers still race
-  with each other, and the last one wins. (#2840)
+  attempts to remove that file and rethrows. (#2840) ([#2846](https://github.com/tpsdev-ai/flair/pull/2846))

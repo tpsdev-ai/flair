@@ -14,4 +14,4 @@
   displaced by age; a holder recorded on another host is still judged by age
   (single-host guard, #2866).
 
-  > **Heads-up:** Stop every older Flair process that writes migration state before upgrading. An unreadable lock record is refused, not reclaimed; remove it by hand only after no writer is running.
+  > **Heads-up:** Stop every older Flair process that writes migration state before upgrading. An unreadable lock record is refused, not reclaimed; remove it by hand only after no writer is running. ([#2929](https://github.com/tpsdev-ai/flair/pull/2929))
