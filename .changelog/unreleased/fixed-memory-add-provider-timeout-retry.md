@@ -1,0 +1,1 @@
+- **`flair memory add` retries a write the embedding provider timed out on.** A `503 memory_provider_timeout` refusal states nothing was written, so the command replays the same memory id up to two more times; after that it exits 1 with one `memory add:` error line. Every other failure is unchanged.
