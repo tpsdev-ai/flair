@@ -10,9 +10,10 @@
 // seconds for the container logs plus one per-request cap.
 //
 // Each poll inspects the container before it believes /Health, and inspects
-// once more before it reports ready. Polling stops when an inspect reports the
-// container not running; the waiter prints the exit code and attempts
-// `docker logs`, reporting a logs error if that fails.
+// once more before it reports ready. A dead container detected before the
+// deadline stops polling; the waiter prints the exit code and attempts
+// `docker logs`, reporting a logs error if that fails. An inspect that reports
+// not running after the deadline ends the wait as a timeout.
 //
 // Usage:
 //   node wait-for-harper.mjs --container <name> --url <health-url>

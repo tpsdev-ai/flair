@@ -7,8 +7,9 @@
  * the final inspect is bounded by the per-request cap, and the waiter checks
  * the budget after the first inspect before it probes and after the final
  * inspect before it reports ready. Every poll inspects the container before it
- * believes /Health. Polling stops when an inspect reports the container not
- * running; the diagnostic runs before the process exits.
+ * believes /Health. A dead container detected before the deadline stops
+ * polling; the waiter prints the exit code and runs the diagnostic. An inspect
+ * that reports not running after the deadline ends the wait as a timeout.
  *
  * These tests drive the waiter through a real local HTTP server and a stub
  * `docker` first on PATH. No Docker, no Harper, no external network.
@@ -45,7 +46,11 @@ const SENTINEL = "admin:test-pass";
  * deadline (p); `inspect-ignore-term` ignores SIGTERM and sleeps past its cap
  * (q); `inspect-slow-final` sleeps 1.5 s before the second inspect answers (o);
  * `inspect-final-stall` sleeps past the final inspect's cap (r); `logs-error`
- * makes `docker logs` fail with that file's text (s).
+ * makes `docker logs` fail with that file's text (s); `logs-ignore-term`
+ * ignores SIGTERM and sleeps past the logs cap (t); `logs-secret-stderr`
+ * appends that file's text to a successful `docker logs` stderr, and
+ * `inspect-fail-text` / `inspect-fails-final` seed the reported text of a first
+ * and a final inspect error (u).
  */
 const DOCKER_STUB = `#!/usr/bin/env bash
 set -euo pipefail
@@ -56,7 +61,11 @@ cmd=\${1:?}; shift
 case "$cmd" in
   inspect)
     if [ -f "$WAIT_STUB_DIR/inspect-fails" ]; then
-      echo "docker stub: cannot inspect" >&2
+      if [ -f "$WAIT_STUB_DIR/inspect-fail-text" ]; then
+        cat "$WAIT_STUB_DIR/inspect-fail-text" >&2
+      else
+        echo "docker stub: cannot inspect" >&2
+      fi
       exit 70
     fi
     [ "\${1:-}" = "--format" ] || { echo "docker stub: expected --format" >&2; exit 64; }
@@ -82,6 +91,14 @@ case "$cmd" in
       count=$(cat "$WAIT_STUB_DIR/inspect-count" 2>/dev/null || echo 0)
       index=$count
       if [ "$index" -ge "\${#states[@]}" ]; then index=$(( \${#states[@]} - 1 )); fi
+      if [ -f "$WAIT_STUB_DIR/inspect-fails-final" ] && [ "$index" -eq 1 ]; then
+        if [ -f "$WAIT_STUB_DIR/inspect-fail-final-text" ]; then
+          cat "$WAIT_STUB_DIR/inspect-fail-final-text" >&2
+        else
+          echo "docker stub: cannot inspect" >&2
+        fi
+        exit 70
+      fi
       if [ -f "$WAIT_STUB_DIR/inspect-slow-final" ] && [ "$index" -eq 1 ]; then
         sleep 1.5
       fi
@@ -95,6 +112,10 @@ case "$cmd" in
     printf '%s %s\\n' "$(cat "$WAIT_STUB_DIR/running")" "$(cat "$WAIT_STUB_DIR/exit-code")"
     ;;
   logs)
+    if [ -f "$WAIT_STUB_DIR/logs-ignore-term" ]; then
+      trap '' TERM
+      exec sleep 15
+    fi
     if [ -f "$WAIT_STUB_DIR/logs-error" ]; then
       cat "$WAIT_STUB_DIR/logs-error" >&2
       exit 71
@@ -102,6 +123,9 @@ case "$cmd" in
     echo "stub container log for \${1:-}"
     if [ -f "$WAIT_STUB_DIR/container-log" ]; then
       cat "$WAIT_STUB_DIR/container-log"
+    fi
+    if [ -f "$WAIT_STUB_DIR/logs-secret-stderr" ]; then
+      cat "$WAIT_STUB_DIR/logs-secret-stderr" >&2
     fi
     printf 'env HARPER_START_CREDENTIALS=%s\\n' "\${HARPER_START_CREDENTIALS-<unset>}"
     ;;
@@ -129,6 +153,11 @@ function sandbox(
     inspectIgnoreTerm?: boolean;
     inspectFinalStall?: boolean;
     logsFailError?: string;
+    logsIgnoreTerm?: boolean;
+    logsSecretStderr?: string;
+    inspectFailText?: string;
+    inspectFailsFinal?: boolean;
+    inspectFailsFinalText?: string;
     containerLog?: string;
   } = {},
 ): Sandbox {
@@ -147,6 +176,11 @@ function sandbox(
   if (options.inspectIgnoreTerm) writeFileSync(join(root, "inspect-ignore-term"), "");
   if (options.inspectFinalStall) writeFileSync(join(root, "inspect-final-stall"), "");
   if (options.logsFailError) writeFileSync(join(root, "logs-error"), options.logsFailError);
+  if (options.logsIgnoreTerm) writeFileSync(join(root, "logs-ignore-term"), "");
+  if (options.logsSecretStderr) writeFileSync(join(root, "logs-secret-stderr"), options.logsSecretStderr);
+  if (options.inspectFailText) writeFileSync(join(root, "inspect-fail-text"), options.inspectFailText);
+  if (options.inspectFailsFinal) writeFileSync(join(root, "inspect-fails-final"), "");
+  if (options.inspectFailsFinalText) writeFileSync(join(root, "inspect-fail-final-text"), options.inspectFailsFinalText);
   if (options.containerLog) writeFileSync(join(root, "container-log"), options.containerLog);
   return { root, bin };
 }
@@ -716,6 +750,80 @@ describe("wait-for-harper.mjs", () => {
       expect(result.output).toContain("[redacted]");
       expect(result.output).not.toContain("test-pass");
       expect(result.output).not.toContain(token);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(t) a docker logs that ignores SIGTERM is killed at its bound",
+    async () => {
+      const server = await health(STATUS(200));
+      const box = sandbox({ running: "false", exitCode: "4", logsIgnoreTerm: true });
+      const result = await run(box, [
+        "--container",
+        "harper-flair",
+        ...WAIT_ARGS(server.url),
+        "--per-request-ms",
+        "500",
+        "--budget-seconds",
+        "20",
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.output).toContain("docker logs failed:");
+      // The logs cap is ten seconds; one per-request cap follows it.
+      expect(result.seconds).toBeGreaterThanOrEqual(9);
+      expect(result.seconds).toBeLessThan(13);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(u) the successful logs stderr and both inspect error reports are redacted",
+    async () => {
+      const server = await health(STATUS(200));
+      const token = Buffer.from(SENTINEL).toString("base64");
+      const seeded = `raw ${SENTINEL} token ${token}\n`;
+      const credentialArgs = ["--credentials-env", "HARPER_START_CREDENTIALS"];
+      const expectRedacted = (output: string) => {
+        expect(output).toContain("[redacted]");
+        expect(output).not.toContain("test-pass");
+        expect(output).not.toContain(token);
+      };
+
+      const logsBox = sandbox({ running: "false", exitCode: "4", logsSecretStderr: seeded });
+      const logsRun = await run(
+        logsBox,
+        ["--container", "harper-flair", ...WAIT_ARGS(server.url), ...credentialArgs, "--budget-seconds", "20"],
+        { HARPER_START_CREDENTIALS: SENTINEL },
+      );
+      expect(logsRun.status).toBe(1);
+      expectRedacted(logsRun.output);
+
+      const firstBox = sandbox({ inspectFails: true, inspectFailText: seeded });
+      const firstRun = await run(
+        firstBox,
+        ["--container", "harper-flair", ...WAIT_ARGS(server.url), ...credentialArgs, "--budget-seconds", "20"],
+        { HARPER_START_CREDENTIALS: SENTINEL },
+      );
+      expect(firstRun.status).toBe(1);
+      expect(firstRun.output).toContain("cannot inspect container 'harper-flair'");
+      expectRedacted(firstRun.output);
+
+      const finalBox = sandbox({
+        inspectSequence: ["true 0", "true 0"],
+        inspectFailsFinal: true,
+        inspectFailsFinalText: seeded,
+      });
+      const finalRun = await run(
+        finalBox,
+        ["--container", "harper-flair", ...WAIT_ARGS(server.url), ...credentialArgs, "--budget-seconds", "20"],
+        { HARPER_START_CREDENTIALS: SENTINEL },
+      );
+      expect(finalRun.status).toBe(1);
+      expect(finalRun.output).toContain("cannot inspect container 'harper-flair'");
+      expect(finalRun.output).not.toContain("Harper ready");
+      expectRedacted(finalRun.output);
     },
     CASE_TIMEOUT_MS,
   );

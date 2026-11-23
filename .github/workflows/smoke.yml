@@ -126,9 +126,10 @@ jobs:
 
           # Wait against an elapsed budget, not a poll count: on a loaded runner
           # the in-container install can outlast a fixed number of polls.
-          # Polling stops when an inspect reports the container not running; the
+          # A dead container detected before the deadline stops polling; the
           # waiter prints its exit code and attempts `docker logs`, reporting a
-          # logs error if that fails. This probe is unauthenticated, so it names
+          # logs error if that fails. A result that arrives after the deadline
+          # is a timeout. This probe is unauthenticated, so it names
           # no credentials variable.
           node "$GITHUB_WORKSPACE/scripts/ci/wait-for-harper.mjs" \
             --container harper-flair-smoke \
