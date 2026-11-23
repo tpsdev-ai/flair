@@ -439,9 +439,16 @@ defineCheck("changelog-unreleased", null, () => {
   // Default true so a missing merge-base does not become an unpublished escape.
   let thisChangeShips = true;
   let changedPaths = null;
-  const baseRef = process.env.GITHUB_BASE_REF
-    ? `origin/${process.env.GITHUB_BASE_REF}`
-    : "origin/main";
+  // A merge-queue (merge_group) run has no GITHUB_BASE_REF. CI passes the
+  // group's parent commit (merge_group.base_sha) as FLAIR_DOCS_BASE_SHA, so the
+  // files and commits checked here are the queued PR's own, the PR whose author
+  // CI reads, and not those of a PR ahead of it in the same group.
+  const explicitBase = (process.env.FLAIR_DOCS_BASE_SHA ?? "").trim();
+  const baseRef = explicitBase
+    ? explicitBase
+    : process.env.GITHUB_BASE_REF
+      ? `origin/${process.env.GITHUB_BASE_REF}`
+      : "origin/main";
   let base = "";
   try {
     base = execFileSync("git", ["merge-base", "HEAD", baseRef],

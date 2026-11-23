@@ -31,6 +31,22 @@ describe("operators", () => {
     expect(evaluate("!'x'", ctx)).toBe(false);
   });
 
+  test("an operator or bracket inside a string literal is text, not syntax", () => {
+    expect(evaluate("'!'", ctx)).toBe("!");
+    expect(evaluate("contains(')', 'x')", ctx)).toBe(false);
+    expect(evaluate("format('{0}', '(')", ctx)).toBe("(");
+    expect(evaluate("'a' == '&&'", ctx)).toBe(false);
+    expect(evaluate("!false", ctx)).toBe(true);
+  });
+
+  test("&& and || do not evaluate the operand they skip, and do evaluate the one they return", () => {
+    expect(evaluate("false && fromJSON('')", ctx)).toBe(false);
+    expect(evaluate("true || fromJSON('')", ctx)).toBe(true);
+    expect(evaluate("true && fromJSON('[1]')", ctx)).toEqual([1]);
+    expect(evaluate("false || fromJSON('[1]')", ctx)).toEqual([1]);
+    expect(() => evaluate("true && fromJSON('')", ctx)).toThrow();
+  });
+
   test("an absent property is null and a hyphenated step id resolves", () => {
     expect(evaluate("github.event.missing.deeper", ctx)).toBeNull();
     expect(evaluate("steps.queued-pr.outputs.login", ctx)).toBe("renovate[bot]");
@@ -90,6 +106,12 @@ describe("workflow values and conditions", () => {
     expect(evaluateIf("always()", failed)).toBe(true);
     expect(evaluateIf("${{ always() && github.event_name == 'merge_group' }}", failed)).toBe(true);
     expect(evaluateIf("failure()", failed)).toBe(true);
+  });
+
+  test("a status call in a skipped operand still counts as a status call", () => {
+    const failed = { ...ctx, needs: { build: { result: "failure" } } };
+    expect(evaluateIf("true || always()", failed)).toBe(true);
+    expect(evaluateIf("true || github.event_name == 'merge_group'", failed)).toBe(false);
   });
 
   test("a status-function name inside a string literal is not a call", () => {

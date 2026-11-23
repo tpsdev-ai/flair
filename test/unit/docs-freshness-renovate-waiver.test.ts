@@ -122,10 +122,12 @@ function runGate(dir: string, author?: string, gitEnv: NodeJS.ProcessEnv = fixtu
  * GITHUB_BASE_REF there, so the script falls back to origin/main, and HEAD is
  * the queue's one squash commit on top of it.
  */
-function runQueueGate(dir: string, author?: string): { status: number | null; out: string } {
+function runQueueGate(dir: string, author?: string, groupBase?: string): { status: number | null; out: string } {
   const env: NodeJS.ProcessEnv = { ...fixtureGitEnv(), GITHUB_ACTIONS: "", GITHUB_BASE_REF: "" };
   delete env.FLAIR_PR_AUTHOR_LOGIN;
+  delete env.FLAIR_DOCS_BASE_SHA;
   if (author !== undefined) env.FLAIR_PR_AUTHOR_LOGIN = author;
+  if (groupBase !== undefined) env.FLAIR_DOCS_BASE_SHA = groupBase;
   const r = spawnSync(process.execPath, [join(dir, SCRIPT_REL)], { cwd: dir, encoding: "utf8", env });
   return { status: r.status, out: `${r.stdout}${r.stderr}` };
 }
@@ -574,6 +576,44 @@ describe("merge-queue commit (no GITHUB_BASE_REF)", () => {
     addDependencyOnlyCommit(dir, { author: "renovate" });
     const res = runQueueGate(dir, "human-a");
     expect(res.out).not.toContain("waived the per-PR fragment requirement");
+    expect(res.out).toContain("adds no changelog fragment");
+    expect(res.status).not.toBe(0);
+  });
+
+  // A merge group can sit on top of a PR ahead of it in the queue. With the
+  // group's parent commit as the base, the gate checks only the queued PR's own
+  // changes, the PR whose author the workflow reads.
+  function stackedGroup(second: "ci-only" | "unfragmented-fix"): { dir: string; groupBase: string } {
+    const dir = makeRepo();
+    addDependencyOnlyCommit(dir, { author: "renovate" });
+    const groupBase = gitOut(dir, "rev-parse", "HEAD").trim();
+    if (second === "ci-only") {
+      writeFixtureFile(dir, "scripts/ci-only.sh", "echo ci\n");
+      git(dir, "add", "-A");
+      commitAs(dir, "Human A", "human-a@example.invalid", "ci: add a lane helper (#9)");
+    } else {
+      writeFixtureFile(dir, "src/util.ts", "export const unit = 4;\n");
+      git(dir, "add", "-A");
+      commitAs(dir, "Human A", "human-a@example.invalid", "fix: adjust the unit (#9)");
+    }
+    return { dir, groupBase };
+  }
+
+  test("a CI-only PR queued behind a Renovate dependency PR passes when the base is the group's parent", () => {
+    const { dir, groupBase } = stackedGroup("ci-only");
+    const scoped = runQueueGate(dir, "human-a", groupBase);
+    expect(scoped.out).not.toContain("adds no changelog fragment");
+    expect(scoped.status).toBe(0);
+    // Against origin/main the same group also carries the Renovate PR's fix(deps)
+    // commit and dependency files, checked under the CI-only PR's login.
+    const unscoped = runQueueGate(dir, "human-a");
+    expect(unscoped.out).toContain("adds no changelog fragment");
+    expect(unscoped.status).not.toBe(0);
+  });
+
+  test("the group's parent as base still requires a fragment for the queued PR's own shipped fix", () => {
+    const { dir, groupBase } = stackedGroup("unfragmented-fix");
+    const res = runQueueGate(dir, "human-a", groupBase);
     expect(res.out).toContain("adds no changelog fragment");
     expect(res.status).not.toBe(0);
   });

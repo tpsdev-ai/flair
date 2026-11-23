@@ -10,7 +10,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { load } from "js-yaml";
 
@@ -77,6 +77,65 @@ function jobNamed(doc: Workflow, check: string): [string, Job] {
   const found = Object.entries(doc.jobs).filter(([, job]) => job.name === check);
   if (found.length !== 1) throw new Error(`expected exactly one job named ${JSON.stringify(check)}, found ${found.length}`);
   return found[0];
+}
+
+/**
+ * The environment for fixture git commands: no inherited GIT_* variable (a
+ * repository, index or config from the caller), no system or global config,
+ * and a fixed identity.
+ */
+function fixtureGitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+  return {
+    ...env,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@t",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@t",
+  };
+}
+
+/** Run `fn` with process.env replaced by fixtureGitEnv(): runGate's own git reads inherit process.env. */
+function withFixtureGitEnv<T>(fn: () => T): T {
+  const saved = { ...process.env };
+  const scoped = fixtureGitEnv();
+  for (const key of Object.keys(process.env)) if (!(key in scoped)) delete process.env[key];
+  Object.assign(process.env, scoped);
+  try {
+    return fn();
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  }
+}
+
+/** main with an empty baseline, then a queue commit adding an unbudgeted CLI spawn and its own baseline entries. */
+function buildSpawnGateFixture(): { dir: string; mainSha: string } {
+  const dir = tempDir("flair-mq-spawn-gate-");
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8", env: fixtureGitEnv() }).trim();
+  const write = (rel: string, body: string) => {
+    mkdirSync(join(dir, rel, ".."), { recursive: true });
+    writeFileSync(join(dir, rel), body);
+  };
+  git("init", "-q");
+  write("scripts/ci/cli-spawn-budgets.baseline.json", "[]\n");
+  write("test/base.test.ts", `test("ok", () => {});\n`);
+  git("add", "-A");
+  git("commit", "-qm", "main");
+  const mainSha = git("rev-parse", "HEAD");
+  write("test/attack.test.ts", `test("a CLI spawn", () => {\n  const p = Bun.spawn(["bun", "src/cli.ts", "status"], {});\n});\n`);
+  write("scripts/ci/cli-spawn-budgets.baseline.json", JSON.stringify([
+    { file: "test/attack.test.ts", scope: "a CLI spawn", fingerprint: `["bun","src/cli.ts","status"] ; {}`, kind: "spawn-no-timeout", occurrence: 0, reason: "self-granted" },
+    { file: "test/attack.test.ts", scope: "a CLI spawn", fingerprint: "a CLI spawn", kind: "case-no-budget", occurrence: 0, reason: "self-granted" },
+  ], null, 2) + "\n");
+  git("add", "-A");
+  git("commit", "-qm", "fix: queue group (#3079)");
+  return { dir, mainSha };
 }
 
 const needsOf = (job: Job) => (Array.isArray(job.needs) ? job.needs : job.needs === undefined ? [] : [job.needs]);
@@ -267,6 +326,14 @@ describe("docs-freshness on merge_group", () => {
     expect(evaluateValue(binding, eventContext("pull_request"))).toBe("human-a");
     expect(evaluateValue(binding, eventContext("merge_group")) ?? "").toBe("");
   });
+
+  test("the gate's base is the group's parent commit on merge_group, and unset on other events", () => {
+    const gate = (job().steps ?? []).find((step) => step.run === "node scripts/docs-freshness-check.mjs");
+    const binding = gate?.env?.FLAIR_DOCS_BASE_SHA;
+    expect(evaluateValue(binding, eventContext("merge_group"))).toBe(BASE_SHA);
+    expect(evaluateValue(binding, eventContext("pull_request")) ?? "").toBe("");
+    expect(evaluateValue(binding, eventContext("push")) ?? "").toBe("");
+  });
 });
 
 describe("cli-spawn-budgets base ref on merge_group", () => {
@@ -309,36 +376,35 @@ describe("cli-spawn-budgets base ref on merge_group", () => {
   });
 
   test("the real gate reads the baseline from the merge-group base and refuses a self-granted exception", () => {
-    const dir = tempDir("flair-mq-spawn-gate-");
-    const git = (...args: string[]) =>
-      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" }).trim();
-    const write = (rel: string, body: string) => {
-      mkdirSync(join(dir, rel, ".."), { recursive: true });
-      writeFileSync(join(dir, rel), body);
-    };
-    git("init", "-q");
-    write("scripts/ci/cli-spawn-budgets.baseline.json", "[]\n");
-    write("test/base.test.ts", `test("ok", () => {});\n`);
-    git("add", "-A");
-    git("commit", "-qm", "main");
-    const mainSha = git("rev-parse", "HEAD");
-    // The queue's commit on top of main: an unbudgeted CLI spawn plus its own baseline entries.
-    write("test/attack.test.ts", `test("a CLI spawn", () => {\n  const p = Bun.spawn(["bun", "src/cli.ts", "status"], {});\n});\n`);
-    write("scripts/ci/cli-spawn-budgets.baseline.json", JSON.stringify([
-      { file: "test/attack.test.ts", scope: "a CLI spawn", fingerprint: `["bun","src/cli.ts","status"] ; {}`, kind: "spawn-no-timeout", occurrence: 0, reason: "self-granted" },
-      { file: "test/attack.test.ts", scope: "a CLI spawn", fingerprint: "a CLI spawn", kind: "case-no-budget", occurrence: 0, reason: "self-granted" },
-    ], null, 2) + "\n");
-    git("add", "-A");
-    git("commit", "-qm", "fix: queue group (#3079)");
-
+    const { dir, mainSha } = buildSpawnGateFixture();
     const ctx = eventContext("merge_group");
     (ctx.github as { event: { merge_group: { base_sha: string } } }).event.merge_group.base_sha = mainSha;
     const baseRef = String(evaluateValue(gateStep().env?.CLI_SPAWN_BUDGETS_BASE_REF, ctx));
     expect(baseRef).toBe(mainSha);
-    const result = runGate({ root: dir, baseRef, env: { CLI_SPAWN_BUDGETS_BASE_REF: baseRef } });
+    const result = withFixtureGitEnv(() => runGate({ root: dir, baseRef, env: { CLI_SPAWN_BUDGETS_BASE_REF: baseRef } }));
     expect(result.baseSha).toBe(mainSha);
     expect(result.defaulted).toBe(false);
     expect(result.ok).toBe(false);
     expect(result.added.length).toBeGreaterThan(0);
+  });
+
+  test("the fixture and the gate's git reads ignore the caller's GIT_INDEX_FILE, GIT_DIR and git config", () => {
+    const outside = tempDir("flair-mq-outside-git-");
+    const foreignIndex = join(outside, "foreign-index");
+    const foreignConfig = join(outside, "foreign-config");
+    writeFileSync(foreignConfig, "[user]\n\tname = foreign\n");
+    const saved = { ...process.env };
+    Object.assign(process.env, { GIT_INDEX_FILE: foreignIndex, GIT_DIR: join(outside, "no-such-repo"), GIT_CONFIG_GLOBAL: foreignConfig });
+    try {
+      const { dir, mainSha } = buildSpawnGateFixture();
+      const result = withFixtureGitEnv(() => runGate({ root: dir, baseRef: mainSha, env: { CLI_SPAWN_BUDGETS_BASE_REF: mainSha } }));
+      expect(result.baseSha).toBe(mainSha);
+      expect(existsSync(foreignIndex)).toBe(false);
+      const log = execFileSync("git", ["log", "--format=%an %s"], { cwd: dir, encoding: "utf8", env: fixtureGitEnv() }).trim().split("\n");
+      expect(log).toStrictEqual(["t fix: queue group (#3079)", "t main"]);
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
   });
 });

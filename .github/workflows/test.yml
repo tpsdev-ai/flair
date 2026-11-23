@@ -2379,9 +2379,12 @@ jobs:
       # command tree from dist/cli.js (the exported `program`), not a source regex.
       - name: Build CLI
         run: bun run build:cli
+      # On merge_group, the base is the group's parent commit, so the changes
+      # this checks are the queued PR's own (empty on other events).
       - run: node scripts/docs-freshness-check.mjs
         env:
           FLAIR_PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login || steps.queued-pr.outputs.login }}
+          FLAIR_DOCS_BASE_SHA: ${{ github.event.merge_group.base_sha }}
 
   # flair#1807: the CLI spawn-budget gate. Every test that spawns the CLI entry
   # must carry its own child deadline (a `timeout:` on the spawn), and the case

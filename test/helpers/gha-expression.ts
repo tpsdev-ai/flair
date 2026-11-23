@@ -5,12 +5,13 @@
  *
  * Supported: string ('' escapes a quote), number, boolean and null literals;
  * dotted and indexed property paths (an absent property is null); `!`, `==`,
- * `!=`, `&&` and `||` (which return an operand); parentheses; and startsWith,
- * endsWith, contains, format, fromJSON, toJSON, always, success, failure and
- * cancelled. The status functions read the `needs` results in the context:
- * success() is true when no needed job has a result other than success,
- * failure() when one failed. Anything else, hashFiles() included, throws when
- * a test evaluates it.
+ * `!=`, `&&` and `||` (which return an operand and do not evaluate the one
+ * they skip); parentheses; and startsWith, endsWith, contains, format,
+ * fromJSON, toJSON, always, success, failure and cancelled. Operators and
+ * brackets inside string literals are text. The status functions read the
+ * `needs` results in the context: success() is true when no needed job has a
+ * result other than success, failure() when one failed. Anything else,
+ * hashFiles() included, throws when a test evaluates it.
  */
 
 export type Context = Record<string, unknown>;
@@ -109,6 +110,8 @@ class Parser {
   private pos = 0;
   /** Set when the expression calls a status function (a call token, not text inside a string). */
   statusCalled = false;
+  /** False while parsing an operand that && or || does not evaluate: it is parsed, not run. */
+  private active = true;
   constructor(private readonly tokens: Token[], private readonly ctx: Context, private readonly src: string) {}
 
   parse(): unknown {
@@ -117,9 +120,19 @@ class Parser {
     return value;
   }
 
+  /** The next token; with `text`, only an operator or punctuation token with that text (never a string). */
   private peek(text?: string): Token | undefined {
     const t = this.tokens[this.pos];
-    return t && (text === undefined || t.text === text) ? t : undefined;
+    if (!t) return undefined;
+    if (text === undefined) return t;
+    return (t.kind === "op" || t.kind === "punc") && t.text === text ? t : undefined;
+  }
+
+  /** Parse an operand that is not evaluated (short-circuit): its syntax and status calls still count. */
+  private skip(parse: () => unknown): void {
+    const saved = this.active;
+    this.active = false;
+    try { parse(); } finally { this.active = saved; }
   }
 
   private expect(text: string): void {
@@ -129,13 +142,21 @@ class Parser {
 
   private or(): unknown {
     let left = this.and();
-    while (this.peek("||")) { this.pos++; const right = this.and(); left = truthy(left) ? left : right; }
+    while (this.peek("||")) {
+      this.pos++;
+      if (truthy(left)) this.skip(() => this.and());
+      else left = this.and();
+    }
     return left;
   }
 
   private and(): unknown {
     let left = this.equality();
-    while (this.peek("&&")) { this.pos++; const right = this.equality(); left = truthy(left) ? right : left; }
+    while (this.peek("&&")) {
+      this.pos++;
+      if (!truthy(left)) this.skip(() => this.equality());
+      else left = this.equality();
+    }
     return left;
   }
 
@@ -158,14 +179,14 @@ class Parser {
     if (!t) throw new Error(`unexpected end of: ${this.src}`);
     if (t.kind === "str") return t.text;
     if (t.kind === "num") return Number(t.text);
-    if (t.text === "(") { const v = this.or(); this.expect(")"); return v; }
+    if (t.kind === "punc" && t.text === "(") { const v = this.or(); this.expect(")"); return v; }
     if (t.kind !== "ident") throw new Error(`unexpected '${t.text}' in: ${this.src}`);
     if (t.text === "true") return true;
     if (t.text === "false") return false;
     if (t.text === "null") return null;
     if (this.peek("(")) {
       const status = STATUS_FUNCTIONS[t.text.toLowerCase()];
-      if (status) { this.pos++; this.expect(")"); this.statusCalled = true; return status(this.ctx); }
+      if (status) { this.pos++; this.expect(")"); this.statusCalled = true; return this.active ? status(this.ctx) : null; }
       const fn = FUNCTIONS[t.text.toLowerCase()];
       if (!fn) throw new Error(`unsupported function ${t.text}() in: ${this.src}`);
       this.pos++;
@@ -174,7 +195,7 @@ class Parser {
         for (;;) { args.push(this.or()); if (this.peek(",")) { this.pos++; continue; } break; }
       }
       this.expect(")");
-      return fn(...args);
+      return this.active ? fn(...args) : null;
     }
     return Object.hasOwn(this.ctx, t.text) ? this.ctx[t.text] : null;
   }
