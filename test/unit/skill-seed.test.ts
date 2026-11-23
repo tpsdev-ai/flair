@@ -85,7 +85,9 @@ function fakeIo(opts: {
       rowBudgets.push(timeoutMs);
       const outcome = opts.putRow?.() ?? { ok: true };
       if (outcome.ok) row = outcome.rowAfter ?? { ok: true, row: liveRow(CURRENT) };
-      return outcome.ok ? { ok: true } : { ok: false, detail: outcome.detail ?? "HTTP 500", status: outcome.status, code: outcome.code };
+      return outcome.ok
+        ? { ok: true }
+        : { ok: false, detail: outcome.detail ?? "HTTP 500", status: outcome.status, code: outcome.code, timedOut: outcome.timedOut };
     },
     putAssignment: async () => {
       calls.putAssignment += 1;
@@ -436,8 +438,8 @@ describe("runSkillSeed — a skill-row write refused with 503 memory_provider_ti
     // another 2 s wait would reach the bound.
     expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
     const message = (out as { message: string }).message;
-    expect(message).toContain("memory_provider_timeout on 6 attempts over 178 s");
-    expect(message).toContain("the 180 s bound on that write leaves no time for another");
+    expect(message).toContain("did not finish within its 180 s bound: 6 attempts over 178 s");
+    expect(message).toContain("each was refused with 503 memory_provider_timeout, and no time is left for another");
     expect(message).toContain("the org assignment was not written. Re-run 'flair init'");
     expect(io.calls).toEqual({ putRow: 6, putAssignment: 0 });
     expect(io.rowBudgets).toEqual([180_000, 150_000, 120_000, 90_000, 60_000, 30_000]);
@@ -507,8 +509,39 @@ describe("runSkillSeed — a skill-row write refused with 503 memory_provider_ti
     };
     const out = await runSkillSeed(io, current, clock);
     expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
-    expect((out as { message: string }).message).toContain("passed while the seed re-read the instance");
+    const message = (out as { message: string }).message;
+    // 28 s refusal, 2 s wait, then the re-read moves the clock 180 s on.
+    expect(message).toContain("did not finish within its 180 s bound: 1 attempt over 210 s");
+    expect(message).toContain("it was refused with 503 memory_provider_timeout, and the bound passed while the seed re-read the instance");
     expect(io.calls).toEqual({ putRow: 1, putAssignment: 0 });
+  }, 5_000);
+
+  it("refuses with the attempts and the time spent when a retried write gets no answer within the time left", async () => {
+    // The stub stops failing after 50 calls, so a retry loop without a bound
+    // ends in success instead of hanging.
+    const clock = fakeClock();
+    let attempts = 0;
+    const io = fakeIo({
+      row: { ok: true, row: null },
+      assignment: { ok: true, row: null },
+      putRow: () => {
+        if (++attempts > 50) return { ok: true };
+        if (attempts === 1) {
+          clock.t += REFUSAL_AFTER_MS;
+          return PROVIDER_TIMEOUT;
+        }
+        const left = io.rowBudgets[attempts - 1] ?? 0;
+        clock.t += left;
+        return { ok: false, timedOut: true, detail: `no answer within ${left / 1000} s` };
+      },
+    });
+    const out = await runSkillSeed(io, current, clock);
+    expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
+    const message = (out as { message: string }).message;
+    expect(message).toContain("did not finish within its 180 s bound: 2 attempts over 180 s");
+    expect(message).toContain("the last got no answer within 150 s");
+    expect(io.calls).toEqual({ putRow: 2, putAssignment: 0 });
+    expect(io.rowBudgets).toEqual([180_000, 150_000]);
   }, 5_000);
 });
 
@@ -613,7 +646,8 @@ describe("skillSeedRestIo — a slow first skill-row write", () => {
     const out = await runSkillSeed(slow, current);
     expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
     const message = (out as { message: string }).message;
-    expect(message).toContain("no answer within 0.1 s");
+    expect(message).toContain("did not finish within its 0.1 s bound: 1 attempt over");
+    expect(message).toContain("it got no answer within 0.1 s");
     expect(message).toContain("waits for its embedding model, which may need to download or load");
     expect(message).toContain("the org assignment was not written. Re-run 'flair init'");
     expect(instance.puts).toEqual([`Memory/${SEED_SKILL_ID}`]);
@@ -678,7 +712,7 @@ describe("skillSeedRestIo — the instance's 503 refusals of the skill-row write
     // The refusals take no fake time: attempts at 0, 2, 4, 6 and 8 s, and a
     // 2 s wait after the fifth would reach the 10 s bound.
     expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
-    expect((out as { message: string }).message).toContain("on 5 attempts over 8 s, and the 10 s bound");
+    expect((out as { message: string }).message).toContain("did not finish within its 10 s bound: 5 attempts over 8 s");
     expect(instance.puts).toEqual(Array.from({ length: 5 }, () => `Memory/${SEED_SKILL_ID}`));
   }, 5_000);
 
@@ -690,6 +724,20 @@ describe("skillSeedRestIo — the instance's 503 refusals of the skill-row write
     expect(instance.puts).toEqual([`Memory/${SEED_SKILL_ID}`]);
     expect(clock.waits).toEqual([]);
   }, 5_000);
+
+  it("refuses with the attempts and the time spent when the retried PUT gets no answer within the time left", async () => {
+    // Real clock: the refusal answers at once, the 2 s wait runs, and the
+    // second PUT answers after the 2.5 s bound has passed.
+    const instance = refusingInstance([memoryProviderTimeoutResponse]);
+    instance.delays.memoryPut = 1_500;
+    const io = skillSeedRestIo(restOptions(instance, { skillWriteTimeoutMs: 2_500 }), current);
+    const out = await runSkillSeed(io, current);
+    expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
+    const message = (out as { message: string }).message;
+    expect(message).toContain("did not finish within its 2.5 s bound: 2 attempts over");
+    expect(message).toContain("the last got no answer within");
+    expect(instance.puts).toEqual([`Memory/${SEED_SKILL_ID}`, `Memory/${SEED_SKILL_ID}`]);
+  }, 10_000);
 
   it("says what it is waiting on once, across two slow attempts", async () => {
     const instance = refusingInstance([memoryProviderTimeoutResponse], 80);

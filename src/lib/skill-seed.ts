@@ -124,9 +124,10 @@ export type SeedRead<T> = { ok: boolean; row?: T | null; detail?: string };
 
 /**
  * A write result. `ok:false` carries what failed; an HTTP refusal also carries
- * its status and the body's `error` code, when it has one.
+ * its status and the body's `error` code, when it has one, and `timedOut` marks
+ * a request that got no answer within its bound.
  */
-export type SeedWrite = { ok: boolean; detail?: string; status?: number; code?: string };
+export type SeedWrite = { ok: boolean; detail?: string; status?: number; code?: string; timedOut?: boolean };
 
 export interface SkillSeedIo {
   /** The operator principal the writes run as: the Basic administrator's username. */
@@ -246,7 +247,9 @@ const ASSIGNMENT_REMEDY =
  * `memory_provider_timeout`, the seed waits {@link SEED_SKILL_WRITE_RETRY_BACKOFF_MS}
  * and runs the whole pass again, reads and checks included, while the io's
  * skill-write bound, counted from the first attempt, leaves time for that wait.
- * Each attempt's write waits at most the time left in that bound.
+ * Each attempt's write waits at most the time left in that bound. A write that
+ * does not finish within the bound is refused with the attempts and the time
+ * spent.
  */
 export async function runSkillSeed(
   io: SkillSeedIo,
@@ -259,27 +262,44 @@ export async function runSkillSeed(
     firstWriteAt ??= clock.now();
     return firstWriteAt + boundMs - clock.now();
   };
-  for (let attempt = 1; ; attempt++) {
+  let attempts = 0;
+  const boundPassed = (end: string): SkillSeedOutcome =>
+    refused(
+      "skill_seed_write_failed",
+      `writing the "${SEED_SKILL_ID}" skill row did not finish within its ${seconds(boundMs)} bound: ${attempts} ` +
+        `${attempts === 1 ? "attempt" : "attempts"} over ${seconds(clock.now() - (firstWriteAt ?? clock.now()))}; ` +
+        `${end}; the org assignment was not written. Re-run 'flair init'`,
+    );
+  const refusedEach = () => `${attempts === 1 ? "it was" : "each was"} refused with 503 memory_provider_timeout`;
+  for (;;) {
     const outcome = await seedPass(io, current, rowWriteBudget);
+    if (outcome.kind === "no_time") {
+      return boundPassed(`${refusedEach()}, and the bound passed while the seed re-read the instance`);
+    }
+    if (outcome.kind === "no_answer") {
+      attempts++;
+      return boundPassed(`${attempts === 1 ? "it" : "the last"} got ${outcome.detail}`);
+    }
     if (outcome.kind !== "provider_timeout") return outcome;
-    const elapsedMs = clock.now() - (firstWriteAt ?? clock.now());
-    if (elapsedMs + SEED_SKILL_WRITE_RETRY_BACKOFF_MS >= boundMs) {
-      return refused(
-        "skill_seed_write_failed",
-        `writing the "${SEED_SKILL_ID}" skill row was refused with 503 memory_provider_timeout on ${attempt} ` +
-          `attempts over ${seconds(elapsedMs)}, and the ${seconds(boundMs)} bound on that write leaves no time for ` +
-          `another (last: ${outcome.detail}); the org assignment was not written. Re-run 'flair init'`,
-      );
+    attempts++;
+    if (clock.now() - (firstWriteAt ?? clock.now()) + SEED_SKILL_WRITE_RETRY_BACKOFF_MS >= boundMs) {
+      return boundPassed(`${refusedEach()}, and no time is left for another (last: ${outcome.detail})`);
     }
     await clock.pause(SEED_SKILL_WRITE_RETRY_BACKOFF_MS);
   }
 }
 
+/** What one pass reports to the retry loop instead of an outcome. */
+type SeedPassSignal =
+  | { kind: "provider_timeout"; detail: string }
+  | { kind: "no_answer"; detail: string }
+  | { kind: "no_time" };
+
 async function seedPass(
   io: SkillSeedIo,
   current: SeedCurrent,
   rowWriteBudget: () => number,
-): Promise<SkillSeedOutcome | { kind: "provider_timeout"; detail: string }> {
+): Promise<SkillSeedOutcome | SeedPassSignal> {
   const rowRead = await io.readRow();
   if (!rowRead.ok) {
     return refused(
@@ -353,18 +373,13 @@ async function seedPass(
   const action = decideSkillSeed(storedContent, current.content, current.hashes);
   if (action === "create" || action === "replace") {
     const budgetMs = rowWriteBudget();
-    if (budgetMs <= 0) {
-      return refused(
-        "skill_seed_write_failed",
-        `the bound on writing the "${SEED_SKILL_ID}" skill row passed while the seed re-read the instance after a 503 ` +
-          "memory_provider_timeout; the org assignment was not written. Re-run 'flair init'",
-      );
-    }
+    if (budgetMs <= 0) return { kind: "no_time" };
     const write = await io.putRow(budgetMs);
     if (!write.ok) {
       if (write.status === 503 && write.code === MEMORY_PROVIDER_TIMEOUT) {
         return { kind: "provider_timeout", detail: write.detail ?? "no detail" };
       }
+      if (write.timedOut) return { kind: "no_answer", detail: write.detail ?? "no detail" };
       return refused(
         "skill_seed_write_failed",
         `writing the "${SEED_SKILL_ID}" skill row failed (${write.detail ?? "no detail"}); the org assignment was not ` +
@@ -541,7 +556,7 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
-      if (isTimeout(err)) return { ok: false, detail: onTimeout(timeoutMs) };
+      if (isTimeout(err)) return { ok: false, detail: onTimeout(timeoutMs), timedOut: true };
       return { ok: false, detail: `the request failed: ${detailOf(err)}` };
     }
     if (!res.ok) {
