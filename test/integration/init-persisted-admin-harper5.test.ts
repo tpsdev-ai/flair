@@ -21,8 +21,11 @@ import { HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { seedAgentViaOpsApi } from "../../src/cli.js";
 import { detectPersistedAdminUser } from "../../src/lib/init-admin-pass.ts";
 import { nodeBin } from "../helpers/node-runtime.js";
+import { EMBEDDING_MODEL_FILE, mappedModelFiles } from "../helpers/mapped-model-files.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
+/** The model the CI lanes pre-fetch; else <repo>/models (the harper-lifecycle default). */
+const MODELS_DIR = process.env.FLAIR_MODELS_DIR ?? join(REPO_ROOT, "models");
 const CLI = join(REPO_ROOT, "dist", "cli.js");
 
 const SKIP_EXTRAS = [
@@ -68,8 +71,7 @@ function initEnv(extra: Record<string, string | undefined> = {}): NodeJS.Process
   ]) {
     delete env[key];
   }
-  // The model the CI lanes pre-fetch; else <repo>/models (the harper-lifecycle default).
-  env.FLAIR_MODELS_DIR = process.env.FLAIR_MODELS_DIR ?? join(REPO_ROOT, "models");
+  env.FLAIR_MODELS_DIR = MODELS_DIR;
   for (const [k, v] of Object.entries(extra)) {
     if (v === undefined) delete env[k];
     else env[k] = v;
@@ -105,6 +107,11 @@ function runInit(args: string[], extraEnv: Record<string, string | undefined> = 
       resolvePromise({ code, out });
     });
   });
+}
+
+/** The pid of the Harper this init started, from its own pid file. */
+function harperPid(): number {
+  return Number.parseInt(readFileSync(join(dataDir, "hdb.pid"), "utf-8").trim(), 10);
 }
 
 /** Stop the Harper this init started (my own pid, from its own pid file). */
@@ -190,6 +197,8 @@ describe("flair#2210 — a real Harper 5 install is not read as fresh", () => {
       ...SKIP_EXTRAS,
     ]);
     expect(firstRun.code, `flair init failed:\n${firstRun.out.slice(-4000)}`).toBe(0);
+    // The init child resolved the pre-fetched model: its Harper has that file mapped.
+    expect(mappedModelFiles(harperPid())).toEqual([realpathSync(join(MODELS_DIR, EMBEDDING_MODEL_FILE))]);
     expect(existsSync(adminPassPath)).toBe(true);
     installedPassword = readFileSync(adminPassPath, "utf8").trim();
     // The real data dir has Harper's persisted admin user (RocksDB hdb_user/).
