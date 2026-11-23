@@ -78,6 +78,27 @@ function redact(text, secrets) {
   return result;
 }
 
+/**
+ * Validate the health URL: absolute http or https, and no userinfo. Node's
+ * http.request turns a userinfo into a Basic header by itself, so a URL that
+ * carries one would send credentials the caller did not name.
+ */
+function healthUrl(text) {
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new Error("--url must be an absolute http or https URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("--url must be an absolute http or https URL");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("--url must not carry credentials; name the variable with --credentials-env");
+  }
+  return text;
+}
+
 function positiveInteger(flag, value) {
   if (!/^[0-9]+$/.test(value) || Number(value) <= 0) {
     throw new Error(`${flag} must be a positive whole number, got '${value}'`);
@@ -120,7 +141,7 @@ export function parseArgs(argv, env = process.env) {
 
   return {
     container: name,
-    url,
+    url: healthUrl(url),
     credentialsEnv,
     budgetSeconds: resolveBudget(budget, env.HARPER_START_BUDGET_S),
     pollIntervalMs: poll === undefined ? DEFAULT_POLL_INTERVAL_MS : positiveInteger("--poll-interval-ms", poll),
