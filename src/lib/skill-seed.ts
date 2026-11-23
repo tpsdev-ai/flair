@@ -85,8 +85,8 @@ export const SEED_SKILL_WRITE_NOTICE_MS = 5_000;
 
 /**
  * Backoff schedule (in ms) when the skill row's write is refused with a
- * retryable `503 memory_provider_timeout` (flair#3043). Capped by the
- * remaining time in `skillWriteTimeoutMs`.
+ * retryable `503 memory_provider_timeout` (flair#3043). When the next delay
+ * does not fit in the remaining wait, the loop returns without sleeping.
  */
 export const SEED_SKILL_RETRY_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000];
 
@@ -382,6 +382,7 @@ export interface SkillSeedRestOptions {
    */
   retryBackoffMs?: number[];
   sleepImpl?: (ms: number) => Promise<void>;
+  now?: () => number;
 }
 
 function detailOf(err: unknown): string {
@@ -498,7 +499,7 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
   // treated as retryable (flair#3043): the provider did not answer within
   // its bound, nothing was written, and the instance may still be loading or
   // downloading the embedding model. Later attempts back off and retry until
-  // the wait is exhausted or a non-retryable refusal occurs.
+  // the next backoff does not fit in the remaining wait or a non-retryable refusal occurs.
   const putRow = async (): Promise<SeedWrite> => {
     const notice = setTimeout(() => {
       opts.notify?.(
@@ -508,15 +509,23 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
     }, skillNoticeMs);
     (notice as unknown as { unref?: () => void }).unref?.();
 
-    const start = Date.now();
+    const now = opts.now ?? (() => performance.now());
+    const start = now();
     const deadline = start + skillWriteMs;
     const backoff = opts.retryBackoffMs ?? SEED_SKILL_RETRY_BACKOFF_MS;
     const sleep = opts.sleepImpl ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
 
-    const onTimeout = (ms: number) =>
-      `no answer within ${seconds(ms)} — the instance embeds a skill row as it writes it, so this write also ` +
-      `waits for its embedding model, which may need to download or load; 'flair doctor' reports embeddings. The write may ` +
-      `still land; the id is fixed, so a re-run updates that row rather than adding one`;
+    let lastRetryableRefusal: SeedWrite | undefined;
+
+    const onTimeout = (ms: number) => {
+      const base = `no answer within ${seconds(skillWriteMs)} — the instance embeds a skill row as it writes it, so this write also ` +
+        `waits for its embedding model, which may need to download or load; 'flair doctor' reports embeddings. The write may ` +
+        `still land; the id is fixed, so a re-run updates that row rather than adding one`;
+      if (lastRetryableRefusal?.detail) {
+        return `${base}; earlier attempt failed with ${lastRetryableRefusal.detail}`;
+      }
+      return base;
+    };
 
     try {
       let attempt = 0;
@@ -524,7 +533,7 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
 
       while (true) {
         attempt++;
-        const remainingMs = deadline - Date.now();
+        const remainingMs = deadline - now();
         if (remainingMs <= 0) {
           return lastResult.detail ? lastResult : { ok: false, detail: onTimeout(skillWriteMs) };
         }
@@ -535,15 +544,16 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
 
         // A 503 memory_provider_timeout refusal is retryable within the announced wait (flair#3043).
         if (res.status === 503 && res.errorCode === "memory_provider_timeout") {
+          lastRetryableRefusal = res;
           const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 1_000;
-          if (deadline - (Date.now() + waitMs) > 0) {
+          if (deadline - (now() + waitMs) > 0) {
             await sleep(waitMs);
             continue;
           }
         }
 
-        // Fails when the wait is exhausted or the refusal is not retryable;
-        // final message names the last error.
+        // Returns when the next backoff does not fit in the remaining wait or
+        // the refusal is not retryable; final message names the last error.
         return lastResult;
       }
     } finally {
