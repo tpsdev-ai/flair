@@ -8,8 +8,7 @@
 
   The ordinary (non-skill) write-back of `POST /FeedMemories` takes the target
   id's lock and commits before releasing it. An omitted id is generated; a
-  caller-supplied id can contend. The skill branch returns before this lock;
-  its conversion is deferred. The feed write is a foreground client write: a
+  caller-supplied id can contend. The feed write is a foreground client write: a
   held id waits its budget and can answer `503 memory_busy`, with the caller id
   and nothing else; an id marked outcome-unknown answers
   `503 write_outcome_unknown`. The authored replacement and its committed-row
@@ -35,4 +34,4 @@
   committed row before the release. When the committed row does not show the
   staged write, feed ingest answers `409 feed_write_unconfirmed` and the dedup
   repair answers `409 feed_dedup_target_changed`; the best-effort
-  `lastReflected` stamps log a skip. The lock remains per process.
+  `lastReflected` stamps log a skip. The lock remains per process. ([#2777](https://github.com/tpsdev-ai/flair/pull/2777))

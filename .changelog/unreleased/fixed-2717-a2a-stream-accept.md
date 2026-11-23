@@ -6,4 +6,4 @@
   `"jsonrpc": "1.0"`); every other request keeps the default connect handling.
   post's answer is returned as post gives it: an SSE stream for an admitted
   `message/stream`, JSON-RPC objects for other methods and for refusals.
-  `docs/api-reference.md` documents the header on `message/stream` (#2717).
+  `docs/api-reference.md` documents the header on `message/stream` (#2717). ([#2731](https://github.com/tpsdev-ai/flair/pull/2731))

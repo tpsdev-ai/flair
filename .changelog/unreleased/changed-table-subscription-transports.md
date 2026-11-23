@@ -4,9 +4,8 @@
   follow the same rule as SSE and WebSocket subscriptions: administrators and
   trusted internal callers only. UNSUBSCRIBE, which only ends a subscription the
   session holds, is not guarded. Over MQTT 5 a refused SUBSCRIBE gets SUBACK
-  `0x87` for a verified non-admin agent and `0x80` for a caller without a valid
-  credential whose session Harper admits (Harper may instead refuse it at
-  CONNECT). A refused PUBLISH at QoS 1 or 2 gets the same codes on PUBACK or
+  `0x87` when Harper admits the session (Harper may instead refuse it at
+  CONNECT). A refused PUBLISH at QoS 1 or 2 gets that code on PUBACK or
   PUBREC, with an optional reason string for a non-admin agent; a refused QoS 0
   PUBLISH gets no answer. MQTT 3.1.1 has only SUBACK `0x80`; its PUBACK carries
   no reason code, so a PUBACK alone cannot tell a refused PUBLISH from an
@@ -44,4 +43,4 @@
   Harper's MCP session to a flair caller exists. Flair's
   feed resources (`/FeedMemories`, `/FeedSouls`) and the BM25 index now read
   table changes in-process through `subscribeInProcess`, with their own
-  subscriber rules as before.
+  subscriber rules as before. ([#2720](https://github.com/tpsdev-ai/flair/pull/2720))
