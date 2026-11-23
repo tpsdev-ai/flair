@@ -2379,8 +2379,10 @@ jobs:
       # command tree from dist/cli.js (the exported `program`), not a source regex.
       - name: Build CLI
         run: bun run build:cli
-      # On merge_group, the base is the group's parent commit, so the changes
-      # this checks are the queued PR's own (empty on other events).
+      # On merge_group, FLAIR_DOCS_BASE_SHA is the group's parent commit, so the
+      # per-change fragment rule and changed-path checks read only the queued
+      # PR's changes. The binding is empty on other events, where the script
+      # keeps its usual base.
       - run: node scripts/docs-freshness-check.mjs
         env:
           FLAIR_PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login || steps.queued-pr.outputs.login }}

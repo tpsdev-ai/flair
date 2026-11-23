@@ -440,9 +440,11 @@ defineCheck("changelog-unreleased", null, () => {
   let thisChangeShips = true;
   let changedPaths = null;
   // A merge-queue (merge_group) run has no GITHUB_BASE_REF. CI passes the
-  // group's parent commit (merge_group.base_sha) as FLAIR_DOCS_BASE_SHA, so the
-  // files and commits checked here are the queued PR's own, the PR whose author
-  // CI reads, and not those of a PR ahead of it in the same group.
+  // group's parent commit (merge_group.base_sha) as FLAIR_DOCS_BASE_SHA. With it
+  // as the base, the changed-path analysis, the Renovate waiver and the
+  // per-change fragment rule below read only the queued PR's changes, the PR
+  // whose author CI reads. The since-tag count above still reads all history
+  // since the last release tag.
   const explicitBase = (process.env.FLAIR_DOCS_BASE_SHA ?? "").trim();
   const baseRef = explicitBase
     ? explicitBase
@@ -461,6 +463,24 @@ defineCheck("changelog-unreleased", null, () => {
     }
   } catch {
     // merge-base or diff unavailable — leave thisChangeShips true (fail-closed).
+  }
+  // An explicit base must be a readable ancestor of HEAD. Otherwise the
+  // per-change rule cannot run against the queued PR's changes, and with a
+  // fragment already staged no other rule would report that, so fail here.
+  if (explicitBase) {
+    let ancestor = false;
+    try {
+      execFileSync("git", ["merge-base", "--is-ancestor", explicitBase, "HEAD"], { cwd: ROOT, stdio: "ignore" });
+      ancestor = true;
+    } catch {
+      ancestor = false;
+    }
+    if (!ancestor || base === "") {
+      return [...failures, {
+        file: `${FRAGMENT_DIR_REL}/`, line: 1,
+        msg: `FLAIR_DOCS_BASE_SHA is ${explicitBase}, which is not a readable ancestor of HEAD, so the per-change fragment rule could not check this change. CI sets it from merge_group.base_sha; check that the checkout fetched full history (fetch-depth: 0), then rerun.`,
+      }];
+    }
   }
 
   // ── Renovate dependency waiver (flair#2872) ──────────────────────────────────

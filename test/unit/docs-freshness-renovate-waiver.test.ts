@@ -118,9 +118,9 @@ function runGate(dir: string, author?: string, gitEnv: NodeJS.ProcessEnv = fixtu
 }
 
 /**
- * The gate as a merge-queue (merge_group) run sees it: GitHub sets no
- * GITHUB_BASE_REF there, so the script falls back to origin/main, and HEAD is
- * the queue's one squash commit on top of it.
+ * The gate with no GITHUB_BASE_REF, as on merge_group. Without `groupBase` the
+ * script falls back to origin/main; with it, the script gets
+ * FLAIR_DOCS_BASE_SHA, as CI sets it from merge_group.base_sha.
  */
 function runQueueGate(dir: string, author?: string, groupBase?: string): { status: number | null; out: string } {
   const env: NodeJS.ProcessEnv = { ...fixtureGitEnv(), GITHUB_ACTIONS: "", GITHUB_BASE_REF: "" };
@@ -609,6 +609,30 @@ describe("merge-queue commit (no GITHUB_BASE_REF)", () => {
     const unscoped = runQueueGate(dir, "human-a");
     expect(unscoped.out).toContain("adds no changelog fragment");
     expect(unscoped.status).not.toBe(0);
+  });
+
+  test("an unreadable or non-ancestor base fails the gate even with a fragment already staged", () => {
+    const dir = makeRepo();
+    writeFixtureFile(dir, ".changelog/unreleased/fixed-someone-else.md", "- **Someone else's fix.**\n");
+    git(dir, "add", "-A");
+    commitAs(dir, "Fixture", "fixture@example.invalid", "chore: stage another change's fragment");
+    git(dir, "push", "-q", "origin", "HEAD:refs/heads/main");
+    git(dir, "fetch", "-q", "origin");
+    const parent = gitOut(dir, "rev-parse", "HEAD").trim();
+    writeFixtureFile(dir, "src/util.ts", "export const unit = 5;\n");
+    git(dir, "add", "-A");
+    commitAs(dir, "Human A", "human-a@example.invalid", "fix: adjust the unit (#9)");
+    // A side commit off the same parent: readable and sharing history, but not an ancestor of HEAD.
+    const notAncestor = gitOut(dir, "commit-tree", "HEAD^{tree}", "-p", parent, "-m", "side").trim();
+    for (const groupBase of ["0123456789abcdef0123456789abcdef01234567", notAncestor]) {
+      const res = runQueueGate(dir, "human-a", groupBase);
+      expect(res.out).toContain(`FLAIR_DOCS_BASE_SHA is ${groupBase}, which is not a readable ancestor of HEAD`);
+      expect(res.status).not.toBe(0);
+    }
+    // The readable parent runs the per-change rule, which needs this PR's own fragment.
+    const res = runQueueGate(dir, "human-a", parent);
+    expect(res.out).toContain("adds no changelog fragment");
+    expect(res.status).not.toBe(0);
   });
 
   test("the group's parent as base still requires a fragment for the queued PR's own shipped fix", () => {
