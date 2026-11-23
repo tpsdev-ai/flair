@@ -24,8 +24,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # The merge queue on main: GitHub tests the PR merged with the current main
-  # on a gh-readonly-queue/main/* branch and waits for the required checks to
+  # The merge queue on main: GitHub tests the PR merged onto main plus the PRs
+  # queued ahead of it, on a gh-readonly-queue/main/* branch and waits for the required checks to
   # report on that commit.
   merge_group:
     types: [checks_requested]

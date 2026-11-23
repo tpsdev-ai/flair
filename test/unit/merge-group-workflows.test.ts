@@ -5,7 +5,7 @@
 // (test/helpers/gha-expression.ts). They fail when a trigger is removed; when
 // a required job or a job it needs is skipped (except First-publish preflight,
 // which is skipped on merge_group by design and tested as that exception) or
-// checks out a ref of its own; when a Node matrix loses a leg; when an
+// has an actions/checkout step that overrides ref or repository; when a Node matrix loses a leg; when an
 // aggregate gate stops failing on a failed need; when two queue runs share a
 // concurrency group; or when a base binding loses its merge-group value.
 
@@ -188,7 +188,7 @@ describe("required checks run on the merge-queue commit", () => {
   );
 
   test.each(REQUIRED_ACTIONS_CHECKS)(
-    "%s: %s and every job it needs check out the event's own commit (no ref or repository override)",
+    "%s: no actions/checkout step in %s or a job it needs overrides ref or repository",
     (file, check) => {
       const doc = workflow(file);
       const [id] = jobNamed(doc, check);
