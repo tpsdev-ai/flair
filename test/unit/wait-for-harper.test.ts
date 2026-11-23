@@ -464,7 +464,7 @@ describe("wait-for-harper.mjs", () => {
       expect(result.status).toBe(1);
       expect(result.output).toContain("exit code 3");
       expect(result.output).not.toContain("Harper ready");
-      // One authenticated probe plus the unauthenticated diagnostic request.
+      // One probe plus the unauthenticated diagnostic request.
       expect(server.requests()).toBe(2);
     },
     CASE_TIMEOUT_MS,
