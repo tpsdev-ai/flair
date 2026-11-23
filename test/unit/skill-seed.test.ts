@@ -849,4 +849,33 @@ describe("skillSeedRestIo — the instance's 503 refusals of the skill-row write
     expect(notices[0]).toContain("waiting up to 150 s");
     expect(notices[0]).not.toContain("waiting up to 180 s");
   }, 5_000);
+
+  it("bounds preflight reads on a retry pass by the remaining budget so a stalled read cannot outlast the bound", async () => {
+    // A retry pass starts with ~1 s left (bound 3 s - 2 s backoff = 1 s).
+    // In pass 1 reads answer at once; only the retry pass's read stalls for 15 s.
+    // Its timeout signal is bounded by the remaining 1 s budget, so the pass ends
+    // in ~3 s total, not 17 s later.
+    const instance = refusingInstance([memoryProviderTimeoutResponse]);
+    let puts = 0;
+    const innerFetch = instance.fetch;
+    instance.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const isMemoryPut = (init?.method ?? "GET") === "PUT" && new URL(String(input)).pathname.startsWith("/Memory/");
+      if (isMemoryPut) puts++;
+      // Once the first PUT has run, stall subsequent reads on the retry pass
+      if (puts > 0 && (init?.method ?? "GET") === "GET") {
+        instance.delays.read = 15_000;
+      }
+      return innerFetch(input, init);
+    }) as typeof fetch;
+
+    const io = skillSeedRestIo(restOptions(instance, { skillWriteTimeoutMs: 3_000 }), current);
+    const start = performance.now();
+    const out = await runSkillSeed(io, current);
+    const elapsed = performance.now() - start;
+    expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
+    expect((out as { message: string }).message).toContain("the bound passed while the seed re-read the instance");
+    // Finished around ~3 s (well under the 15 s read delay + 2 s backoff = 17 s).
+    expect(elapsed).toBeLessThan(6_000);
+    expect(elapsed).toBeGreaterThanOrEqual(2_800);
+  }, 10_000);
 });

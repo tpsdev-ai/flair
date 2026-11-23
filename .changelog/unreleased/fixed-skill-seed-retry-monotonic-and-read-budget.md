@@ -1,0 +1,1 @@
+- **`flair init` bounds retry passes and tracks skill-seed deadlines with a monotonic clock.** Preflight reads during skill-seed retry passes are bounded by the remaining write budget so a stalled read cannot outlast the 180 s bound, deadlines are monotonic against clock adjustments, and retrying when a 503 write actually landed skips redundant writes.

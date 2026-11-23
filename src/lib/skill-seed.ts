@@ -132,10 +132,10 @@ export type SeedWrite = { ok: boolean; detail?: string; status?: number; code?: 
 export interface SkillSeedIo {
   /** The operator principal the writes run as: the Basic administrator's username. */
   operator: string;
-  readRow(): Promise<SeedRead<SeedRowShape>>;
-  readAssignment(): Promise<SeedRead<SeedAssignment>>;
+  readRow(timeoutMs?: number): Promise<SeedRead<SeedRowShape>>;
+  readAssignment(timeoutMs?: number): Promise<SeedRead<SeedAssignment>>;
   /** The Agent record whose id equals `operator`; `row: null` when there is none. */
-  readOperatorAgent(): Promise<SeedRead<unknown>>;
+  readOperatorAgent(timeoutMs?: number): Promise<SeedRead<unknown>>;
   /** Write the skill row, waiting at most `timeoutMs` (default: the io's own bound). */
   putRow(timeoutMs?: number): Promise<SeedWrite>;
   putAssignment(): Promise<SeedWrite>;
@@ -308,11 +308,16 @@ async function seedPass(
   rowWriteBudget: () => number,
   peekBudget: () => number | undefined,
 ): Promise<SkillSeedOutcome | SeedPassSignal> {
-  // On retry passes (after at least one write attempt), guard preflight reads
-  // against an exhausted skill-write budget so we don't burn the read timeout
-  // on reads that cannot lead to a successful write.
+  // On retry passes, bound each preflight read by the remaining skill-write
+  // budget so a stalled read cannot outlast the 180 s bound.
+  const readBudget = (): number | undefined => {
+    const left = peekBudget();
+    return left === undefined ? undefined : Math.min(SEED_REQUEST_TIMEOUT_MS, Math.max(0, Math.round(left)));
+  };
+
   if ((peekBudget() ?? 1) <= 0) return { kind: "no_time" };
-  const rowRead = await io.readRow();
+  const rowRead = await io.readRow(readBudget());
+  if ((peekBudget() ?? 1) <= 0) return { kind: "no_time" };
   if (!rowRead.ok) {
     return refused(
       "skill_seed_row_unreadable",
@@ -321,7 +326,8 @@ async function seedPass(
     );
   }
 
-  const agentRead = await io.readOperatorAgent();
+  const agentRead = await io.readOperatorAgent(readBudget());
+  if ((peekBudget() ?? 1) <= 0) return { kind: "no_time" };
   if (!agentRead.ok) {
     return refused(
       "skill_seed_operator_unreadable",
@@ -364,7 +370,8 @@ async function seedPass(
   }
   const storedContent = typeof stored?.content === "string" ? stored.content : null;
 
-  const assignRead = await io.readAssignment();
+  const assignRead = await io.readAssignment(readBudget());
+  if ((peekBudget() ?? 1) <= 0) return { kind: "no_time" };
   if (!assignRead.ok) {
     return refused(
       "skill_seed_assignment_unreadable",
@@ -528,12 +535,12 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
   const skillWriteMs = opts.skillWriteTimeoutMs ?? SEED_SKILL_WRITE_TIMEOUT_MS;
   const skillNoticeMs = opts.skillWriteNoticeMs ?? SEED_SKILL_WRITE_NOTICE_MS;
 
-  const readById = async <T>(table: string, id: string): Promise<SeedRead<T>> => {
+  const readById = async <T>(table: string, id: string, timeoutMs: number = requestMs): Promise<SeedRead<T>> => {
     let res: Response;
     try {
       res = await fetchImpl(`${base}/${table}/${encodeURIComponent(id)}`, {
         headers: { Authorization: auth },
-        signal: AbortSignal.timeout(Math.max(0, Math.round(requestMs))),
+        signal: AbortSignal.timeout(Math.max(0, Math.round(timeoutMs))),
       });
     } catch (err) {
       return { ok: false, detail: `the request failed: ${detailOf(err)}` };
@@ -613,9 +620,9 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
 
   return {
     operator: opts.user,
-    readRow: () => readById<SeedRowShape>("Memory", SEED_SKILL_ID),
-    readAssignment: () => readById<SeedAssignment>("OrgSkillAssignment", SEED_ASSIGNMENT_ID),
-    readOperatorAgent: () => readById<unknown>("Agent", opts.user),
+    readRow: (timeoutMs?: number) => readById<SeedRowShape>("Memory", SEED_SKILL_ID, timeoutMs ?? requestMs),
+    readAssignment: (timeoutMs?: number) => readById<SeedAssignment>("OrgSkillAssignment", SEED_ASSIGNMENT_ID, timeoutMs ?? requestMs),
+    readOperatorAgent: (timeoutMs?: number) => readById<unknown>("Agent", opts.user, timeoutMs ?? requestMs),
     putRow,
     skillWriteTimeoutMs: skillWriteMs,
     putAssignment: () =>
