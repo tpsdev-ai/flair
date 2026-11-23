@@ -2,4 +2,4 @@
   The owner-scoped write guard refuses a non-admin agent's addressed POST, PUT
   or PATCH whose body `id` is present, not null, not a string or number and not
   the addressed key with 400 `id_target_mismatch`, and checks each object element of an array
-  body as it checks the body itself (#2551).
+  body as it checks the body itself (#2551). ([#2681](https://github.com/tpsdev-ai/flair/pull/2681))
