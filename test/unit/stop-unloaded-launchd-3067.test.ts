@@ -129,7 +129,7 @@ setInterval(() => {}, 1000);
   return pid;
 }
 
-/** A live process that is not Flair's and records any signal it receives. */
+/** A live process that is not Flair's and records SIGTERM if received. */
 async function startForeignStub(f: Fixture): Promise<number> {
   const script = join(f.home, "foreign-stub.cjs");
   writeFileSync(script, `
@@ -148,7 +148,7 @@ setInterval(() => {}, 1000);
   return Number(readFileSync(join(f.dataDir, "hdb.pid"), "utf8"));
 }
 
-/** A live process that is not recorded as Flair's and records any signal it receives. */
+/** A live process that is not recorded as Flair's and records SIGTERM if received. */
 async function startSentinel(f: Fixture): Promise<number> {
   const script = join(f.home, "sentinel.cjs");
   writeFileSync(script, `
@@ -169,6 +169,33 @@ setInterval(() => {}, 1000);
   const deadline = Date.now() + 5000;
   while (!existsSync(join(f.home, "sentinel-ready")) && Date.now() < deadline) await Bun.sleep(10);
   return child.pid;
+}
+
+/** A live process recorded as Flair's by hdb.pid and its sidecar, but not serving the port. */
+async function startWedgedStub(f: Fixture): Promise<number> {
+  const script = join(f.home, "wedged-stub.cjs");
+  writeFileSync(script, `
+const fs = require('node:fs');
+fs.writeFileSync(process.env.WEDGED_PIDFILE, String(process.pid));
+fs.writeFileSync(process.env.WEDGED_READY, '1');
+setInterval(() => {}, 1000);
+`);
+  const child = Bun.spawn(["node", script], {
+    env: {
+      ...process.env,
+      WEDGED_PIDFILE: join(f.dataDir, "hdb.pid"),
+      WEDGED_READY: join(f.home, "wedged-ready"),
+    },
+    stdout: "ignore", stderr: "ignore",
+  });
+  f.children.push(child);
+  const deadline = Date.now() + 5000;
+  while (!existsSync(join(f.home, "wedged-ready")) && Date.now() < deadline) await Bun.sleep(10);
+  const pid = Number(readFileSync(join(f.dataDir, "hdb.pid"), "utf8"));
+  writeFileSync(join(f.dataDir, "flair-daemon.json"), JSON.stringify({
+    pid, startTimeMs: Date.now(), port: f.port, flairVersion: "test",
+  }));
+  return pid;
 }
 
 async function runStop(f: Fixture): Promise<{ out: string; code: number; elapsed: number }> {
@@ -265,17 +292,28 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(() => process.kill(sentinel, 0)).not.toThrow();
   }, 30_000);
 
-  test("a failed launchctl list is not read as not-loaded: stop refuses", async () => {
+  test("a failed launchctl list is not read as not-loaded: stop refuses to signal a recorded pid", async () => {
     const f = await makeFixture();
     writeFileSync(join(f.state, "fail"), "1");
-    const sentinel = await startSentinel(f);
+    const pid = await startForeignStub(f);
     const result = await runStop(f);
     expect(result.code).toBe(1);
     expect(result.out).toContain("could not read whether the launchd job");
     expect(result.out).toContain("flair doctor");
     expect(unloadCalls(f)).toEqual([]);
-    expect(existsSync(join(f.home, "sentinel-signalled"))).toBe(false);
-    expect(() => process.kill(sentinel, 0)).not.toThrow();
+    expect(existsSync(join(f.home, "signalled"))).toBe(false);
+    expect(() => process.kill(pid, 0)).not.toThrow();
+  }, 30_000);
+
+  test("an unloaded job with a verified recorded pid that is not serving stops directly (WEDGED)", async () => {
+    const f = await makeFixture();
+    const pid = await startWedgedStub(f);
+    const result = await runStop(f);
+    expect(result.code).toBe(0);
+    expect(result.out).toContain(`stopped the directly started Flair (pid ${pid})`);
+    expect(result.out).toContain(`the launchd job ${f.label} was not loaded`);
+    expect(unloadCalls(f)).toEqual([]);
+    expect(() => process.kill(pid, 0)).toThrow();
   }, 30_000);
 
   test("no listener and an unreadable pidfile: no Flair process is named", async () => {

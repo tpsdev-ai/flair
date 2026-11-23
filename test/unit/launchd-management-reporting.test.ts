@@ -256,8 +256,8 @@ describe("flair#1022 — assessLaunchdManagement distinguishes healthy from mana
   });
 
   test("no-service does not answer the loaded-state question, and never consults launchctl", () => {
-    // The field describes whether `launchctl list` reports the job loaded. With
-    // no plist there is no job to ask about, so no answer may be asserted.
+    // The observer never queries launchd when there is no plist, so it must
+    // omit `jobLoaded` rather than answer a state it never read.
     let consulted = 0;
     const m = assessLaunchdManagement({
       ...base,
