@@ -1,10 +1,9 @@
 // cli-memory-add-provider-timeout-retry.test.ts
 //
 // `flair memory add` must retry a write the instance refused with exactly
-// `503 memory_provider_timeout` — the embedding provider did not answer
-// within its bound and nothing was written, so replaying the same PUT (same
-// memory id) cannot double-write the row. Before this fix the error
-// propagated uncaught and the command died with a stack trace.
+// `503 memory_provider_timeout` — the refusal states the embedding provider
+// did not answer within its bound and nothing was written, so a replay sends
+// the same PUT to the same memory id. Before this fix it was not retried.
 //
 // We spawn the real CLI against a mock HTTP server (FLAIR_URL) that answers
 // each attempt with a scripted status/body, and record every request. Mirrors
@@ -78,7 +77,7 @@ function addArgs(extra: string[] = []): string[] {
 }
 
 describe("flair memory add retries a provider timeout", () => {
-  it("one timeout then success: exit 0, one write, same id on both attempts", async () => {
+  it("one timeout then an accepted response: exit 0, two PUT attempts, one accepted response, same id on both", async () => {
     const { server, url, captures } = await startMockServer([PROVIDER_TIMEOUT, { status: 200, body: JSON.stringify({ ok: true }) }]);
     try {
       const { code } = await runCli(addArgs(), { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" }, "timeout then success");
@@ -87,7 +86,7 @@ describe("flair memory add retries a provider timeout", () => {
       expect(captures[0].method).toBe("PUT");
       expect(captures[1].method).toBe("PUT");
       expect(captures[1].path).toBe(captures[0].path);
-      // The first attempt was refused, so the single successful write is the retry.
+      // The first attempt was refused; the accepted 200 response is the retry's.
       expect(captures[1].body.id).toBe(captures[0].body.id);
       expect(captures[0].body.id).toBeString();
     } finally {
@@ -95,7 +94,7 @@ describe("flair memory add retries a provider timeout", () => {
     }
   }, 25_000);
 
-  it("timeouts on every attempt: exit 1 after 3 attempts, one readable line, no stack", async () => {
+  it("timeouts on every attempt: exit 1 after 3 attempts, one memory add: error line, no stack frames", async () => {
     const { server, url, captures } = await startMockServer([PROVIDER_TIMEOUT]);
     try {
       const { code, stderr } = await runCli(addArgs(), { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" }, "all timeouts");
