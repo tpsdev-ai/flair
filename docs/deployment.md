@@ -94,7 +94,12 @@ flair doctor
 
 For systemd auto-start, supply your own unit. The commands below assume you installed a user unit named `flair.service`.
 
+Enable that unit to start on login. To start it after reboot without a login, enable lingering for the account that owns it with `loginctl enable-linger <username>`.
+
 ```bash
+# Start on login
+systemctl --user enable flair
+
 # Manual control
 systemctl --user start flair
 systemctl --user stop flair
@@ -140,10 +145,9 @@ on the node — see [`docs/deploying-on-fabric.md`](deploying-on-fabric.md).
 ### SSH tunnel (simplest)
 
 ```bash
-ssh -f -N -L 19926:localhost:19926 your-server
+LOCAL_FLAIR_PORT=19927 # choose an unused local port
+ssh -f -N -o ExitOnForwardFailure=yes -L "${LOCAL_FLAIR_PORT}:localhost:19926" your-server && export FLAIR_URL="http://localhost:${LOCAL_FLAIR_PORT}"
 ```
-
-Then set `FLAIR_URL=http://localhost:19926` on the client.
 
 ### Direct network access
 
@@ -242,6 +246,8 @@ flair backup --output ~/flair-backup-$(date +%Y%m%d).json --admin-pass-file ~/.f
 # Restore to an initialized instance; keep the archive's .sha256 sidecar beside it
 flair restore ~/flair-backup-20260405.json --admin-pass-file ~/.flair/admin-pass
 ```
+
+Archived agents must already exist on the target; see [restore limitations](standalone-local.md#backup--restore). Restore reports missing agents as failed and attempts the archive's Memory and Soul writes.
 
 Keep the archive and its `.sha256` sidecar together; a legacy archive without a sidecar needs [local approval](standalone-local.md#restoring-an-archive-written-before-digest-sidecars).
 

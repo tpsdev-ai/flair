@@ -62,9 +62,9 @@ The launchd label, Node path, and n8n version below are site-specific examples; 
 launchctl stop ai.tpsdev.n8n
 
 # Activate/deactivate via CLI
-N8N_PATH="/opt/homebrew/opt/node@24/bin" npx n8n@1.123.38 update:workflow --id=$WORKFLOW_ID --active=true
+PATH="/opt/homebrew/opt/node@24/bin:$PATH" npx n8n@1.123.38 update:workflow --id=$WORKFLOW_ID --active=true
 # or
-N8N_PATH="/opt/homebrew/opt/node@24/bin" npx n8n@1.123.38 update:workflow --id=$WORKFLOW_ID --active=false
+PATH="/opt/homebrew/opt/node@24/bin:$PATH" npx n8n@1.123.38 update:workflow --id=$WORKFLOW_ID --active=false
 
 # Start n8n
 launchctl start ai.tpsdev.n8n

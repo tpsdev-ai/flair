@@ -76,9 +76,9 @@ checks passed.
 Run the CLI against a local Flair instance:
 
 ```bash
-node dist/cli.js --help
-node dist/cli.js init --data-dir /tmp/flair-dev --port 19926
-node dist/cli.js status --port 19926
+node dist/cli-shim.cjs --help
+node dist/cli-shim.cjs init --data-dir /tmp/flair-dev --port 19926
+node dist/cli-shim.cjs status --port 19926
 ```
 
 ## PR expectations

@@ -66,17 +66,18 @@ tail -50 ~/.flair/data/log/system.log
 
 **If the installed native dependencies are missing, reinstall:**
 ```bash
-# Use a user-writable npm prefix so the package dir is yours (see README Quick Start)
+npm uninstall -g @tpsdev-ai/flair             # use the original prefix; a root-owned install may need sudo
 mkdir -p ~/.npm-global && npm config set prefix ~/.npm-global
 export PATH="$HOME/.npm-global/bin:$PATH"     # add to your shell rc to persist
-
-npm uninstall -g @tpsdev-ai/flair             # remove the root-owned copy (may need sudo to remove it)
 npm install -g @tpsdev-ai/flair               # reinstall, no sudo
+flair init                                     # on macOS, repoint an eligible launchd plist
 flair restart
-flair doctor                                  # should now report semantic search operational
+flair doctor
 ```
 
-**Other causes:** a missing native llama.cpp addon for your platform, or a corrupted/partial model download. `flair doctor` prints the underlying init error. Restart Flair to retry model initialization, then run `FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed --agent <id>` to regenerate stored embeddings.
+On macOS, check whether `flair init` reports that it re-pointed the plist; if it refused, follow the remedy it prints before restarting.
+
+**Other causes:** a missing native llama.cpp addon for your platform, or a corrupted/partial model download. `flair doctor` prints the underlying init error. Restart Flair to retry model initialization, then run `FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed` to regenerate stored embeddings. Each affected agent needs its local signing key.
 
 **HuggingFace outage:** the model normally resolves from HuggingFace (`nomic-ai/nomic-embed-text-v1.5-GGUF`). If HF is down or 403/429-ing, point `FLAIR_MODELS_DIR` at a directory containing your own copy of `nomic-embed-text-v1.5.Q4_K_M.gguf` instead of waiting it out:
 ```bash
@@ -101,8 +102,10 @@ The `ci-models` release above is a first-party mirror of the same file (public, 
 ```bash
 flair doctor    # shows the specific error
 flair restart  # retry model initialization
-FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed --agent <id> --stale-only # regenerate stale embeddings
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed --stale-only # regenerate stale embeddings across agents
 ```
+
+An agent without a local signing key is skipped; check the command output for skipped agents.
 
 If `flair doctor` shows a native addon error:
 ```bash
@@ -238,7 +241,7 @@ flair agent list --admin-pass-file ~/.flair/admin-pass
 **Symptoms:** You wrote a memory but search doesn't find it.
 
 **Possible causes:**
-1. **Hash-fallback embeddings:** Check `flair status` — if embeddings are in hash mode, semantic search won't work properly. Restart to retry model initialization, then run `FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed --agent <id> --stale-only`.
+1. **Hash-fallback embeddings:** Check `flair status` — if embeddings are in hash mode, semantic search won't work properly. Restart to retry model initialization, then run `FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed --stale-only` (requires each affected agent's local signing key).
 2. **Content safety flags:** The memory might have been flagged. Search for it directly: `flair memory list --agent <id>`.
 3. **`visibility: private`:** Only its author can find a `private` memory. This is the most common cause when one agent wrote the memory and another is searching for it, because **`private` is what a bare write lands on**: visibility defaults from durability (`permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private`), and a write with no `--durability` is `standard`. Check what the memory landed on with `flair memory list --agent <author> --json` (the table view doesn't show visibility, the JSON records do), then either search as its author, or rewrite it with `--visibility shared` so every agent on the instance can find it (no grant needed — non-private reads are open within the instance).
 4. **Dedup threshold:** If the content is very similar to an existing memory, it may have been deduplicated. Check with `flair memory list`.

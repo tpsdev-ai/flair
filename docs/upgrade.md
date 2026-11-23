@@ -580,7 +580,7 @@ npm install -g @tpsdev-ai/flair@<previous-version>
 flair restart
 
 # If data looks wrong, keep the pre-upgrade archive and its .sha256 sidecar together
-flair restore ~/flair-backup-<date>.json --admin-pass-file ~/.flair/admin-pass
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair restore ~/flair-backup-<date>.json
 ```
 
 A legacy logical backup without a `.sha256` sidecar needs [local approval](standalone-local.md#restoring-an-archive-written-before-digest-sidecars) before restore.
@@ -698,19 +698,22 @@ flair snapshot list
 flair restart # macOS: hand a directly started instance to launchd before stopping
 flair stop
 npm install -g @tpsdev-ai/flair@<previous-version>
+```
 
+On macOS, continue only if `flair stop` succeeds. Move this instance's plist out of `~/Library/LaunchAgents` before restoring, and check that `lsof +D ~/.flair/data` shows no Harper process. Older restore commands can load a plist they find while stopping Flair.
+
+```bash
 # 3. Restore before starting the previous engine against the data
-flair snapshot restore ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair snapshot restore ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz
 
 # 4. Verify
 flair status
 flair doctor
 ```
 
-`flair snapshot restore` does the stop/replace/restart in one step (confirming before
-the destructive replace unless you pass `--yes`); the equivalent by hand is `flair
-stop && rm -rf ~/.flair/data && mkdir -p ~/.flair/data && tar -xzf
-<snapshot> -C ~/.flair/data && flair start`, in case you'd rather not use the command.
+`flair snapshot restore` confirms before replacing the data directory unless you pass `--yes`.
+
+On macOS, run `flair init` after verification to recreate this instance's launchd plist, then `flair restart` to load it.
 
 The only full rollback is restoring the pre-upgrade physical data-directory snapshot.
 `flair backup`/`restore` logically exports/imports only Agent, Memory and Soul rows

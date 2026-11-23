@@ -325,8 +325,8 @@ flair agent add my-project
 
 # On client machines
 npm install -g @tpsdev-ai/flair  # for the CLI
-ssh -f -N -L 19926:localhost:19926 your-server
-export FLAIR_URL=http://localhost:19926
+LOCAL_FLAIR_PORT=19927 # choose an unused local port
+ssh -f -N -o ExitOnForwardFailure=yes -L "${LOCAL_FLAIR_PORT}:localhost:19926" your-server && export FLAIR_URL="http://localhost:${LOCAL_FLAIR_PORT}"
 export FLAIR_AGENT_ID=my-project
 # Copy the key from the server:
 scp server:~/.flair/keys/my-project.key ~/.flair/keys/
