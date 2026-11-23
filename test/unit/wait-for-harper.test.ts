@@ -14,11 +14,12 @@
  * These tests drive the waiter through a real local HTTP server and a stub
  * `docker` first on PATH. No Docker, no Harper, no external network.
  *
- * The credential is sent as a request header, removed from the environment of
- * every child process, and redacted from printed output in its raw, Base64
- * token and full header forms: the tests assert the server sees it, while the
- * stub's environment and the waiter's output do not. The failure diagnostic
- * is bounded by ten seconds for the container logs plus one per-request cap.
+ * The credential is sent as a request header and redacted from printed output
+ * in its raw, Base64 token and full header forms: the tests assert the server
+ * sees it, while the waiter's output does not. The named environment variable
+ * is omitted from the waiter's Docker children; the stub records that variable
+ * only. The failure diagnostic is bounded by ten seconds for the container
+ * logs plus one per-request cap.
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
@@ -39,8 +40,9 @@ const SENTINEL = "admin:test-pass";
 
 /**
  * Stub `docker`: `inspect --format <format> <name>` answers from files in the
- * sandbox, `logs <name>` prints one known line. Each call records its argv so
- * a test can assert the credential reached no child process. Every call also
+ * sandbox, `logs <name>` prints one known line. Each call records its argv and
+ * the value of HARPER_START_CREDENTIALS, so a test can assert that variable
+ * reached no child process. Every call also
  * writes a warning to stderr, so a wait that reads stderr as container state
  * fails (a). `inspect-open-stdout` answers and then holds stdout open past the
  * deadline (p); `inspect-ignore-term` ignores SIGTERM and sleeps past its cap
@@ -350,7 +352,7 @@ describe("wait-for-harper.mjs", () => {
   );
 
   test(
-    "(d) a stalled /Health is cut off at the budget",
+    "(d) a stalled /Health stops polling at the budget; the timeout line follows",
     async () => {
       const server = await health(() => {
         // Never answer: the request stays open until the waiter aborts it.
@@ -433,7 +435,7 @@ describe("wait-for-harper.mjs", () => {
   );
 
   test(
-    "(h) the credential is a request header, absent from child environments and printed output",
+    "(h) the credential is a request header, and its named variable is absent from the docker children and printed output",
     async () => {
       const server = await health(STATUS(200));
       const box = sandbox();
@@ -462,8 +464,9 @@ describe("wait-for-harper.mjs", () => {
       expect(readFileSync(join(box.root, "docker-env.log"), "utf8")).not.toContain("test-pass");
 
       // Failure path: the diagnostic request is unauthenticated; the docker
-      // children do not inherit the credential, and its raw value and Base64
-      // token are redacted from the container logs and the response headers.
+      // children do not receive the named variable, and its raw value and
+      // Base64 token are redacted from the container logs and the response
+      // headers.
       const failing = sandbox({
         running: "false",
         exitCode: "9",
@@ -824,6 +827,57 @@ describe("wait-for-harper.mjs", () => {
       expect(finalRun.output).toContain("cannot inspect container 'harper-flair'");
       expect(finalRun.output).not.toContain("Harper ready");
       expectRedacted(finalRun.output);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(v) a first inspect that reports the container stopped after the deadline is a timeout",
+    async () => {
+      const server = await health(STATUS(200));
+      const box = sandbox({ running: "false", exitCode: "5", inspectOpenStdout: true });
+      const result = await run(box, [
+        "--container",
+        "harper-flair",
+        "--url",
+        server.url,
+        "--poll-interval-ms",
+        "100",
+        "--per-request-ms",
+        "5000",
+        "--budget-seconds",
+        "1",
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.output).toContain("Harper did not answer /Health within 1s");
+      expect(result.output).not.toContain("exited (exit code 5)");
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(w) a final inspect that reports the container stopped after the deadline is a timeout",
+    async () => {
+      const server = await health(STATUS(200));
+      const box = sandbox({ inspectSequence: ["true 0", "false 6"], inspectSlowFinal: true });
+      const result = await run(box, [
+        "--container",
+        "harper-flair",
+        "--url",
+        server.url,
+        "--poll-interval-ms",
+        "100",
+        "--per-request-ms",
+        "2000",
+        "--budget-seconds",
+        "1",
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.output).toContain("Harper did not answer /Health within 1s");
+      expect(result.output).not.toContain("exited (exit code 6)");
+      expect(result.output).not.toContain("Harper ready");
     },
     CASE_TIMEOUT_MS,
   );

@@ -22,9 +22,9 @@
 //     [--per-request-ms <n>]
 //
 //   --credentials-env names an environment variable holding `user:pass`. The
-//   value is read in this process, sent as a request header, removed from the
-//   environment of every child process, and redacted from printed output in
-//   its raw, Base64 token and full header forms.
+//   value is read in this process, sent as a request header, and redacted from
+//   printed output in its raw, Base64 token and full header forms. That named
+//   variable is omitted from the waiter's Docker children.
 //   --budget-seconds bounds the polling; it defaults to
 //   $HARPER_START_BUDGET_S, then 300.
 //
@@ -62,7 +62,7 @@ export function resolveBudget(flagValue, envValue) {
   return seconds;
 }
 
-/** The credential's value, removed from the environment of every child process. */
+/** The named credential variable, omitted from the waiter's Docker children. */
 function childEnvironment(credentialsEnv) {
   const env = { ...process.env };
   if (credentialsEnv !== undefined) delete env[credentialsEnv];
