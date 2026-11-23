@@ -1,1 +1,1 @@
-- **The MQTT-off deploy progress line adds its cluster phrase only when the replicated answer lists cluster nodes.** A replicated answer without a node list now names only the target, and the final report's peer list is empty.
+- **The MQTT-off deploy progress line adds its cluster phrase only when the replicated answer lists cluster nodes.** A replicated answer without a node list now names only the target, and the final report's peer list is empty. ([#2738](https://github.com/tpsdev-ai/flair/pull/2738))

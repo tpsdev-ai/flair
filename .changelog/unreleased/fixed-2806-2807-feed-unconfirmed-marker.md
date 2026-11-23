@@ -6,4 +6,4 @@
   does the same when its post-commit confirmation read fails or does not show
   its expiry on the matched row. A later owner PUT, PATCH or DELETE of that id,
   and a later feed request that reaches the ordinary write-back for it, answer
-  `503 write_outcome_unknown` until the process restarts.
+  `503 write_outcome_unknown` until the process restarts. ([#2811](https://github.com/tpsdev-ai/flair/pull/2811))

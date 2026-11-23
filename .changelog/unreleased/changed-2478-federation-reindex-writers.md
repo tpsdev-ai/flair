@@ -19,4 +19,4 @@
   its re-PUT. A row it cannot lock writes nothing and is counted in the
   result's `skipped` total; `skippedSamples` lists up to five of those ids.
   The admin `_reindex` PUT runs under the same lock as an ordinary PUT and
-  confirms the committed row after its own-committed write.
+  confirms the committed row after its own-committed write. ([#2784](https://github.com/tpsdev-ai/flair/pull/2784))

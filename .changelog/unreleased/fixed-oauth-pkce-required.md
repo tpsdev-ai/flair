@@ -9,4 +9,4 @@
   only with a `code_verifier` whose S256 hash matches the challenge stored with
   it. A code stored without an S256 challenge is `invalid_grant`; for an
   otherwise valid, unused code carrying an S256 challenge, a missing verifier is
-  `invalid_request`.
+  `invalid_request`. ([#2711](https://github.com/tpsdev-ai/flair/pull/2711), [#2706](https://github.com/tpsdev-ai/flair/pull/2706))
