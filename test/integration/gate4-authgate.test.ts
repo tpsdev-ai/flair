@@ -201,6 +201,40 @@ describe("flair#614 backstop follow-up: FederationInstance/FederationPeers/Healt
       expect(Array.isArray(body.agents.names)).toBe(true);
       expect(body.federation?.peerList?.some((p: any) => p.id === seededPeerId)).toBe(true);
     }, 30_000);
+
+    test("agent total and table use Agent records; a Memory author without one is a separate labelled entry", async () => {
+      const authorId = "operator-seed";
+      const memRes = await adminOp(harper, {
+        operation: "insert", database: "flair", table: "Memory",
+        records: [{
+          id: "skill:using-flair-3051", agentId: authorId, content: "fixture content",
+          createdAt: new Date().toISOString(), durability: "persistent",
+        }],
+      });
+      expect(memRes.status, `Memory insert returned ${memRes.status}: ${await memRes.text()}`).toBe(200);
+
+      const adminPath = "/HealthDetail";
+      const adminRes = await fetch(`${harper.httpURL}${adminPath}`, {
+        headers: { Authorization: ed25519Header(admin, "GET", adminPath) },
+      });
+      expect(adminRes.status, `admin GET ${adminPath} returned ${adminRes.status}`).toBe(200);
+      const adminBody = await adminRes.json() as any;
+      expect(adminBody.agents.count).toBe(2);
+      expect(adminBody.agents.count).toBe(adminBody.agents.perAgent.length);
+      expect(adminBody.agents.perAgent.map((r: any) => r.id).sort()).toEqual([admin.id, nonAdmin.id].sort());
+      expect(adminBody.agents.unregisteredMemoryAuthors).toEqual([{ id: authorId, memoryCount: 1 }]);
+
+      const nonAdminPath = "/HealthDetail";
+      const nonAdminRes = await fetch(`${harper.httpURL}${nonAdminPath}`, {
+        headers: { Authorization: ed25519Header(nonAdmin, "GET", nonAdminPath) },
+      });
+      const nonAdminText = await nonAdminRes.text();
+      expect(nonAdminRes.status, `non-admin GET ${nonAdminPath} returned ${nonAdminRes.status}`).toBe(200);
+      const nonAdminBody = JSON.parse(nonAdminText);
+      expect(nonAdminBody.agents.perAgent.map((r: any) => r.id)).toEqual([nonAdmin.id]);
+      expect(nonAdminBody.agents.unregisteredMemoryAuthors).toBeUndefined();
+      expect(nonAdminText).not.toContain(authorId);
+    }, 30_000);
   });
 
   // ── SkillScan (allowCreate → allowVerified) ───────────────────────────────
