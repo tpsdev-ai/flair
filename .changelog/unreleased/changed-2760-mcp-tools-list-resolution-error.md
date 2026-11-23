@@ -3,4 +3,4 @@
   mapping is refused (for example, the principal is deactivated), `tools/list`
   returns the same JSON-RPC error as a `tools/call` of a known tool by that
   caller, and no tool list. A subject with no mapping still gets a tool list
-  (flair#2760).
+  (flair#2760). ([#2776](https://github.com/tpsdev-ai/flair/pull/2776))

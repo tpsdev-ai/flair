@@ -4,4 +4,4 @@
   IdP credential touch and the `.content`-suffix migration re-read the committed
   row after their transaction commits. A readable mismatch retries within the
   site's bound, if any; an unreadable verification stops. An unconfirmed
-  migration write is uncounted; a later scan decides pending state (#2656).
+  migration write is uncounted; a later scan decides pending state (#2656). ([#2657](https://github.com/tpsdev-ai/flair/pull/2657))

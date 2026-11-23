@@ -20,7 +20,7 @@
   revoked. It does not show where they came from or that a sidecar-free
   archive is unchanged since it was written (flair#2664).
 
-  > **Heads-up:** to restore a backup written before this release, first run
+  > **Heads-up:** to restore an archive without a sidecar, first run
   > `flair backup-approval legacy-admit <archive>` on the restoring host,
   > check the SHA-256 it prints, then run it again with
-  > `--confirm-digest <sha256>`.
+  > `--confirm-digest <sha256>`. ([#2707](https://github.com/tpsdev-ai/flair/pull/2707))
