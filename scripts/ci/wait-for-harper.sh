@@ -4,8 +4,8 @@
 # The CI E2E lane starts Harper with `harper install && harper dev /flair`
 # inside a container and then polls /Health. Two failure modes made that poll
 # flaky on loaded runners: the install could outlast a fixed poll count, and
-# the loop kept sleeping after the container had already exited, so the only
-# diagnosis was a generic "failed to start after Ns".
+# the loop kept sleeping after the container had already exited, so a slow
+# install and a dead container surfaced as the same generic start failure.
 #
 # This script waits against an elapsed-time budget instead of a loop count, and
 # checks the container on every poll. When the container has exited it fails at

@@ -4,8 +4,8 @@
  * The workflow step starts Harper inside a container (`harper install &&
  * harper dev /flair`) and then waits for /Health. A fixed poll count (60 x 2 s)
  * timed out on loaded runners while the install was still running, and the loop
- * kept sleeping after the container had already exited, so the only evidence was
- * a generic start failure.
+ * kept sleeping after the container had already exited, so a slow install and a
+ * dead container surfaced as the same generic start failure.
  *
  * `scripts/ci/wait-for-harper.sh` waits against an elapsed-time budget and
  * inspects the container on every poll. These tests drive it hermetically: a
