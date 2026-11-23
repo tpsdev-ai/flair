@@ -11,6 +11,11 @@
 
 import { randomBytes } from "node:crypto";
 import nacl from "tweetnacl";
+import {
+  EMBEDDING_READY_DEADLINE_MS,
+  recordStepSummary,
+  warmInstanceEmbeddings,
+} from "../../../scripts/ci/embedding-readiness.mjs";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,6 +40,31 @@ export interface FlairInstance {
 // Resolution
 // ---------------------------------------------------------------------------
 
+/**
+ * Client-side timeout and acceptance policy for instance resolution, measured
+ * on a monotonic clock: every `/Health` request's client timeout and every poll
+ * sleep is clamped to the time left, and an answer that arrives at or after the
+ * bound is not accepted (a fetch or sleep that ignores its timer can still
+ * settle later).
+ */
+export const INSTANCE_RESOLVE_BUDGET_MS = 30_000;
+/** Client timeout of one `/Health` request, before clamping to the time left. */
+export const HEALTH_REQUEST_TIMEOUT_MS = 2_000;
+/** Pause between `/Health` polls, before clamping to the time left. */
+export const HEALTH_POLL_INTERVAL_MS = 500;
+
+/** Seams for the resolution bound's unit test; the smoke path passes none. */
+export interface ResolveFlairInstanceOptions {
+  /** Monotonic milliseconds (default `performance.now()`). */
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  fetchImpl?: typeof fetch;
+  /** Builds each `/Health` request's signal (default `AbortSignal.timeout`). */
+  timeoutSignal?: (ms: number) => AbortSignal;
+  /** Resolution budget (default `INSTANCE_RESOLVE_BUDGET_MS`), so the default clock can be tested in real time. */
+  budgetMs?: number;
+}
+
 function resolvePorts(): { httpPort: number; opsPort: number } {
   if (process.env.FLAIR_TEST_URL) {
     const u = new URL(process.env.FLAIR_TEST_URL);
@@ -53,7 +83,7 @@ function resolvePorts(): { httpPort: number; opsPort: number } {
  *
  * Admin credentials: FLAIR_ADMIN_PASS env > "admin123" (Docker default)
  */
-export async function resolveFlairInstance(): Promise<FlairInstance> {
+export async function resolveFlairInstance(opts: ResolveFlairInstanceOptions = {}): Promise<FlairInstance> {
   const { httpPort, opsPort } = resolvePorts();
   const baseUrl = process.env.FLAIR_TEST_URL ?? `http://127.0.0.1:${httpPort}`;
   const opsUrl = `http://127.0.0.1:${opsPort}`;
@@ -61,28 +91,46 @@ export async function resolveFlairInstance(): Promise<FlairInstance> {
   const adminPass = process.env.FLAIR_ADMIN_PASS ?? "admin123";
   const authHeader = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
-  // Wait for Flair to be healthy
-  const deadline = Date.now() + 30_000;
+  // Wait for Flair to be healthy, within INSTANCE_RESOLVE_BUDGET_MS measured on
+  // a monotonic clock: each request's client timeout and each sleep are sized to
+  // the time left, and a success that arrives at or after the deadline is refused.
+  // This is a client-side timeout and acceptance policy; a fetch or sleep that
+  // ignores its timer can still settle later.
+  const now = opts.now ?? (() => performance.now());
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const timeoutSignal = opts.timeoutSignal ?? ((ms: number) => AbortSignal.timeout(ms));
+  const budgetMs = opts.budgetMs ?? INSTANCE_RESOLVE_BUDGET_MS;
+  const deadline = now() + budgetMs;
   let ready = false;
 
-  while (Date.now() < deadline) {
+  for (;;) {
+    // Whole milliseconds (Node's AbortSignal.timeout rejects a fraction),
+    // rounded down so the request's timer is never due after the deadline.
+    const requestMs = Math.min(HEALTH_REQUEST_TIMEOUT_MS, Math.floor(deadline - now()));
+    if (requestMs < 1) break;
     try {
-      const res = await fetch(`${baseUrl}/Health`, {
-        signal: AbortSignal.timeout(2000),
+      const res = await fetchImpl(`${baseUrl}/Health`, {
+        signal: timeoutSignal(requestMs),
       });
-      if (res.ok) {
+      if (res.ok && now() < deadline) {
         ready = true;
         break;
       }
     } catch {
       // Not ready yet
     }
-    await new Promise(r => setTimeout(r, 500));
+    // Whole milliseconds for the pause too: a timer may round a fractional
+    // delay up (Node makes any delay under 1 ms a 1 ms timer), which would fall
+    // due after the deadline, so under 1 ms left ends the wait without a sleep.
+    const pauseMs = Math.min(HEALTH_POLL_INTERVAL_MS, Math.floor(deadline - now()));
+    if (pauseMs < 1) break;
+    await sleep(pauseMs);
   }
 
   if (!ready) {
     throw new Error(
-      `Flair instance at ${baseUrl} did not respond within 30s. ` +
+      `Flair instance at ${baseUrl} was not confirmed healthy before the client-side deadline (${budgetMs / 1000}s). ` +
       `Ensure a Flair instance is running (local: 'flair serve', Docker: see CI workflow). ` +
       `Or set FLAIR_TEST_URL to an existing instance.`,
     );
@@ -222,12 +270,24 @@ export async function writeMemory(
  * locally where the model is already warm (a warm write is ~3s). Confirmed
  * across #1217/#1221/#1222.
  *
- * This helper pays the cold-start cost UP FRONT, on a throwaway agent+memory,
- * with a generous budget and a couple of retries, so the model is hot before
- * the measured Step-2 write ever runs. It exercises the exact same path the
- * timed step does (create agent → PUT /Memory, admin-authed), so it warms
- * precisely what Step 2 needs. It creates and deletes its own throwaway agent,
- * leaving no residue in the instance.
+ * This helper pays the cold-start cost UP FRONT, on a throwaway agent+memory:
+ * it returns only after a stored embedding was observed on this instance, before
+ * the measured Step-2 write runs (an observation, not a guarantee the model
+ * stays loaded). It exercises the same server path the timed step does (an
+ * ops-inserted agent, then an admin-authed PUT /Memory). It deletes its own
+ * throwaway rows and agent and reports a failed delete, naming what may remain,
+ * rather than treating it as gone.
+ *
+ * flair#3052: elapsed time (the shared helper in
+ * scripts/ci/embedding-readiness.mjs) and a hard attempt cap
+ * (MAX_READINESS_ATTEMPTS) govern retries and acceptance, not an attempt count
+ * alone: three calls that each time out at the default provider bound, plus two
+ * retry pauses, take about 62 s however generous the per-attempt budget was.
+ * This is a client-side policy; an in-flight request or sleep can still settle
+ * after the deadline, and its answer is then refused. Among non-2xx Memory responses
+ * only a 503 whose JSON error field is `memory_provider_timeout` is retried;
+ * any other non-2xx answer fails at once. A 2xx whose read-back fails or does
+ * not show a stored vector and model stamp is also retried within the deadline.
  *
  * NOTE: this deliberately does NOT weaken `writeMemory`'s 10s timeout — that
  * timeout is a real client-side guard and stays put. The fix is to ensure the
@@ -235,56 +295,17 @@ export async function writeMemory(
  */
 export async function warmEmbeddingModel(
   flair: FlairInstance,
-  opts?: { timeoutMs?: number; attempts?: number },
+  opts?: { deadlineMs?: number },
 ): Promise<{ elapsedMs: number; attempts: number }> {
-  const timeoutMs = opts?.timeoutMs ?? 90_000;
-  const maxAttempts = opts?.attempts ?? 3;
-
-  // A real throwaway agent so the write is fully valid and reaches the
-  // server-side embedding step (Memory.put → getEmbedding) rather than being
-  // rejected before it. Mirrors Step 1 + Step 2 of the golden path.
-  const warmAgentId = await createAgent(flair.opsUrl, flair.authHeader);
-  const t0 = performance.now();
-  let lastErr: unknown;
-
-  try {
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const memId = `${warmAgentId}-warmup-${Date.now()}-${randomBytes(4).toString("hex")}`;
-      const body = {
-        id: memId,
-        agentId: warmAgentId,
-        content: `embedding warm-up ${memId}`,
-        type: "memory",
-        durability: "ephemeral",
-        createdAt: new Date().toISOString(),
-      };
-      try {
-        // Generous per-attempt budget: this call is EXPECTED to absorb the
-        // cold model load, so it must not use writeMemory's 10s abort.
-        const res = await fetch(`${flair.baseUrl}/Memory/${encodeURIComponent(memId)}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Authorization: flair.authHeader },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(timeoutMs),
-        });
-        if (res.ok) {
-          return { elapsedMs: Math.round(performance.now() - t0), attempts: attempt };
-        }
-        lastErr = new Error(`HTTP ${res.status} ${await res.text().catch(() => "")}`);
-      } catch (err) {
-        lastErr = err;
-      }
-      // Brief backoff before retrying a still-loading model.
-      if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 1000));
-    }
-    throw new Error(
-      `warmEmbeddingModel: embedding model did not become ready within ` +
-      `${maxAttempts} attempt(s) @ ${timeoutMs}ms each: ${String(lastErr)}`,
-    );
-  } finally {
-    // Never let a warm-up leak an agent into the instance, even on failure.
-    await flair.cleanup([warmAgentId]).catch(() => {});
-  }
+  const result = await warmInstanceEmbeddings({
+    baseUrl: flair.baseUrl,
+    opsUrl: flair.opsUrl,
+    authHeader: flair.authHeader,
+    label: "smoke warm-up",
+    deadlineMs: opts?.deadlineMs ?? EMBEDDING_READY_DEADLINE_MS,
+  });
+  recordStepSummary("Smoke Tests (Golden Path)", result);
+  return result;
 }
 
 /**
