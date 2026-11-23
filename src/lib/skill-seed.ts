@@ -458,12 +458,13 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
     onTimeout: (ms: number) => string = (ms) => `no answer within ${seconds(ms)}`,
   ): Promise<SeedWrite> => {
     let res: Response;
+    const timeoutInteger = Math.max(0, Math.round(timeoutMs));
     try {
       res = await fetchImpl(`${base}/${table}/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: auth },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(timeoutInteger),
       });
     } catch (err) {
       if (isTimeout(err)) return { ok: false, detail: onTimeout(timeoutMs) };
@@ -533,7 +534,7 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
 
       while (true) {
         attempt++;
-        const remainingMs = deadline - now();
+        const remainingMs = Math.max(0, Math.round(deadline - now()));
         if (remainingMs <= 0) {
           return lastResult.detail ? lastResult : { ok: false, detail: onTimeout(skillWriteMs) };
         }

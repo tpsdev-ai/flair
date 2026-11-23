@@ -636,6 +636,30 @@ describe("skillSeedRestIo — a slow first skill-row write", () => {
     expect(clock).toBe(100_800);
   });
 
+  it("safely handles fractional timestamps from performance.now() without AbortSignal.timeout range errors (flair#3043)", async () => {
+    let clock = 100_000.456789;
+    const instance = slowInstance();
+    const originalFetch = instance.fetch;
+
+    instance.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    const io = skillSeedRestIo(
+      restOptions(instance, {
+        skillWriteTimeoutMs: 1_000,
+        now: () => {
+          clock += 0.333333;
+          return clock;
+        },
+      }),
+      current,
+    );
+
+    const out = await runSkillSeed(io, current);
+    expect(out).toMatchObject({ kind: "ok", action: "create" });
+  });
+
   it("does not retry 503 write_outcome_unknown (flair#3043)", async () => {
     let memoryPuts = 0;
     const instance = slowInstance();

@@ -28,7 +28,7 @@ describe("using-flair seed provider timeout retry against real Harper (flair#304
     for (const entry of ["config.yaml", "package.json", "dist", "schemas"]) {
       cpSync(join(process.cwd(), entry), join(component, entry), { recursive: true });
     }
-    symlinkSync(join(process.cwd(), "node_modules"), join(component, "node_modules"), "dir");
+    symlinkSync(join(process.cwd(), "node_modules"), join(component, "node_modules"), process.platform === "win32" ? "junction" : "dir");
 
     // Patch embedding provider in the ephemeral instance so embedding calls hang and trigger Harper's lock timeout
     appendFileSync(
