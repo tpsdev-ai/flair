@@ -246,6 +246,10 @@ jobs:
       # flair#2311: verify command/file agreement and the lane partition.
       - name: Verify lane shard coverage
         run: node scripts/ci/lane-shards.mjs --verify --of 2
+      # The waiter suite runs here as a named step as well as through the
+      # lane's file discovery; the darwin lane below runs it under bash 3.2.
+      - name: Waiter unit tests (bash docker stub)
+        run: bun test test/unit/wait-for-harper.test.ts
       - name: Shared unit lane (root, isolated and workspace tests)
         # --keep-going (flair#2030): keep attempting later steps until the lane budget
         # runs out and report every failure (and any unrun step) in one
@@ -407,6 +411,10 @@ jobs:
         run: bun run build && bun run build:cli
       - name: Run darwin-gated unit tests (must execute, not skip)
         run: bun scripts/check-darwin-gated-tests.mjs
+      # The waiter's docker stub uses "#!/usr/bin/env bash" and the runner's
+      # stock /bin/bash 3.2 has no mapfile builtin; /bin first pins it.
+      - name: Waiter unit tests (macOS /bin/bash 3.2)
+        run: PATH="/bin:$PATH" bun test test/unit/wait-for-harper.test.ts
       - name: Repeat Darwin zombie regression
         run: |
           for run in {1..20}; do

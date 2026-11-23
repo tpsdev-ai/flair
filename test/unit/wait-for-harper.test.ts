@@ -89,7 +89,8 @@ case "$cmd" in
       exec node -e 'setTimeout(() => {}, 6000)'
     fi
     if [ -f "$WAIT_STUB_DIR/inspect-sequence" ]; then
-      mapfile -t states < "$WAIT_STUB_DIR/inspect-sequence"
+      states=()
+      while IFS= read -r line; do states+=("$line"); done < "$WAIT_STUB_DIR/inspect-sequence"
       count=$(cat "$WAIT_STUB_DIR/inspect-count" 2>/dev/null || echo 0)
       index=$count
       if [ "$index" -ge "\${#states[@]}" ]; then index=$(( \${#states[@]} - 1 )); fi
