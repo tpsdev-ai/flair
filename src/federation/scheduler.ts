@@ -1014,6 +1014,38 @@ export function federationShimShapeProblem(shimText: string, templateText: strin
   return null;
 }
 
+export interface FederationShimExecTargets {
+  nodeBin: string;
+  flairBin: string;
+  nodeExists: boolean;
+}
+
+/**
+ * The paths on the federation-sync shim's `exec` line, and whether the node
+ * binary exists (flair#3056): `flair doctor` names a shim whose node was
+ * removed by a Homebrew upgrade. null when the shim cannot be read or does not
+ * hold exactly one generated exec line.
+ */
+export function readFederationShimExecTargets(
+  opts: { shimPathOverride?: string; read?: (p: string) => string; exists?: (p: string) => boolean } = {},
+): FederationShimExecTargets | null {
+  const read = opts.read ?? ((p: string) => readFileSync(p, "utf-8"));
+  const exists = opts.exists ?? existsSync;
+  const shimPath = opts.shimPathOverride ?? SHIM_PATH_DEFAULT;
+  let text: string;
+  try {
+    text = read(shimPath);
+  } catch {
+    return null;
+  }
+  const exec = [...text.matchAll(SHIM_EXEC_LINE_RE)];
+  if (exec.length !== 1) return null;
+  const nodeBin = exec[0]![1]!;
+  const flairBin = exec[0]![2]!;
+  if (!isAbsolute(nodeBin)) return null;
+  return { nodeBin, flairBin, nodeExists: exists(nodeBin) };
+}
+
 /** Does the federation-sync unit exec `shimPath`? Returns the reason it does not, or null. */
 function federationUnitExecsShim(plat: SchedulerPlatform, text: string, shimPath: string): string | null {
   if (plat === "darwin") {

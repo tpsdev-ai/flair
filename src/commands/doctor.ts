@@ -2662,6 +2662,10 @@ program
         const lastExit = d.status.installed && d.status.active === true
           ? queryLastExitStatus({ plat: d.status.platform, darwinTarget: d.darwinTarget, linuxServiceUnit: d.linuxServiceUnit })
           : null;
+        // flair#3056: name the shim's missing node binary rather than only the
+        // exit code — a Homebrew upgrade deletes the Cellar path it was written
+        // with, so every run fails before flair starts.
+        const shimExec = d.kind === "federation" ? fedSched.readFederationShimExecTargets() : null;
         const facts = {
           label: d.label,
           enableCommand: d.enableCommand,
@@ -2669,6 +2673,7 @@ program
           installed: d.status.installed,
           active: d.status.active,
           lastExit,
+          missingNodeBin: shimExec && !shimExec.nodeExists ? shimExec.nodeBin : null,
           stderrLogPath: d.stderrLogPath,
         };
         const finding = d.kind === "federation"

@@ -1,0 +1,2 @@
+- **The launchd plist's node path and the federation sync shim use Homebrew's stable `opt/<formula>` alias, so `brew upgrade node` leaves them working.**
+  On a Homebrew Node install those files held the realpath into `Cellar/<formula>/<version>/bin/node`, which an upgrade deletes. The alias is written only when it resolves to the binary being written; any other node path is unchanged. `flair doctor` also names the missing node binary when the shim's exec target does not exist, and points at `flair init`.

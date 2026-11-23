@@ -15,6 +15,12 @@
  *   - mise: `$MISE_DATA_DIR | ~/.local/share/mise` + `/installs/node/<major>/bin/node`.
  *     mise keeps `installs/node/<major>` as a symlink to the newest installed
  *     runtime of that major, so it resolves to the same binary and is written.
+ *   - Homebrew: `<prefix>/Cellar/<formula>/<version>/bin/node` (a realpath into
+ *     the Cellar) has the alias `<prefix>/opt/<formula>/bin/node`, where
+ *     `<prefix>` is taken from the path (so /opt/homebrew and /usr/local both
+ *     work) and `<formula>` is `node` or a versioned `node@NN`. `brew upgrade
+ *     node` deletes the versioned Cellar directory and repoints `opt/node`,
+ *     so the alias keeps naming an installed runtime.
  *   - Volta: `$VOLTA_HOME | ~/.volta` + `/bin/node`. Considered, but a standard
  *     Volta install makes that path a link to `volta-shim`, whose realpath is
  *     not a node binary, so the equality check rejects it and the exact path is
@@ -40,7 +46,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { resolveHome } from "./home.js";
 
-export type AliasManager = "mise" | "volta";
+export type AliasManager = "homebrew" | "mise" | "volta";
 
 export interface AliasCandidate {
   manager: AliasManager;
@@ -54,6 +60,9 @@ export interface AliasHooks {
   home?: string;
   env?: NodeJS.Dict<string>;
 }
+
+const HOMEBREW_CELLAR_RE = /^(.*)\/Cellar\/([^/]+)\/[^/]+\/bin\/node$/;
+const HOMEBREW_FORMULA_RE = /^node(?:@\d+)?$/;
 
 /** `24.19.0` / `v24.19.0` → `24.19.0`; null when no version is present. */
 export function parseNodeVersion(nodePath: string): string | null {
@@ -69,8 +78,18 @@ export function parseNodeVersion(nodePath: string): string | null {
 export function aliasCandidates(nodeBin: string, hooks: AliasHooks = {}): AliasCandidate[] {
   const home = hooks.home ?? resolveHome();
   const env = hooks.env ?? process.env;
-  const version = parseNodeVersion(nodeBin);
   const out: AliasCandidate[] = [];
+
+  // A Cellar path carries the version in a segment Homebrew may suffix with a
+  // revision (`26.10.0_1`), so this candidate is derived from the path alone.
+  const cellar = HOMEBREW_CELLAR_RE.exec(nodeBin);
+  const prefix = cellar?.[1];
+  const formula = cellar?.[2];
+  if (prefix && formula && prefix.startsWith("/") && HOMEBREW_FORMULA_RE.test(formula)) {
+    out.push({ manager: "homebrew", path: join(prefix, "opt", formula, "bin", "node") });
+  }
+
+  const version = parseNodeVersion(nodeBin);
   if (!version || !home) return out;
   const major = version.split(".")[0]!;
 
@@ -86,7 +105,8 @@ export function aliasCandidates(nodeBin: string, hooks: AliasHooks = {}): AliasC
 /**
  * The node path to WRITE into a generated unit: a floating alias whose realpath
  * is the same binary as `nodeBin`, when one exists; otherwise `nodeBin`
- * unchanged. mise's major alias is preferred over Volta's when both match.
+ * unchanged. Candidates are tried in aliasCandidates order (Homebrew, then
+ * mise's major alias, then Volta's).
  */
 export function preferVersionManagerAlias(nodeBin: string, hooks: AliasHooks = {}): string {
   const exists = hooks.exists ?? existsSync;

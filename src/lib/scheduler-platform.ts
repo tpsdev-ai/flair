@@ -619,6 +619,12 @@ export interface ScheduledDriverFacts {
   active: boolean | null;
   /** Last-run read — null when it was not queried (nothing installed/loaded). */
   lastExit: LastExitStatus | null;
+  /**
+   * The node binary the driver's shim execs, when that path does not exist
+   * (flair#3056). A Homebrew node upgrade deletes the versioned Cellar
+   * directory the shim names, so every run fails before flair starts.
+   */
+  missingNodeBin?: string | null;
   /** The job's stderr log, named in the degraded remedy. */
   stderrLogPath: string;
 }
@@ -700,6 +706,18 @@ export function describeScheduledDriverFinding(f: ScheduledDriverFacts): Schedul
     };
   }
   if (le.state === "recorded" && le.exitCode !== 0) {
+    if (f.missingNodeBin) {
+      return {
+        state: "degraded",
+        icon: "error",
+        isIssue: true,
+        message: `${f.label} DEGRADED — the node binary it runs is missing (${f.missingNodeBin})`,
+        detail: [
+          `The service manager has the job loaded and is firing it, but every run fails because ${f.missingNodeBin} does not exist.`,
+          `Fix: flair init   # then check: ${f.statusCommand}`,
+        ],
+      };
+    }
     return {
       state: "degraded",
       icon: "error",

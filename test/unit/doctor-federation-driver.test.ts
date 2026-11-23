@@ -19,7 +19,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   describeScheduledDriverFinding,
   type ScheduledDriverFacts,
@@ -38,6 +38,7 @@ import {
   loadYamlDoc,
   parseEnvAssignments,
 } from "../../src/lib/doctor-federation-driver.ts";
+import { readFederationShimExecTargets } from "../../src/federation/scheduler.ts";
 import * as render from "../../src/render.ts";
 
 function driverFacts(overrides: Partial<ScheduledDriverFacts> = {}): ScheduledDriverFacts {
@@ -341,5 +342,41 @@ describe("cli wiring (supplementary)", () => {
     expect(cli).toContain("describeFederationDriverFinding");
     expect(cli).toContain("resolveFlairConfigYaml");
     expect(cli).toContain("federationPeersConfigured");
+  });
+});
+
+// ─── flair#3056: the shim's node binary is missing ──────────────────────────
+
+describe("flair#3056 — a shim whose node path was removed", () => {
+  it("doctor names the missing node binary and points at flair init, not only the exit code", () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-3056-shim-"));
+    try {
+      const shim = join(dir, "flair-federation-sync");
+      const nodeBin = join(dir, "Cellar", "node", "26.10.0_1", "bin", "node");
+      writeFileSync(shim, [
+        "#!/bin/sh",
+        "# Deployed by `flair federation sync enable`",
+        `exec "${nodeBin}" "${join(dir, "flair")}" federation sync "$@"`,
+        "",
+      ].join("\n"));
+      const missing = readFederationShimExecTargets({ shimPathOverride: shim });
+      expect(missing).not.toBeNull();
+      expect(missing!.nodeExists).toBe(false);
+      const f = describeFederationDriverFinding({
+        peersConfigured: true,
+        driver: driverFacts({ lastExit: recorded(1), missingNodeBin: missing!.nodeBin }),
+      });
+      expect(f.state).toBe("degraded");
+      expect(f.isIssue).toBe(true);
+      expect(f.message).toContain(nodeBin);
+      expect(f.message).not.toContain("last run failed");
+      expect(f.detail.join("\n")).toContain("flair init");
+      // With the binary present the shim is read as pointing at it.
+      mkdirSync(dirname(nodeBin), { recursive: true });
+      writeFileSync(nodeBin, "");
+      expect(readFederationShimExecTargets({ shimPathOverride: shim })!.nodeExists).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
