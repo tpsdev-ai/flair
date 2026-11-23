@@ -64,22 +64,27 @@ async function rowsById(h: HarperInstance, table: string, id: string): Promise<a
 
 /**
  * Load the embedding model before the seed, so the short provider bound is not
- * spent on a first-call model download or load. A POST embeds outside the
- * write lock, so it waits for the model. Each attempt writes a row for another
- * agent; the first row stored with a vector ends it.
+ * spent on a first-call model load. A POST that names no id takes no per-id
+ * write lock, so its embedding is not held to that bound and waits for the
+ * model. Each attempt writes a row for another agent and reads back the id the
+ * POST returned; the first row stored with a vector ends it.
  */
 async function warmEmbeddingModel(h: HarperInstance): Promise<void> {
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const id = `warm-up-${attempt}`;
     const res = await fetch(`${h.httpURL}/Memory`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: adminAuth(h) },
-      body: JSON.stringify({ id, agentId: WARMUP_AGENT_ID, content: `warm-up ${attempt}`, durability: "standard", createdAt }),
+      body: JSON.stringify({ agentId: WARMUP_AGENT_ID, content: `warm-up ${attempt}`, durability: "standard", createdAt }),
       signal: AbortSignal.timeout(100_000),
     });
-    if (!res.ok) throw new Error(`warm-up POST returned ${res.status}: ${await res.text()}`);
+    const text = await res.text();
+    if (!res.ok) throw new Error(`warm-up POST returned ${res.status}: ${text}`);
+    const body = JSON.parse(text);
+    const id = typeof body === "string" ? body : body?.id;
+    if (typeof id !== "string" || id.length === 0) throw new Error(`warm-up POST returned no id: ${text.slice(0, 200)}`);
     const [row] = await rowsById(h, "Memory", id);
-    if (Array.isArray(row?.embedding) && row.embedding.length > 0) return;
+    if (row?.agentId !== WARMUP_AGENT_ID) throw new Error(`warm-up row ${id} was not committed`);
+    if (Array.isArray(row.embedding) && row.embedding.length > 0) return;
   }
   throw new Error("the embedding model did not load: three warm-up rows were stored without a vector");
 }
