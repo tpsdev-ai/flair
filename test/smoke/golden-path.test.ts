@@ -23,8 +23,10 @@ import {
   writeMemory,
   searchMemories,
   bootstrapAgent,
+  INSTANCE_RESOLVE_BUDGET_MS,
   type FlairInstance,
 } from "./helpers/flair-instance.js";
+import { EMBEDDING_READY_DEADLINE_MS, OPS_TIMEOUT_MS } from "../../scripts/ci/embedding-readiness.mjs";
 
 import {
   assertShape,
@@ -48,7 +50,16 @@ const MARKER_CONTENT = `Smoke test marker ${RANDOM}`;
 // The model loads lazily on the first embed call and that load can exceed the
 // per-write 10s client timeout on a cold/loaded CI runner, so the warm-up must
 // be allowed to run well past both the default hook timeout and that 10s abort.
-const WARMUP_TIMEOUT_MS = 120_000;
+// flair#3052: the hook covers the whole setup path, not only the wait. Its
+// client-side bounds sum to 240 s: instance resolution (a 30 s client-side
+// timeout and acceptance policy on a monotonic clock), the warm-up agent create
+// (one 10 s bound shared with its 401 retry), the 180 s total-elapsed wait, and
+// the two deletes (10 s each, likewise shared). The 250 s hook leaves 10 s for
+// request processing and for rounding a fractional remaining time up to a whole
+// millisecond.
+const SETUP_TIMEOUT_MS = 250_000;
+const SETUP_CLIENT_BOUNDS_MS =
+  INSTANCE_RESOLVE_BUDGET_MS + OPS_TIMEOUT_MS * 3 + EMBEDDING_READY_DEADLINE_MS;
 
 beforeAll(async () => {
   flair = await resolveFlairInstance();
@@ -57,14 +68,16 @@ beforeAll(async () => {
   // flair#1219: warm the embedding model BEFORE any timed step. `/Health` 200
   // does not imply the embedding model is loaded — it loads lazily on the first
   // embed call. Paying that cold-start cost here (on a throwaway agent+memory)
-  // guarantees the measured Step-2 write is a warm write, never the one that
-  // absorbs the model load. Without this, Step 2 flaked with
-  // `TimeoutError: The operation timed out` at ~10s on cold CI runners.
+  // means a stored embedding was observed before the measured Step-2 write
+  // runs, so that write is not expected to absorb the model load (an
+  // observation, not a guarantee the model stays loaded). Without this, Step 2
+  // flaked with `TimeoutError: The operation timed out` at ~10s on cold CI
+  // runners.
   const warm = await warmEmbeddingModel(flair);
   console.log(
     `[golden-path] Embedding model warm (${warm.elapsedMs}ms, ${warm.attempts} attempt(s))`,
   );
-}, WARMUP_TIMEOUT_MS);
+}, SETUP_TIMEOUT_MS);
 
 afterAll(async () => {
   if (flair && agentId) {
@@ -78,6 +91,12 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 
 describe("Golden path: agent + memory + search + bootstrap", () => {
+  test("the setup hook budget is at least the sum of the setup path's client-side bounds", () => {
+    expect(SETUP_TIMEOUT_MS).toBeGreaterThanOrEqual(SETUP_CLIENT_BOUNDS_MS);
+    // Near its bound: the hook must not drift far above the path it covers.
+    expect(SETUP_TIMEOUT_MS - SETUP_CLIENT_BOUNDS_MS).toBeLessThanOrEqual(10_000);
+  });
+
   test("Step 1: Create agent", async () => {
     const t0 = performance.now();
 
