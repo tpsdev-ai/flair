@@ -16,7 +16,6 @@ import { createServer, Server } from "node:http";
 import { childOverranDeadline } from "../helpers/child-deadline.js";
 
 const CHILD_DEADLINE_MS = 20_000;
-const CASE_BUDGET_MS = 25_000;
 
 type Reply = { status: number; body: string };
 type Capture = { method?: string; path?: string; body?: any };
@@ -50,7 +49,7 @@ function runCli(
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const child = spawn("bun", ["src/cli.ts", ...args], { cwd: ".", env, timeout: CHILD_DEADLINE_MS });
+    const child = spawn("bun", ["src/cli.ts", ...args], { cwd: ".", env, timeout: 20_000 });
     let out = "";
     let err = "";
     child.stdout?.on("data", (d) => (out += d.toString()));
@@ -94,7 +93,7 @@ describe("flair memory add retries a provider timeout", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  }, CASE_BUDGET_MS);
+  }, 25_000);
 
   it("timeouts on every attempt: exit 1 after 3 attempts, one readable line, no stack", async () => {
     const { server, url, captures } = await startMockServer([PROVIDER_TIMEOUT]);
@@ -111,7 +110,7 @@ describe("flair memory add retries a provider timeout", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  }, CASE_BUDGET_MS);
+  }, 25_000);
 
   it("a 500 is not a provider timeout: one attempt, today's behaviour", async () => {
     const { server, url, captures } = await startMockServer([{ status: 500, body: JSON.stringify({ error: "internal_error" }) }]);
@@ -122,7 +121,7 @@ describe("flair memory add retries a provider timeout", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  }, CASE_BUDGET_MS);
+  }, 25_000);
 
   it("a 503 with another code is not a provider timeout: one attempt, today's behaviour", async () => {
     const { server, url, captures } = await startMockServer([{ status: 503, body: JSON.stringify({ error: "memory_locked" }) }]);
@@ -133,5 +132,5 @@ describe("flair memory add retries a provider timeout", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  }, CASE_BUDGET_MS);
+  }, 25_000);
 });
