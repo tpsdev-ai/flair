@@ -252,7 +252,7 @@ describe("restore verifies preserved content (#2226)", () => {
   });
 
   describe("flair restore --dry-run (#2992)", () => {
-    test("restore --replace --dry-run against an archive a real replace refuses exits non-zero and reports the refusals without deleting or writing", async () => {
+    test("restore --replace --dry-run against an archive a real replace refuses exits non-zero and reports scope-field refusals without deleting or writing", async () => {
       const archive = {
         version: 1,
         agents: [agent],
@@ -263,6 +263,110 @@ describe("restore verifies preserved content (#2226)", () => {
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("the Soul scope-field rule refuses");
       expect(result.stderr).toContain("no rows were deleted");
+      expect(result.stdout).not.toContain("Dry run complete");
+      expect(result.stdout).not.toContain("Restore complete");
+      expect(result.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+    });
+
+    test("restore --replace --dry-run refuses an archive carrying a filesystem skill source", async () => {
+      const archive = {
+        version: 1,
+        agents: [agent],
+        memories: [],
+        souls: [
+          {
+            id: "flint:skill",
+            agentId: "flint",
+            key: "skill-assignment",
+            value: "my-skill",
+            metadata: JSON.stringify({ source: "/tmp/non-durable-skill" }),
+          },
+        ],
+      };
+      const result = await run(archive, [], ["--replace", "--dry-run"]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("its skill-assignment source is a filesystem path");
+      expect(result.stderr).toContain("no rows were deleted");
+      expect(result.stdout).not.toContain("Dry run complete");
+      expect(result.stdout).not.toContain("Restore complete");
+      expect(result.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+    });
+
+    test("restore --replace --dry-run reports a skill-assignment preflight refusal", async () => {
+      const archive = {
+        version: 1,
+        agents: [agent],
+        memories: [],
+        souls: [
+          {
+            id: "flint:skill",
+            agentId: "flint",
+            key: "skill-assignment",
+            value: "my-skill",
+            metadata: JSON.stringify({ optOut: "not-a-boolean" }),
+          },
+        ],
+      };
+      const result = await run(archive, [], ["--replace", "--dry-run"]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("the archived row would be refused by the Soul skill-assignment rule (skill_opt_out_not_boolean)");
+      expect(result.stderr).toContain("no rows were deleted");
+      expect(result.stdout).not.toContain("Dry run complete");
+      expect(result.stdout).not.toContain("Restore complete");
+      expect(result.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+    });
+
+    test("restore --replace --dry-run reports a surviving Memory content match", async () => {
+      const archive = {
+        version: 1,
+        agents: [agent],
+        memories: [],
+        souls: [{ id: "flint:role", agentId: "flint", key: "role", value: "learned-content" }],
+      };
+      const faults = [
+        {
+          method: "GET",
+          path: "/Memory",
+          body: [{ id: "surviving-mem", agentId: "flint", content: "learned-content" }],
+        },
+      ];
+      const result = await run(archive, faults, ["--replace", "--dry-run"]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("its value equals the content of the same agent's Memory surviving-mem");
+      expect(result.stderr).toContain("soul_value_is_learned_content");
+      expect(result.stderr).toContain("no rows were deleted");
+      expect(result.stdout).not.toContain("Dry run complete");
+      expect(result.stdout).not.toContain("Restore complete");
+      expect(result.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+    });
+
+    test("restore --replace --dry-run reports a MemoryCandidate claim match", async () => {
+      const archive = {
+        version: 1,
+        agents: [agent],
+        memories: [],
+        souls: [{ id: "flint:role", agentId: "flint", key: "role", value: "candidate-claim" }],
+      };
+      const faults = [
+        { method: "GET", path: "/Memory", body: [] },
+        {
+          method: "GET",
+          path: "/AdminMemoryCandidates/flint",
+          body: { candidates: [{ id: "cand-1" }], hasMore: false },
+        },
+        {
+          method: "GET",
+          path: "/MemoryCandidate/cand-1",
+          body: { id: "cand-1", agentId: "flint", claim: "candidate-claim" },
+        },
+      ];
+      const result = await run(archive, faults, ["--replace", "--dry-run"]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("its value equals the claim of the same agent's MemoryCandidate cand-1");
+      expect(result.stderr).toContain("soul_value_is_learned_content");
+      expect(result.stderr).toContain("no rows were deleted");
+      expect(result.stdout).not.toContain("Dry run complete");
+      expect(result.stdout).not.toContain("Restore complete");
       expect(result.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
     });
 

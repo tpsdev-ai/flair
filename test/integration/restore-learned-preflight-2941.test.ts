@@ -577,4 +577,42 @@ describe("flair restore --replace refuses a learned-content Soul replay before d
       proxy.stop(true);
     }
   }, 300_000);
+
+  test("case (x): flair restore --replace --dry-run against a real instance reports preflight refusal and leaves instance rows unchanged (#2992)", async () => {
+    const home = tempDir("flair-2992-dryrun-home-");
+    const agent = "learned-dryrun-agent";
+    const soulId = `${agent}:identity`;
+    const candidateId = `${agent}:candidate`;
+    const value = "the dry run candidate claim";
+
+    await seedAgent(agent);
+    expect(await operatorPut(`/Soul/${encodeURIComponent(soulId)}`, {
+      id: soulId, agentId: agent, key: "identity", value, durability: "permanent", createdAt: CREATED_AT,
+    })).toBeLessThan(300);
+    const archive = await backup(home, "learned-dryrun.json", agent);
+    await op({
+      operation: "upsert",
+      table: "MemoryCandidate",
+      records: [{ id: candidateId, agentId: agent, claim: value, generatedAt: CREATED_AT, status: "pending" }],
+    });
+
+    const before = {
+      agent: await row("Agent", agent),
+      soul: await row("Soul", soulId),
+      candidate: await row("MemoryCandidate", candidateId),
+    };
+
+    const restored = await runCli(["restore", archive, "--replace", "--dry-run", "--url", harper.httpURL], home, { FLAIR_ADMIN_PASS: harper.admin.password });
+
+    expect(restored.code, `${restored.stdout}${restored.stderr}`).toBe(1);
+    expect(restored.stdout).not.toContain("Dry run complete");
+    expect(restored.stdout).not.toContain("Deleting existing data");
+    assertNothingDeleted(restored);
+    expect(restored.stderr).toContain(`Soul ${soulId}`);
+    expect(restored.stderr).toContain("soul_value_is_learned_content");
+    expect(restored.stderr).toContain(candidateId);
+    expect(await row("Agent", agent)).toEqual(before.agent);
+    expect(await row("Soul", soulId)).toEqual(before.soul);
+    expect(await row("MemoryCandidate", candidateId)).toEqual(before.candidate);
+  }, 300_000);
 });
