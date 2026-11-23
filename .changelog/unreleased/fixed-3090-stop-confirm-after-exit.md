@@ -1,0 +1,1 @@
+- **`flair stop` confirms the launchd job and the port after the recorded pid exits.** It reports success only when the job is still not loaded and nothing serves the instance; otherwise it exits non-zero naming what it found. ([#3090](https://github.com/tpsdev-ai/flair/issues/3090))

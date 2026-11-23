@@ -66,6 +66,14 @@ case "$verb" in
       echo "Bootstrap failed: 5: Input/output error" >&2
       exit 5
     fi
+    n=0
+    if [ -f "$LAUNCHCTL_STATE/list-count" ]; then n=$(cat "$LAUNCHCTL_STATE/list-count"); fi
+    n=$((n+1))
+    printf '%s' "$n" > "$LAUNCHCTL_STATE/list-count"
+    if [ -f "$LAUNCHCTL_STATE/later-loaded" ] && [ "$n" -ge 2 ]; then
+      printf '{\\n\\t"Label" = "%s";\\n\\t"PID" = %s;\\n};\\n' "$2" "$(cat "$LAUNCHCTL_STATE/pid")"
+      exit 0
+    fi
     if [ -f "$LAUNCHCTL_STATE/loaded" ]; then
       printf '{\\n\\t"Label" = "%s";\\n\\t"PID" = %s;\\n};\\n' "$2" "$(cat "$LAUNCHCTL_STATE/pid")"
       exit 0
@@ -88,19 +96,40 @@ exit 0
   return fixture;
 }
 
-/** A directly started instance: serves Flair's /Health, records its pid, dies on SIGTERM. */
-async function startFlairStub(f: Fixture): Promise<number> {
+/** A directly started instance: serves Flair's /Health, records its pid, dies on SIGTERM.
+ *  With `successor: true`, SIGTERM closes its listener and keeps the process alive
+ *  until a successor it spawns answers on the same port, so the successor is
+ *  already serving when the recorded pid exits. */
+async function startFlairStub(f: Fixture, opts: { successor?: boolean } = {}): Promise<number> {
   const script = join(f.home, "flair-stub.cjs");
   writeFileSync(script, `
 const fs = require('node:fs');
 const http = require('node:http');
 const body = fs.readFileSync(process.env.HEALTH_BODY_FILE, 'utf8');
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(body);
-}).listen(Number(process.env.HTTP_PORT), '127.0.0.1', () => {
+});
+server.listen(Number(process.env.HTTP_PORT), '127.0.0.1', () => {
   fs.writeFileSync(process.env.FLAIR_PIDFILE, String(process.pid));
 });
+if (process.env.SUCCESSOR_SCRIPT) {
+  process.on('SIGTERM', () => {
+    try { server.close(); } catch {}
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, [process.env.SUCCESSOR_SCRIPT], {
+      env: process.env, detached: true, stdio: 'ignore',
+    });
+    child.unref();
+    const deadline = Date.now() + 5000;
+    const timer = setInterval(() => {
+      if (fs.existsSync(process.env.SUCCESSOR_READY_FILE) || Date.now() > deadline) {
+        clearInterval(timer);
+        process.exit(0);
+      }
+    }, 10);
+  });
+}
 setInterval(() => {}, 1000);
 `);
   // Built by the module the server's Health resource uses, so the classifier
@@ -110,12 +139,39 @@ setInterval(() => {}, 1000);
     { searchReady: true, ok: true, status: 200 },
     { version: "0.53.0", buildCommit: null },
   )));
+  let successorScript: string | undefined;
+  if (opts.successor) {
+    successorScript = join(f.home, "successor-stub.cjs");
+    writeFileSync(successorScript, `
+const fs = require('node:fs');
+const http = require('node:http');
+const body = fs.readFileSync(process.env.HEALTH_BODY_FILE, 'utf8');
+function start() {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(body);
+  });
+  server.on('error', () => setTimeout(start, 25));
+  server.listen(Number(process.env.HTTP_PORT), '127.0.0.1', () => {
+    fs.writeFileSync(process.env.SUCCESSOR_PID_FILE, String(process.pid));
+    fs.writeFileSync(process.env.SUCCESSOR_READY_FILE, '1');
+  });
+}
+start();
+setInterval(() => {}, 1000);
+`);
+  }
   const child = Bun.spawn(["node", script], {
     env: {
       ...process.env,
       FLAIR_PIDFILE: join(f.dataDir, "hdb.pid"),
       HEALTH_BODY_FILE: healthBody,
       HTTP_PORT: String(f.port),
+      ...(successorScript ? {
+        SUCCESSOR_SCRIPT: successorScript,
+        SUCCESSOR_PID_FILE: join(f.home, "successor.pid"),
+        SUCCESSOR_READY_FILE: join(f.home, "successor-ready"),
+      } : {}),
     },
     stdout: "ignore", stderr: "ignore",
   });
@@ -236,6 +292,12 @@ afterEach(() => {
   for (const child of fixture?.children ?? []) {
     try { child.kill("SIGKILL"); } catch { /* already gone */ }
   }
+  // A successor stub is spawned detached by the instance stub, so it is not in
+  // `children`; kill the pid it recorded, if it got that far.
+  const successorPidFile = fixture ? join(fixture.home, "successor.pid") : null;
+  if (successorPidFile && existsSync(successorPidFile)) {
+    try { process.kill(Number(readFileSync(successorPidFile, "utf8")), "SIGKILL"); } catch { /* already gone */ }
+  }
   fixture = undefined;
 });
 
@@ -252,6 +314,32 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(result.elapsed).toBeLessThan(10_000);
     expect(unloadCalls(f)).toEqual([]);
     expect(() => process.kill(pid, 0)).toThrow();
+  }, 30_000);
+
+  test("a job that is loaded during the stop is not reported as stopped", async () => {
+    const f = await makeFixture();
+    const pid = await startFlairStub(f);
+    // The first `launchctl list` answers 113; after the recorded pid exits the
+    // next read reports the job loaded, so the stop did not leave it unloaded.
+    writeFileSync(join(f.state, "later-loaded"), "1");
+    writeFileSync(join(f.state, "pid"), String(pid));
+    const result = await runStop(f);
+    expect(result.code).toBe(1);
+    expect(result.out).toContain(`pid ${pid} exited, but Flair is not confirmed down`);
+    expect(result.out).toContain("now reads loaded");
+    expect(result.out).not.toContain("stopped the directly started Flair");
+    expect(result.out).toContain("flair doctor");
+  }, 30_000);
+
+  test("a successor serving /Health after the recorded pid exits is not reported as stopped", async () => {
+    const f = await makeFixture();
+    const pid = await startFlairStub(f, { successor: true });
+    const result = await runStop(f);
+    expect(result.code).toBe(1);
+    expect(result.out).toContain(`pid ${pid} exited, but Flair is not confirmed down`);
+    expect(result.out).toContain("the instance reads DISAGREEMENT");
+    expect(result.out).not.toContain("stopped the directly started Flair");
+    expect(result.out).toContain("flair doctor");
   }, 30_000);
 
   test("a loaded job still takes the unload path", async () => {
