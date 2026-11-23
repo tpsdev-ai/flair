@@ -843,11 +843,12 @@ jobs:
             -c "harper install && harper dev /flair"
           # Wait against an elapsed budget, not a poll count: on a loaded runner
           # the in-container install can outlast a fixed number of polls. The
-          # script also fails at once when the container exits, with its exit
+          # waiter also fails at once when the container exits, with its exit
           # code and logs, instead of sleeping out the budget.
-          bash "$GITHUB_WORKSPACE/scripts/ci/wait-for-harper.sh" \
-            harper-flair http://localhost:9926/Health \
-            HARPER_START_CREDENTIALS "$HARPER_START_BUDGET_S"
+          node "$GITHUB_WORKSPACE/scripts/ci/wait-for-harper.mjs" \
+            --container harper-flair \
+            --url http://localhost:9926/Health \
+            --credentials-env HARPER_START_CREDENTIALS
       - name: E2E CLI smoke test
         run: bash test/e2e-cli.sh
         env:
