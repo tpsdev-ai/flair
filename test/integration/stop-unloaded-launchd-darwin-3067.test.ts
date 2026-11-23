@@ -16,8 +16,9 @@
 //
 // SAFETY — HOME is a throwaway directory and the CLI is a spawned
 // `node dist/cli.js`, so Node honours HOME before start and every plist, data
-// dir and label resolves inside the fixture. Teardown stops the recorded pid
-// and removes that one directory; it never signals by pattern.
+// dir and label resolves inside the fixture. Teardown signals the recorded pid
+// if it is still alive (best effort; it does not confirm the exit) and removes
+// that one directory; it never signals by pattern.
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -179,7 +180,7 @@ test.skipIf(!isDarwin)(
 
     const recordedPid = readPidFile(dataDir);
     expect(recordedPid, "flair init's direct process did not record a pid").not.toBeNull();
-    // Keep the pid for teardown: if stop fails after Harper removes hdb.pid, afterEach still kills it.
+    // Keep the pid for teardown, so afterEach can still signal it if hdb.pid is gone.
     entry.pid = recordedPid!;
     expect(isAlive(recordedPid!), "the recorded pid is not alive before stop").toBe(true);
 
