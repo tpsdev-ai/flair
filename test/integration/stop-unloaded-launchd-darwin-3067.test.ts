@@ -179,6 +179,8 @@ test.skipIf(!isDarwin)(
 
     const recordedPid = readPidFile(dataDir);
     expect(recordedPid, "flair init's direct process did not record a pid").not.toBeNull();
+    // Keep the pid for teardown: if stop fails after Harper removes hdb.pid, afterEach still kills it.
+    entry.pid = recordedPid!;
     expect(isAlive(recordedPid!), "the recorded pid is not alive before stop").toBe(true);
 
     const stop = runCli(home, ["stop", "--port", String(configPort)]);
