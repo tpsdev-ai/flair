@@ -369,7 +369,8 @@ const REFUSAL_AFTER_MS = 28_000;
 
 /**
  * A fake clock: `pause` records each wait and moves time forward by it. It
- * yields one real timer turn, so a retry loop cannot starve the test timeout.
+ * also yields one real timer turn, which lets the test timeout fire during a
+ * retry loop that waits.
  */
 function fakeClock(): SeedClock & { t: number; waits: number[] } {
   const clock = {

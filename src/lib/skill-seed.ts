@@ -87,8 +87,9 @@ export const SEED_SKILL_WRITE_NOTICE_MS = 5_000;
 /**
  * The wait before the seed tries the skill row's write again after the
  * instance refused it with 503 `memory_provider_timeout`, which states nothing
- * was written. The seed tries again only while {@link SEED_SKILL_WRITE_TIMEOUT_MS},
- * counted from the first attempt, leaves time for this wait.
+ * was written. The seed tries again only while the skill-write bound
+ * ({@link SEED_SKILL_WRITE_TIMEOUT_MS} by default), counted from the first
+ * attempt, leaves time for this wait.
  */
 export const SEED_SKILL_WRITE_RETRY_BACKOFF_MS = 2_000;
 
@@ -351,7 +352,6 @@ async function seedPass(
 
   const action = decideSkillSeed(storedContent, current.content, current.hashes);
   if (action === "create" || action === "replace") {
-    // Only a retried pass can find no time left: its reads ran after the wait.
     const budgetMs = rowWriteBudget();
     if (budgetMs <= 0) {
       return refused(
