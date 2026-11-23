@@ -6,4 +6,4 @@
   A refused row is named with its id and the run exits non-zero without
   deleting or writing target rows. When the same id is refused in both the
   snapshot and the live rows, the message names both sources and gives both
-  remedies. Merge restore deletes nothing and is not affected (#2931).
+  remedies. Merge restore deletes nothing and is not affected (#2931). ([#2935](https://github.com/tpsdev-ai/flair/pull/2935), [#2942](https://github.com/tpsdev-ai/flair/pull/2942))

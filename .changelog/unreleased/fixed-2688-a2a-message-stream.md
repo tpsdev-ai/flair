@@ -17,4 +17,4 @@
   caller match applies to `message/send` and `message/stream` only, that an
   authenticated caller can request the unfiltered `tasks/list` board, and
   that the board comes from the YAML issue files when any exist, otherwise
-  from `issues.jsonl` (#2688).
+  from `issues.jsonl` (#2688). ([#2716](https://github.com/tpsdev-ai/flair/pull/2716))

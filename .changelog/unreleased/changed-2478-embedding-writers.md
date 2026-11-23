@@ -45,4 +45,4 @@
   current text, within at most 3 attempts. An unreadable read-back, or the
   attempts exhausted, leaves the outcome logged as unconfirmed. The
   migration's fallback does the same, leaving such a row uncounted for the
-  next scan (#2478).
+  next scan (#2478). ([#2743](https://github.com/tpsdev-ai/flair/pull/2743))
