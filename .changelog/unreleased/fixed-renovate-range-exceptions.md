@@ -1,1 +1,1 @@
-- **Renovate stops forcing pins for engine, peer, and PEP 621 `project.dependencies` ranges.** Dockerfile and Compose digest-pin proposals join the Docker group.
+- **Renovate uses its `auto` range strategy for `engines` and peer dependencies**, instead of the preset's global `replace`. Dockerfile and Compose digest-pin proposals join the Docker group.
