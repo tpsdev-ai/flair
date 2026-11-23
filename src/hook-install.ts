@@ -306,7 +306,7 @@ function installSourceRefusal(config: any, path: string): string | null {
   for (const match of findHookMatches(config)) {
     const command = config.hooks.SessionStart[match.groupIndex].hooks[match.hookIndex].command;
     const source = parseInstallerHookForm(command) ?? parseLegacySessionStartHookCommand(command) ?? parseUnpinnedInstallerHookForm(command);
-    if (!source) return `SessionStart hook in ${path} is not a command Flair wrote — left untouched`;
+    if (!source) return `SessionStart hook in ${path} is not a command form Flair's installer recognizes — left untouched`;
     if (!isHookCommandValueSafe(source.agentId)) return unsafeAgentIdMessage(source.agentId);
     if (source.flairUrl !== undefined && !isHookCommandValueSafe(source.flairUrl)) return unsafeFlairUrlMessage(source.flairUrl);
   }
@@ -546,7 +546,7 @@ export interface HookRepinResult {
   harness: Harness;
   /** "update" = re-pinned to the current spec; "noop" = already current;
    *  "skip" = nothing Flair may re-pin here (no hook); "hold" = a hook we will
-   *  not touch (a shape Flair did not write, duplicate assignments, duplicate
+   *  not touch (a shape outside the installer's, duplicate assignments, duplicate
    *  matching entries, unsupported metadata) — visible through A1's hold seam.
    *  `ok:false` is a fail-closed parse or backup error, never a silent pass. */
   action: "update" | "noop" | "skip" | "hold";
@@ -576,7 +576,7 @@ function findHookMatches(config: any): Array<{ groupIndex: number; hookIndex: nu
 }
 
 /** Check the matching hook's JSON envelope; command validation is separate.
- * Call before a no-op so foreign metadata cannot report already wired.
+ * Call before a no-op so metadata outside the installer's shape cannot report already wired.
  * No match or several matches return null; callers handle those cases.
  */
 export function sessionStartHookShapeRefusal(path: string): string | null {
@@ -592,7 +592,7 @@ export function sessionStartHookShapeRefusal(path: string): string | null {
     return `SessionStart hook group in ${path} holds more than the one entry Flair writes — left untouched`;
   }
   if (groupKeys !== "hooks" || entryKeys !== "command,type" || entry.type !== "command") {
-    return `SessionStart hook in ${path} carries fields Flair did not write — left untouched`;
+    return `SessionStart hook in ${path} carries fields outside the shape Flair's installer writes — left untouched`;
   }
   return null;
 }
@@ -631,10 +631,10 @@ export function guardedPinSpan(command: string | null): string | null {
  *
  * NEVER adds a hook — a home with no Flair hook is a clean `skip`, not an
  * `add`: wiring a hook is `flair init` / `flair hook install`, an opt-in the
- * upgrade path must not make on the user's behalf. Only rewrites the exact
- * canonical `npx -y -p …` invocation Flair itself writes (pinned or the
- * pre-#1007 bare unpinned form); a command outside those recognized forms is the
- * user's and is left untouched. An edit that keeps a recognized form (for example a
+ * upgrade path must not make on the user's behalf. Only rewrites two command
+ * forms: the installer's pinned `npx -y -p …` invocation and the pre-#1007 bare
+ * unpinned form. A command in any other form (the older unpinned `-p` form
+ * included) is left untouched. An edit that keeps a recognized form (for example a
  * changed agent id) is still matched and can be rewritten. Fail-closed on a malformed settings file and backs up before any
  * real write — the same Sherlock conditions installHook implements. Idempotent:
  * a second call is a `noop`.
@@ -680,7 +680,7 @@ function decideSessionStartHookRewrite(
   const { groupIndex, hookIndex } = matches[0]!;
   const group = config.hooks.SessionStart[groupIndex];
   const entry = group?.hooks?.[hookIndex];
-  // Unsupported hook metadata (anything Flair did not write), including a
+  // Hook metadata outside the shape the current writer emits, including a
   // GROUP that holds another hook: the writer emits exactly
   // `{ hooks: [{ type: "command", command }] }`.
   const groupKeys = group && typeof group === "object" ? Object.keys(group).sort().join(",") : "";
@@ -689,7 +689,7 @@ function decideSessionStartHookRewrite(
     return { kind: "hold", ok: false, message: `SessionStart hook group in ${path} holds more than the one entry Flair writes — left untouched` };
   }
   if (groupKeys !== "hooks" || entryKeys !== "command,type" || entry.type !== "command") {
-    return { kind: "hold", ok: false, message: `SessionStart hook in ${path} carries fields Flair did not write — left untouched` };
+    return { kind: "hold", ok: false, message: `SessionStart hook in ${path} carries fields outside the shape Flair's installer writes — left untouched` };
   }
   const current: string = entry.command ?? "";
   const requestedAgentId = opts?.agentId;
@@ -738,7 +738,7 @@ function decideSessionStartHookRewrite(
     };
   }
   // flair#3050 round 5: validate the EXISTING installer-form values with the
-  // builder's own rule before treating the command as Flair-written. A re-pin
+  // builder's own rule before rewriting the command. A re-pin
   // writes the command back, so an unsafe value is a named refusal.
   if (!isHookCommandValueSafe(form.agentId)) {
     return { kind: "hold", ok: false, message: unsafeAgentIdMessage(form.agentId) };
@@ -789,10 +789,11 @@ function decideSessionStartHookRewrite(
     };
   }
   // Rebuild by substituting ONLY the CAPTURED `<ver>` span — identity, URL
-  // and the wire format are preserved by construction. Substituting the
-  // captured OFFSET (not the first substring match) is what keeps a
-  // hand-edited id or URL that CONTAINS the package-spec string from being
-  // rewritten INSTEAD of the pin (flair#1834 PR-H round 2).
+  // and the wire format are preserved by construction. An id or URL holding a
+  // character outside the builder's set (a package-spec string's `@` included)
+  // was refused above, before this point; for an accepted command, substituting
+  // the captured OFFSET (not the first substring match) replaces exactly the pin
+  // span (flair#1834 PR-H round 2).
   const next = current.slice(0, form.pkgSpecStart) + mcpServerSpec() + current.slice(form.pkgSpecEnd);
   if (next === current) {
     return { kind: "noop", message: `SessionStart hook in ${path} already pinned to ${mcpServerSpec()}` };

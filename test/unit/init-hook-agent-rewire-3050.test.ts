@@ -16,8 +16,8 @@ import { tempDir } from "../helpers/temp-dir.ts";
  * (src/lib/owned-pins.ts); a present hook used to report "already wired"
  * without reading the FLAIR_AGENT_ID it embeds. The unit cases pin the writer's
  * boundaries: the requested id is written, a same-id apply on the current
- * installer form is a byte-level no-op, a legacy unpinned hook is migrated, and
- * an entry Flair cannot identify or a shape it did not write is a named
+ * installer form is a byte-level no-op, the pre-#1007 bare legacy hook is migrated,
+ * and an entry Flair cannot identify or a shape outside the installer's is a named
  * refusal that writes nothing (no backup either).
  */
 
@@ -131,7 +131,7 @@ describe("applyOrRepinSessionStartHook — agent rewire", () => {
 
     expect(result.applied).toBe(false);
     expect(result.ok).toBe(false);
-    expect(result.message).toContain("carries fields Flair did not write");
+    expect(result.message).toContain("carries fields outside the shape Flair's installer writes");
     expect(readFileSync(settingsPath, "utf-8")).toBe(before);
     expect(settingsDirFiles()).toBe("settings.json");
   });
@@ -146,7 +146,7 @@ describe("applyOrRepinSessionStartHook — agent rewire", () => {
 
     expect(result.applied).toBe(false);
     expect(result.ok).toBe(false);
-    expect(result.message).toContain("carries fields Flair did not write");
+    expect(result.message).toContain("carries fields outside the shape Flair's installer writes");
     expect(readFileSync(settingsPath, "utf-8")).toBe(before);
     expect(settingsDirFiles()).toBe("settings.json");
   });

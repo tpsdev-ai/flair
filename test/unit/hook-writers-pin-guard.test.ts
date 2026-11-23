@@ -111,7 +111,7 @@ describe("installHook — the SessionStart pin is never lowered", () => {
       const before = readFileSync(path, "utf-8");
       const res = install();
       expect(res.ok).toBe(false);
-      expect(res.message).toContain("not a command Flair wrote");
+      expect(res.message).toContain("not a command form Flair's installer recognizes");
       expect(readFileSync(path, "utf-8")).toBe(before);
       expect(readdirSync(dirname(path))).toEqual(["settings.json"]);
     });

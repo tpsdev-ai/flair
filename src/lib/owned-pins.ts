@@ -463,7 +463,7 @@ export function applyOrRepinSessionStartHook(
         message: rewire.message,
       };
     }
-    // A legacy unpinned hook is migrated even when its id already matches:
+    // The pre-#1007 bare legacy hook is migrated even when its id already matches:
     // reporting "already wired" would leave it running unpinned.
     if (isLegacy) {
       if (skip) {

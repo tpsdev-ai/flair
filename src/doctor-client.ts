@@ -299,7 +299,7 @@ export function parseLegacySessionStartHookCommand(command: string): { agentId: 
   if (typeof command !== "string") return null;
   const trimmed = command.trim();
   // flair#3050 round 5: a chained or extended command (`&&`, `;`, `|`, a
-  // substitution or redirection) is not the bare shape Flair wrote, even when
+  // substitution or redirection) is not the bare legacy shape, even when
   // the chain is attached to a value (`FLAIR_AGENT_ID=agent-a&& npx ...`).
   if (/[;&|`$()<>]/.test(trimmed)) return null;
   const m = trimmed.match(LEGACY_SESSION_START_HOOK_RE);
@@ -2195,7 +2195,7 @@ export function upgradeSessionStartHookCommand(homeDir: string, settingsPath?: s
             const legacy = parseLegacySessionStartHookCommand(hook.command);
             const source = installer ?? legacy;
             if (!source) {
-              outcome = { ok: false, path, changed: false, message: `the SessionStart hook in ${path} is not the command Flair wrote — leaving it untouched` };
+              outcome = { ok: false, path, changed: false, message: `the SessionStart hook in ${path} is not a command form doctor can rewrite (the installer form or the pre-#1007 bare form) — leaving it untouched` };
               return { hold: outcome.message };
             }
             if (!isHookCommandValueSafe(source.agentId)) {
@@ -2212,7 +2212,7 @@ export function upgradeSessionStartHookCommand(homeDir: string, settingsPath?: s
               return { noop: outcome.message };
             }
             if (!legacy) {
-              outcome = { ok: false, path, changed: false, message: `the SessionStart hook in ${path} is not the legacy command Flair wrote — leaving it untouched` };
+              outcome = { ok: false, path, changed: false, message: `the SessionStart hook in ${path} is not in the bare legacy command form — leaving it untouched` };
               return { hold: outcome.message };
             }
             // flair#1778 2c-i-a3: the repair rewrites the entry to a version-
