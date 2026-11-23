@@ -1465,11 +1465,20 @@ describe("cumulative allowlist lifetime (#2897)", () => {
     for (const badGhsa of [
       "GHSA-a",
       "GHSA-aaaa-bbbb",
+      "GHSA-aaa-bbbb-cccc",
+      "GHSA-aaaa-bbb-cccc",
+      "GHSA-aaaa-bbbb-ccc",
       "GHSA-aaaaa-bbbb-cccc",
       "GHSA-aaaa-bbbbb-cccc",
       "GHSA-aaaa-bbbb-ccccc",
       "GHSA-aaaa-bbbb-cccc-",
       "GHSA-aaaa-bbbb-cccc-dddd",
+      "GHSA_aaaa_bbbb_cccc",
+      "GHSA-aaaa_bbbb-cccc",
+      "GHSA-aaaa-bbbb_cccc",
+      "xGHSA-aaaa-bbbb-cccc",
+      "GHSA-aaaa-bbbb-ccccx",
+      "GHSA-aaaa-bbbb-ccc!",
     ]) {
       const problems = validateAllowlist(
         { policy, entries: [entry({ ghsa: badGhsa })] },
@@ -1477,6 +1486,21 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       ).join("\n");
       expect(problems).toContain('"ghsa" must be a GHSA id');
     }
+
+    for (const badCasing of [
+      "ghsa-aaaa-bbbb-cccc",
+      "GHSA-Aaaa-bbbb-cccc",
+      "GHSA-aaaa-Bbbb-cccc",
+      "GHSA-aaaa-bbbb-Cccc",
+      "GHSA-AAAA-BBBB-CCCC",
+    ]) {
+      const problems = validateAllowlist(
+        { policy, entries: [entry({ ghsa: badCasing })] },
+        new Date("2026-09-21"),
+      ).join("\n");
+      expect(problems).toContain('"ghsa" must use canonical casing (uppercase GHSA- prefix, lowercase remainder)');
+    }
+
     expect(validateAllowlist(ALLOWLIST, ALLOWLIST_AS_OF)).toEqual([]);
   });
 
