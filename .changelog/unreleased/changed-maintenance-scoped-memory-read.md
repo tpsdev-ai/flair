@@ -1,1 +1,1 @@
-- **Owner-targeted memory maintenance searches Memory by its indexed `agentId` condition.** The item loop now supplies that condition to the read instead of scanning the whole table; a fleet-wide admin run still scans every row.
+- **Owner-targeted memory maintenance searches Memory by its indexed `agentId` condition.** The item loop now supplies that condition to the read instead of scanning the whole table; a fleet-wide admin run still scans every row. ([#2737](https://github.com/tpsdev-ai/flair/pull/2737))

@@ -19,4 +19,4 @@
   that does not hold the archive fields after the commit answers
   `409 stored_row_changed`. A skill row keeps the existing `Memory.put` path
   and its skill-state refusals (`skill_state_requires_delete` for
-  `archived: true`).
+  `archived: true`). ([#2805](https://github.com/tpsdev-ai/flair/pull/2805))
