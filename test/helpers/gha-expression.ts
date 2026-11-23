@@ -1,0 +1,215 @@
+/**
+ * gha-expression.ts — evaluate the GitHub Actions expressions our workflows use,
+ * so a workflow test can ask what a job condition, a matrix or an env binding
+ * resolves to for one event, instead of matching the expression's text.
+ *
+ * Covers what the CI workflows use: string ('' escapes a quote), number,
+ * boolean and null literals; dotted and indexed property paths (an absent
+ * property is null, as on GitHub); `!`, `==`, `!=`, `&&` and `||` (which return
+ * an operand, as on GitHub); parentheses; and startsWith, endsWith, contains,
+ * format, fromJSON, toJSON, always, success, failure and cancelled. The status
+ * functions answer as if every needed job succeeded. Any other construct
+ * throws, so a workflow that starts using one fails its test instead of being
+ * evaluated wrongly.
+ */
+
+export type Context = Record<string, unknown>;
+
+type Token = { kind: "str" | "num" | "ident" | "op" | "punc"; text: string };
+
+function tokenize(src: string): Token[] {
+  const tokens: Token[] = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (/\s/.test(c)) { i++; continue; }
+    if (c === "'") {
+      let text = "";
+      i++;
+      for (;;) {
+        if (i >= src.length) throw new Error(`unterminated string in: ${src}`);
+        if (src[i] === "'") {
+          if (src[i + 1] === "'") { text += "'"; i += 2; continue; }
+          i++;
+          break;
+        }
+        text += src[i++];
+      }
+      tokens.push({ kind: "str", text });
+      continue;
+    }
+    const two = src.slice(i, i + 2);
+    if (two === "==" || two === "!=" || two === "&&" || two === "||") { tokens.push({ kind: "op", text: two }); i += 2; continue; }
+    if (c === "!") { tokens.push({ kind: "op", text: c }); i++; continue; }
+    if ("().,[]".includes(c)) { tokens.push({ kind: "punc", text: c }); i++; continue; }
+    const num = /^\d+(\.\d+)?/.exec(src.slice(i));
+    if (num) { tokens.push({ kind: "num", text: num[0] }); i += num[0].length; continue; }
+    const ident = /^[A-Za-z_][A-Za-z0-9_-]*/.exec(src.slice(i));
+    if (ident) { tokens.push({ kind: "ident", text: ident[0] }); i += ident[0].length; continue; }
+    throw new Error(`unsupported character '${c}' in: ${src}`);
+  }
+  return tokens;
+}
+
+const isNullish = (v: unknown) => v === null || v === undefined;
+
+export function truthy(v: unknown): boolean {
+  return !(v === false || v === 0 || v === "" || isNullish(v) || (typeof v === "number" && Number.isNaN(v)));
+}
+
+function toNumber(v: unknown): number {
+  if (isNullish(v)) return 0;
+  if (typeof v === "boolean") return v ? 1 : 0;
+  if (typeof v === "number") return v;
+  if (typeof v === "string") return v.trim() === "" ? 0 : Number(v);
+  return Number.NaN;
+}
+
+/** GitHub's loose equality: strings compare case-insensitively, mixed types as numbers. */
+function looseEqual(a: unknown, b: unknown): boolean {
+  if (typeof a === "string" && typeof b === "string") return a.toLowerCase() === b.toLowerCase();
+  if (isNullish(a) && isNullish(b)) return true;
+  if (typeof a === "object" && a !== null) return a === b;
+  if (typeof b === "object" && b !== null) return false;
+  return toNumber(a) === toNumber(b);
+}
+
+export function toText(v: unknown): string {
+  if (isNullish(v)) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return JSON.stringify(v);
+}
+
+const FUNCTIONS: Record<string, (...args: unknown[]) => unknown> = {
+  startswith: (a, b) => toText(a).toLowerCase().startsWith(toText(b).toLowerCase()),
+  endswith: (a, b) => toText(a).toLowerCase().endsWith(toText(b).toLowerCase()),
+  contains: (a, b) =>
+    Array.isArray(a) ? a.some((item) => looseEqual(item, b)) : toText(a).toLowerCase().includes(toText(b).toLowerCase()),
+  format: (fmt, ...args) => toText(fmt).replace(/\{(\d+)\}/g, (_, n: string) => toText(args[Number(n)])),
+  fromjson: (s) => JSON.parse(toText(s)),
+  tojson: (v) => JSON.stringify(v, null, 2),
+  always: () => true,
+  success: () => true,
+  failure: () => false,
+  cancelled: () => false,
+};
+
+class Parser {
+  private pos = 0;
+  constructor(private readonly tokens: Token[], private readonly ctx: Context, private readonly src: string) {}
+
+  parse(): unknown {
+    const value = this.or();
+    if (this.pos !== this.tokens.length) throw new Error(`unexpected '${this.tokens[this.pos].text}' in: ${this.src}`);
+    return value;
+  }
+
+  private peek(text?: string): Token | undefined {
+    const t = this.tokens[this.pos];
+    return t && (text === undefined || t.text === text) ? t : undefined;
+  }
+
+  private expect(text: string): void {
+    if (!this.peek(text)) throw new Error(`expected '${text}' in: ${this.src}`);
+    this.pos++;
+  }
+
+  private or(): unknown {
+    let left = this.and();
+    while (this.peek("||")) { this.pos++; const right = this.and(); left = truthy(left) ? left : right; }
+    return left;
+  }
+
+  private and(): unknown {
+    let left = this.equality();
+    while (this.peek("&&")) { this.pos++; const right = this.equality(); left = truthy(left) ? right : left; }
+    return left;
+  }
+
+  private equality(): unknown {
+    let left = this.unary();
+    for (;;) {
+      if (this.peek("==")) { this.pos++; left = looseEqual(left, this.unary()); continue; }
+      if (this.peek("!=")) { this.pos++; left = !looseEqual(left, this.unary()); continue; }
+      return left;
+    }
+  }
+
+  private unary(): unknown {
+    if (this.peek("!")) { this.pos++; return !truthy(this.unary()); }
+    return this.postfix(this.primary());
+  }
+
+  private primary(): unknown {
+    const t = this.tokens[this.pos++];
+    if (!t) throw new Error(`unexpected end of: ${this.src}`);
+    if (t.kind === "str") return t.text;
+    if (t.kind === "num") return Number(t.text);
+    if (t.text === "(") { const v = this.or(); this.expect(")"); return v; }
+    if (t.kind !== "ident") throw new Error(`unexpected '${t.text}' in: ${this.src}`);
+    if (t.text === "true") return true;
+    if (t.text === "false") return false;
+    if (t.text === "null") return null;
+    if (this.peek("(")) {
+      const fn = FUNCTIONS[t.text.toLowerCase()];
+      if (!fn) throw new Error(`unsupported function ${t.text}() in: ${this.src}`);
+      this.pos++;
+      const args: unknown[] = [];
+      if (!this.peek(")")) {
+        for (;;) { args.push(this.or()); if (this.peek(",")) { this.pos++; continue; } break; }
+      }
+      this.expect(")");
+      return fn(...args);
+    }
+    return Object.hasOwn(this.ctx, t.text) ? this.ctx[t.text] : null;
+  }
+
+  private postfix(value: unknown): unknown {
+    for (;;) {
+      if (this.peek(".")) {
+        this.pos++;
+        const name = this.tokens[this.pos++];
+        if (!name || name.kind !== "ident") throw new Error(`expected a property name in: ${this.src}`);
+        value = property(value, name.text);
+        continue;
+      }
+      if (this.peek("[")) {
+        this.pos++;
+        const key = this.or();
+        this.expect("]");
+        value = property(value, key);
+        continue;
+      }
+      return value;
+    }
+  }
+}
+
+function property(value: unknown, key: unknown): unknown {
+  if (value === null || typeof value !== "object") return null;
+  const k = toText(key);
+  return Object.hasOwn(value, k) ? (value as Record<string, unknown>)[k] : null;
+}
+
+/** Evaluate one expression body (the text inside `${{ }}`, or a bare `if:`). */
+export function evaluate(expression: string, ctx: Context): unknown {
+  return new Parser(tokenize(expression), ctx, expression).parse();
+}
+
+/** A workflow value: a single `${{ }}` yields its value; text with several interpolates them. */
+export function evaluateValue(value: unknown, ctx: Context): unknown {
+  if (typeof value !== "string" || !value.includes("${{")) return value;
+  const whole = /^\s*\$\{\{([\s\S]*)\}\}\s*$/.exec(value);
+  if (whole && !whole[1].includes("${{")) return evaluate(whole[1], ctx);
+  return value.replace(/\$\{\{([\s\S]*?)\}\}/g, (_, body: string) => toText(evaluate(body, ctx)));
+}
+
+/** A job or step `if:`. Absent means success(), which is true when every needed job succeeded. */
+export function evaluateIf(condition: unknown, ctx: Context): boolean {
+  if (condition === undefined) return true;
+  if (typeof condition === "boolean") return condition;
+  const text = String(condition);
+  const wrapped = /^\s*\$\{\{([\s\S]*)\}\}\s*$/.exec(text);
+  return truthy(evaluate(wrapped ? wrapped[1] : text, ctx));
+}

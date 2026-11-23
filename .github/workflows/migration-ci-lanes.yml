@@ -20,8 +20,8 @@
 # `upgrade-smoke` job in test.yml instead of duplicating it here — see that
 # file's comment block on the extension.
 #
-# Sherlock §4 compliance (flair#695): pull_request trigger only
-# (never pull_request_target with PR-code checkout); no secrets exposed to
+# Sherlock §4 compliance (flair#695): no pull_request_target trigger, so PR
+# code is never checked out under it; no secrets exposed to
 # either job (public npm install + public GITHUB_TOKEN-default only — no
 # NPM_TOKEN, no deploy credentials); every third-party action below is
 # pinned to a full commit SHA, not a tag; no `${{ }}` interpolation of

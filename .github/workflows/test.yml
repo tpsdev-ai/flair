@@ -24,9 +24,8 @@ on:
   pull_request:
     branches: [main]
   # The merge queue on main: GitHub tests the PR merged with the current main
-  # on a gh-readonly-queue/main/* branch and needs every required check to
-  # report on that commit. Each job that reads pull_request-only context says
-  # in its comments what it does on this event.
+  # on a gh-readonly-queue/main/* branch and waits for the required checks to
+  # report on that commit.
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
@@ -372,10 +371,12 @@ jobs:
     # release/v* PRs only; needs just node + npm, so no install step.
     #
     # Merge queue: a merge_group event has no head_ref, so this job is skipped
-    # there and its required check reports success. That is deliberate: a
-    # release PR already ran it on its own head to enter the queue, and the
-    # tag-triggered release-publish.yml runs the same script again before it
-    # stages anything, so the merged commit is checked before any publish.
+    # there (check-run conclusion `skipped`). A skipped job satisfies its
+    # required check; #3065, a non-release PR, merged with this check skipped.
+    # That is deliberate: a release PR ran it on its own head to enter
+    # the queue, and the tag-triggered release-publish.yml runs the same script
+    # again before it stages anything, so the merged commit is checked before
+    # any publish.
     name: First-publish preflight
     if: startsWith(github.head_ref, 'release/v')
     runs-on: ubuntu-24.04
@@ -514,8 +515,9 @@ jobs:
   #
   # `launchd-lane-changes` gates the macOS job by changed file (macOS minutes
   # are the expensive input) without narrowing the whole CI workflow's
-  # triggers. It only runs for pull requests; pushes to main, merge-queue
-  # (merge_group) runs and workflow_dispatch run the lane unconditionally.
+  # triggers. It only runs for pull requests; pushes to main and
+  # workflow_dispatch run the lane unconditionally, and merge-queue
+  # (merge_group) runs skip it (see the lane's own comment).
   launchd-lane-changes:
     name: "launchd adopt-then-upgrade: changed-files gate"
     if: github.event_name == 'pull_request'
@@ -550,10 +552,13 @@ jobs:
   launchd-adopt-upgrade-darwin:
     name: "launchd adopt-then-upgrade (macOS, advisory)"
     needs: [launchd-lane-changes]
-    # Runs unconditionally on push to main, merge_group and workflow_dispatch;
-    # on pull requests it runs only when the changed-files gate says the lane's
-    # surface moved (or the PR is a release/v* cut).
-    if: ${{ always() && (github.event_name != 'pull_request' || needs.launchd-lane-changes.outputs.run == 'true') }}
+    # Runs unconditionally on push to main and workflow_dispatch; on pull
+    # requests it runs only when the changed-files gate says the lane's
+    # surface moved (or the PR is a release/v* cut). Skipped on merge_group:
+    # the lane is advisory, so a queue run would add macOS load beside the
+    # required Darwin-gated job without gating anything, and the push to main
+    # runs it on the same commit.
+    if: ${{ always() && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || needs.launchd-lane-changes.outputs.run == 'true') }}
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -2314,6 +2319,38 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           fetch-depth: 0
+      # Merge queue: a merge_group event carries no pull_request payload, so
+      # the PR author login the Renovate waiver (flair#2872) reads would be
+      # empty and a Renovate fix(deps) PR that relies on the waiver would fail
+      # here. This step expects the queue ref to be
+      # [refs/heads/]gh-readonly-queue/main/pr-<number>-<sha> and stops the job
+      # on any other ref. It takes the number from that GitHub-generated ref
+      # and the login from the API, never from commit metadata, and stops the
+      # job when the API call fails or returns no valid login (a null author
+      # included). It runs before any step that executes the PR's code.
+      - name: Resolve the queued pull request's author (merge queue only)
+        id: queued-pr
+        if: github.event_name == 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUEUE_REF: ${{ github.event.merge_group.head_ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$QUEUE_REF" =~ ^(refs/heads/)?gh-readonly-queue/main/pr-([0-9]+)-[0-9a-f]+$ ]]; then
+            echo "::error::merge-group ref '${QUEUE_REF}' does not match [refs/heads/]gh-readonly-queue/main/pr-<number>-<sha>, so the queued PR's author cannot be read; fix the pattern in this step (test.yml, docs-freshness) and re-queue"
+            exit 1
+          fi
+          pr="${BASH_REMATCH[2]}"
+          if ! login="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr}" --jq '.user.login // empty')"; then
+            echo "::error::could not read queued PR #${pr} from the API; re-queue the PR"
+            exit 1
+          fi
+          if [[ ! "$login" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\[bot\])?$ ]]; then
+            echo "::error::the API returned no valid author login for queued PR #${pr} (got '${login}'); re-queue the PR"
+            exit 1
+          fi
+          echo "Queued PR #${pr} author: ${login}"
+          echo "login=${login}" >> "$GITHUB_OUTPUT"
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
           bun-version: "1.3.10"
@@ -2335,33 +2372,6 @@ jobs:
       # command tree from dist/cli.js (the exported `program`), not a source regex.
       - name: Build CLI
         run: bun run build:cli
-      # Merge queue: a merge_group event carries no pull_request payload, so
-      # the PR author login the Renovate waiver (flair#2872) reads would be
-      # empty and a Renovate fix(deps) PR that relies on the waiver would fail
-      # here. GitHub names the queue branch gh-readonly-queue/main/pr-<number>-
-      # <sha>; take the number from that GitHub-generated ref and the login
-      # from the API, never from commit metadata. A ref or lookup that fails
-      # stops the job with the reason instead of checking without a login.
-      - name: Resolve the queued pull request's author (merge queue only)
-        id: queued-pr
-        if: github.event_name == 'merge_group'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          QUEUE_REF: ${{ github.event.merge_group.head_ref }}
-        run: |
-          set -euo pipefail
-          if [[ ! "$QUEUE_REF" =~ (^|/)gh-readonly-queue/main/pr-([0-9]+)-[0-9a-f]+$ ]]; then
-            echo "::error::merge-group ref '${QUEUE_REF}' does not match gh-readonly-queue/main/pr-<number>-<sha>, so the queued PR's author cannot be read; fix the pattern in this step (test.yml, docs-freshness) and re-queue"
-            exit 1
-          fi
-          pr="${BASH_REMATCH[2]}"
-          login="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr}" --jq '.user.login')"
-          if [ -z "$login" ]; then
-            echo "::error::the API returned no author for queued PR #${pr}; re-queue the PR"
-            exit 1
-          fi
-          echo "Queued PR #${pr} author: ${login}"
-          echo "login=${login}" >> "$GITHUB_OUTPUT"
       - run: node scripts/docs-freshness-check.mjs
         env:
           FLAIR_PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login || steps.queued-pr.outputs.login }}
