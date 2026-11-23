@@ -1487,7 +1487,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       const firstDays = readFixtureHistory(root);
       expect(validateAllowlist({ policy, entries: [renewed] }, new Date("2026-09-21"))).toEqual([]);
       const problems = validateAllowlistHistory({ policy, entries: [renewed] }, firstDays, new Date("2026-09-21"));
-      expect(problems.join("\n")).toContain("the advisory's first history day (2026-09-01), the earliest day its id appears in parsed allowlist history");
+      expect(problems.join("\n")).toContain("the advisory's first history day (2026-09-01)");
       expect(problems.join("\n")).toContain("lifetime cap:");
       expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
       expect(validateAllowlist({ policy, entries: [{ ...renewed, added: firstDays.get(GHSA.toUpperCase()) }] }, new Date("2026-09-21")).join("\n"))
@@ -1703,7 +1703,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       expect(
         validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21")).join("\n"),
       ).toContain(
-        '"added" (2026-09-20) is later than the advisory\'s first history day (2026-09-01), the earliest day its id appears in parsed allowlist history',
+        '"added" (2026-09-20) is later than the advisory\'s first history day (2026-09-01)',
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1724,7 +1724,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
           firstDays,
           new Date("2026-09-21"),
         ).join("\n"),
-      ).toContain("is later than the advisory's first history day (2026-09-01), the earliest day its id appears in parsed allowlist history");
+      ).toContain("is later than the advisory's first history day (2026-09-01)");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1741,7 +1741,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
       expect(
         validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21")).join("\n"),
-      ).toContain("the advisory's first history day (2026-09-01), the earliest day its id appears in parsed allowlist history");
+      ).toContain("the advisory's first history day (2026-09-01)");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

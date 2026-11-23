@@ -804,7 +804,7 @@ export function validateAllowlistHistory(allowlist, firstDays, today) {
     if (entry.added <= boundary) return;
     const bound =
       firstDays.has(id)
-        ? `the advisory's first history day (${boundary}), the earliest day its id appears in parsed allowlist history`
+        ? `the advisory's first history day (${boundary})`
         : `today (${boundary}), because the advisory has no first history day in parsed allowlist history`;
     problems.push(
       `entry[${i}] (${entry.ghsa} / ${entry.package ?? "no package"}): lifetime cap: "added" (${entry.added}) is later than ${bound}.`,
