@@ -4,4 +4,4 @@
   decision for an `agent` or `anonymous` verdict is unchanged. A resource's
   handler can apply its own rules after the gate.
 
-  > **Heads-up:** pass `internalContext()` for a deliberate elevated in-process call.
+  > **Heads-up:** pass `internalContext()` for a deliberate elevated in-process call. ([#2843](https://github.com/tpsdev-ai/flair/pull/2843))

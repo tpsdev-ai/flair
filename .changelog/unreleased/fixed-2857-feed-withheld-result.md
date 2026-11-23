@@ -3,4 +3,4 @@
   The ordinary `POST /FeedMemories` write-back and the dedup expiry repair mark
   the id outcome-unknown when the raw table returns a `Response` instead of the
   row, and answer the `500 write_response_withheld` refusal. A confirmed write
-  records no marker.
+  records no marker. ([#2916](https://github.com/tpsdev-ai/flair/pull/2916))

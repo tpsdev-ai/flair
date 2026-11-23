@@ -4,4 +4,4 @@
   while the successor and version committed, leaving two live heads after a
   200. The close is now confirmed in a fresh committed read, re-applied from
   that read with the row identity and caller authority re-checked, and refused
-  when the close cannot be confirmed (#2645).
+  when the close cannot be confirmed (#2645). ([#2650](https://github.com/tpsdev-ai/flair/pull/2650))
