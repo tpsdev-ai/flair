@@ -273,6 +273,19 @@ describe("flair#3068 — recall() rejects on an error response", () => {
     await expect(new Flair(server).as("planner").recall("q")).resolves.toEqual(rows);
   });
 
+  it("rejects a response that carries no results", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return { unexpected: true };
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/unexpected response/);
+  });
+
   it("rejects when the search read throws", async () => {
     const server = fakeServer({
       SemanticSearch: fakeResourceEntry(
