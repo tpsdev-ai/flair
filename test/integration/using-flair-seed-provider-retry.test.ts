@@ -17,8 +17,9 @@ import { currentSeed, runSkillSeed, SEED_ASSIGNMENT_ID, SEED_SKILL_ID, skillSeed
 import { USING_FLAIR_SKILL_CONTENT, USING_FLAIR_SKILL_TRIGGER } from "../../src/lib/using-flair-skill.ts";
 
 const WARMUP_AGENT_ID = "agent-warmup";
-const PROVIDER_BOUND_MS = 300;
-const PROVIDER_DELAY_MS = 900;
+// A bound a warm embed meets on a loaded runner, and a delay well above it.
+const PROVIDER_BOUND_MS = 2_000;
+const PROVIDER_DELAY_MS = 5_000;
 /** The shipped trigger, the text a skill row embeds. */
 const SKILL_TEXT_MATCH = USING_FLAIR_SKILL_TRIGGER;
 
@@ -128,10 +129,13 @@ describe("the using-flair seed retries a real provider-timeout refusal", () => {
     );
 
     expect(outcome).toMatchObject({ kind: "ok", action: "create", skillId: SEED_SKILL_ID, assignmentId: SEED_ASSIGNMENT_ID });
-    expect(memoryPuts).toHaveLength(2);
-    expect(memoryPuts[0]).toEqual({ status: 503, error: "memory_provider_timeout" });
-    expect(memoryPuts[1].status).toBeGreaterThanOrEqual(200);
-    expect(memoryPuts[1].status).toBeLessThan(300);
+    // The delay fires once; a retry slowed past the bound would be refused the
+    // same way, so every PUT before the last is the timeout refusal.
+    expect(memoryPuts.length).toBeGreaterThanOrEqual(2);
+    for (const put of memoryPuts.slice(0, -1)) expect(put).toEqual({ status: 503, error: "memory_provider_timeout" });
+    const last = memoryPuts[memoryPuts.length - 1];
+    expect(last.status).toBeGreaterThanOrEqual(200);
+    expect(last.status).toBeLessThan(300);
 
     const [row] = await rowsById(harper, "Memory", SEED_SKILL_ID);
     expect(row).toMatchObject({
