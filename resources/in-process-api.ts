@@ -121,6 +121,26 @@ export interface SearchResult {
 // ─── Resource resolution ─────────────────────────────────────────────────────
 
 /**
+ * A by-id read through the resource's static `get(id, context)` form, which
+ * binds the id before `get()` runs. Resolves to the stored row, or `null` when
+ * the resource reports the id absent: a 404 `Response` from a scoped read, or an
+ * absent row for an unfiltered one. Any other failure throws rather than
+ * resolving to a value a caller could mistake for a missing record.
+ */
+async function readMemoryById(Cls: any, id: string, context: CallContext): Promise<any> {
+  const result = await Cls.get(id, context);
+  if (result instanceof Response) {
+    if (result.status === 404) return null;
+    throw new Error(`Memory.get(${id}) failed with HTTP ${result.status}`);
+  }
+  if (result && typeof result === "object" && "error" in result && "status" in result) {
+    if ((result as any).status === 404) return null;
+    throw new Error(`Memory.get(${id}) failed with HTTP ${(result as any).status}: ${(result as any).error}`);
+  }
+  return result ?? null;
+}
+
+/**
  * Resolve a Flair resource class from the Harper server registry.
  * Throws with a helpful message listing available resources if not found.
  */
@@ -190,7 +210,10 @@ export class AgentHandle {
     if (opts?.tag) body.tag = opts.tag;
     if (opts?.subject) body.subject = opts.subject;
     if (opts?.subjects) body.subjects = opts.subjects;
-    return unwrap(await h.post(body));
+    const result = await unwrap(await h.post(body));
+    if (Array.isArray(result)) return result;
+    if (result && Array.isArray(result.results)) return result.results;
+    throw new Error(`recall() failed: ${result?.error ?? "unexpected response"}${result?.status ? ` (HTTP ${result.status})` : ""}`);
   }
 }
 
@@ -229,11 +252,10 @@ class AgentMemory {
     return unwrap(await h.post(body));
   }
 
-  /** Get a memory by id, scoped to this agent. */
+  /** Get a memory by id, scoped to this agent. Resolves to `null` when the record is absent or not readable by this agent. */
   async get(id: string): Promise<MemoryRecord | null> {
     const Cls = resolveResource(this.#server, "Memory");
-    const h = new Cls(undefined, this.#ctx);
-    return unwrap(await h.get(id));
+    return readMemoryById(Cls, id, this.#ctx);
   }
 
   /**
@@ -261,8 +283,23 @@ class AgentMemory {
     if (opts?.visibility) {
       conditions.push({ search_attribute: "visibility", search_type: "equals", search_value: opts.visibility });
     }
-    const query = conditions.length > 0 ? { conditions, operator: "and" } : undefined;
-    return unwrap(await h.search(query));
+    const limit = opts?.limit;
+    if (limit !== undefined && limit <= 0) return [];
+    const query: any = conditions.length > 0 ? { conditions, operator: "and" } : {};
+    if (limit !== undefined) query.limit = limit;
+    const source = await unwrap(await h.search(conditions.length > 0 || limit !== undefined ? query : undefined));
+    if (Array.isArray(source)) {
+      return limit !== undefined ? source.slice(0, limit) : source;
+    }
+    if (source && typeof source[Symbol.asyncIterator] === "function") {
+      const rows: MemoryRecord[] = [];
+      for await (const row of source) {
+        rows.push(row as MemoryRecord);
+        if (limit !== undefined && rows.length >= limit) break;
+      }
+      return rows;
+    }
+    throw new Error(`memory.search() failed: ${source?.error ?? "unexpected response"}${source?.status ? ` (HTTP ${source.status})` : ""}`);
   }
 }
 
@@ -329,11 +366,10 @@ class AdminMemory {
     this.#agentId = agentId;
   }
 
-  /** Read any memory by id, unfiltered. */
+  /** Read any memory by id, unfiltered. Resolves to `null` for an absent id. */
   async get(id: string): Promise<MemoryRecord | null> {
     const Cls = resolveResource(this.#server, "Memory");
-    const h = new Cls(undefined, this.#ctx);
-    return unwrap(await h.get(id));
+    return readMemoryById(Cls, id, this.#ctx);
   }
 
   /**

@@ -1,0 +1,1 @@
+- **The in-process facade's read methods now resolve to the shapes they document.** `recall()` resolves to an array of hits, `memory.get()` resolves to the stored row or `null` for an absent id, and `memory.search()` resolves to an array of at most its `limit` rows.
