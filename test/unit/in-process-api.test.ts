@@ -218,6 +218,32 @@ describe("flair#3068 — recall() rejects on an error response", () => {
     await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/rate_limit_exceeded.*HTTP 429/);
   });
 
+  it("rejects a 429 Response whose body claims a 200 status and carries an empty results array", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return new Response(JSON.stringify({ error: "x", status: 200, results: [] }), { status: 429 });
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/x.*HTTP 429/);
+  });
+
+  it("rejects a failing Response whose body is not JSON, with the response's status", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return new Response("<html>bad gateway</html>", { status: 503 });
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/request failed.*HTTP 503/);
+  });
+
   it("rejects a plain failure envelope whose body also carries an empty results array", async () => {
     const server = fakeServer({
       SemanticSearch: fakeResourceEntry(
@@ -361,6 +387,20 @@ describe("flair#3068 — memory.search() rejects on an error response", () => {
       Memory: searchStub(() => ({ error: "bad", status: 500 })),
     });
     await expect(new Flair(server).as("planner").memory.search()).rejects.toThrow(/bad.*HTTP 500/);
+  });
+
+  it("rejects a 429 Response whose body claims a 200 status and carries an empty results array", async () => {
+    const server = fakeServer({
+      Memory: searchStub(() => new Response(JSON.stringify({ error: "x", status: 200, results: [] }), { status: 429 })),
+    });
+    await expect(new Flair(server).as("planner").memory.search()).rejects.toThrow(/x.*HTTP 429/);
+  });
+
+  it("rejects a failing Response whose body is not JSON, with the response's status", async () => {
+    const server = fakeServer({
+      Memory: searchStub(() => new Response("<html>bad gateway</html>", { status: 503 })),
+    });
+    await expect(new Flair(server).as("planner").memory.search()).rejects.toThrow(/request failed.*HTTP 503/);
   });
 
   it("rejects when the search read throws", async () => {
