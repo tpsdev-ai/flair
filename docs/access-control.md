@@ -325,8 +325,9 @@ A connection acts as its principal:
   just-in-time provisioning create are not admins.
 - **Scopes** narrow a connection: each tool requires one OAuth scope (listed in
   [auth.md](auth.md#scopes)), and a call whose access token does not grant it is
-  refused with `insufficient_scope`. A scope does not add to what the principal
-  can do.
+  refused with `insufficient_scope`. A refreshed token keeps the scope of its
+  sign-in, so a connection that signed in without a tool's scope is refused
+  that tool until it signs in again requesting it.
 
 ### Tokens
 

@@ -671,10 +671,9 @@ async function handleToolCall(request: any, id: any, params: any): Promise<any> 
 
 /**
  * flair#3076: the answer to a tools/call whose token does not grant the tool's
- * scope. HTTP 403 with a Bearer `insufficient_scope` challenge whose `scope`
- * names the scopes to request (challengeScope), and a JSON-RPC error naming the
- * tool and the scope it requires. The CORS headers are the ones withMCPAuth
- * sets on its 401, so a browser client can read the challenge.
+ * scope. HTTP 403 with a Bearer `insufficient_scope` challenge whose `scope` is
+ * challengeScope(), and a JSON-RPC error naming the tool and the scope it
+ * requires.
  */
 function insufficientScope(id: any, tool: string, required: McpToolScope, granted: readonly string[]) {
   return {

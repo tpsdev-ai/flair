@@ -246,7 +246,7 @@ const databasesMock = {
 mock.module("harper", () => ({ databases: databasesMock, Resource: NoopBase, server: { http: () => {}, getUser: async () => null } }));
 
 const { mcpHandler, resolveAgentFromSub, PrincipalRefusedError } = await import("../../resources/mcp-handler.ts");
-const { MCP_TOOL_SCOPES } = await import("../../resources/mcp-tool-scopes.ts");
+const { MCP_TOOL_SCOPES, MCP_REQUESTED_SCOPES } = await import("../../resources/mcp-tool-scopes.ts");
 const { __setHandlers } = await import("../../resources/mcp-tools.ts");
 
 // Inject capture doubles for the delegated handlers via the tools registry —
@@ -638,6 +638,12 @@ describe("tools/call — the token must grant the tool's OAuth scope (flair#3076
     expect(body.error).toBeUndefined();
     expect(lastCall?.resource).toBe("Memory.post");
     expect(lastCall?.ctx.request.tpsAgent).toBe("agt_bob");
+  });
+
+  it("the requested scopes are the scope of each tool except soul_set", () => {
+    const expected = new Set(Object.entries(MCP_TOOL_SCOPES).filter(([name]) => name !== "soul_set").map(([, scope]) => scope));
+    expect([...MCP_REQUESTED_SCOPES].sort()).toEqual([...expected].sort());
+    expect(MCP_REQUESTED_SCOPES).not.toContain(MCP_TOOL_SCOPES.soul_set);
   });
 
   it("the challenge names the granted scope tokens, the requested set and the required scope", async () => {

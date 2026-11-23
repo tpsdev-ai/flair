@@ -4,9 +4,8 @@
  * `withMCPAuth` passes the access token's verified `scope` claim (a
  * space-separated string) to the handler as `request.mcp.scope`. A tools/call
  * runs only when that claim grants the scope this table lists for the tool. A
- * token with no `scope` claim grants no scope. A scope never widens a call: the
- * tool still runs as the token's mapped principal, with that principal's
- * authority.
+ * token with no `scope` claim grants no scope. The tool runs as the token's
+ * mapped principal, with that principal's authority.
  *
  * resources/mcp-tools.ts refuses to load when a tool has no entry here, or an
  * entry names a tool it does not serve.
@@ -35,14 +34,14 @@ export const MCP_TOOL_SCOPES: Readonly<Record<string, McpToolScope>> = Object.fr
   record_usage: "memory:write",
   // The principal list.
   team_directory: "principal:read",
-  // A change to a principal's Soul, an operator action.
+  // A Soul write is an operator action; with this scope soul_set still refuses
+  // the write (soul_write_requires_operator).
   soul_set: "principal:admin",
 });
 
 /**
- * The scopes `/mcp` asks a client to request: the 401 challenge names them, and
- * Flair's client metadata documents declare them. They cover every tool but
- * `soul_set`.
+ * The scopes the /mcp 401 challenge names and Flair's client metadata documents
+ * declare: the scope of each tool except `soul_set`.
  */
 export const MCP_REQUESTED_SCOPES: readonly McpToolScope[] = Object.freeze([
   "memory:read",
@@ -55,7 +54,7 @@ export function requiredToolScope(tool: string): McpToolScope | undefined {
   return Object.prototype.hasOwnProperty.call(MCP_TOOL_SCOPES, tool) ? MCP_TOOL_SCOPES[tool] : undefined;
 }
 
-/** The scopes a token's `scope` claim grants. Anything but a string grants none. */
+/** The scopes a token's `scope` claim grants. An absent claim grants none. */
 export function grantedScopes(claim: unknown): string[] {
   return typeof claim === "string" ? claim.split(/\s+/).filter(Boolean) : [];
 }
@@ -65,8 +64,8 @@ export function grantedScopes(claim: unknown): string[] {
 const SCOPE_TOKEN = /^[\x21\x23-\x5B\x5D-\x7E]+$/;
 
 /**
- * The `scope` an insufficient_scope challenge names: the scopes the token was
- * granted, MCP_REQUESTED_SCOPES, and the scope the tool requires.
+ * The `scope` an insufficient_scope challenge names: the granted values that are
+ * RFC 6749 scope tokens, MCP_REQUESTED_SCOPES, and the scope the tool requires.
  */
 export function challengeScope(granted: readonly string[], required: McpToolScope): string {
   const scopes = new Set<string>();

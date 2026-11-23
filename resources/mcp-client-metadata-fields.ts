@@ -113,9 +113,8 @@ export function buildCimdDocument(params: BuildCimdDocumentParams): CimdDocument
     // pending oauth#161 — rejected by today's open-draft #167 validator; see module header.
     token_endpoint_auth_method: CIMD_TARGET_AUTH_METHOD,
     grant_types: [...CIMD_TARGET_GRANT_TYPES],
-    // flair#3076: a @harperfast/oauth authorization server grants a
-    // client_credentials token this document's `scope`, and Flair's /mcp
-    // requires each tool's scope.
+    // flair#3076: @harperfast/oauth 2.9.0 mints a client_credentials token with
+    // this document's `scope` (test/unit-isolated/mcp-machine-token-scope-3076.test.ts).
     scope: MCP_REQUESTED_SCOPES.join(" "),
     // redirect_uris AND response_types are both deliberately omitted — #161
     // blesses this explicitly for client_credentials-only CIMD clients (no

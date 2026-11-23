@@ -7,7 +7,7 @@
 // memory:read token cannot store or delete; a token with no scope claim is
 // refused every tool call and still lists tools; memory:admin neither stands in
 // for memory:write nor lifts a non-admin principal's bound; the 401 challenge
-// names the scopes to request.
+// names the scopes to request; a refreshed token keeps its sign-in's scope.
 //
 // Harness: the mcp-principal-status.test.ts pattern. An ephemeral Harper with
 // MCP OAuth on and a pinned issuer, a signing key this test controls seeded
@@ -15,7 +15,7 @@
 // to non-admin principals with provisionIdpIdentityMapping. Every request goes
 // to this test's own loopback instance.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { SignJWT, importPKCS8 } from "jose";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { assertOwnInstance, basicAuthOf } from "../helpers/own-harper-instance";
@@ -27,9 +27,15 @@ const RESOURCE = `${ISSUER}/mcp`;
 const KID = "mcp-scope-test-key";
 const sfx = Date.now().toString(36);
 
-// P calls the tools; Q owns the records P must not reach. Both are non-admin.
+// P calls the tools; Q owns the records P must not reach; R signs in through
+// the plugin's token endpoint. All three are non-admin.
 const P = { id: `mcpscope-p-${sfx}`, sub: `idp-sub-scope-p-${sfx}` };
 const Q = { id: `mcpscope-q-${sfx}`, sub: `idp-sub-scope-q-${sfx}` };
+const R = { id: `mcpscope-r-${sfx}`, sub: `idp-sub-scope-r-${sfx}` };
+const SIGN_IN_CLIENT = `mcp-scope-sign-in-client-${sfx}`;
+const SIGN_IN_REDIRECT = "https://client.example/callback";
+// A redirect URI Flair's own authorization server accepts.
+const FLAIR_AS_REDIRECT = "https://claude.com/api/mcp/auth_callback";
 
 const ALL_SCOPES = [
   "memory:read", "memory:write", "memory:admin",
@@ -126,6 +132,40 @@ function challengeScopes(wwwAuth: string | null): string[] {
   const m = /\bscope="([^"]*)"/.exec(wwwAuth ?? "");
   return m ? m[1].split(" ").filter(Boolean) : [];
 }
+
+/** The plugin's token endpoint, form-encoded. */
+async function tokenEndpoint(fields: Record<string, string>): Promise<any> {
+  assertOwnInstance(harper);
+  const res = await fetch(`${harper.httpURL}/oauth/mcp/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(fields).toString(),
+  });
+  const text = await res.text();
+  expect(res.status, `token endpoint → ${res.status}: ${text.slice(0, 300)}`).toBe(200);
+  return JSON.parse(text);
+}
+
+/**
+ * One sign-in by R that requested `scope`: an authorization code stored the way
+ * the plugin's callback stores one, then exchanged at the token endpoint.
+ */
+async function signIn(scope: string): Promise<any> {
+  const code = randomBytes(32).toString("base64url");
+  const verifier = randomBytes(32).toString("base64url");
+  const seeded = await adminOp({
+    operation: "insert", database: "oauth", table: "mcp_auth_codes",
+    records: [{
+      code, client_id: SIGN_IN_CLIENT, user: R.sub, resource: RESOURCE,
+      code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256",
+      redirect_uri: SIGN_IN_REDIRECT, scope, client_auth_method: "none",
+    }],
+  });
+  expect(seeded.status, await seeded.clone().text()).toBe(200);
+  return tokenEndpoint({ grant_type: "authorization_code", client_id: SIGN_IN_CLIENT, code, code_verifier: verifier, redirect_uri: SIGN_IN_REDIRECT });
+}
+
+const tokenScope = (token: string) => JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8")).scope;
 
 /** A refusal for want of `scope`: HTTP 403, the JSON-RPC error naming it, and the Bearer challenge. */
 function expectInsufficientScope(r: McpReply, scope: string, what: string): void {
@@ -291,7 +331,7 @@ function cases(): Record<string, ToolCase> {
     soul_set: {
       prepare: async () => ({ key: "voice", value: marker("soul_set", "write") }),
       unchanged: async () => { expect(await rowById("Soul", `${P.id}:voice`)).toBeUndefined(); },
-      // With the scope, the call reaches the tool, which refuses every runtime Soul write.
+      // With the scope, the call reaches the tool, which refuses the write.
       reached: async (r) => {
         const result = expectReached(r, "soul_set");
         expect(result.isError).toBe(true);
@@ -336,7 +376,7 @@ describe("each /mcp tool requires the OAuth scope its operation needs (flair#307
     const now = new Date().toISOString();
     const agents = await adminOp({
       operation: "insert", database: "flair", table: "Agent",
-      records: [P, Q].map((x) => ({ id: x.id, name: x.id, kind: "agent", type: "agent", role: "agent", status: "active", publicKey: `mcp-oauth:${x.sub}`, createdAt: now, updatedAt: now })),
+      records: [P, Q, R].map((x) => ({ id: x.id, name: x.id, kind: "agent", type: "agent", role: "agent", status: "active", publicKey: `mcp-oauth:${x.sub}`, createdAt: now, updatedAt: now })),
     });
     expect(agents.status, await agents.clone().text()).toBe(200);
 
@@ -344,7 +384,7 @@ describe("each /mcp tool requires the OAuth scope its operation needs (flair#307
     // 127.0.0.1, where this ephemeral instance's own ops API answers.
     const opsPort = Number(new URL(harper.opsURL).port);
     expect(harper.opsURL, "the ephemeral ops API").toBe(`http://127.0.0.1:${opsPort}`);
-    for (const x of [P, Q]) {
+    for (const x of [P, Q, R]) {
       await provisionIdpIdentityMapping({
         opsPortOrUrl: opsPort,
         adminUser: harper.admin.username,
@@ -355,6 +395,19 @@ describe("each /mcp tool requires the OAuth scope its operation needs (flair#307
         idpSubject: x.sub,
       });
     }
+
+    // A public client that may refresh, for the plugin's own token endpoint.
+    const client = await adminOp({
+      operation: "insert", database: "oauth", table: "harper_oauth_mcp_clients",
+      records: [{
+        client_id: SIGN_IN_CLIENT,
+        grant_types: JSON.stringify(["authorization_code", "refresh_token"]),
+        response_types: JSON.stringify(["code"]),
+        redirect_uris: JSON.stringify([SIGN_IN_REDIRECT]),
+        token_endpoint_auth_method: "none",
+      }],
+    });
+    expect(client.status, await client.clone().text()).toBe(200);
 
     writer = await mintToken(P.sub, "memory:read memory:write");
     qWriter = await mintToken(Q.sub, "memory:read memory:write");
@@ -441,6 +494,59 @@ describe("each /mcp tool requires the OAuth scope its operation needs (flair#307
 
     const get = expectReached(await call(everything, "memory_get", { id: theirs }), "memory_get of Q's private memory");
     expect(get.isError, JSON.stringify(get).slice(0, 300)).toBe(true);
+  }, 60_000);
+
+  test("a refreshed token keeps its sign-in's scope: an unscoped sign-in is refused, refreshed or not, until a new sign-in requests the scope", async () => {
+    const unscoped = await signIn("");
+    expect(tokenScope(unscoped.access_token)).toBeUndefined();
+    expect(typeof unscoped.refresh_token).toBe("string");
+    expectInsufficientScope(await call(unscoped.access_token, "memory_search", { query: "mcpscope" }), "memory:read", "unscoped sign-in");
+
+    // The refresh asks for the scopes; the plugin mints with the sign-in's scope.
+    const refreshed = await tokenEndpoint({ grant_type: "refresh_token", client_id: SIGN_IN_CLIENT, refresh_token: unscoped.refresh_token, scope: REQUESTED });
+    expect(tokenScope(refreshed.access_token)).toBeUndefined();
+    expectInsufficientScope(await call(refreshed.access_token, "memory_search", { query: "mcpscope" }), "memory:read", "refreshed unscoped token");
+
+    const scoped = await signIn(REQUESTED);
+    expect(tokenScope(scoped.access_token)).toBe(REQUESTED);
+    expectServed(await call(scoped.access_token, "memory_search", { query: "mcpscope" }), "a new sign-in that requested the scope");
+  }, 60_000);
+
+  test("Flair's own authorization server advertises seven scopes, and neither /mcp nor /Memory accepts its access token", async () => {
+    const metadata: any = await (await fetch(`${harper.httpURL}/OAuthMetadata`)).json();
+    expect([...metadata.scopes_supported].sort()).toEqual([...ALL_SCOPES].sort());
+
+    // A real flair_at_ token: a registered client, an admin's consent (S256), the code exchange.
+    const clientId = `flair_cl_scope_test_${sfx}`;
+    const registered = await adminOp({
+      operation: "insert", database: "flair", table: "OAuthClient",
+      records: [{ id: clientId, name: "scope test", redirectUris: [FLAIR_AS_REDIRECT], grantTypes: ["authorization_code", "refresh_token"], scope: "memory:read", registeredBy: "test", createdAt: new Date().toISOString() }],
+    });
+    expect(registered.status, await registered.clone().text()).toBe(200);
+    const verifier = randomBytes(32).toString("base64url");
+    const approve = await fetch(`${harper.httpURL}/OAuthAuthorize`, {
+      method: "POST", redirect: "manual",
+      headers: { "Content-Type": "application/json", Authorization: basicAuthOf(harper) },
+      body: JSON.stringify({
+        action: "approve", client_id: clientId, redirect_uri: FLAIR_AS_REDIRECT, scope: "memory:read memory:write", state: sfx,
+        code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256",
+      }),
+    });
+    expect(approve.status).toBe(302);
+    const code = new URL(approve.headers.get("location") ?? "").searchParams.get("code");
+    expect(typeof code).toBe("string");
+    const exchanged = await fetch(`${harper.httpURL}/OAuthToken`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ grant_type: "authorization_code", code, client_id: clientId, redirect_uri: FLAIR_AS_REDIRECT, code_verifier: verifier }),
+    });
+    const issued: any = await exchanged.json();
+    expect(exchanged.status, JSON.stringify(issued)).toBe(200);
+    expect(String(issued.access_token).startsWith("flair_at_")).toBe(true);
+
+    const rest = await fetch(`${harper.httpURL}/Memory/?limit=1`, { headers: { Authorization: `Bearer ${issued.access_token}` } });
+    await rest.arrayBuffer();
+    expect(rest.status).toBe(401);
+    expect((await call(issued.access_token, "memory_search", { query: "mcpscope" })).status).toBe(401);
   }, 60_000);
 
   test("the 401 challenge names the scopes to request", async () => {

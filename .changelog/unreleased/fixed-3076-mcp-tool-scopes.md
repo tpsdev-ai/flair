@@ -5,5 +5,6 @@
   principal:read`, and `docs/auth.md` lists the scope each tool requires
   (flair#3076).
 
-  > **Heads-up:** an MCP client's existing token may not grant these scopes; its
-  > tool calls are then refused until the client authorizes again.
+  > **Heads-up:** a refreshed token keeps the scope of its sign-in. An MCP
+  > client that signed in without these scopes is refused tool calls, before and
+  > after a refresh, until it signs in again requesting them.

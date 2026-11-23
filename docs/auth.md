@@ -278,7 +278,7 @@ flair idp add \
 
 ### Scopes
 
-Flair's OAuth discovery advertises seven scopes. The native `/mcp` surface honours them: each `/mcp` tool requires one scope, listed below. A tool call whose access token does not grant that scope gets HTTP 403 with a JSON-RPC `insufficient_scope` error naming the scope and a `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"` challenge, and the tool does not run. A token with no `scope` claim grants no scope. A scope does not add authority: the call runs as the token's principal, with that principal's access.
+Flair's own authorization server (`/OAuthMetadata`, `/OAuthToken`) advertises seven scopes. The native `/mcp` surface is guarded by a different authorization server, `@harperfast/oauth`. `/mcp` gates its tools with four of the seven names: each tool requires the scope listed below, and `memory:admin`, `connector:read` and `connector:admin` gate no `/mcp` tool. A tool call whose access token does not grant the tool's scope gets HTTP 403 with a JSON-RPC `insufficient_scope` error naming the scope and a `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"` challenge, and the tool does not run. A token with no `scope` claim grants no scope. The tool runs as the token's principal, with that principal's access.
 
 | Scope | Description | `/mcp` tools that require it |
 |-------|-------------|------------------------------|
@@ -286,13 +286,13 @@ Flair's OAuth discovery advertises seven scopes. The native `/mcp` surface honou
 | `memory:write` | Write and delete memories | `memory_store`, `memory_update`, `memory_delete`, `memory_basement`, `memory_restore`, `skill_store`, `flair_workspace_set`, `flair_orgevent`, `record_usage` |
 | `memory:admin` | Memory maintenance operations | none |
 | `principal:read` | View principal list | `team_directory` |
-| `principal:admin` | Create/modify/disable principals and their Soul entries | `soul_set` |
+| `principal:admin` | Create/modify/disable principals | `soul_set`, which then refuses the write (`soul_write_requires_operator`) |
 | `connector:read` | View OAuth clients and IdPs | none |
 | `connector:admin` | Manage OAuth clients and IdPs | none |
 
-The `/mcp` 401 challenge asks for `memory:read memory:write principal:read`.
+The `/mcp` 401 challenge names `memory:read memory:write principal:read`, the scope of each `/mcp` tool except `soul_set`. A refreshed access token keeps the scope of the sign-in it came from: a connection whose sign-in did not request a tool's scope is refused that tool, before and after a refresh, until it signs in again requesting it.
 
-`/mcp` takes access tokens from the `@harperfast/oauth` authorization server. The access tokens Flair's own authorization server issues (`flair_at_…`, from `/OAuthToken`, XAA included) are not accepted by any Flair resource yet.
+The access tokens Flair's own authorization server issues (`flair_at_…`) are not accepted by `/mcp` or by Flair's REST resources yet.
 
 ### JIT Provisioning
 

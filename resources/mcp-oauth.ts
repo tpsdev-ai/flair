@@ -594,9 +594,9 @@ export function rateLimitedMcpHandler(handler: (request: any) => Promise<any>): 
 }
 
 /**
- * flair#3076: add `scope="<MCP_REQUESTED_SCOPES>"` to a 401 Bearer challenge
- * that names no scope, so a client that follows the challenge requests the
- * scopes the /mcp tools require. Any other response is returned as it is.
+ * flair#3076: add `scope="<MCP_REQUESTED_SCOPES>"` (the scope of each /mcp tool
+ * except soul_set) to a 401 Bearer challenge that names no scope. Any other
+ * response is returned as it is.
  */
 export function withRequestedScope(res: any): any {
   const challenge = res?.headers?.["WWW-Authenticate"];
