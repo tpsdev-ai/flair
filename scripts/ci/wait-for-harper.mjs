@@ -152,7 +152,7 @@ async function inspectContainer(container, timeoutMs, env) {
   return { running: running === "true", exitCode: exitCode || "unknown" };
 }
 
-/** One GET with a hard deadline and no keep-alive socket; null on any failure. */
+/** One GET with a hard deadline and no keep-alive socket; null when it errors or times out. */
 function request(url, headers, timeoutMs) {
   return new Promise((resolve) => {
     let settled = false;
@@ -181,9 +181,10 @@ function request(url, headers, timeoutMs) {
   });
 }
 
+/** The /Health response status, or null when no response arrived. */
 async function probe(url, authorization, timeoutMs) {
   const response = await request(url, authorization ? { authorization } : {}, timeoutMs);
-  return response !== null && response.status >= 200 && response.status < 300;
+  return response === null ? null : response.status;
 }
 
 /**
@@ -245,12 +246,13 @@ export async function main(options) {
   const elapsedMs = () => performance.now() - startedAt;
 
   const reportExited = async (exitCode) => {
-    console.error(`Harper container '${container}' exited (exit code ${exitCode}) before ${url} answered`);
+    console.error(`Harper container '${container}' exited (exit code ${exitCode}) before Harper was ready`);
     await diagnose({ ...options, childEnv, secrets });
     return 1;
   };
 
   let lastProgressAt = 0;
+  let lastHealthResult = "no response";
   for (;;) {
     if (remaining() <= 0) break;
 
@@ -265,7 +267,9 @@ export async function main(options) {
     if (remaining() <= 0) break;
     if (!state.running) return reportExited(state.exitCode);
 
-    if (await probe(url, authorization, Math.min(perRequestMs, remaining()))) {
+    const status = await probe(url, authorization, Math.min(perRequestMs, remaining()));
+    if (status !== null) lastHealthResult = String(status);
+    if (status !== null && status >= 200 && status < 300) {
       if (remaining() <= 0) break;
       let finalState;
       try {
@@ -290,7 +294,7 @@ export async function main(options) {
     if (sleepMs > 0) await new Promise((resolve) => setTimeout(resolve, sleepMs));
   }
 
-  console.error(`Harper did not answer /Health within ${budgetSeconds}s`);
+  console.error(`Harper was not ready within ${budgetSeconds}s; last /Health result: ${lastHealthResult}`);
   await diagnose({ ...options, childEnv, secrets });
   return 1;
 }

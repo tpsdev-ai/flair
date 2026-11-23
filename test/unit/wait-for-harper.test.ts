@@ -316,7 +316,7 @@ describe("wait-for-harper.mjs", () => {
       expect(result.output).toContain("stub container log for harper-flair");
       expect(result.seconds).toBeLessThan(10);
       expect(result.output).not.toContain("Harper ready");
-      expect(result.output).not.toContain("did not answer /Health within");
+      expect(result.output).not.toContain("was not ready within");
       // The first inspect happened before the probe, so /Health was never
       // believed: only the unauthenticated diagnostic request reached it.
       expect(server.requests()).toBe(1);
@@ -326,7 +326,7 @@ describe("wait-for-harper.mjs", () => {
   );
 
   test(
-    "(c) when /Health never answers, polling stops at the budget; the timeout line and logs follow",
+    "(c) when /Health keeps answering 503, polling stops at the budget; the timeout line and logs follow",
     async () => {
       // Polling stops at the 2s budget; the failure diagnostic then takes at
       // most ten seconds of container logs plus one per-request cap.
@@ -343,7 +343,7 @@ describe("wait-for-harper.mjs", () => {
       ]);
 
       expect(result.status).toBe(1);
-      expect(result.output).toContain("Harper did not answer /Health within 2s");
+      expect(result.output).toContain("Harper was not ready within 2s; last /Health result: 503");
       expect(result.output).toContain("stub container log for harper-flair");
       expect(result.seconds).toBeGreaterThanOrEqual(1.9);
       expect(result.seconds).toBeLessThan(5);
@@ -369,7 +369,7 @@ describe("wait-for-harper.mjs", () => {
       ]);
 
       expect(result.status).toBe(1);
-      expect(result.output).toContain("Harper did not answer /Health within 1s");
+      expect(result.output).toContain("Harper was not ready within 1s; last /Health result: no response");
       expect(result.seconds).toBeGreaterThanOrEqual(0.9);
       expect(result.seconds).toBeLessThan(4);
     },
@@ -414,7 +414,7 @@ describe("wait-for-harper.mjs", () => {
       ["--container", "harper-flair", ...WAIT_ARGS(server.url), "--budget-seconds", "1", "--per-request-ms", "200"],
       { HARPER_START_BUDGET_S: "50" },
     );
-    expect(result.output).toContain("Harper did not answer /Health within 1s");
+    expect(result.output).toContain("Harper was not ready within 1s");
     expect(result.seconds).toBeLessThan(5);
   }, CASE_TIMEOUT_MS);
 
@@ -435,7 +435,7 @@ describe("wait-for-harper.mjs", () => {
   );
 
   test(
-    "(h) the credential is a request header, and its named variable is absent from the docker children and printed output",
+    "(h) the credential is a request header, and its value is absent from the docker children and printed output",
     async () => {
       const server = await health(STATUS(200));
       const box = sandbox();
@@ -549,6 +549,7 @@ describe("wait-for-harper.mjs", () => {
 
       expect(result.status).toBe(1);
       expect(result.output).toContain("exit code 3");
+      expect(result.output).toContain("exited (exit code 3) before Harper was ready");
       expect(result.output).not.toContain("Harper ready");
       // One probe plus the unauthenticated diagnostic request.
       expect(server.requests()).toBe(2);
@@ -592,7 +593,7 @@ describe("wait-for-harper.mjs", () => {
       );
 
       expect(result.status).toBe(1);
-      expect(result.output).toContain("Harper did not answer /Health within 2s");
+      expect(result.output).toContain("Harper was not ready within 2s");
       expect(result.seconds).toBeGreaterThanOrEqual(1.8);
       expect(result.seconds).toBeLessThan(6);
     },
@@ -628,7 +629,7 @@ describe("wait-for-harper.mjs", () => {
       ]);
 
       expect(result.status).toBe(1);
-      expect(result.output).toContain("Harper did not answer /Health within 1s");
+      expect(result.output).toContain("Harper was not ready within 1s; last /Health result: 200");
       expect(result.output).not.toContain("Harper ready");
       expect(result.seconds).toBeGreaterThanOrEqual(1.4);
     },
@@ -667,7 +668,7 @@ describe("wait-for-harper.mjs", () => {
       );
 
       expect(result.status).toBe(1);
-      expect(result.output).toContain("Harper did not answer /Health within 1s");
+      expect(result.output).toContain("Harper was not ready within 1s");
       // Without the budget check after the first inspect, a probe runs, fails
       // and prints the progress line before the timeout.
       expect(result.output).not.toContain("waiting for Harper /Health");
@@ -850,7 +851,7 @@ describe("wait-for-harper.mjs", () => {
       ]);
 
       expect(result.status).toBe(1);
-      expect(result.output).toContain("Harper did not answer /Health within 1s");
+      expect(result.output).toContain("Harper was not ready within 1s");
       expect(result.output).not.toContain("exited (exit code 5)");
     },
     CASE_TIMEOUT_MS,
@@ -875,7 +876,7 @@ describe("wait-for-harper.mjs", () => {
       ]);
 
       expect(result.status).toBe(1);
-      expect(result.output).toContain("Harper did not answer /Health within 1s");
+      expect(result.output).toContain("Harper was not ready within 1s");
       expect(result.output).not.toContain("exited (exit code 6)");
       expect(result.output).not.toContain("Harper ready");
     },
