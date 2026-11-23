@@ -915,7 +915,7 @@ describe("wait-for-harper.mjs", () => {
   );
 
   test(
-    "(y) a URL that is not http(s) or carries userinfo is bad usage before any Docker call",
+    "(y) a URL that is not http(s) or carries a username or password is bad usage before any Docker call",
     async () => {
       const badUrls = ["not-a-url", "ftp://host/Health", "http://user:pass@127.0.0.1:8080/Health"];
       for (const url of badUrls) {

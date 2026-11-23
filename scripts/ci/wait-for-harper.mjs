@@ -79,9 +79,9 @@ function redact(text, secrets) {
 }
 
 /**
- * Validate the health URL: absolute http or https, and no userinfo. Node's
- * http.request turns a userinfo into a Basic header by itself, so a URL that
- * carries one would send credentials the caller did not name.
+ * Validate the health URL: absolute http or https, with no username or password.
+ * Node's http.request can turn nonempty URL credentials into a Basic header by
+ * itself, so such a URL would send credentials the caller did not name.
  */
 function healthUrl(text) {
   let parsed;
