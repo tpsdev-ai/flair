@@ -1969,11 +1969,28 @@ export function claudeCodeMcpEntry(env: WireEnv) {
   return flairMcpEntry(env, { stdioType: true });
 }
 
+/**
+ * A value Flair cannot write into the Codex section's basic-string env lines (a quote, a backslash or a
+ * control character): refused before the file is read, by name, so the refusal is about the value and
+ * not about the file's content.
+ */
+export function codexEnvValueRefusal(env: WireEnv, display: string): string | null {
+  for (const [name, value] of [["FLAIR_AGENT_ID", env.FLAIR_AGENT_ID], ["FLAIR_URL", env.FLAIR_URL], ["FLAIR_CLIENT", env.FLAIR_CLIENT]] as const) {
+    if (value !== undefined && /["\\\x00-\x1f\x7f]/.test(value)) {
+      return `Codex: refusing to write ${display}: the ${name} value contains a quote, backslash or control character, ` +
+        `which Flair does not write into Codex's config; use a value without them.`;
+    }
+  }
+  return null;
+}
+
 function _wireCodex(env: WireEnv, testHooks?: CodexRewriteTestHooks): { ok: boolean; message: string } {
   // One critical section keeps the shape decision and replacement on the
   // same in-lock bytes; defer backup until a write is accepted.
   const path = codexConfigPath();
   const display = "~/.codex/config.toml";
+  const valueRefusal = codexEnvValueRefusal(env, display);
+  if (valueRefusal) return { ok: false, message: valueRefusal };
   // Parent creation stays OUTSIDE the primitive (it needs the resolved parent
   // to observe an absent destination).
   try {

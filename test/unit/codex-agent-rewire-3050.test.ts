@@ -611,6 +611,23 @@ describe("Codex fallback definition guard", () => {
     expect((Bun.TOML.parse(raw) as any).other.tool.note).toContain("mcp_servers.flair");
     expectRefusal(raw, wireCodex(ENV_B));
   });
+  // A value Flair cannot write into the section's env lines is refused by name before the file is read,
+  // not with the config-content conditions (the file is not what is wrong).
+  for (const [name, env] of [
+    ["an agent id with a quote", { FLAIR_AGENT_ID: 'agent"x', FLAIR_URL: URL_A }],
+    ["an agent id with a backslash", { FLAIR_AGENT_ID: "agent\\x", FLAIR_URL: URL_A }],
+    ["a URL with a control character", { FLAIR_AGENT_ID: "agent-b", FLAIR_URL: URL_A + "\u0001" }],
+  ] as const) {
+    it(`refuses ${name} by name, before reading the file`, () => {
+      const raw = seed(tomlSnippet(ENV_A) + "\n");
+      const res = wireCodex(env);
+      expect(res.ok).toBe(false);
+      expect(res.message).toContain("contains a quote, backslash or control character");
+      expect(res.message).not.toContain("Flair edits Codex's config only when");
+      expect(readFileSync(cfgPath(), "utf8")).toBe(raw);
+      expect(existsSync(`${cfgPath()}.bak`)).toBe(false);
+    });
+  }
   // The remedy each refusal names is one that clears it: follow it, re-run, and the wiring succeeds.
   for (const [what, raw, repaired] of [
     ["an inline flair entry in [mcp_servers]", '[mcp_servers]\nflair = { command = "npx" }\n', ""],
