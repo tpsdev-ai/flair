@@ -197,7 +197,8 @@ describe("flair#2210 — a real Harper 5 install is not read as fresh", () => {
       ...SKIP_EXTRAS,
     ]);
     expect(firstRun.code, `flair init failed:\n${firstRun.out.slice(-4000)}`).toBe(0);
-    // The init child resolved the pre-fetched model: its Harper has that file mapped.
+    // The init child resolved the pre-fetched model: its Harper has that file
+    // mapped (Linux) or open (macOS).
     expect(mappedModelFiles(harperPid())).toEqual([realpathSync(join(MODELS_DIR, EMBEDDING_MODEL_FILE))]);
     expect(existsSync(adminPassPath)).toBe(true);
     installedPassword = readFileSync(adminPassPath, "utf8").trim();

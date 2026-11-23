@@ -247,9 +247,10 @@ const ASSIGNMENT_REMEDY =
  * `memory_provider_timeout`, the seed waits {@link SEED_SKILL_WRITE_RETRY_BACKOFF_MS}
  * and runs the whole pass again, reads and checks included, while the io's
  * skill-write bound, counted from the first attempt, leaves time for that wait.
- * Each attempt's write waits at most the time left in that bound. A write that
- * does not finish within the bound is refused with the attempts and the time
- * spent.
+ * Each attempt's write waits at most the time left in that bound. When the
+ * bound leaves no time for another wait, passes before a retried pass's write,
+ * or ends a write that got no answer, the refusal names the attempts and the
+ * time spent.
  */
 export async function runSkillSeed(
   io: SkillSeedIo,

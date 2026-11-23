@@ -171,7 +171,8 @@ describe.skipIf(process.platform !== "linux")("flair#2271 — supplied credentia
     symlinkSync(dataDir, join(home, ".flair", "data"));
     const r = await runInit(["--data-dir", dataDir, "--port", String(httpPort), "--ops-port", String(opsPort), ...SKIP_EXTRAS]);
     expect(r.code, r.out).toBe(0);
-    // The init child resolved the pre-fetched model: its Harper has that file mapped.
+    // The init child resolved the pre-fetched model: its Harper has that file
+    // mapped (Linux) or open (macOS).
     expect(mappedModelFiles(harperPid())).toEqual([realpathSync(join(MODELS_DIR, EMBEDDING_MODEL_FILE))]);
     expect(existsSync(adminPassPath)).toBe(true);
     installedPassword = readFileSync(adminPassPath, "utf8").trim();

@@ -1,7 +1,7 @@
 /**
- * The embedding-model files a running process has mapped: the files its
- * embedding engine loaded (harper-fabric-embeddings maps the model it loads).
- * Linux reads /proc/<pid>/maps; macOS lists the process's open files with lsof.
+ * The embedding-model files a running process holds. On Linux, the files in
+ * its memory map (/proc/<pid>/maps; harper-fabric-embeddings maps the model it
+ * loads). On macOS, its open files (lsof), which do not show a mapping.
  */
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
