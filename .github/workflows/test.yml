@@ -819,6 +819,9 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Start Harper with Flair component (for E2E / Playwright)
+        env:
+          HARPER_START_BUDGET_S: "300"
+          HARPER_START_CREDENTIALS: "admin:admin123"
         run: |
           # ops-nv9d slice 2: the E2E/Playwright lane deliberately leaves Harper
           # on a WILDCARD bind (bare HTTP_PORT + NODE_HOSTNAME=0.0.0.0) so the
@@ -838,22 +841,13 @@ jobs:
             --entrypoint /bin/sh \
             harperfast/harper:${{ steps.harper-image.outputs.tag }} \
             -c "harper install && harper dev /flair"
-          # Wait for Harper to be healthy (Basic auth required by Harper's authorizeLocal)
-          for i in $(seq 1 60); do
-            if curl -sf -u admin:admin123 http://localhost:9926/Health 2>/dev/null; then
-              echo "Harper ready (${i}s)"
-              break
-            fi
-            if [ "$i" -eq 60 ]; then
-              echo "Harper failed to start after 120s. Full logs:"
-              docker logs harper-flair 2>&1
-              echo "---"
-              echo "Trying direct curl with verbose:"
-              curl -v http://localhost:9926/Health 2>&1 || true
-              exit 1
-            fi
-            sleep 2
-          done
+          # Wait against an elapsed budget, not a poll count: on a loaded runner
+          # the in-container install can outlast a fixed number of polls. The
+          # script also fails at once when the container exits, with its exit
+          # code and logs, instead of sleeping out the budget.
+          bash "$GITHUB_WORKSPACE/scripts/ci/wait-for-harper.sh" \
+            harper-flair http://localhost:9926/Health \
+            HARPER_START_CREDENTIALS "$HARPER_START_BUDGET_S"
       - name: E2E CLI smoke test
         run: bash test/e2e-cli.sh
         env:
