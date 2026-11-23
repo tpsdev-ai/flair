@@ -246,6 +246,7 @@ const databasesMock = {
 mock.module("harper", () => ({ databases: databasesMock, Resource: NoopBase, server: { http: () => {}, getUser: async () => null } }));
 
 const { mcpHandler, resolveAgentFromSub, PrincipalRefusedError } = await import("../../resources/mcp-handler.ts");
+const { MCP_TOOL_SCOPES } = await import("../../resources/mcp-tool-scopes.ts");
 const { __setHandlers } = await import("../../resources/mcp-tools.ts");
 
 // Inject capture doubles for the delegated handlers via the tools registry —
@@ -263,10 +264,14 @@ const restoreHandlers = __setHandlers({
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+// flair#3076: a tools/call runs only when the token grants the tool's scope.
+// A request built with a token subject grants the scopes the tools require
+// unless the case passes its own `scope`.
+const TOOL_SCOPES = "memory:read memory:write principal:read principal:admin";
 function post(body: any, mcp?: any) {
   return {
     method: "POST",
-    mcp,
+    mcp: mcp && !("scope" in mcp) ? { ...mcp, scope: TOOL_SCOPES } : mcp,
     text: async () => JSON.stringify(body),
   };
 }
@@ -574,6 +579,73 @@ describe("resolveAgentFromSub", () => {
     process.env.FLAIR_MCP_JIT_PROVISION = "1";
     const agent = await resolveAgentFromSub("fresh-sub-2", "flair_cl_jit");
     expect(agent?.clientId).toBe("flair_cl_jit");
+  });
+});
+
+// ─── flair#3076: tools/call requires the tool's OAuth scope ───────────────────
+describe("tools/call — the token must grant the tool's OAuth scope (flair#3076)", () => {
+  const ALL_SCOPES = [
+    "memory:read", "memory:write", "memory:admin",
+    "principal:read", "principal:admin",
+    "connector:read", "connector:admin",
+  ];
+
+  beforeEach(() => {
+    credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+    agents["agt_bob"] = { id: "agt_bob", status: "active" };
+  });
+
+  function callWith(sub: string, scope: unknown, name: string, args: any = {}) {
+    return mcpHandler(post({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name, arguments: args } }, { sub, scope }));
+  }
+
+  async function expectRefused(res: any, tool: string, required: string): Promise<void> {
+    expect(res.status, tool).toBe(403);
+    expect(res.headers["WWW-Authenticate"], tool).toMatch(/^Bearer error="insufficient_scope", scope="[^"]+"$/);
+    const body = await parse(res);
+    expect(body.result, tool).toBeUndefined();
+    expect(body.error.code, tool).toBe(-32001);
+    expect(body.error.message, tool).toContain(`insufficient_scope: ${tool} requires the '${required}' scope`);
+  }
+
+  it("a token that grants every other scope is refused each tool with 403 insufficient_scope naming the tool's scope, before the subject is resolved", async () => {
+    // A resolution would read the credential and answer `unavailable`.
+    credentialSearchError = new Error("storage unavailable");
+    for (const [name, required] of Object.entries(MCP_TOOL_SCOPES)) {
+      lastCall = null;
+      const res = await callWith("sub-bob", ALL_SCOPES.filter((s) => s !== required).join(" "), name);
+      await expectRefused(res, name, required);
+      expect(lastCall, name).toBeNull();
+    }
+  });
+
+  it("a token with no scope claim, or an empty one, is refused each tool, and with JIT on provisions no principal", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    for (const scope of [undefined, ""]) {
+      for (const [name, required] of Object.entries(MCP_TOOL_SCOPES)) {
+        lastCall = null;
+        await expectRefused(await callWith("sub-unmapped", scope, name), name, required);
+        expect(lastCall, name).toBeNull();
+      }
+    }
+    expect(puts).toEqual([]);
+  });
+
+  it("a token that grants the tool's scope reaches the tool", async () => {
+    const res = await callWith("sub-bob", "memory:write", "memory_store", { content: "scoped" });
+    expect(res.status).toBe(200);
+    const body = await parse(res);
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.post");
+    expect(lastCall?.ctx.request.tpsAgent).toBe("agt_bob");
+  });
+
+  it("the challenge names the granted scope tokens, the requested set and the required scope", async () => {
+    const res = await callWith("sub-bob", 'memory:read offline_access not"a-token', "memory_store", { content: "x" });
+    await expectRefused(res, "memory_store", "memory:write");
+    expect(res.headers["WWW-Authenticate"]).toBe(
+      'Bearer error="insufficient_scope", scope="memory:read offline_access memory:write principal:read"',
+    );
   });
 });
 

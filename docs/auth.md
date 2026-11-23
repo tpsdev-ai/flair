@@ -278,14 +278,21 @@ flair idp add \
 
 ### Scopes
 
-| Scope | Description |
-|-------|-------------|
-| `memory:read` | Read memories and search |
-| `memory:write` | Write and delete memories |
-| `memory:admin` | Memory maintenance operations |
-| `principal:read` | View principal list |
-| `principal:admin` | Create/modify/disable principals |
-| `connector:admin` | Manage OAuth clients and IdPs |
+Flair's OAuth discovery advertises seven scopes. The native `/mcp` surface honours them: each `/mcp` tool requires one scope, listed below. A tool call whose access token does not grant that scope gets HTTP 403 with a JSON-RPC `insufficient_scope` error naming the scope and a `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"` challenge, and the tool does not run. A token with no `scope` claim grants no scope. A scope does not add authority: the call runs as the token's principal, with that principal's access.
+
+| Scope | Description | `/mcp` tools that require it |
+|-------|-------------|------------------------------|
+| `memory:read` | Read memories and search | `memory_search`, `memory_get`, `skill_search`, `skill_get`, `bootstrap`, `soul_get`, `attention` |
+| `memory:write` | Write and delete memories | `memory_store`, `memory_update`, `memory_delete`, `memory_basement`, `memory_restore`, `skill_store`, `flair_workspace_set`, `flair_orgevent`, `record_usage` |
+| `memory:admin` | Memory maintenance operations | none |
+| `principal:read` | View principal list | `team_directory` |
+| `principal:admin` | Create/modify/disable principals and their Soul entries | `soul_set` |
+| `connector:read` | View OAuth clients and IdPs | none |
+| `connector:admin` | Manage OAuth clients and IdPs | none |
+
+The `/mcp` 401 challenge asks for `memory:read memory:write principal:read`.
+
+`/mcp` takes access tokens from the `@harperfast/oauth` authorization server. The access tokens Flair's own authorization server issues (`flair_at_…`, from `/OAuthToken`, XAA included) are not accepted by any Flair resource yet.
 
 ### JIT Provisioning
 

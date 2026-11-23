@@ -25,6 +25,7 @@ import { mcpOAuthEnabled, mcpAuthConfig, mcpIssuer } from "./mcp-oauth-flag.js";
 import { mcpOAuthDegraded } from "./mcp-oauth-env-guard.js";
 import { checkMcpRateLimit } from "./rate-limit.js";
 import { MULTI_WORKER_GUARD_HTTP_NAME } from "./multi-worker-guard.js";
+import { MCP_REQUESTED_SCOPES } from "./mcp-tool-scopes.js";
 
 /**
  * Boot guard (flair#1021, flair#1322), after the flag and degraded-start checks.
@@ -592,6 +593,22 @@ export function rateLimitedMcpHandler(handler: (request: any) => Promise<any>): 
   };
 }
 
+/**
+ * flair#3076: add `scope="<MCP_REQUESTED_SCOPES>"` to a 401 Bearer challenge
+ * that names no scope, so a client that follows the challenge requests the
+ * scopes the /mcp tools require. Any other response is returned as it is.
+ */
+export function withRequestedScope(res: any): any {
+  const challenge = res?.headers?.["WWW-Authenticate"];
+  if (res?.status !== 401 || typeof challenge !== "string" || !/^Bearer\s/.test(challenge) || /\bscope=/.test(challenge)) {
+    return res;
+  }
+  return {
+    ...res,
+    headers: { ...res.headers, "WWW-Authenticate": `${challenge}, scope="${MCP_REQUESTED_SCOPES.join(" ")}"` },
+  };
+}
+
 export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<boolean> {
   if (!mcpOAuthEnabled()) {
     // OFF → no route, no import, no side effects.
@@ -709,7 +726,7 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
       // Reaching the wrapper means the live config is present, enabled, and
       // its issuer passed the rule; mounted state is derived on read, never
       // recorded for a request that may then be denied.
-      return guardedMcp(request, next);
+      return withRequestedScope(await guardedMcp(request, next));
     },
     { urlPath: "/mcp", after: MULTI_WORKER_GUARD_HTTP_NAME },
   );

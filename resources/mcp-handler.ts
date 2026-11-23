@@ -9,7 +9,8 @@
  *
  * ── This handler's job ──────────────────────────────────────────────────────
  *   1. Parse the JSON-RPC request (initialize / tools/list / tools/call / ping).
- *   2. For tools/call: resolve `request.mcp.sub` → a flair `Agent` id via the
+ *   2. For tools/call: require the token's `scope` to grant the tool's scope
+ *      (resources/mcp-tool-scopes.ts), then resolve `request.mcp.sub` → a flair `Agent` id via the
  *      `Credential(kind:"idp", idpSubject=sub)` lookup, JIT-provisioning a
  *      Principal+Credential the first time IF the trust anchor allows it.
  *   3. Establish the flair scoping context and invoke the tool, which delegates
@@ -28,6 +29,7 @@ import { databases } from "harper";
 import { randomBytes } from "node:crypto";
 import { TOOLS, listToolDefs, type ResolvedAgent } from "./mcp-tools.js";
 import { checkToolArguments, withoutNullArguments } from "./mcp-tool-arguments.js";
+import { challengeScope, grantedScopes, requiredToolScope, type McpToolScope } from "./mcp-tool-scopes.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
 import { isPrincipalDeactivated } from "./agent-auth.js";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
@@ -594,6 +596,18 @@ async function handleToolCall(request: any, id: any, params: any): Promise<any> 
     return rpcError(id, -32001, "unauthorized: no verified token subject");
   }
 
+  // flair#3076: the token's granted scope must include the scope this tool
+  // requires. Checked before the subject is resolved, so a refused call reads
+  // no credential and provisions no principal.
+  const required = requiredToolScope(toolName);
+  if (required === undefined) {
+    return rpcError(id, -32602, `unknown tool: ${toolName}`);
+  }
+  const granted = grantedScopes(request?.mcp?.scope);
+  if (!granted.includes(required)) {
+    return insufficientScope(id, toolName, required, granted);
+  }
+
   // flair#718 authorship-provenance, Sherlock's binding refinement: source
   // the authorship stamp from `client_id` (the server-generated
   // `flair_cl_...` machine id — resources/OAuth.ts, an RS256-verified JWT
@@ -653,6 +667,35 @@ async function handleToolCall(request: any, id: any, params: any): Promise<any> 
     structuredContent: typeof result === "object" ? result : { value: result },
     isError,
   });
+}
+
+/**
+ * flair#3076: the answer to a tools/call whose token does not grant the tool's
+ * scope. HTTP 403 with a Bearer `insufficient_scope` challenge whose `scope`
+ * names the scopes to request (challengeScope), and a JSON-RPC error naming the
+ * tool and the scope it requires. The CORS headers are the ones withMCPAuth
+ * sets on its 401, so a browser client can read the challenge.
+ */
+function insufficientScope(id: any, tool: string, required: McpToolScope, granted: readonly string[]) {
+  return {
+    status: 403,
+    headers: {
+      ...JSON_HEADERS,
+      "WWW-Authenticate": `Bearer error="insufficient_scope", scope="${challengeScope(granted, required)}"`,
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Expose-Headers": "WWW-Authenticate",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: id ?? null,
+      error: {
+        code: -32001,
+        message:
+          `insufficient_scope: ${tool} requires the '${required}' scope, which this access token does not grant. ` +
+          "Obtain a token that grants it; the WWW-Authenticate header names the scopes to request.",
+      },
+    }),
+  };
 }
 
 /**

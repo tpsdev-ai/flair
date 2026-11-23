@@ -43,6 +43,8 @@
  * so the document shape is unit-testable without spinning up Harper.
  */
 
+import { MCP_REQUESTED_SCOPES } from "./mcp-tool-scopes.js";
+
 export interface Ed25519Jwk {
   kty: "OKP";
   crv: "Ed25519";
@@ -62,6 +64,7 @@ export interface CimdDocument {
   jwks: { keys: Ed25519Jwk[] };
   token_endpoint_auth_method: string;
   grant_types: string[];
+  scope: string;
 }
 
 /** The grant this agent's CIMD document targets — formalized by oauth#161, accepted by the published 2.2.0 validator. See module header. */
@@ -110,6 +113,10 @@ export function buildCimdDocument(params: BuildCimdDocumentParams): CimdDocument
     // pending oauth#161 — rejected by today's open-draft #167 validator; see module header.
     token_endpoint_auth_method: CIMD_TARGET_AUTH_METHOD,
     grant_types: [...CIMD_TARGET_GRANT_TYPES],
+    // flair#3076: a @harperfast/oauth authorization server grants a
+    // client_credentials token this document's `scope`, and Flair's /mcp
+    // requires each tool's scope.
+    scope: MCP_REQUESTED_SCOPES.join(" "),
     // redirect_uris AND response_types are both deliberately omitted — #161
     // blesses this explicitly for client_credentials-only CIMD clients (no
     // redirect-based flow is ever possible for a headless agent). Neither
