@@ -69,7 +69,10 @@ setInterval(() => {}, 1000);
   }
 
   async function stop(pid: number, unloadFails = false, accelerated = false) {
-    writeFileSync(join(shimBin, "launchctl"), unloadFails ? "#!/bin/sh\nexit 7\n" : `#!/bin/sh\nkill -TERM ${pid}\n`, { mode: 0o755 });
+    const listAnswer = `printf '{\\n\\t"PID" = ${pid};\\n};\\n'`;
+    writeFileSync(join(shimBin, "launchctl"), unloadFails
+      ? `#!/bin/sh\ncase "$1" in list) ${listAnswer}; exit 0;; unload) exit 7;; esac\nexit 0\n`
+      : `#!/bin/sh\ncase "$1" in list) ${listAnswer}; exit 0;; unload) kill -TERM ${pid};; esac\nexit 0\n`, { mode: 0o755 });
     const runner = join(home, "stop.ts");
     writeFileSync(runner, `
 const { program } = await import(${JSON.stringify(join(repoRoot, "src/cli.ts"))});
