@@ -33,4 +33,4 @@
   redirected read, is NOT RUN.
 
   > **Heads-up:** to keep an MQTT configuration you turned on deliberately, pass
-  > `--keep-mqtt-config` to `flair deploy` / `flair upgrade --target`.
+  > `--keep-mqtt-config` to `flair deploy` / `flair upgrade --target`. ([#2730](https://github.com/tpsdev-ai/flair/pull/2730))

@@ -13,4 +13,4 @@
   > names an id, whose body cannot be structured-cloned is refused with
   > `400 memory_body_uncloneable` (any memory write, not only skills). A Memory
   > skill create or update returns `409 skill_head_moved` when the live head keeps
-  > moving across its lock attempts, as skill-tagged `POST /FeedMemories` already does.
+  > moving across its lock attempts, as skill-tagged `POST /FeedMemories` already does. ([#3024](https://github.com/tpsdev-ai/flair/pull/3024))

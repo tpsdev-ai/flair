@@ -13,19 +13,25 @@
 //
 // Real, HOME-isolated Harper; the invalid server-built rows come from the
 // existing test-only fault hook (test/fixtures/skill-write-fault-2139/probe.js).
+//
+// The Harper runs from a copy of the built component without migration-boot.js
+// (test/helpers/component-without-migration-boot.ts). With it loaded, a
+// migration cycle can rewrite a freshly upserted row (its embedding fields,
+// updatedAt, and an instanceToken on a row without one) between a test's two
+// reads, and the whole-row comparisons below would count that write (#3035).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
+import { cpSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
-import { componentWithReplayProbe, type ProbeComponent, type ProbeFiles } from "../helpers/component-with-replay-probe";
+import { componentWithoutMigrationBoot, type ComposedComponent } from "../helpers/component-without-migration-boot";
 
-const FAULT_PROBE: ProbeFiles = {
+const FAULT_PROBE = {
   source: join("test", "fixtures", "skill-write-fault-2139", "probe.js"),
   target: join("dist", "resources", "zz-skill-write-fault-2139.js"),
-  out: "skill-write-fault-2139", // unused: the probe writes no files
 };
 /** The owner-id prefix the probe hands an invalid row to (see the probe). */
 const MUTATE_PREFIX = "__flair_fault_mutate__";
@@ -48,7 +54,7 @@ const now = () => new Date().toISOString();
 
 let harper: HarperInstance;
 let installDir = "";
-let composed: ProbeComponent | undefined;
+let composed: ComposedComponent | undefined;
 
 function assertOwnInstance(h: HarperInstance): void {
   for (const url of [h.httpURL, h.opsURL]) {
@@ -129,10 +135,15 @@ const nextId = (label: string) => `rowval-${label}-${sfx}-${++seq}`;
 
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
-  composed = componentWithReplayProbe({ probe: FAULT_PROBE });
+  composed = componentWithoutMigrationBoot();
+  cpSync(join(composed.sourceRoot, FAULT_PROBE.source), join(composed.dir, FAULT_PROBE.target));
   harper = await startHarper({ cwd: composed.dir, harperBinDir: composed.sourceRoot });
   installDir = harper.installDir;
   assertOwnInstance(harper);
+  // "idle": no migration cycle was scheduled on this instance.
+  const detail = await fetch(`${harper.httpURL}/HealthDetail`, { headers: { Authorization: basicAuth() } });
+  expect(detail.status).toBe(200);
+  expect((await detail.json()).migrations?.cyclePhase).toBe("idle");
   await ops({
     operation: "upsert", database: "flair", table: "Agent",
     records: [A, ...STEPS.map((s) => MUTATE[s]), MUTATE[MEMORY_MUTATE_STEP]].map((a) => ({

@@ -9,4 +9,4 @@
   row. The check they make next, which the reindex endpoint and a reindex write
   also make, keeps the gate's decision for a request the gate verified, and
   decides any other annotated caller (a Basic credential or an in-process context)
-  from its Agent row read at that moment plus `FLAIR_ADMIN_AGENTS`.
+  from its Agent row read at that moment plus `FLAIR_ADMIN_AGENTS`. ([#2712](https://github.com/tpsdev-ai/flair/pull/2712))
