@@ -284,11 +284,11 @@ Flair's own authorization server (`/OAuthMetadata`, `/OAuthToken`) advertises se
 |-------|-------------|------------------------------|
 | `memory:read` | Read memories and search | `memory_search`, `memory_get`, `skill_search`, `skill_get`, `bootstrap`, `soul_get`, `attention` |
 | `memory:write` | Write and delete memories | `memory_store`, `memory_update`, `memory_delete`, `memory_basement`, `memory_restore`, `skill_store`, `flair_workspace_set`, `flair_orgevent`, `record_usage` |
-| `memory:admin` | Memory maintenance operations | none |
+| `memory:admin` | Reserved for memory maintenance operations | none |
 | `principal:read` | View principal list | `team_directory` |
-| `principal:admin` | Create/modify/disable principals | `soul_set`, which then refuses the write (`soul_write_requires_operator`) |
-| `connector:read` | View OAuth clients and IdPs | none |
-| `connector:admin` | Manage OAuth clients and IdPs | none |
+| `principal:admin` | Reserved for creating, modifying and disabling principals | `soul_set`, which then refuses the write (`soul_write_requires_operator`) |
+| `connector:read` | Reserved for viewing OAuth clients and IdPs | none |
+| `connector:admin` | Reserved for managing OAuth clients and IdPs | none |
 
 The `/mcp` 401 challenge names `memory:read memory:write principal:read`, the scope of each `/mcp` tool except `soul_set`. A refreshed access token keeps the scope of the sign-in it came from: a connection whose sign-in did not request a tool's scope is refused that tool, before and after a refresh, until it signs in again requesting it.
 

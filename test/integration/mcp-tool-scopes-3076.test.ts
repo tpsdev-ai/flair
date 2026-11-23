@@ -7,31 +7,42 @@
 // memory:read token cannot store or delete; a token with no scope claim is
 // refused every tool call and still lists tools; memory:admin neither stands in
 // for memory:write nor lifts a non-admin principal's bound; the 401 challenge
-// names the scopes to request; a refreshed token keeps its sign-in's scope.
+// names the scopes to request; a sign-in through the plugin's authorize and
+// callback carries the scope it requested; a refreshed token keeps its
+// sign-in's scope.
 //
 // Harness: the mcp-principal-status.test.ts pattern. An ephemeral Harper with
 // MCP OAuth on and a pinned issuer, a signing key this test controls seeded
 // into oauth.harper_oauth_mcp_keys, tokens minted with jose, and subjects mapped
-// to non-admin principals with provisionIdpIdentityMapping. Every request goes
-// to this test's own loopback instance.
+// to non-admin principals with provisionIdpIdentityMapping. The component runs
+// from a scratch directory whose config.yaml is the shipped one with the github
+// provider replaced by a loopback OAuth provider this file serves, so a sign-in
+// goes through the plugin's real authorize, callback and token endpoints. Every
+// Harper request goes to this test's own loopback instance.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
+import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SignJWT, importPKCS8 } from "jose";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { assertOwnInstance, basicAuthOf } from "../helpers/own-harper-instance";
 import { provisionIdpIdentityMapping } from "../../src/lib/mcp-enable";
 import { TOOLS } from "../../resources/mcp-tools";
 
+const REPO_ROOT = join(import.meta.dir, "..", "..");
 const ISSUER = "https://mcp-scope-test.flair.internal";
 const RESOURCE = `${ISSUER}/mcp`;
 const KID = "mcp-scope-test-key";
 const sfx = Date.now().toString(36);
 
-// P calls the tools; Q owns the records P must not reach; R signs in through
-// the plugin's token endpoint. All three are non-admin.
+// P calls the tools; Q owns the records P must not reach; R is the principal
+// the upstream provider's user signs in as. All three are non-admin.
 const P = { id: `mcpscope-p-${sfx}`, sub: `idp-sub-scope-p-${sfx}` };
 const Q = { id: `mcpscope-q-${sfx}`, sub: `idp-sub-scope-q-${sfx}` };
-const R = { id: `mcpscope-r-${sfx}`, sub: `idp-sub-scope-r-${sfx}` };
+const R = { id: `mcpscope-r-${sfx}` };
+// The upstream OAuth provider: a loopback fixture this file serves.
+const UPSTREAM = { name: "upstream", clientId: "scope-upstream-client", clientSecret: "scope-upstream-secret", email: "agent-r@example.test" };
 const SIGN_IN_CLIENT = `mcp-scope-sign-in-client-${sfx}`;
 const SIGN_IN_REDIRECT = "https://client.example/callback";
 // A redirect URI Flair's own authorization server accepts.
@@ -68,6 +79,72 @@ const EXPECTED: Record<string, string> = {
 
 let harper: HarperInstance;
 let privateKeyPem: string;
+let upstream: ReturnType<typeof Bun.serve> | undefined;
+let workDir: string | undefined;
+
+/**
+ * The upstream provider: /authorize approves at once and redirects back with a
+ * code and the state; /token exchanges that code once for an access token;
+ * /userinfo answers for that token.
+ */
+function startUpstream(): ReturnType<typeof Bun.serve> {
+  const codes = new Set<string>();
+  const tokens = new Set<string>();
+  return Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (req.method === "GET" && url.pathname === "/authorize") {
+        const back = new URL(url.searchParams.get("redirect_uri") ?? "");
+        const code = randomBytes(16).toString("base64url");
+        codes.add(code);
+        back.searchParams.set("code", code);
+        back.searchParams.set("state", url.searchParams.get("state") ?? "");
+        return new Response(null, { status: 302, headers: { Location: back.toString() } });
+      }
+      if (req.method === "POST" && url.pathname === "/token") {
+        const form = new URLSearchParams(await req.text());
+        const known = form.get("client_id") === UPSTREAM.clientId && form.get("client_secret") === UPSTREAM.clientSecret;
+        if (!known || !codes.delete(form.get("code") ?? "")) return Response.json({ error: "invalid_grant" }, { status: 400 });
+        const token = randomBytes(16).toString("base64url");
+        tokens.add(token);
+        return Response.json({ access_token: token, token_type: "bearer" });
+      }
+      if (req.method === "GET" && url.pathname === "/userinfo") {
+        if (!tokens.has((req.headers.get("authorization") ?? "").replace(/^Bearer /, ""))) {
+          return Response.json({ error: "invalid_token" }, { status: 401 });
+        }
+        return Response.json({ sub: "upstream-user-r", email: UPSTREAM.email, name: "agent r" });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  });
+}
+
+/** A component directory: the shipped config.yaml with its github provider replaced by the upstream fixture. */
+function makeWorkDir(upstreamOrigin: string): string {
+  const shipped = readFileSync(join(REPO_ROOT, "config.yaml"), "utf-8");
+  const start = shipped.indexOf("\n    github:\n");
+  const end = shipped.indexOf("\n  mcp:\n");
+  expect(start, "the shipped config's github provider").toBeGreaterThan(0);
+  expect(end, "the mcp block after the providers").toBeGreaterThan(start);
+  const provider = [
+    `    ${UPSTREAM.name}:`,
+    `      clientId: ${UPSTREAM.clientId}`,
+    `      clientSecret: ${UPSTREAM.clientSecret}`,
+    `      redirectUri: ${ISSUER}/oauth`,
+    `      authorizationUrl: ${upstreamOrigin}/authorize`,
+    `      tokenUrl: ${upstreamOrigin}/token`,
+    `      userInfoUrl: ${upstreamOrigin}/userinfo`,
+  ].join("\n");
+  const dir = mkdtempSync(join(tmpdir(), "flair-scope-signin-"));
+  symlinkSync(join(REPO_ROOT, "node_modules"), join(dir, "node_modules"));
+  symlinkSync(join(REPO_ROOT, "dist"), join(dir, "dist"));
+  cpSync(join(REPO_ROOT, "schemas"), join(dir, "schemas"), { recursive: true });
+  writeFileSync(join(dir, "config.yaml"), `${shipped.slice(0, start)}\n${provider}${shipped.slice(end)}`, "utf-8");
+  return dir;
+}
 
 async function adminOp(op: Record<string, any>): Promise<Response> {
   assertOwnInstance(harper);
@@ -146,26 +223,65 @@ async function tokenEndpoint(fields: Record<string, string>): Promise<any> {
   return JSON.parse(text);
 }
 
-/**
- * One sign-in by R that requested `scope`: an authorization code stored the way
- * the plugin's callback stores one, then exchanged at the token endpoint.
- */
-async function signIn(scope: string): Promise<any> {
-  const code = randomBytes(32).toString("base64url");
-  const verifier = randomBytes(32).toString("base64url");
-  const seeded = await adminOp({
-    operation: "insert", database: "oauth", table: "mcp_auth_codes",
-    records: [{
-      code, client_id: SIGN_IN_CLIENT, user: R.sub, resource: RESOURCE,
-      code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256",
-      redirect_uri: SIGN_IN_REDIRECT, scope, client_auth_method: "none",
-    }],
-  });
-  expect(seeded.status, await seeded.clone().text()).toBe(200);
-  return tokenEndpoint({ grant_type: "authorization_code", client_id: SIGN_IN_CLIENT, code, code_verifier: verifier, redirect_uri: SIGN_IN_REDIRECT });
-}
+const tokenClaims = (token: string) => JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8"));
+const tokenScope = (token: string) => tokenClaims(token).scope;
 
-const tokenScope = (token: string) => JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8")).scope;
+/**
+ * One sign-in that requested `scope` (no scope parameter when undefined): the
+ * plugin's /oauth/mcp/authorize, the upstream provider's approval, the plugin's
+ * /oauth/<provider>/callback, then the code exchange at /oauth/mcp/token. The
+ * token's subject is then mapped to R.
+ */
+async function signIn(scope: string | undefined): Promise<any> {
+  assertOwnInstance(harper);
+  const verifier = randomBytes(32).toString("base64url");
+  const clientState = randomBytes(8).toString("hex");
+  const authorize = new URL(`${harper.httpURL}/oauth/mcp/authorize`);
+  const query: Record<string, string> = {
+    client_id: SIGN_IN_CLIENT, redirect_uri: SIGN_IN_REDIRECT, response_type: "code", resource: RESOURCE, state: clientState,
+    code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256",
+  };
+  if (scope !== undefined) query.scope = scope;
+  for (const [k, v] of Object.entries(query)) authorize.searchParams.set(k, v);
+
+  const started = await fetch(authorize, { redirect: "manual" });
+  const startedText = await started.text();
+  expect(started.status, `authorize → ${started.status}: ${startedText.slice(0, 300)}`).toBe(302);
+  const toUpstream = new URL(started.headers.get("location") ?? "");
+  expect(`${toUpstream.origin}${toUpstream.pathname}`).toBe(`http://127.0.0.1:${upstream!.port}/authorize`);
+  const cookies = started.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
+
+  const approved = await fetch(toUpstream, { redirect: "manual" });
+  await approved.arrayBuffer();
+  expect(approved.status).toBe(302);
+  const back = new URL(approved.headers.get("location") ?? "");
+  expect(back.pathname).toBe(`/oauth/${UPSTREAM.name}/callback`);
+
+  // The callback URL names the public origin; this instance serves it on loopback.
+  const callback = await fetch(`${harper.httpURL}${back.pathname}${back.search}`, { redirect: "manual", headers: { Cookie: cookies } });
+  const callbackText = await callback.text();
+  expect(callback.status, `callback → ${callback.status}: ${callbackText.slice(0, 300)}`).toBe(302);
+  const toClient = new URL(callback.headers.get("location") ?? "");
+  const detail = `callback redirect: ${toClient.search}`;
+  expect(`${toClient.origin}${toClient.pathname}`, detail).toBe(SIGN_IN_REDIRECT);
+  expect(toClient.searchParams.get("error"), detail).toBeNull();
+  expect(toClient.searchParams.get("state"), detail).toBe(clientState);
+  const code = toClient.searchParams.get("code");
+  expect(typeof code, detail).toBe("string");
+
+  const tokens = await tokenEndpoint({ grant_type: "authorization_code", client_id: SIGN_IN_CLIENT, code: code!, code_verifier: verifier, redirect_uri: SIGN_IN_REDIRECT });
+  const opsPort = Number(new URL(harper.opsURL).port);
+  await provisionIdpIdentityMapping({
+    opsPortOrUrl: opsPort,
+    adminUser: harper.admin.username,
+    adminPass: harper.admin.password,
+    principal: R.id,
+    principalKind: "agent",
+    idpProvider: "scope-test-idp",
+    idpSubject: String(tokenClaims(tokens.access_token).sub),
+  });
+  return tokens;
+}
 
 /** A refusal for want of `scope`: HTTP 403, the JSON-RPC error naming it, and the Bearer challenge. */
 function expectInsufficientScope(r: McpReply, scope: string, what: string): void {
@@ -351,13 +467,14 @@ describe("each /mcp tool requires the OAuth scope its operation needs (flair#307
     });
     privateKeyPem = privateKey;
 
+    upstream = startUpstream();
+    workDir = makeWorkDir(`http://127.0.0.1:${upstream.port}`);
     harper = await startHarper({
+      cwd: workDir,
+      harperBinDir: REPO_ROOT,
       serverEnv: {
         FLAIR_MCP_OAUTH: "true",
         FLAIR_MCP_ISSUER: ISSUER,
-        OAUTH_GITHUB_CLIENT_ID: "mcp-scope-test-client",
-        OAUTH_GITHUB_CLIENT_SECRET: "mcp-scope-test-secret",
-        OAUTH_GITHUB_REDIRECT_URI: `${ISSUER}/oauth`,
         // An empty value reads as unset: JIT provisioning stays off.
         FLAIR_MCP_JIT_PROVISION: "",
         FLAIR_MCP_RATE_LIMIT: "1000",
@@ -376,7 +493,7 @@ describe("each /mcp tool requires the OAuth scope its operation needs (flair#307
     const now = new Date().toISOString();
     const agents = await adminOp({
       operation: "insert", database: "flair", table: "Agent",
-      records: [P, Q, R].map((x) => ({ id: x.id, name: x.id, kind: "agent", type: "agent", role: "agent", status: "active", publicKey: `mcp-oauth:${x.sub}`, createdAt: now, updatedAt: now })),
+      records: [[P.id, P.sub], [Q.id, Q.sub], [R.id, UPSTREAM.name]].map(([id, key]) => ({ id, name: id, kind: "agent", type: "agent", role: "agent", status: "active", publicKey: `mcp-oauth:${key}`, createdAt: now, updatedAt: now })),
     });
     expect(agents.status, await agents.clone().text()).toBe(200);
 
@@ -384,7 +501,7 @@ describe("each /mcp tool requires the OAuth scope its operation needs (flair#307
     // 127.0.0.1, where this ephemeral instance's own ops API answers.
     const opsPort = Number(new URL(harper.opsURL).port);
     expect(harper.opsURL, "the ephemeral ops API").toBe(`http://127.0.0.1:${opsPort}`);
-    for (const x of [P, Q, R]) {
+    for (const x of [P, Q]) {
       await provisionIdpIdentityMapping({
         opsPortOrUrl: opsPort,
         adminUser: harper.admin.username,
@@ -415,6 +532,8 @@ describe("each /mcp tool requires the OAuth scope its operation needs (flair#307
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
+    upstream?.stop(true);
+    if (workDir) rmSync(workDir, { recursive: true, force: true });
   }, 30_000);
 
   for (const [tool, scope] of Object.entries(EXPECTED)) {
@@ -496,8 +615,17 @@ describe("each /mcp tool requires the OAuth scope its operation needs (flair#307
     expect(get.isError, JSON.stringify(get).slice(0, 300)).toBe(true);
   }, 60_000);
 
+  test("a sign-in through the plugin's authorize and callback carries the scope it requested", async () => {
+    const reader = await signIn("memory:read");
+    expect(tokenScope(reader.access_token)).toBe("memory:read");
+    expectServed(await call(reader.access_token, "memory_search", { query: "mcpscope" }), "memory_search after a memory:read sign-in");
+    const content = marker("sign-in", "store");
+    expectInsufficientScope(await call(reader.access_token, "memory_store", { content }), "memory:write", "memory_store after a memory:read sign-in");
+    expect(await rows("Memory", "content", content)).toEqual([]);
+  }, 60_000);
+
   test("a refreshed token keeps its sign-in's scope: an unscoped sign-in is refused, refreshed or not, until a new sign-in requests the scope", async () => {
-    const unscoped = await signIn("");
+    const unscoped = await signIn(undefined);
     expect(tokenScope(unscoped.access_token)).toBeUndefined();
     expect(typeof unscoped.refresh_token).toBe("string");
     expectInsufficientScope(await call(unscoped.access_token, "memory_search", { query: "mcpscope" }), "memory:read", "unscoped sign-in");
