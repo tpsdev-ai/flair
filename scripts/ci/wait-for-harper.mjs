@@ -3,14 +3,16 @@
 // The CI E2E lane starts Harper inside a container and polls /Health. This
 // waiter polls against one elapsed-time budget, taken once in milliseconds.
 // Each poll's probe and first inspect get the smaller of the per-request cap
-// and the time left; the final inspect gets the per-request cap, and the
-// waiter checks the budget after it, so it never reports ready past the
-// budget. The failure diagnostic is bounded separately: ten seconds for the
-// container logs plus one per-request cap.
+// and the time left; the final inspect gets the per-request cap. The waiter
+// checks the budget after the first inspect, before the probe, and after the
+// final inspect, before it reports ready, and kills each docker child with
+// SIGKILL at its bound. The failure diagnostic is bounded separately: ten
+// seconds for the container logs plus one per-request cap.
 //
 // Each poll inspects the container before it believes /Health, and inspects
-// once more before it reports ready. Polling stops when an exit is detected;
-// the diagnostic runs before the process exits.
+// once more before it reports ready. Polling stops when an inspect reports the
+// container not running; the waiter prints the exit code and attempts
+// `docker logs`, reporting a logs error if that fails.
 //
 // Usage:
 //   node wait-for-harper.mjs --container <name> --url <health-url>
@@ -137,7 +139,13 @@ async function inspectContainer(container, timeoutMs, env) {
   const { stdout } = await execFileAsync(
     "docker",
     ["inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", container],
-    { env, timeout: Math.max(1, Math.floor(timeoutMs)), maxBuffer: 1024 * 1024, encoding: "utf8" },
+    {
+      env,
+      timeout: Math.max(1, Math.floor(timeoutMs)),
+      killSignal: "SIGKILL",
+      maxBuffer: 1024 * 1024,
+      encoding: "utf8",
+    },
   );
   const [running, exitCode] = String(stdout).trim().split(/\s+/);
   return { running: running === "true", exitCode: exitCode || "unknown" };
@@ -187,6 +195,7 @@ async function diagnose({ container, url, perRequestMs, childEnv, secrets }) {
     const { stdout, stderr } = await execFileAsync("docker", ["logs", container], {
       env: childEnv,
       timeout: 10_000,
+      killSignal: "SIGKILL",
       maxBuffer: 10 * 1024 * 1024,
       encoding: "utf8",
     });
@@ -252,6 +261,7 @@ export async function main(options) {
       console.error(`wait-for-harper: cannot inspect container '${container}': ${redact(errorText(error), secrets)}`);
       return 1;
     }
+    if (remaining() <= 0) break;
     if (!state.running) return reportExited(state.exitCode);
 
     if (await probe(url, authorization, Math.min(perRequestMs, remaining()))) {

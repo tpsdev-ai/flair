@@ -5,9 +5,10 @@
  * /Health. `scripts/ci/wait-for-harper.mjs` polls against one elapsed-time
  * budget: each poll's probe and first inspect are bounded by the time left,
  * the final inspect is bounded by the per-request cap, and the waiter checks
- * the budget before it reports ready. Every poll inspects the container
- * before it believes /Health. Polling stops when an exit is detected, and the
- * diagnostic runs before the process exits.
+ * the budget after the first inspect before it probes and after the final
+ * inspect before it reports ready. Every poll inspects the container before it
+ * believes /Health. Polling stops when an inspect reports the container not
+ * running; the diagnostic runs before the process exits.
  *
  * These tests drive the waiter through a real local HTTP server and a stub
  * `docker` first on PATH. No Docker, no Harper, no external network.
@@ -15,9 +16,8 @@
  * The credential is sent as a request header, removed from the environment of
  * every child process, and redacted from printed output in its raw, Base64
  * token and full header forms: the tests assert the server sees it, while the
- * stub's environment and the waiter's output do not. Polling stops at the
- * budget; the failure diagnostic then takes at most ten seconds for the
- * container logs plus one per-request cap.
+ * stub's environment and the waiter's output do not. The failure diagnostic
+ * is bounded by ten seconds for the container logs plus one per-request cap.
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
@@ -41,8 +41,11 @@ const SENTINEL = "admin:test-pass";
  * sandbox, `logs <name>` prints one known line. Each call records its argv so
  * a test can assert the credential reached no child process. Every call also
  * writes a warning to stderr, so a wait that reads stderr as container state
- * fails (a). With `inspect-slow-final`, the second inspect sleeps past the
- * budget before it answers running (o).
+ * fails (a). `inspect-open-stdout` answers and then holds stdout open past the
+ * deadline (p); `inspect-ignore-term` ignores SIGTERM and sleeps past its cap
+ * (q); `inspect-slow-final` sleeps 1.5 s before the second inspect answers (o);
+ * `inspect-final-stall` sleeps past the final inspect's cap (r); `logs-error`
+ * makes `docker logs` fail with that file's text (s).
  */
 const DOCKER_STUB = `#!/usr/bin/env bash
 set -euo pipefail
@@ -62,6 +65,15 @@ case "$cmd" in
       *State.Running*State.ExitCode*) : ;;
       *) echo "docker stub: unexpected format '$fmt'" >&2; exit 64 ;;
     esac
+    if [ -f "$WAIT_STUB_DIR/inspect-ignore-term" ]; then
+      trap '' TERM
+      exec sleep 6
+    fi
+    if [ -f "$WAIT_STUB_DIR/inspect-open-stdout" ]; then
+      printf '%s %s\\n' "$(cat "$WAIT_STUB_DIR/running")" "$(cat "$WAIT_STUB_DIR/exit-code")"
+      sleep 2 &
+      exit 0
+    fi
     if [ -f "$WAIT_STUB_DIR/inspect-sleep" ]; then
       exec node -e 'setTimeout(() => {}, 6000)'
     fi
@@ -73,6 +85,9 @@ case "$cmd" in
       if [ -f "$WAIT_STUB_DIR/inspect-slow-final" ] && [ "$index" -eq 1 ]; then
         sleep 1.5
       fi
+      if [ -f "$WAIT_STUB_DIR/inspect-final-stall" ] && [ "$index" -eq 1 ]; then
+        exec node -e 'setTimeout(() => {}, 6000)'
+      fi
       printf '%s\\n' "\${states[$index]}"
       printf '%s\\n' "$(( count + 1 ))" > "$WAIT_STUB_DIR/inspect-count"
       exit 0
@@ -80,6 +95,10 @@ case "$cmd" in
     printf '%s %s\\n' "$(cat "$WAIT_STUB_DIR/running")" "$(cat "$WAIT_STUB_DIR/exit-code")"
     ;;
   logs)
+    if [ -f "$WAIT_STUB_DIR/logs-error" ]; then
+      cat "$WAIT_STUB_DIR/logs-error" >&2
+      exit 71
+    fi
     echo "stub container log for \${1:-}"
     if [ -f "$WAIT_STUB_DIR/container-log" ]; then
       cat "$WAIT_STUB_DIR/container-log"
@@ -106,6 +125,10 @@ function sandbox(
     inspectSequence?: string[];
     inspectSlowFinal?: boolean;
     inspectSleep?: boolean;
+    inspectOpenStdout?: boolean;
+    inspectIgnoreTerm?: boolean;
+    inspectFinalStall?: boolean;
+    logsFailError?: string;
     containerLog?: string;
   } = {},
 ): Sandbox {
@@ -120,6 +143,10 @@ function sandbox(
   if (options.inspectSequence) writeFileSync(join(root, "inspect-sequence"), `${options.inspectSequence.join("\n")}\n`);
   if (options.inspectSlowFinal) writeFileSync(join(root, "inspect-slow-final"), "");
   if (options.inspectSleep) writeFileSync(join(root, "inspect-sleep"), "");
+  if (options.inspectOpenStdout) writeFileSync(join(root, "inspect-open-stdout"), "");
+  if (options.inspectIgnoreTerm) writeFileSync(join(root, "inspect-ignore-term"), "");
+  if (options.inspectFinalStall) writeFileSync(join(root, "inspect-final-stall"), "");
+  if (options.logsFailError) writeFileSync(join(root, "logs-error"), options.logsFailError);
   if (options.containerLog) writeFileSync(join(root, "container-log"), options.containerLog);
   return { root, bin };
 }
@@ -567,6 +594,128 @@ describe("wait-for-harper.mjs", () => {
       expect(result.output).toContain("Harper did not answer /Health within 1s");
       expect(result.output).not.toContain("Harper ready");
       expect(result.seconds).toBeGreaterThanOrEqual(1.4);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(p) a first inspect that answers after the deadline times out without probing",
+    async () => {
+      const server = await health((_index, res) => {
+        setTimeout(() => {
+          res.statusCode = 200;
+          res.end("ok");
+        }, 100);
+      });
+      const box = sandbox({ inspectOpenStdout: true });
+      const result = await run(
+        box,
+        [
+          "--container",
+          "harper-flair",
+          "--url",
+          server.url,
+          "--poll-interval-ms",
+          "100",
+          "--per-request-ms",
+          "5000",
+          "--progress-interval-ms",
+          "1",
+          "--budget-seconds",
+          "1",
+          "--credentials-env",
+          "HARPER_START_CREDENTIALS",
+        ],
+        { HARPER_START_CREDENTIALS: SENTINEL },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.output).toContain("Harper did not answer /Health within 1s");
+      // Without the budget check after the first inspect, a probe runs, fails
+      // and prints the progress line before the timeout.
+      expect(result.output).not.toContain("waiting for Harper /Health");
+      // Only the unauthenticated diagnostic request answers; the probe sends
+      // the credential and never reaches the server.
+      expect(server.requests()).toBe(1);
+      expect(server.authorizations).toHaveLength(0);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(q) a docker inspect that ignores SIGTERM is killed at its bound",
+    async () => {
+      const server = await health(STATUS(200));
+      const box = sandbox({ inspectIgnoreTerm: true });
+      const result = await run(box, [
+        "--container",
+        "harper-flair",
+        ...WAIT_ARGS(server.url),
+        "--budget-seconds",
+        "10",
+        "--per-request-ms",
+        "500",
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.output).toContain("cannot inspect container 'harper-flair'");
+      expect(result.seconds).toBeLessThan(3);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(r) a final inspect that outlasts its per-request cap is cut off",
+    async () => {
+      const server = await health(STATUS(200));
+      const box = sandbox({ inspectSequence: ["true 0", "true 0"], inspectFinalStall: true });
+      const result = await run(box, [
+        "--container",
+        "harper-flair",
+        ...WAIT_ARGS(server.url),
+        "--budget-seconds",
+        "10",
+        "--per-request-ms",
+        "500",
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.output).toContain("cannot inspect container 'harper-flair'");
+      expect(result.output).not.toContain("Harper ready");
+      expect(result.seconds).toBeLessThan(2);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(s) the docker logs error branch redacts the credential",
+    async () => {
+      const server = await health(STATUS(200));
+      const token = Buffer.from(SENTINEL).toString("base64");
+      const box = sandbox({
+        running: "false",
+        exitCode: "5",
+        logsFailError: `docker logs error: raw ${SENTINEL} token ${token}\n`,
+      });
+      const result = await run(
+        box,
+        [
+          "--container",
+          "harper-flair",
+          ...WAIT_ARGS(server.url),
+          "--credentials-env",
+          "HARPER_START_CREDENTIALS",
+          "--budget-seconds",
+          "20",
+        ],
+        { HARPER_START_CREDENTIALS: SENTINEL },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.output).toContain("docker logs failed:");
+      expect(result.output).toContain("[redacted]");
+      expect(result.output).not.toContain("test-pass");
+      expect(result.output).not.toContain(token);
     },
     CASE_TIMEOUT_MS,
   );
