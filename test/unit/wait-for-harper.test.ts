@@ -34,11 +34,14 @@ const SENTINEL = "admin:test-pass";
 /**
  * Stub `docker`: `inspect --format <format> <name>` answers from files in the
  * sandbox, `logs <name>` prints one known line. Each call records its argv so
- * a test can assert the credential reached no child process.
+ * a test can assert the credential reached no child process. Every call also
+ * writes a warning to stderr, so a wait that reads stderr as container state
+ * fails (a).
  */
 const DOCKER_STUB = `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "$*" >> "$WAIT_STUB_DIR/docker-argv.log"
+echo "docker stub: warning on stderr" >&2
 cmd=\${1:?}; shift
 case "$cmd" in
   inspect)
