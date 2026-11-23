@@ -10,4 +10,4 @@
   after confirmed contact, the sender attempts to write a candidate clamped to
   scan time and capped below retryable or indeterminate rows.
   A row dated more than 5 minutes ahead is not sent. With the flag off the
-  sender sends no Presence records.
+  sender sends no Presence records. ([#2638](https://github.com/tpsdev-ai/flair/pull/2638))

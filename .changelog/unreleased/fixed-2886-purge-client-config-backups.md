@@ -14,4 +14,4 @@
   `Not checked` and left in place; a failed hold or restore is reported under `Left (failed)`
   instead. Purging a home other than the resolved caller home resolves pi under that home; a
   `PI_CODING_AGENT_DIR` override is then ignored and reported. A run with failed or unverified
-  leftovers exits non-zero. Plain `flair uninstall` keeps every backup.
+  leftovers exits non-zero. Plain `flair uninstall` keeps every backup. ([#2896](https://github.com/tpsdev-ai/flair/pull/2896))

@@ -5,4 +5,4 @@
   `soul_write_requires_operator`. The advertised list now omits `soul_set` for
   those callers. Listing resolves the caller the way a call does, except that it
   never JIT-provisions. An agent's soul is changed by the operator, on the
-  agent's behalf (flair#2689).
+  agent's behalf (flair#2689). ([#2745](https://github.com/tpsdev-ai/flair/pull/2745))

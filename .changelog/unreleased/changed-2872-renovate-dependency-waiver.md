@@ -2,4 +2,4 @@
 
   During release PR preparation, `feat` and `fix` commits since the tag selected by
   `git describe` enter Dependencies when their recorded author name matches
-  `renovate[bot]` and every changed Git basename matches that list (#2872).
+  `renovate[bot]` and every changed Git basename matches that list (#2872). ([#2905](https://github.com/tpsdev-ai/flair/pull/2905))

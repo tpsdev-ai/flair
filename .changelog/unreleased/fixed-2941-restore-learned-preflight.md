@@ -17,4 +17,4 @@
   listing that cannot be read refuses the run before any delete, when
   a non-empty archived Soul value requires that read; refusals already
   collected are printed before that error. A refused Soul write now
-  reports the server's error name when the body carries one (#2941).
+  reports the server's error name when the body carries one (#2941). ([#2942](https://github.com/tpsdev-ai/flair/pull/2942))
