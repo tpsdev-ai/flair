@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -38,7 +38,8 @@ import {
   loadYamlDoc,
   parseEnvAssignments,
 } from "../../src/lib/doctor-federation-driver.ts";
-import { readFederationShimExecTargets } from "../../src/federation/scheduler.ts";
+import { enableScheduler, inspectFederationShimNode } from "../../src/federation/scheduler.ts";
+import { tempDir } from "../helpers/temp-dir.ts";
 import * as render from "../../src/render.ts";
 
 function driverFacts(overrides: Partial<ScheduledDriverFacts> = {}): ScheduledDriverFacts {
@@ -345,38 +346,114 @@ describe("cli wiring (supplementary)", () => {
   });
 });
 
-// ─── flair#3056: the shim's node binary is missing ──────────────────────────
+// ─── flair#3056: the node path on the shim's exec line does not exist ───────
 
-describe("flair#3056 — a shim whose node path was removed", () => {
-  it("doctor names the missing node binary and points at flair init, not only the exit code", () => {
-    const dir = mkdtempSync(join(tmpdir(), "flair-3056-shim-"));
-    try {
-      const shim = join(dir, "flair-federation-sync");
-      const nodeBin = join(dir, "Cellar", "node", "26.10.0_1", "bin", "node");
-      writeFileSync(shim, [
-        "#!/bin/sh",
-        "# Deployed by `flair federation sync enable`",
-        `exec "${nodeBin}" "${join(dir, "flair")}" federation sync "$@"`,
-        "",
-      ].join("\n"));
-      const missing = readFederationShimExecTargets({ shimPathOverride: shim });
-      expect(missing).not.toBeNull();
-      expect(missing!.nodeExists).toBe(false);
-      const f = describeFederationDriverFinding({
-        peersConfigured: true,
-        driver: driverFacts({ lastExit: recorded(1), missingNodeBin: missing!.nodeBin }),
-      });
+describe("flair#3056 — describeScheduledDriverFinding with shimMissingNode", () => {
+  const missing = { unitPath: "/h/unit.plist", shimPath: "/h/.flair/bin/flair-federation-sync", nodeBin: "/h/Cellar/node/26.10.0_1/bin/node" };
+  const lastExits: Array<LastExitStatus | null> = [
+    recorded(1),
+    recorded(0),
+    { state: "never-ran", exitCode: null, detail: "never" },
+    { state: "running", exitCode: null, detail: "running" },
+    { state: "unavailable", exitCode: null, detail: "unavailable" },
+    null,
+  ];
+  for (const lastExit of lastExits) {
+    it(`names the missing node path and points at flair init (last exit: ${lastExit ? `${lastExit.state} ${lastExit.exitCode ?? ""}` : "not read"})`, () => {
+      const f = describeFederationDriverFinding({ peersConfigured: true, driver: driverFacts({ lastExit, shimMissingNode: missing }) });
       expect(f.state).toBe("degraded");
       expect(f.isIssue).toBe(true);
-      expect(f.message).toContain(nodeBin);
-      expect(f.message).not.toContain("last run failed");
-      expect(f.detail.join("\n")).toContain("flair init");
-      // With the binary present the shim is read as pointing at it.
-      mkdirSync(dirname(nodeBin), { recursive: true });
-      writeFileSync(nodeBin, "");
-      expect(readFederationShimExecTargets({ shimPathOverride: shim })!.nodeExists).toBe(true);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+      expect(f.message).toContain(missing.nodeBin);
+      expect(f.detail[0]).toBe(`${missing.unitPath} runs ${missing.shimPath}, whose exec line names ${missing.nodeBin}; that path does not exist.`);
+      expect(f.detail.join("\n")).toContain("Fix: flair init");
+    });
+  }
+
+  it("is not reported for a driver that is not loaded (that finding names enable)", () => {
+    const f = describeFederationDriverFinding({ peersConfigured: true, driver: driverFacts({ active: false, lastExit: null, shimMissingNode: missing }) });
+    expect(f.message).toContain("NOT LOADED");
+    expect(f.message).not.toContain(missing.nodeBin);
+  });
+});
+
+describe("flair#3056 — inspectFederationShimNode reads the unit and the shim from disk", () => {
+  const templateRoot = join(import.meta.dir, "..", "..", "templates");
+
+  function setup(platform: "darwin" | "linux") {
+    const root = tempDir("flair-3056-inspect-");
+    const home = join(root, "home");
+    mkdirSync(join(home, ".flair", "bin"), { recursive: true });
+    const tree = join(root, "tree");
+    mkdirSync(join(tree, "dist"), { recursive: true });
+    writeFileSync(join(tree, "dist", "cli.js"), "// flair\n");
+    writeFileSync(join(home, ".flair", "admin-pass"), "x\n", { mode: 0o600 });
+    const paths = {
+      platformOverride: platform,
+      shimPathOverride: join(home, ".flair", "bin", "flair-federation-sync"),
+      launchdPlistOverride: join(home, "Library", "LaunchAgents", "dev.flair.federation.sync.plist"),
+      systemdServiceOverride: join(home, ".config", "systemd", "user", "flair-federation-sync.service"),
+      templateRootOverride: templateRoot,
+    };
+    const nodeBin = join(root, "Cellar", "node", "26.10.0_1", "bin", "node");
+    enableScheduler({
+      ...paths,
+      intervalSeconds: 300,
+      adminPassFile: join(home, ".flair", "admin-pass"),
+      flairBin: join(tree, "dist", "cli.js"),
+      nodeBin,
+      systemdTimerOverride: join(home, ".config", "systemd", "user", "flair-federation-sync.timer"),
+      homeOverride: home,
+      skipLoad: true,
+    });
+    const unitPath = platform === "darwin" ? paths.launchdPlistOverride : paths.systemdServiceOverride;
+    return { root, paths, nodeBin, unitPath, shim: paths.shimPathOverride };
+  }
+
+  for (const platform of ["darwin", "linux"] as const) {
+    it(`${platform}: names the node path when the unit runs the generated shim and the path does not exist`, () => {
+      const s = setup(platform);
+      expect(inspectFederationShimNode(s.paths)).toEqual({ unitPath: s.unitPath, shimPath: s.shim, nodeBin: s.nodeBin });
+    });
+
+    it(`${platform}: null once the node path exists`, () => {
+      const s = setup(platform);
+      mkdirSync(dirname(s.nodeBin), { recursive: true });
+      writeFileSync(s.nodeBin, "#!/bin/sh\n", { mode: 0o755 });
+      expect(inspectFederationShimNode(s.paths)).toBeNull();
+    });
+
+    it(`${platform}: null when the unit runs another program`, () => {
+      const s = setup(platform);
+      const unit = readFileSync(s.unitPath, "utf-8");
+      const other = join(s.root, "other-sync.sh");
+      const changed = platform === "darwin"
+        ? unit.replace(`<string>${s.shim}</string>`, `<string>${other}</string>`)
+        : unit.replace(`ExecStart=${s.shim}`, `ExecStart=${other}`);
+      expect(changed).not.toBe(unit);
+      writeFileSync(s.unitPath, changed);
+      expect(inspectFederationShimNode(s.paths)).toBeNull();
+    });
+  }
+
+  it("null when the shim runs a command the generated shim does not", () => {
+    const s = setup("darwin");
+    const shim = readFileSync(s.shim, "utf-8");
+    writeFileSync(s.shim, shim.replace(/^exec /m, "echo hand-edit\nexec "));
+    expect(inspectFederationShimNode(s.paths)).toBeNull();
+  });
+
+  it("null when the shim path is a symlink (it is not followed)", () => {
+    const s = setup("darwin");
+    const real = join(s.root, "elsewhere-shim");
+    writeFileSync(real, readFileSync(s.shim, "utf-8"));
+    rmSync(s.shim);
+    symlinkSync(real, s.shim);
+    expect(inspectFederationShimNode(s.paths)).toBeNull();
+  });
+
+  it("null when the shim is larger than the read bound", () => {
+    const s = setup("darwin");
+    writeFileSync(s.shim, readFileSync(s.shim, "utf-8") + `# ${"x".repeat(64 * 1024)}\n`);
+    expect(inspectFederationShimNode(s.paths)).toBeNull();
   });
 });

@@ -159,10 +159,14 @@ exactly a shape flair supports:
 | Both, when moving to a different installed tree | the old tree is an npm-global install; its flair version and this CLI's are strict semver and this CLI's is not older (prereleases count: `0.57.0-beta.1` is older than `0.57.0`) | a plain tree or checkout (separately managed), an unreadable, non-semver or newer version (a downgrade cannot be ruled out) |
 
 A unit that serves this CLI's tree with a different, existing node is treated
-as a deliberate pin: `flair init` leaves it, and init and `flair doctor` report it
-with the hand edit that would move it. A plist that already serves this CLI's
-tree has a missing runtime path replaced without the version check in the table,
-which applies only to a move between trees. The write is atomic and
+as a deliberate pin: `flair init` leaves it (apart from the Homebrew case below),
+and init and `flair doctor` report it with the hand edit that would move it. A
+plist that already serves this CLI's tree has a missing runtime path replaced
+without the version check in the table, which applies only to a move between
+trees. In a plist or federation-sync shim that serves this CLI's tree, an
+existing node path in Homebrew's Cellar (`<prefix>/Cellar/<formula>/<version>/bin/node`)
+is replaced by `<prefix>/opt/<formula>/bin/node` when that alias resolves to the
+same binary. The write is atomic and
 lands only over the bytes it was planned from — the file is read as a regular
 file (a symlink is refused, not followed) whose bytes are valid UTF-8 (anything
 else is refused before planning), and its bytes are re-checked immediately

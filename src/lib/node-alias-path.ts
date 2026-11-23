@@ -64,6 +64,40 @@ export interface AliasHooks {
 const HOMEBREW_CELLAR_RE = /^(.*)\/Cellar\/([^/]+)\/[^/]+\/bin\/node$/;
 const HOMEBREW_FORMULA_RE = /^node(?:@\d+)?$/;
 
+/**
+ * `<prefix>/opt/<formula>/bin/node` for a `<prefix>/Cellar/<formula>/<version>/bin/node`
+ * path, else null. A Cellar path carries the version in a segment Homebrew may
+ * suffix with a revision (`26.10.0_1`), so this candidate is derived from the
+ * path alone.
+ */
+function homebrewAliasCandidate(nodeBin: string): string | null {
+  const cellar = HOMEBREW_CELLAR_RE.exec(nodeBin);
+  const prefix = cellar?.[1];
+  const formula = cellar?.[2];
+  if (!prefix || !formula || !prefix.startsWith("/") || !HOMEBREW_FORMULA_RE.test(formula)) return null;
+  return join(prefix, "opt", formula, "bin", "node");
+}
+
+/**
+ * The Homebrew `opt/<formula>/bin/node` alias to record IN PLACE OF an
+ * already-recorded `Cellar/<formula>/<version>/bin/node` path (flair#3056):
+ * returned only when that alias exists and its realpath equals the recorded
+ * path's realpath. null otherwise, including when either realpath cannot be
+ * read. mise and Volta candidates are not considered here.
+ */
+export function homebrewOptAlias(nodeBin: string, hooks: Pick<AliasHooks, "exists" | "realpath"> = {}): string | null {
+  const alias = homebrewAliasCandidate(nodeBin);
+  if (alias === null) return null;
+  const exists = hooks.exists ?? existsSync;
+  const realpath = hooks.realpath ?? ((p: string) => realpathSync(p));
+  try {
+    if (!exists(alias)) return null;
+    return realpath(alias) === realpath(nodeBin) ? alias : null;
+  } catch {
+    return null;
+  }
+}
+
 /** `24.19.0` / `v24.19.0` → `24.19.0`; null when no version is present. */
 export function parseNodeVersion(nodePath: string): string | null {
   const m = /(?:^|[/\\])v?(\d+\.\d+\.\d+)(?:[/\\]|$)/.exec(nodePath);
@@ -80,14 +114,8 @@ export function aliasCandidates(nodeBin: string, hooks: AliasHooks = {}): AliasC
   const env = hooks.env ?? process.env;
   const out: AliasCandidate[] = [];
 
-  // A Cellar path carries the version in a segment Homebrew may suffix with a
-  // revision (`26.10.0_1`), so this candidate is derived from the path alone.
-  const cellar = HOMEBREW_CELLAR_RE.exec(nodeBin);
-  const prefix = cellar?.[1];
-  const formula = cellar?.[2];
-  if (prefix && formula && prefix.startsWith("/") && HOMEBREW_FORMULA_RE.test(formula)) {
-    out.push({ manager: "homebrew", path: join(prefix, "opt", formula, "bin", "node") });
-  }
+  const brew = homebrewAliasCandidate(nodeBin);
+  if (brew) out.push({ manager: "homebrew", path: brew });
 
   const version = parseNodeVersion(nodeBin);
   if (!version || !home) return out;

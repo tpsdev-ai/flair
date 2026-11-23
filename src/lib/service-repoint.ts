@@ -46,9 +46,13 @@
  *     semver, or is newer by semver ordering (0.57.0-beta.1 is older than 0.57.0)
  *     → refused: a downgrade cannot be ruled out;
  *   - it serves THIS CLI's tree with an existing, different node → a deliberate
- *     runtime pin, left as it is (`pinned-node`);
+ *     runtime pin, left as it is (`pinned-node`), apart from the launchd
+ *     Homebrew case below;
  *   - launchd only: it serves this CLI's tree and one of its runtime paths no
- *     longer exists → only the missing path is replaced (systemd: refused).
+ *     longer exists → the missing path is replaced (systemd: refused);
+ *   - launchd only: it serves this CLI's tree with an existing node path in
+ *     Homebrew's Cellar whose `opt/<formula>` alias resolves to the same
+ *     binary → that node path is replaced by the alias (flair#3056).
  *
  * Every refusal names the unit file, what did not match, and the remedy — the
  * paths to set by hand, an update, or a reinstall.
@@ -107,6 +111,8 @@ export interface RepointDeps {
   canonical: (p: string) => string;
   /** The flair version declared by the package at `dir`, or null. */
   treeVersion: (dir: string) => string | null;
+  /** homebrewOptAlias (src/lib/node-alias-path.ts) for a recorded node path, or null. */
+  homebrewOptAlias: (nodeBin: string) => string | null;
 }
 
 export interface RepointChange {
@@ -454,10 +460,13 @@ export function planPlistRuntimeRepoint(
   const next = { ...current };
   const sameTree = deps.samePath(oldTree, t.workingDirectory);
   if (sameTree) {
-    // Same tree: replace only what no longer exists; an existing different node is a deliberate pin.
+    // Same tree: replace what no longer exists, and an existing Homebrew Cellar
+    // node whose opt alias resolves to the same binary (flair#3056); any other
+    // existing different node is a deliberate pin.
     if (!deps.exists(current.launcher)) next.launcher = t.launcher;
     if (!deps.exists(current.harperBin)) next.harperBin = t.harperBin;
     if (!deps.exists(current.nodeBin)) next.nodeBin = t.nodeBin;
+    else next.nodeBin = deps.homebrewOptAlias(current.nodeBin) ?? current.nodeBin;
   } else {
     const refusal = treeGate(oldTree, t, deps, unit, true);
     if (refusal) return { kind: "refuse", detail: refusal };

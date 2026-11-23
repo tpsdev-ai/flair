@@ -57,13 +57,16 @@
  * `flair federation sync --admin-pass-file`, which reads it through
  * readAdminPassFileSecure() and refuses a file that is not owner-only.
  */
-import { existsSync, chmodSync, rmSync, readFileSync, mkdirSync, realpathSync } from "node:fs";
+import {
+  existsSync, chmodSync, rmSync, readFileSync, mkdirSync, realpathSync, openSync, fstatSync, readSync, closeSync, statSync,
+  constants as fsConstants,
+} from "node:fs";
 import { resolve, dirname, isAbsolute } from "node:path";
 
 import { fileURLToPath } from "node:url";
 import { escapeXml, unescapeXml } from "../lib/xml-escape.js";
 import { snapshotRegularFile, writeFilesAtomically, type AtomicWriteHooks, type FileSnapshot } from "../lib/atomic-write.js";
-import { preferVersionManagerAlias, type AliasHooks } from "../lib/node-alias-path.js";
+import { homebrewOptAlias, preferVersionManagerAlias, type AliasHooks } from "../lib/node-alias-path.js";
 import { compareVersions, isNpmGlobalFlairTree } from "../lib/tree-divergence.js";
 import { findFlairPackageDir } from "../lib/upgrade-exec-path.js";
 import {
@@ -1014,36 +1017,86 @@ export function federationShimShapeProblem(shimText: string, templateText: strin
   return null;
 }
 
-export interface FederationShimExecTargets {
-  nodeBin: string;
-  flairBin: string;
-  nodeExists: boolean;
-}
+/** The largest unit or shim file inspectFederationShimNode reads; the generated files are a few KiB. */
+const INSPECT_MAX_BYTES = 64 * 1024;
 
 /**
- * The paths on the federation-sync shim's `exec` line, and whether the node
- * binary exists (flair#3056): `flair doctor` names a shim whose node was
- * removed by a Homebrew upgrade. null when the shim cannot be read or does not
- * hold exactly one generated exec line.
+ * `path`'s text when it is a regular file of at most INSPECT_MAX_BYTES. It is
+ * opened with O_NOFOLLOW, so a symlink at `path` itself is not followed. null
+ * otherwise, and when it cannot be read.
  */
-export function readFederationShimExecTargets(
-  opts: { shimPathOverride?: string; read?: (p: string) => string; exists?: (p: string) => boolean } = {},
-): FederationShimExecTargets | null {
-  const read = opts.read ?? ((p: string) => readFileSync(p, "utf-8"));
-  const exists = opts.exists ?? existsSync;
-  const shimPath = opts.shimPathOverride ?? SHIM_PATH_DEFAULT;
-  let text: string;
+function readBoundedRegularFile(path: string): string | null {
+  let fd: number;
   try {
-    text = read(shimPath);
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
   } catch {
     return null;
   }
-  const exec = [...text.matchAll(SHIM_EXEC_LINE_RE)];
+  try {
+    if (!fstatSync(fd).isFile()) return null;
+    const buf = Buffer.alloc(INSPECT_MAX_BYTES + 1);
+    let n = 0;
+    while (n < buf.length) {
+      const got = readSync(fd, buf, n, buf.length - n, null);
+      if (got === 0) break;
+      n += got;
+    }
+    return n > INSPECT_MAX_BYTES ? null : buf.subarray(0, n).toString("utf-8");
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export interface FederationShimMissingNode {
+  /** The scheduler unit file that runs the shim. */
+  unitPath: string;
+  shimPath: string;
+  /** The node path on the shim's exec line, which does not exist. */
+  nodeBin: string;
+}
+
+/**
+ * For `flair doctor` (flair#3056): the node path on the federation-sync shim's
+ * exec line when that path does not exist (stat fails with ENOENT or ENOTDIR).
+ * Returned only when the scheduler unit file runs `shimPath` and the shim runs
+ * exactly the commands `flair federation sync enable` writes. null otherwise,
+ * including when either file cannot be read through readBoundedRegularFile or
+ * the stat fails another way.
+ */
+export function inspectFederationShimNode(
+  opts: Pick<
+    RewriteFederationRuntimeOpts,
+    "platformOverride" | "shimPathOverride" | "launchdPlistOverride" | "systemdServiceOverride" | "templateRootOverride"
+  > = {},
+): FederationShimMissingNode | null {
+  const plat = detectPlatform(opts.platformOverride);
+  const shimPath = opts.shimPathOverride ?? SHIM_PATH_DEFAULT;
+  const unitPath = plat === "darwin"
+    ? (opts.launchdPlistOverride ?? LAUNCHD_PLIST_PATH)
+    : (opts.systemdServiceOverride ?? SYSTEMD_SERVICE_PATH);
+  const unitText = readBoundedRegularFile(unitPath);
+  if (unitText === null || federationUnitExecsShim(plat, unitText, shimPath) !== null) return null;
+  const shimText = readBoundedRegularFile(shimPath);
+  if (shimText === null || !shimText.includes(SHIM_MARKER)) return null;
+  const exec = [...shimText.matchAll(SHIM_EXEC_LINE_RE)];
   if (exec.length !== 1) return null;
+  let templateText: string;
+  try {
+    templateText = readTemplate(opts.templateRootOverride ?? defaultTemplateRoot(), "bin/flair-federation-sync.sh.tmpl");
+  } catch {
+    return null;
+  }
+  if (federationShimShapeProblem(shimText, templateText) !== null) return null;
   const nodeBin = exec[0]![1]!;
-  const flairBin = exec[0]![2]!;
   if (!isAbsolute(nodeBin)) return null;
-  return { nodeBin, flairBin, nodeExists: exists(nodeBin) };
+  try {
+    statSync(nodeBin);
+    return null;
+  } catch (err: any) {
+    return err?.code === "ENOENT" || err?.code === "ENOTDIR" ? { unitPath, shimPath, nodeBin } : null;
+  }
 }
 
 /** Does the federation-sync unit exec `shimPath`? Returns the reason it does not, or null. */
@@ -1171,9 +1224,14 @@ export function rewriteFederationSchedulerRuntime(
   let nextNode = oldNode;
   let nextFlair = oldFlair;
   if (oldPkg && canonical(oldPkg.dir) === canonical(cliTree)) {
-    // Same install tree as this CLI.
+    // Same install tree as this CLI. An existing Homebrew Cellar node is
+    // replaced by its opt alias when that alias resolves to the same binary
+    // (flair#3056).
+    const brewAlias = oldNodeMissing ? null : homebrewOptAlias(oldNode, { exists, realpath });
     if (oldNodeMissing) {
       nextNode = newNode;
+    } else if (brewAlias !== null) {
+      nextNode = brewAlias;
     } else if (canonical(oldNode) === canonical(newNode)) {
       return { ...base, status: "current", detail: `${shimPath} already runs this CLI's tree (${cliTree}).` };
     } else {

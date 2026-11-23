@@ -620,11 +620,10 @@ export interface ScheduledDriverFacts {
   /** Last-run read — null when it was not queried (nothing installed/loaded). */
   lastExit: LastExitStatus | null;
   /**
-   * The node binary the driver's shim execs, when that path does not exist
-   * (flair#3056). A Homebrew node upgrade deletes the versioned Cellar
-   * directory the shim names, so every run fails before flair starts.
+   * Set when the unit file runs the flair-generated shim and the node path on
+   * the shim's exec line does not exist (flair#3056).
    */
-  missingNodeBin?: string | null;
+  shimMissingNode?: { unitPath: string; shimPath: string; nodeBin: string } | null;
   /** The job's stderr log, named in the degraded remedy. */
   stderrLogPath: string;
 }
@@ -695,6 +694,19 @@ export function describeScheduledDriverFinding(f: ScheduledDriverFacts): Schedul
     };
   }
   // Loaded from here down.
+  if (f.shimMissingNode) {
+    const m = f.shimMissingNode;
+    return {
+      state: "degraded",
+      icon: "error",
+      isIssue: true,
+      message: `${f.label} DEGRADED — the node binary its shim execs does not exist (${m.nodeBin})`,
+      detail: [
+        `${m.unitPath} runs ${m.shimPath}, whose exec line names ${m.nodeBin}; that path does not exist.`,
+        `Fix: flair init   # then check: ${f.statusCommand}`,
+      ],
+    };
+  }
   const le = f.lastExit;
   if (!le || le.state === "unavailable") {
     return {
@@ -706,18 +718,6 @@ export function describeScheduledDriverFinding(f: ScheduledDriverFacts): Schedul
     };
   }
   if (le.state === "recorded" && le.exitCode !== 0) {
-    if (f.missingNodeBin) {
-      return {
-        state: "degraded",
-        icon: "error",
-        isIssue: true,
-        message: `${f.label} DEGRADED — the node binary it runs is missing (${f.missingNodeBin})`,
-        detail: [
-          `The service manager has the job loaded and is firing it, but every run fails because ${f.missingNodeBin} does not exist.`,
-          `Fix: flair init   # then check: ${f.statusCommand}`,
-        ],
-      };
-    }
     return {
       state: "degraded",
       icon: "error",

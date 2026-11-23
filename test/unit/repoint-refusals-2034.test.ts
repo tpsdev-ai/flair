@@ -106,6 +106,7 @@ function repointDeps(over: { present?: string[]; versions?: Record<string, strin
     samePath: (a, b) => resolve(a) === resolve(b),
     canonical: (p) => resolve(p),
     treeVersion: (d) => versions[d] ?? null,
+    homebrewOptAlias: () => null,
   };
 }
 

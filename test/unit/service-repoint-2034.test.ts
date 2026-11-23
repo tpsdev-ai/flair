@@ -52,6 +52,7 @@ function deps(over: Partial<RepointDeps> & { present?: string[]; versions?: Reco
     samePath: (a, b) => a.replace(/\/$/, "") === b.replace(/\/$/, ""),
     canonical: (p) => p,
     treeVersion: (d) => versions[d] ?? null,
+    homebrewOptAlias: () => null,
     ...over,
   };
 }
