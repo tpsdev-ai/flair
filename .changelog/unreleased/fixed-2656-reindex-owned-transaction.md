@@ -6,4 +6,4 @@
   `503 write_outcome_unknown`. In v0.62.0 it joined the request's transaction
   and answered success without that read, so a same-id write committing
   between its last check and the request's commit could leave the stored row
-  without the re-PUT while the re-PUT answered success.
+  without the re-PUT while the re-PUT answered success. ([#2891](https://github.com/tpsdev-ai/flair/pull/2891))

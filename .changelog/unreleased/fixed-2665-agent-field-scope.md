@@ -12,4 +12,4 @@
   > **Heads-up:** an Agent row with no stored home (a missing, null or empty
   > `originatorInstanceId`) takes no key change from a peer, and a sync does not create an agent whose id `FLAIR_ADMIN_AGENTS`
   > names. The receiving instance's administrator can write the key, or create
-  > the agent, through its operations API.
+  > the agent, through its operations API. ([#2674](https://github.com/tpsdev-ai/flair/pull/2674))

@@ -19,4 +19,4 @@
   checked.
   Non-empty or malformed `resolutions` in root or workspace manifests are refused.
   `--ci` refuses `FLAIR_DEP_MIN_AGE_DAYS` and `FLAIR_DEP_KEEP_CURRENT` when set;
-  local runs without `--ci` retain both knobs.
+  local runs without `--ci` retain both knobs. ([#2791](https://github.com/tpsdev-ai/flair/pull/2791))

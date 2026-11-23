@@ -7,4 +7,4 @@
   in the lock set; the head is resolved again under
   the locks, and a head outside that set releases and retries. `409
   skill_head_moved` is returned only if the resolved head stays outside the held
-  set through the final attempt.
+  set through the final attempt. ([#2934](https://github.com/tpsdev-ai/flair/pull/2934))

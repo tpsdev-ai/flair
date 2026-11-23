@@ -16,4 +16,4 @@
   `no-row`. The runner writes
   at most 100 ids into the state file's record, and a later cycle starts from
   the record it reads back, so ids beyond those 100 are carried only in its
-  count. (#2840)
+  count. (#2840) ([#2846](https://github.com/tpsdev-ai/flair/pull/2846))
