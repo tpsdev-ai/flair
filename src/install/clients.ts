@@ -2047,8 +2047,9 @@ function _wireCodex(env: WireEnv, testHooks?: CodexRewriteTestHooks): { ok: bool
           return { hold: decision.line! };
         }
         if (hasSection) {
-          // A section with the current pin AND this call's env is an
-          // idempotent no-op; otherwise (BEHIND or equal) replace it. flair#3050:
+          // A section with the current pin AND this call's agent id and URL is an
+          // idempotent no-op (a FLAIR_CLIENT-only change is not compared; deferred);
+          // otherwise (BEHIND or equal) replace it. flair#3050:
           // a current pin with a different agent id or URL still rewrites, or
           // `flair init --agent <next>` would leave Codex on the old agent.
           const pinCurrent = shape.spec === mcpServerSpec();

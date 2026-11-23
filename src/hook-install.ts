@@ -702,8 +702,8 @@ function decideSessionStartHookRewrite(
     if (!legacy) {
       return { kind: "hold", ok: false, message: `SessionStart hook in ${path} is not one of the installer forms Flair writes — left untouched` };
     }
-    // flair#3050 round 3: the pre-#1007 bare form is Flair-authored too, so a
-    // re-init MIGRATES it to the current pinned installer form. It used to fall
+    // flair#3050 round 3: the recognized pre-#1007 bare form is eligible for
+    // migration, so a re-init MIGRATES it to the current pinned installer form. It used to fall
     // through to "already wired" while still running unpinned.
     if (requestedAgentId !== undefined && !isHookCommandValueSafe(requestedAgentId)) {
       return { kind: "hold", ok: false, message: unsafeAgentIdMessage(requestedAgentId) };

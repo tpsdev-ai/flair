@@ -576,7 +576,7 @@ describe("Codex fallback definition guard", () => {
     });
   }
   // flair#3050: the outside-definition scan reads values spread over lines (multiline arrays and strings) as values,
-  // not as keys; anything it cannot read still refuses.
+  // not as keys; anything it cannot read still refuses, and a multiline-string line naming mcp_servers still refuses.
   for (const [what, raw] of [
     ["another server's multiline args holding an = sign", '[mcp_servers.other]\ncommand = "npx"\nargs = [\n  "-y",\n  "other-mcp",\n  "--port=8080",\n]\n'],
     ["inline tables inside a multiline array", '[other]\nitems = [\n  { k = "v" },\n  { k = "w" },\n]\n'],
@@ -615,7 +615,8 @@ describe("Codex fallback definition guard", () => {
     expect((Bun.TOML.parse(raw) as any).other.tool.note).toContain("mcp_servers.flair");
     expectRefusal(raw, wireCodex(ENV_B));
   });
-  // A value Flair cannot write into the section's env lines is refused by name before the file is read,
+  // An empty agent id or URL, or an agent id, URL or client value containing a quote, backslash or control
+  // character, is refused by name before the file is read,
   // not with the config-content conditions (the file is not what is wrong).
   for (const [name, env, key, why] of [
     ["an agent id with a quote", { FLAIR_AGENT_ID: 'agent"x', FLAIR_URL: URL_A }, "FLAIR_AGENT_ID", "contains a quote, backslash or control character"],
@@ -658,6 +659,18 @@ describe("Codex fallback definition guard", () => {
       const raw = seed(tomlSnippet(ENV_A) + "\n\n[other]\n" + value);
       if (TOML_ACCEPTS_EXTRA_CLOSING_QUOTES) expect((Bun.TOML.parse(raw) as any).other.x).toBeTruthy();
       expect(wireCodex(ENV_B).ok).toBe(true);
+    });
+  }
+  // Six quotes in a row are not a valid closer, so the scan refuses rather than guess where the string ends.
+  for (const [what, tail] of [
+    ["a basic string closed by six quotes", 'x = """a""""""\n'],
+    ["a basic string closed by six quotes before a comment", 'x = """a"""""" # "\n'],
+    ["a literal string closed by six quotes before a comment", "x = '''a'''''' # '\n"],
+  ] as const) {
+    it(`refuses a section followed by ${what}`, () => {
+      const raw = seed(tomlSnippet(ENV_A) + "\n\n[other]\n" + tail);
+      expect(() => Bun.TOML.parse(raw)).toThrow();
+      expectRefusal(raw, wireCodex(ENV_B));
     });
   }
   for (const quote of ['"', "'"]) {
