@@ -24,38 +24,18 @@
  */
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
-import { ApiHttpError, ApiRequestOutcomeUnknown, apiErrorRawBody } from "../lib/auth-resolve.js";
+import { ApiHttpError, ApiRequestOutcomeUnknown } from "../lib/auth-resolve.js";
+import {
+  MEMORY_PROVIDER_RETRY_DELAY_MS,
+  apiErrorCode,
+  isProviderTimeoutRefusal,
+} from "../lib/memory-provider-timeout.js";
 import { readFileSync, existsSync, rmSync, mkdtempSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { extractSnapshot, createSnapshot } from "./snapshot.js";
 
 export type ApiCall = (method: string, path: string, body?: unknown) => Promise<any>;
-
-/** How long a memory write refused with `503 memory_provider_timeout` waits before its single retry. */
-const RESTORE_PROVIDER_RETRY_DELAY_MS = 1_000;
-
-/**
- * The server's `error` code on an `ApiHttpError`, parsed from the response body
- * that error carries (`apiErrorRawBody`; the message is never read). Returns
- * undefined for a non-HTTP error, an error that carries no body, or a body
- * without a string `error` field.
- */
-function apiErrorCode(err: unknown): string | undefined {
-  const text = apiErrorRawBody(err);
-  if (text === undefined) return undefined;
-  try {
-    const body = JSON.parse(text);
-    return body && typeof body === "object" && typeof body.error === "string" ? body.error : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** A memory write refused with exactly 503 and `memory_provider_timeout`. */
-function isProviderTimeoutRefusal(err: unknown): boolean {
-  return err instanceof ApiHttpError && err.status === 503 && apiErrorCode(err) === "memory_provider_timeout";
-}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -665,7 +645,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
         // nothing, so replaying this one PUT cannot double-write the row.
         if (!isProviderTimeoutRefusal(err)) throw err;
         result.retried.memories.push(id);
-        await delay(RESTORE_PROVIDER_RETRY_DELAY_MS);
+        await delay(MEMORY_PROVIDER_RETRY_DELAY_MS);
         // No client-side timer here: a request abandoned at a client deadline
         // could still commit after this row was recorded failed. The whole
         // request now carries the shared deadline, and its expiry is an
