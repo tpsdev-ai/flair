@@ -4,7 +4,9 @@
 // waiter works against one elapsed-time budget, taken once in milliseconds.
 // The HTTP probe and the container inspect each get the smaller of their
 // per-request cap and the time left, so the wait ends at the deadline even
-// when a request stalls.
+// when a request stalls. Polling stops at the budget; the failure diagnostic
+// then takes at most ten seconds for the container logs plus one per-request
+// cap.
 //
 // Each poll inspects the container before it believes /Health, and inspects
 // once more before it reports ready: a dead container behind a healthy port
@@ -17,7 +19,8 @@
 //     [--per-request-ms <n>]
 //
 //   --credentials-env names an environment variable holding `user:pass`. The
-//   value is read in this process and sent only as an Authorization header.
+//   value is read in this process, sent as a request header, removed from the
+//   environment of every child process, and redacted from printed output.
 //   --budget-seconds defaults to $HARPER_START_BUDGET_S, then 300.
 //
 // Exit status: 0 once /Health answers, 1 on failure, 2 on bad usage.
@@ -34,15 +37,38 @@ const DEFAULT_BUDGET_S = 300;
 const DEFAULT_POLL_INTERVAL_MS = 2000;
 const DEFAULT_PROGRESS_INTERVAL_MS = 30_000;
 const DEFAULT_PER_REQUEST_MS = 5000;
+const MAX_BUDGET_SECONDS = 24 * 60 * 60;
 const CREDENTIALS_ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 
 /** Resolve the budget: the flag, else the environment, else 300 seconds. */
 export function resolveBudget(flagValue, envValue) {
   const raw = flagValue !== undefined ? flagValue : envValue?.trim() || String(DEFAULT_BUDGET_S);
-  if (!/^[0-9]+$/.test(raw) || Number(raw) <= 0) {
-    throw new Error(`budget must be a positive whole number of seconds, got '${raw}'`);
+  const seconds = Number(raw);
+  if (
+    !/^[0-9]+$/.test(raw) ||
+    !Number.isSafeInteger(seconds) ||
+    seconds <= 0 ||
+    seconds > MAX_BUDGET_SECONDS
+  ) {
+    throw new Error(`budget must be a positive whole number of seconds at most ${MAX_BUDGET_SECONDS}, got '${raw}'`);
   }
-  return Number(raw);
+  return seconds;
+}
+
+/** The credential's value, removed from the environment of every child process. */
+function childEnvironment(credentialsEnv) {
+  const env = { ...process.env };
+  if (credentialsEnv !== undefined) delete env[credentialsEnv];
+  return env;
+}
+
+/** Remove a credential's value from text before it is printed. */
+function redact(text, secrets) {
+  let result = String(text);
+  for (const secret of secrets) {
+    if (secret) result = result.split(secret).join("[redacted]");
+  }
+  return result;
 }
 
 function positiveInteger(flag, value) {
@@ -103,11 +129,11 @@ function errorText(error) {
 }
 
 /** Inspect the container's state; stdout only, so a warning on stderr is not state. */
-async function inspectContainer(container, timeoutMs) {
+async function inspectContainer(container, timeoutMs, env) {
   const { stdout } = await execFileAsync(
     "docker",
     ["inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", container],
-    { timeout: Math.max(1, timeoutMs), maxBuffer: 1024 * 1024, encoding: "utf8" },
+    { env, timeout: Math.max(1, Math.floor(timeoutMs)), maxBuffer: 1024 * 1024, encoding: "utf8" },
   );
   const [running, exitCode] = String(stdout).trim().split(/\s+/);
   return { running: running === "true", exitCode: exitCode || "unknown" };
@@ -127,8 +153,11 @@ function request(url, headers, timeoutMs) {
     const target = new URL(url);
     const send = target.protocol === "https:" ? httpsRequest : httpRequest;
     const req = send(target, { method: "GET", headers, agent: false }, (response) => {
-      response.resume();
-      settle({ status: response.statusCode ?? 0, headers: response.headers });
+      // Capture the status and headers, then close the response: a body that
+      // never ends must not keep this process alive past the budget.
+      const result = { status: response.statusCode ?? 0, headers: response.headers };
+      response.destroy();
+      settle(result);
     });
     timer = setTimeout(() => {
       req.destroy(new Error("request timed out"));
@@ -145,18 +174,19 @@ async function probe(url, authorization, timeoutMs) {
 }
 
 /** On failure: container logs, then an unauthenticated request's status and headers. */
-async function diagnose({ container, url, perRequestMs }) {
+async function diagnose({ container, url, perRequestMs, childEnv, secrets }) {
   console.error("Full logs:");
   try {
     const { stdout, stderr } = await execFileAsync("docker", ["logs", container], {
+      env: childEnv,
       timeout: 10_000,
       maxBuffer: 10 * 1024 * 1024,
       encoding: "utf8",
     });
-    if (String(stdout).trim()) console.error(String(stdout).trimEnd());
-    if (String(stderr).trim()) console.error(String(stderr).trimEnd());
+    if (String(stdout).trim()) console.error(redact(String(stdout).trimEnd(), secrets));
+    if (String(stderr).trim()) console.error(redact(String(stderr).trimEnd(), secrets));
   } catch (error) {
-    console.error(`docker logs failed: ${errorText(error)}`);
+    console.error(`docker logs failed: ${redact(errorText(error), secrets)}`);
   }
   console.error("---");
   console.error("Unauthenticated diagnostic request:");
@@ -166,7 +196,7 @@ async function diagnose({ container, url, perRequestMs }) {
   } else {
     console.error(`status ${response.status}`);
     for (const [header, value] of Object.entries(response.headers)) {
-      console.error(`${header}: ${value}`);
+      console.error(redact(`${header}: ${value}`, secrets));
     }
   }
 }
@@ -175,6 +205,7 @@ export async function main(options) {
   const { container, url, credentialsEnv, budgetSeconds, pollIntervalMs, progressIntervalMs, perRequestMs } = options;
 
   let authorization;
+  let secrets = [];
   if (credentialsEnv !== undefined) {
     if (!CREDENTIALS_ENV_NAME.test(credentialsEnv)) {
       console.error(`wait-for-harper: credentials variable name '${credentialsEnv}' is not valid`);
@@ -186,16 +217,18 @@ export async function main(options) {
       return 2;
     }
     authorization = `Basic ${Buffer.from(credential).toString("base64")}`;
+    secrets = [credential];
   }
+  const childEnv = childEnvironment(credentialsEnv);
 
-  const startedAt = Date.now();
+  const startedAt = performance.now();
   const deadline = startedAt + budgetSeconds * 1000;
-  const remaining = () => deadline - Date.now();
-  const elapsedMs = () => Date.now() - startedAt;
+  const remaining = () => deadline - performance.now();
+  const elapsedMs = () => performance.now() - startedAt;
 
   const reportExited = async (exitCode) => {
     console.error(`Harper container '${container}' exited (exit code ${exitCode}) before ${url} answered`);
-    await diagnose(options);
+    await diagnose({ ...options, childEnv, secrets });
     return 1;
   };
 
@@ -205,10 +238,10 @@ export async function main(options) {
 
     let state;
     try {
-      state = await inspectContainer(container, Math.min(perRequestMs, remaining()));
+      state = await inspectContainer(container, Math.min(perRequestMs, remaining()), childEnv);
     } catch (error) {
       if (remaining() <= 0) break;
-      console.error(`wait-for-harper: cannot inspect container '${container}': ${errorText(error)}`);
+      console.error(`wait-for-harper: cannot inspect container '${container}': ${redact(errorText(error), secrets)}`);
       return 1;
     }
     if (!state.running) return reportExited(state.exitCode);
@@ -216,10 +249,10 @@ export async function main(options) {
     if (await probe(url, authorization, Math.min(perRequestMs, remaining()))) {
       let finalState;
       try {
-        finalState = await inspectContainer(container, Math.min(perRequestMs, Math.max(1, remaining())));
+        finalState = await inspectContainer(container, Math.min(perRequestMs, Math.max(1, remaining())), childEnv);
       } catch (error) {
         if (remaining() <= 0) break;
-        console.error(`wait-for-harper: cannot inspect container '${container}': ${errorText(error)}`);
+        console.error(`wait-for-harper: cannot inspect container '${container}': ${redact(errorText(error), secrets)}`);
         return 1;
       }
       if (!finalState.running) return reportExited(finalState.exitCode);
@@ -237,7 +270,7 @@ export async function main(options) {
   }
 
   console.error(`Harper did not answer /Health within ${budgetSeconds}s`);
-  await diagnose(options);
+  await diagnose({ ...options, childEnv, secrets });
   return 1;
 }
 

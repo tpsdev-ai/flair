@@ -10,9 +10,11 @@
  * These tests drive the waiter through a real local HTTP server and a stub
  * `docker` first on PATH. No Docker, no Harper, no external network.
  *
- * The credential is sent only as a request header: the tests assert the
- * server sees it, and that it never appears in the stub's argv or in the
- * waiter's output, including on the failure path.
+ * The credential is sent as a request header, removed from the environment of
+ * every child process, and redacted from printed output: the tests assert the
+ * server sees it, while the stub's environment and the waiter's output do not.
+ * Polling stops at the budget; the failure diagnostic then takes at most ten
+ * seconds for the container logs plus one per-request cap.
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
@@ -41,6 +43,7 @@ const SENTINEL = "admin:test-pass";
 const DOCKER_STUB = `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "$*" >> "$WAIT_STUB_DIR/docker-argv.log"
+printf '%s\\n' "\${HARPER_START_CREDENTIALS-<unset>}" >> "$WAIT_STUB_DIR/docker-env.log"
 echo "docker stub: warning on stderr" >&2
 cmd=\${1:?}; shift
 case "$cmd" in
@@ -55,10 +58,26 @@ case "$cmd" in
       *State.Running*State.ExitCode*) : ;;
       *) echo "docker stub: unexpected format '$fmt'" >&2; exit 64 ;;
     esac
+    if [ -f "$WAIT_STUB_DIR/inspect-sleep" ]; then
+      exec node -e 'setTimeout(() => {}, 6000)'
+    fi
+    if [ -f "$WAIT_STUB_DIR/inspect-sequence" ]; then
+      mapfile -t states < "$WAIT_STUB_DIR/inspect-sequence"
+      count=$(cat "$WAIT_STUB_DIR/inspect-count" 2>/dev/null || echo 0)
+      index=$count
+      if [ "$index" -ge "\${#states[@]}" ]; then index=$(( \${#states[@]} - 1 )); fi
+      printf '%s\\n' "\${states[$index]}"
+      printf '%s\\n' "$(( count + 1 ))" > "$WAIT_STUB_DIR/inspect-count"
+      exit 0
+    fi
     printf '%s %s\\n' "$(cat "$WAIT_STUB_DIR/running")" "$(cat "$WAIT_STUB_DIR/exit-code")"
     ;;
   logs)
     echo "stub container log for \${1:-}"
+    if [ -f "$WAIT_STUB_DIR/container-log" ]; then
+      cat "$WAIT_STUB_DIR/container-log"
+    fi
+    printf 'env HARPER_START_CREDENTIALS=%s\\n' "\${HARPER_START_CREDENTIALS-<unset>}"
     ;;
   *)
     echo "docker stub: unexpected command '$cmd'" >&2
@@ -72,7 +91,16 @@ interface Sandbox {
   bin: string;
 }
 
-function sandbox(options: { running?: string; exitCode?: string; inspectFails?: boolean } = {}): Sandbox {
+function sandbox(
+  options: {
+    running?: string;
+    exitCode?: string;
+    inspectFails?: boolean;
+    inspectSequence?: string[];
+    inspectSleep?: boolean;
+    containerLog?: string;
+  } = {},
+): Sandbox {
   const root = tempDir("flair-wait-harper-");
   const bin = join(root, "bin");
   mkdirSync(bin, { recursive: true });
@@ -81,6 +109,9 @@ function sandbox(options: { running?: string; exitCode?: string; inspectFails?: 
   writeFileSync(join(root, "running"), `${options.running ?? "true"}\n`);
   writeFileSync(join(root, "exit-code"), `${options.exitCode ?? "0"}\n`);
   if (options.inspectFails) writeFileSync(join(root, "inspect-fails"), "");
+  if (options.inspectSequence) writeFileSync(join(root, "inspect-sequence"), `${options.inspectSequence.join("\n")}\n`);
+  if (options.inspectSleep) writeFileSync(join(root, "inspect-sleep"), "");
+  if (options.containerLog) writeFileSync(join(root, "container-log"), options.containerLog);
   return { root, bin };
 }
 
@@ -90,7 +121,12 @@ interface Run {
   seconds: number;
 }
 
-async function run(box: Sandbox, args: string[], env: Record<string, string> = {}): Promise<Run> {
+async function run(
+  box: Sandbox,
+  args: string[],
+  env: Record<string, string> = {},
+  timeoutMs = CASE_TIMEOUT_MS,
+): Promise<Run> {
   const started = Date.now();
   const child = spawn("node", [SCRIPT, ...args], {
     env: {
@@ -110,7 +146,7 @@ async function run(box: Sandbox, args: string[], env: Record<string, string> = {
   child.stderr.on("data", (chunk) => {
     stderr += chunk;
   });
-  const kill = setTimeout(() => child.kill("SIGKILL"), CASE_TIMEOUT_MS);
+  const kill = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
   const status = await new Promise<number | null>((resolve) => child.on("close", (code) => resolve(code)));
   clearTimeout(kill);
   return { status, output: `${stdout}${stderr}`, seconds: (Date.now() - started) / 1000 };
@@ -220,6 +256,8 @@ describe("wait-for-harper.mjs", () => {
   test(
     "(c) fails at the budget, with the timeout line and logs, when /Health never answers",
     async () => {
+      // Polling stops at the 2s budget; the failure diagnostic then takes at
+      // most ten seconds of container logs plus one per-request cap.
       const server = await health(STATUS(503));
       const box = sandbox();
       const result = await run(box, [
@@ -325,7 +363,7 @@ describe("wait-for-harper.mjs", () => {
   );
 
   test(
-    "(h) the credential is only a request header: never on argv, never printed",
+    "(h) the credential is a request header, absent from child environments and printed output",
     async () => {
       const server = await health(STATUS(200));
       const box = sandbox();
@@ -349,23 +387,138 @@ describe("wait-for-harper.mjs", () => {
       const argv = readFileSync(join(box.root, "docker-argv.log"), "utf8");
       expect(argv).toContain("inspect");
       expect(argv).not.toContain("test-pass");
+      expect(readFileSync(join(box.root, "docker-env.log"), "utf8")).not.toContain("test-pass");
 
-      // Failure path: the diagnostic request is unauthenticated and the
-      // credential is still absent from output and from every child argv.
-      const failing = sandbox({ running: "false", exitCode: "9" });
+      // Failure path: the diagnostic request is unauthenticated; the docker
+      // children do not inherit the credential, and a copy of it in the
+      // container logs is redacted before printing.
+      const failing = sandbox({ running: "false", exitCode: "9", containerLog: `auth ${SENTINEL}\n` });
       const failed = await run(
         failing,
-        ["--container", "harper-flair", ...WAIT_ARGS(server.url), "--budget-seconds", "20"],
+        [
+          "--container",
+          "harper-flair",
+          ...WAIT_ARGS(server.url),
+          "--credentials-env",
+          "HARPER_START_CREDENTIALS",
+          "--budget-seconds",
+          "20",
+        ],
         { HARPER_START_CREDENTIALS: SENTINEL },
       );
       expect(failed.status).toBe(1);
       expect(failed.output).toContain("Unauthenticated diagnostic request:");
+      expect(failed.output).toContain("[redacted]");
       expect(failed.output).not.toContain("test-pass");
       expect(server.authorizations).toHaveLength(1);
       expect(readFileSync(join(failing.root, "docker-argv.log"), "utf8")).not.toContain("test-pass");
+      expect(readFileSync(join(failing.root, "docker-env.log"), "utf8")).not.toContain("test-pass");
     },
     CASE_TIMEOUT_MS,
   );
+
+  test(
+    "(j) a response that sends headers and never ends its body still ends the wait",
+    async () => {
+      const server = await health((_index, res) => {
+        res.on("error", () => {});
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.write("partial body");
+      });
+      const box = sandbox();
+      const result = await run(
+        box,
+        [
+          "--container",
+          "harper-flair",
+          ...WAIT_ARGS(server.url),
+          "--budget-seconds",
+          "2",
+          "--per-request-ms",
+          "500",
+        ],
+        {},
+        5000,
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.output).toContain("Harper ready");
+      expect(result.seconds).toBeLessThan(4);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(k) an exit between the probe and the second inspect fails, naming the exit",
+    async () => {
+      const server = await health(STATUS(200));
+      const box = sandbox({ inspectSequence: ["true 0", "false 3"] });
+      const result = await run(box, [
+        "--container",
+        "harper-flair",
+        ...WAIT_ARGS(server.url),
+        "--budget-seconds",
+        "20",
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.output).toContain("exit code 3");
+      expect(result.output).not.toContain("Harper ready");
+      // One authenticated probe plus the unauthenticated diagnostic request.
+      expect(server.requests()).toBe(2);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(l) an inspect that outlasts its bound is cut off within the budget and a margin",
+    async () => {
+      const server = await health(STATUS(503));
+      const box = sandbox({ inspectSleep: true });
+      const result = await run(box, [
+        "--container",
+        "harper-flair",
+        ...WAIT_ARGS(server.url),
+        "--budget-seconds",
+        "2",
+        "--per-request-ms",
+        "500",
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.output).toContain("cannot inspect container 'harper-flair'");
+      expect(result.seconds).toBeLessThan(4);
+      expect(server.requests()).toBe(0);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(m) HARPER_START_BUDGET_S alone bounds the wait",
+    async () => {
+      const server = await health(STATUS(503));
+      const box = sandbox();
+      const result = await run(
+        box,
+        ["--container", "harper-flair", "--url", server.url, "--poll-interval-ms", "100", "--per-request-ms", "200"],
+        { HARPER_START_BUDGET_S: "2" },
+        6000,
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.output).toContain("Harper did not answer /Health within 2s");
+      expect(result.seconds).toBeGreaterThanOrEqual(1.8);
+      expect(result.seconds).toBeLessThan(6);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test("(n) the budget rejects values that overflow a safe whole number", () => {
+    expect(() => resolveBudget("9".repeat(400), undefined)).toThrow();
+    expect(() => resolveBudget(undefined, "9".repeat(400))).toThrow();
+    expect(() => resolveBudget("86401", undefined)).toThrow();
+    expect(resolveBudget("86400", undefined)).toBe(86400);
+  });
 
   test("(i) both workflows call the waiter", () => {
     interface Step {
