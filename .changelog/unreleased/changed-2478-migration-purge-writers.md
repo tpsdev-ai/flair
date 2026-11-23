@@ -16,4 +16,4 @@
   `POST /AgentSeed` writes no existing Memory row: its starter memories are
   creates under a fresh id, so it takes no lock.
 
-  The lock remains per process.
+  The lock remains per process. ([#2779](https://github.com/tpsdev-ai/flair/pull/2779))

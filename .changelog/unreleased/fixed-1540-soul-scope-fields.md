@@ -6,4 +6,4 @@
   `soul_scope_fields_not_writable`, for operator and internal writes on POST,
   PUT and PATCH. POST and PUT check the request body; PATCH checks the merged
   row. `flair restore` and `flair import` report a Soul row refused with this
-  error, with the row's id (#1540).
+  error, with the row's id (#1540). ([#2898](https://github.com/tpsdev-ai/flair/pull/2898), [#2918](https://github.com/tpsdev-ai/flair/pull/2918))

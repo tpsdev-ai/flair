@@ -3,4 +3,4 @@
   Commits, tombstones and recovery share one custody lock. Generation commits
   and tombstones stage an intent marker before publication. Open refuses
   retained generation entries without CURRENT and symlinked generations.
-  New custody refuses an existing registry (#971).
+  New custody refuses an existing registry (#971). ([#2961](https://github.com/tpsdev-ai/flair/pull/2961))

@@ -10,4 +10,4 @@
   the pointer gone. A pointer replaced after the sweep's final confirmation
   read, by a write whose transaction takes its time after the sweep's first
   read, stays stored and is not counted; a write whose transaction took its time
-  before that read and commits after the confirmation read is not covered.
+  before that read and commits after the confirmation read is not covered. ([#2713](https://github.com/tpsdev-ai/flair/pull/2713))

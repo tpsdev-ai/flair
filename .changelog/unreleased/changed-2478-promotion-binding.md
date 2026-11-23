@@ -1,1 +1,1 @@
-- Newly stamped promotion verdicts carry a server-only `promotionContentHash` bound to the stored text.
+- Newly stamped promotion verdicts carry a server-only `promotionContentHash` bound to the stored text. ([#2633](https://github.com/tpsdev-ai/flair/pull/2633))
