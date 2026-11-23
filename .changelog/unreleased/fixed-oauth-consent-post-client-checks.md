@@ -5,4 +5,4 @@
   `GET /OAuthAuthorize`. Both run before authentication, and nothing is stored on
   a refusal. A blank scope is stored as `memory:read`, the scope the consent page
   renders for it. A deny still answers the `access_denied` redirect and issues no
-  code.
+  code. ([#2702](https://github.com/tpsdev-ai/flair/pull/2702))
