@@ -125,10 +125,10 @@ jobs:
             -c "harper install && harper dev /flair"
 
           # Wait against an elapsed budget, not a poll count: on a loaded runner
-          # the in-container install can outlast a fixed number of polls. The
-          # waiter also fails at once when the container exits, with its exit
-          # code and logs, instead of sleeping out the budget. This probe is
-          # unauthenticated, so it names no credentials variable.
+          # the in-container install can outlast a fixed number of polls.
+          # Polling stops when the container exits, and the waiter prints its
+          # exit code and logs. This probe is unauthenticated, so it names no
+          # credentials variable.
           node "$GITHUB_WORKSPACE/scripts/ci/wait-for-harper.mjs" \
             --container harper-flair-smoke \
             --url http://localhost:9926/Health

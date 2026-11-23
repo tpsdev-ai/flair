@@ -1,16 +1,16 @@
 // wait-for-harper.mjs — wait for a Docker-hosted Harper to answer /Health.
 //
 // The CI E2E lane starts Harper inside a container and polls /Health. This
-// waiter works against one elapsed-time budget, taken once in milliseconds.
-// The HTTP probe and the container inspect each get the smaller of their
-// per-request cap and the time left, so the wait ends at the deadline even
-// when a request stalls. Polling stops at the budget; the failure diagnostic
-// then takes at most ten seconds for the container logs plus one per-request
-// cap.
+// waiter polls against one elapsed-time budget, taken once in milliseconds.
+// Each poll's probe and first inspect get the smaller of the per-request cap
+// and the time left; the final inspect gets the per-request cap, and the
+// waiter checks the budget after it, so it never reports ready past the
+// budget. The failure diagnostic is bounded separately: ten seconds for the
+// container logs plus one per-request cap.
 //
 // Each poll inspects the container before it believes /Health, and inspects
-// once more before it reports ready: a dead container behind a healthy port
-// fails at once with its exit code and logs.
+// once more before it reports ready. Polling stops when an exit is detected;
+// the diagnostic runs before the process exits.
 //
 // Usage:
 //   node wait-for-harper.mjs --container <name> --url <health-url>
@@ -20,10 +20,14 @@
 //
 //   --credentials-env names an environment variable holding `user:pass`. The
 //   value is read in this process, sent as a request header, removed from the
-//   environment of every child process, and redacted from printed output.
-//   --budget-seconds defaults to $HARPER_START_BUDGET_S, then 300.
+//   environment of every child process, and redacted from printed output in
+//   its raw, Base64 token and full header forms.
+//   --budget-seconds bounds the polling; it defaults to
+//   $HARPER_START_BUDGET_S, then 300.
 //
-// Exit status: 0 once /Health answers, 1 on failure, 2 on bad usage.
+// Exit status: 0 when a /Health probe answers with a 2xx status and the final
+// inspect finds the container running before the deadline, 1 on failure,
+// 2 on bad usage.
 
 import { execFile } from "node:child_process";
 import { request as httpRequest } from "node:http";
@@ -173,7 +177,10 @@ async function probe(url, authorization, timeoutMs) {
   return response !== null && response.status >= 200 && response.status < 300;
 }
 
-/** On failure: container logs, then an unauthenticated request's status and headers. */
+/**
+ * On failure: container logs, then an unauthenticated request; its status and
+ * headers are printed only when that request answers.
+ */
 async function diagnose({ container, url, perRequestMs, childEnv, secrets }) {
   console.error("Full logs:");
   try {
@@ -216,8 +223,9 @@ export async function main(options) {
       console.error(`wait-for-harper: credentials variable '${credentialsEnv}' is unset or empty`);
       return 2;
     }
-    authorization = `Basic ${Buffer.from(credential).toString("base64")}`;
-    secrets = [credential];
+    const token = Buffer.from(credential).toString("base64");
+    authorization = `Basic ${token}`;
+    secrets = [authorization, token, credential];
   }
   const childEnv = childEnvironment(credentialsEnv);
 
@@ -247,14 +255,16 @@ export async function main(options) {
     if (!state.running) return reportExited(state.exitCode);
 
     if (await probe(url, authorization, Math.min(perRequestMs, remaining()))) {
+      if (remaining() <= 0) break;
       let finalState;
       try {
-        finalState = await inspectContainer(container, Math.min(perRequestMs, Math.max(1, remaining())), childEnv);
+        finalState = await inspectContainer(container, perRequestMs, childEnv);
       } catch (error) {
         if (remaining() <= 0) break;
         console.error(`wait-for-harper: cannot inspect container '${container}': ${redact(errorText(error), secrets)}`);
         return 1;
       }
+      if (remaining() <= 0) break;
       if (!finalState.running) return reportExited(finalState.exitCode);
       console.log(`Harper ready after ${Math.floor(elapsedMs() / 1000)}s`);
       return 0;
