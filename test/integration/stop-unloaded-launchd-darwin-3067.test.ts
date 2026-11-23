@@ -46,14 +46,16 @@ function stripAmbientFlair(env: NodeJS.ProcessEnv): Record<string, string> {
   return out;
 }
 
+// No FLAIR_ADMIN_PASS or HDB_ADMIN_PASSWORD: `flair init` resolves an env
+// credential before the reuse branch, so the fixture's ~/.flair/admin-pass is
+// the source here — the same env runInit uses in
+// doctor-fix-launchd-darwin.test.ts.
 function cliEnv(home: string): Record<string, string> {
   return {
     ...stripAmbientFlair(process.env),
     HOME: home,
     FLAIR_MODELS_DIR: MODELS_DIR,
     HDB_ADMIN_USERNAME: ADMIN_USER,
-    HDB_ADMIN_PASSWORD: ADMIN_PASS,
-    FLAIR_ADMIN_PASS: ADMIN_PASS,
   };
 }
 
@@ -141,24 +143,28 @@ test.skipIf(!isDarwin)(
     const entry: (typeof live)[number] = { home, dataDir, label, plistPath };
     live.push(entry);
 
-    // A real Harper installation, so `flair init` finds it and starts it
-    // directly instead of installing one.
-    const populate = await spawnDirectHarper(dataDir);
-    entry.populate = populate;
-    const httpPort = Number(new URL(populate.httpURL).port);
-    await stopHarper(populate, { keepInstallDir: true });
-    entry.populate = undefined;
-    const cfg = readHarperConfig(dataDir);
-    const configPort = harperPortValue(cfg?.http?.port) ?? httpPort;
-    if (configPort !== httpPort) throw new Error(`config port ${configPort} differs from the booted port ${httpPort}`);
-
+    // The persisted admin credential `flair init` reuses, written before the
+    // populate boot as doctor-fix-launchd-darwin.test.ts writes it.
     const passDir = join(home, ".flair");
     mkdirSync(passDir, { recursive: true });
     const passFile = join(passDir, "admin-pass");
     writeFileSync(passFile, `${ADMIN_PASS}\n`, { mode: 0o600 });
     chmodSync(passFile, 0o600);
 
-    const init = runCli(home, ["init", "--port", String(configPort), "--no-mcp", "--skip-soul"]);
+    // A real Harper installation, so `flair init` finds it and starts it
+    // directly instead of installing one.
+    const populate = await spawnDirectHarper(dataDir);
+    entry.populate = populate;
+    const httpPort = Number(new URL(populate.httpURL).port);
+    const opsPort = Number(new URL(populate.opsURL).port);
+    await stopHarper(populate, { keepInstallDir: true });
+    entry.populate = undefined;
+    const cfg = readHarperConfig(dataDir);
+    const configPort = harperPortValue(cfg?.http?.port) ?? httpPort;
+    const configOpsPort = harperPortValue(cfg?.operationsApi?.network?.port) ?? opsPort;
+    if (configPort !== httpPort) throw new Error(`config port ${configPort} differs from the booted port ${httpPort}`);
+
+    const init = runCli(home, ["init", "--port", String(configPort), "--ops-port", String(configOpsPort), "--no-mcp", "--skip-soul"]);
     expect(init.signal, `flair init overran:\n${init.stdout}\n${init.stderr}`).toBeNull();
     expect(init.status, `flair init failed:\n${init.stdout}\n${init.stderr}`).toBe(0);
 
