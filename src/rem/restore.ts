@@ -54,8 +54,9 @@ export function formatUnknownState(state: { entity: "memory" | "soul"; id: strin
 
 /**
  * The server release that first serves `GET /AdminMemoryCandidates/{agentId}`. This is a server-capability
- * minimum, not a package version, so its name does not end in "version": check-version-sync treats any
- * identifier ending in "version" that holds the target release as a version site the release must bump.
+ * minimum, not a package version, so its name does not end in "version": in the files it scans,
+ * check-version-sync treats a declaration whose identifier ends in "version" and holds the target release as
+ * a version site the release must bump.
  */
 export const CANDIDATE_LIST_FIRST_SERVER_RELEASE = "0.63.0";
 
