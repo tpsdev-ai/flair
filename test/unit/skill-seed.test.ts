@@ -367,7 +367,10 @@ const PROVIDER_TIMEOUT: SeedWrite = {
 /** How long the instance takes to refuse one write in these tests. */
 const REFUSAL_AFTER_MS = 28_000;
 
-/** A fake clock: `pause` records each wait and moves time forward by it. */
+/**
+ * A fake clock: `pause` records each wait and moves time forward by it. It
+ * yields one real timer turn, so a retry loop cannot starve the test timeout.
+ */
 function fakeClock(): SeedClock & { t: number; waits: number[] } {
   const clock = {
     t: 0,
@@ -376,6 +379,7 @@ function fakeClock(): SeedClock & { t: number; waits: number[] } {
     pause: async (ms: number) => {
       clock.waits.push(ms);
       clock.t += ms;
+      await new Promise((resolve) => setTimeout(resolve, 0));
     },
   };
   return clock;
@@ -481,11 +485,15 @@ describe("runSkillSeed — a skill-row write refused with 503 memory_provider_ti
   }, 5_000);
 
   it("refuses without another write when the bound passes while a retried pass re-reads", async () => {
+    // The stub stops refusing after 50 calls, so a retry loop without a bound
+    // ends in success instead of hanging.
     const clock = fakeClock();
+    let attempts = 0;
     const io = fakeIo({
       row: { ok: true, row: null },
       assignment: { ok: true, row: null },
       putRow: () => {
+        if (++attempts > 50) return { ok: true };
         clock.t += REFUSAL_AFTER_MS;
         return PROVIDER_TIMEOUT;
       },
