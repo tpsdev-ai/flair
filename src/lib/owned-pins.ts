@@ -439,8 +439,8 @@ export function applyOrRepinSessionStartHook(
     const wiredAgentId = installer ? installer.agentId : legacy!.agentId;
     const wiredUrl = installer ? installer.flairUrl : legacy!.flairUrl;
     // flair#3050 round 5: validate the EXISTING values of either form with the
-    // builder's own rule before any no-op or re-point treats it as written by
-    // Flair. An unsafe id or URL is a named refusal, not "already wired".
+    // builder's own rule before it permits a no-op or a rewrite of the supported
+    // form. An unsafe id or URL is a named refusal, not "already wired".
     if (!isHookCommandValueSafe(wiredAgentId)) {
       return { applied: false, ok: false, message: unsafeAgentIdMessage(wiredAgentId) };
     }

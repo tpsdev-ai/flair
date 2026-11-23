@@ -628,6 +628,19 @@ describe("Codex fallback definition guard", () => {
       expect(existsSync(`${cfgPath()}.bak`)).toBe(false);
     });
   }
+  it("refuses an unwritable FLAIR_CLIENT by name before touching config.toml, even when config.toml is not a regular file", () => {
+    // A directory at config.toml makes any read or write fail differently, so this passes only while the
+    // value check runs first and covers FLAIR_CLIENT.
+    mkdirSync(cfgPath(), { recursive: true });
+    const before = readdirSync(join(isoHome, ".codex")).sort().join(",");
+    const res = wireCodex({ FLAIR_AGENT_ID: "agent-b", FLAIR_URL: URL_A, FLAIR_CLIENT: 'client"x' });
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain("the FLAIR_CLIENT value contains a quote, backslash or control character");
+    expect(res.message).not.toContain("Flair edits Codex's config only when");
+    expect(readdirSync(join(isoHome, ".codex")).sort().join(",")).toBe(before);
+    expect(readdirSync(cfgPath())).toEqual([]);
+    expect(existsSync(`${cfgPath()}.bak`)).toBe(false);
+  });
   // The remedy each refusal names is one that clears it: follow it, re-run, and the wiring succeeds.
   for (const [what, raw, repaired] of [
     ["an inline flair entry in [mcp_servers]", '[mcp_servers]\nflair = { command = "npx" }\n', ""],

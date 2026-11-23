@@ -1,8 +1,9 @@
 import { expect } from "bun:test";
 
 /**
- * flair#3050: the clauses a Codex refusal message must carry, written out here rather than imported
- * from production, so that dropping or rewording any clause in src/install/clients.ts fails a test.
+ * flair#3050: the clauses a Codex config-content refusal message must carry, written out here rather
+ * than imported from production, so that removing or altering any of these literal substrings in
+ * src/install/clients.ts fails a test. They are substring checks: text added around them is not checked.
  */
 export const CODEX_CONDITION_CLAUSES = [
   "Flair edits Codex's config only when its content meets all of these conditions:",
