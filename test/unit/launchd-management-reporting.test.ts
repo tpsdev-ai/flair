@@ -255,6 +255,22 @@ describe("flair#1022 — assessLaunchdManagement distinguishes healthy from mana
     expect(isDetached(m)).toBe(false);
   });
 
+  test("no-service does not answer the loaded-state question, and never consults launchctl", () => {
+    // The observer never queries launchd when there is no plist, so it must
+    // omit `jobLoaded` rather than answer a state it never read.
+    let consulted = 0;
+    const m = assessLaunchdManagement({
+      ...base,
+      platform: "darwin",
+      instancePid: null,
+      plistExists: () => false,
+      list: () => { consulted++; return { code: 113, stdout: "" }; },
+    });
+    expect(m.state).toBe("no-service");
+    expect("jobLoaded" in m).toBe(false);
+    expect(consulted).toBe(0);
+  });
+
   test("a detached verdict carries the plist diagnosis as its cause when there is one", () => {
     const m = assessLaunchdManagement({
       ...base,
@@ -304,15 +320,15 @@ describe("flair#1022 — parseLaunchctlList / readLaunchctlJobState", () => {
     expect(parseLaunchctlList(listLoadedNotRunning("x", 19968))).toEqual({ pid: null, lastExitStatus: 19968 });
   });
 
-  test("a nonzero exit from launchctl means the label is not registered", () => {
+  test("launchd's 113 exit means the label is not registered", () => {
     expect(readLaunchctlJobState("x", unregisteredLister)).toEqual({
-      registered: false, pid: null, lastExitStatus: null,
+      registered: false, readable: true, pid: null, lastExitStatus: null,
     });
   });
 
-  test("a lister that throws is not registered rather than an exception", () => {
+  test("a lister that throws is an unreadable lookup, not an absent job", () => {
     expect(readLaunchctlJobState("x", () => { throw new Error("launchctl missing"); })).toEqual({
-      registered: false, pid: null, lastExitStatus: null,
+      registered: false, readable: false, pid: null, lastExitStatus: null,
     });
   });
 });
