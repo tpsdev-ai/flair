@@ -24,6 +24,7 @@ let harper: HarperInstance;
 let appDir = "";
 
 const AGENT = "facade-shapes-agent";
+const SECOND_AGENT = "facade-shapes-reader";
 const sfx = Date.now().toString(36);
 const TOPIC = `deploy schedule ${sfx}`;
 const MISSING_ID = "00000000-0000-0000-0000-000000000000";
@@ -81,22 +82,37 @@ describe("flair#3068 — the facade's read methods return what they document", (
     expect(hits.map((h: any) => h.content).join(" ")).toContain(TOPIC);
   }, 120_000);
 
-  test("(b) memory.get() resolves to the stored row, and null for an absent id", async () => {
+  test("(b) memory.get() resolves to the stored row, and null for an absent id or another agent's private record", async () => {
+    expect(await fleet("register", { id: SECOND_AGENT })).toBe(SECOND_AGENT);
+
     const written = await fleet("remember", { agentId: AGENT, content: `get target ${sfx}`, visibility: "private" });
     expect(written.written).toBe(true);
+    const shared = await fleet("remember", { agentId: AGENT, content: `shared target ${sfx}`, visibility: "shared" });
+    expect(shared.written).toBe(true);
 
+    // The owner reads its own private record.
     const got = await fleet("facadeGet", { agentId: AGENT, id: written.id });
     expect(got.kind, `memory.get() resolved to ${JSON.stringify(got)}`).toBe("row");
     expect(got.id).toBe(written.id);
     expect(got.content).toBe(`get target ${sfx}`);
 
+    // A second, non-admin agent: another agent's private record reads as null;
+    // its shared record reads as the row.
+    const foreignPrivate = await fleet("facadeGet", { agentId: SECOND_AGENT, id: written.id });
+    expect(foreignPrivate.kind, `memory.get() of another agent's private record resolved to ${JSON.stringify(foreignPrivate)}`).toBe("null");
+    const foreignShared = await fleet("facadeGet", { agentId: SECOND_AGENT, id: shared.id });
+    expect(foreignShared.kind, `memory.get() of another agent's shared record resolved to ${JSON.stringify(foreignShared)}`).toBe("row");
+    expect(foreignShared.id).toBe(shared.id);
+    expect(foreignShared.content).toBe(`shared target ${sfx}`);
+
     const missing = await fleet("facadeGet", { agentId: AGENT, id: MISSING_ID });
     expect(missing.kind, `memory.get() of an absent id resolved to ${JSON.stringify(missing)}`).toBe("null");
 
-    // The admin handle reads through the same by-id path.
+    // The admin handle reads through the same by-id path, without the read scope.
     const adminGot = await fleet("facadeGet", { agentId: "facade-admin-reader", id: written.id, asAdmin: true });
     expect(adminGot.kind, `admin.memory.get() resolved to ${JSON.stringify(adminGot)}`).toBe("row");
     expect(adminGot.id).toBe(written.id);
+    expect(adminGot.content).toBe(`get target ${sfx}`);
 
     const adminMissing = await fleet("facadeGet", { agentId: "facade-admin-reader", id: MISSING_ID, asAdmin: true });
     expect(adminMissing.kind, `admin.memory.get() of an absent id resolved to ${JSON.stringify(adminMissing)}`).toBe("null");
