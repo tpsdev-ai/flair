@@ -262,13 +262,13 @@ export async function runSkillSeed(
   let firstWriteAt: number | undefined;
   const rowWriteBudget = (): number => {
     firstWriteAt ??= clock.now();
-    return firstWriteAt + boundMs - clock.now();
+    return Math.max(0, Math.round(firstWriteAt + boundMs - clock.now()));
   };
   // Returns the remaining budget without initialising it; undefined when no
   // write attempt has been made yet (so the preflight reads of the first pass
   // are never refused for a budget that has not started).
   const peekBudget = (): number | undefined =>
-    firstWriteAt === undefined ? undefined : firstWriteAt + boundMs - clock.now();
+    firstWriteAt === undefined ? undefined : Math.max(0, Math.round(firstWriteAt + boundMs - clock.now()));
   let attempts = 0;
   const boundPassed = (end: string): SkillSeedOutcome =>
     refused(
@@ -533,7 +533,7 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
     try {
       res = await fetchImpl(`${base}/${table}/${encodeURIComponent(id)}`, {
         headers: { Authorization: auth },
-        signal: AbortSignal.timeout(requestMs),
+        signal: AbortSignal.timeout(Math.max(0, Math.round(requestMs))),
       });
     } catch (err) {
       return { ok: false, detail: `the request failed: ${detailOf(err)}` };
@@ -565,7 +565,7 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: auth },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(Math.max(0, Math.round(timeoutMs))),
       });
     } catch (err) {
       if (isTimeout(err)) return { ok: false, detail: onTimeout(timeoutMs), timedOut: true };
