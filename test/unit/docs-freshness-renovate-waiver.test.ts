@@ -580,15 +580,77 @@ describe("release wiring", () => {
     expect(result.stderr).toContain("promote: --allow-no-release-tag requires --with-dependencies");
   });
 
-  test("docs-freshness step gets the PR event author login exactly once", () => {
+  test("docs-freshness step gets the PR author login exactly once: from the PR event, or from the API in the merge queue", () => {
     const workflow = load(readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8")) as {
-      jobs: Record<string, { env?: Record<string, string>; steps: Array<{ run?: string; env?: Record<string, string> }> }>;
+      jobs: Record<string, { env?: Record<string, string>; steps: Array<{ id?: string; if?: string; run?: string; env?: Record<string, string> }> }>;
     };
     const job = workflow.jobs["docs-freshness"];
     const step = job.steps.find((entry) => entry.run === "node scripts/docs-freshness-check.mjs");
-    expect(step?.env?.FLAIR_PR_AUTHOR_LOGIN).toBe("${{ github.event.pull_request.user.login }}");
+    expect(step?.env?.FLAIR_PR_AUTHOR_LOGIN).toBe("${{ github.event.pull_request.user.login || steps.queued-pr.outputs.login }}");
+    // The merge-queue fallback runs only on merge_group, takes the PR number from
+    // the queue ref, and reads the login from the PR itself, not commit metadata.
+    const lookup = job.steps.find((entry) => entry.id === "queued-pr");
+    expect(lookup?.if).toBe("github.event_name == 'merge_group'");
+    expect(lookup?.env?.QUEUE_REF).toBe("${{ github.event.merge_group.head_ref }}");
+    expect(lookup?.run).toContain("gh api \"repos/${GITHUB_REPOSITORY}/pulls/${pr}\" --jq '.user.login'");
+    expect(lookup?.run).not.toContain("head_commit");
+    expect(job.steps.indexOf(lookup!)).toBeLessThan(job.steps.indexOf(step!));
     const bindings = [job.env, ...job.steps.map((entry) => entry.env)].filter((env) => env && Object.hasOwn(env, "FLAIR_PR_AUTHOR_LOGIN"));
     expect(bindings).toHaveLength(1);
     expect(JSON.stringify(job).match(/FLAIR_PR_AUTHOR_LOGIN/g)).toHaveLength(1);
+  });
+
+  // Runs the committed lookup step under bash with a stub `gh`, so the queue-ref
+  // pattern and the empty-login refusal are exercised, not just present.
+  function runQueuedPrLookup(queueRef: string, ghLogin: string) {
+    const workflow = load(readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8")) as {
+      jobs: Record<string, { steps: Array<{ id?: string; run?: string }> }>;
+    };
+    const run = workflow.jobs["docs-freshness"].steps.find((entry) => entry.id === "queued-pr")?.run;
+    if (typeof run !== "string") throw new Error("fixture drift: the queued-pr step is missing");
+    const dir = tempDir("flair-queued-pr-");
+    const argsFile = join(dir, "gh-args");
+    writeFixtureFile(dir, "bin/gh", `#!/bin/sh\nprintf '%s\\n' "$@" > '${argsFile}'\nprintf '%s\\n' '${ghLogin}'\n`);
+    chmodSync(join(dir, "bin", "gh"), 0o755);
+    writeFixtureFile(dir, "step.sh", run);
+    const output = join(dir, "github-output");
+    writeFileSync(output, "");
+    const result = spawnSync("/bin/bash", [join(dir, "step.sh")], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}`, QUEUE_REF: queueRef, GITHUB_REPOSITORY: "tpsdev-ai/flair", GITHUB_OUTPUT: output },
+    });
+    const ghArgs = (() => { try { return readFileSync(argsFile, "utf8").trim().split("\n"); } catch { return null; } })();
+    return { status: result.status, out: `${result.stdout}${result.stderr}`, output: readFileSync(output, "utf8"), ghArgs };
+  }
+
+  test.each([
+    "refs/heads/gh-readonly-queue/main/pr-3070-2d9033d3e9c0a1b2c3d4e5f60718293a4b5c6d7e",
+    "gh-readonly-queue/main/pr-3070-2d9033d3",
+  ])("merge-queue lookup reads the author of the queued PR named by %s", (queueRef) => {
+    const result = runQueuedPrLookup(queueRef, "renovate[bot]");
+    expect(result.status).toBe(0);
+    expect(result.ghArgs).toEqual(["api", "repos/tpsdev-ai/flair/pulls/3070", "--jq", ".user.login"]);
+    expect(result.output).toBe("login=renovate[bot]\n");
+  });
+
+  test.each([
+    "refs/heads/main",
+    "refs/heads/gh-readonly-queue/release/pr-3070-2d9033d3",
+    "refs/heads/gh-readonly-queue/main/pr-3070",
+    "refs/heads/gh-readonly-queue/main/pr-x-2d9033d3",
+    "",
+  ])("merge-queue lookup refuses a ref that names no queued PR on main: %j", (queueRef) => {
+    const result = runQueuedPrLookup(queueRef, "renovate[bot]");
+    expect(result.status).toBe(1);
+    expect(result.out).toContain("does not match gh-readonly-queue/main/pr-<number>-<sha>");
+    expect(result.ghArgs).toBeNull();
+    expect(result.output).toBe("");
+  });
+
+  test("merge-queue lookup refuses an empty author instead of checking without one", () => {
+    const result = runQueuedPrLookup("refs/heads/gh-readonly-queue/main/pr-3070-2d9033d3", "");
+    expect(result.status).toBe(1);
+    expect(result.out).toContain("the API returned no author for queued PR #3070");
+    expect(result.output).toBe("");
   });
 });

@@ -41,6 +41,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # The merge queue on main: both lanes are required checks, so they run on
+  # the queue's merged commit too. Neither job reads pull_request context.
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 # Cancel a pull request's superseded runs. A pull_request run cancels any
@@ -48,7 +52,9 @@ on:
 # therefore cancel the current head (rerun the current head if that happens).
 # A paths-filtered event that starts no run cannot cancel anything. Distinct
 # non-PR runs use their run IDs as groups, so this concurrency block does not
-# cancel or serialize push-to-main runs.
+# cancel or serialize push-to-main runs. A merge-queue (merge_group) run is a
+# non-PR run too, so it gets its own run-ID group: this block neither cancels
+# it nor lets it cancel another run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
