@@ -64,11 +64,12 @@ function initEnv(extra: Record<string, string | undefined> = {}): NodeJS.Process
     "FLAIR_OPS_TARGET",
     "FLAIR_ADMIN_USER",
     "FLAIR_SOCKET_GROUP",
-    "FLAIR_MODELS_DIR",
     "ROOTPATH",
   ]) {
     delete env[key];
   }
+  // The model the CI lanes pre-fetch; else <repo>/models (the harper-lifecycle default).
+  env.FLAIR_MODELS_DIR = process.env.FLAIR_MODELS_DIR ?? join(REPO_ROOT, "models");
   for (const [k, v] of Object.entries(extra)) {
     if (v === undefined) delete env[k];
     else env[k] = v;
