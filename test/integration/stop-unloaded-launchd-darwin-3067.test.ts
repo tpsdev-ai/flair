@@ -33,7 +33,6 @@ const CLI_JS = join(REPO_ROOT, "dist", "cli.js");
 const MODELS_DIR = join(REPO_ROOT, "models");
 const ADMIN_USER = "admin";
 const ADMIN_PASS = "test123";
-const CHILD_DEADLINE_MS = 120_000;
 
 const live: Array<{ home: string; dataDir: string; label: string; plistPath: string; pid?: number; populate?: HarperInstance; direct?: ChildProcess }> = [];
 
@@ -106,13 +105,13 @@ async function waitForHealth(url: string, timeoutMs: number): Promise<{ ok: bool
   throw new Error(`no response from ${url} within ${timeoutMs}ms (${last})`);
 }
 
-function runCli(home: string, args: string[], timeoutMs: number): { status: number | null; signal: string | null; stdout: string; stderr: string } {
+function runCli(home: string, args: string[]): { status: number | null; signal: string | null; stdout: string; stderr: string } {
   requireCliBuild();
   const res = spawnSync(nodeBin(), [CLI_JS, ...args], {
     cwd: REPO_ROOT,
     env: cliEnv(home),
     encoding: "utf8",
-    timeout: timeoutMs,
+    timeout: 120_000,
     killSignal: "SIGKILL",
   });
   return { status: res.status, signal: res.signal, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
@@ -159,7 +158,7 @@ test.skipIf(!isDarwin)(
     writeFileSync(passFile, `${ADMIN_PASS}\n`, { mode: 0o600 });
     chmodSync(passFile, 0o600);
 
-    const init = runCli(home, ["init", "--port", String(configPort), "--no-mcp", "--skip-soul"], CHILD_DEADLINE_MS);
+    const init = runCli(home, ["init", "--port", String(configPort), "--no-mcp", "--skip-soul"]);
     expect(init.signal, `flair init overran:\n${init.stdout}\n${init.stderr}`).toBeNull();
     expect(init.status, `flair init failed:\n${init.stdout}\n${init.stderr}`).toBe(0);
 
@@ -176,7 +175,7 @@ test.skipIf(!isDarwin)(
     expect(recordedPid, "flair init's direct process did not record a pid").not.toBeNull();
     expect(isAlive(recordedPid!), "the recorded pid is not alive before stop").toBe(true);
 
-    const stop = runCli(home, ["stop", "--port", String(configPort)], CHILD_DEADLINE_MS);
+    const stop = runCli(home, ["stop", "--port", String(configPort)]);
     expect(stop.signal, `flair stop overran:\n${stop.stdout}\n${stop.stderr}`).toBeNull();
     expect(stop.status, `flair stop failed:\n${stop.stdout}\n${stop.stderr}`).toBe(0);
     expect(stop.stdout).toContain(`stopped the directly started Flair (pid ${recordedPid})`);
