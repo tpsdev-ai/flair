@@ -21,4 +21,4 @@
   last write's outcome is unresolved, or a store with no lock — writes
   nothing for that row and reports it: maintenance counts it in `skipped`,
   and the usage writer logs the skip. A skipped usage contribution is not
-  credited, so the memory's count can undercount by that contribution.
+  credited, so the memory's count can undercount by that contribution. ([#2773](https://github.com/tpsdev-ai/flair/pull/2773), [#2891](https://github.com/tpsdev-ai/flair/pull/2891))

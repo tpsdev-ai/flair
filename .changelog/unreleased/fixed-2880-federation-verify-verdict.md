@@ -4,4 +4,4 @@
   error, and a `--peer` name that matches no listed peer use the
   `verification-failed` kind and a non-zero exit code. A peer that was verified
   missing the memory remains `diverged`. When a failed verification leaves an
-  unknown-outcome cleanup request, its summary gives the count.
+  unknown-outcome cleanup request, its summary gives the count. ([#2915](https://github.com/tpsdev-ai/flair/pull/2915))

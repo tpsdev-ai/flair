@@ -30,4 +30,4 @@
   An HTTP error response whose body mentions `fetch failed` or `unable to
   connect` is no longer treated as a failed connection: the CLI no longer
   retries it on the port in `~/.flair/config.yaml` or reports the instance as
-  unreachable.
+  unreachable. ([#2772](https://github.com/tpsdev-ai/flair/pull/2772))
