@@ -22,6 +22,10 @@ import { confirmedPurgeIds } from "../lib/memory-purge-response.js";
 import { resolveHome } from "../lib/home.js";
 import { ALL_TIERS } from "../lib/memory-integrity.js";
 import {
+  MEMORY_PROVIDER_RETRY_DELAY_MS,
+  isProviderTimeoutRefusal,
+} from "../lib/memory-provider-timeout.js";
+import {
   normalizeOrigin,
   buildCheckpoint,
   buildOpsPost,
@@ -128,6 +132,11 @@ export function categorizeForHygiene(row: HygieneRow, opts: HygieneOptions): Hyg
 export function register(program: Command): void {
   // ─── flair memory ──────────────────────────────────────────────────────────
   const ENTITIES_OPTION_DESCRIPTION = cli.ENTITIES_OPTION_DESCRIPTION;
+  // A write refused with 503 memory_provider_timeout wrote nothing (the
+  // write-lock contract), so `memory add` replays it with the same id. The
+  // bounded attempt count keeps a slow provider from turning one command into
+  // an unbounded wait.
+  const MEMORY_ADD_MAX_ATTEMPTS = 3;
 
   const memory = program.command("memory").description("Manage agent memories");
   addSharedCredentialOptions(
@@ -183,12 +192,27 @@ export function register(program: Command): void {
         const entities = parseEntitiesOptionOrExit(String(opts.entities));
         if (entities.length > 0) body.entities = entities;
       }
-      const out = await api("PUT", `/Memory/${encodeRecordId(memId)}`, body, {
-        agentId,
-        agentIdSource: source,
-        explicitAdminPass: opts.adminPass,
-        adminUser: opts.adminUser,
-      });
+      let out: any;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          out = await api("PUT", `/Memory/${encodeRecordId(memId)}`, body, {
+            agentId,
+            agentIdSource: source,
+            explicitAdminPass: opts.adminPass,
+            adminUser: opts.adminUser,
+          });
+          break;
+        } catch (err) {
+          if (!isProviderTimeoutRefusal(err)) throw err;
+          if (attempt >= MEMORY_ADD_MAX_ATTEMPTS) {
+            console.error(
+              `error: memory add: the embedding provider timed out (503 memory_provider_timeout) on all ${attempt} attempts; nothing was written — retry when the provider is responsive`,
+            );
+            process.exit(1);
+          }
+          await new Promise((resolve) => setTimeout(resolve, MEMORY_PROVIDER_RETRY_DELAY_MS * attempt));
+        }
+      }
       console.log(JSON.stringify(out, null, 2));
     });
   // ─── flair memory write-task-summary ────────────────────────────────────────
