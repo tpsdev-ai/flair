@@ -15,8 +15,9 @@
 // unit inventory (scripts/check-darwin-gated-tests.mjs skips test/integration*).
 //
 // SAFETY — HOME is a throwaway directory and the CLI is a spawned
-// `node dist/cli.js`, so Node honours HOME before start and every plist, data
-// dir and label resolves inside the fixture. Teardown signals the recorded pid
+// `node dist/cli.js`, so Node honours HOME before start. The plist and the data
+// directory are under the scratch HOME; the launchd label is derived from that
+// data-dir path and names a job in the user's launchd session. Teardown signals the recorded pid
 // if it is still alive (best effort; it does not confirm the exit) and removes
 // that one directory; it never signals by pattern.
 import { afterEach, expect, test } from "bun:test";
@@ -180,7 +181,6 @@ test.skipIf(!isDarwin)(
 
     const recordedPid = readPidFile(dataDir);
     expect(recordedPid, "flair init's direct process did not record a pid").not.toBeNull();
-    // Keep the pid for teardown, so afterEach can still signal it if hdb.pid is gone.
     entry.pid = recordedPid!;
     expect(isAlive(recordedPid!), "the recorded pid is not alive before stop").toBe(true);
 
