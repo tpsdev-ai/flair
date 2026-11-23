@@ -247,7 +247,7 @@ registrations; its key field is the fingerprint, not the key.
 | POST | `/FeedMemories` | Ed25519 | Ingest path; `agentId` stamped from the caller (`stamp-strict`). |
 | POST | `/MemoryArchive` | Ed25519 | Basement / restore. Accepts `{ id, action: "basement" \| "restore" }`; a successful ordinary-memory operation returns HTTP 200 with Memory.put()'s write receipt, including `id`, `written`, `deduplicated` and any returned visibility or redaction fields. Read the memory to inspect its archive state. Read/write refusals retain their HTTP status and body; a persisted-row change detected by the archive's re-read returns `409 memory_changed`. |
 | POST | `/MemoryMaintenance` | Ed25519 or admin | Hygiene: expire ephemeral, archive old standard. An agent's own run is scoped to the caller; an admin run with no `agentId` is fleet-wide, and one that names an `agentId` is scoped to that agent. Fleet-wide maintenance expires and archives eligible rows of every agent. A supplied admin `agentId` that is not a conforming string (the agent-id rule `^[a-zA-Z0-9_-]{1,64}$` included) is refused 400 with the rule and a `remedy`: run that agent's own authenticated non-admin maintenance, which reaches its rows, when the stored id can authenticate (the signed TPS-Ed25519 header cannot carry a colon or whitespace); for an id the header cannot represent, run fleet-wide, which reaches that agent's rows and expires or archives every other agent's eligible rows. |
-| POST | `/MemoryReindex` | Admin Basic / Ed25519 admin | Embedding / HNSW rebuild. |
+| POST | `/MemoryReindex` | Admin Basic / Ed25519 admin | Secondary-index (`agentId`) heal via primary-store re-PUT (no embedding regeneration). |
 | POST | `/ConsolidateMemories` | Ed25519 | Dedup / consolidate. |
 | POST | `/ReflectMemories` | Ed25519 | REM distill → MemoryCandidate. |
 | POST | `/MemoryDedupStats` | Admin Basic / Ed25519 admin | Dedup diagnostics. Fleet-wide sweep; `allowCreate` is `allowAdmin`. |
@@ -315,7 +315,7 @@ The remedy is `flair upgrade` (the adapter), not a server upgrade alone.
 | GET / POST / PUT | `/WorkspaceState` | Ed25519 | Owner-only. POST stamps `agentId`; PUT rejects a mismatch. |
 | GET | `/WorkspaceLatest/<agentId>` | Ed25519 | Latest workspace row for the caller. |
 | GET / POST / PUT / PATCH | `/OrgEvent` | Ed25519 / Admin Basic | Any verified agent reads every event. `authorId` for a non-admin agent: POST sets it from the caller, whatever the body says; PUT requires the body to name the caller (403 otherwise, including when it is absent); PATCH leaves the stored value unless the body names one, and refuses a change (403). An administrator (an admin agent key or credentialed Basic admin) may supply `authorId` on any verb; POST defaults it to the administrator's own id. The server assigns an OrgEvent's `createdAt` on create. After the earlier checks, a `createdAt` check reads the stored row under each event's id. A stored row's `createdAt` is authoritative whatever its value (an empty string included): an update that omits it keeps it, and one that names a different value is refused with 409 `created_at_immutable`. An event that reaches the check and is not an object, or whose id is not a non-empty string or a non-empty array of strings, is refused with 400 `invalid_event_id` before any write, as is an administrator's PATCH to the collection (for a non-admin's collection PUT, PATCH or DELETE, if reached, the table guard returns the 403 collection refusal; existing DELETE middleware may refuse earlier). Before validation, an addressed POST binds a missing or `null` body id to the addressed id, and a string or number body id when its text matches the address; any other id type is left unchanged by this step. At the root collection, POST generates an id when the body's id is missing, `null` or empty. At POST id validation, at the root collection or an addressed path whose body id was not bound, a remaining id that is not a non-empty string or a non-empty array of strings receives 400 `invalid_event_id`. |
-| GET / POST | `/OrgEventCatchup/<agentId>` | Ed25519 | Catch-up feed for the caller. `since` is optional (defaults to the per-agent watermark). GET pages; POST acks `{ position }` (advance-on-ack). |
+| GET / POST | `/OrgEventCatchup/<agentId>` | Ed25519 | Catch-up feed for the caller. `after` defaults to the per-agent watermark; `since` is an optional ISO `createdAt` floor. GET pages; POST acks `{ position }` (advance-on-ack). |
 | GET / POST | `/AgentReadPosition/<agentId>` | Ed25519 | Owner-only watermark (`stream`, default `org-event`). Foundation for light-comms catch-up. |
 | POST | `/OrgEventMaintenance` | Admin Basic / Ed25519 admin | Expire / sweep org events. |
 | POST | `/AttentionQuery` | Ed25519 | Cross-table “what touches entity E”. Entity strings: [docs/entity-vocabulary.md](entity-vocabulary.md). |
@@ -445,7 +445,7 @@ client-writable even if a client sends them. Full comments live in
 | `activityUpdatedAt` | BigInt | When activity/task were asserted |
 | `flairVersion` | String | Serving `@tpsdev-ai/flair` version. Null when redacted or never stamped — see below. |
 | `harperVersion` | String | Serving Harper version. Same redaction. Also null when the server could not resolve Harper's version. |
-| `originatorInstanceId` | String | Local instance on create; preserved on update; verified sender on receipt. |
+| `originatorInstanceId` | String | Local instance id on local create when resolvable, otherwise null; stored value on local update; verified sender on federation receipt. |
 | `receivedAt` | BigInt | Local receipt time in Unix ms; stamped on federation receipt. |
 
 ### Presence for API consumers
@@ -481,7 +481,7 @@ A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `last
 | `agentId` | String! | Owner; no-forge |
 | `content` | String! | Embedded text (non-skill) |
 | `contentHash` | String | Near-duplicate key |
-| `embeddedContentHash` | String | Hash of the text embedded for this row. |
+| `embeddedContentHash` | String | Stored embedding-text hash; may be absent, null, or retained from an earlier vector. |
 | `trigger` | String | Skill “when to use”; skill rows embed from this |
 | `visibility` | String | `shared` \| `private` (durability default if omitted) |
 | `embedding` | [Float] | HNSW, M:16 |
@@ -574,7 +574,7 @@ agents.
 |-------|------|-------|
 | `id` | ID PK | Agent id |
 | `name` | String! | |
-| `role` / `type` | String | Legacy; `role` reconciles with `admin` |
+| `role` / `type` | String | Role / legacy type; see [admin authority](auth.md#jit-provisioning) |
 | `kind` | String | `human` \| `agent` |
 | `displayName` | String | |
 | `status` | String | `active` \| `deactivated` |

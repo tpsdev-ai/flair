@@ -53,8 +53,8 @@ Rules that apply across every type:
 
 ## The validator
 
-`resources/entity-vocab.ts` validates `entities` on Memory, WorkspaceState, and
-OrgEvent POST/PUT.
+`resources/entity-vocab.ts` validates `entities` on Memory and WorkspaceState
+POST/PUT, and on single-record OrgEvent POST/PUT.
 
 ```ts
 import { isValidEntity, validateEntities, invalidEntitiesResponse } from "./entity-vocab.js";

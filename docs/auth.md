@@ -244,7 +244,7 @@ For organizations using an Identity Provider (IdP), XAA maps IdP identities to F
 1. User authenticates with the organization's IdP (Google, Azure AD, Okta)
 2. IdP issues an ID token (JWT) with user identity and group claims
 3. Client sends the ID token to Flair's token endpoint using the `jwt-bearer` grant type
-4. Flair validates the JWT signature, checks issuer/domain, maps to a Principal, and issues an access token
+4. Flair verifies the JWT signature and issuer, applies any configured domain restriction, maps to a Principal, and issues an access token.
 
 A `jti` claim, when present, must be a nonempty string, and the assertion must then carry an `exp` no more than 24 hours (plus 30 seconds of clock skew) ahead. Flair records the `jti` before it issues tokens, and refuses the assertion if it is presented to this Harper instance again.
 
@@ -304,7 +304,7 @@ flair principal promote <principal-id> <tier>
 
 `<tier>` is one of `endorsed`, `corroborated`, or `unverified`. There is no `verified` tier and no `admin` tier. The command writes `defaultTrustTier` and does not write `role` or `admin`, so it cannot grant admin.
 
-Admin authority is `role: admin` on the Agent record. Agent resource writes reconcile `admin: true` to `role: admin`. The CLI that writes both is:
+Admin authority is `role: admin` on the Agent record; the auth gate does not read the `admin` mirror. Administrator POST, PUT and ordinary PATCH writes through the Agent resource reconcile `admin: true` to `role: admin`; guarded `flairPrincipalWriteBack`/`flairStampHome` PATCH writes do not. Non-admin PATCH cannot change admin status. The CLI that writes both is:
 
 ```bash
 flair principal add <principal-id> --admin

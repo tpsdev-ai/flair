@@ -664,12 +664,13 @@ and read `agentId` and `scope`.
 **Revoke:** `flair principal disable bob-the-bot` on the Flair host; its next
 request gets `{"error":"principal_deactivated"}`.
 
-`flair agent remove bob-the-bot`, also run on the Flair host, asks you to type
-`yes` (or takes `--force`), then:
+`flair agent remove bob-the-bot`, also run on the Flair host, scans the agent's
+`Memory` and `Soul` rows, asks you to type `yes` (or takes `--force`), then:
 
-- scans the agent's `Memory` and `Soul` rows, confirms the Memory purge receipt,
-  checks Soul delete responses, and confirms the scanned Soul rows are gone
-  before deleting the Agent record;
+- purges scanned `Memory` rows when present and confirms the purge receipt,
+  deletes scanned `Soul` rows when present and checks each delete response,
+  then re-scans `Soul` to confirm no rows for the agent remain before deleting
+  the Agent record;
 - sends a delete for the `Agent` record, and stops with an error if the
   operations API rejects it;
 - unless you pass `--keep-keys`, attempts to delete the agent's key files
