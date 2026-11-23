@@ -70,6 +70,10 @@ case "$verb" in
     if [ -f "$LAUNCHCTL_STATE/list-count" ]; then n=$(cat "$LAUNCHCTL_STATE/list-count"); fi
     n=$((n+1))
     printf '%s' "$n" > "$LAUNCHCTL_STATE/list-count"
+    if [ -f "$LAUNCHCTL_STATE/later-fail" ] && [ "$n" -ge 2 ]; then
+      echo "Bootstrap failed: 5: Input/output error" >&2
+      exit 5
+    fi
     if [ -f "$LAUNCHCTL_STATE/later-loaded" ] && [ "$n" -ge 2 ]; then
       printf '{\\n\\t"Label" = "%s";\\n\\t"PID" = %s;\\n};\\n' "$2" "$(cat "$LAUNCHCTL_STATE/pid")"
       exit 0
@@ -97,10 +101,12 @@ exit 0
 }
 
 /** A directly started instance: serves Flair's /Health, records its pid, dies on SIGTERM.
- *  With `successor: true`, SIGTERM closes its listener and keeps the process alive
- *  until a successor it spawns answers on the same port, so the successor is
- *  already serving when the recorded pid exits. */
-async function startFlairStub(f: Fixture, opts: { successor?: boolean } = {}): Promise<number> {
+ *  With `successor: "serving"`, SIGTERM closes its listener and keeps the process
+ *  alive until a successor it spawns answers /Health on the same port, so that
+ *  successor is serving when the recorded pid exits. With `successor: "silent"`
+ *  the successor accepts TCP but never answers /Health. The stub exits once the
+ *  successor reports ready, or after 5 seconds whether or not it did. */
+async function startFlairStub(f: Fixture, opts: { successor?: "serving" | "silent" } = {}): Promise<number> {
   const script = join(f.home, "flair-stub.cjs");
   writeFileSync(script, `
 const fs = require('node:fs');
@@ -142,7 +148,20 @@ setInterval(() => {}, 1000);
   let successorScript: string | undefined;
   if (opts.successor) {
     successorScript = join(f.home, "successor-stub.cjs");
-    writeFileSync(successorScript, `
+    writeFileSync(successorScript, opts.successor === "silent" ? `
+const fs = require('node:fs');
+const net = require('node:net');
+function start() {
+  const server = net.createServer(() => {});
+  server.on('error', () => setTimeout(start, 25));
+  server.listen(Number(process.env.HTTP_PORT), '127.0.0.1', () => {
+    fs.writeFileSync(process.env.SUCCESSOR_PID_FILE, String(process.pid));
+    fs.writeFileSync(process.env.SUCCESSOR_READY_FILE, '1');
+  });
+}
+start();
+setInterval(() => {}, 1000);
+` : `
 const fs = require('node:fs');
 const http = require('node:http');
 const body = fs.readFileSync(process.env.HEALTH_BODY_FILE, 'utf8');
@@ -333,11 +352,38 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
 
   test("a successor serving /Health after the recorded pid exits is not reported as stopped", async () => {
     const f = await makeFixture();
-    const pid = await startFlairStub(f, { successor: true });
+    const pid = await startFlairStub(f, { successor: "serving" });
     const result = await runStop(f);
     expect(result.code).toBe(1);
     expect(result.out).toContain(`pid ${pid} exited, but Flair is not confirmed down`);
     expect(result.out).toContain("the instance reads DISAGREEMENT");
+    expect(result.out).not.toContain("stopped the directly started Flair");
+    expect(result.out).toContain("flair doctor");
+  }, 30_000);
+
+  test("a failed launchctl read after the recorded pid exits is not reported as stopped", async () => {
+    const f = await makeFixture();
+    const pid = await startFlairStub(f);
+    // The first `launchctl list` answers 113; the re-check after the recorded
+    // pid exits fails, so the job's state is unknown rather than not-loaded.
+    writeFileSync(join(f.state, "later-fail"), "1");
+    const result = await runStop(f);
+    expect(result.code).toBe(1);
+    expect(result.out).toContain(`pid ${pid} exited, but Flair is not confirmed down`);
+    expect(result.out).toContain("now reads unknown");
+    expect(result.out).toContain("the instance reads NOT_RUNNING");
+    expect(result.out).not.toContain("stopped the directly started Flair");
+    expect(result.out).toContain("flair doctor");
+  }, 30_000);
+
+  test("a successor that accepts TCP but answers no HTTP after the recorded pid exits is not reported as stopped", async () => {
+    const f = await makeFixture();
+    const pid = await startFlairStub(f, { successor: "silent" });
+    const result = await runStop(f);
+    expect(result.code).toBe(1);
+    expect(result.out).toContain(`pid ${pid} exited, but Flair is not confirmed down`);
+    expect(result.out).toContain("now reads not-loaded");
+    expect(result.out).toContain("the instance reads UNKNOWN");
     expect(result.out).not.toContain("stopped the directly started Flair");
     expect(result.out).toContain("flair doctor");
   }, 30_000);
