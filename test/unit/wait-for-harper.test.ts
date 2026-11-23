@@ -263,7 +263,7 @@ describe("wait-for-harper.mjs", () => {
   );
 
   test(
-    "(c) when /Health never answers, polling stops at the budget and the diagnostic prints the timeout line and logs",
+    "(c) when /Health never answers, polling stops at the budget; the timeout line and logs follow",
     async () => {
       // Polling stops at the 2s budget; the failure diagnostic then takes at
       // most ten seconds of container logs plus one per-request cap.

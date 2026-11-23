@@ -158,7 +158,7 @@ function request(url, headers, timeoutMs) {
     const send = target.protocol === "https:" ? httpsRequest : httpRequest;
     const req = send(target, { method: "GET", headers, agent: false }, (response) => {
       // Capture the status and headers, then close the response: a body that
-      // never ends must not keep this process alive past the budget.
+      // never ends must not keep this process alive past the request's bound.
       const result = { status: response.statusCode ?? 0, headers: response.headers };
       response.destroy();
       settle(result);
