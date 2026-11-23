@@ -540,10 +540,10 @@ Reconcile to one space with: flair reembed --stale-only
 Fix with:
 
 ```bash
-FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-$(cat ~/.flair/admin-pass)}" flair reembed # re-embed fetched rows; needs each agent's local key
-FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-$(cat ~/.flair/admin-pass)}" flair reembed --stale-only
-FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-$(cat ~/.flair/admin-pass)}" flair reembed --agent <id> # scope to one agent
-FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-$(cat ~/.flair/admin-pass)}" flair reembed --agent <id> --dry-run # show the count without writing
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair reembed # re-embed fetched rows; needs each agent's local key
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair reembed --stale-only
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair reembed --agent <id> # scope to one agent
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair reembed --agent <id> --dry-run # show the count without writing
 ```
 
 The CLI waits for the batched re-embed loop; the server stays available. This is
@@ -580,7 +580,7 @@ npm install -g @tpsdev-ai/flair@<previous-version>
 flair restart
 
 # If data looks wrong, keep the pre-upgrade archive and its .sha256 sidecar together
-FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-$(cat ~/.flair/admin-pass)}" flair restore ~/flair-backup-<date>.json
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair restore ~/flair-backup-<date>.json
 ```
 
 A legacy logical backup without a `.sha256` sidecar needs [local approval](standalone-local.md#restoring-an-archive-written-before-digest-sidecars) before restore.
@@ -704,7 +704,7 @@ On macOS, continue only if `flair stop` succeeds. Move this instance's plist out
 
 ```bash
 # 3. Restore before starting the previous engine against the data
-FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-$(cat ~/.flair/admin-pass)}" flair snapshot restore --data-dir ~/.flair/data --port <port> ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair snapshot restore --data-dir ~/.flair/data --port <port> ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz
 
 # 4. Verify
 flair status
