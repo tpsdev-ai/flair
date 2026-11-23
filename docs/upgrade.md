@@ -713,7 +713,7 @@ flair doctor
 
 `flair snapshot restore` confirms before replacing the data directory unless you pass `--yes`.
 
-On macOS, run `flair init` after verification to recreate this instance's launchd plist, then `flair restart` to load it.
+On macOS, after verification, run `flair init` with the `--port` (and `--data-dir`, if it is not the default) this instance uses, to recreate its launchd plist, then `flair restart` to load it. A bare `flair init` uses the default port.
 
 The only full rollback is restoring the pre-upgrade physical data-directory snapshot.
 `flair backup`/`restore` logically exports/imports only Agent, Memory and Soul rows

@@ -105,7 +105,7 @@ flair restart  # retry model initialization
 FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair reembed --stale-only # regenerate stale embeddings across agents
 ```
 
-An agent without a local signing key is skipped; check the command output for skipped agents.
+An agent without a local signing key is skipped; check the command output for skipped agents. One run reads at most 100,000 memories and does not page past them, so on a larger store some stale rows are not repaired ([#3086](https://github.com/tpsdev-ai/flair/issues/3086)).
 
 If `flair doctor` shows a native addon error:
 ```bash
