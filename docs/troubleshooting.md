@@ -94,7 +94,7 @@ The `ci-models` release above is a first-party mirror of the same file (public, 
 
 ### "Embeddings hash-512d:N"
 
-**Symptoms:** `flair status` lists `hash-512d:N` under `Embeddings` (and, when hash-fallback rows reach 10%, an unfiltered `flair status` shows the server's health warning suggesting `flair reembed --stale-only --dry-run`). Search returns poor results.
+**Symptoms:** `flair status` lists `hash-512d:N` under `Embeddings`. Search returns poor results.
 
 **Cause:** The nomic-embed-text model failed to load. Usually a missing native binary or corrupted model file.
 

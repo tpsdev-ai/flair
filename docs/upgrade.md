@@ -704,8 +704,7 @@ On macOS, continue only if `flair stop` succeeds. Move this instance's plist out
 
 ```bash
 # 3. Restore before starting the previous engine against the data
-#    (pass this instance's --data-dir and --port)
-FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-$(cat ~/.flair/admin-pass)}" flair snapshot restore --data-dir <data-dir> --port <port> ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-$(cat ~/.flair/admin-pass)}" flair snapshot restore --data-dir ~/.flair/data --port <port> ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz
 
 # 4. Verify
 flair status
@@ -714,7 +713,9 @@ flair doctor
 
 `flair snapshot restore` confirms before replacing the data directory unless you pass `--yes`.
 
-On macOS, after verification, run `flair init` with the `--port` (and `--data-dir`, if it is not the default) this instance uses, to recreate its launchd plist, then `flair restart` to load it.
+This downgrade procedure covers the default `~/.flair/data` instance only. Older CLI releases can ignore `--data-dir` when the snapshot restore stops and restarts Flair, so it does not cover a custom data directory.
+
+On macOS, after verification, run `flair init` with the `--port` this instance uses, to recreate its launchd plist, then `flair restart` to load it.
 
 The only full rollback is restoring the pre-upgrade physical data-directory snapshot.
 `flair backup`/`restore` logically exports/imports only Agent, Memory and Soul rows
