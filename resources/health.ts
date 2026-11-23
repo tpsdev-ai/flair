@@ -209,6 +209,10 @@ export class HealthDetail extends Resource {
     // corpus is one space and still outstanding against getModelId().
     let mixedEmbeddingSpaces = false;
     let memoryScanOk = false;
+    // Set only when the Memory scan finished without throwing. A failed or
+    // partial scan leaves it false, and the unregistered-author list is then
+    // reported unavailable (null); no other field reads this flag.
+    let memoryScanComplete = false;
     let memoryModelCounts: Record<string, number> = {};
 
     // flair#1326: same search-ready signal as public /Health. HealthDetail
@@ -341,6 +345,7 @@ export class HealthDetail extends Resource {
       memoryScanOk = true;
       memoryModelCounts = modelCounts;
       if (distinctSpaces.size > 1) mixedEmbeddingSpaces = true;
+      memoryScanComplete = true;
     } catch { stats.memories = null; }
 
     // ── Agent stats ──
@@ -363,14 +368,22 @@ export class HealthDetail extends Resource {
       const blank = (id: string): AgentRow => ({
         id, memoryCount: 0, hashFallback: 0, writes24h: 0, lastWriteAt: null, usageCount: 0,
       });
+      // The count, the names and the table all come from one map keyed by
+      // Agent id, so the admin total, names and row set describe the same
+      // agents. A Memory row whose author has no Agent record — the
+      // operator's `skill:using-flair` seed when the operator id was never
+      // registered — is kept in a separate list, never added to `perAgent`
+      // as if it were an agent (flair#3051).
       const perAgentMap = new Map<string, AgentRow>();
       for (const a of agents) {
         if (a.id) perAgentMap.set(a.id, blank(a.id));
       }
+      const unregisteredMap = new Map<string, AgentRow>();
       const cutoff24h = nowMs - 24 * 3600 * 1000;
       for (const m of memoriesList) {
         if (!m.agentId) continue;
-        const row = perAgentMap.get(m.agentId) ?? blank(m.agentId);
+        const known = perAgentMap.get(m.agentId);
+        const row = known ?? unregisteredMap.get(m.agentId) ?? blank(m.agentId);
         row.memoryCount++;
         row.usageCount += (m.usageCount ?? 0);
         if (!m.embeddingModel || m.embeddingModel === "hash-512d") row.hashFallback++;
@@ -381,16 +394,31 @@ export class HealthDetail extends Resource {
             row.lastWriteAt = m.createdAt;
           }
         }
-        perAgentMap.set(m.agentId, row);
+        if (known) perAgentMap.set(m.agentId, row);
+        else unregisteredMap.set(m.agentId, row);
       }
+      const agentIds = Array.from(perAgentMap.keys());
       const perAgentFull = Array.from(perAgentMap.values()).sort((a, b) => b.memoryCount - a.memoryCount);
       const perAgent = isAdmin
         ? perAgentFull
         : perAgentFull.filter((r) => r.id === callerAgent || r.memoryCount > 0);
+      const unregisteredMemoryAuthors = Array.from(unregisteredMap.values())
+        .sort((a, b) => b.memoryCount - a.memoryCount)
+        .map((r) => ({ id: r.id, memoryCount: r.memoryCount }));
       stats.agents = {
-        count: agents.length,
-        names: isAdmin ? agents.map((a: any) => a.id).filter(Boolean) : undefined,
+        count: perAgentMap.size,
+        names: isAdmin ? agentIds : undefined,
         perAgent,
+        // A non-admin gets the de-duplicated Agent count — one per distinct
+        // truthy Agent id, so a duplicate collapses and an id-less row is
+        // not counted — and only the perAgent rows it may see: its own row
+        // and rows with memories. unregisteredMemoryAuthors is undefined for
+        // a non-admin. An admin gets that list only after a complete Memory
+        // scan; null means the scan did not finish, so the answer is unknown
+        // rather than empty or partial.
+        unregisteredMemoryAuthors: isAdmin
+          ? (memoryScanComplete ? unregisteredMemoryAuthors : null)
+          : undefined,
       };
     } catch { stats.agents = null; }
 
