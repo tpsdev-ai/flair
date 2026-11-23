@@ -371,8 +371,9 @@ jobs:
     # network error is "cannot confirm live", never "assume it exists". Runs on
     # release/v* PRs only; needs just node + npm, so no install step.
     #
-    # Merge queue: a merge_group event has no head_ref, so this job is skipped
-    # there (check-run conclusion `skipped`). A skipped job satisfies its
+    # Merge queue: the top-level github.head_ref is empty on merge_group (the
+    # author lookup reads github.event.merge_group.head_ref instead), so this
+    # job is skipped there (check-run conclusion `skipped`). A skipped job satisfies its
     # required check; #3065, a non-release PR, merged with this check skipped.
     # That is deliberate: a release PR ran it on its own head to enter
     # the queue, and the tag-triggered release-publish.yml runs the same script

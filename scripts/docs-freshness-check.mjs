@@ -361,6 +361,32 @@ defineCheck("changelog-unreleased", null, () => {
     });
   }
 
+  // FLAIR_DOCS_BASE_SHA is the merge-group base CI supplies (see the per-change
+  // rule below). Unset or empty means no explicit base, its value on other
+  // events. Any other value must be a readable ancestor of HEAD. It is checked
+  // here, before any rule below can return a pass, and fails the check if not.
+  const suppliedBase = process.env.FLAIR_DOCS_BASE_SHA;
+  const explicitBase = (suppliedBase ?? "").trim();
+  if (suppliedBase !== undefined && suppliedBase !== "") {
+    let ancestor = false;
+    if (explicitBase) {
+      try {
+        execFileSync("git", ["merge-base", "--is-ancestor", explicitBase, "HEAD"], { cwd: ROOT, stdio: "ignore" });
+        ancestor = true;
+      } catch {
+        ancestor = false;
+      }
+    }
+    if (!ancestor) {
+      return [...failures, {
+        file: `${FRAGMENT_DIR_REL}/`, line: 1,
+        msg: explicitBase
+          ? `FLAIR_DOCS_BASE_SHA is ${explicitBase}, which is not a readable ancestor of HEAD, so the per-change fragment rule could not check this change. CI sets it from merge_group.base_sha; check that the checkout fetched full history (fetch-depth: 0), then rerun.`
+          : `FLAIR_DOCS_BASE_SHA is set but blank (${JSON.stringify(suppliedBase)}), so the per-change fragment rule has no base for this change. CI sets it from merge_group.base_sha and leaves it empty on other events; set a commit sha or leave it empty.`,
+      }];
+    }
+  }
+
   // How much work has landed since the tag selected by git describe?
   let commitsSinceTag = null;
   let excludedRenovateCommits = 0;
@@ -443,9 +469,8 @@ defineCheck("changelog-unreleased", null, () => {
   // group's parent commit (merge_group.base_sha) as FLAIR_DOCS_BASE_SHA. With it
   // as the base, the changed-path analysis, the Renovate waiver and the
   // per-change fragment rule below read only the queued PR's changes, the PR
-  // whose author CI reads. The since-tag count above still reads all history
-  // since the last release tag.
-  const explicitBase = (process.env.FLAIR_DOCS_BASE_SHA ?? "").trim();
+  // whose author CI reads. The value was validated above. The since-tag count
+  // above still reads all history since the last release tag.
   const baseRef = explicitBase
     ? explicitBase
     : process.env.GITHUB_BASE_REF
@@ -463,24 +488,6 @@ defineCheck("changelog-unreleased", null, () => {
     }
   } catch {
     // merge-base or diff unavailable — leave thisChangeShips true (fail-closed).
-  }
-  // An explicit base must be a readable ancestor of HEAD. Otherwise the
-  // per-change rule cannot run against the queued PR's changes, and with a
-  // fragment already staged no other rule would report that, so fail here.
-  if (explicitBase) {
-    let ancestor = false;
-    try {
-      execFileSync("git", ["merge-base", "--is-ancestor", explicitBase, "HEAD"], { cwd: ROOT, stdio: "ignore" });
-      ancestor = true;
-    } catch {
-      ancestor = false;
-    }
-    if (!ancestor || base === "") {
-      return [...failures, {
-        file: `${FRAGMENT_DIR_REL}/`, line: 1,
-        msg: `FLAIR_DOCS_BASE_SHA is ${explicitBase}, which is not a readable ancestor of HEAD, so the per-change fragment rule could not check this change. CI sets it from merge_group.base_sha; check that the checkout fetched full history (fetch-depth: 0), then rerun.`,
-      }];
-    }
   }
 
   // ── Renovate dependency waiver (flair#2872) ──────────────────────────────────

@@ -2,11 +2,12 @@
 // checks. GitHub runs a merge-queue group as a `merge_group` event on a
 // gh-readonly-queue/main/* commit, and the queue waits for the required checks
 // to report there. These tests evaluate the committed workflows for that event
-// (test/helpers/gha-expression.ts). They fail when a trigger is removed, a
-// required job or a job it needs is skipped or checks out a ref of its own, a
-// Node matrix loses a leg, an aggregate gate stops failing on a failed need,
-// two queue runs share a concurrency group, or a base binding loses its
-// merge-group value.
+// (test/helpers/gha-expression.ts). They fail when a trigger is removed; when
+// a required job or a job it needs is skipped (except First-publish preflight,
+// which is skipped on merge_group by design and tested as that exception) or
+// checks out a ref of its own; when a Node matrix loses a leg; when an
+// aggregate gate stops failing on a failed need; when two queue runs share a
+// concurrency group; or when a base binding loses its merge-group value.
 
 import { describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";

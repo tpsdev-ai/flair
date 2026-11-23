@@ -581,8 +581,9 @@ describe("merge-queue commit (no GITHUB_BASE_REF)", () => {
   });
 
   // A merge group can sit on top of a PR ahead of it in the queue. With the
-  // group's parent commit as the base, the gate checks only the queued PR's own
-  // changes, the PR whose author the workflow reads.
+  // group's parent commit as the base, the gate's per-change fragment rule and
+  // changed-path analysis read only the queued PR's own changes, the PR whose
+  // author the workflow reads.
   function stackedGroup(second: "ci-only" | "unfragmented-fix"): { dir: string; groupBase: string } {
     const dir = makeRepo();
     addDependencyOnlyCommit(dir, { author: "renovate" });
@@ -635,6 +636,40 @@ describe("merge-queue commit (no GITHUB_BASE_REF)", () => {
     expect(res.status).not.toBe(0);
   });
 
+  test("an unreadable base fails the gate on the release-PR path, which otherwise passes without fragments", () => {
+    const dir = makeRepo();
+    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+    pkg.version = "0.2.0";
+    writeFileSync(join(dir, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
+    writeFixtureFile(dir, "CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2020-02-01\n\n### Fixed\n\n- **A fix.**\n\n## [0.1.0] - 2020-01-01\n\n### Added\n\n- Initial.\n");
+    writeFixtureFile(dir, "src/util.ts", "export const unit = 6;\n");
+    git(dir, "add", "-A");
+    commitAs(dir, "Human A", "human-a@example.invalid", "fix: release v0.2.0 (#9)");
+    const parent = gitOut(dir, "rev-parse", "origin/main").trim();
+    // With a readable base, the release-PR exception (a version section, no v0.2.0 tag, no fragments) passes.
+    const readable = runQueueGate(dir, "human-a", parent);
+    expect(readable.status).toBe(0);
+    const unreadable = "0123456789abcdef0123456789abcdef01234567";
+    const res = runQueueGate(dir, "human-a", unreadable);
+    expect(res.out).toContain(`FLAIR_DOCS_BASE_SHA is ${unreadable}, which is not a readable ancestor of HEAD`);
+    expect(res.status).not.toBe(0);
+  });
+
+  test("a blank base fails the gate by name; an empty one is unset", () => {
+    const dir = makeRepo();
+    writeFixtureFile(dir, "scripts/ci-only.sh", "echo ci\n");
+    git(dir, "add", "-A");
+    commitAs(dir, "Human A", "human-a@example.invalid", "ci: add a lane helper (#9)");
+    for (const blank of ["   ", "\t"]) {
+      const res = runQueueGate(dir, "human-a", blank);
+      expect(res.out).toContain(`FLAIR_DOCS_BASE_SHA is set but blank (${JSON.stringify(blank)})`);
+      expect(res.status).not.toBe(0);
+    }
+    const empty = runQueueGate(dir, "human-a", "");
+    expect(empty.out).not.toContain("FLAIR_DOCS_BASE_SHA");
+    expect(empty.status).toBe(0);
+  });
+
   test("the group's parent as base still requires a fragment for the queued PR's own shipped fix", () => {
     const { dir, groupBase } = stackedGroup("unfragmented-fix");
     const res = runQueueGate(dir, "human-a", groupBase);
@@ -642,7 +677,7 @@ describe("merge-queue commit (no GITHUB_BASE_REF)", () => {
     expect(res.status).not.toBe(0);
   });
 
-  test("a multi-commit PR titled fix: without a fragment passes as a PR but fails as its queue squash commit", () => {
+  test("a multi-commit PR titled fix: whose own commits are chore: passes as a PR without a fragment but fails as its queue squash commit", () => {
     const pr = makeRepo();
     writeFixtureFile(pr, "src/util.ts", "export const unit = 2;\n");
     git(pr, "add", "-A");
