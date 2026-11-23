@@ -28,6 +28,22 @@
   ],
   "packageRules": [
     {
+      "matchDepTypes": [
+        "engines",
+        "peerDependencies"
+      ],
+      "rangeStrategy": "auto"
+    },
+    {
+      "matchManagers": [
+        "pep621"
+      ],
+      "matchDepTypes": [
+        "project.dependencies"
+      ],
+      "rangeStrategy": "replace"
+    },
+    {
       "description": "Group bun + npm non-major updates into a single PR so the review surface stays small. A red CI on a 60-package PR is hard to diagnose.",
       "matchManagers": [
         "bun",
@@ -87,6 +103,7 @@
         "minor",
         "patch",
         "pin",
+        "pinDigest",
         "digest"
       ],
       "groupName": "non-major docker dependencies"

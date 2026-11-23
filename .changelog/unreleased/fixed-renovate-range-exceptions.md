@@ -1,0 +1,1 @@
+- **Renovate uses its `auto` range strategy for `engines` and peer dependencies**, instead of the preset's global `replace`. Dockerfile and Compose digest-pin proposals join the Docker group.
