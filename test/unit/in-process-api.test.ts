@@ -204,6 +204,19 @@ describe("flair#3068 — recall() rejects on an error response", () => {
     });
     await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/bad.*HTTP 500/);
   });
+
+  it("rejects when the search read throws", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            throw new Error("storage unavailable");
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/storage unavailable/);
+  });
 });
 
 describe("flair#3068 — memory.get() rejects on an error response", () => {
