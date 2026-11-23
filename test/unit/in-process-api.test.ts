@@ -205,6 +205,74 @@ describe("flair#3068 — recall() rejects on an error response", () => {
     await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/bad.*HTTP 500/);
   });
 
+  it("rejects a 429 Response whose body also carries an empty results array", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return new Response(JSON.stringify({ error: "rate_limit_exceeded", results: [] }), { status: 429 });
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/rate_limit_exceeded.*HTTP 429/);
+  });
+
+  it("rejects a plain failure envelope whose body also carries an empty results array", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return { error: "rate_limit_exceeded", status: 429, results: [] };
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/rate_limit_exceeded.*HTTP 429/);
+  });
+
+  it("resolves a 200 Response carrying a results envelope", async () => {
+    const rows = [{ id: "m-1", content: "deploy schedule", score: 0.9, agentId: "planner" }];
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return new Response(JSON.stringify({ results: rows }), { status: 200 });
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).resolves.toEqual(rows);
+  });
+
+  it("resolves a 200 Response carrying a bare array", async () => {
+    const rows = [{ id: "m-1", content: "deploy schedule", score: 0.9, agentId: "planner" }];
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return new Response(JSON.stringify(rows), { status: 200 });
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).resolves.toEqual(rows);
+  });
+
+  it("resolves a plain successful results envelope", async () => {
+    const rows = [{ id: "m-1", content: "deploy schedule", score: 0.9, agentId: "planner" }];
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return { results: rows };
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).resolves.toEqual(rows);
+  });
+
   it("rejects when the search read throws", async () => {
     const server = fakeServer({
       SemanticSearch: fakeResourceEntry(

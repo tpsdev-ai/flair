@@ -211,6 +211,9 @@ export class AgentHandle {
     if (opts?.subject) body.subject = opts.subject;
     if (opts?.subjects) body.subjects = opts.subjects;
     const result = await unwrap(await h.post(body));
+    if (isFailureEnvelope(result)) {
+      throw new Error(`recall() failed: ${result.error} (HTTP ${result.status})`);
+    }
     if (Array.isArray(result)) return result;
     if (result && Array.isArray(result.results)) return result.results;
     throw new Error(`recall() failed: ${result?.error ?? "unexpected response"}${result?.status ? ` (HTTP ${result.status})` : ""}`);
@@ -511,17 +514,37 @@ export class Flair {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
+ * A structured failure: an object carrying an `error` and a numeric
+ * `status` >= 400. Only these are rejected before results are extracted.
+ */
+function isFailureEnvelope(value: any): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    "error" in value &&
+    typeof value.status === "number" &&
+    value.status >= 400
+  );
+}
+
+/**
  * Unwrap a handler return value into a plain object.
  * Handlers may return a `Response` (the 401/403/400 guards) — surface its
  * JSON body so the caller sees the structured error rather than an opaque object.
+ * A 2xx `Response` resolves to its parsed body unchanged; a non-2xx one becomes
+ * `{ ...body, error, status }` with the response's own status winning.
  */
 async function unwrap(value: any): Promise<any> {
   if (value && typeof value === "object" && typeof value.json === "function" && "status" in value) {
+    const status = (value as any).status;
+    const ok = typeof status === "number" && status >= 200 && status < 300;
     try {
       const body = await value.json();
-      return { error: body?.error ?? "request failed", status: (value as any).status, ...body };
+      if (ok) return body;
+      return { ...body, error: body?.error ?? "request failed", status };
     } catch {
-      return { error: "request failed", status: (value as any).status };
+      return { error: "request failed", status };
     }
   }
   return value;
