@@ -487,6 +487,76 @@ describe("runSkillSeed — a skill-row write refused with 503 memory_provider_ti
     expect(io.calls).toEqual({ putRow: 1, putAssignment: 0 });
   }, 5_000);
 
+  it("re-reads before the retry: when the first 503 PUT actually landed, the re-read yields unchanged, putRow runs once, and the assignment is written", async () => {
+    // The server says "nothing written" (503 memory_provider_timeout), but the
+    // write actually landed.  The retry pass re-reads and finds the current text
+    // already in place, so decideSkillSeed returns "unchanged" — no second PUT.
+    // The assignment is then written exactly once.
+    const clock = fakeClock();
+    let putAttempts = 0;
+    const io = fakeIo({
+      row: { ok: true, row: null },
+      assignment: { ok: true, row: null },
+      putRow: () => {
+        putAttempts++;
+        // First PUT: server refuses but write lands anyway.
+        // fakeIo will not update `row` on a non-ok result, so we patch readRow
+        // after the backoff (see clock.pause override below).
+        return PROVIDER_TIMEOUT;
+      },
+    });
+    const pause = clock.pause;
+    clock.pause = async (ms) => {
+      await pause(ms);
+      // Simulate the write having landed: subsequent reads find the current text.
+      io.readRow = async () => ({ ok: true, row: liveRow(CURRENT) });
+    };
+    const out = await runSkillSeed(io, current, clock);
+    expect(out).toMatchObject({ kind: "ok", action: "unchanged", skillId: SEED_SKILL_ID, assignmentId: SEED_ASSIGNMENT_ID });
+    // putRow fired once (the initial refused attempt); the retry pass skipped it.
+    expect(putAttempts).toBe(1);
+    expect(io.calls).toEqual({ putRow: 1, putAssignment: 1 });
+    expect(clock.waits).toEqual([SEED_SKILL_WRITE_RETRY_BACKOFF_MS]);
+  }, 5_000);
+
+  it("refuses without reads when the bound is already exhausted before a retry pass starts", async () => {
+    // After the first 503 refusal the backoff is skipped when the budget is gone.
+    // But if the budget is somehow not gone yet (the runSkillSeed guard passes),
+    // the pre-read check in seedPass must catch an exhausted budget right away,
+    // without spending a read timeout on reads that cannot lead to a write.
+    const clock = fakeClock();
+    let putAttempts = 0;
+    const io = fakeIo({
+      row: { ok: true, row: null },
+      assignment: { ok: true, row: null },
+      putRow: () => {
+        putAttempts++;
+        clock.t += REFUSAL_AFTER_MS;
+        return PROVIDER_TIMEOUT;
+      },
+    });
+    // Override pause: the backoff advances time enough to exhaust the budget so
+    // that the pre-read check in the next seedPass fires before any read.
+    let reads = 0;
+    const readRow = io.readRow;
+    io.readRow = async () => {
+      reads++;
+      return readRow();
+    };
+    const pause = clock.pause;
+    clock.pause = async (ms) => {
+      await pause(ms);
+      // Exhaust whatever remains of the bound so peekBudget() <= 0 on entry.
+      clock.t += SEED_SKILL_WRITE_TIMEOUT_MS;
+    };
+    const out = await runSkillSeed(io, current, clock);
+    expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
+    expect((out as { message: string }).message).toContain("memory_provider_timeout");
+    // The retry pass must not have done any reads (the pre-read budget guard fired).
+    expect(reads).toBe(1);
+    expect(putAttempts).toBe(1);
+  }, 5_000);
+
   it("refuses without another write when the bound passes while a retried pass re-reads", async () => {
     // The stub stops refusing after 50 calls, so a retry loop without a bound
     // ends in success instead of hanging.
@@ -750,5 +820,33 @@ describe("skillSeedRestIo — the instance's 503 refusals of the skill-row write
     expect(await runSkillSeed(io, current, fakeClock())).toMatchObject({ kind: "ok", action: "create" });
     expect(instance.puts).toEqual([`Memory/${SEED_SKILL_ID}`, `Memory/${SEED_SKILL_ID}`, `OrgSkillAssignment/${SEED_ASSIGNMENT_ID}`]);
     expect(notices).toHaveLength(1);
+  }, 5_000);
+
+  it("says the remaining budget (not the full bound) in the notice when the write fires on a retry pass", async () => {
+    // On a retry pass the seed passes `budgetMs` (the time left) to putRow,
+    // not `skillWriteMs` (the full bound). The notice must say the former.
+    // The first (refused) write answers immediately without triggering the notice,
+    // but consumes 28 s of fake clock time. The second write is slow (80 ms)
+    // so the notice fires during the retry pass with the remaining 150 s budget.
+    const instance = refusingInstance([memoryProviderTimeoutResponse], 0);
+    instance.delays.memoryPut = 80;
+    const notices: string[] = [];
+    const clock = fakeClock();
+    const inner503 = instance.fetch;
+    instance.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const result = await inner503(input, init);
+      if (result.status === 503) clock.t += REFUSAL_AFTER_MS;
+      return result;
+    }) as typeof fetch;
+    const io = skillSeedRestIo(
+      restOptions(instance, { skillWriteNoticeMs: 20, notify: (line) => notices.push(line) }),
+      current,
+    );
+    expect(await runSkillSeed(io, current, clock)).toMatchObject({ kind: "ok", action: "create" });
+    // The retry write should have fired with the remaining budget, not the full bound.
+    expect(notices).toHaveLength(1);
+    // "150 s" is the remaining budget (180 - 28 - 2); the full bound is "180 s".
+    expect(notices[0]).toContain("waiting up to 150 s");
+    expect(notices[0]).not.toContain("waiting up to 180 s");
   }, 5_000);
 });

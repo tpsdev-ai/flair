@@ -150,7 +150,8 @@ export interface SeedClock {
 }
 
 const REAL_CLOCK: SeedClock = {
-  now: () => Date.now(),
+  // performance.now() is monotonic and cannot go backward on NTP corrections.
+  now: () => performance.now(),
   pause: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
@@ -263,6 +264,11 @@ export async function runSkillSeed(
     firstWriteAt ??= clock.now();
     return firstWriteAt + boundMs - clock.now();
   };
+  // Returns the remaining budget without initialising it; undefined when no
+  // write attempt has been made yet (so the preflight reads of the first pass
+  // are never refused for a budget that has not started).
+  const peekBudget = (): number | undefined =>
+    firstWriteAt === undefined ? undefined : firstWriteAt + boundMs - clock.now();
   let attempts = 0;
   const boundPassed = (end: string): SkillSeedOutcome =>
     refused(
@@ -273,7 +279,7 @@ export async function runSkillSeed(
     );
   const refusedEach = () => `${attempts === 1 ? "it was" : "each was"} refused with 503 memory_provider_timeout`;
   for (;;) {
-    const outcome = await seedPass(io, current, rowWriteBudget);
+    const outcome = await seedPass(io, current, rowWriteBudget, peekBudget);
     if (outcome.kind === "no_time") {
       return boundPassed(`${refusedEach()}, and the bound passed while the seed re-read the instance`);
     }
@@ -300,7 +306,12 @@ async function seedPass(
   io: SkillSeedIo,
   current: SeedCurrent,
   rowWriteBudget: () => number,
+  peekBudget: () => number | undefined,
 ): Promise<SkillSeedOutcome | SeedPassSignal> {
+  // On retry passes (after at least one write attempt), guard preflight reads
+  // against an exhausted skill-write budget so we don't burn the read timeout
+  // on reads that cannot lead to a successful write.
+  if ((peekBudget() ?? 1) <= 0) return { kind: "no_time" };
   const rowRead = await io.readRow();
   if (!rowRead.ok) {
     return refused(
@@ -585,7 +596,7 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
       noticed = true;
       opts.notify?.(
         `using-flair skill: still writing "${SEED_SKILL_ID}" — the instance embeds a skill row as it writes it, ` +
-          `and it may need to download (~80 MB) or load the embedding model first; waiting up to ${seconds(skillWriteMs)}`,
+          `and it may need to download (~80 MB) or load the embedding model first; waiting up to ${seconds(timeoutMs)}`,
       );
     }, skillNoticeMs);
     (notice as unknown as { unref?: () => void }).unref?.();
