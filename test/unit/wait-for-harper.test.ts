@@ -883,6 +883,37 @@ describe("wait-for-harper.mjs", () => {
     CASE_TIMEOUT_MS,
   );
 
+  test(
+    "(x) a probe that answers 503 before a stalled probe reports no response",
+    async () => {
+      const server = await health((index, res) => {
+        if (index === 1) {
+          res.statusCode = 503;
+          res.end("not yet");
+        }
+        // Later requests never answer: the probe is aborted at its bound.
+      });
+      const box = sandbox();
+      const result = await run(box, [
+        "--container",
+        "harper-flair",
+        ...WAIT_ARGS(server.url),
+        "--budget-seconds",
+        "2",
+        "--per-request-ms",
+        "500",
+      ]);
+
+      expect(result.status).toBe(1);
+      // The 503 was recorded first, so the timeout line reports the later
+      // probe that got no response rather than that stale status.
+      expect(server.requests()).toBeGreaterThan(1);
+      expect(result.output).toContain("Harper was not ready within 2s; last /Health result: no response");
+      expect(result.output).not.toContain("last /Health result: 503");
+    },
+    CASE_TIMEOUT_MS,
+  );
+
   test("(i) both workflows call the waiter", () => {
     interface Step {
       name?: string;

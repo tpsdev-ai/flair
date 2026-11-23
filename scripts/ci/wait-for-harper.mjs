@@ -268,7 +268,7 @@ export async function main(options) {
     if (!state.running) return reportExited(state.exitCode);
 
     const status = await probe(url, authorization, Math.min(perRequestMs, remaining()));
-    if (status !== null) lastHealthResult = String(status);
+    lastHealthResult = status === null ? "no response" : String(status);
     if (status !== null && status >= 200 && status < 300) {
       if (remaining() <= 0) break;
       let finalState;
