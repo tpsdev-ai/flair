@@ -58,6 +58,7 @@ const DOCKER_STUB = `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "$*" >> "$WAIT_STUB_DIR/docker-argv.log"
 printf '%s\\n' "\${HARPER_START_CREDENTIALS-<unset>}" >> "$WAIT_STUB_DIR/docker-env.log"
+printf '%s\\n' "\${ENV-<unset>}" >> "$WAIT_STUB_DIR/env-child.log"
 echo "docker stub: warning on stderr" >&2
 cmd=\${1:?}; shift
 case "$cmd" in
@@ -201,10 +202,11 @@ async function run(
   timeoutMs = CASE_TIMEOUT_MS,
 ): Promise<Run> {
   const started = Date.now();
-  // A host shell startup file must not decide a case's result: bash reads
-  // BASH_ENV and POSIX sh reads ENV before a non-interactive script, so the
-  // stub would exit before it reads its fixture files. Keep PATH and the
-  // fixture variables the cases set explicitly.
+  // A host shell startup file must not decide a case's result: a
+  // noninteractive bash reads the file BASH_ENV names before it runs a script,
+  // so the stub would exit before it reads its fixture files. Keep PATH and
+  // the fixture variables the cases set explicitly; BASH_ENV and ENV are
+  // removed from the child environment.
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: `${box.bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -324,15 +326,21 @@ describe("wait-for-harper.mjs", () => {
       });
       const box = sandbox();
       const prior = process.env.BASH_ENV;
+      const priorEnv = process.env.ENV;
       process.env.BASH_ENV = bashEnv;
+      process.env.ENV = "env-startup-file";
       try {
         const result = await run(box, ["--container", "harper-flair", ...WAIT_ARGS(server.url), "--budget-seconds", "20"]);
 
         expect(result.status).toBe(0);
         expect(result.output).toMatch(/Harper ready after \d+s/);
+        // ENV must not reach a docker child: the stub records what it sees.
+        expect(readFileSync(join(box.root, "env-child.log"), "utf8")).not.toContain("env-startup-file");
       } finally {
         if (prior === undefined) delete process.env.BASH_ENV;
         else process.env.BASH_ENV = prior;
+        if (priorEnv === undefined) delete process.env.ENV;
+        else process.env.ENV = priorEnv;
       }
     },
     CASE_TIMEOUT_MS,
@@ -706,8 +714,8 @@ describe("wait-for-harper.mjs", () => {
       // Without the budget check after the first inspect, a probe runs, fails
       // and prints the progress line before the timeout.
       expect(result.output).not.toContain("waiting for Harper /Health");
-      // Only the unauthenticated diagnostic request answers; the probe sends
-      // the credential and never reaches the server.
+      // No authenticated probe runs; only the unauthenticated diagnostic
+      // request reaches the server.
       expect(server.requests()).toBe(1);
       expect(server.authorizations).toHaveLength(0);
     },
