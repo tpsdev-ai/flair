@@ -1,1 +1,0 @@
-- **`@tpsdev-ai/n8n-nodes-flair` declares its `@langchain/classic` peer range as `>=1.0.0 <2`.** ([#2925](https://github.com/tpsdev-ai/flair/pull/2925))

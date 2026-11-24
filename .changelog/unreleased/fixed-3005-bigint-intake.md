@@ -1,1 +1,0 @@
-- **A BigInt agent id or A2A message answers a caller error instead of the server's generic error.** POST /Agent and POST /AgentSeed answer 400 with the key-registration string remedy, an A2A message with a BigInt answers -32602 naming `message`, and A2A reports a missing OrgEvent validator with its own error code. ([#3006](https://github.com/tpsdev-ai/flair/pull/3006))

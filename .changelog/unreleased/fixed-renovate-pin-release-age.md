@@ -1,1 +1,0 @@
-- **The shared Renovate preset uses `rangeStrategy: "replace"`.** (flair#2871). ([#2924](https://github.com/tpsdev-ai/flair/pull/2924))

@@ -205,6 +205,66 @@ describe("rewriteFederationSchedulerRuntime — macOS", () => {
     expect(readFileSync(f.shim, "utf-8")).toBe(before);
   });
 
+  test("a plist that names the shim only inside an XML comment is refused", () => {
+    const f = fixture();
+    enable(f, "darwin");
+    const unit = readFileSync(f.plist, "utf-8");
+    const entry = /<key>ProgramArguments<\/key>\s*<array>\s*(<string>[^<]*<\/string>)/.exec(unit)![1]!;
+    const decoy = unit
+      .replace(entry, "<string>/usr/local/bin/my-sync</string>")
+      .replace("<dict>", `<dict>\n  <!-- <key>ProgramArguments</key><array>${entry}</array> -->`);
+    writeFileSync(f.plist, decoy);
+    const before = readFileSync(f.shim, "utf-8");
+    const r = rewrite(f, "darwin");
+    expect(r.status).toBe("refused");
+    expect(r.detail).toContain(`its ProgramArguments are ["/usr/local/bin/my-sync"]`);
+    expect(readFileSync(f.shim, "utf-8")).toBe(before);
+  });
+
+  // Comment markup that one removal pass cannot clear: flair could not confirm the plist execs the shim.
+  const unclearComments: Array<[string, (unit: string, entry: string) => string]> = [
+    ["overlapping comment markup hides a ProgramArguments that names the shim", (unit, entry) =>
+      unit.replace(entry, "<string>/usr/local/bin/my-sync</string>")
+        .replace("<dict>", `<dict>\n  <!<!---->-- <key>ProgramArguments</key><array>${entry}</array> -->`)],
+    ["overlapping comment markup sits before a ProgramArguments that names the shim", (unit) =>
+      unit.replace("<dict>", "<dict>\n  <!<!---->-- hidden -->")],
+    ["a comment is not closed", (unit) => unit.replace("</plist>", "</plist>\n<!-- not closed")],
+  ];
+  for (const [what, edit] of unclearComments) {
+    test(`a plist where ${what} is refused as unconfirmed`, () => {
+      const f = fixture();
+      enable(f, "darwin");
+      const unit = readFileSync(f.plist, "utf-8");
+      const entry = /<key>ProgramArguments<\/key>\s*<array>\s*(<string>[^<]*<\/string>)/.exec(unit)![1]!;
+      const changed = edit(unit, entry);
+      expect(changed).not.toBe(unit);
+      writeFileSync(f.plist, changed);
+      const before = readFileSync(f.shim, "utf-8");
+      const r = rewrite(f, "darwin");
+      expect(r.status).toBe("refused");
+      expect(r.detail).toContain(
+        `flair could not confirm that ${f.plist} execs the flair-generated shim: its XML comments overlap or one is not closed.`,
+      );
+      expect(readFileSync(f.shim, "utf-8")).toBe(before);
+    });
+  }
+
+  test("a plist whose top-level Label is another job's is refused as unconfirmed", () => {
+    const f = fixture();
+    enable(f, "darwin");
+    const unit = readFileSync(f.plist, "utf-8");
+    const changed = unit.replace("<string>dev.flair.federation.sync</string>", "<string>dev.example.other</string>");
+    expect(changed).not.toBe(unit);
+    writeFileSync(f.plist, changed);
+    const before = readFileSync(f.shim, "utf-8");
+    const r = rewrite(f, "darwin");
+    expect(r.status).toBe("refused");
+    expect(r.detail).toContain(
+      `flair could not confirm that ${f.plist} execs the flair-generated shim: its Label is not dev.flair.federation.sync.`,
+    );
+    expect(readFileSync(f.shim, "utf-8")).toBe(before);
+  });
+
   test("a hand-changed shim (not the generated shape) is refused", () => {
     const f = fixture();
     enable(f, "darwin");
@@ -276,6 +336,22 @@ describe("rewriteFederationSchedulerRuntime — Linux", () => {
     enable(f, "linux");
     writeFileSync(f.service, readFileSync(f.service, "utf-8").replace(/^ExecStart=.*$/m, "ExecStart=/usr/bin/true"));
     expect(rewrite(f, "linux").status).toBe("refused");
+  });
+
+  test("a service unit with a second ExecStart is refused as unconfirmed", () => {
+    const f = fixture();
+    enable(f, "linux");
+    const unit = readFileSync(f.service, "utf-8");
+    const changed = unit.replace(`ExecStart=${f.shim}`, `ExecStart=${f.shim}\nExecStart=/usr/bin/true`);
+    expect(changed).not.toBe(unit);
+    writeFileSync(f.service, changed);
+    const before = readFileSync(f.shim, "utf-8");
+    const r = rewrite(f, "linux");
+    expect(r.status).toBe("refused");
+    expect(r.detail).toContain(
+      `flair could not confirm that ${f.service} execs the flair-generated shim: its ExecStart is ${JSON.stringify([f.shim, "/usr/bin/true"])}`,
+    );
+    expect(readFileSync(f.shim, "utf-8")).toBe(before);
   });
 });
 
