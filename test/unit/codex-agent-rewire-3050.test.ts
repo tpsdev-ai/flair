@@ -119,6 +119,15 @@ describe("flair#3050 — Codex env is part of the already-wired check", () => {
     expect(toml).toContain('FLAIR_AGENT_ID = "agent-a"');
   });
 
+  it("current pin + the same agent and URL + a different FLAIR_CLIENT → already wired, bytes unchanged", () => {
+    // A FLAIR_CLIENT-only change is not compared yet, matching the JSON clients.
+    const before = seed(section(mcpServerSpec(), ENV_A.FLAIR_AGENT_ID, URL_A));
+    const res = wireCodex({ ...ENV_A, FLAIR_CLIENT: "client-x" });
+    expect(res.ok).toBe(true);
+    expect(res.message).toBe("Codex: already wired in ~/.codex/config.toml");
+    expect(readFileSync(cfgPath(), "utf-8")).toBe(before);
+  });
+
   it("current pin + the same env → already wired, bytes unchanged", () => {
     const before = seed(section(mcpServerSpec(), ENV_A.FLAIR_AGENT_ID, URL_A));
     const res = wireCodex(ENV_A);

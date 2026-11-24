@@ -43,6 +43,10 @@ function flairCommand(agentId: string): string {
   return buildSessionStartHookCommand(agentId, undefined, { harness: "claude-code" });
 }
 
+function flairCommandWithUrl(agentId: string, url: string): string {
+  return buildSessionStartHookCommand(agentId, url, { harness: "claude-code" });
+}
+
 /** The pre-#1007 unpinned shape Flair wrote. */
 function legacyCommand(agentId: string): string {
   return `FLAIR_AGENT_ID=${agentId} npx -y ${FLAIR_MCP_PACKAGE} flair-session-start`;
@@ -93,6 +97,25 @@ describe("applyOrRepinSessionStartHook — agent rewire", () => {
       JSON.stringify(before.hooks.SessionStart[0]),
     );
     expect(after.theme).toBe("dark");
+  });
+
+  it("re-points the id and re-pins a behind pin in one write, both spans exact", () => {
+    // The new id is longer than the old one, so substituting the id span first
+    // would shift the pin span the command captured.
+    const url = "http://127.0.0.1:19926";
+    const behind = flairCommandWithUrl("agent-a", url).replace(mcpServerSpec(), `${FLAIR_MCP_PACKAGE}@0.0.1`);
+    expect(behind).not.toBe(flairCommandWithUrl("agent-a", url));
+    const settingsPath = writeSettings(hookSettings(behind));
+    const before = JSON.parse(readFileSync(settingsPath, "utf-8"));
+
+    const result = applyOrRepinSessionStartHook(home, "agent-b-renamed", false);
+
+    expect(result.applied).toBe(true);
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("re-pointed");
+    expect(result.message).toContain("and re-pinned it");
+    before.hooks.SessionStart[1].hooks[0].command = flairCommandWithUrl("agent-b-renamed", url);
+    expect(JSON.parse(readFileSync(settingsPath, "utf-8"))).toEqual(before);
   });
 
   it("reports already wired with unchanged bytes when the agent id matches", () => {
