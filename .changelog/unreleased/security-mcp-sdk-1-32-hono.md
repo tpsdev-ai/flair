@@ -1,1 +1,0 @@
-- **flair-mcp pins `@modelcontextprotocol/sdk` 1.32.0; the workspace lockfile resolves hono 4.13.16.** ([#2742](https://github.com/tpsdev-ai/flair/pull/2742))

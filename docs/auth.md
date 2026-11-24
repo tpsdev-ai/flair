@@ -22,7 +22,7 @@ With **Agent Private Key** selected, `n8n-nodes-flair` signs as the credential's
 
 ## Ed25519 Agent Auth (Default)
 
-Every agent has an Ed25519 key pair. Requests are signed with `agentId:timestamp:nonce:METHOD:/path` and verified against the agent's registered public key. 30-second replay window with nonce deduplication.
+Each signing agent has an Ed25519 key pair. Requests are signed with `agentId:timestamp:nonce:METHOD:/path?query` and verified against the agent's registered public key. 30-second replay window with nonce deduplication.
 
 ```bash
 # Register an agent
@@ -43,22 +43,22 @@ never an existence signal. The adapter write-up is
 
 Flair has no `mode`/`shape` config setting — the shape you get is emergent from *how you provision principals*, not something you declare:
 
-- **Personal.** `flair init --agent <id>` creates (or reuses) ONE agent identity and wires that same `FLAIR_AGENT_ID` into every MCP client it configures (Claude Code, Codex, Gemini, Cursor). One human driving several AI clients ends up with one canonical principal and one Ed25519 keypair — all clients share ownership of the same memory. This is intentional, not a limitation: all clients see each other's private rows (one human's memory, one view). Writes with fresh IDs create separate records even when the server reports a dedup match; writes that reuse an existing ID update that record. Usage counting treats the shared principal as one contributor.
+- **Personal.** `flair init --agent <id>` creates (or reuses) ONE agent identity and wires that same `FLAIR_AGENT_ID` into every MCP client it configures (Claude Code, Codex, Gemini, Cursor, Antigravity). When pi is selected, it registers the native extension and prints the agent environment to export at launch. One human driving several AI clients ends up with one canonical principal and one Ed25519 keypair — all clients share ownership of the same memory. This is intentional, not a limitation: all clients see each other's private rows (one human's memory, one view). Writes with fresh IDs create separate records even when the server reports a dedup match; writes that reuse an existing ID update that record. Usage counting treats the shared principal as one contributor.
 - **Org (multiple real agents).** `flair agent add <id>` mints a distinct principal — its own keypair, its own ownership boundary — for each real agent that should be a separate identity. Wire each principal's own `FLAIR_AGENT_ID` into its own client(s).
 
 Nothing in flair validates which shape you're in; a personal install that later grows into an org just runs `flair agent add` for the new distinct identities it needs.
 
 ### Authorship: which client wrote a row
 
-The personal shape's one shared principal means `agentId` alone can't answer "was this written by Claude Code or Codex?" — every write it receives has the same owner. `flair init`'s per-client wiring closes that gap by setting an additional env var per client: `FLAIR_CLIENT` (`"claude-code"` / `"codex"` / `"gemini"` / `"cursor"`). `flair-client` and `flair-mcp` forward it on memory writes as `claimedClient`, and the server folds it into the write's `provenance` blob as `claimed.client` — self-reported, unverified metadata recording *which tool* authored a row, alongside the existing `claimed.model`.
+The personal shape's one shared principal means `agentId` alone can't answer "was this written by Claude Code or Codex?" — every write it receives has the same owner. `flair init`'s per-client MCP wiring closes that gap by setting an additional env var per client: `FLAIR_CLIENT` (`"claude-code"` / `"codex"` / `"gemini"` / `"cursor"` / `"antigravity"`). `flair-client` and `flair-mcp` forward it on memory writes as `claimedClient`, and the server folds it into the write's `provenance` blob as `claimed.client` — self-reported, unverified metadata recording *which tool* authored a row, alongside the existing `claimed.model`.
 
 This is deliberately in `claimed`, never `verified`: it carries **zero authority**. It is never read for access control, read-scope, attribution weighting, or dedup decisions — it exists purely for audit/analysis. Absent on any install that predates this field (no backfill, no migration) and absent whenever a client doesn't set `FLAIR_CLIENT`.
 
-The native `/mcp` OAuth surface (see below) doesn't need any client-side wiring at all: the handler stamps `claimed.client` directly from the OAuth token's verified `client_id` claim — the server-generated `flair_cl_...` machine id assigned at Dynamic Client Registration, **not** the user-supplied `client_name` (which the registering client fully controls and could set to anything). Using `client_id` keeps the stamp a stable, server-verified label even though it still only carries `claimed`-level (unverified-by-content) authority.
+The native `/mcp` handler stamps `claimed.client` from the token's verified `client_id` when present, so the label is tied to the authenticated client rather than its display name; it remains claimed metadata.
 
 ## OAuth 2.1
 
-Flair includes a built-in OAuth 2.1 authorization server for client integrations (e.g., Claude connecting to Flair as an MCP server).
+Flair's legacy OAuth endpoints are separate from the native `/mcp` authorization server.
 
 The native `/mcp` endpoint is guarded by the `@harperfast/oauth` authorization server instead; who can connect through it, and how to revoke that access, is in [access-control.md](access-control.md).
 
@@ -140,8 +140,8 @@ metadata's `code_challenge_methods_supported` lists `["S256"]` as the supported 
 1. Client generates a PKCE `code_verifier` and its `S256` `code_challenge`
    (`BASE64URL(SHA256(code_verifier))`, RFC 7636)
 2. Client redirects user to `GET /OAuthAuthorize?response_type=code&client_id=...&redirect_uri=...&code_challenge=...&code_challenge_method=S256`
-3. User approves or denies on the consent page
-4. Flair redirects back with an authorization code on approve, or with `error=access_denied` on deny
+3. User approves with administrator Basic auth or a signed agent request, or denies on the consent page
+4. Flair redirects to `https://claude.com/api/mcp/auth_callback` with an authorization code on approve, or with `error=access_denied` on deny
 5. Client exchanges code and `code_verifier` for access token at `POST /OAuthToken`
 
 After the earlier request, scope and client checks pass, `GET /OAuthAuthorize`
@@ -168,7 +168,7 @@ A PKCE refusal does not redeem the code.
 | `/OAuthToken` | POST | Token endpoint |
 | `/.well-known/oauth-authorization-server` | GET | Authorization server metadata (RFC 8414) |
 | `/.well-known/oauth-protected-resource` | GET | Protected resource metadata (RFC 9728) |
-| `/OAuthMetadata` | GET | Alias of `/.well-known/oauth-authorization-server` |
+| `/OAuthMetadata` | GET | Legacy authorization-server metadata; matches the well-known document when OAuth MCP is off |
 
 Both well-known documents are public — RFC 8414 §3 and RFC 9728 §3 require them
 to be retrievable without authentication — and are served with
@@ -237,14 +237,14 @@ localhost. See [deploying-on-fabric.md](deploying-on-fabric.md).
 
 ## XAA (Enterprise-Managed Authorization)
 
-For organizations using an Identity Provider (IdP), XAA lets the IdP control who accesses Flair and with what scopes.
+For organizations using an Identity Provider (IdP), XAA maps IdP identities to Flair principals.
 
 ### How It Works
 
 1. User authenticates with the organization's IdP (Google, Azure AD, Okta)
 2. IdP issues an ID token (JWT) with user identity and group claims
 3. Client sends the ID token to Flair's token endpoint using the `jwt-bearer` grant type
-4. Flair validates the JWT signature, checks issuer/domain, maps to a Principal, and issues a scoped access token
+4. Flair verifies the JWT signature and issuer, applies any configured domain restriction, maps to a Principal, and issues an access token.
 
 A `jti` claim, when present, must be a nonempty string, and the assertion must then carry an `exp` no more than 24 hours (plus 30 seconds of clock skew) ahead. Flair records the `jti` before it issues tokens, and refuses the assertion if it is presented to this Harper instance again.
 
@@ -265,6 +265,8 @@ flair idp add \
   --name "Google Workspace" \
   --issuer "https://accounts.google.com" \
   --jwks-uri "https://www.googleapis.com/oauth2/v3/certs" \
+  --client-id "<client-id-at-google>" \
+  --admin-pass-file ~/.flair/admin-pass \
   --required-domain "yourcompany.com"
 ```
 
@@ -278,21 +280,21 @@ flair idp add \
 
 ### Scopes
 
-Flair's own authorization server (`/OAuthMetadata`, `/OAuthToken`) advertises seven scopes. The native `/mcp` surface is guarded by a different authorization server, `@harperfast/oauth`. `/mcp` gates its tools with four of the seven names: each tool requires the scope listed below, and `memory:admin`, `connector:read` and `connector:admin` gate no `/mcp` tool. A tool call whose access token does not grant the tool's scope gets HTTP 403 with a JSON-RPC `insufficient_scope` error naming the scope and a `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"` challenge, and the tool does not run. A token with no `scope` claim grants no scope. The tool runs as the token's principal, with that principal's access.
+Discovery advertises these scope names:
 
-| Scope | Description | `/mcp` tools that require it |
-|-------|-------------|------------------------------|
-| `memory:read` | Read memories and search | `memory_search`, `memory_get`, `skill_search`, `skill_get`, `bootstrap`, `soul_get`, `attention` |
-| `memory:write` | Write and delete memories | `memory_store`, `memory_update`, `memory_delete`, `memory_basement`, `memory_restore`, `skill_store`, `flair_workspace_set`, `flair_orgevent`, `record_usage` |
-| `memory:admin` | Reserved for memory maintenance operations | none |
-| `principal:read` | View principal list | `team_directory` |
-| `principal:admin` | Reserved for creating, modifying and disabling principals | `soul_set`, which then refuses the write (`soul_write_requires_operator`) |
-| `connector:read` | Reserved for viewing OAuth clients and IdPs | none |
-| `connector:admin` | Reserved for managing OAuth clients and IdPs | none |
+| Scope | `/mcp` tools that require it |
+|-------|------------------------------|
+| `memory:read` | `memory_search`, `memory_get`, `skill_search`, `skill_get`, `bootstrap`, `soul_get`, `attention` |
+| `memory:write` | `memory_store`, `memory_update`, `memory_delete`, `memory_basement`, `memory_restore`, `skill_store`, `flair_workspace_set`, `flair_orgevent`, `record_usage` |
+| `memory:admin` | none |
+| `principal:read` | `team_directory` |
+| `principal:admin` | `soul_set`, which then refuses the write (`soul_write_requires_operator`) |
+| `connector:read` | none |
+| `connector:admin` | none |
 
-The `/mcp` 401 challenge names `memory:read memory:write principal:read`, the scope of each `/mcp` tool except `soul_set`. A refreshed access token keeps the scope of the sign-in it came from: a connection whose sign-in did not request a tool's scope is refused that tool, before and after a refresh, until it signs in again requesting it.
+For native `/mcp` tool calls, the access token must grant the tool's scope above. A missing `scope` claim grants no scope. A call missing its tool's scope returns HTTP 403 with a JSON-RPC `insufficient_scope` error naming the required scope and a `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"` challenge, before resolving the principal or running the tool. A permitted call runs with the mapped principal's authority.
 
-The access tokens Flair's own authorization server issues (`flair_at_…`) are not accepted by `/mcp` or by Flair's REST resources yet.
+The `/mcp` 401 challenge names `memory:read memory:write principal:read`. Refresh preserves the scopes from sign-in; existing connectors missing a required scope must sign in again requesting it.
 
 ### JIT Provisioning
 
@@ -306,7 +308,7 @@ flair principal promote <principal-id> <tier>
 
 `<tier>` is one of `endorsed`, `corroborated`, or `unverified`. There is no `verified` tier and no `admin` tier. The command writes `defaultTrustTier` and does not write `role` or `admin`, so it cannot grant admin.
 
-Admin authority is `role: admin` on the Agent record. `admin: true` is the mirror the server keeps in step with that role; setting the mirror alone does not grant admin. The CLI that writes both is:
+Admin authority is `role: admin` on the Agent record; the auth gate does not read the `admin` mirror. Administrator POST, PUT and ordinary PATCH writes through the Agent resource reconcile `admin: true` to `role: admin`; guarded `flairPrincipalWriteBack`/`flairStampHome` PATCH writes do not. Non-admin PATCH cannot change admin status. The CLI that writes both is:
 
 ```bash
 flair principal add <principal-id> --admin
@@ -327,10 +329,10 @@ For a request signed with an agent key, the admin decision uses the Agent row th
 
 ## Web Admin
 
-The web admin at `/AdminDashboard` provides a UI for managing:
+The web admin at `/AdminDashboard` provides read-only views:
 
-- **Principals:** view, promote, disable agents and users
-- **Connectors:** OAuth clients and active sessions
+- **Principals:** list agents and users
+- **Connectors:** list OAuth clients
 - **IdP:** enterprise identity provider configuration
 - **Memory:** browse and search stored memories
 - **Instance:** federation status, peer connections

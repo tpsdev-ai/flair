@@ -87,3 +87,34 @@ describe("preferVersionManagerAlias", () => {
     expect(aliasCandidates(MISE_EXACT, { home: HOME, env: {} }).map((c) => c.manager)).toEqual(["mise", "volta"]);
   });
 });
+
+describe("Homebrew (flair#3056)", () => {
+  const CELLAR = "/opt/homebrew/Cellar/node/26.10.0_1/bin/node";
+  const OPT = "/opt/homebrew/opt/node/bin/node";
+
+  test("writes opt/<formula>/bin/node when it resolves to the same binary", () => {
+    expect(preferVersionManagerAlias(CELLAR, hooksFor({ [CELLAR]: CELLAR, [OPT]: CELLAR }))).toBe(OPT);
+  });
+
+  test("a versioned node@22 formula keeps its own opt alias", () => {
+    const cellar = "/opt/homebrew/Cellar/node@22/22.11.0/bin/node";
+    const opt = "/opt/homebrew/opt/node@22/bin/node";
+    expect(preferVersionManagerAlias(cellar, hooksFor({ [cellar]: cellar, [opt]: cellar }))).toBe(opt);
+  });
+
+  test("/usr/local prefix is taken from the path", () => {
+    const cellar = "/usr/local/Cellar/node/26.12.1/bin/node";
+    const opt = "/usr/local/opt/node/bin/node";
+    expect(preferVersionManagerAlias(cellar, hooksFor({ [cellar]: cellar, [opt]: cellar }))).toBe(opt);
+  });
+
+  test("an opt alias that points at a DIFFERENT version is rejected", () => {
+    const other = "/opt/homebrew/Cellar/node/26.12.1/bin/node";
+    expect(preferVersionManagerAlias(CELLAR, hooksFor({ [CELLAR]: CELLAR, [OPT]: other }))).toBe(CELLAR);
+  });
+
+  test("a binary outside Cellar is unchanged", () => {
+    expect(aliasCandidates("/usr/local/bin/node", { home: HOME, env: {} })).toEqual([]);
+    expect(preferVersionManagerAlias("/usr/local/bin/node", hooksFor({ "/usr/local/bin/node": "/usr/local/bin/node" }))).toBe("/usr/local/bin/node");
+  });
+});
