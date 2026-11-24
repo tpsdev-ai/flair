@@ -365,9 +365,7 @@ chmod 700 "$ADMIN_PASS_SOURCE_DIR"
 ADMIN_PASS_SOURCE_FILE="$ADMIN_PASS_SOURCE_DIR/admin-pass"
 # umask 077 + chmod: readAdminPassFileSecure refuses group/other bits.
 # The launcher checks the persisted file's mode; verify that file below.
-# init persists the secret it read, without trailing whitespace, plus a newline.
-# The generated secret has no whitespace, so the persisted file should equal
-# this source; the check after init refuses any other result.
+# The check after init refuses a persisted file that differs from this source.
 ( umask 077; printf '%s\n' "$ADMIN_PASS" > "$ADMIN_PASS_SOURCE_FILE" )
 chmod 600 "$ADMIN_PASS_SOURCE_FILE"
 unset FLAIR_ADMIN_PASS HDB_ADMIN_PASSWORD
