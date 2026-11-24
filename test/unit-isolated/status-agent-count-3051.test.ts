@@ -21,12 +21,15 @@ let memoryRows: Array<Record<string, unknown>> = [];
 let memoryScanFailure: "before" | "after" | null = null;
 let authVerdict: Record<string, unknown> = { kind: "internal" };
 let realBridgeBase: string | null = null;
+let realHome: string | null = null;
+let realRemLog: string | null = null;
+let bm25Status: Record<string, unknown> = {};
 const originalTransaction = (globalThis as any).transaction;
 
 function absent(): never { throw Object.assign(new Error("fixture path absent"), { code: "ENOENT" }); }
 
 mock.module("node:os", () => ({
-  homedir: () => HOME,
+  homedir: () => realHome ?? HOME,
   hostname: () => "fixture",
   platform: () => "linux",
 }));
@@ -34,8 +37,12 @@ mock.module("node:fs", () => ({
   existsSync: () => false,
   readFileSync: absent,
   promises: {
-    stat: async (p: string) => (realBridgeBase !== null && String(p) === realBridgeBase ? nativeFsp.stat(p) : absent()),
-    open: async () => absent(),
+    stat: async (p: string) => {
+      if (realBridgeBase !== null && String(p) === realBridgeBase) return nativeFsp.stat(p);
+      if (realRemLog !== null && String(p) === realRemLog) return nativeFsp.stat(p);
+      return absent();
+    },
+    open: async (p: string, flags?: string | number) => (realRemLog !== null && String(p) === realRemLog ? nativeFsp.open(p, flags) : absent()),
     readFile: async () => absent(),
     readdir: async (p: string) => (realBridgeBase !== null && String(p) === realBridgeBase ? nativeFsp.readdir(p) : absent()),
   },
@@ -77,7 +84,7 @@ mock.module("../../resources/bm25.js", () => ({
 mock.module("../../resources/bm25-index-service.js", () => ({
   bm25IndexEnabled: () => false,
   bm25IndexInRetrievalPath: () => false,
-  bm25IndexStatus: () => ({}),
+  bm25IndexStatus: () => bm25Status,
   noteMemoryUpsert: () => {}, noteMemoryDelete: () => {},
 }));
 mock.module("../../resources/embedding-space-guard.js", () => ({ normalizeStamp: (s: string) => s, spaceGuardState: () => ({ state: "uniform", reason: null }) }));
@@ -124,6 +131,7 @@ beforeEach(() => {
     { id: "skill:using-flair", agentId: "operator-seed", createdAt: new Date(NOW - 1000).toISOString(), embeddingModel: "fixture-model" },
   ];
   memoryScanFailure = null;
+  bm25Status = {};
   authVerdict = { kind: "internal" };
   setSystemTime(NOW);
   spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network access"));
@@ -623,5 +631,41 @@ test("a real temporary bridge filename reaches the human line escaped", async ()
   } finally {
     realBridgeBase = null;
     process.chdir(previousCwd);
+  }
+});
+
+test("deep status escapes a REM last-distilled timestamp read from a real nightly JSONL file", async () => {
+  const home = tempDir("rem-3082-");
+  const logs = join(home, ".flair", "logs");
+  await nativeFsp.mkdir(logs, { recursive: true });
+  const distilledAt = "Nov\x1b 21 2026";
+  expect(Number.isFinite(Date.parse(distilledAt))).toBe(true);
+  await nativeFsp.writeFile(join(logs, "rem-nightly.jsonl"), JSON.stringify({
+    status: "completed",
+    distilledAt,
+    distill: { gathered: 3 },
+  }) + "\n");
+  realHome = home;
+  realRemLog = join(logs, "rem-nightly.jsonl");
+  try {
+    const detail: any = await new HealthDetail().get();
+    expect(detail.rem.lastDistilledAt).toBe(distilledAt);
+    const deep = await statusOutput(detail, ["deep"]);
+    expect(deep).toContain("Nov\\u{1b} 21 2026");
+    expect(deep.includes("\x1b")).toBe(false);
+  } finally {
+    realHome = null;
+    realRemLog = null;
+  }
+});
+
+test("plain and deep status escape a BM25 summary from the real HealthDetail", async () => {
+  bm25Status = { state: "ready", summary: "ready · 817 docs" + H };
+  const detail: any = await new HealthDetail().get();
+  expect(detail.bm25.summary).toContain("\x1b");
+  for (const args of [[], ["deep"]]) {
+    const output = await statusOutput(detail, args);
+    expect(output, JSON.stringify(args)).toContain("ready · 817 docs\\u{1b}[31mred");
+    expect(output.includes("\x1b"), JSON.stringify(args)).toBe(false);
   }
 });

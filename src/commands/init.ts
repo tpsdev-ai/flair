@@ -403,6 +403,7 @@ addAdminPassOptions(
       const clusterAdminPass = opts.clusterAdminPass || process.env.FLAIR_CLUSTER_ADMIN_PASS;
       let flairAdminPass = opts.flairAdminPass || process.env.FLAIR_ADMIN_PASS;
       let didProvision = false;
+      let provisionedPrincipal: { adminUser: string; adminPass: string } | null = null;
 
       if (clusterAdminUser && clusterAdminPass) {
         // ── New provisioning path: deploy Flair to Fabric, wait, provision super_user ──
@@ -425,26 +426,29 @@ addAdminPassOptions(
         console.log(`Admin password written to ${secretPath}`);
 
         // Atomic provisioning: deploy + wait + provision user
-        await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass);
+        const principal = await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass);
+        provisionedPrincipal = principal;
         didProvision = true;
+        const opsUser = principal.adminUser;
+        const opsPass = principal.adminPass;
 
         // Hub instances (--remote) receive federation pair requests and need
         // the flair_pair_initiator role so bootstrap credentials can pass
         // platform auth before reaching the FederationPair resource handler.
         if (opts.remote) {
-          await ensureFlairPairInitiatorRole(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
+          await ensureFlairPairInitiatorRole(opsUrl, opsUser, opsPass);
         }
 
         // Every flair instance has agents, so provision the least-privilege
         // flair_agent role (idempotent, harmless until a user is assigned to it).
-        await ensureFlairAgentRole(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
+        await ensureFlairAgentRole(opsUrl, opsUser, opsPass);
         // THE FLIP (auth-rbac): provision the shared least-privilege flair-agent user.
         // This ACTIVATES the gate's per-agent de-elevation (verified non-admin agents
         // resolve to flair-agent instead of admin super_user). Safe now: #487 gave
         // every agent-facing resource its own allow* + resolveAgentAuth, so they no
         // longer rely on the admin super_user bypass. The gate also falls back to
         // admin if this user is ever absent, so de-elevation degrades gracefully.
-        await ensureFlairAgentUser(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
+        await ensureFlairAgentUser(opsUrl, opsUser, opsPass);
       } else {
         // ── Existing behavior: --admin-pass required for already-running Flair ──
         if (!opts.adminPass) {
@@ -462,11 +466,13 @@ addAdminPassOptions(
       }
 
       // flair#1345: only the already-running-instance leg honors --admin-user /
-      // FLAIR_ADMIN_USER — the provisioning leg just CREATED the superuser as
-      // DEFAULT_ADMIN_USER via provisionFabric, so that name is ground truth.
-      const adminUser = didProvision ? DEFAULT_ADMIN_USER : resolveAdminUser(opts.adminUser);
+      // FLAIR_ADMIN_USER — the provisioning leg authenticates as the principal
+      // provisionFabric reports: the cluster administrator when it was already a
+      // super_user, otherwise the DEFAULT_ADMIN_USER it created.
+      const adminUser = didProvision ? provisionedPrincipal!.adminUser : resolveAdminUser(opts.adminUser);
+      const adminPass = didProvision ? provisionedPrincipal!.adminPass : flairAdminPass;
       refuseOperatorAgentId(agentId, adminUser);
-      const auth = `Basic ${Buffer.from(`${adminUser}:${flairAdminPass}`).toString("base64")}`;
+      const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
       const role = opts.remote ? "hub" : undefined;
 
       // Generate or reuse keypair (only if --agent-id provided, or --remote needs
@@ -490,7 +496,7 @@ addAdminPassOptions(
             opsUrl,
             { instanceId, publicKey },
             adminUser,
-            flairAdminPass,
+            adminPass,
           );
         } catch (err: any) {
           // A refusal (two rows) or an unreachable ops API — both are this
@@ -536,7 +542,7 @@ addAdminPassOptions(
 
           // Seed agent via remote ops API
           console.log(`Seeding agent '${agentId}' on ${baseUrl}...`);
-          await seedAgentWithLocalHome(opsUrl, agentId, pubKeyB64url, adminUser, flairAdminPass);
+          await seedAgentWithLocalHome(opsUrl, agentId, pubKeyB64url, adminUser, adminPass);
           console.log(`Agent '${agentId}' registered on remote instance ✓`);
         } else {
           // No agentId -- generate throwaway keypair for FederationInstance row
@@ -551,7 +557,7 @@ addAdminPassOptions(
 
       // flair#2141 S2 — seed the org-wide using-flair skill on the remote
       // instance, as the operator. Idempotent; a refusal fails this run.
-      await seedUsingFlairSkillViaRest(baseUrl, adminUser, flairAdminPass);
+      await seedUsingFlairSkillViaRest(baseUrl, adminUser, adminPass);
 
       // Verify connectivity
       if (didProvision) {
@@ -585,7 +591,9 @@ addAdminPassOptions(
         const displayTarget = target || opsTarget;
         console.log(`\n✓ Flair hub deployed to ${displayTarget}`);
         console.log(`  Component: flair@${flavor}`);
-        console.log(`  Admin user: ${adminUser} (pass written to ${join(resolveHome(), ".tps", "secrets", "flair-fabric-hdb")})`);
+        console.log(`  Admin user: ${adminUser}` + (provisionedPrincipal?.adminUser === DEFAULT_ADMIN_USER
+          ? ` (pass written to ${join(resolveHome(), ".tps", "secrets", "flair-fabric-hdb")})`
+          : " (the existing super_user; its password is the one supplied for it)"));
         if (instanceId) console.log(`  Instance: ${instanceId} (role=${role})`);
         console.log(`  Federation: ready — run \`flair federation token\` to mint a pairing token`);
       } else {

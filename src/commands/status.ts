@@ -604,7 +604,7 @@ const statusCmd = program
     }
 
     const bm25Line = formatBm25StatusLine(healthData?.bm25);
-    if (bm25Line) console.log(render.kv("BM25 index", bm25Line));
+    if (bm25Line) console.log(render.kv("BM25 index", escapeTerminalText(bm25Line)));
 
     if (agents) {
       if (agents.count > 0) {
@@ -1071,7 +1071,7 @@ statusCmd
     }
 
     const bm25DeepLine = formatBm25StatusLine(healthData?.bm25);
-    if (bm25DeepLine) console.log(`BM25 index:   ${bm25DeepLine}`);
+    if (bm25DeepLine) console.log(`BM25 index:   ${escapeTerminalText(bm25DeepLine)}`);
 
     const agents = healthData?.agents;
     if (agents) {
@@ -1159,7 +1159,7 @@ statusCmd
       if (typeof r.pendingCandidates === "number") console.log(`Pending candidates: ${r.pendingCandidates}`);
       const ds = distillationStaleness(r);
       if (typeof r.pendingCandidates === "number" || ds.lastDistilledAt || ds.stale) {
-        const base = ds.lastDistilledAt ? `${relativeTime(ds.lastDistilledAt)} (${ds.lastDistilledAt})` : "not observed";
+        const base = ds.lastDistilledAt ? `${relativeTime(ds.lastDistilledAt)} (${escapeTerminalText(ds.lastDistilledAt)})` : "not observed";
         console.log(`Last distilled:     ${base} (server-local log tail)${ds.stale ? DISTILL_STALE_HINT : ""}`);
       }
     }

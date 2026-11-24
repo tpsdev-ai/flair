@@ -314,7 +314,7 @@ describe("provisionFabric — full happy path", () => {
       return new Response("unknown", { status: 400 });
     });
 
-    await provisionFabric(
+    const principal = await provisionFabric(
       TEST_OPTS.target,
       TEST_OPTS.opsTarget,
       TEST_OPTS.clusterAdminUser,
@@ -326,6 +326,7 @@ describe("provisionFabric — full happy path", () => {
     expect(listUsersCalled).toBe(true);
     expect(addUserCalled).toBe(true);
     expect(waitCalled).toBe(true);
+    expect(principal).toEqual({ adminUser: "admin", adminPass: TEST_OPTS.flairAdminPass });
   });
 
   test("skips add_user when cluster-admin is already super_user", async () => {
@@ -357,7 +358,7 @@ describe("provisionFabric — full happy path", () => {
       return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
     });
 
-    await provisionFabric(
+    const principal = await provisionFabric(
       TEST_OPTS.target,
       TEST_OPTS.opsTarget,
       TEST_OPTS.clusterAdminUser,
@@ -368,6 +369,8 @@ describe("provisionFabric — full happy path", () => {
     expect(deployCalled).toBe(true);
     expect(listUsersCalled).toBe(true);
     expect(addUserCalled).toBe(false);
+    // No 'admin' user was created: the existing super_user is the usable principal.
+    expect(principal).toEqual({ adminUser: "cluster-admin", adminPass: "cluster-secret" });
   });
 
   test("falls back to alter_user when add_user returns 'already exists'", async () => {

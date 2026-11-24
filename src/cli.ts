@@ -4146,7 +4146,7 @@ export async function provisionFabric(
   clusterAdminUser: string,
   clusterAdminPass: string,
   flairAdminPass: string,
-): Promise<void> {
+): Promise<{ adminUser: string; adminPass: string }> {
   const projectRoot = process.cwd();
 
   // 1. Build and deploy component tarball. `target` is the served URL this
@@ -4192,8 +4192,14 @@ export async function provisionFabric(
     // If we can't check, assume not and proceed with add_user
   }
 
+  let adminUser = DEFAULT_ADMIN_USER;
+  let adminPass = flairAdminPass;
+
   if (clusterAdminIsSuperUser) {
     console.log(`Cluster admin '${clusterAdminUser}' is already a super_user — skipping user provisioning`);
+    // The run authenticates as this existing administrator: no 'admin' user exists.
+    adminUser = clusterAdminUser;
+    adminPass = clusterAdminPass;
   } else {
     console.log(`Provisioning Harper user 'admin' as super_user...`);
     try {
@@ -4223,6 +4229,8 @@ export async function provisionFabric(
       }
     }
   }
+
+  return { adminUser, adminPass };
 }
 
 // ─── flair_pair_initiator role ──────────────────────────────────────────────

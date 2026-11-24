@@ -32,6 +32,7 @@ function runInit(home: string, args: string[], extraEnv: Record<string, string> 
       if (init && typeof init.body === "string" && init.body.startsWith("{")) {
         const body = JSON.parse(init.body);
         if (body.operation === "sql") return json([]);
+        if (body.operation === "list_users") return json(JSON.parse(process.env.FIXTURE_LIST_USERS ?? "[]"));
         return json({});
       }
       return json({ ok: true });
@@ -111,7 +112,9 @@ describe("flair init --agent-id refuses the operator identity before the agent k
       "--force", "--cluster-admin-user", "cluster-admin", "--cluster-admin-pass", "fixture-cluster-pass",
       "--agent-id", "admin",
       "--keys-dir", join(home, "keys"), "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
-    ], { FLAIR_ADMIN_USER: "operator-z" }, root);
+    ], { FLAIR_ADMIN_USER: "operator-z", FIXTURE_LIST_USERS: JSON.stringify([
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+    ]) }, root);
     const out = result.stdout + result.stderr;
     expect(result.status, out).not.toBe(0);
     expect(out).toContain('"admin" is the operator identity');
@@ -122,6 +125,33 @@ describe("flair init --agent-id refuses the operator identity before the agent k
     const requests = recordedRequests(home);
     const bodies = requests.map((r) => (typeof r.body === "string" ? JSON.parse(r.body) : null)).filter(Boolean);
     expect(bodies.some((b: any) => b.operation === "deploy_component")).toBe(true);
+    expect(bodies.some((b: any) => b.table === "Agent")).toBe(false);
+  }, 120_000);
+
+  test("remote provisioning: an existing super_user cluster admin is the operator and its id is refused", () => {
+    const home = tempDir("opi-remote-provision-superuser-");
+    const root = join(home, "root");
+    mkdirSync(join(root, "dist"), { recursive: true });
+    mkdirSync(join(root, "schemas"), { recursive: true });
+    for (const name of ["config.yaml", "package.json", "LICENSE", "README.md", "SECURITY.md"]) {
+      writeFileSync(join(root, name), "");
+    }
+    const result = runInit(home, [
+      "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
+      "--force", "--cluster-admin-user", "cluster-admin", "--cluster-admin-pass", "fixture-cluster-pass",
+      "--agent-id", "cluster-admin",
+      "--keys-dir", join(home, "keys"), "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
+    ], { FIXTURE_LIST_USERS: JSON.stringify([
+      { username: "cluster-admin", role: { permission: { super_user: true } } },
+    ]) }, root);
+    const out = result.stdout + result.stderr;
+    expect(result.status, out).not.toBe(0);
+    expect(out).toContain('"cluster-admin" is the operator identity');
+    expect(out).toContain("Choose another --agent-id");
+    expect(existsSync(join(home, "keys"))).toBe(false);
+    const bodies = recordedRequests(home).map((r) => (typeof r.body === "string" ? JSON.parse(r.body) : null)).filter(Boolean);
+    expect(bodies.some((b: any) => b.operation === "deploy_component")).toBe(true);
+    expect(bodies.some((b: any) => b.operation === "add_user" && b.username === "admin")).toBe(false);
     expect(bodies.some((b: any) => b.table === "Agent")).toBe(false);
   }, 120_000);
 

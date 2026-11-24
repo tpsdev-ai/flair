@@ -3,8 +3,9 @@
   `flair status` and `flair status deep` escape control, format, surrogate,
   unassigned, line- and paragraph-separator code points in agent ids, model
   names, Soul keys, federation and OAuth fields, warning messages,
-  bridge-installed names and disk paths; deep also escapes the REM nightly
-  timestamp and bootstrap error text. Terminal escaping does not change JSON
+  bridge-installed names and disk paths, the BM25 index summary in both views;
+  deep also escapes the REM nightly and last-distilled timestamps and bootstrap
+  error text. Terminal escaping does not change JSON
   output; a failed Memory scan makes the per-agent `memoryCount`,
   `hashFallback`, `writes24h`, `usageCount` and `lastWriteAt` values null in
   JSON. When a row's memory count is unknown, plain status prints "unknown" for
