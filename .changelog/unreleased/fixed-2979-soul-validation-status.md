@@ -1,1 +1,0 @@
-- **A Soul PUT that fails schema validation now returns the validator's 400 with its field message instead of a 500 append error.** The instruction-version transaction still aborts on both paths, so no new row or version commits. ([#2996](https://github.com/tpsdev-ai/flair/pull/2996))

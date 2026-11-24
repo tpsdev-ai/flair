@@ -361,6 +361,32 @@ defineCheck("changelog-unreleased", null, () => {
     });
   }
 
+  // FLAIR_DOCS_BASE_SHA is the merge-group base CI supplies (see the per-change
+  // rule below). Unset or empty means no explicit base, its value on other
+  // events. Any other value must be a readable ancestor of HEAD. It is checked
+  // here, before any rule below can return a pass, and fails the check if not.
+  const suppliedBase = process.env.FLAIR_DOCS_BASE_SHA;
+  const explicitBase = (suppliedBase ?? "").trim();
+  if (suppliedBase !== undefined && suppliedBase !== "") {
+    let ancestor = false;
+    if (explicitBase) {
+      try {
+        execFileSync("git", ["merge-base", "--is-ancestor", explicitBase, "HEAD"], { cwd: ROOT, stdio: "ignore" });
+        ancestor = true;
+      } catch {
+        ancestor = false;
+      }
+    }
+    if (!ancestor) {
+      return [...failures, {
+        file: `${FRAGMENT_DIR_REL}/`, line: 1,
+        msg: explicitBase
+          ? `FLAIR_DOCS_BASE_SHA is ${explicitBase}, which is not a readable ancestor of HEAD, so the per-change fragment rule could not check this change. CI sets it from merge_group.base_sha; check that the checkout fetched full history (fetch-depth: 0), then rerun.`
+          : `FLAIR_DOCS_BASE_SHA is set but blank (${JSON.stringify(suppliedBase)}), so the per-change fragment rule has no base for this change. CI sets it from merge_group.base_sha and leaves it empty on other events; set a commit sha or leave it empty.`,
+      }];
+    }
+  }
+
   // How much work has landed since the tag selected by git describe?
   let commitsSinceTag = null;
   let excludedRenovateCommits = 0;
@@ -439,9 +465,17 @@ defineCheck("changelog-unreleased", null, () => {
   // Default true so a missing merge-base does not become an unpublished escape.
   let thisChangeShips = true;
   let changedPaths = null;
-  const baseRef = process.env.GITHUB_BASE_REF
-    ? `origin/${process.env.GITHUB_BASE_REF}`
-    : "origin/main";
+  // A merge-queue (merge_group) run has no GITHUB_BASE_REF. CI passes the
+  // group's parent commit (merge_group.base_sha) as FLAIR_DOCS_BASE_SHA. With it
+  // as the base, the changed-path analysis, the Renovate waiver and the
+  // per-change fragment rule below read only the queued PR's changes, the PR
+  // whose author CI reads. The value was validated above. The since-tag count
+  // above still reads all history since the last release tag.
+  const baseRef = explicitBase
+    ? explicitBase
+    : process.env.GITHUB_BASE_REF
+      ? `origin/${process.env.GITHUB_BASE_REF}`
+      : "origin/main";
   let base = "";
   try {
     base = execFileSync("git", ["merge-base", "HEAD", baseRef],

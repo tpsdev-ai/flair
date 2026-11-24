@@ -117,6 +117,21 @@ function runGate(dir: string, author?: string, gitEnv: NodeJS.ProcessEnv = fixtu
   return { status: r.status, out: `${r.stdout}${r.stderr}` };
 }
 
+/**
+ * The gate with no GITHUB_BASE_REF, as on merge_group. Without `groupBase` the
+ * script falls back to origin/main; with it, the script gets
+ * FLAIR_DOCS_BASE_SHA, as CI sets it from merge_group.base_sha.
+ */
+function runQueueGate(dir: string, author?: string, groupBase?: string): { status: number | null; out: string } {
+  const env: NodeJS.ProcessEnv = { ...fixtureGitEnv(), GITHUB_ACTIONS: "", GITHUB_BASE_REF: "" };
+  delete env.FLAIR_PR_AUTHOR_LOGIN;
+  delete env.FLAIR_DOCS_BASE_SHA;
+  if (author !== undefined) env.FLAIR_PR_AUTHOR_LOGIN = author;
+  if (groupBase !== undefined) env.FLAIR_DOCS_BASE_SHA = groupBase;
+  const r = spawnSync(process.execPath, [join(dir, SCRIPT_REL)], { cwd: dir, encoding: "utf8", env });
+  return { status: r.status, out: `${r.stdout}${r.stderr}` };
+}
+
 function runPromotion(dir: string, extraArgs: string[] = [], env: NodeJS.ProcessEnv = fixtureGitEnv()) {
   const r = spawnSync("bash", [join(dir, "scripts", "release-promote-changelog.sh"), "0.2.0", ...extraArgs], {
     cwd: dir, encoding: "utf8", env,
@@ -547,6 +562,143 @@ describe("release-time history", () => {
   });
 });
 
+describe("merge-queue commit (no GITHUB_BASE_REF)", () => {
+  test("a Renovate dependency-only squash commit is waived when the queued PR's login is Renovate's", () => {
+    const dir = makeRepo();
+    addDependencyOnlyCommit(dir, { author: "renovate" });
+    const res = runQueueGate(dir, "renovate[bot]");
+    expect(res.out).toContain("waived the per-PR fragment requirement");
+    expect(res.status).toBe(0);
+  });
+
+  test("the same squash commit needs a fragment when the queued PR's login is not Renovate's", () => {
+    const dir = makeRepo();
+    addDependencyOnlyCommit(dir, { author: "renovate" });
+    const res = runQueueGate(dir, "human-a");
+    expect(res.out).not.toContain("waived the per-PR fragment requirement");
+    expect(res.out).toContain("adds no changelog fragment");
+    expect(res.status).not.toBe(0);
+  });
+
+  // A merge group can sit on top of a PR ahead of it in the queue. With the
+  // group's parent commit as the base, the gate's per-change fragment rule and
+  // changed-path analysis read only the queued PR's own changes, the PR whose
+  // author the workflow reads.
+  function stackedGroup(second: "ci-only" | "unfragmented-fix"): { dir: string; groupBase: string } {
+    const dir = makeRepo();
+    addDependencyOnlyCommit(dir, { author: "renovate" });
+    const groupBase = gitOut(dir, "rev-parse", "HEAD").trim();
+    if (second === "ci-only") {
+      writeFixtureFile(dir, "scripts/ci-only.sh", "echo ci\n");
+      git(dir, "add", "-A");
+      commitAs(dir, "Human A", "human-a@example.invalid", "ci: add a lane helper (#9)");
+    } else {
+      writeFixtureFile(dir, "src/util.ts", "export const unit = 4;\n");
+      git(dir, "add", "-A");
+      commitAs(dir, "Human A", "human-a@example.invalid", "fix: adjust the unit (#9)");
+    }
+    return { dir, groupBase };
+  }
+
+  test("a CI-only PR queued behind a Renovate dependency PR passes when the base is the group's parent", () => {
+    const { dir, groupBase } = stackedGroup("ci-only");
+    const scoped = runQueueGate(dir, "human-a", groupBase);
+    expect(scoped.out).not.toContain("adds no changelog fragment");
+    expect(scoped.status).toBe(0);
+    // Against origin/main the same group also carries the Renovate PR's fix(deps)
+    // commit and dependency files, checked under the CI-only PR's login.
+    const unscoped = runQueueGate(dir, "human-a");
+    expect(unscoped.out).toContain("adds no changelog fragment");
+    expect(unscoped.status).not.toBe(0);
+  });
+
+  test("an unreadable or non-ancestor base fails the gate even with a fragment already staged", () => {
+    const dir = makeRepo();
+    writeFixtureFile(dir, ".changelog/unreleased/fixed-someone-else.md", "- **Someone else's fix.**\n");
+    git(dir, "add", "-A");
+    commitAs(dir, "Fixture", "fixture@example.invalid", "chore: stage another change's fragment");
+    git(dir, "push", "-q", "origin", "HEAD:refs/heads/main");
+    git(dir, "fetch", "-q", "origin");
+    const parent = gitOut(dir, "rev-parse", "HEAD").trim();
+    writeFixtureFile(dir, "src/util.ts", "export const unit = 5;\n");
+    git(dir, "add", "-A");
+    commitAs(dir, "Human A", "human-a@example.invalid", "fix: adjust the unit (#9)");
+    // A side commit off the same parent: readable and sharing history, but not an ancestor of HEAD.
+    const notAncestor = gitOut(dir, "commit-tree", "HEAD^{tree}", "-p", parent, "-m", "side").trim();
+    for (const groupBase of ["0123456789abcdef0123456789abcdef01234567", notAncestor]) {
+      const res = runQueueGate(dir, "human-a", groupBase);
+      expect(res.out).toContain(`FLAIR_DOCS_BASE_SHA is ${groupBase}, which is not a readable ancestor of HEAD`);
+      expect(res.status).not.toBe(0);
+    }
+    // The readable parent runs the per-change rule, which needs this PR's own fragment.
+    const res = runQueueGate(dir, "human-a", parent);
+    expect(res.out).toContain("adds no changelog fragment");
+    expect(res.status).not.toBe(0);
+  });
+
+  test("an unreadable base fails the gate on the release-PR path, which otherwise passes without fragments", () => {
+    const dir = makeRepo();
+    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+    pkg.version = "0.2.0";
+    writeFileSync(join(dir, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
+    writeFixtureFile(dir, "CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2020-02-01\n\n### Fixed\n\n- **A fix.**\n\n## [0.1.0] - 2020-01-01\n\n### Added\n\n- Initial.\n");
+    writeFixtureFile(dir, "src/util.ts", "export const unit = 6;\n");
+    git(dir, "add", "-A");
+    commitAs(dir, "Human A", "human-a@example.invalid", "fix: release v0.2.0 (#9)");
+    const parent = gitOut(dir, "rev-parse", "origin/main").trim();
+    // With a readable base, the release-PR exception (a version section, no v0.2.0 tag, no fragments) passes.
+    const readable = runQueueGate(dir, "human-a", parent);
+    expect(readable.status).toBe(0);
+    const unreadable = "0123456789abcdef0123456789abcdef01234567";
+    const res = runQueueGate(dir, "human-a", unreadable);
+    expect(res.out).toContain(`FLAIR_DOCS_BASE_SHA is ${unreadable}, which is not a readable ancestor of HEAD`);
+    expect(res.status).not.toBe(0);
+  });
+
+  test("a blank base fails the gate by name; an empty one is unset", () => {
+    const dir = makeRepo();
+    writeFixtureFile(dir, "scripts/ci-only.sh", "echo ci\n");
+    git(dir, "add", "-A");
+    commitAs(dir, "Human A", "human-a@example.invalid", "ci: add a lane helper (#9)");
+    for (const blank of ["   ", "\t"]) {
+      const res = runQueueGate(dir, "human-a", blank);
+      expect(res.out).toContain(`FLAIR_DOCS_BASE_SHA is set but blank (${JSON.stringify(blank)})`);
+      expect(res.status).not.toBe(0);
+    }
+    const empty = runQueueGate(dir, "human-a", "");
+    expect(empty.out).not.toContain("FLAIR_DOCS_BASE_SHA");
+    expect(empty.status).toBe(0);
+  });
+
+  test("the group's parent as base still requires a fragment for the queued PR's own shipped fix", () => {
+    const { dir, groupBase } = stackedGroup("unfragmented-fix");
+    const res = runQueueGate(dir, "human-a", groupBase);
+    expect(res.out).toContain("adds no changelog fragment");
+    expect(res.status).not.toBe(0);
+  });
+
+  test("a multi-commit PR titled fix: whose own commits are chore: passes as a PR without a fragment but fails as its queue squash commit", () => {
+    const pr = makeRepo();
+    writeFixtureFile(pr, "src/util.ts", "export const unit = 2;\n");
+    git(pr, "add", "-A");
+    commitAs(pr, "Human A", "human-a@example.invalid", "chore: wip");
+    writeFixtureFile(pr, "src/util.ts", "export const unit = 3;\n");
+    git(pr, "add", "-A");
+    commitAs(pr, "Human A", "human-a@example.invalid", "chore: rename");
+    const asPr = runGate(pr, "human-a");
+    expect(asPr.out).not.toContain("adds no changelog fragment");
+    expect(asPr.status).toBe(0);
+
+    const queue = makeRepo();
+    writeFixtureFile(queue, "src/util.ts", "export const unit = 3;\n");
+    git(queue, "add", "-A");
+    commitAs(queue, "Human A", "human-a@example.invalid", "fix: tighten the unit default (#7)\n\n* chore: wip\n\n* chore: rename");
+    const asQueue = runQueueGate(queue, "human-a");
+    expect(asQueue.out).toContain("adds no changelog fragment");
+    expect(asQueue.status).not.toBe(0);
+  });
+});
+
 describe("release wiring", () => {
   test.each([{ tagArgs: [] }, { tagArgs: ["--allow-no-release-tag"] }])("release promotion invocation runs under /bin/bash with %j", ({ tagArgs }) => {
     const sh = readFileSync(join(REPO_ROOT, "scripts", "release.sh"), "utf8");
@@ -580,15 +732,107 @@ describe("release wiring", () => {
     expect(result.stderr).toContain("promote: --allow-no-release-tag requires --with-dependencies");
   });
 
-  test("docs-freshness step gets the PR event author login exactly once", () => {
+  test("docs-freshness step gets the PR author login exactly once: from the PR event, or from the API in the merge queue", () => {
     const workflow = load(readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8")) as {
-      jobs: Record<string, { env?: Record<string, string>; steps: Array<{ run?: string; env?: Record<string, string> }> }>;
+      jobs: Record<string, { env?: Record<string, string>; steps: Array<{ id?: string; if?: string; run?: string; env?: Record<string, string> }> }>;
     };
     const job = workflow.jobs["docs-freshness"];
     const step = job.steps.find((entry) => entry.run === "node scripts/docs-freshness-check.mjs");
-    expect(step?.env?.FLAIR_PR_AUTHOR_LOGIN).toBe("${{ github.event.pull_request.user.login }}");
+    expect(step?.env?.FLAIR_PR_AUTHOR_LOGIN).toBe("${{ github.event.pull_request.user.login || steps.queued-pr.outputs.login }}");
+    // The merge-queue fallback runs only on merge_group, takes the PR number from
+    // the queue ref, and reads the login from the PR itself, not commit metadata.
+    const lookup = job.steps.find((entry) => entry.id === "queued-pr");
+    expect(lookup?.if).toBe("github.event_name == 'merge_group'");
+    expect(lookup?.env?.QUEUE_REF).toBe("${{ github.event.merge_group.head_ref }}");
+    expect(lookup?.run).toContain("gh api \"repos/${GITHUB_REPOSITORY}/pulls/${pr}\" --jq '.user.login // empty'");
+    expect(lookup?.run).not.toContain("head_commit");
+    expect(job.steps.indexOf(lookup!)).toBeLessThan(job.steps.indexOf(step!));
     const bindings = [job.env, ...job.steps.map((entry) => entry.env)].filter((env) => env && Object.hasOwn(env, "FLAIR_PR_AUTHOR_LOGIN"));
     expect(bindings).toHaveLength(1);
     expect(JSON.stringify(job).match(/FLAIR_PR_AUTHOR_LOGIN/g)).toHaveLength(1);
+  });
+
+  // Runs the committed lookup step under bash with a stub `gh` that answers like
+  // `gh api --jq`: it records its arguments, then runs the step's own filter
+  // (argument 4) through real jq over a JSON response, or exits non-zero the
+  // way a failed API call does. The queue-ref pattern, the null-author refusal
+  // and the API-failure refusal are exercised, not just present.
+  function runQueuedPrLookup(queueRef: string, response: { json: string } | { exit: number }) {
+    const workflow = load(readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8")) as {
+      jobs: Record<string, { steps: Array<{ id?: string; run?: string }> }>;
+    };
+    const run = workflow.jobs["docs-freshness"].steps.find((entry) => entry.id === "queued-pr")?.run;
+    if (typeof run !== "string") throw new Error("fixture drift: the queued-pr step is missing");
+    const dir = tempDir("flair-queued-pr-");
+    const argsFile = join(dir, "gh-args");
+    const responseFile = join(dir, "response.json");
+    if ("json" in response) writeFileSync(responseFile, response.json);
+    const answer = "json" in response
+      ? `[ "$3" = "--jq" ] || exit 64\nexec jq -r "$4" '${responseFile}'\n`
+      : `echo "HTTP 502: Bad Gateway (https://api.github.com/repos/tpsdev-ai/flair/pulls)" >&2\nexit ${response.exit}\n`;
+    writeFixtureFile(dir, "bin/gh", `#!/bin/sh\nprintf '%s\\n' "$@" > '${argsFile}'\n${answer}`);
+    chmodSync(join(dir, "bin", "gh"), 0o755);
+    writeFixtureFile(dir, "step.sh", run);
+    const output = join(dir, "github-output");
+    writeFileSync(output, "");
+    const result = spawnSync("/bin/bash", [join(dir, "step.sh")], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}`, QUEUE_REF: queueRef, GITHUB_REPOSITORY: "tpsdev-ai/flair", GITHUB_OUTPUT: output },
+    });
+    const ghArgs = (() => { try { return readFileSync(argsFile, "utf8").trim().split("\n"); } catch { return null; } })();
+    return { status: result.status, out: `${result.stdout}${result.stderr}`, output: readFileSync(output, "utf8"), ghArgs };
+  }
+
+  const QUEUED = "refs/heads/gh-readonly-queue/main/pr-3070-2d9033d3";
+  const author = (login: unknown) => ({ json: JSON.stringify({ number: 3070, user: login === undefined ? undefined : login === null ? null : { login } }) });
+
+  test.each([
+    "refs/heads/gh-readonly-queue/main/pr-3070-2d9033d3e9c0a1b2c3d4e5f60718293a4b5c6d7e",
+    "gh-readonly-queue/main/pr-3070-2d9033d3",
+  ])("merge-queue lookup reads the author of the queued PR named by %s", (queueRef) => {
+    const result = runQueuedPrLookup(queueRef, author("renovate[bot]"));
+    expect(result.status).toBe(0);
+    expect(result.ghArgs).toEqual(["api", "repos/tpsdev-ai/flair/pulls/3070", "--jq", ".user.login // empty"]);
+    expect(result.output).toBe("login=renovate[bot]\n");
+  });
+
+  test("merge-queue lookup accepts a human login", () => {
+    const result = runQueuedPrLookup(QUEUED, author("human-a"));
+    expect(result.status).toBe(0);
+    expect(result.output).toBe("login=human-a\n");
+  });
+
+  test.each([
+    "refs/heads/main",
+    "refs/heads/gh-readonly-queue/release/pr-3070-2d9033d3",
+    "refs/heads/gh-readonly-queue/main/pr-3070",
+    "refs/heads/gh-readonly-queue/main/pr-x-2d9033d3",
+    "refs/heads/fork/gh-readonly-queue/main/pr-3070-2d9033d3",
+    "",
+  ])("merge-queue lookup refuses a ref that names no queued PR on main: %j", (queueRef) => {
+    const result = runQueuedPrLookup(queueRef, author("renovate[bot]"));
+    expect(result.status).toBe(1);
+    expect(result.out).toContain("does not match [refs/heads/]gh-readonly-queue/main/pr-<number>-<sha>");
+    expect(result.ghArgs).toBeNull();
+    expect(result.output).toBe("");
+  });
+
+  test.each([
+    ["a null author (user: null)", author(null)],
+    ["no user field", author(undefined)],
+    ["an empty login", author("")],
+    ["a login that is not a GitHub login", author("two words")],
+  ])("merge-queue lookup refuses %s instead of checking without a login", (_label, response) => {
+    const result = runQueuedPrLookup(QUEUED, response);
+    expect(result.status).toBe(1);
+    expect(result.out).toContain("the API returned no valid author login for queued PR #3070");
+    expect(result.output).toBe("");
+  });
+
+  test("merge-queue lookup stops when the API call fails", () => {
+    const result = runQueuedPrLookup(QUEUED, { exit: 1 });
+    expect(result.status).toBe(1);
+    expect(result.out).toContain("could not read queued PR #3070 from the API");
+    expect(result.output).toBe("");
   });
 });

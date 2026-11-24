@@ -1,1 +1,0 @@
-- **An ordinary Memory owner `PATCH` compares retained request fields with its staged write after commit.** A mismatch answers the named 409 `stored_row_changed` (#2645). ([#2648](https://github.com/tpsdev-ai/flair/pull/2648))
