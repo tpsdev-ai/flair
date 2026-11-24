@@ -4,8 +4,8 @@
 
 Flair uses cryptographic identity (Ed25519) for agent authentication. Within
 an org, memory reads are open — agents see each other's non-private memories —
-while writes are isolated per agent and private memories stay strictly
-owner-only. The hard access boundary is the federation edge (cross-instance).
+while writes are isolated per agent and private memories restrict non-admin
+reads to their owner. The hard access boundary is the federation edge (cross-instance).
 
 ## Authentication
 
@@ -17,7 +17,7 @@ Every request includes an `Authorization` header:
 TPS-Ed25519 <agentId>:<timestamp>:<nonce>:<signature>
 ```
 
-The signature covers `agentId:timestamp:nonce:METHOD:/path` using the
+The signature covers `agentId:timestamp:nonce:METHOD:/path?query` using the
 agent's Ed25519 private key. The server verifies against the agent's
 registered public key.
 
@@ -49,11 +49,14 @@ requests to it require admin Basic auth: Flair ships with
 `authorizeLocal: false`, so an unauthenticated loopback request is
 rejected (`401`) instead of being auto-elevated to super_user. The same
 API is also reachable over a Unix **domain socket**
-(`~/.flair/data/operations-server`, owner-write-only), which Harper
+(`~/.flair/data/operations-server`), which Harper
 treats as an inherent local-admin channel — a request over the socket is
 authorized as super_user **without** credentials. This is by design (the
-admin-password rotation flow relies on it) and is constrained to the box
-owner; see Threats NOT Mitigated below.
+admin-password rotation flow relies on it). CLI `init`, `start`, `restart` and
+launchd repair attempt parent/socket modes `0700`/`0600` (or `0750`/`0660` with
+`FLAIR_SOCKET_GROUP`, changing the socket's group); unattended macOS launchd
+spawns use `Umask 077` (`0700` socket, since Darwin does not retain `0600` on
+Unix sockets) without reapplying the CLI posture.
 
 ## Data Scoping
 
@@ -65,19 +68,17 @@ centralized read-scope rule), not application logic:
 
 - `GET /Memory/` — applies the owner/visibility base scope and omits retained
   closed skill payloads that fail the non-admin reader's current-authority check
-- `POST /MemorySearch` — same read scope: own memories plus all non-private
+- `POST /SemanticSearch` — applies the owner/visibility read scope
 - `POST /Memory` — writes are attributed to the authenticated agent; an
   agent cannot write as another (write isolation)
 
-**Private memories are strictly owner-only** — a memory written with
-`visibility: private` is returned only to its author, never to another agent.
+Non-admin memory reads restrict `visibility: private` to its author.
 
-**A write that does not name a visibility gets one anyway.** The server derives
-it from the memory's durability: `permanent`/`persistent` → `shared`,
-`standard`/`ephemeral` → `private`. Durability itself defaults to `standard`,
-so a write naming neither is stamped `private` and is owner-only. An explicit
-`visibility` on the write always overrides the rule, and the response to a
-create names the value the record actually landed on.
+On `POST /Memory` and `PUT /Memory` creates, omitted visibility defaults by
+durability: `permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private`.
+Durability defaults to `standard`. Explicit visibility overrides this default;
+ephemeral memories require `private`, and grant-authorized `supersedes` writes
+keep the predecessor's visibility, including when visibility is omitted.
 
 ### Record Ownership on Writes
 
@@ -128,7 +129,7 @@ Within an org, non-private memories pass the base read-scope check without a
 grant; non-admin by-id and collection reads of retained closed skills
 additionally require readable current authority. This is deliberate: the goal
 is relevance (surface what's useful to the org) over secrecy. A writer keeps something private by marking it
-`visibility: private`, which keeps it strictly owner-only. The access boundary
+`visibility: private`, which restricts non-admin reads to its author. The access boundary
 that stays hard is the **federation edge** (cross-instance / cross-org), not
 within-org reads.
 
@@ -142,9 +143,9 @@ are restricted to admin-only.
 
 ### Key Storage
 
-Private keys are stored at `~/.flair/keys/<agentId>.key` with `0600`
-permissions (owner read/write only). Legacy path `~/.tps/secrets/flair/`
-is supported with deprecation warnings.
+New private keys at `~/.flair/keys/<agentId>.key` are written, then set to
+`0600` (owner read/write); existing keys are reused as-is. Legacy path
+`~/.tps/secrets/flair/<agentId>-priv.key` is also supported.
 
 ### Key Generation
 
@@ -163,8 +164,8 @@ public key in Flair, and backs up the old key as `<agentId>.key.bak`.
 
 - **Agent impersonation:** Ed25519 signatures prevent one agent from
   acting as another without possessing the private key.
-- **Private-memory leakage:** memories marked `visibility: private` are
-  strictly owner-only and never returned to another agent. Non-private
+- **Private-memory leakage:** non-admin reads of `visibility: private` memories
+  are restricted to their author. Non-private
   memories are intentionally readable within the org (by design, not
   leakage); the cross-instance boundary is the federation edge.
 - **Write forgery:** writes are attributed to the authenticated agent —
@@ -172,8 +173,6 @@ public key in Flair, and backs up the old key as `<agentId>.key.bak`.
 - **Replay attacks:** 30-second window + nonce deduplication.
 - **Privilege escalation via SQL:** SQL and GraphQL endpoints blocked
   for non-admin agents.
-- **Admin token theft from filesystem:** Admin credentials are only in
-  process environment, never on disk.
 
 ### Threats NOT Mitigated (Runtime Responsibility)
 
@@ -184,13 +183,10 @@ public key in Flair, and backs up the old key as `<agentId>.key.bak`.
   process could extract them.
 - **Network sniffing:** Flair uses HTTP by default. Use HTTPS in
   production or restrict to localhost.
-- **Same-OS-user ops-API socket access:** the operations-API domain
-  socket (`operations-server`, owner-write-only) is an unauthenticated
-  super_user channel by Harper design — any process running as the box
-  owner can perform admin operations through it (the admin-password
-  rotation flow uses this path). Owner-write permissions keep it
-  unreachable by other OS users, co-tenants, and the network; isolate
-  untrusted workloads to separate OS users.
+- **Local ops-API socket access:** the operations-API domain socket
+  (`operations-server`) grants local admin access, restricted by the
+  directory and socket modes above. Isolate untrusted workloads to separate
+  OS users outside any configured `FLAIR_SOCKET_GROUP`.
 
 ## Recommendations
 
@@ -199,4 +195,4 @@ public key in Flair, and backs up the old key as `<agentId>.key.bak`.
 3. **Rotate keys** periodically with `flair agent rotate-key`
 4. **Back up** with `flair backup` — backup files contain memory content
    and should be treated as sensitive
-5. **Monitor** with `flair status` — warns about key permission issues
+5. **Monitor** with `flair status`

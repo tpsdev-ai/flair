@@ -274,6 +274,17 @@ async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, ad
   console.log(`using-flair skill: ${outcome.message}`);
 }
 
+/**
+ * Refuse an `--agent-id` that names an administrator username reserved by this init path,
+ * before any key or Agent write.
+ */
+function refuseOperatorAgentId(agentId: string | undefined, administratorNames: string[]): void {
+  if (!agentId || !administratorNames.includes(agentId)) return;
+  console.error(`Error: --agent-id "${agentId}" is an administrator username reserved by this init path.`);
+  console.error("  Choose another --agent-id.");
+  process.exit(1);
+}
+
 function readOccupiedListener(port: number): OccupiedHarperListener {
   return cli.readOccupiedListener(port);
 }
@@ -391,6 +402,10 @@ addAdminPassOptions(
 
       if (clusterAdminUser && clusterAdminPass) {
         // ── New provisioning path: deploy Flair to Fabric, wait, provision super_user ──
+        // Provisioning either reuses an existing super_user cluster admin or
+        // creates or updates DEFAULT_ADMIN_USER, so both names are known before
+        // provisionFabric runs. Refuse either one here, before any write.
+        refuseOperatorAgentId(agentId, [clusterAdminUser, DEFAULT_ADMIN_USER]);
         if (!opts.force) {
           console.error("Error: --force is required with --target/--ops-target (remote init provisions a live Fabric instance)");
           console.error("  Pass --force to confirm this is intended.");
@@ -450,6 +465,7 @@ addAdminPassOptions(
       // FLAIR_ADMIN_USER — the provisioning leg just CREATED the superuser as
       // DEFAULT_ADMIN_USER via provisionFabric, so that name is ground truth.
       const adminUser = didProvision ? DEFAULT_ADMIN_USER : resolveAdminUser(opts.adminUser);
+      if (!didProvision) refuseOperatorAgentId(agentId, [adminUser]);
       const auth = `Basic ${Buffer.from(`${adminUser}:${flairAdminPass}`).toString("base64")}`;
       const role = opts.remote ? "hub" : undefined;
 
@@ -584,6 +600,9 @@ addAdminPassOptions(
     }
 
     // ── Local init (full one-command setup) ──
+    // Local init uses DEFAULT_ADMIN_USER, so the
+    // check runs here, before any key or Agent write.
+    refuseOperatorAgentId(agentId, [DEFAULT_ADMIN_USER]);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     // Resolve ONCE, here: the operator means "relative to my shell's cwd", but
     // Harper is spawned with cwd = the flair package directory, so a raw
