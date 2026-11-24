@@ -19,7 +19,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import {
   describeScheduledDriverFinding,
   type ScheduledDriverFacts,
@@ -429,6 +429,21 @@ describe("flair#3056 — inspectFederationShimNode reads the unit and the shim f
       const changed = platform === "darwin"
         ? unit.replace(`<string>${s.shim}</string>`, `<string>${other}</string>`)
         : unit.replace(`ExecStart=${s.shim}`, `ExecStart=${other}`);
+      expect(changed).not.toBe(unit);
+      writeFileSync(s.unitPath, changed);
+      expect(inspectFederationShimNode(s.paths)).toBeNull();
+    });
+
+    it(`${platform}: null when the unit names the shim by a relative program path`, () => {
+      const s = setup(platform);
+      const unit = readFileSync(s.unitPath, "utf-8");
+      // A relative path that would resolve to the shim from this process's
+      // cwd; the unit's own directory is not this process's cwd.
+      const relativeProgram = relative(process.cwd(), s.shim);
+      expect(resolve(relativeProgram)).toBe(resolve(s.shim));
+      const changed = platform === "darwin"
+        ? unit.replace(`<string>${s.shim}</string>`, `<string>${relativeProgram}</string>`)
+        : unit.replace(`ExecStart=${s.shim}`, `ExecStart=${relativeProgram}`);
       expect(changed).not.toBe(unit);
       writeFileSync(s.unitPath, changed);
       expect(inspectFederationShimNode(s.paths)).toBeNull();

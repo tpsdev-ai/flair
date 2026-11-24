@@ -1138,7 +1138,16 @@ function federationUnitExecsShim(plat: SchedulerPlatform, text: string, shimPath
     const block = doc.top.get("ProgramArguments");
     const items = block?.t === "array" ? block.items : [];
     const args = items.map((v) => (v.t === "string" ? v.v : `<${v.t}>`));
-    if (items.length !== 1 || items[0]!.t !== "string" || resolve(args[0]!) !== resolve(shimPath)) {
+    if (items.length !== 1 || items[0]!.t !== "string") {
+      return `its ProgramArguments are ${JSON.stringify(args)}, not [${JSON.stringify(shimPath)}]`;
+    }
+    // launchd resolves a relative ProgramArguments[0] against the unit's own
+    // WorkingDirectory, not this process's cwd, so only an absolute program
+    // path can be attributed to the shim.
+    if (!isAbsolute(args[0]!)) {
+      return `its ProgramArguments program ${JSON.stringify(args[0]!)} is not an absolute path`;
+    }
+    if (resolve(args[0]!) !== resolve(shimPath)) {
       return `its ProgramArguments are ${JSON.stringify(args)}, not [${JSON.stringify(shimPath)}]`;
     }
     return null;
@@ -1154,7 +1163,15 @@ function federationUnitExecsShim(plat: SchedulerPlatform, text: string, shimPath
     }
     if (section === "service" && /^ExecStart\s*=/.test(line)) execs.push(line.replace(/^ExecStart\s*=\s*/, "").replace(/^[-@:+!]+/, ""));
   }
-  if (execs.length !== 1 || resolve(execs[0]!) !== resolve(shimPath)) {
+  if (execs.length !== 1) {
+    return `its ExecStart is ${JSON.stringify(execs)}, not ${JSON.stringify(shimPath)}`;
+  }
+  // systemd does not resolve a relative ExecStart against this process's cwd,
+  // so only an absolute program path can be attributed to the shim.
+  if (!isAbsolute(execs[0]!)) {
+    return `its ExecStart program ${JSON.stringify(execs[0]!)} is not an absolute path`;
+  }
+  if (resolve(execs[0]!) !== resolve(shimPath)) {
     return `its ExecStart is ${JSON.stringify(execs)}, not ${JSON.stringify(shimPath)}`;
   }
   return null;

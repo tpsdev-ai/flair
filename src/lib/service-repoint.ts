@@ -46,8 +46,10 @@
  *     semver, or is newer by semver ordering (0.57.0-beta.1 is older than 0.57.0)
  *     → refused: a downgrade cannot be ruled out;
  *   - it serves THIS CLI's tree with an existing, different node → a deliberate
- *     runtime pin, left as it is (`pinned-node`), apart from the launchd
- *     Homebrew case below;
+ *     runtime pin (`pinned-node`): when the unit's other runtime paths exist it
+ *     is left as it is, apart from the launchd Homebrew case below; a missing
+ *     other runtime path is replaced in a launchd plist, keeping the pin,
+ *     while a systemd unit is refused;
  *   - launchd only: it serves this CLI's tree and one of its runtime paths no
  *     longer exists → the missing path is replaced (systemd: refused);
  *   - launchd only: it serves this CLI's tree with an existing node path in

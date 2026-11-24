@@ -19,7 +19,7 @@ import { describe, it, expect } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 import { installServiceManagerTripwire } from "../helpers/fake-launchctl.ts";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.ts";
@@ -124,10 +124,10 @@ function fixture(root: string, nodeBin: string): Fixture {
 }
 
 /** Run `flair doctor` against `port` in the fixture's HOME; returns the "Scheduled drivers" section. */
-function runDoctor(f: Fixture, port: number, lastExit: number): { section: string; calls: string[] } {
+function runDoctor(f: Fixture, port: number, lastExit: number, cwdOverride?: string): { section: string; calls: string[] } {
   const fake = fakeServiceManager(f.root, lastExit);
   const tripwire = installServiceManagerTripwire("flair-3056-doctor-tripwire-");
-  const cwd = join(f.root, "cwd");
+  const cwd = cwdOverride ?? join(f.root, "cwd");
   mkdirSync(cwd, { recursive: true });
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -220,6 +220,29 @@ describe("flair doctor names the shim's missing node binary (flair#3056)", () =>
     writeFileSync(f.unitPath, changed);
 
     const { section, calls } = runDoctor(f, await deadPort(), 1);
+
+    expectFederationQueries(calls);
+    expect(section).toContain("Federation sync driver DEGRADED — loaded, but its last run failed");
+    expect(section).not.toContain(nodeBin);
+  }, CASE_BUDGET_MS);
+
+  it("does not attribute it to the shim when the unit names it by a relative program path", async () => {
+    const root = tempDir("flair-3056-doctor-");
+    const nodeBin = join(root, "homebrew", "Cellar", "node", "26.10.0_1", "bin", "node");
+    const f = fixture(root, nodeBin);
+    // Deeper than the unit's own directory, so the relative path resolves to
+    // the shim from this cwd only.
+    const cwd = join(root, "cwd", "deep");
+    const relativeProgram = relative(cwd, f.shim);
+    expect(resolve(cwd, relativeProgram)).toBe(resolve(f.shim));
+    const unit = readFileSync(f.unitPath, "utf-8");
+    const changed = PLATFORM === "darwin"
+      ? unit.replace(`<string>${f.shim}</string>`, `<string>${relativeProgram}</string>`)
+      : unit.replace(`ExecStart=${f.shim}`, `ExecStart=${relativeProgram}`);
+    expect(changed).not.toBe(unit);
+    writeFileSync(f.unitPath, changed);
+
+    const { section, calls } = runDoctor(f, await deadPort(), 1, cwd);
 
     expectFederationQueries(calls);
     expect(section).toContain("Federation sync driver DEGRADED — loaded, but its last run failed");

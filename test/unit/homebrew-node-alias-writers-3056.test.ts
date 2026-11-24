@@ -24,7 +24,7 @@
  */
 import { describe, test, expect } from "bun:test";
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tempDir } from "../helpers/temp-dir.ts";
 import { buildLaunchdPlist, writeInitLaunchdPlist, type WriteInitLaunchdPlistOptions } from "../../src/cli.ts";
@@ -413,6 +413,36 @@ describe("federation-sync shim rewrite: a shim running ANOTHER tree that records
     expect(r.status).toBe("rewritten");
     expect(execLine(readFileSync(p.shim, "utf-8"))).toBe(`exec "${cliNode}" "${b.cli}" federation sync "$@"`);
   });
+});
+
+describe("federation-sync shim rewrite: the unit must name the shim by an absolute program path (flair#3056)", () => {
+  for (const platform of ["darwin", "linux"] as const) {
+    test(`${platform}: a relative program path is not attributed, and the shim is left unchanged`, () => {
+      const b = brew();
+      const cellar = b.cellar("node", "26.10.0_1");
+      const alias = b.opt("node", "26.10.0_1");
+      const p = shimPaths(b);
+      enable(b, p, platform, { nodeBin: cellar });
+      const unitPath = platform === "darwin" ? p.plist : p.service;
+      const unit = readFileSync(unitPath, "utf-8");
+      // Resolves to the shim from this process's cwd, which is not the unit's
+      // own directory.
+      const relativeProgram = relative(process.cwd(), p.shim);
+      expect(resolve(relativeProgram)).toBe(resolve(p.shim));
+      const changed = platform === "darwin"
+        ? unit.replace(`<string>${p.shim}</string>`, `<string>${relativeProgram}</string>`)
+        : unit.replace(`ExecStart=${p.shim}`, `ExecStart=${relativeProgram}`);
+      expect(changed).not.toBe(unit);
+      writeFileSync(unitPath, changed);
+      const before = readFileSync(p.shim, "utf-8");
+
+      const r = rewrite(b, p, platform, alias);
+
+      expect(r.status).toBe("refused");
+      expect(r.detail).toContain("is not an absolute path");
+      expect(readFileSync(p.shim, "utf-8")).toBe(before);
+    });
+  }
 });
 
 describe("flair doctor's install-tree section on a same-tree Cellar shim (flair#3056)", () => {
