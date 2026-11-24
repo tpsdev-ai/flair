@@ -162,8 +162,8 @@ Apart from the Homebrew case below, a unit that serves this CLI's tree with a
 different, existing node is treated as a deliberate pin: `flair init` does not
 change that node path. When the unit's other runtime paths exist, init leaves
 the unit unchanged, and init and `flair doctor` report the pin with the hand edit
-that would move it. When one of them is missing, a plist has it replaced as the
-next sentence says, and a systemd unit is refused. A
+that would move it. When one of them is missing, a plist has it set to this
+CLI's path for it, as the next sentence says, and a systemd unit is refused. A
 plist that already serves this CLI's tree has a missing runtime path replaced
 without the version check in the table, which applies only to a move between
 trees. In a plist or federation-sync shim that serves this CLI's tree and that

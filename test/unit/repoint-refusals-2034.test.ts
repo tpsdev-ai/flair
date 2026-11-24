@@ -1113,7 +1113,9 @@ describe("6 — a deliberate pin's message offers only a remedy that exists", ()
     );
     expect(pin?.kind).toBe("pinned");
     expect(pin!.message).not.toContain("flair init && flair restart");
-    expect(pin!.message).toContain("does not change it");
+    expect(pin!.message).toContain(
+      "`flair init` does not change it, except that it can replace a Homebrew Cellar node path in a launchd plist with its `opt` alias (the same binary).",
+    );
     expect(pin!.message).toContain(`to ${NEW_NODE} in the unit by hand`);
   });
 });
