@@ -106,7 +106,8 @@ fi
 # mask whether the plist's own value is what the upgraded server honours.
 #
 # The admin password reaches init through a source file and later
-# restart/verify calls through the environment to keep it out of argv and logs.
+# restart/verify calls through the environment, so it stays out of argv.
+# Init's output is scanned for it before it is printed.
 # ops-nv9d slice 2: these are BARE values on purpose. This lane deliberately
 # exports a bare port as "the reported rockit shape" and then installs + exercises
 # a PUBLISHED BASELINE (pre-parser) CLI. Qualifying HTTP_PORT here would delete
@@ -369,20 +370,39 @@ ADMIN_PASS_SOURCE_FILE="$ADMIN_PASS_SOURCE_DIR/admin-pass"
 ( umask 077; printf '%s\n' "$ADMIN_PASS" > "$ADMIN_PASS_SOURCE_FILE" )
 chmod 600 "$ADMIN_PASS_SOURCE_FILE"
 unset FLAIR_ADMIN_PASS HDB_ADMIN_PASSWORD
+# Init's output stays in the 0700 source directory until a scan for the
+# password finds nothing. `grep -f` reads the value from the source file, so it
+# never appears on a command line. A scan that cannot run (exit 2) refuses too.
+INIT_LOG="$ADMIN_PASS_SOURCE_DIR/init.log"
+init_rc=0
 flair init \
   --port "$PORT" \
   --ops-port "$OPS_PORT" \
   --ops-bind 127.0.0.1 \
   --admin-pass-file "$ADMIN_PASS_SOURCE_FILE" \
   --skip-soul \
-  --no-mcp
+  --no-mcp >"$INIT_LOG" 2>&1 || init_rc=$?
+scan_rc=0
+grep -qF -f "$ADMIN_PASS_SOURCE_FILE" "$INIT_LOG" || scan_rc=$?
+if [ "$scan_rc" -ne 1 ]; then
+  echo "flair init output withheld: the admin password scan found the value or could not run (grep exit ${scan_rc})" >&2
+  exit 1
+fi
+cat "$INIT_LOG"
+# A failed init still reaches the ERR trap's diagnostics with init's exit code.
+if [ "$init_rc" -ne 0 ]; then (exit "$init_rc"); fi
 if [ ! -f "$PASS_FILE" ] || [ -L "$PASS_FILE" ] || [ ! -O "$PASS_FILE" ] ||
    [ "$(stat -f '%Lp' "$PASS_FILE")" != "600" ] || ! cmp -s "$ADMIN_PASS_SOURCE_FILE" "$PASS_FILE"; then
   echo "admin-pass file ${PASS_FILE} must be a runner-owned regular 0600 file identical to the source after flair init" >&2
   exit 1
 fi
+admin_pass_source_dir_used="$ADMIN_PASS_SOURCE_DIR"
 cleanup_admin_pass_source
 ADMIN_PASS_SOURCE_DIR=""
+if [ -e "$admin_pass_source_dir_used" ]; then
+  echo "admin-pass source directory ${admin_pass_source_dir_used} still exists after cleanup" >&2
+  exit 1
+fi
 export HDB_ADMIN_PASSWORD="$ADMIN_PASS"
 export FLAIR_ADMIN_PASS="$ADMIN_PASS"
 wait_health "$HTTP_URL/Health" 180
