@@ -259,6 +259,10 @@ jobs:
       # flair#2311: verify command/file agreement and the lane partition.
       - name: Verify lane shard coverage
         run: node scripts/ci/lane-shards.mjs --verify --of 2
+      # The waiter suite runs here as a named step as well as through the
+      # lane's file discovery; the darwin lane below runs it under bash 3.2.
+      - name: Waiter unit tests (bash docker stub)
+        run: bun test test/unit/wait-for-harper.test.ts
       - name: Shared unit lane (root, isolated and workspace tests)
         # --keep-going (flair#2030): keep attempting later steps until the lane budget
         # runs out and report every failure (and any unrun step) in one
@@ -429,6 +433,10 @@ jobs:
         run: bun run build && bun run build:cli
       - name: Run darwin-gated unit tests (must execute, not skip)
         run: bun scripts/check-darwin-gated-tests.mjs
+      # The waiter's docker stub uses "#!/usr/bin/env bash" and the runner's
+      # stock /bin/bash 3.2 has no mapfile builtin; /bin first pins it.
+      - name: Waiter unit tests (macOS /bin/bash 3.2)
+        run: PATH="/bin:$PATH" bun test test/unit/wait-for-harper.test.ts
       - name: Repeat Darwin zombie regression
         run: |
           for run in {1..20}; do
@@ -847,6 +855,9 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Start Harper with Flair component (for E2E / Playwright)
+        env:
+          HARPER_START_BUDGET_S: "300"
+          HARPER_START_CREDENTIALS: "admin:admin123"
         run: |
           # ops-nv9d slice 2: the E2E/Playwright lane deliberately leaves Harper
           # on a WILDCARD bind (bare HTTP_PORT + NODE_HOSTNAME=0.0.0.0) so the
@@ -866,22 +877,15 @@ jobs:
             --entrypoint /bin/sh \
             harperfast/harper:${{ steps.harper-image.outputs.tag }} \
             -c "harper install && harper dev /flair"
-          # Wait for Harper to be healthy (Basic auth required by Harper's authorizeLocal)
-          for i in $(seq 1 60); do
-            if curl -sf -u admin:admin123 http://localhost:9926/Health 2>/dev/null; then
-              echo "Harper ready (${i}s)"
-              break
-            fi
-            if [ "$i" -eq 60 ]; then
-              echo "Harper failed to start after 120s. Full logs:"
-              docker logs harper-flair 2>&1
-              echo "---"
-              echo "Trying direct curl with verbose:"
-              curl -v http://localhost:9926/Health 2>&1 || true
-              exit 1
-            fi
-            sleep 2
-          done
+          # Poll against an elapsed budget, not a fixed poll count. A dead
+          # container detected before the deadline stops polling; the waiter
+          # prints its exit code and attempts `docker logs`, reporting a logs
+          # error if that fails. An inspect that answers after the deadline
+          # ends the wait as a timeout.
+          node "$GITHUB_WORKSPACE/scripts/ci/wait-for-harper.mjs" \
+            --container harper-flair \
+            --url http://localhost:9926/Health \
+            --credentials-env HARPER_START_CREDENTIALS
       - name: E2E CLI smoke test
         run: bash test/e2e-cli.sh
         env:
