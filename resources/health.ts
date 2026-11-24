@@ -380,28 +380,43 @@ export class HealthDetail extends Resource {
       }
       const unregisteredMap = new Map<string, AgentRow>();
       const cutoff24h = nowMs - 24 * 3600 * 1000;
-      for (const m of memoriesList) {
-        if (!m.agentId) continue;
-        const known = perAgentMap.get(m.agentId);
-        const row = known ?? unregisteredMap.get(m.agentId) ?? blank(m.agentId);
-        row.memoryCount++;
-        row.usageCount += (m.usageCount ?? 0);
-        if (!m.embeddingModel || m.embeddingModel === "hash-512d") row.hashFallback++;
-        if (m.createdAt) {
-          const ts = new Date(m.createdAt).getTime();
-          if (ts >= cutoff24h) row.writes24h++;
-          if (!row.lastWriteAt || ts > new Date(row.lastWriteAt).getTime()) {
-            row.lastWriteAt = m.createdAt;
+      // Only a completed Memory scan yields counts. A scan that threw part-way
+      // leaves a partial `memoriesList`; counting it would report partial
+      // numbers as facts, so the loop is skipped and every row below reports
+      // its Memory-derived values as unknown.
+      if (memoryScanComplete) {
+        for (const m of memoriesList) {
+          if (!m.agentId) continue;
+          const known = perAgentMap.get(m.agentId);
+          const row = known ?? unregisteredMap.get(m.agentId) ?? blank(m.agentId);
+          row.memoryCount++;
+          row.usageCount += (m.usageCount ?? 0);
+          if (!m.embeddingModel || m.embeddingModel === "hash-512d") row.hashFallback++;
+          if (m.createdAt) {
+            const ts = new Date(m.createdAt).getTime();
+            if (ts >= cutoff24h) row.writes24h++;
+            if (!row.lastWriteAt || ts > new Date(row.lastWriteAt).getTime()) {
+              row.lastWriteAt = m.createdAt;
+            }
           }
+          if (known) perAgentMap.set(m.agentId, row);
+          else unregisteredMap.set(m.agentId, row);
         }
-        if (known) perAgentMap.set(m.agentId, row);
-        else unregisteredMap.set(m.agentId, row);
       }
       const agentIds = Array.from(perAgentMap.keys());
-      const perAgentFull = Array.from(perAgentMap.values()).sort((a, b) => b.memoryCount - a.memoryCount);
+      const perAgentFull = memoryScanComplete
+        ? Array.from(perAgentMap.values()).sort((a, b) => b.memoryCount - a.memoryCount)
+        : agentIds.map((id) => ({
+            id,
+            memoryCount: null,
+            hashFallback: null,
+            writes24h: null,
+            lastWriteAt: null,
+            usageCount: null,
+          }));
       const perAgent = isAdmin
         ? perAgentFull
-        : perAgentFull.filter((r) => r.id === callerAgent || r.memoryCount > 0);
+        : perAgentFull.filter((r) => r.id === callerAgent || (r.memoryCount ?? 0) > 0);
       const unregisteredMemoryAuthors = Array.from(unregisteredMap.values())
         .sort((a, b) => b.memoryCount - a.memoryCount)
         .map((r) => ({ id: r.id, memoryCount: r.memoryCount }));
@@ -415,7 +430,9 @@ export class HealthDetail extends Resource {
         // and rows with memories. unregisteredMemoryAuthors is undefined for
         // a non-admin. An admin gets that list only after a complete Memory
         // scan; null means the scan did not finish, so the answer is unknown
-        // rather than empty or partial.
+        // rather than empty or partial. The same rule covers each row's
+        // Memory-derived values: they are null (unknown), never zero or a
+        // partial count, when the scan did not complete.
         unregisteredMemoryAuthors: isAdmin
           ? (memoryScanComplete ? unregisteredMemoryAuthors : null)
           : undefined,

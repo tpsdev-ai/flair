@@ -245,7 +245,9 @@ for (const scenario of cases) {
         const parsed = JSON.parse(output) as Record<string, any>;
         expect(expiryWarning(parsed)).toBe(warning);
       } else {
-        expect(output).toContain(warning);
+        // Human status escapes control code points in stored warning text, so
+        // this multi-line warning reaches the terminal as one escaped line.
+        expect(output).toContain(warning.replace(/\n/g, "\\u{0a}"));
         expect(output.split("memories have expired validTo")).toHaveLength(2);
       }
     }
