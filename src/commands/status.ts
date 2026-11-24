@@ -775,7 +775,7 @@ statusCmd
         : render.wrap(render.c.dim, "unknown");
     console.log(render.kv("Nightly", nightlyTxt, 18));
     if (r.lastNightlyAt) {
-      console.log(render.kv("Last nightly", `${render.relativeTime(r.lastNightlyAt)} ${render.wrap(render.c.dim, `(${r.lastNightlyAt})`)}`, 18));
+      console.log(render.kv("Last nightly", `${render.relativeTime(r.lastNightlyAt)} ${render.wrap(render.c.dim, `(${escapeTerminalText(String(r.lastNightlyAt))})`)}`, 18));
     }
     const ds = distillationStaleness(r);
     if (typeof r.pendingCandidates === "number") {
@@ -815,7 +815,7 @@ statusCmd
     console.log(render.wrap(render.c.bold, "Federation"));
     if (f.instance) {
       const statusColor = f.instance.status === "active" ? render.c.green : render.c.yellow;
-      console.log(render.kv("Instance", `${f.instance.id}  ${render.wrap(render.c.dim, "(")}${f.instance.role ?? "—"}${render.wrap(render.c.dim, ", ")}${render.wrap(statusColor, f.instance.status ?? "—")}${render.wrap(render.c.dim, ")")}`));
+      console.log(render.kv("Instance", `${escapeTerminalText(String(f.instance.id ?? ""))}  ${render.wrap(render.c.dim, "(")}${escapeTerminalText(String(f.instance.role ?? "—"))}${render.wrap(render.c.dim, ", ")}${render.wrap(statusColor, escapeTerminalText(String(f.instance.status ?? "—")))}${render.wrap(render.c.dim, ")")}`));
     } else {
       console.log(render.kv("Instance", render.wrap(render.c.dim, "—")));
     }
@@ -829,15 +829,15 @@ statusCmd
     if (Array.isArray(f.peerList) && f.peerList.length > 0) {
       console.log();
       const cols: render.TableColumn[] = [
-        { label: "peer", key: "id" },
-        { label: "role", key: "role", format: (v) => String(v ?? "—") },
+        { label: "peer", key: "id", format: (v) => escapeTerminalText(String(v ?? "—")) },
+        { label: "role", key: "role", format: (v) => escapeTerminalText(String(v ?? "—")) },
         {
           label: "status",
           key: "status",
           format: (v) => {
             const s = String(v ?? "—");
             const color = s === "paired" || s === "connected" ? render.c.green : s === "revoked" ? render.c.red : render.c.yellow;
-            return render.wrap(color, s);
+            return render.wrap(color, escapeTerminalText(s));
           },
         },
         {
@@ -846,7 +846,7 @@ statusCmd
           format: (v) => {
             const s = String(v ?? "—");
             const color = s === "connected" ? render.c.green : s === "disconnected" ? render.c.yellow : s === "revoked" ? render.c.red : render.c.dim;
-            return render.wrap(color, s);
+            return render.wrap(color, escapeTerminalText(s));
           },
         },
         {
@@ -855,7 +855,7 @@ statusCmd
           format: (v) => {
             const iso = v as string | null;
             if (!iso) return render.wrap(render.c.dim, "never");
-            return `${render.relativeTime(iso)} ${render.wrap(render.c.dim, `(${iso})`)}`;
+            return `${render.relativeTime(iso)} ${render.wrap(render.c.dim, `(${escapeTerminalText(String(iso))})`)}`;
           },
         },
       ];
