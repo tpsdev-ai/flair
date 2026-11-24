@@ -4144,8 +4144,8 @@ export async function waitForFlairRestart(
  * The Harper user provisioning selected for the rest of a remote `flair init`
  * run, and the password that user has.
  *
- * `created` is true when provisioning set this user's password to the
- * generated Flair admin password (which init writes to the admin-pass file):
+ * `created` is true when provisioning set this user's password to the chosen
+ * Flair admin password (which init writes to the admin-pass file):
  * `add_user` created `admin`, or `alter_user` reset an `admin` that already
  * existed. It is false when the run reused an existing super_user cluster
  * administrator, in which case `password` is the cluster administrator's own

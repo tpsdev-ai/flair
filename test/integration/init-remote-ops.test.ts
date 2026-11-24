@@ -16,6 +16,7 @@ import {
   waitForFlairRestart,
   provisionFabric,
   callOpsApi,
+  program,
 } from "../../src/cli.js";
 import { startHarper, stopHarper, HARPER_STOP_BUDGET_MS, type HarperInstance } from "../helpers/harper-lifecycle.js";
 import { adminPasswordHintLine, finishRemoteInit, type RemoteInitPrincipal } from "../../src/commands/init.js";
@@ -434,44 +435,55 @@ describe("CLI --force + --cluster-admin-user validation", () => {
 // `provisionFabric` has two branches. When `list_users` shows the cluster
 // administrator is a super_user it reuses that administrator, with the
 // password the operator supplied; otherwise it creates (or updates) `admin`
-// with the generated Flair admin password. Every later call in that init run —
+// with the chosen Flair admin password. Every later call in that init run —
 // the two roles, the shared agent user, the Agent seed, the skill seed and the
 // verification read — must authenticate as that principal. These run against a
 // spawned Harper so a wrong principal is a real 401/403, not a mocked answer.
 //
 // The tarball `deploy_component` upload is the one step short-circuited: on a
 // live instance it restarts the server and the request does not return within
-// the call's 30 s bound. It is not an authentication step; `list_users` (the
+// the call's 30 s bound. The stub still checks that the upload carries the
+// cluster administrator's Basic auth before it returns; `list_users` (the
 // branch decision) and every call after it go to the real instance.
 
 const REAL_FETCH = globalThis.fetch;
 
 const basic = (user: string, pass: string) => "Basic " + btoa(`${user}:${pass}`);
 
-interface RecordedCall { user: string; path: string; operation?: string }
+interface RecordedCall { user: string; pass: string; path: string; operation?: string }
 
-/** Record every Basic-auth request and short-circuit only `deploy_component`. */
-function installRecorder(): { calls: RecordedCall[]; restore: () => void } {
+/**
+ * Record every forwarded Basic-auth request and short-circuit only
+ * `deploy_component`, after checking its Basic auth is `deployAuth`'s.
+ */
+function installRecorder(deployAuth: { user: string; pass: string }): {
+  calls: RecordedCall[];
+  deployAuthOk: () => boolean;
+  restore: () => void;
+} {
   const calls: RecordedCall[] = [];
+  let deployAuthOk = false;
   const prev = globalThis.fetch;
   globalThis.fetch = (async (input: any, init?: any) => {
-    const bodyText = typeof init?.body === "string" ? init.body : null;
-    if (bodyText !== null && JSON.parse(bodyText)?.operation === "deploy_component") {
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
-    }
     const url = typeof input === "string" ? input : input.url;
     const headers = new Headers(init?.headers ?? (typeof input === "object" ? input.headers : undefined));
     const authz = headers.get("authorization") ?? "";
+    const bodyText = typeof init?.body === "string" ? init.body : null;
+    let operation: string | undefined;
+    try { operation = bodyText === null ? undefined : JSON.parse(bodyText)?.operation; } catch { operation = undefined; }
+    if (operation === "deploy_component") {
+      deployAuthOk = authz === basic(deployAuth.user, deployAuth.pass);
+      if (!deployAuthOk) throw new Error("deploy_component did not carry the cluster administrator's Basic auth");
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
     if (authz.startsWith("Basic ")) {
       const decoded = Buffer.from(authz.slice("Basic ".length), "base64").toString("utf8");
-      const user = decoded.slice(0, decoded.indexOf(":"));
-      let operation: string | undefined;
-      try { operation = bodyText === null ? undefined : JSON.parse(bodyText)?.operation; } catch { operation = undefined; }
-      calls.push({ user, path: new URL(url).pathname, operation });
+      const sep = decoded.indexOf(":");
+      calls.push({ user: decoded.slice(0, sep), pass: decoded.slice(sep + 1), path: new URL(url).pathname, operation });
     }
     return REAL_FETCH(input, init);
   }) as typeof fetch;
-  return { calls, restore: () => { globalThis.fetch = prev; } };
+  return { calls, deployAuthOk: () => deployAuthOk, restore: () => { globalThis.fetch = prev; } };
 }
 
 async function harperOps(h: HarperInstance, user: string, pass: string, body: Record<string, unknown>) {
@@ -504,12 +516,16 @@ const laterOptions = (h: HarperInstance, agentId: string, keysDir: string) => ({
 });
 
 /** Every call the later steps made, and where each phase landed. */
-function expectAllCallsAs(calls: RecordedCall[], username: string, label: string): void {
+function expectAllCallsAs(calls: RecordedCall[], username: string, password: string, label: string): void {
   expect(calls.length, `${label}: the later steps made no authenticated call`).toBeGreaterThan(0);
   expect(
     Array.from(new Set(calls.map((c) => c.user))),
     `${label}: every later call must authenticate as the selected principal`,
   ).toEqual([username]);
+  expect(
+    calls.every((c) => c.user === username && c.pass === password),
+    `${label}: every later call must carry the selected principal's credentials`,
+  ).toBe(true);
   expect(calls.map((c) => c.operation), `${label}: the role calls`).toContain("list_roles");
   expect(calls.map((c) => c.operation), `${label}: the shared agent user`).toContain("add_user");
   expect(calls.some((c) => c.path.startsWith("/Memory/")), `${label}: the skill seed`).toBe(true);
@@ -560,18 +576,19 @@ describe("flair#3106 — existing super_user branch (real Harper)", () => {
   afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("reuses the cluster administrator and makes every later call as that user", async () => {
-    const recorder = installRecorder();
+    const recorder = installRecorder({ user: "cluster-north", pass: "cluster-north-pass" });
     try {
       const principal = await provisionFabric(
         harper.httpURL, harper.opsURL, "cluster-north", "cluster-north-pass", "generated-north",
       );
       expect(principal).toEqual({ username: "cluster-north", password: "cluster-north-pass", created: false });
+      expect(recorder.deployAuthOk(), "the deploy request must carry the cluster administrator's Basic auth").toBe(true);
 
       recorder.calls.length = 0;
       const keysDir = join(tmpDir, "keys-north");
       const out = await finishRemoteInit(principal, laterOptions(harper, "agent-north", keysDir));
 
-      expectAllCallsAs(recorder.calls, "cluster-north", "existing super_user branch");
+      expectAllCallsAs(recorder.calls, "cluster-north", "cluster-north-pass", "existing super_user branch");
       const hubId = await expectWritesLanded(harper, principal, "agent-north");
       expect(out.instanceId).toBe(hubId);
       expect(out.privPath).toBe(join(keysDir, "agent-north.key"));
@@ -584,6 +601,38 @@ describe("flair#3106 — existing super_user branch (real Harper)", () => {
       recorder.restore();
     }
   }, 120_000);
+
+  test("reused super_user: the action authenticates every later call as it and prints the cluster-administrator hint", async () => {
+    const recorder = installRecorder({ user: "cluster-north", pass: "cluster-north-pass" });
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    try {
+      const out = await runInitAction(initArgs(harper, {
+        clusterUser: "cluster-north",
+        clusterPass: "cluster-north-pass",
+        flairPass: "supplied-north",
+        agentId: "agent-north-action",
+        keysDir: join(tmpDir, "keys-north-action"),
+      }), home);
+      expect(out.exitCode).toBeUndefined();
+      expect(recorder.deployAuthOk(), "the deploy request must carry the cluster administrator's Basic auth").toBe(true);
+      expect(recorder.calls.length, "the later steps made no authenticated call").toBeGreaterThan(0);
+      expect(Array.from(new Set(recorder.calls.map((c) => c.user))), "every later call must authenticate as the reused super_user").toEqual(["cluster-north"]);
+      expect(recorder.calls.every((c) => c.user === "cluster-north" && c.pass === "cluster-north-pass"), "every later call must carry the reused super_user's credentials").toBe(true);
+
+      const principal: RemoteInitPrincipal = { username: "cluster-north", password: "cluster-north-pass", created: false };
+      await expectWritesLanded(harper, principal, "agent-north-action");
+
+      const secretPath = join(home, ".tps", "secrets", "flair-fabric-hdb");
+      expect(readFileSync(secretPath, "utf8") === "supplied-north\n", "the admin-pass file must hold the chosen Flair admin password").toBe(true);
+      const hint = hintOf(out.stdout);
+      expect(hint).toContain("cluster administrator password");
+      expect(hint).not.toContain(secretPath);
+      expect(out.stdout).toContain("Admin user: cluster-north");
+    } finally {
+      recorder.restore();
+    }
+  }, 150_000);
+
 });
 
 describe("flair#3106 — created admin branch (real Harper)", () => {
@@ -618,18 +667,19 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
   afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("creates admin when the cluster administrator is not a super_user, and makes every later call as that admin", async () => {
-    const recorder = installRecorder();
+    const recorder = installRecorder({ user: "cluster-east", pass: "cluster-east-pass" });
     try {
       const principal = await provisionFabric(
         harper.httpURL, harper.opsURL, "cluster-east", "cluster-east-pass", "generated-east",
       );
       expect(principal).toEqual({ username: "admin", password: "generated-east", created: true });
+      expect(recorder.deployAuthOk(), "the deploy request must carry the cluster administrator's Basic auth").toBe(true);
 
       recorder.calls.length = 0;
       const keysDir = join(tmpDir, "keys-east");
       const out = await finishRemoteInit(principal, laterOptions(harper, "agent-east", keysDir));
 
-      expectAllCallsAs(recorder.calls, "admin", "created admin branch");
+      expectAllCallsAs(recorder.calls, "admin", "generated-east", "created admin branch");
       const hubId = await expectWritesLanded(harper, principal, "agent-east");
       expect(out.instanceId).toBe(hubId);
 
@@ -641,7 +691,7 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
   }, 120_000);
 
   test("a reused super_user NAMED admin gets the cluster-administrator hint and authenticates with its own password", async () => {
-    const recorder = installRecorder();
+    const recorder = installRecorder({ user: "admin", pass: "reused-admin-pass" });
     try {
       // Make an `admin` super_user exist with a known password, independently of
       // the created-admin test above (add_user, else alter_user when it is
@@ -661,10 +711,11 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
         harper.httpURL, harper.opsURL, "admin", "reused-admin-pass", "generated-second",
       );
       expect(principal).toEqual({ username: "admin", password: "reused-admin-pass", created: false });
+      expect(recorder.deployAuthOk(), "the deploy request must carry the cluster administrator's Basic auth").toBe(true);
 
       recorder.calls.length = 0;
       const out = await finishRemoteInit(principal, laterOptions(harper, "agent-west", join(tmpDir, "keys-west")));
-      expectAllCallsAs(recorder.calls, "admin", "reused admin branch");
+      expectAllCallsAs(recorder.calls, "admin", "reused-admin-pass", "reused admin branch");
       await expectWritesLanded(harper, principal, "agent-west");
       expect(out.instanceId).toBeTruthy();
 
@@ -675,4 +726,161 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
       recorder.restore();
     }
   }, 120_000);
+
+  test("created admin: the action creates admin and authenticates every later call as it", async () => {
+    const dropped = await harperOps(harper, "cluster-south", "cluster-south-pass", { operation: "drop_user", username: "admin" });
+    expect(dropped.status, `drop_user admin: ${dropped.text.slice(0, 200)}`).toBe(200);
+
+    const recorder = installRecorder({ user: "cluster-east", pass: "cluster-east-pass" });
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    try {
+      const out = await runInitAction(initArgs(harper, {
+        clusterUser: "cluster-east",
+        clusterPass: "cluster-east-pass",
+        flairPass: "chosen-east",
+        agentId: "agent-east-action",
+        keysDir: join(tmpDir, "keys-east-action"),
+      }), home);
+      expect(out.exitCode).toBeUndefined();
+      expect(recorder.deployAuthOk(), "the deploy request must carry the cluster administrator's Basic auth").toBe(true);
+      expect(recorder.calls.length, "the later steps made no authenticated call").toBeGreaterThan(0);
+
+      // Provisioning itself authenticates as the cluster administrator. Every
+      // call after the first one made as the created admin must be the admin's.
+      const firstAdminCall = recorder.calls.findIndex((c) => c.user === "admin");
+      expect(firstAdminCall, "provisioning never made a call as the created admin").toBeGreaterThan(0);
+      const provisioning = recorder.calls.slice(0, firstAdminCall);
+      const later = recorder.calls.slice(firstAdminCall);
+      expect(
+        provisioning.every((c) => c.user === "cluster-east" && c.pass === "cluster-east-pass"),
+        "the provisioning calls must carry the cluster administrator's credentials",
+      ).toBe(true);
+      expectAllCallsAs(later, "admin", "chosen-east", "created admin action");
+
+      const principal: RemoteInitPrincipal = { username: "admin", password: "chosen-east", created: true };
+      await expectWritesLanded(harper, principal, "agent-east-action");
+
+      const secretPath = join(home, ".tps", "secrets", "flair-fabric-hdb");
+      expect(readFileSync(secretPath, "utf8") === "chosen-east\n", "the admin-pass file must hold the chosen Flair admin password").toBe(true);
+      const hint = hintOf(out.stdout);
+      expect(hint).toContain(secretPath);
+      expect(out.stdout).toContain("Admin user: admin");
+    } finally {
+      recorder.restore();
+    }
+  }, 150_000);
+
+  test("reused super_user named admin: the action uses its own password and prints the cluster-administrator hint", async () => {
+    const seeded = await harperOps(harper, "cluster-east", "cluster-east-pass", {
+      operation: "add_user", username: "admin", password: "reused-admin-pass", role: "super_user", active: true,
+    });
+    if (seeded.status !== 200) {
+      const altered = await harperOps(harper, "cluster-east", "cluster-east-pass", {
+        operation: "alter_user", username: "admin", password: "reused-admin-pass", role: "super_user", active: true,
+      });
+      expect(altered.status, `alter_user admin: ${altered.text.slice(0, 200)}`).toBe(200);
+    }
+
+    const recorder = installRecorder({ user: "admin", pass: "reused-admin-pass" });
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    try {
+      const out = await runInitAction(initArgs(harper, {
+        clusterUser: "admin",
+        clusterPass: "reused-admin-pass",
+        flairPass: "supplied-west",
+        agentId: "agent-west-action",
+        keysDir: join(tmpDir, "keys-west-action"),
+      }), home);
+      expect(out.exitCode).toBeUndefined();
+      expect(recorder.deployAuthOk(), "the deploy request must carry the cluster administrator's Basic auth").toBe(true);
+      expect(recorder.calls.length, "the later steps made no authenticated call").toBeGreaterThan(0);
+      expect(Array.from(new Set(recorder.calls.map((c) => c.user))), "every later call must authenticate as the reused admin").toEqual(["admin"]);
+      expect(recorder.calls.every((c) => c.user === "admin" && c.pass === "reused-admin-pass"), "every later call must carry the reused super_user's own password").toBe(true);
+
+      const principal: RemoteInitPrincipal = { username: "admin", password: "reused-admin-pass", created: false };
+      await expectWritesLanded(harper, principal, "agent-west-action");
+
+      const secretPath = join(home, ".tps", "secrets", "flair-fabric-hdb");
+      expect(readFileSync(secretPath, "utf8") === "supplied-west\n", "the admin-pass file must hold the chosen Flair admin password").toBe(true);
+      const hint = hintOf(out.stdout);
+      expect(hint).toContain("cluster administrator password");
+      expect(hint).not.toContain(secretPath);
+      expect(out.stdout).toContain("Admin user: admin");
+    } finally {
+      recorder.restore();
+    }
+  }, 150_000);
 });
+
+// ─── the `flair init` action helpers ────────────────────────────────────────────
+//
+// These drive the command action itself: the principal assignment, the later
+// calls, the admin-pass file write and the summary hint. A change that swaps
+// the selected principal for default credentials, or picks the hint by
+// username, has to fail here; the handler-level cases above do not see the
+// action's own wiring.
+
+const INIT_ACTION_ENV_KEYS = [
+  "HOME",
+  "USERPROFILE",
+  "FLAIR_ADMIN_PASS",
+  "FLAIR_CLUSTER_ADMIN_USER",
+  "FLAIR_CLUSTER_ADMIN_PASS",
+  "FLAIR_TARGET",
+  "FLAIR_OPS_TARGET",
+  "FLAIR_ADMIN_USER",
+  "ROOTPATH",
+] as const;
+
+/** Run the in-process `flair init` action with HOME isolated to `home`. */
+async function runInitAction(args: string[], home: string): Promise<{ stdout: string; stderr: string; exitCode?: number }> {
+  const saved = INIT_ACTION_ENV_KEYS.map((key) => [key, process.env[key]] as const);
+  const origExit = process.exit;
+  const origLog = console.log;
+  const origErr = console.error;
+  let stdout = "";
+  let stderr = "";
+  let exitCode: number | undefined;
+  process.env.HOME = home;
+  for (const key of INIT_ACTION_ENV_KEYS) {
+    if (key !== "HOME" && key !== "USERPROFILE") delete process.env[key];
+  }
+  console.log = (...parts: unknown[]) => { stdout += parts.map((part) => String(part)).join(" ") + "\n"; };
+  console.error = (...parts: unknown[]) => { stderr += parts.map((part) => String(part)).join(" ") + "\n"; };
+  process.exit = ((code?: number) => {
+    exitCode = code ?? 0;
+    throw new Error(`process.exit(${code ?? 0})`);
+  }) as typeof process.exit;
+  try {
+    await program.parseAsync(["node", "flair", "init", ...args]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.includes("process.exit")) throw err;
+  } finally {
+    process.exit = origExit;
+    console.log = origLog;
+    console.error = origErr;
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  return { stdout, stderr, exitCode };
+}
+
+const hintOf = (stdout: string): string =>
+  stdout.split("\n").find((line) => line.startsWith("  Admin password:")) ?? "";
+
+const initArgs = (h: HarperInstance, opts: {
+  clusterUser: string; clusterPass: string; flairPass: string; agentId: string; keysDir: string;
+}): string[] => [
+  "--target", h.httpURL,
+  "--ops-target", h.opsURL,
+  "--remote",
+  "--force",
+  "--cluster-admin-user", opts.clusterUser,
+  "--cluster-admin-pass", opts.clusterPass,
+  "--flair-admin-pass", opts.flairPass,
+  "--agent-id", opts.agentId,
+  "--keys-dir", opts.keysDir,
+];

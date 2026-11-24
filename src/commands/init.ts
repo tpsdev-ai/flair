@@ -341,7 +341,7 @@ function repointMainServiceUnit(...args: any[]): any {
  * `list_users` shows the cluster administrator is a super_user it reuses that
  * administrator (`created: false`, password = the one the operator supplied);
  * otherwise it creates or updates `admin` (`created: true`, password = the
- * generated Flair admin password init wrote to the admin-pass file). On the
+ * chosen Flair admin password init wrote to the admin-pass file). On the
  * already-running-instance leg it is the instance's admin user.
  */
 export interface RemoteInitPrincipal {
@@ -352,14 +352,14 @@ export interface RemoteInitPrincipal {
 
 /**
  * The `flair init` summary's password line, which must name the password the
- * principal actually has: the generated Flair admin password that init wrote to
+ * principal actually has: the chosen Flair admin password that init wrote to
  * `adminPassPath` when provisioning created or updated `admin`, otherwise the
  * cluster administrator password this run supplied. `principal.created` decides,
  * never the username: a reused super_user may itself be named `admin`.
  */
 export function adminPasswordHintLine(principal: RemoteInitPrincipal, adminPassPath: string): string {
   if (principal.created) {
-    return `  Admin password: the generated Flair admin password, written to ${adminPassPath}`;
+    return `  Admin password: the chosen Flair admin password, written to ${adminPassPath}`;
   }
   return "  Admin password: the cluster administrator password this run supplied";
 }
@@ -380,10 +380,12 @@ export interface RemoteInitLaterOptions {
 }
 
 /**
- * Every call a remote `flair init` makes after provisioning, as one operator
- * principal: the roles and shared agent user, the agent and federation-instance
- * seed, the org-wide skill seed, and the connectivity check. `principal` is the
- * user provisioning returned, and every call below authenticates as it.
+ * The calls a `flair init` run makes after provisioning. On the provisioning
+ * leg they are the roles and shared agent user, the agent and federation-instance
+ * seed, the org-wide skill seed and the verification read, and every one of them
+ * authenticates as the `principal` provisioning returned. On the
+ * already-running-instance leg only the `/Health` connectivity check sends no
+ * Authorization header; the other calls authenticate as that principal too.
  */
 export async function finishRemoteInit(
   principal: RemoteInitPrincipal,
