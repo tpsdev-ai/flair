@@ -1,1 +1,0 @@
-- **The changelog guard reports a fragment claiming an npm-install-only advisory as fixed in the forms fix, fixes, fixed and fixing (#2828).** ([#2830](https://github.com/tpsdev-ai/flair/pull/2830))
