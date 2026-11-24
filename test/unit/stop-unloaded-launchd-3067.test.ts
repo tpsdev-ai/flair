@@ -105,8 +105,9 @@ exit 0
 /** A directly started instance: serves Flair's /Health, records its pid, dies on SIGTERM.
  *  With `successor: "serving"`, SIGTERM closes its listener and keeps the process
  *  alive until a successor it spawns answers /Health on the same port, so that
- *  successor is serving when the recorded pid exits; the successor records its
- *  own pid and sidecar only once the test writes `successor-record-trigger`.
+ *  successor is serving when the recorded pid exits; in `serving` mode the
+ *  successor records its own pid and sidecar only once the test writes
+ *  `successor-record-trigger`.
  *  With `successor: "serving-recorded"` it records them before it starts
  *  listening, so they are on disk before the first stop's final evidence read.
  *  With `successor: "silent"` the successor accepts TCP but never answers
