@@ -353,10 +353,11 @@ log "Bring the instance up the product way (flair init, direct-spawned)"
 # #1573 pass-file launcher plist, which needs that file to start.
 ADMIN_PASS="${ADMIN_PASS:-}"
 # Flair's reader strips trailing whitespace, which the exact-value scan below
-# would not match; whitespace at either end is refused before the source is written.
+# would not match. An override may use only the base64url characters the
+# generator below produces, listed one by one: a range can follow the locale's collation.
 case "$ADMIN_PASS" in
-  [[:space:]]* | *[[:space:]])
-    echo "ADMIN_PASS must not begin or end with whitespace" >&2
+  *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]*)
+    echo "ADMIN_PASS must contain only base64url characters (A-Z a-z 0-9 _ -)" >&2
     exit 1
     ;;
 esac

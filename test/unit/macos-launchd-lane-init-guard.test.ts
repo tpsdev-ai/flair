@@ -111,7 +111,7 @@ case "\${STUB_MODE:-ok}" in
     echo "init ok"
     ;;
   trim)
-    value="$(sed 's/[[:space:]]*$//' "$pass_file")"
+    value="$(PASS_PATH="$pass_file" "$JS_RUNTIME" -e 'process.stdout.write(require("node:fs").readFileSync(process.env.PASS_PATH, "utf-8").replace(/\\s+$/, ""))')"
     printf '%s\\n' "$value" > "$PASS_FILE"
     chmod 600 "$PASS_FILE"
     echo "init using $value"
@@ -222,6 +222,7 @@ function runCase(mode: Mode, errTrap: boolean, shell = "bash", options: CaseOpti
       PASS_FILE: scratch.passFile,
       SOURCE_MODES: join(scratch.root, "source-modes"),
       FIFO_WRITER_PID: join(scratch.root, "fifo-writer.pid"),
+      JS_RUNTIME: process.execPath,
       STUB_MODE: mode,
       HARNESS_ERR_TRAP: errTrap ? "1" : "0",
       ...(options.adminPass === undefined ? {} : { ADMIN_PASS: options.adminPass }),
@@ -292,18 +293,42 @@ describe("launchd lane init guard (flair#3100)", () => {
   );
 
   // The trim stub persists and prints the value with trailing whitespace
-  // stripped, as Flair's reader does.
+  // stripped by the expression Flair's reader uses, replace(/\s+$/, "").
+  function expectOverrideRefused(cases: ReadonlyArray<readonly [Mode, string]>) {
+    for (const [mode, adminPass] of cases) {
+      const { result, out, scratch } = runCase(mode, false, "bash", { adminPass });
+      expect(result.status).toBe(1);
+      expect(out).toContain("ADMIN_PASS must contain only base64url characters (A-Z a-z 0-9 _ -)");
+      expect(out).not.toContain("override");
+      expect(readdirSync(scratch.runDir)).toHaveLength(0);
+      expect(readdirSync(join(scratch.root, "pass"))).toHaveLength(0);
+    }
+  }
+
   test(
     "an ADMIN_PASS override with whitespace at either end is refused before the source is written or init runs",
     () => {
-      for (const [mode, adminPass] of [["trim", "override-value "], ["ok", " override-value"]] as const) {
-        const { result, out, scratch } = runCase(mode, false, "bash", { adminPass });
-        expect(result.status).toBe(1);
-        expect(out).toContain("ADMIN_PASS must not begin or end with whitespace");
-        expect(out).not.toContain("override-value");
-        expect(readdirSync(scratch.runDir)).toHaveLength(0);
-        expect(readdirSync(join(scratch.root, "pass"))).toHaveLength(0);
-      }
+      expectOverrideRefused([["trim", "override-value "], ["ok", " override-value"]]);
+    },
+    60_000,
+  );
+
+  test(
+    "an ADMIN_PASS override edged with Unicode whitespace is refused before the source is written or init runs",
+    () => {
+      expectOverrideRefused([
+        ["trim", "override-value\uFEFF"],
+        ["ok", "\uFEFFoverride-value"],
+        ["trim", "override-value\u00A0"],
+      ]);
+    },
+    60_000,
+  );
+
+  test(
+    "an ADMIN_PASS override with a character outside base64url is refused before the source is written or init runs",
+    () => {
+      expectOverrideRefused([["ok", "override+value"]]);
     },
     60_000,
   );
@@ -319,6 +344,18 @@ describe("launchd lane init guard (flair#3100)", () => {
       expect(readdirSync(scratch.runDir)).toHaveLength(0);
       // Modes of the source directory and file, as the stub init received them.
       expect(readFileSync(join(scratch.root, "source-modes"), "utf8")).toBe("700\n600\n");
+    },
+    60_000,
+  );
+
+  // Darwin only, as above.
+  test.skipIf(process.platform !== "darwin")(
+    "an ADMIN_PASS override of base64url characters is accepted and persisted",
+    () => {
+      const { result, out, value } = runCase("ok", false, "bash", { adminPass: "Override_value-09" });
+      expect(result.status).toBe(0);
+      expect(out).toContain("REACHED-END");
+      expect(value).toBe("Override_value-09");
     },
     60_000,
   );
