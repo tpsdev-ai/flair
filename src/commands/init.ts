@@ -275,12 +275,12 @@ async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, ad
 }
 
 /**
- * Refuse an `--agent-id` that names an administrator identity for this cluster,
+ * Refuse an `--agent-id` that names an administrator username reserved by this init path,
  * before any key or Agent write.
  */
 function refuseOperatorAgentId(agentId: string | undefined, administratorNames: string[]): void {
   if (!agentId || !administratorNames.includes(agentId)) return;
-  console.error(`Error: --agent-id "${agentId}" is an administrator identity for this cluster.`);
+  console.error(`Error: --agent-id "${agentId}" is an administrator username reserved by this init path.`);
   console.error("  Choose another --agent-id.");
   process.exit(1);
 }
@@ -403,7 +403,7 @@ addAdminPassOptions(
       if (clusterAdminUser && clusterAdminPass) {
         // ── New provisioning path: deploy Flair to Fabric, wait, provision super_user ──
         // Provisioning either reuses an existing super_user cluster admin or
-        // creates DEFAULT_ADMIN_USER, so both names are known before
+        // creates or updates DEFAULT_ADMIN_USER, so both names are known before
         // provisionFabric runs. Refuse either one here, before any write.
         refuseOperatorAgentId(agentId, [clusterAdminUser, DEFAULT_ADMIN_USER]);
         if (!opts.force) {
@@ -600,7 +600,7 @@ addAdminPassOptions(
     }
 
     // ── Local init (full one-command setup) ──
-    // Local bootstrap always creates the operator as DEFAULT_ADMIN_USER, so the
+    // Local init uses DEFAULT_ADMIN_USER, so the
     // check runs here, before any key or Agent write.
     refuseOperatorAgentId(agentId, [DEFAULT_ADMIN_USER]);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();

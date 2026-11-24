@@ -1,6 +1,6 @@
 /**
- * #3082 item 3: `flair init --agent-id` refuses an id that is an administrator
- * identity for the cluster BEFORE it creates a key or registers an Agent. init
+ * #3082 item 3: `flair init --agent-id` refuses an administrator username
+ * reserved by this init path BEFORE it creates a key or registers an Agent. init
  * registers the agent before any later check, so without this preflight a
  * refusal would land after both writes.
  *
@@ -63,7 +63,7 @@ function requestBodies(home: string): any[] {
 function expectRefused(home: string, result: ReturnType<typeof runInit>, id: string) {
   const out = result.stdout + result.stderr;
   expect(result.status, out).not.toBe(0);
-  expect(out).toContain(`"${id}" is an administrator identity for this cluster`);
+  expect(out).toContain(`"${id}" is an administrator username reserved by this init path`);
   expect(out).toContain("Choose another --agent-id");
   // No key file, and no request of any kind reached the instance.
   expect(existsSync(join(home, "keys"))).toBe(false);
@@ -81,8 +81,8 @@ function deployRoot(home: string): string {
   return root;
 }
 
-describe("flair init --agent-id refuses an administrator id before the agent key or Agent write (flair#3082)", () => {
-  test("remote provisioning: the default administrator id is refused before provisionFabric", () => {
+describe("flair init --agent-id refuses a reserved administrator username before the agent key or Agent write (flair#3082)", () => {
+  test("remote provisioning: the default administrator username is reserved and refused before provisionFabric", () => {
     const home = tempDir("opi-prov-admin-");
     const result = runInit(home, [
       "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
@@ -97,7 +97,7 @@ describe("flair init --agent-id refuses an administrator id before the agent key
     expect(requestBodies(home).some((b: any) => b.operation === "deploy_component")).toBe(false);
   });
 
-  test("remote provisioning: the cluster administrator id is refused before provisionFabric", () => {
+  test("remote provisioning: the cluster administrator username is reserved and refused before provisionFabric", () => {
     const home = tempDir("opi-prov-cluster-");
     const result = runInit(home, [
       "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
@@ -111,7 +111,7 @@ describe("flair init --agent-id refuses an administrator id before the agent key
     expect(requestBodies(home).some((b: any) => b.operation === "deploy_component")).toBe(false);
   });
 
-  test("remote provisioning: a non-administrator id proceeds", () => {
+  test("remote provisioning: an unreserved agent id proceeds", () => {
     const home = tempDir("opi-prov-other-");
     const root = deployRoot(home);
     const result = runInit(home, [
@@ -123,11 +123,11 @@ describe("flair init --agent-id refuses an administrator id before the agent key
       { username: "cluster-admin", role: { permission: { super_user: false } } },
     ]) }, root);
     const out = result.stdout + result.stderr;
-    expect(out).not.toContain("administrator identity for this cluster");
+    expect(out).not.toContain("administrator username reserved by this init path");
     expect(requestBodies(home).some((b: any) => b.operation === "deploy_component")).toBe(true);
   }, 120_000);
 
-  test("remote init: the default administrator id is refused", () => {
+  test("remote init: the default administrator username is reserved and refused", () => {
     const home = tempDir("opi-remote-");
     const result = runInit(home, [
       "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
@@ -137,7 +137,7 @@ describe("flair init --agent-id refuses an administrator id before the agent key
     expectRefused(home, result, "admin");
   });
 
-  test("remote init: --admin-user names the administrator for an already-running instance", () => {
+  test("remote init: --admin-user sets the reserved administrator username for an already-running instance", () => {
     const home = tempDir("opi-remote-user-");
     const result = runInit(home, [
       "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
@@ -147,7 +147,7 @@ describe("flair init --agent-id refuses an administrator id before the agent key
     expectRefused(home, result, "operator-b");
   });
 
-  test("remote init: FLAIR_ADMIN_USER names the administrator when no flag is given", () => {
+  test("remote init: FLAIR_ADMIN_USER sets the reserved administrator username when no flag is given", () => {
     const home = tempDir("opi-remote-env-");
     const result = runInit(home, [
       "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
@@ -157,7 +157,7 @@ describe("flair init --agent-id refuses an administrator id before the agent key
     expectRefused(home, result, "operator-c");
   });
 
-  test("local init: the default administrator id is refused", () => {
+  test("local init: the default administrator username is reserved and refused", () => {
     const home = tempDir("opi-local-");
     const result = runInit(home, [
       "init", "--agent-id", "admin", "--data-dir", join(home, "data"), "--keys-dir", join(home, "keys"),
@@ -173,6 +173,6 @@ describe("flair init --agent-id refuses an administrator id before the agent key
       "--skip-start", "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
     ]);
     const out = result.stdout + result.stderr;
-    expect(out).not.toContain("administrator identity for this cluster");
+    expect(out).not.toContain("administrator username reserved by this init path");
   }, 60_000);
 });
