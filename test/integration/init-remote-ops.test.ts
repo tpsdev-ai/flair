@@ -436,8 +436,10 @@ describe("CLI --force + --cluster-admin-user validation", () => {
 // administrator is a super_user it reuses that administrator, with the
 // password the operator supplied; otherwise it creates (or updates) `admin`
 // with the chosen Flair admin password. Every later call in that init run —
-// the two roles, the shared agent user, the Agent seed, the skill seed and the
-// verification read — must authenticate as that principal. These run against a
+// the flair_agent role and the shared agent user (plus, with `--remote`, the
+// pair-initiator role and the federation-instance reconcile), the Agent seed
+// when `--agent-id` is given, the skill seed and the verification read — must
+// authenticate as that principal. These run against a
 // spawned Harper so a wrong principal is a real 401/403, not a mocked answer.
 //
 // The tarball `deploy_component` upload is the one step short-circuited: on a
@@ -458,16 +460,19 @@ interface RecordedCall { user: string; pass: string; path: string; operation?: s
  */
 function installRecorder(deployAuth: { user: string; pass: string }): {
   calls: RecordedCall[];
+  all: { url: string; authz: string | null }[];
   deployAuthOk: () => boolean;
   restore: () => void;
 } {
   const calls: RecordedCall[] = [];
+  const all: { url: string; authz: string | null }[] = [];
   let deployAuthOk = false;
   const prev = globalThis.fetch;
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = typeof input === "string" ? input : input.url;
     const headers = new Headers(init?.headers ?? (typeof input === "object" ? input.headers : undefined));
     const authz = headers.get("authorization") ?? "";
+    all.push({ url, authz: authz === "" ? null : authz });
     const bodyText = typeof init?.body === "string" ? init.body : null;
     let operation: string | undefined;
     try { operation = bodyText === null ? undefined : JSON.parse(bodyText)?.operation; } catch { operation = undefined; }
@@ -483,7 +488,7 @@ function installRecorder(deployAuth: { user: string; pass: string }): {
     }
     return REAL_FETCH(input, init);
   }) as typeof fetch;
-  return { calls, deployAuthOk: () => deployAuthOk, restore: () => { globalThis.fetch = prev; } };
+  return { calls, all, deployAuthOk: () => deployAuthOk, restore: () => { globalThis.fetch = prev; } };
 }
 
 async function harperOps(h: HarperInstance, user: string, pass: string, body: Record<string, unknown>) {
@@ -806,6 +811,127 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
       expect(hint).toContain("cluster administrator password");
       expect(hint).not.toContain(secretPath);
       expect(out.stdout).toContain("Admin user: admin");
+    } finally {
+      recorder.restore();
+    }
+  }, 150_000);
+});
+
+describe("flair#3106 — existing admin update path (real Harper)", () => {
+  let harper: HarperInstance;
+
+  beforeAll(async () => {
+    harper = await startHarper();
+    // `admin` already exists on a fresh instance, so a non-super cluster
+    // administrator drives provisionFabric's add_user -> "already exists" ->
+    // alter_user branch.
+    const opsRole = await harperOps(harper, "admin", "test123", {
+      operation: "add_role",
+      role: "cluster-ops-role",
+      permission: { super_user: false, operations: ["add_user", "drop_user", "alter_user", "list_users"] },
+    });
+    expect([200, 409], opsRole.text).toContain(opsRole.status);
+    const opsUser = await harperOps(harper, "admin", "test123", {
+      operation: "add_user", username: "cluster-update", password: "cluster-update-pass", role: "cluster-ops-role", active: true,
+    });
+    expect([200, 409], opsUser.text).toContain(opsUser.status);
+  }, 180_000);
+
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
+
+  test("updates the existing admin and the action uses it, its new password and the created hint", async () => {
+    const recorder = installRecorder({ user: "cluster-update", pass: "cluster-update-pass" });
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    try {
+      const out = await runInitAction(initArgs(harper, {
+        clusterUser: "cluster-update",
+        clusterPass: "cluster-update-pass",
+        flairPass: "chosen-update",
+        agentId: "agent-update",
+        keysDir: join(tmpDir, "keys-update"),
+      }), home);
+      expect(out.exitCode).toBeUndefined();
+      expect(recorder.deployAuthOk(), "the deploy request must carry the cluster administrator's Basic auth").toBe(true);
+      // The case must drill the update branch, not a create.
+      expect(out.stdout).toContain("User 'admin' updated");
+
+      // Provisioning runs as the cluster administrator until the existing
+      // `admin` is selected; every call after that must be `admin`.
+      const firstAdminCall = recorder.calls.findIndex((c) => c.user === "admin");
+      expect(firstAdminCall, "provisioning never selected the updated admin").toBeGreaterThan(0);
+      expect(
+        recorder.calls.slice(0, firstAdminCall).every((c) => c.user === "cluster-update" && c.pass === "cluster-update-pass"),
+        "the provisioning calls must carry the cluster administrator's credentials",
+      ).toBe(true);
+      expectAllCallsAs(recorder.calls.slice(firstAdminCall), "admin", "chosen-update", "updated admin action");
+
+      const principal: RemoteInitPrincipal = { username: "admin", password: "chosen-update", created: true };
+      await expectWritesLanded(harper, principal, "agent-update");
+
+      const secretPath = join(home, ".tps", "secrets", "flair-fabric-hdb");
+      expect(readFileSync(secretPath, "utf8") === "chosen-update\n", "the admin-pass file must hold the chosen Flair admin password").toBe(true);
+      const hint = hintOf(out.stdout);
+      expect(hint).toContain(secretPath);
+      expect(out.stdout).toContain("Admin user: admin");
+    } finally {
+      recorder.restore();
+    }
+  }, 150_000);
+});
+
+describe("flair#3106 — already-running instance leg (real Harper)", () => {
+  let harper: HarperInstance;
+
+  beforeAll(async () => {
+    harper = await startHarper();
+    // A nondefault super_user with its own password: this leg must use the
+    // operator's `--admin-user`/`--admin-pass`, not the instance's `admin`.
+    const role = await harperOps(harper, "admin", "test123", { operation: "add_role", role: "super-role", permission: { super_user: true } });
+    expect([200, 409], role.text).toContain(role.status);
+    const user = await harperOps(harper, "admin", "test123", {
+      operation: "add_user", username: "ops-distinct", password: "ops-distinct-pass", role: "super-role", active: true,
+    });
+    expect([200, 409], user.text).toContain(user.status);
+  }, 180_000);
+
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
+
+  test("uses the resolved administrator on every later call and sends /Health without an Authorization header", async () => {
+    const recorder = installRecorder({ user: "ops-distinct", pass: "ops-distinct-pass" });
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    try {
+      const out = await runInitAction([
+        "--target", harper.httpURL,
+        "--ops-target", harper.opsURL,
+        "--force",
+        "--admin-user", "ops-distinct",
+        "--admin-pass", "ops-distinct-pass",
+        "--agent-id", "agent-live",
+        "--keys-dir", join(tmpDir, "keys-live"),
+      ], home);
+      expect(out.exitCode).toBeUndefined();
+      // HOME isolation does not cover in-process helpers: every request must
+      // target THIS ephemeral instance, never a default port elsewhere.
+      expect(
+        recorder.all.every((c) => c.url.startsWith(harper.httpURL) || c.url.startsWith(harper.opsURL)),
+        "every request must target this ephemeral instance",
+      ).toBe(true);
+      expect(recorder.calls.length, "the later steps made no authenticated call").toBeGreaterThan(0);
+      expect(Array.from(new Set(recorder.calls.map((c) => c.user))), "every authenticated later call must be the resolved administrator").toEqual(["ops-distinct"]);
+      expect(recorder.calls.every((c) => c.pass === "ops-distinct-pass"), "every authenticated later call must carry its password").toBe(true);
+      expect(recorder.calls.some((c) => c.path.startsWith("/Memory/")), "the skill seed").toBe(true);
+      expect(recorder.calls.some((c) => c.operation === "insert"), "the agent seed").toBe(true);
+
+      const health = recorder.all.filter((c) => new URL(c.url).pathname === "/Health");
+      expect(health.length, "the leg must check /Health").toBeGreaterThan(0);
+      expect(health.every((c) => c.authz === null), "/Health must not send an Authorization header").toBe(true);
+
+      const skill = await harperGet(harper, `/Memory/${encodeURIComponent("skill:using-flair")}`, "ops-distinct", "ops-distinct-pass");
+      expect(skill.status).toBe(200);
+      expect(skill.body?.agentId).toBe("ops-distinct");
+      const agent = await harperGet(harper, "/Agent/agent-live", "ops-distinct", "ops-distinct-pass");
+      expect(agent.status, `Agent agent-live: body ${JSON.stringify(agent.body)?.slice(0, 200)}`).toBe(200);
+      expect(agent.body?.id).toBe("agent-live");
     } finally {
       recorder.restore();
     }

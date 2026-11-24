@@ -370,9 +370,10 @@ export interface RemoteInitLaterOptions {
   /** `--remote`: the instance answers federation pair requests as a hub. */
   remote: boolean;
   /**
-   * Provisioning leg only: create/align the flair_pair_initiator and
-   * flair_agent roles and the shared flair-agent user before the agent seed,
-   * and verify the instance with `/FederationInstance` instead of `/Health`.
+   * Provisioning leg only: create/align the flair_agent role and the shared
+   * flair-agent user (plus the flair_pair_initiator role with `--remote`) before
+   * the agent seed, and verify the instance with `/FederationInstance` instead
+   * of `/Health`.
    */
   provisioned: boolean;
   agentId?: string;
@@ -381,11 +382,13 @@ export interface RemoteInitLaterOptions {
 
 /**
  * The calls a `flair init` run makes after provisioning. On the provisioning
- * leg they are the roles and shared agent user, the agent and federation-instance
- * seed, the org-wide skill seed and the verification read, and every one of them
- * authenticates as the `principal` provisioning returned. On the
- * already-running-instance leg only the `/Health` connectivity check sends no
- * Authorization header; the other calls authenticate as that principal too.
+ * leg they are the flair_agent role and shared agent user (plus the
+ * flair_pair_initiator role and the federation-instance reconcile with
+ * `--remote`), the agent seed with `--agent-id`, the org-wide skill seed and
+ * the verification read; every one authenticates as the `principal`
+ * provisioning returned. On the already-running-instance leg only the
+ * `/Health` connectivity check sends no Authorization header; the other calls
+ * authenticate as that principal too.
  */
 export async function finishRemoteInit(
   principal: RemoteInitPrincipal,
