@@ -13,7 +13,7 @@
  */
 import { Command, Option } from "commander";
 import * as render from "../render.js";
-import { resolveAdminUser, addAdminPassOptions } from "../lib/auth-resolve.js";
+import { resolveAdminUser, addAdminPassOptions, envAdminPass } from "../lib/auth-resolve.js";
 import type { ResolvedSigningIdentity } from "../lib/signing-identity.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { DURABILITY_TIERS_HELP } from "../lib/durability-copy.js";
@@ -519,7 +519,7 @@ export function register(program: Command): void {
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper ops API port (default: HTTP - 1)")
     .action(async (opts: any) => {
-      const adminPass = process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD;
+      const adminPass = envAdminPass();
       if (!adminPass) {
         console.error("❌ Admin password required (set FLAIR_ADMIN_PASS or HDB_ADMIN_PASSWORD).");
         process.exit(1);

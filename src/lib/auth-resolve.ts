@@ -1056,6 +1056,17 @@ export function resolveAdminUser(explicit?: string): string {
   return explicit || process.env.FLAIR_ADMIN_USER || DEFAULT_ADMIN_USER;
 }
 
+/**
+ * Return the administrator password from ambient environment variables, or
+ * undefined when neither is set or both are empty.
+ *
+ * Checks FLAIR_ADMIN_PASS first, falling back to HDB_ADMIN_PASSWORD if
+ * FLAIR_ADMIN_PASS is unset or empty ("") (#3093).
+ */
+export function envAdminPass(): string | undefined {
+  return process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD || undefined;
+}
+
 export function defaultKeysDir(): string {
   return join(resolveHome(), ".flair", "keys");
 }
@@ -1895,10 +1906,12 @@ export async function authedRequest(
     if (process.env.FLAIR_TOKEN) {
       authHeader = `Bearer ${process.env.FLAIR_TOKEN}`;
       credSource = "env-token";
-    } else if (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD) {
-      const adminPass = (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD)!;
-      authHeader = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
-      credSource = "env-admin";
+    } else {
+      const adminPass = envAdminPass();
+      if (adminPass) {
+        authHeader = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+        credSource = "env-admin";
+      }
     }
   }
 

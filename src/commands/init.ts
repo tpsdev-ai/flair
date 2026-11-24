@@ -10,7 +10,7 @@ import { applyOrReportClaudeMdBootstrap } from "../doctor-client.js";
 import { applyOrRepinSessionStartHook } from "../lib/owned-pins.js";
 import { hookSettingsPath } from "../hook-install.js";
 import { ClientId, claudeCodeMcpEntry, detectClients, renderWiringSummary, wireAntigravity, wireClaudeCodeJson, wireCodex, wireCursor, wireGemini, wirePi } from "../install/clients.js";
-import { DEFAULT_ADMIN_USER, ApiRequestOutcomeUnknown, addAdminPassOptions, authFetch, defaultAdminPassPath, defaultKeysDir, readAdminPassFileSecure, resolveAdminUser } from "../lib/auth-resolve.js";
+import { DEFAULT_ADMIN_USER, envAdminPass, ApiRequestOutcomeUnknown, addAdminPassOptions, authFetch, defaultAdminPassPath, defaultKeysDir, readAdminPassFileSecure, resolveAdminUser } from "../lib/auth-resolve.js";
 import {
   INIT_RESET_ADMIN_PASS_COMMAND,
   detectPersistedAdminUser,
@@ -805,7 +805,7 @@ addAdminPassOptions(
       }
     }
     const explicitCredential = !!(
-      opts.adminPassFile || process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD || opts.adminPass
+      opts.adminPassFile || envAdminPass() || opts.adminPass
     );
     const passwordCtx = {
       persistedAdminUser,
