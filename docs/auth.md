@@ -292,7 +292,7 @@ Discovery advertises these scope names:
 | `connector:read` | none |
 | `connector:admin` | none |
 
-For native `/mcp` tool calls, the access token must grant the tool's scope above. A missing `scope` claim grants no scope. A call missing its tool's scope returns HTTP 403 with a JSON-RPC `insufficient_scope` error naming the required scope and a `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"` challenge, before resolving the principal or running the tool. A permitted call runs with the mapped principal's authority.
+The jwt-bearer grant above issues opaque `flair_at_` tokens, which native `/mcp` does not accept; `/mcp` accepts the access tokens from its own OAuth sign-in. For native `/mcp` tool calls, the access token must grant the tool's scope above. A missing `scope` claim grants no scope. A call missing its tool's scope returns HTTP 403 with a JSON-RPC `insufficient_scope` error naming the required scope and a `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"` challenge, before resolving the principal or running the tool. A permitted call runs with the mapped principal's authority.
 
 The `/mcp` 401 challenge names `memory:read memory:write principal:read`. Refresh preserves the scopes from sign-in; existing connectors missing a required scope must sign in again requesting it.
 
