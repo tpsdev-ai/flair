@@ -476,6 +476,40 @@ describe("flair#3056 — inspectFederationShimNode reads the unit and the shim f
     });
   }
 
+  it("darwin: null when the plist's top-level Label is another job's", () => {
+    const s = setup("darwin");
+    const unit = readFileSync(s.unitPath, "utf-8");
+    const changed = unit.replace("<string>dev.flair.federation.sync</string>", "<string>dev.example.other</string>");
+    expect(changed).not.toBe(unit);
+    writeFileSync(s.unitPath, changed);
+    expect(inspectFederationShimNode(s.paths)).toBeNull();
+  });
+
+  it("linux: null when the service has a second ExecStart", () => {
+    const s = setup("linux");
+    const unit = readFileSync(s.unitPath, "utf-8");
+    const changed = unit.replace(`ExecStart=${s.shim}`, `ExecStart=${s.shim}\nExecStart=${join(s.root, "other-sync.sh")}`);
+    expect(changed).not.toBe(unit);
+    writeFileSync(s.unitPath, changed);
+    expect(inspectFederationShimNode(s.paths)).toBeNull();
+  });
+
+  it("null when the unit file path is a symlink (it is not followed)", () => {
+    const s = setup("darwin");
+    const real = join(s.root, "elsewhere-unit.plist");
+    writeFileSync(real, readFileSync(s.unitPath, "utf-8"));
+    rmSync(s.unitPath);
+    symlinkSync(real, s.unitPath);
+    expect(inspectFederationShimNode(s.paths)).toBeNull();
+  });
+
+  it("null when the unit file is larger than the read bound", () => {
+    const s = setup("darwin");
+    const unit = readFileSync(s.unitPath, "utf-8");
+    writeFileSync(s.unitPath, unit.replace("<dict>", `<dict>\n  <!-- ${"x".repeat(64 * 1024)} -->`));
+    expect(inspectFederationShimNode(s.paths)).toBeNull();
+  });
+
   it("null when the shim runs a command the generated shim does not", () => {
     const s = setup("darwin");
     const shim = readFileSync(s.shim, "utf-8");

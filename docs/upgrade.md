@@ -158,9 +158,12 @@ exactly a shape flair supports:
 | Linux systemd user unit (the one proven above) | one `WorkingDirectory=` (the served tree) and one `ExecStart=` of `<node> <harper.js> run .` or `<launcher> <admin-pass file> <node> <harper.js>`, optional `-` prefix | drop-ins (any location systemd reports, or `<unit>.d` beside the file), any other argument (operator arguments are never rewritten), quoting, `%` specifiers, `$` variables, line continuations, other `ExecStart=` prefixes, and a new path that would need quoting |
 | Both, when moving to a different installed tree | the old tree is an npm-global install; its flair version and this CLI's are strict semver and this CLI's is not older (prereleases count: `0.57.0-beta.1` is older than `0.57.0`) | a plain tree or checkout (separately managed), an unreadable, non-semver or newer version (a downgrade cannot be ruled out) |
 
-A unit that serves this CLI's tree with a different, existing node is treated
-as a deliberate pin: `flair init` leaves it (apart from the Homebrew case below),
-and init and `flair doctor` report it with the hand edit that would move it. A
+Apart from the Homebrew case below, a unit that serves this CLI's tree with a
+different, existing node is treated as a deliberate pin: `flair init` does not
+change that node path. When the unit's other runtime paths exist, init leaves
+the unit unchanged, and init and `flair doctor` report the pin with the hand edit
+that would move it. When one of them is missing, a plist has it replaced as the
+next sentence says, and a systemd unit is refused. A
 plist that already serves this CLI's tree has a missing runtime path replaced
 without the version check in the table, which applies only to a move between
 trees. In a plist or federation-sync shim that serves this CLI's tree and that

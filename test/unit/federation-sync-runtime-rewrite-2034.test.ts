@@ -249,6 +249,22 @@ describe("rewriteFederationSchedulerRuntime — macOS", () => {
     });
   }
 
+  test("a plist whose top-level Label is another job's is refused as unconfirmed", () => {
+    const f = fixture();
+    enable(f, "darwin");
+    const unit = readFileSync(f.plist, "utf-8");
+    const changed = unit.replace("<string>dev.flair.federation.sync</string>", "<string>dev.example.other</string>");
+    expect(changed).not.toBe(unit);
+    writeFileSync(f.plist, changed);
+    const before = readFileSync(f.shim, "utf-8");
+    const r = rewrite(f, "darwin");
+    expect(r.status).toBe("refused");
+    expect(r.detail).toContain(
+      `flair could not confirm that ${f.plist} execs the flair-generated shim: its Label is not dev.flair.federation.sync.`,
+    );
+    expect(readFileSync(f.shim, "utf-8")).toBe(before);
+  });
+
   test("a hand-changed shim (not the generated shape) is refused", () => {
     const f = fixture();
     enable(f, "darwin");
@@ -320,6 +336,22 @@ describe("rewriteFederationSchedulerRuntime — Linux", () => {
     enable(f, "linux");
     writeFileSync(f.service, readFileSync(f.service, "utf-8").replace(/^ExecStart=.*$/m, "ExecStart=/usr/bin/true"));
     expect(rewrite(f, "linux").status).toBe("refused");
+  });
+
+  test("a service unit with a second ExecStart is refused as unconfirmed", () => {
+    const f = fixture();
+    enable(f, "linux");
+    const unit = readFileSync(f.service, "utf-8");
+    const changed = unit.replace(`ExecStart=${f.shim}`, `ExecStart=${f.shim}\nExecStart=/usr/bin/true`);
+    expect(changed).not.toBe(unit);
+    writeFileSync(f.service, changed);
+    const before = readFileSync(f.shim, "utf-8");
+    const r = rewrite(f, "linux");
+    expect(r.status).toBe("refused");
+    expect(r.detail).toContain(
+      `flair could not confirm that ${f.service} execs the flair-generated shim: its ExecStart is ${JSON.stringify([f.shim, "/usr/bin/true"])}`,
+    );
+    expect(readFileSync(f.shim, "utf-8")).toBe(before);
   });
 });
 

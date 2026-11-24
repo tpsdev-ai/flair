@@ -11,11 +11,15 @@
  *   - the federation-sync shim writers (`enableScheduler` for a new shim,
  *     `rewriteFederationSchedulerRuntime` for an existing one).
  *
- * An existing plist or shim that serves this CLI's tree and records a Cellar
- * path is rewritten to the opt alias when that alias resolves to the same
- * binary; a Cellar path whose alias now resolves to another version, and a path
- * outside the Cellar layout, are kept. A plist or shim serving another tree
- * follows the cross-tree rules instead. No launchctl or systemctl; the files the
+ * An existing plist or shim that its writer accepts for re-pointing
+ * (writeInitLaunchdPlist and rewriteFederationSchedulerRuntime refuse files
+ * not in the shape flair writes), that serves this CLI's tree and that records
+ * an existing Cellar node path is rewritten to the opt alias when that alias
+ * resolves to the same binary. An existing Cellar node path whose alias
+ * now resolves to another version, and an existing node path outside the
+ * Cellar layout, are kept; a missing node path is replaced under the existing
+ * re-point rules. A plist or shim serving another tree follows the cross-tree
+ * rules instead. No launchctl or systemctl; the files the
  * writers touch are under the temp dir.
  */
 import { describe, test, expect } from "bun:test";
