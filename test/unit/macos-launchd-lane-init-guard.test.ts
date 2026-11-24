@@ -2,10 +2,11 @@
  * macos-launchd-lane-init-guard.test.ts — flair#3100
  *
  * A failed `flair init` whose output passes the password scan must reach
- * on_error's diagnostics in the launchd adopt-then-upgrade lane. The block
- * under test is extracted from scripts/ci/macos-launchd-upgrade-lane.sh itself
+ * on_error's diagnostics in the launchd adopt-then-upgrade lane. The code under
+ * test, the lane's on_error/cleanup_admin_pass_source trap wiring and its init
+ * block, is extracted from scripts/ci/macos-launchd-upgrade-lane.sh itself
  * (never copied), because stock macOS /bin/bash 3.2 does NOT fire the ERR trap
- * for `(exit "$init_rc")` inside an `if` body; Bash 5 does.
+ * for `(exit "$init_rc")` inside an `if` body.
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
@@ -26,6 +27,20 @@ import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const LANE = join(REPO_ROOT, "scripts", "ci", "macos-launchd-upgrade-lane.sh");
+
+/** The on_error and cleanup_admin_pass_source trap wiring, verbatim from the lane script. */
+function extractTrapWiring(): string {
+  const lines = readFileSync(LANE, "utf8").split("\n");
+  const start = lines.indexOf("on_error() {");
+  if (start < 0) throw new Error(`on_error start marker not found in ${LANE}`);
+  const anchor = lines.indexOf("cleanup_admin_pass_source() {", start);
+  if (anchor < 0) throw new Error(`cleanup_admin_pass_source anchor not found in ${LANE}`);
+  // Ends at the first blank line after the cleanup function, so a deleted trap
+  // registration reaches the cases instead of failing this extraction.
+  const end = lines.findIndex((line, index) => index > anchor && line.trim() === "");
+  if (end < 0) throw new Error(`trap wiring end marker not found in ${LANE}`);
+  return lines.slice(start, end).join("\n");
+}
 
 /** The init block, verbatim from the lane script. */
 function extractInitBlock(): string {
@@ -93,21 +108,18 @@ case "\${STUB_MODE:-ok}" in
 esac
 `;
 
+// The lane's shell options and the globals its wiring reads. dump_diagnostics
+// and extract_symptom inspect a real lane run, so they are stubbed.
 const HARNESS_HEAD = `set -Eeuo pipefail
-on_error() {
-  local code=$?
-  echo "DIAG code=$code"
-  exit "$code"
-}
+REGISTRY_PID=""
 ADMIN_PASS_SOURCE_DIR=""
-cleanup_admin_pass_source() {
-  if [ -n "$ADMIN_PASS_SOURCE_DIR" ]; then
-    rm -rf "$ADMIN_PASS_SOURCE_DIR"
-  fi
-}
-trap cleanup_admin_pass_source EXIT
-if [ "\${HARNESS_ERR_TRAP:-0}" = "1" ]; then
-  trap on_error ERR
+dump_diagnostics() { :; }
+extract_symptom() { :; }
+`;
+
+// Runs after the lane's wiring: a case without an ERR trap removes the lane's.
+const HARNESS_ERR_TRAP = `if [ "\${HARNESS_ERR_TRAP:-0}" != "1" ]; then
+  trap - ERR
 fi
 `;
 
@@ -143,7 +155,10 @@ function makeScratch(): Scratch {
   mkdirSync(join(root, "pass"));
   writeFileSync(join(binDir, "flair"), STUB);
   chmodSync(join(binDir, "flair"), 0o755);
-  writeFileSync(join(root, "harness.sh"), `${HARNESS_HEAD}${extractInitBlock()}\n${HARNESS_TAIL}`);
+  writeFileSync(
+    join(root, "harness.sh"),
+    `${HARNESS_HEAD}${extractTrapWiring()}\n${HARNESS_ERR_TRAP}${extractInitBlock()}\n${HARNESS_TAIL}`,
+  );
   return { root, runDir, passFile };
 }
 
@@ -195,7 +210,7 @@ describe("launchd lane init guard (flair#3100)", () => {
     () => {
       const { result, out, scratch } = runCase("fail", false);
       expect(result.status).toBe(3);
-      expect((out.match(/DIAG code=3/g) ?? []).length).toBe(1);
+      expect((out.match(/lane failed \(exit 3\)/g) ?? []).length).toBe(1);
       expect(out).not.toContain("REACHED-END");
       expect(readdirSync(scratch.runDir)).toHaveLength(0);
     },
@@ -203,7 +218,7 @@ describe("launchd lane init guard (flair#3100)", () => {
   );
 
   test(
-    "stock /bin/bash fires on_error for a failed init when an ERR trap is installed",
+    "with the ERR trap installed, a failed init on stock /bin/bash reaches on_error once with the init's exit code",
     () => {
       if (!existsSync("/bin/bash")) {
         console.warn("[case] skipped: /bin/bash does not exist on this host");
@@ -211,7 +226,7 @@ describe("launchd lane init guard (flair#3100)", () => {
       }
       const { result, out } = runCase("fail", true, "/bin/bash");
       expect(result.status).toBe(3);
-      expect((out.match(/DIAG code=3/g) ?? []).length).toBe(1);
+      expect((out.match(/lane failed \(exit 3\)/g) ?? []).length).toBe(1);
       expect(out).not.toContain("REACHED-END");
     },
     60_000,
@@ -220,12 +235,13 @@ describe("launchd lane init guard (flair#3100)", () => {
   test(
     "a leaked password withholds init output and prints no value",
     () => {
-      const { result, out, value } = runCase("leak", false);
+      const { result, out, value, scratch } = runCase("leak", false);
       expect(result.status).toBe(1);
       expect(out).toContain("withheld");
       expect(value.length).toBeGreaterThan(0);
       expect(out).not.toContain(value);
       expect(out).not.toContain("REACHED-END");
+      expect(readdirSync(scratch.runDir)).toHaveLength(0);
     },
     60_000,
   );
