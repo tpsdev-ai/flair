@@ -58,6 +58,7 @@ REGISTRY_PID=""
 BASELINE_PID=""
 SERVING_PID=""
 LABEL=""
+ADMIN_PASS_SOURCE_DIR=""
 
 mkdir -p "$DIAG_DIR" "$FLAIR_MODELS_DIR"
 
@@ -104,12 +105,8 @@ fi
 # harper-config.yaml) that supplies it, and exporting a second copy would
 # mask whether the plist's own value is what the upgraded server honours.
 #
-# The admin password is NOT placed in argv: the lane writes it to the 0600
-# `~/.flair/admin-pass` and passes only that path to `flair init
-# --admin-pass-file`. Passing the password inline makes init skip the file,
-# which is not the rockit shape and makes the adopted launchd job fail to
-# start. The value reaches later restart/verify calls through the environment
-# only, and is never echoed.
+# The admin password reaches init through a source file and later
+# restart/verify calls through the environment to keep it out of argv and logs.
 # ops-nv9d slice 2: these are BARE values on purpose. This lane deliberately
 # exports a bare port as "the reported rockit shape" and then installs + exercises
 # a PUBLISHED BASELINE (pre-parser) CLI. Qualifying HTTP_PORT here would delete
@@ -215,6 +212,13 @@ on_error() {
   exit "$code"
 }
 trap on_error ERR
+
+cleanup_admin_pass_source() {
+  if [ -n "$ADMIN_PASS_SOURCE_DIR" ]; then
+    rm -rf "$ADMIN_PASS_SOURCE_DIR"
+  fi
+}
+trap cleanup_admin_pass_source EXIT
 
 launchd_pid() {
   # Tabular `launchctl list`: PID <tab> Status <tab> Label. A non-running job
@@ -343,38 +347,49 @@ npm install -g "@tpsdev-ai/flair@${BASELINE_VERSION}"
 echo "installed: $(flair --version 2>&1 | tail -n1)"
 
 log "Bring the instance up the product way (flair init, direct-spawned)"
-# Match rockit exactly: the admin password lives in the 0600
-# `~/.flair/admin-pass`, and init reads it through `--admin-pass-file` (the
-# product's preferred flag). The #1573 pass-file launcher takes that same file
-# as argv[1], so the file has to exist BEFORE doctor --fix writes the plist.
-# Writing it here (rather than letting init generate it) keeps the secret out
-# of argv and out of the logs, and makes the lane's shape the one rockit runs.
+# Supply a separate source: init refuses a pre-existing destination on a stopped
+# instance. Let init persist ~/.flair/admin-pass before doctor --fix writes the
+# #1573 pass-file launcher plist, which needs that file to start.
 ADMIN_PASS="${ADMIN_PASS:-}"
 if [ -z "$ADMIN_PASS" ]; then
   # Same generator init uses (base64url over 18 random bytes), invoked through
   # node so the value never appears on a command line anyone can read.
   ADMIN_PASS="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(18).toString("base64url"))')"
 fi
-mkdir -p "$HOME/.flair"
-# umask 077 + chmod: readAdminPassFileSecure refuses any group/other bit, and
-# the launcher re-checks the mode at start time.
-( umask 077; printf '%s\n' "$ADMIN_PASS" > "$PASS_FILE" )
-chmod 600 "$PASS_FILE"
-# init reads the file (passwordSource becomes "file"), so it neither writes
-# nor prints the secret. The env vars below are for this lane's own
-# restart/verify calls; they are not argv and are never echoed.
+if [ -n "${RUNNER_TEMP:-}" ]; then
+  ADMIN_PASS_SOURCE_DIR="$(mktemp -d "$RUNNER_TEMP/flair-admin-pass.XXXXXX")"
+else
+  ADMIN_PASS_SOURCE_DIR="$(mktemp -d)"
+fi
+chmod 700 "$ADMIN_PASS_SOURCE_DIR"
+ADMIN_PASS_SOURCE_FILE="$ADMIN_PASS_SOURCE_DIR/admin-pass"
+# umask 077 + chmod: readAdminPassFileSecure refuses group/other bits.
+# The launcher checks the persisted file's mode; verify that file below.
+(
+  umask 077
+  # v0.59.0's plist writer omits the newline; v0.60.0's init adds it.
+  if version_lt "$BASELINE_VERSION" "0.60.0"; then
+    printf '%s' "$ADMIN_PASS" > "$ADMIN_PASS_SOURCE_FILE"
+  else
+    printf '%s\n' "$ADMIN_PASS" > "$ADMIN_PASS_SOURCE_FILE"
+  fi
+)
+chmod 600 "$ADMIN_PASS_SOURCE_FILE"
 unset FLAIR_ADMIN_PASS HDB_ADMIN_PASSWORD
 flair init \
   --port "$PORT" \
   --ops-port "$OPS_PORT" \
   --ops-bind 127.0.0.1 \
-  --admin-pass-file "$PASS_FILE" \
+  --admin-pass-file "$ADMIN_PASS_SOURCE_FILE" \
   --skip-soul \
   --no-mcp
-if [ ! -s "$PASS_FILE" ]; then
-  echo "admin-pass file ${PASS_FILE} is missing after flair init — the pass-file launcher cannot start" >&2
+if [ ! -f "$PASS_FILE" ] || [ -L "$PASS_FILE" ] || [ ! -O "$PASS_FILE" ] ||
+   [ "$(stat -f '%Lp' "$PASS_FILE")" != "600" ] || ! cmp -s "$ADMIN_PASS_SOURCE_FILE" "$PASS_FILE"; then
+  echo "admin-pass file ${PASS_FILE} must be a runner-owned regular 0600 file identical to the source after flair init" >&2
   exit 1
 fi
+cleanup_admin_pass_source
+ADMIN_PASS_SOURCE_DIR=""
 export HDB_ADMIN_PASSWORD="$ADMIN_PASS"
 export FLAIR_ADMIN_PASS="$ADMIN_PASS"
 wait_health "$HTTP_URL/Health" 180
