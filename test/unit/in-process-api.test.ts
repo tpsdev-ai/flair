@@ -160,3 +160,306 @@ describe("Flair (public in-process API)", () => {
     });
   });
 });
+
+// ─── flair#3068 — error responses reject ─────────────────────────────────────
+//
+// The facade's reads resolve to what they document. A refusal from the
+// resource (a `Response` or an `{ error, status }` object) rejects instead of
+// resolving to something a caller could mistake for a record. A 404 is the one
+// exception: `memory.get()` resolves it to `null`.
+
+function memoryReadStub(getImpl: (id: string, ctx: any) => any) {
+  return fakeResourceEntry(
+    class MemoryStub {
+      static async get(id: string, ctx: any) {
+        return getImpl(id, ctx);
+      }
+    },
+  );
+}
+
+describe("flair#3068 — recall() rejects on an error response", () => {
+  it("rejects a 429 Response with the error and its status", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return new Response(JSON.stringify({ error: "rate_limit_exceeded" }), { status: 429 });
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/rate_limit_exceeded.*HTTP 429/);
+  });
+
+  it("rejects an { error, status } object instead of resolving to it", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return { error: "bad", status: 500 };
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/bad.*HTTP 500/);
+  });
+
+  it("rejects a 429 Response whose body also carries an empty results array", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return new Response(JSON.stringify({ error: "rate_limit_exceeded", results: [] }), { status: 429 });
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/rate_limit_exceeded.*HTTP 429/);
+  });
+
+  it("rejects a 429 Response whose body claims a 200 status and carries an empty results array", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return new Response(JSON.stringify({ error: "x", status: 200, results: [] }), { status: 429 });
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/x.*HTTP 429/);
+  });
+
+  it("rejects a failing Response whose body is not JSON, with the response's status", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return new Response("<html>bad gateway</html>", { status: 503 });
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/request failed.*HTTP 503/);
+  });
+
+  it("rejects a plain failure envelope whose body also carries an empty results array", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return { error: "rate_limit_exceeded", status: 429, results: [] };
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/rate_limit_exceeded.*HTTP 429/);
+  });
+
+  it("resolves a 200 Response carrying a results envelope", async () => {
+    const rows = [{ id: "m-1", content: "deploy schedule", score: 0.9, agentId: "planner" }];
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return new Response(JSON.stringify({ results: rows }), { status: 200 });
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).resolves.toEqual(rows);
+  });
+
+  it("resolves a 200 Response carrying a bare array", async () => {
+    const rows = [{ id: "m-1", content: "deploy schedule", score: 0.9, agentId: "planner" }];
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return new Response(JSON.stringify(rows), { status: 200 });
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).resolves.toEqual(rows);
+  });
+
+  it("resolves a plain successful results envelope", async () => {
+    const rows = [{ id: "m-1", content: "deploy schedule", score: 0.9, agentId: "planner" }];
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return { results: rows };
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).resolves.toEqual(rows);
+  });
+
+  it("rejects a response that carries no results", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            return { unexpected: true };
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/unexpected response/);
+  });
+
+  it("rejects when the search read throws", async () => {
+    const server = fakeServer({
+      SemanticSearch: fakeResourceEntry(
+        class {
+          async post() {
+            throw new Error("storage unavailable");
+          }
+        },
+      ),
+    });
+    await expect(new Flair(server).as("planner").recall("q")).rejects.toThrow(/storage unavailable/);
+  });
+});
+
+describe("flair#3068 — memory.get() rejects on an error response", () => {
+  it("rejects a 503 Response for an agent and for admin, and a 404 still resolves to null", async () => {
+    const server = fakeServer({
+      Memory: memoryReadStub((id) =>
+        id === "missing" ? new Response(JSON.stringify({ error: "not found" }), { status: 404 }) : new Response(JSON.stringify({ error: "unavailable" }), { status: 503 }),
+      ),
+    });
+    const flair = new Flair(server);
+    await expect(flair.as("planner").memory.get("m-1")).rejects.toThrow(/HTTP 503/);
+    await expect(flair.admin.memory.get("m-1")).rejects.toThrow(/HTTP 503/);
+    await expect(flair.as("planner").memory.get("missing")).resolves.toBeNull();
+    await expect(flair.admin.memory.get("missing")).resolves.toBeNull();
+  });
+
+  it("rejects an { error, status } object instead of resolving to it", async () => {
+    const server = fakeServer({
+      Memory: memoryReadStub((id) =>
+        id === "missing" ? { error: "not found", status: 404 } : { error: "unavailable", status: 503 },
+      ),
+    });
+    const flair = new Flair(server);
+    await expect(flair.as("planner").memory.get("m-1")).rejects.toThrow(/HTTP 503/);
+    await expect(flair.admin.memory.get("m-1")).rejects.toThrow(/HTTP 503/);
+    await expect(flair.as("planner").memory.get("missing")).resolves.toBeNull();
+  });
+
+  it("rejects when the storage read throws", async () => {
+    const server = fakeServer({
+      Memory: memoryReadStub(() => {
+        throw new Error("storage unavailable");
+      }),
+    });
+    const flair = new Flair(server);
+    await expect(flair.as("planner").memory.get("m-1")).rejects.toThrow(/storage unavailable/);
+    await expect(flair.admin.memory.get("m-1")).rejects.toThrow(/storage unavailable/);
+  });
+});
+
+describe("flair#3068 — memory.search() rejects on an error response", () => {
+  function searchStub(searchImpl: () => any) {
+    return fakeResourceEntry(
+      class MemoryStub {
+        async search() {
+          return searchImpl();
+        }
+      },
+    );
+  }
+
+  it("rejects a 503 Response with the error and its status", async () => {
+    const server = fakeServer({
+      Memory: searchStub(() => new Response(JSON.stringify({ error: "unavailable" }), { status: 503 })),
+    });
+    await expect(new Flair(server).as("planner").memory.search()).rejects.toThrow(/unavailable.*HTTP 503/);
+  });
+
+  it("rejects an { error, status } object instead of resolving to it", async () => {
+    const server = fakeServer({
+      Memory: searchStub(() => ({ error: "bad", status: 500 })),
+    });
+    await expect(new Flair(server).as("planner").memory.search()).rejects.toThrow(/bad.*HTTP 500/);
+  });
+
+  it("rejects a 429 Response whose body claims a 200 status and carries an empty results array", async () => {
+    const server = fakeServer({
+      Memory: searchStub(() => new Response(JSON.stringify({ error: "x", status: 200, results: [] }), { status: 429 })),
+    });
+    await expect(new Flair(server).as("planner").memory.search()).rejects.toThrow(/x.*HTTP 429/);
+  });
+
+  it("rejects a failing Response whose body is not JSON, with the response's status", async () => {
+    const server = fakeServer({
+      Memory: searchStub(() => new Response("<html>bad gateway</html>", { status: 503 })),
+    });
+    await expect(new Flair(server).as("planner").memory.search()).rejects.toThrow(/request failed.*HTTP 503/);
+  });
+
+  it("rejects when the search read throws", async () => {
+    const server = fakeServer({
+      Memory: searchStub(() => {
+        throw new Error("storage unavailable");
+      }),
+    });
+    await expect(new Flair(server).as("planner").memory.search()).rejects.toThrow(/storage unavailable/);
+  });
+});
+
+// ─── flair#3068 — the search limit has two halves ───────────────────────────
+//
+// `memory.search({ limit })` forwards the limit to the resource query AND caps
+// what resolves back, because the resource may yield more rows than the limit
+// it was handed. The stub below ignores `query.limit` and always yields five
+// rows, as an array or as an async iterable.
+
+function recordingMemorySearch(makeRows: () => any) {
+  const calls: any[] = [];
+  const entry = fakeResourceEntry(
+    class MemoryStub {
+      async search(query: any) {
+        calls.push(query);
+        return makeRows();
+      }
+    },
+  );
+  return { entry, calls };
+}
+
+const fiveRows = () => [1, 2, 3, 4, 5].map((n) => ({ id: `row-${n}`, agentId: "planner", content: `row ${n}` }));
+
+describe("flair#3068 — memory.search() forwards and caps the limit", () => {
+  it("forwards limit to the query and caps an array result", async () => {
+    const { entry, calls } = recordingMemorySearch(() => fiveRows());
+    const rows = await new Flair(fakeServer({ Memory: entry })).as("planner").memory.search({ limit: 2 });
+    expect(calls[0]?.limit).toBe(2);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r: any) => r.id)).toEqual(["row-1", "row-2"]);
+  });
+
+  it("forwards limit to the query and caps an async-iterable result", async () => {
+    const { entry, calls } = recordingMemorySearch(() =>
+      (async function* () {
+        for (const row of fiveRows()) yield row;
+      })(),
+    );
+    const rows = await new Flair(fakeServer({ Memory: entry })).as("planner").memory.search({ limit: 2 });
+    expect(calls[0]?.limit).toBe(2);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r: any) => r.id)).toEqual(["row-1", "row-2"]);
+  });
+
+  it("limit: 0 resolves to an empty array without reading", async () => {
+    const { entry, calls } = recordingMemorySearch(() => fiveRows());
+    const rows = await new Flair(fakeServer({ Memory: entry })).as("planner").memory.search({ limit: 0 });
+    expect(rows).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+});
