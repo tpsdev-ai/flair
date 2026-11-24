@@ -31,7 +31,7 @@ import type { AddressInfo, Socket } from "node:net";
 import { join } from "node:path";
 import { load as loadYaml } from "js-yaml";
 
-import { resolveBudget } from "../../scripts/ci/wait-for-harper.mjs";
+import { main, resolveBudget } from "../../scripts/ci/wait-for-harper.mjs";
 import { tempDir } from "../helpers/temp-dir.ts";
 
 const REPO = join(import.meta.dir, "..", "..");
@@ -203,20 +203,23 @@ async function run(
   timeoutMs = CASE_TIMEOUT_MS,
 ): Promise<Run> {
   const started = Date.now();
-  // A host shell startup file must not decide a case's result: a
-  // noninteractive bash reads the file BASH_ENV names before it runs a script,
-  // so the stub would exit before it reads its fixture files. Keep PATH and
-  // the fixture variables the cases set explicitly; BASH_ENV and ENV are
-  // removed from the child environment.
+  // A host shell startup file or Node preload must not decide a case's result:
+  // a noninteractive bash reads the file BASH_ENV names before it runs a
+  // script, and NODE_OPTIONS can preload code into the child before its entry
+  // point. Keep PATH and the fixture variables the cases set explicitly;
+  // BASH_ENV, ENV and NODE_OPTIONS are removed from the child environment
+  // unless a case sets one.
+  const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  delete baseEnv.BASH_ENV;
+  delete baseEnv.ENV;
+  delete baseEnv.NODE_OPTIONS;
   const childEnv: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...baseEnv,
     PATH: `${box.bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
     WAIT_STUB_DIR: box.root,
     HARPER_START_BUDGET_S: "",
     ...env,
   };
-  delete childEnv.BASH_ENV;
-  delete childEnv.ENV;
   const child = spawn("node", [SCRIPT, ...args], {
     env: childEnv,
     stdio: ["ignore", "pipe", "pipe"],
@@ -321,6 +324,8 @@ describe("wait-for-harper.mjs", () => {
       const dir = tempDir("flair-wait-harper-env-");
       const bashEnv = join(dir, "bash-env.sh");
       writeFileSync(bashEnv, "exit 7\n");
+      const preload = join(dir, "preload.cjs");
+      writeFileSync(preload, "process.exit(7);\n");
       const server = await health((index, res) => {
         res.statusCode = index >= 2 ? 200 : 503;
         res.end();
@@ -328,8 +333,10 @@ describe("wait-for-harper.mjs", () => {
       const box = sandbox();
       const prior = process.env.BASH_ENV;
       const priorEnv = process.env.ENV;
+      const priorNodeOptions = process.env.NODE_OPTIONS;
       process.env.BASH_ENV = bashEnv;
       process.env.ENV = "env-startup-file";
+      process.env.NODE_OPTIONS = `--require ${preload}`;
       try {
         const result = await run(box, ["--container", "harper-flair", ...WAIT_ARGS(server.url), "--budget-seconds", "20"]);
 
@@ -342,6 +349,8 @@ describe("wait-for-harper.mjs", () => {
         else process.env.BASH_ENV = prior;
         if (priorEnv === undefined) delete process.env.ENV;
         else process.env.ENV = priorEnv;
+        if (priorNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+        else process.env.NODE_OPTIONS = priorNodeOptions;
       }
     },
     CASE_TIMEOUT_MS,
@@ -541,9 +550,14 @@ describe("wait-for-harper.mjs", () => {
       );
       expect(failed.status).toBe(1);
       expect(failed.output).toContain("Unauthenticated diagnostic request:");
+      expect(failed.output).toContain("www-authenticate: [redacted]");
+      expect(failed.output).toContain("x-echo-raw: [redacted]");
       expect(failed.output).toContain("[redacted]");
       expect(failed.output).not.toContain("test-pass");
       expect(failed.output).not.toContain(token);
+      // The diagnostic heading alone is not evidence: exactly one request
+      // reached this server, and it carried no authorization.
+      expect(diagnostic.requests()).toBe(1);
       expect(diagnostic.authorizations).toHaveLength(0);
       expect(readFileSync(join(failing.root, "docker-argv.log"), "utf8")).not.toContain("test-pass");
       expect(readFileSync(join(failing.root, "docker-env.log"), "utf8")).not.toContain("test-pass");
@@ -970,6 +984,89 @@ describe("wait-for-harper.mjs", () => {
       expect(server.requests()).toBeGreaterThan(1);
       expect(result.output).toContain("Harper was not ready within 2s; last /Health result: no response");
       expect(result.output).not.toContain("last /Health result: 503");
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(y2) a credentials variable name that starts with NODE_ is bad usage before any Docker call",
+    async () => {
+      const server = await health(STATUS(200));
+      const box = sandbox();
+      const result = await run(
+        box,
+        [
+          "--container",
+          "harper-flair",
+          ...WAIT_ARGS(server.url),
+          "--credentials-env",
+          "NODE_V8_COVERAGE",
+          "--budget-seconds",
+          "20",
+        ],
+        { NODE_V8_COVERAGE: box.root },
+      );
+
+      expect(result.status).toBe(2);
+      expect(result.output).toContain("credentials variable name 'NODE_V8_COVERAGE' is not valid");
+      let calls = "";
+      try {
+        calls = readFileSync(join(box.root, "docker-argv.log"), "utf8");
+      } catch {
+        calls = "";
+      }
+      expect(calls).toBe("");
+      expect(server.requests()).toBe(0);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(y3) a per-request cap above the timer maximum is bad usage before any Docker call",
+    async () => {
+      const server = await health(STATUS(200));
+      const box = sandbox();
+      const result = await run(box, [
+        "--container",
+        "harper-flair",
+        "--url",
+        server.url,
+        "--poll-interval-ms",
+        "100",
+        "--per-request-ms",
+        "2147483648",
+        "--budget-seconds",
+        "20",
+      ]);
+
+      expect(result.status).toBe(2);
+      expect(result.output).toContain("--per-request-ms must be at most 2147483647, got '2147483648'");
+      let calls = "";
+      try {
+        calls = readFileSync(join(box.root, "docker-argv.log"), "utf8");
+      } catch {
+        calls = "";
+      }
+      expect(calls).toBe("");
+      expect(server.requests()).toBe(0);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(z) main rejects a credentialed URL for direct callers before any work",
+    async () => {
+      const status = await main({
+        container: "harper-flair",
+        url: "http://user:pass@127.0.0.1:9/Health",
+        credentialsEnv: undefined,
+        budgetSeconds: 5,
+        pollIntervalMs: 100,
+        progressIntervalMs: 1000,
+        perRequestMs: 100,
+      });
+
+      expect(status).toBe(2);
     },
     CASE_TIMEOUT_MS,
   );

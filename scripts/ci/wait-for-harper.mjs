@@ -45,6 +45,7 @@ const DEFAULT_POLL_INTERVAL_MS = 2000;
 const DEFAULT_PROGRESS_INTERVAL_MS = 30_000;
 const DEFAULT_PER_REQUEST_MS = 5000;
 const MAX_BUDGET_SECONDS = 24 * 60 * 60;
+const MAX_TIMER_MS = 2147483647;
 const CREDENTIALS_ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 
 /** Resolve the budget: the flag, else the environment, else 300 seconds. */
@@ -147,8 +148,18 @@ export function parseArgs(argv, env = process.env) {
     pollIntervalMs: poll === undefined ? DEFAULT_POLL_INTERVAL_MS : positiveInteger("--poll-interval-ms", poll),
     progressIntervalMs:
       progress === undefined ? DEFAULT_PROGRESS_INTERVAL_MS : positiveInteger("--progress-interval-ms", progress),
-    perRequestMs: perRequest === undefined ? DEFAULT_PER_REQUEST_MS : positiveInteger("--per-request-ms", perRequest),
+    perRequestMs: perRequestLimit(perRequest),
   };
+}
+
+/** A per-request cap must fit Node's timer range; above it Node fires in 1 ms. */
+function perRequestLimit(value) {
+  if (value === undefined) return DEFAULT_PER_REQUEST_MS;
+  const milliseconds = positiveInteger("--per-request-ms", value);
+  if (milliseconds > MAX_TIMER_MS) {
+    throw new Error(`--per-request-ms must be at most ${MAX_TIMER_MS}, got '${value}'`);
+  }
+  return milliseconds;
 }
 
 function errorText(error) {
@@ -243,10 +254,18 @@ async function diagnose({ container, url, perRequestMs, childEnv, secrets }) {
 export async function main(options) {
   const { container, url, credentialsEnv, budgetSeconds, pollIntervalMs, progressIntervalMs, perRequestMs } = options;
 
+  let checkedUrl;
+  try {
+    checkedUrl = healthUrl(url);
+  } catch (error) {
+    console.error(`wait-for-harper: ${error.message}`);
+    return 2;
+  }
+
   let authorization;
   let secrets = [];
   if (credentialsEnv !== undefined) {
-    if (!CREDENTIALS_ENV_NAME.test(credentialsEnv)) {
+    if (!CREDENTIALS_ENV_NAME.test(credentialsEnv) || credentialsEnv.startsWith("NODE_")) {
       console.error(`wait-for-harper: credentials variable name '${credentialsEnv}' is not valid`);
       return 2;
     }
@@ -293,7 +312,7 @@ export async function main(options) {
     if (remaining() <= 0) break;
     if (!state.running) return reportExited(state.exitCode);
 
-    const status = await probe(url, authorization, Math.min(perRequestMs, remaining()));
+    const status = await probe(checkedUrl, authorization, Math.min(perRequestMs, remaining()));
     lastHealthResult = status === null ? "no response" : String(status);
     if (status !== null && status >= 200 && status < 300) {
       if (remaining() <= 0) break;
