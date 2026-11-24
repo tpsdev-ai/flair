@@ -52,6 +52,7 @@ while [ "$#" -gt 0 ]; do
 done
 case "\${STUB_MODE:-ok}" in
   ok)
+    stat -f '%Lp' "$(dirname "$pass_file")" "$pass_file" > "$SOURCE_MODES"
     cp "$pass_file" "$PASS_FILE"
     chmod 600 "$PASS_FILE"
     echo "init ok"
@@ -146,17 +147,38 @@ function makeScratch(): Scratch {
   return { root, runDir, passFile };
 }
 
-function runCase(mode: Mode, errTrap: boolean, shell = "bash") {
+/** A fake `id` whose `id -u` prints a uid other than this process's effective uid. */
+function writeForeignId(root: string): string {
+  const euid = process.geteuid?.();
+  if (euid === undefined) throw new Error("process.geteuid is unavailable on this platform");
+  const dir = join(root, "fake-id");
+  mkdirSync(dir);
+  writeFileSync(
+    join(dir, "id"),
+    `#!/bin/sh
+if [ "$#" -eq 1 ] && [ "$1" = "-u" ]; then echo ${euid + 1}; exit 0; fi
+echo "fake id: unexpected arguments: $*" >&2
+exit 64
+`,
+  );
+  chmodSync(join(dir, "id"), 0o755);
+  return dir;
+}
+
+function runCase(mode: Mode, errTrap: boolean, shell = "bash", foreignEuid = false) {
   const scratch = makeScratch();
+  const pathDirs = [join(scratch.root, "bin"), process.env.PATH ?? ""];
+  if (foreignEuid) pathDirs.unshift(writeForeignId(scratch.root));
   const result = spawnSync(shell, [join(scratch.root, "harness.sh")], {
     encoding: "utf8",
     env: {
-      PATH: `${join(scratch.root, "bin")}:${process.env.PATH ?? ""}`,
+      PATH: pathDirs.join(":"),
       HOME: join(scratch.root, "home"),
       PORT: "19926",
       OPS_PORT: "19925",
       RUNNER_TEMP: scratch.runDir,
       PASS_FILE: scratch.passFile,
+      SOURCE_MODES: join(scratch.root, "source-modes"),
       STUB_MODE: mode,
       HARNESS_ERR_TRAP: errTrap ? "1" : "0",
     },
@@ -229,14 +251,15 @@ describe("launchd lane init guard (flair#3100)", () => {
       expect(out).toContain("REACHED-END");
       expect(out).not.toContain("SOURCE-PRESENT-AFTER-BLOCK");
       expect(readdirSync(scratch.runDir)).toHaveLength(0);
+      // Modes of the source directory and file, as the stub init received them.
+      expect(readFileSync(join(scratch.root, "source-modes"), "utf8")).toBe("700\n600\n");
     },
     60_000,
   );
 
-  // Darwin only, as above. Each fixture fails exactly one destination check:
-  // bytes -> cmp, mode -> the 0600 mode check, symlink (its own mode set to
-  // 0600 with chmod -h) -> -L. A directory is refused by -f and by cmp.
-  // Foreign ownership (-O) needs a second user and is not exercised here.
+  // Darwin only, as above. The first three fixtures each isolate one destination
+  // check: bytes -> cmp, mode -> the 0600 mode check, symlink (its own mode set
+  // to 0600 with chmod -h) -> -L. The directory has two refusal paths: -f and cmp.
   test.skipIf(process.platform !== "darwin")(
     "a persisted file whose bytes differ from the source is refused before adoption",
     () => {
@@ -274,6 +297,19 @@ describe("launchd lane init guard (flair#3100)", () => {
     "a persisted directory is refused before adoption",
     () => {
       const { result, out } = runCase("dir", false);
+      expect(result.status).toBe(1);
+      expect(out).toContain("must be a runner-owned regular 0600 file identical to the source");
+      expect(out).not.toContain("REACHED-END");
+    },
+    60_000,
+  );
+
+  // Darwin only, as above. A fake `id` on PATH reports another effective uid, so
+  // this fixture (a regular 0600 file identical to the source) fails only the owner check.
+  test.skipIf(process.platform !== "darwin")(
+    "a persisted file whose owner is not the effective uid is refused before adoption",
+    () => {
+      const { result, out } = runCase("ok", false, "bash", true);
       expect(result.status).toBe(1);
       expect(out).toContain("must be a runner-owned regular 0600 file identical to the source");
       expect(out).not.toContain("REACHED-END");

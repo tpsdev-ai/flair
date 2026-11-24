@@ -393,7 +393,7 @@ cat "$INIT_LOG"
 if [ "$init_rc" -ne 0 ]; then
   (exit "$init_rc") || on_error
 fi
-if [ ! -f "$PASS_FILE" ] || [ -L "$PASS_FILE" ] || [ ! -O "$PASS_FILE" ] ||
+if [ ! -f "$PASS_FILE" ] || [ -L "$PASS_FILE" ] || [ "$(stat -f '%u' "$PASS_FILE")" != "$(id -u)" ] ||
    [ "$(stat -f '%Lp' "$PASS_FILE")" != "600" ] || ! cmp -s "$ADMIN_PASS_SOURCE_FILE" "$PASS_FILE"; then
   echo "admin-pass file ${PASS_FILE} must be a runner-owned regular 0600 file identical to the source after flair init" >&2
   exit 1
