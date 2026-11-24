@@ -132,10 +132,10 @@ export type SeedWrite = { ok: boolean; detail?: string; status?: number; code?: 
 export interface SkillSeedIo {
   /** The operator principal the writes run as: the Basic administrator's username. */
   operator: string;
-  readRow(): Promise<SeedRead<SeedRowShape>>;
-  readAssignment(): Promise<SeedRead<SeedAssignment>>;
+  readRow(timeoutMs?: number): Promise<SeedRead<SeedRowShape>>;
+  readAssignment(timeoutMs?: number): Promise<SeedRead<SeedAssignment>>;
   /** The Agent record whose id equals `operator`; `row: null` when there is none. */
-  readOperatorAgent(): Promise<SeedRead<unknown>>;
+  readOperatorAgent(timeoutMs?: number): Promise<SeedRead<unknown>>;
   /** Write the skill row, waiting at most `timeoutMs` (default: the io's own bound). */
   putRow(timeoutMs?: number): Promise<SeedWrite>;
   putAssignment(): Promise<SeedWrite>;
@@ -150,7 +150,8 @@ export interface SeedClock {
 }
 
 const REAL_CLOCK: SeedClock = {
-  now: () => Date.now(),
+  // performance.now() is monotonic and cannot go backward on NTP corrections.
+  now: () => performance.now(),
   pause: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
@@ -261,8 +262,13 @@ export async function runSkillSeed(
   let firstWriteAt: number | undefined;
   const rowWriteBudget = (): number => {
     firstWriteAt ??= clock.now();
-    return firstWriteAt + boundMs - clock.now();
+    return Math.max(0, Math.round(firstWriteAt + boundMs - clock.now()));
   };
+  // Returns the remaining budget without initialising it; undefined when no
+  // write attempt has been made yet (so the preflight reads of the first pass
+  // are never refused for a budget that has not started).
+  const peekBudget = (): number | undefined =>
+    firstWriteAt === undefined ? undefined : Math.max(0, Math.round(firstWriteAt + boundMs - clock.now()));
   let attempts = 0;
   const boundPassed = (end: string): SkillSeedOutcome =>
     refused(
@@ -273,7 +279,7 @@ export async function runSkillSeed(
     );
   const refusedEach = () => `${attempts === 1 ? "it was" : "each was"} refused with 503 memory_provider_timeout`;
   for (;;) {
-    const outcome = await seedPass(io, current, rowWriteBudget);
+    const outcome = await seedPass(io, current, rowWriteBudget, peekBudget);
     if (outcome.kind === "no_time") {
       return boundPassed(`${refusedEach()}, and the bound passed while the seed re-read the instance`);
     }
@@ -300,8 +306,18 @@ async function seedPass(
   io: SkillSeedIo,
   current: SeedCurrent,
   rowWriteBudget: () => number,
+  peekBudget: () => number | undefined,
 ): Promise<SkillSeedOutcome | SeedPassSignal> {
-  const rowRead = await io.readRow();
+  // On retry passes, bound each preflight read by the remaining skill-write
+  // budget so a stalled read cannot outlast the 180 s bound.
+  const readBudget = (): number | undefined => {
+    const left = peekBudget();
+    return left === undefined ? undefined : Math.min(SEED_REQUEST_TIMEOUT_MS, Math.max(0, Math.round(left)));
+  };
+
+  if ((peekBudget() ?? 1) <= 0) return { kind: "no_time" };
+  const rowRead = await io.readRow(readBudget());
+  if ((peekBudget() ?? 1) <= 0) return { kind: "no_time" };
   if (!rowRead.ok) {
     return refused(
       "skill_seed_row_unreadable",
@@ -310,7 +326,8 @@ async function seedPass(
     );
   }
 
-  const agentRead = await io.readOperatorAgent();
+  const agentRead = await io.readOperatorAgent(readBudget());
+  if ((peekBudget() ?? 1) <= 0) return { kind: "no_time" };
   if (!agentRead.ok) {
     return refused(
       "skill_seed_operator_unreadable",
@@ -353,7 +370,8 @@ async function seedPass(
   }
   const storedContent = typeof stored?.content === "string" ? stored.content : null;
 
-  const assignRead = await io.readAssignment();
+  const assignRead = await io.readAssignment(readBudget());
+  if ((peekBudget() ?? 1) <= 0) return { kind: "no_time" };
   if (!assignRead.ok) {
     return refused(
       "skill_seed_assignment_unreadable",
@@ -517,12 +535,12 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
   const skillWriteMs = opts.skillWriteTimeoutMs ?? SEED_SKILL_WRITE_TIMEOUT_MS;
   const skillNoticeMs = opts.skillWriteNoticeMs ?? SEED_SKILL_WRITE_NOTICE_MS;
 
-  const readById = async <T>(table: string, id: string): Promise<SeedRead<T>> => {
+  const readById = async <T>(table: string, id: string, timeoutMs: number = requestMs): Promise<SeedRead<T>> => {
     let res: Response;
     try {
       res = await fetchImpl(`${base}/${table}/${encodeURIComponent(id)}`, {
         headers: { Authorization: auth },
-        signal: AbortSignal.timeout(requestMs),
+        signal: AbortSignal.timeout(Math.max(0, Math.round(timeoutMs))),
       });
     } catch (err) {
       return { ok: false, detail: `the request failed: ${detailOf(err)}` };
@@ -554,7 +572,7 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: auth },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(Math.max(0, Math.round(timeoutMs))),
       });
     } catch (err) {
       if (isTimeout(err)) return { ok: false, detail: onTimeout(timeoutMs), timedOut: true };
@@ -585,7 +603,7 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
       noticed = true;
       opts.notify?.(
         `using-flair skill: still writing "${SEED_SKILL_ID}" — the instance embeds a skill row as it writes it, ` +
-          `and it may need to download (~80 MB) or load the embedding model first; waiting up to ${seconds(skillWriteMs)}`,
+          `and it may need to download (~80 MB) or load the embedding model first; waiting up to ${seconds(timeoutMs)}`,
       );
     }, skillNoticeMs);
     (notice as unknown as { unref?: () => void }).unref?.();
@@ -602,9 +620,9 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
 
   return {
     operator: opts.user,
-    readRow: () => readById<SeedRowShape>("Memory", SEED_SKILL_ID),
-    readAssignment: () => readById<SeedAssignment>("OrgSkillAssignment", SEED_ASSIGNMENT_ID),
-    readOperatorAgent: () => readById<unknown>("Agent", opts.user),
+    readRow: (timeoutMs?: number) => readById<SeedRowShape>("Memory", SEED_SKILL_ID, timeoutMs ?? requestMs),
+    readAssignment: (timeoutMs?: number) => readById<SeedAssignment>("OrgSkillAssignment", SEED_ASSIGNMENT_ID, timeoutMs ?? requestMs),
+    readOperatorAgent: (timeoutMs?: number) => readById<unknown>("Agent", opts.user, timeoutMs ?? requestMs),
     putRow,
     skillWriteTimeoutMs: skillWriteMs,
     putAssignment: () =>
