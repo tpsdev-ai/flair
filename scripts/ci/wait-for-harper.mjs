@@ -23,8 +23,8 @@
 //
 //   --credentials-env names an environment variable holding `user:pass`. The
 //   value is read in this process, sent as a request header, and redacted from
-//   printed output in its raw, Base64 token, full header and password-component
-//   forms. That named variable is omitted from the waiter's Docker children.
+//   Docker output, Docker errors and diagnostic response headers in its raw,
+//   Base64 token, full header and password-component forms. That named variable is omitted from the waiter's Docker children.
 //   --budget-seconds bounds the polling; it defaults to
 //   $HARPER_START_BUDGET_S, then 300.
 //

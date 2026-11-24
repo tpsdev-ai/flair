@@ -14,9 +14,10 @@
  * These tests drive the waiter through a real local HTTP server and a stub
  * `docker` first on PATH. No Docker, no Harper, no external network.
  *
- * The credential is sent as a request header and redacted from printed output
- * in its raw, Base64 token, full header and password-component forms: the tests
- * assert the server sees it, while the waiter's output does not. The named
+ * The credential is sent as a request header and redacted from Docker output,
+ * Docker errors and diagnostic response headers in its raw, Base64 token, full
+ * header and password-component forms: the tests assert the server sees it,
+ * while that redacted text does not. The named
  * environment variable is omitted from the waiter's Docker children; the stub
  * records that variable only. The failure diagnostic is bounded by ten seconds
  * for the container logs plus one per-request cap.
