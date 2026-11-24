@@ -87,7 +87,8 @@ const FUNCTIONS: Record<string, (...args: unknown[]) => unknown> = {
   endswith: (a, b) => toText(a).toLowerCase().endsWith(toText(b).toLowerCase()),
   contains: (a, b) =>
     Array.isArray(a) ? a.some((item) => looseEqual(item, b)) : toText(a).toLowerCase().includes(toText(b).toLowerCase()),
-  format: (fmt, ...args) => toText(fmt).replace(/\{(\d+)\}/g, (_, n: string) => toText(args[Number(n)])),
+  format: (fmt, ...args) => toText(fmt).replace(/\{\{|\}\}|\{(\d+)\}/g, (match, n: string | undefined) =>
+    n === undefined ? match[0] : toText(args[Number(n)])),
   fromjson: (s) => JSON.parse(toText(s)),
   tojson: (v) => JSON.stringify(v, null, 2),
 };
@@ -114,7 +115,8 @@ class Parser {
   private active = true;
   constructor(private readonly tokens: Token[], private readonly ctx: Context, private readonly src: string) {}
 
-  parse(): unknown {
+  parse(active = true): unknown {
+    this.active = active;
     const value = this.or();
     if (this.pos !== this.tokens.length) throw new Error(`unexpected '${this.tokens[this.pos].text}' in: ${this.src}`);
     return value;
@@ -235,9 +237,23 @@ export function evaluate(expression: string, ctx: Context): unknown {
 /** A workflow value: a single `${{ }}` yields its value; text with several interpolates them. */
 export function evaluateValue(value: unknown, ctx: Context): unknown {
   if (typeof value !== "string" || !value.includes("${{")) return value;
-  const whole = /^\s*\$\{\{([\s\S]*)\}\}\s*$/.exec(value);
-  if (whole && !whole[1].includes("${{")) return evaluate(whole[1], ctx);
-  return value.replace(/\$\{\{([\s\S]*?)\}\}/g, (_, body: string) => toText(evaluate(body, ctx)));
+  let result = "";
+  let pos = 0;
+  for (;;) {
+    const start = value.indexOf("${{", pos);
+    if (start === -1) return result + value.slice(pos);
+    let end = start + 3;
+    let quoted = false;
+    for (; end < value.length; end++) {
+      if (value[end] === "'") quoted = !quoted;
+      else if (!quoted && value.slice(end, end + 2) === "}}") break;
+    }
+    if (end === value.length) throw new Error(`unterminated interpolation in: ${value}`);
+    const evaluated = evaluate(value.slice(start + 3, end), ctx);
+    if (pos === 0 && value.slice(0, start).trim() === "" && value.slice(end + 2).trim() === "") return evaluated;
+    result += value.slice(pos, start) + toText(evaluated);
+    pos = end + 2;
+  }
 }
 
 /**
@@ -252,7 +268,9 @@ export function evaluateIf(condition: unknown, ctx: Context): boolean {
   const text = String(condition);
   const wrapped = /^\s*\$\{\{([\s\S]*)\}\}\s*$/.exec(text);
   const body = wrapped ? wrapped[1] : text;
-  const parser = new Parser(tokenize(body), ctx, body);
-  const value = truthy(parser.parse());
-  return parser.statusCalled ? value : STATUS_FUNCTIONS.success(ctx) && value;
+  const tokens = tokenize(body);
+  const parser = new Parser(tokens, ctx, body);
+  parser.parse(false);
+  if (!parser.statusCalled && !STATUS_FUNCTIONS.success(ctx)) return false;
+  return truthy(new Parser(tokens, ctx, body).parse());
 }

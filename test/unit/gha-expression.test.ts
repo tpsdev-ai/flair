@@ -77,6 +77,12 @@ describe("functions", () => {
     expect(evaluate("success()", { ...ctx, needs: { build: { result: "skipped" } } })).toBe(false);
   });
 
+  test("format consumes escaped braces and placeholders together", () => {
+    expect(evaluate("format('{{{0}}}', 'x')", ctx)).toBe("{x}");
+    expect(evaluate("format('{{0}}-{0}', '{1}')", ctx)).toBe("{0}-{1}");
+    expect(evaluate(`fromJSON(format('{{"value": "{0}"}}', 'x'))`, ctx)).toEqual({ value: "x" });
+  });
+
   test("an unsupported construct throws when evaluated", () => {
     expect(() => evaluate("hashFiles('bun.lock')", ctx)).toThrow("unsupported function hashFiles()");
     expect(() => evaluate("1 < 2", ctx)).toThrow("unsupported character '<'");
@@ -99,6 +105,14 @@ describe("workflow values and conditions", () => {
     expect(evaluateIf("startsWith(github.head_ref, 'release/v')", ctx)).toBe(false);
   });
 
+  test("interpolation delimiters inside quoted strings remain text", () => {
+    expect(evaluateValue("prefix-${{ '}}' }}", ctx)).toBe("prefix-}}");
+    expect(evaluateValue("${{ 'it''s }}' }}-${{ github.event_name }}", ctx)).toBe("it's }}-merge_group");
+    expect(evaluateValue("${{ '}}' }}", ctx)).toBe("}}");
+    expect(evaluateValue("${{ '${{' }}", ctx)).toBe("${{");
+    expect(() => evaluateValue("prefix-${{ 'x'", ctx)).toThrow("unterminated interpolation");
+  });
+
   test("a condition without a status function is skipped when a needed job failed; always() still runs", () => {
     const failed = { ...ctx, needs: { build: { result: "failure" } } };
     expect(evaluateIf(undefined, failed)).toBe(false);
@@ -112,6 +126,18 @@ describe("workflow values and conditions", () => {
     const failed = { ...ctx, needs: { build: { result: "failure" } } };
     expect(evaluateIf("true || always()", failed)).toBe(true);
     expect(evaluateIf("true || github.event_name == 'merge_group'", failed)).toBe(false);
+  });
+
+  test("the implicit success guard skips evaluation but validates syntax", () => {
+    const failed = { ...ctx, needs: { build: { result: "failure" } } };
+    expect(evaluateIf("fromJSON('')", failed)).toBe(false);
+    expect(evaluateIf("${{ fromJSON('') }}", failed)).toBe(false);
+    expect(evaluateIf("contains('always()', 'x') || fromJSON('')", failed)).toBe(false);
+    expect(() => evaluateIf("fromJSON('')", ctx)).toThrow();
+    expect(() => evaluateIf("always() && fromJSON('')", failed)).toThrow();
+    expect(() => evaluateIf("fromJSON('') || always()", failed)).toThrow();
+    expect(() => evaluateIf("fromJSON(''", failed)).toThrow("expected ')'");
+    expect(() => evaluateIf("hashFiles('x')", failed)).toThrow("unsupported function hashFiles()");
   });
 
   test("a status-function name inside a string literal is not a call", () => {
