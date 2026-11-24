@@ -52,6 +52,7 @@ function deps(over: Partial<RepointDeps> & { present?: string[]; versions?: Reco
     samePath: (a, b) => a.replace(/\/$/, "") === b.replace(/\/$/, ""),
     canonical: (p) => p,
     treeVersion: (d) => versions[d] ?? null,
+    homebrewOptAlias: () => null,
     ...over,
   };
 }
@@ -147,6 +148,25 @@ describe("planPlistRuntimeRepoint", () => {
       OWNER,
     );
     expect(plan.kind).toBe("pinned-node");
+  });
+
+  test("this CLI's tree under a pinned node with a missing Harper entry: only that entry is replaced, the pin is kept", () => {
+    const pinned = "/opt/pinned/node/bin/node";
+    const goneHarper = `${NEW_TREE}/node_modules/@harperdb/harper/dist/bin/harper.js`;
+    const pinnedPlist = adoptedPlist({ tree: NEW_TREE, node: pinned });
+    const before = pinnedPlist.replace(`<string>${NEW_TREE}/${HARPER}</string>`, `<string>${goneHarper}</string>`);
+    expect(before).not.toBe(pinnedPlist);
+    const plan = planPlistRuntimeRepoint(
+      before,
+      targets,
+      deps({ present: [pinned, NEW_ALIAS_NODE, `${NEW_TREE}/${LAUNCHER}`, `${NEW_TREE}/${HARPER}`, NEW_TREE] }),
+      "/p.plist",
+      OWNER,
+    );
+    expect(plan.kind).toBe("repoint");
+    if (plan.kind !== "repoint") return;
+    expect(plan.changes).toEqual([{ field: "Harper entry", from: goneHarper, to: `${NEW_TREE}/${HARPER}` }]);
+    expect(plan.text).toBe(pinnedPlist);
   });
 
   test("this CLI's tree with a node that no longer exists: only the node is replaced", () => {
@@ -259,6 +279,18 @@ describe("planSystemdUnitRuntimeRepoint (Linux)", () => {
   test("an ExecStart file with no counterpart in the new tree: refused", () => {
     const u = unit.replace(" run .", ` ${LOLD}/only-in-old.js`);
     expect(planSystemdUnitRuntimeRepoint(u, LOLD, t, d, "/u.service").kind).toBe("refuse");
+  });
+
+  test("this CLI's tree under a pinned node with a missing Harper entry: refused, the unit left as it is", () => {
+    const pinned = "/opt/pinned/node/bin/node";
+    const goneHarper = `${LNEW}/node_modules/@harperdb/harper/dist/bin/harper.js`;
+    const u = unit.split(`WorkingDirectory=${LOLD}`).join(`WorkingDirectory=${LNEW}`)
+      .replace(/^ExecStart=.*$/m, `ExecStart=${pinned} ${goneHarper} run .`);
+    const pd = deps({ present: [pinned, `${LNX_NEW}/bin/node`, `${LNEW}/${HARPER}`, LNEW, `${LNEW}/${LAUNCHER}`], versions: { [LOLD]: "0.57.0" } });
+    const plan = planSystemdUnitRuntimeRepoint(u, LNEW, t, pd, "/u.service");
+    expect(plan.kind).toBe("refuse");
+    expect(plan.detail).toContain(`serves this CLI's tree but names ${goneHarper}, which does not exist`);
+    expect("text" in plan).toBe(false);
   });
 
   test("already this CLI's tree: current", () => {
