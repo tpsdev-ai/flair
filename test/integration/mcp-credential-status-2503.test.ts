@@ -55,7 +55,8 @@ async function fleet(op: string, body: Record<string, unknown> = {}): Promise<an
 
 /** One JSON-RPC tools/call through the REAL mcpHandler, as the given sub. */
 async function mcpCall(sub: string, rpc: Record<string, unknown>): Promise<any> {
-  const out = await fleet("mcpRpc", { sub, rpc });
+  // The scopes memory_store and bootstrap require (flair#3076).
+  const out = await fleet("mcpRpc", { sub, rpc, scope: "memory:read memory:write" });
   expect(out.ok, `mcpRpc transport failed: ${JSON.stringify(out).slice(0, 400)}`).toBe(true);
   return out.value.rpc;
 }

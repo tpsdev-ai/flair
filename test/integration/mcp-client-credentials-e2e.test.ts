@@ -238,6 +238,8 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth compone
     expect(doc.grant_types).toEqual(["client_credentials"]);
     expect(doc.token_endpoint_auth_method).toBe("private_key_jwt");
     expect(doc.jwks.keys).toHaveLength(1);
+    // flair#3076: the scope a client_credentials grant mints the token with.
+    expect(doc.scope).toBe("memory:read memory:write principal:read");
   }, 30_000);
 
   test("a real client_credentials grant naming our agent reaches CIMD resolution and is rejected ONLY by the SSRF/DNS gate — not a shape error", async () => {
