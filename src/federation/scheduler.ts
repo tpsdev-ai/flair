@@ -57,15 +57,19 @@
  * `flair federation sync --admin-pass-file`, which reads it through
  * readAdminPassFileSecure() and refuses a file that is not owner-only.
  */
-import { existsSync, chmodSync, rmSync, readFileSync, mkdirSync, realpathSync } from "node:fs";
+import {
+  existsSync, chmodSync, rmSync, readFileSync, mkdirSync, realpathSync, openSync, fstatSync, readSync, closeSync, statSync,
+  constants as fsConstants,
+} from "node:fs";
 import { resolve, dirname, isAbsolute } from "node:path";
 
 import { fileURLToPath } from "node:url";
-import { escapeXml, unescapeXml } from "../lib/xml-escape.js";
+import { escapeXml } from "../lib/xml-escape.js";
 import { snapshotRegularFile, writeFilesAtomically, type AtomicWriteHooks, type FileSnapshot } from "../lib/atomic-write.js";
-import { preferVersionManagerAlias, type AliasHooks } from "../lib/node-alias-path.js";
+import { homebrewOptAlias, preferVersionManagerAlias, type AliasHooks } from "../lib/node-alias-path.js";
 import { compareVersions, isNpmGlobalFlairTree } from "../lib/tree-divergence.js";
 import { findFlairPackageDir } from "../lib/upgrade-exec-path.js";
+import { readPlistStructure } from "../lib/service-repoint.js";
 import {
   type SchedulerPlatform,
   type FirstRunVerification,
@@ -1014,14 +1018,136 @@ export function federationShimShapeProblem(shimText: string, templateText: strin
   return null;
 }
 
-/** Does the federation-sync unit exec `shimPath`? Returns the reason it does not, or null. */
+/** The largest unit or shim file inspectFederationShimNode reads; the generated files are a few KiB. */
+const INSPECT_MAX_BYTES = 64 * 1024;
+
+/**
+ * `path`'s text when it is a regular file of at most INSPECT_MAX_BYTES. It is
+ * opened with O_NOFOLLOW, so a symlink at `path` itself is not followed. null
+ * otherwise, and when it cannot be read.
+ */
+function readBoundedRegularFile(path: string): string | null {
+  let fd: number;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  } catch {
+    return null;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) return null;
+    const buf = Buffer.alloc(INSPECT_MAX_BYTES + 1);
+    let n = 0;
+    while (n < buf.length) {
+      const got = readSync(fd, buf, n, buf.length - n, null);
+      if (got === 0) break;
+      n += got;
+    }
+    return n > INSPECT_MAX_BYTES ? null : buf.subarray(0, n).toString("utf-8");
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export interface FederationShimMissingNode {
+  /** The scheduler unit file that names the shim as its program. */
+  unitPath: string;
+  shimPath: string;
+  /** The node path on the shim's exec line, which does not exist. */
+  nodeBin: string;
+}
+
+/**
+ * For `flair doctor` (flair#3056): the node path on the federation-sync shim's
+ * exec line when that path does not exist (stat fails with ENOENT or ENOTDIR).
+ * Returned only when the scheduler unit file names `shimPath` as its program
+ * (federationUnitExecsShim) and the shim runs exactly the commands `flair
+ * federation sync enable` writes. null otherwise, including when either file
+ * cannot be read through readBoundedRegularFile or the stat fails another way.
+ */
+export function inspectFederationShimNode(
+  opts: Pick<
+    RewriteFederationRuntimeOpts,
+    "platformOverride" | "shimPathOverride" | "launchdPlistOverride" | "systemdServiceOverride" | "templateRootOverride"
+  > = {},
+): FederationShimMissingNode | null {
+  const plat = detectPlatform(opts.platformOverride);
+  const shimPath = opts.shimPathOverride ?? SHIM_PATH_DEFAULT;
+  const unitPath = plat === "darwin"
+    ? (opts.launchdPlistOverride ?? LAUNCHD_PLIST_PATH)
+    : (opts.systemdServiceOverride ?? SYSTEMD_SERVICE_PATH);
+  const unitText = readBoundedRegularFile(unitPath);
+  if (unitText === null || federationUnitExecsShim(plat, unitText, shimPath) !== null) return null;
+  const shimText = readBoundedRegularFile(shimPath);
+  if (shimText === null || !shimText.includes(SHIM_MARKER)) return null;
+  const exec = [...shimText.matchAll(SHIM_EXEC_LINE_RE)];
+  if (exec.length !== 1) return null;
+  let templateText: string;
+  try {
+    templateText = readTemplate(opts.templateRootOverride ?? defaultTemplateRoot(), "bin/flair-federation-sync.sh.tmpl");
+  } catch {
+    return null;
+  }
+  if (federationShimShapeProblem(shimText, templateText) !== null) return null;
+  const nodeBin = exec[0]![1]!;
+  if (!isAbsolute(nodeBin)) return null;
+  try {
+    statSync(nodeBin);
+    return null;
+  } catch (err: any) {
+    return err?.code === "ENOENT" || err?.code === "ENOTDIR" ? { unitPath, shimPath, nodeBin } : null;
+  }
+}
+
+const XML_COMMENT_RE = /<!--[\s\S]*?-->/g;
+
+/**
+ * `text` with its XML comments removed, or null when they cannot be removed
+ * cleanly: removing them is repeated until the text stops changing, and a
+ * second pass that removes anything (a removal formed a new `<!--`) or a `<!--`
+ * left at the end (an unclosed comment) gives null.
+ */
+function stripXmlComments(text: string): string | null {
+  let out = text;
+  let changed = 0;
+  for (;;) {
+    const next = out.replace(XML_COMMENT_RE, "");
+    if (next === out) break;
+    if (++changed > 1) return null;
+    out = next;
+  }
+  return out.includes("<!--") ? null : out;
+}
+
+/**
+ * Does the federation-sync unit file name `shimPath` as its program? Returns
+ * the reason it does not, or null. A plist is read as XML structure after its
+ * comments are removed (stripXmlComments), so a key inside a comment or a
+ * nested dict is not read.
+ */
 function federationUnitExecsShim(plat: SchedulerPlatform, text: string, shimPath: string): string | null {
   if (plat === "darwin") {
-    const label = /<key>Label<\/key>\s*<string>([^<]*)<\/string>/.exec(text);
-    if (!label || unescapeXml(label[1]!) !== LAUNCHD_LABEL) return `its Label is not ${LAUNCHD_LABEL}`;
-    const block = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text);
-    const args = block ? [...block[1]!.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => unescapeXml(m[1]!)) : [];
-    if (args.length !== 1 || resolve(args[0]!) !== resolve(shimPath)) {
+    const stripped = stripXmlComments(text);
+    if (stripped === null) return "its XML comments overlap or one is not closed";
+    const doc = readPlistStructure(stripped);
+    if ("problem" in doc) return `it is not a plist flair can read (it has ${doc.problem})`;
+    const label = doc.top.get("Label");
+    if (label?.t !== "string" || label.v !== LAUNCHD_LABEL) return `its Label is not ${LAUNCHD_LABEL}`;
+    if (doc.top.has("Program")) return "it declares a Program key, which launchd runs instead of ProgramArguments[0]";
+    const block = doc.top.get("ProgramArguments");
+    const items = block?.t === "array" ? block.items : [];
+    const args = items.map((v) => (v.t === "string" ? v.v : `<${v.t}>`));
+    if (items.length !== 1 || items[0]!.t !== "string") {
+      return `its ProgramArguments are ${JSON.stringify(args)}, not [${JSON.stringify(shimPath)}]`;
+    }
+    // launchd resolves a relative ProgramArguments[0] against the unit's own
+    // WorkingDirectory, not this process's cwd, so only an absolute program
+    // path can be attributed to the shim.
+    if (!isAbsolute(args[0]!)) {
+      return `its ProgramArguments program ${JSON.stringify(args[0]!)} is not an absolute path`;
+    }
+    if (resolve(args[0]!) !== resolve(shimPath)) {
       return `its ProgramArguments are ${JSON.stringify(args)}, not [${JSON.stringify(shimPath)}]`;
     }
     return null;
@@ -1037,7 +1163,15 @@ function federationUnitExecsShim(plat: SchedulerPlatform, text: string, shimPath
     }
     if (section === "service" && /^ExecStart\s*=/.test(line)) execs.push(line.replace(/^ExecStart\s*=\s*/, "").replace(/^[-@:+!]+/, ""));
   }
-  if (execs.length !== 1 || resolve(execs[0]!) !== resolve(shimPath)) {
+  if (execs.length !== 1) {
+    return `its ExecStart is ${JSON.stringify(execs)}, not ${JSON.stringify(shimPath)}`;
+  }
+  // systemd does not resolve a relative ExecStart against this process's cwd,
+  // so only an absolute program path can be attributed to the shim.
+  if (!isAbsolute(execs[0]!)) {
+    return `its ExecStart program ${JSON.stringify(execs[0]!)} is not an absolute path`;
+  }
+  if (resolve(execs[0]!) !== resolve(shimPath)) {
     return `its ExecStart is ${JSON.stringify(execs)}, not ${JSON.stringify(shimPath)}`;
   }
   return null;
@@ -1093,7 +1227,7 @@ export function rewriteFederationSchedulerRuntime(
     return refused(`could not read ${unitPath} (${err?.message ?? err}).`);
   }
   const notOurs = federationUnitExecsShim(plat, unitText, shimPath);
-  if (notOurs) return refused(`${unitPath} does not exec the flair-generated shim: ${notOurs}.`);
+  if (notOurs) return refused(`flair could not confirm that ${unitPath} execs the flair-generated shim: ${notOurs}.`);
   if (!exists(shimPath)) return refused(`${unitPath} execs ${shimPath}, which does not exist.`);
   // A regular file (never followed through a symlink), read once: the plan and
   // the pre-rename re-check both use these bytes.
@@ -1139,9 +1273,14 @@ export function rewriteFederationSchedulerRuntime(
   let nextNode = oldNode;
   let nextFlair = oldFlair;
   if (oldPkg && canonical(oldPkg.dir) === canonical(cliTree)) {
-    // Same install tree as this CLI.
+    // Same install tree as this CLI. An existing Homebrew Cellar node is
+    // replaced by its opt alias when that alias resolves to the same binary
+    // (flair#3056).
+    const brewAlias = oldNodeMissing ? null : homebrewOptAlias(oldNode, { exists, realpath });
     if (oldNodeMissing) {
       nextNode = newNode;
+    } else if (brewAlias !== null) {
+      nextNode = brewAlias;
     } else if (canonical(oldNode) === canonical(newNode)) {
       return { ...base, status: "current", detail: `${shimPath} already runs this CLI's tree (${cliTree}).` };
     } else {

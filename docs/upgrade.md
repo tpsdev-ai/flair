@@ -158,11 +158,21 @@ exactly a shape flair supports:
 | Linux systemd user unit (the one proven above) | one `WorkingDirectory=` (the served tree) and one `ExecStart=` of `<node> <harper.js> run .` or `<launcher> <admin-pass file> <node> <harper.js>`, optional `-` prefix | drop-ins (any location systemd reports, or `<unit>.d` beside the file), any other argument (operator arguments are never rewritten), quoting, `%` specifiers, `$` variables, line continuations, other `ExecStart=` prefixes, and a new path that would need quoting |
 | Both, when moving to a different installed tree | the old tree is an npm-global install; its flair version and this CLI's are strict semver and this CLI's is not older (prereleases count: `0.57.0-beta.1` is older than `0.57.0`) | a plain tree or checkout (separately managed), an unreadable, non-semver or newer version (a downgrade cannot be ruled out) |
 
-A unit that serves this CLI's tree with a different, existing node is treated
-as a deliberate pin: `flair init` leaves it, and init and `flair doctor` report it
-with the hand edit that would move it. A plist that already serves this CLI's
-tree has a missing runtime path replaced without the version check in the table,
-which applies only to a move between trees. The write is atomic and
+Apart from the Homebrew case below, a unit that serves this CLI's tree with a
+different, existing node is treated as a deliberate pin: `flair init` does not
+change that node path. With valid target paths and existing other runtime
+paths, init leaves the unit unchanged and reports the pin; `flair doctor`
+reports the pin with the hand edit that would move it. A systemd unit with a
+missing runtime path is refused. A plist that already serves this CLI's tree
+has a missing runtime path replaced without the version check in the table,
+which applies only to a move between trees. In a plist or federation-sync shim that serves this CLI's tree and that
+`flair init` accepts for re-pointing (a plist must pass the macOS row of the
+table above), an existing node path in Homebrew's Cellar
+(`<prefix>/Cellar/<formula>/<version>/bin/node`) is replaced by
+`<prefix>/opt/<formula>/bin/node` when that alias resolves to the same binary.
+A plist can replace a missing runtime path and an eligible Cellar node in the
+same write.
+The write is atomic and
 lands only over the bytes it was planned from — the file is read as a regular
 file (a symlink is refused, not followed) whose bytes are valid UTF-8 (anything
 else is refused before planning), and its bytes are re-checked immediately

@@ -619,6 +619,11 @@ export interface ScheduledDriverFacts {
   active: boolean | null;
   /** Last-run read — null when it was not queried (nothing installed/loaded). */
   lastExit: LastExitStatus | null;
+  /**
+   * Set when the unit file names the flair-generated shim as its program and
+   * the node path on the shim's exec line does not exist (flair#3056).
+   */
+  shimMissingNode?: { unitPath: string; shimPath: string; nodeBin: string } | null;
   /** The job's stderr log, named in the degraded remedy. */
   stderrLogPath: string;
 }
@@ -689,6 +694,19 @@ export function describeScheduledDriverFinding(f: ScheduledDriverFacts): Schedul
     };
   }
   // Loaded from here down.
+  if (f.shimMissingNode) {
+    const m = f.shimMissingNode;
+    return {
+      state: "degraded",
+      icon: "error",
+      isIssue: true,
+      message: `${f.label} DEGRADED — the shim its unit file names execs a node binary that does not exist (${m.nodeBin})`,
+      detail: [
+        `${m.unitPath} names ${m.shimPath} as its program; the shim's exec line names ${m.nodeBin}, which does not exist.`,
+        `Fix: flair init   # then check: ${f.statusCommand}`,
+      ],
+    };
+  }
   const le = f.lastExit;
   if (!le || le.state === "unavailable") {
     return {
