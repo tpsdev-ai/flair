@@ -5474,8 +5474,8 @@ function readProcessState(pid: number, timeoutMs: number, onReadError?: StateRea
  * still answers signal 0. After the signal-0 probe succeeds, read the process
  * state and report a zombie as `gone`, so `flair doctor`'s stop wait stops
  * waiting on a process that has already exited (flair#2313). An unreadable
- * state stays `alive` — a read failure must never report a live process as
- * exited.
+ * state stays `alive` unless a re-probe reports ESRCH — a read failure must
+ * never report a live process as exited.
  *
  * The state reader is injectable so the unreadable and retried branches are
  * unit-testable without a real unreadable process.
@@ -5501,6 +5501,17 @@ export function probePidLiveness(
     const timeoutMs = Math.min(DARWIN_STATE_READ_TIMEOUT_MS, Math.max(DARWIN_STATE_READ_MIN_MS, remainingMs));
     state = readState(pid, timeoutMs, onReadError);
     if (state !== null) break;
+  }
+  if (state === null) {
+    // The pid can exit between the signal-0 probe and the state reads: signal 0
+    // then says it exists while the reads find nothing. Re-probe the pid; ESRCH
+    // is evidence it is gone, where an unreadable state alone stays fail-safe.
+    try {
+      process.kill(pid, 0);
+    } catch (err: any) {
+      if (err?.code === "ESRCH") return { kind: "gone" };
+    }
+    return { kind: "alive" };
   }
   return isExitedState(state) ? { kind: "gone" } : { kind: "alive" };
 }

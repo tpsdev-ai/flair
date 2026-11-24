@@ -168,9 +168,9 @@ const fs = require('node:fs');
 const http = require('node:http');
 const body = fs.readFileSync(process.env.HEALTH_BODY_FILE, 'utf8');
 fs.writeFileSync(process.env.SUCCESSOR_PID_FILE, String(process.pid));
-// A successor started by flair records its own pid and identity sidecar, which
-// is what a later flair stop acts on. The test triggers that recording between
-// the refused stop and the re-run.
+// Simulated startup writes: Harper records its pid in hdb.pid, while Flair
+// records the identity sidecar. A later flair stop acts on that pair. The test
+// triggers both writes between the refused stop and the re-run.
 const record = setInterval(() => {
   if (!fs.existsSync(process.env.SUCCESSOR_RECORD_TRIGGER)) return;
   clearInterval(record);
@@ -386,6 +386,7 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(result.out).toContain("now reads loaded");
     expect(result.out).not.toContain("stopped the directly started Flair");
     expect(result.out).toContain("Run 'flair stop' again to take the unload path.");
+    expect(result.out).toContain("the instance reads NOT_RUNNING");
     expect(result.out).toContain("flair doctor");
     expect(result.out).not.toContain("undefined");
 
@@ -413,7 +414,7 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(unloadCalls(f)).toEqual([]);
   }, 30_000);
 
-  test("a successor serving /Health after the recorded pid exits is not reported as stopped, and a re-run stops it", async () => {
+  test("a successor serving /Health after the recorded pid exits is not reported as stopped, and a re-run resolves once its identity is recorded", async () => {
     const f = await makeFixture();
     const pid = await startFlairStub(f, { successor: "serving" });
     const result = await runStop(f);
@@ -421,18 +422,26 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(result.out).toContain(`pid ${pid} exited, but Flair is not confirmed down`);
     expect(result.out).toContain("the instance reads DISAGREEMENT");
     expect(result.out).toContain(`a process is serving port ${f.port}, but the recorded pid ${pid} is not alive`);
-    expect(result.out).toContain("Run 'flair stop' again to stop the instance it now serves.");
     expect(result.out).not.toContain("stopped the directly started Flair");
     expect(result.out).toContain("flair doctor");
+    expect(result.out).not.toContain("Run 'flair stop' again to stop the instance it now serves");
 
-    // The named step: once the successor has recorded itself as Flair does, a
-    // second `flair stop` verifies and signals it.
     const successorPidFile = join(f.home, "successor.pid");
     await waitForFile(successorPidFile);
+    const successorPid = Number(readFileSync(successorPidFile, "utf8"));
+
+    // Before its identity is recorded, a repeat refuses and signals nothing.
+    const beforeRecording = await runStop(f);
+    expect(beforeRecording.code).toBe(1);
+    expect(beforeRecording.out).not.toContain("stopped the directly started Flair");
+    expect(beforeRecording.out).not.toContain("Run 'flair stop' again to stop the instance it now serves");
+    expect(() => process.kill(successorPid, 0)).not.toThrow();
+
+    // Once the simulated startup writes have recorded the successor (Harper's
+    // pid, Flair's identity sidecar), a re-run verifies and signals it.
     writeFileSync(join(f.home, "successor-record-trigger"), "1");
     await waitForFile(join(f.home, "successor-recorded"));
     const again = await runStop(f);
-    const successorPid = Number(readFileSync(successorPidFile, "utf8"));
     expect(again.code).toBe(0);
     expect(again.out).toContain(`stopped the directly started Flair (pid ${successorPid})`);
     expect(() => process.kill(successorPid, 0)).toThrow();

@@ -301,8 +301,13 @@ async function stopDirectlyStartedFlair(port: number, dataDir: string, label: st
         // Name the step that handles this observation, next to the diagnostic.
         if (managedAfter.jobLoaded === "loaded") {
           console.error("   Run 'flair stop' again to take the unload path.");
-        } else if (managedAfter.jobLoaded === "not-loaded" && after.state === "DISAGREEMENT") {
-          console.error("   Run 'flair stop' again to stop the instance it now serves.");
+        } else if (
+          managedAfter.jobLoaded === "not-loaded" && after.state === "RUNNING"
+        ) {
+          // A re-run resolves only when the classifier verified the serving
+          // process against hdb.pid and the identity sidecar, which is what
+          // RUNNING reports.
+          console.error("   Run 'flair stop' again to stop the instance it now serves (it has recorded its identity).");
         }
         console.error("   Inspect it with: flair doctor");
         process.exit(1);
