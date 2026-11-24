@@ -23,8 +23,8 @@
 //
 //   --credentials-env names an environment variable holding `user:pass`. The
 //   value is read in this process, sent as a request header, and redacted from
-//   printed output in its raw, Base64 token and full header forms. That named
-//   variable is omitted from the waiter's Docker children.
+//   printed output in its raw, Base64 token, full header and password-component
+//   forms. That named variable is omitted from the waiter's Docker children.
 //   --budget-seconds bounds the polling; it defaults to
 //   $HARPER_START_BUDGET_S, then 300.
 //
@@ -258,6 +258,11 @@ export async function main(options) {
     const token = Buffer.from(credential).toString("base64");
     authorization = `Basic ${token}`;
     secrets = [authorization, token, credential];
+    const separator = credential.indexOf(":");
+    if (separator !== -1) {
+      const password = credential.slice(separator + 1);
+      if (password) secrets.push(password);
+    }
   }
   const childEnv = childEnvironment(credentialsEnv);
 

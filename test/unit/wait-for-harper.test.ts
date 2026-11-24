@@ -15,8 +15,8 @@
  * `docker` first on PATH. No Docker, no Harper, no external network.
  *
  * The credential is sent as a request header and redacted from printed output
- * in its raw, Base64 token and full header forms: the tests assert the server
- * sees it, while the waiter's output does not. The named environment variable
+ * in its raw, Base64 token, full header and password-component forms: the tests
+ * assert the server sees it, while the waiter's output does not. The named environment variable
  * is omitted from the waiter's Docker children; the stub records that variable
  * only. The failure diagnostic is bounded by ten seconds for the container
  * logs plus one per-request cap.
@@ -368,20 +368,25 @@ describe("wait-for-harper.mjs", () => {
   );
 
   test(
-    "(c) when /Health keeps answering 503, polling stops at the budget; the timeout line and logs follow",
+    "(c) one completed 503 is the last result recorded at the budget; the timeout line and logs follow",
     async () => {
-      // Polling stops at the 2s budget; the failure diagnostic then takes at
-      // most ten seconds of container logs plus one per-request cap.
+      // The poll interval is longer than the budget, so the one probe answers
+      // 503 and the deadline ends the loop before a probe can time out. The
+      // failure diagnostic then takes at most ten seconds of container logs
+      // plus one per-request cap.
       const server = await health(STATUS(503));
       const box = sandbox();
       const result = await run(box, [
         "--container",
         "harper-flair",
-        ...WAIT_ARGS(server.url),
-        "--budget-seconds",
-        "2",
+        "--url",
+        server.url,
+        "--poll-interval-ms",
+        "5000",
         "--per-request-ms",
         "500",
+        "--budget-seconds",
+        "2",
       ]);
 
       expect(result.status).toBe(1);
@@ -825,7 +830,7 @@ describe("wait-for-harper.mjs", () => {
   );
 
   test(
-    "(u) the successful logs stderr and both inspect error reports are redacted",
+    "(u) the successful logs stderr, a password-only log line and both inspect error reports are redacted",
     async () => {
       const server = await health(STATUS(200));
       const token = Buffer.from(SENTINEL).toString("base64");
@@ -845,6 +850,18 @@ describe("wait-for-harper.mjs", () => {
       );
       expect(logsRun.status).toBe(1);
       expectRedacted(logsRun.output);
+
+      const passwordBox = sandbox({ running: "false", exitCode: "4", logsSecretStderr: "password test-pass\n" });
+      const passwordRun = await run(
+        passwordBox,
+        ["--container", "harper-flair", ...WAIT_ARGS(server.url), ...credentialArgs, "--budget-seconds", "20"],
+        { HARPER_START_CREDENTIALS: SENTINEL },
+      );
+      expect(passwordRun.status).toBe(1);
+      // The line holds only the password component, so it is redacted only when
+      // that component is a secret of its own.
+      expect(passwordRun.output).toContain("password [redacted]");
+      expect(passwordRun.output).not.toContain("test-pass");
 
       const firstBox = sandbox({ inspectFails: true, inspectFailText: seeded });
       const firstRun = await run(
