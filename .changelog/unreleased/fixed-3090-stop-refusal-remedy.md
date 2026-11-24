@@ -7,4 +7,4 @@
   diagnostic.
 
   > **Heads-up:** The exit is still non-zero; the added lines name what was
-  > observed and what resolves it.
+  > observed and the next step.
