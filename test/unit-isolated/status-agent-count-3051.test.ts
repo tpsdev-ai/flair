@@ -142,7 +142,7 @@ async function statusOutput(detail: Record<string, any>, args: string[]): Promis
     fetchHealthDetail: async () => ({ healthy: true, baseUrl: "https://fixture.invalid", healthData: detail }),
     humanBytes: (n: number) => String(n), relativeTime: () => "fixture-time",
     resolveSigningAgentId: () => ({ agentId: "agent-a", source: "flag" }),
-    sortSoulKeyEntries: () => [], defaultDataDir: () => HOME + "/data",
+    sortSoulKeyEntries: (byKey: Record<string, number>) => Object.entries(byKey ?? {}), defaultDataDir: () => HOME + "/data",
     readHarperConfig: () => null, readPortFromConfig: () => null, __pkgVersion: "fixture",
     resolveHttpPort: () => 0, assessInstallTree: () => null,
   });
@@ -354,4 +354,167 @@ test("duplicate-id and missing-id Agent rows: count, names and perAgent are one 
   expect(detail.agents.perAgent.map((r: any) => r.id)).toEqual(["agent-a"]);
   expect(detail.agents.count).toBe(detail.agents.names.length);
   expect(detail.agents.count).toBe(detail.agents.perAgent.length);
+});
+
+// ── Stored text reaches the terminal escaped (flair#3082 item 1) ──────────────
+// ESC, newline, DEL, a C1 control, a bidi override and U+2028 in a stored id
+// are shown as \u{...} escapes; ordinary non-ASCII text prints unchanged.
+const HOSTILE_ID = "\x1b[31mred\n\x7f\u0085\u202e\u2028";
+const HOSTILE_ESCAPED = "\\u{1b}[31mred\\u{0a}\\u{7f}\\u{85}\\u{202e}\\u{2028}";
+const HOSTILE_UNREGISTERED_ID = "\u009bseed\n\x1b\u202e\u2028\x7f";
+const HOSTILE_UNREGISTERED_ESCAPED = "\\u{9b}seed\\u{0a}\\u{1b}\\u{202e}\\u{2028}\\u{7f}";
+const NORMAL_ID = "ágætis-vík";
+
+function memoryRow(id: string, agentId: string, model = "fixture-model") {
+  return { id, agentId, createdAt: new Date(NOW - 1000).toISOString(), embeddingModel: model };
+}
+
+function lineWith(output: string, marker: string): string {
+  return output.split("\n").find((line) => line.includes(marker)) ?? "";
+}
+
+test("plain status escapes a stored id in the names line, the table row and the unregistered line; a normal name is unchanged", async () => {
+  agentRows = [{ id: HOSTILE_ID }, { id: NORMAL_ID }];
+  memoryRows = [memoryRow("m-1", HOSTILE_ID), memoryRow("m-2", HOSTILE_UNREGISTERED_ID)];
+  const detail: any = await new HealthDetail().get();
+
+  const output = await statusOutput(detail, []);
+  const namesLine = output.split("\n").find((line) => line.includes("Total") && line.includes(HOSTILE_ESCAPED)) ?? "";
+  expect(namesLine).toContain(`2 — ${HOSTILE_ESCAPED}, ${NORMAL_ID}`);
+  const tableLine = output.split("\n").find((line) => line.trimStart().startsWith(HOSTILE_ESCAPED)) ?? "";
+  expect(tableLine).not.toContain("Total");
+  expect(tableLine).toContain(HOSTILE_ESCAPED);
+  expect(lineWith(output, "Unregistered memory owners")).toContain(HOSTILE_UNREGISTERED_ESCAPED);
+  expect(output).toContain(HOSTILE_ESCAPED);
+  expect(output).toContain(HOSTILE_UNREGISTERED_ESCAPED);
+  expect(output).toContain(NORMAL_ID);
+  for (const raw of ["\x1b", "\x7f", "\u0085", "\u202e", "\u2028", "\u009b"]) {
+    expect(output.includes(raw)).toBe(false);
+  }
+});
+
+test("deep status escapes a stored id in the names line, the table row and the unregistered line; a normal name is unchanged", async () => {
+  agentRows = [{ id: HOSTILE_ID }, { id: NORMAL_ID }];
+  memoryRows = [memoryRow("m-1", HOSTILE_ID), memoryRow("m-2", HOSTILE_UNREGISTERED_ID)];
+  const detail: any = await new HealthDetail().get();
+
+  const output = await statusOutput(detail, ["deep"]);
+  expect(lineWith(output, "Names:")).toContain(`${HOSTILE_ESCAPED}, ${NORMAL_ID}`);
+  expect(lineWith(output, "Names:").includes(NORMAL_ID)).toBe(true);
+  const tableRows = output.split("\n").filter((line) => line.startsWith("  ") && line.includes(HOSTILE_ESCAPED));
+  expect(tableRows.length).toBeGreaterThan(0);
+  expect(lineWith(output, "Unregistered memory owners")).toContain(HOSTILE_UNREGISTERED_ESCAPED);
+  expect(output).toContain(HOSTILE_ESCAPED);
+  expect(output).toContain(HOSTILE_UNREGISTERED_ESCAPED);
+  expect(output).toContain(NORMAL_ID);
+  for (const raw of ["\x1b", "\x7f", "\u0085", "\u202e", "\u2028", "\u009b"]) {
+    expect(output.includes(raw)).toBe(false);
+  }
+});
+
+test("the bootstrap table escapes the agent id it measured", async () => {
+  agentRows = [{ id: HOSTILE_ID }];
+  memoryRows = [];
+  process.env.HDB_ADMIN_PASSWORD = "fixture-pass";
+  const fetchSpy = globalThis.fetch as any;
+  fetchSpy.mockResolvedValue(new Response("{}", { status: 200 }));
+  try {
+    const detail: any = await new HealthDetail().get();
+    const output = await statusOutput(detail, ["deep", "--bootstrap"]);
+    expect(output).toContain("Bootstrap context");
+    const bootstrapRow = output.split("\n").find((line) => line.trimStart().startsWith(HOSTILE_ESCAPED) && line.trimEnd().endsWith("ok")) ?? "";
+    expect(bootstrapRow).toContain(HOSTILE_ESCAPED);
+    expect(output.includes("\x1b")).toBe(false);
+  } finally {
+    delete process.env.HDB_ADMIN_PASSWORD;
+    fetchSpy.mockClear();
+  }
+});
+
+// ── An incomplete Memory scan reports unknown, never partial (flair#3082 item 2) ──
+test("a Memory scan that yields a row then throws: every per-agent value reads unknown, plain and deep", async () => {
+  agentRows = [{ id: "agent-a" }];
+  memoryRows = [memoryRow("m-1", "agent-a")];
+  memoryScanFailure = "after";
+  const detail: any = await new HealthDetail().get();
+
+  // The Agent roster still comes from the completed Agent scan …
+  expect(detail.agents.count).toBe(1);
+  expect(detail.agents.names).toEqual(["agent-a"]);
+  // … but no Memory-derived value survives the failed scan, not even the one
+  // row it yielded before throwing.
+  expect(detail.agents.perAgent).toEqual([
+    { id: "agent-a", memoryCount: null, hashFallback: null, writes24h: null, lastWriteAt: null, usageCount: null },
+  ]);
+
+  const plain = await statusOutput(detail, []);
+  expect(plain).toMatch(/agent-a\s+unknown\s+unknown/);
+  expect(plain).not.toMatch(/agent-a\s+1\b/);
+
+  const deep = await statusOutput(detail, ["deep"]);
+  expect(deep).toMatch(/agent-a\s+unknown\s+unknown\s+unknown\s+unknown/);
+  expect(deep).not.toMatch(/agent-a\s+1\b/);
+});
+
+test("a Memory scan that throws before any row: every per-agent value reads unknown, plain and deep", async () => {
+  agentRows = [{ id: "agent-a" }];
+  memoryScanFailure = "before";
+  const detail: any = await new HealthDetail().get();
+
+  expect(detail.agents.perAgent).toEqual([
+    { id: "agent-a", memoryCount: null, hashFallback: null, writes24h: null, lastWriteAt: null, usageCount: null },
+  ]);
+  expect(await statusOutput(detail, [])).toMatch(/agent-a\s+unknown\s+unknown/);
+  expect(await statusOutput(detail, ["deep"])).toMatch(/agent-a\s+unknown\s+unknown\s+unknown\s+unknown/);
+});
+
+// ── The other stored text on the same human paths is escaped too ─────────────
+// Memory embedding-model names, Soul keys, federation instance and peer
+// fields, OAuth client fields, warning messages and raw timestamps.
+const H = HOSTILE_ID;
+
+function hostileDetail() {
+  return {
+    ok: true,
+    memories: {
+      total: 1, withEmbeddings: 1, hashFallback: 0, archived: 0, expired: 0,
+      modelCounts: { [H]: 1 },
+      byDurability: { permanent: 0, persistent: 0, standard: 1, ephemeral: 0 },
+    },
+    lastWrite: "2026-11-22T11:59:59.000Z" + H,
+    warnings: [{ level: "warn", message: H }],
+    soul: { total: 1, byKey: { [H]: 1 } },
+    federation: {
+      instance: { id: H, role: H, status: H },
+      peers: { total: 1, connected: 1, disconnected: 0, revoked: 0, unknown: 0 },
+      peerList: [{ id: H, role: H, status: H, liveness: H, lastSyncAt: "2026-11-21T10:00:00.000Z" + H }],
+      pendingTokens: 0,
+    },
+    oauth: { clients: 1, idpConfigs: 0, activeTokens: 0, clientList: [{ id: H, name: H, registeredBy: H, createdAt: H }] },
+  };
+}
+
+test("plain status escapes model names, Soul keys, federation instance fields and warning text", async () => {
+  const output = await statusOutput(hostileDetail(), []);
+
+  expect(lineWith(output, "Embeddings")).toContain(`${HOSTILE_ESCAPED}:1`);
+  expect(lineWith(output, "Entries")).toContain(`${HOSTILE_ESCAPED}:1`);
+  expect(lineWith(output, "Instance")).toContain(`${HOSTILE_ESCAPED}  (${HOSTILE_ESCAPED}, ${HOSTILE_ESCAPED})`);
+  expect(output.split("\n").find((line) => line.trimStart().startsWith("⚠"))).toContain(HOSTILE_ESCAPED);
+  expect(output.includes("\x1b")).toBe(false);
+  expect(output.includes("\u202e")).toBe(false);
+});
+
+test("deep status escapes model names, raw times, Soul keys, federation and peer fields, OAuth fields and warnings", async () => {
+  const output = await statusOutput(hostileDetail(), ["deep"]);
+
+  expect(lineWith(output, "(100.0%)")).toContain(HOSTILE_ESCAPED);
+  expect(lineWith(output, "Last write:")).toContain(`(${"2026-11-22T11:59:59.000Z"}${HOSTILE_ESCAPED})`);
+  expect(lineWith(output, "Keys:")).toContain(`1 ${HOSTILE_ESCAPED}`);
+  expect(lineWith(output, "Instance:")).toContain(`${HOSTILE_ESCAPED} (${HOSTILE_ESCAPED}, ${HOSTILE_ESCAPED})`);
+  expect(lineWith(output, "2026-11-21T10:00:00.000Z" + HOSTILE_ESCAPED)).toContain(HOSTILE_ESCAPED);
+  expect(output).toContain(`    ${HOSTILE_ESCAPED}  ${HOSTILE_ESCAPED}  ${HOSTILE_ESCAPED}  ${HOSTILE_ESCAPED}`);
+  expect(output.split("\n").find((line) => line.trimStart().startsWith("⚠"))).toContain(HOSTILE_ESCAPED);
+  expect(output.includes("\x1b")).toBe(false);
+  expect(output.includes("\u202e")).toBe(false);
 });

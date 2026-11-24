@@ -274,6 +274,21 @@ async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, ad
   console.log(`using-flair skill: ${outcome.message}`);
 }
 
+/**
+ * Refuse an `--agent-id` that is the operator identity, before any key or
+ * Agent row is written. The skill seed refuses this id as well, but init
+ * registers the agent first, so without this preflight its refusal lands after
+ * both writes. `operator` is the EFFECTIVE Basic-auth administrator username
+ * for this run (local and newly provisioned remote: DEFAULT_ADMIN_USER; an
+ * existing remote: --admin-user, then FLAIR_ADMIN_USER, then the default).
+ */
+function refuseOperatorAgentId(agentId: string | undefined, operator: string): void {
+  if (!agentId || agentId !== operator) return;
+  console.error(`Error: --agent-id "${agentId}" is the operator identity for this instance (the Basic-auth administrator username).`);
+  console.error("  Choose another --agent-id.");
+  process.exit(1);
+}
+
 function readOccupiedListener(port: number): OccupiedHarperListener {
   return cli.readOccupiedListener(port);
 }
@@ -450,6 +465,7 @@ addAdminPassOptions(
       // FLAIR_ADMIN_USER — the provisioning leg just CREATED the superuser as
       // DEFAULT_ADMIN_USER via provisionFabric, so that name is ground truth.
       const adminUser = didProvision ? DEFAULT_ADMIN_USER : resolveAdminUser(opts.adminUser);
+      refuseOperatorAgentId(agentId, adminUser);
       const auth = `Basic ${Buffer.from(`${adminUser}:${flairAdminPass}`).toString("base64")}`;
       const role = opts.remote ? "hub" : undefined;
 
@@ -584,6 +600,9 @@ addAdminPassOptions(
     }
 
     // ── Local init (full one-command setup) ──
+    // Local bootstrap always creates the operator as DEFAULT_ADMIN_USER, so the
+    // check runs here, before any key or Agent write.
+    refuseOperatorAgentId(agentId, DEFAULT_ADMIN_USER);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     // Resolve ONCE, here: the operator means "relative to my shell's cwd", but
     // Harper is spawned with cwd = the flair package directory, so a raw

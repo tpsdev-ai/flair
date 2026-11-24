@@ -1093,3 +1093,43 @@ describe("flair-quality Slice 2 — snapshot + diff + OrgEvent thresholds", () =
     });
   });
 });
+
+// flair#3082 item 2: a server whose Memory scan did not complete reports null
+// in every memory-derived per-agent field. Quality must not turn those nulls
+// into a rate or a quiet verdict.
+describe("per-agent memory stats unknown", () => {
+  const unknownRows = () => ({
+    agents: {
+      count: 2,
+      perAgent: [
+        { id: "agent-a", memoryCount: null, hashFallback: null, writes24h: null, lastWriteAt: null, usageCount: null },
+        { id: "agent-b", memoryCount: null, hashFallback: null, writes24h: null, lastWriteAt: null, usageCount: null },
+      ],
+    },
+  });
+
+  test("no signal-density rate and no quiet verdict; both gaps name why", () => {
+    const r = computeQualityReport(true, fixture({ ...unknownRows(), memories: null }), { now: NOW });
+
+    expect(r.signalDensity).toBeNull();
+    expect(r.quietAgents).toBeNull();
+    expect(r.gaps.some((g) => g.metric === "signalDensity" && g.reason.includes("Memory scan did not complete"))).toBe(true);
+    expect(r.gaps.some((g) => g.metric === "quietAgents" && g.reason.includes("Memory scan did not complete"))).toBe(true);
+  });
+
+  test("a known row alongside an unknown one does not yield a partial report", () => {
+    const data = fixture({
+      agents: {
+        count: 2,
+        perAgent: [
+          { id: "agent-a", memoryCount: 4, hashFallback: 0, writes24h: 1, lastWriteAt: daysAgo(0), usageCount: 0 },
+          { id: "agent-b", memoryCount: null, hashFallback: null, writes24h: null, lastWriteAt: null, usageCount: null },
+        ],
+      },
+    });
+    const r = computeQualityReport(true, data, { now: NOW });
+
+    expect(r.signalDensity).toBeNull();
+    expect(r.quietAgents).toBeNull();
+  });
+});

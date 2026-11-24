@@ -1,7 +1,7 @@
 /**
  * status.ts — extracted from src/cli.ts (flair#1636, epic #1618).
  *
- * Pure move, ZERO behavior change: `flair status` / `flair status --deep` (local probe, port auto-discovery, HealthDetail). Shared render helpers humanBytes()/relativeTime()/fetchHealthDetail() stay in cli.ts (other command modules bind them).
+ * Implements `flair status` and `flair status deep`; shared CLI helpers are supplied through `bindCli()`.
  * Shared cli-locals stay in cli.ts and are injected via bindCli() before
  * register(); this module never imports src/cli.ts. Top-level imports only
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
@@ -9,6 +9,7 @@
 import { Command } from "commander";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
+import { escapeTerminalText } from "../lib/terminal-text.js";
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, FLAIR_PKG_NAME } from "../version-check.js";
 import {
@@ -143,9 +144,7 @@ export function statusVersionAdvice(input: {
  * Only judged for a loopback target: the LOCAL install's config says nothing
  * about a remote instance, and warning about the wrong machine is its own lie.
  *
- * `dataDir` defaults to `defaultDataDir()`, so both call sites (plain `status`
- * and `status deep`) behave as before. It is injectable so a test can drive the
- * decision against a temp data dir, without touching process.env.
+ * Both `flair status` and `flair status deep` use this local install check.
  */
 export function localOpsApiWarnings(
   baseUrl: string,
@@ -568,7 +567,7 @@ const statusCmd = program
       console.log(`\n${render.wrap(render.c.bold, "Warnings")}  ${render.wrap(render.c.dim, `(${scopedWarnings.length})`)}`);
       for (const w of scopedWarnings) {
         const icon = w.level === "warn" ? render.icons.warn : render.icons.info;
-        console.log(`  ${icon} ${w.message}`);
+        console.log(`  ${icon} ${escapeTerminalText(w.message)}`);
       }
     }
 
@@ -583,7 +582,7 @@ const statusCmd = program
           .filter(([, n]) => n > 0)
           .sort((a, b) => b[1] - a[1]);
         if (entries.length > 0) {
-          const formatted = entries.map(([k, n]: [string, number]) => `${render.wrap(render.c.cyan, k)}:${n}`).join(render.wrap(render.c.dim, ", "));
+          const formatted = entries.map(([k, n]: [string, number]) => `${render.wrap(render.c.cyan, escapeTerminalText(k))}:${n}`).join(render.wrap(render.c.dim, ", "));
           console.log(render.kv("Embeddings", formatted));
         }
       }
@@ -610,24 +609,30 @@ const statusCmd = program
     if (agents) {
       if (agents.count > 0) {
         console.log(`\n${render.wrap(render.c.bold, "Agents")}`);
-        const nameStr = agents.names?.length > 0 ? ` ${render.wrap(render.c.dim, "—")} ${agents.names.join(render.wrap(render.c.dim, ", "))}` : "";
+        const nameStr = agents.names?.length > 0 ? ` ${render.wrap(render.c.dim, "—")} ${agents.names.map((n: string) => escapeTerminalText(n)).join(render.wrap(render.c.dim, ", "))}` : "";
         console.log(render.kv("Total", `${render.wrap(render.c.bold, String(agents.count))}${nameStr}`));
         if (Array.isArray(agents.perAgent) && agents.perAgent.length > 0) {
+          // Memory-derived values are unknown (null) on every row when the
+          // Memory scan did not complete: render "unknown", never a zero.
+          const idCell = (v: unknown) => escapeTerminalText(String(v ?? ""));
+          const countCell = (v: unknown) => (typeof v === "number" ? String(v) : "unknown");
+          const lastWriteCell = (v: unknown, row: Record<string, unknown>) =>
+            typeof row.memoryCount === "number" ? render.relativeTime(v as string | null) : "unknown";
           const hasDeep = agents.perAgent.some(
             (r: any) => typeof r.hashFallback === "number" || typeof r.writes24h === "number",
           );
           const cols: render.TableColumn[] = hasDeep
             ? [
-                { label: "id", key: "id" },
-                { label: "memories", key: "memoryCount", align: "right" },
-                { label: "hash_fb", key: "hashFallback", align: "right", format: (v) => (typeof v === "number" ? String(v) : "—") },
-                { label: "24h", key: "writes24h", align: "right", format: (v) => (typeof v === "number" ? String(v) : "—") },
-                { label: "last_write", key: "lastWriteAt", format: (v) => render.relativeTime(v as string | null) },
+                { label: "id", key: "id", format: idCell },
+                { label: "memories", key: "memoryCount", align: "right", format: countCell },
+                { label: "hash_fb", key: "hashFallback", align: "right", format: (v, row) => (typeof v === "number" ? String(v) : typeof row.memoryCount === "number" ? "—" : "unknown") },
+                { label: "24h", key: "writes24h", align: "right", format: (v, row) => (typeof v === "number" ? String(v) : typeof row.memoryCount === "number" ? "—" : "unknown") },
+                { label: "last_write", key: "lastWriteAt", format: lastWriteCell },
               ]
             : [
-                { label: "id", key: "id" },
-                { label: "memories", key: "memoryCount", align: "right" },
-                { label: "last_write", key: "lastWriteAt", format: (v) => render.relativeTime(v as string | null) },
+                { label: "id", key: "id", format: idCell },
+                { label: "memories", key: "memoryCount", align: "right", format: countCell },
+                { label: "last_write", key: "lastWriteAt", format: lastWriteCell },
               ];
           console.log(render.table(cols, agents.perAgent as Array<Record<string, unknown>>));
         }
@@ -636,7 +641,7 @@ const statusCmd = program
         console.log(render.kv("Unregistered memory owners", render.wrap(render.c.dim, "unavailable — memory scan did not complete")));
       } else if (Array.isArray(agents.unregisteredMemoryAuthors) && agents.unregisteredMemoryAuthors.length > 0) {
         const owners = agents.unregisteredMemoryAuthors.map(
-          (r: any) => `${r.id} (${r.memoryCount} ${r.memoryCount === 1 ? "memory" : "memories"})`,
+          (r: any) => `${escapeTerminalText(String(r.id ?? ""))} (${r.memoryCount} ${r.memoryCount === 1 ? "memory" : "memories"})`,
         );
         console.log(render.kv("Unregistered memory owners", owners.join(render.wrap(render.c.dim, ", "))));
       }
@@ -652,7 +657,7 @@ const statusCmd = program
       const s = healthData.soul;
       console.log(`\n${render.wrap(render.c.bold, "Soul")}`);
       const entries = sortSoulKeyEntries(s.byKey ?? {});
-      const parts = entries.map(([k, n]: [string, number]) => `${render.wrap(render.c.cyan, k)}:${n}`);
+      const parts = entries.map(([k, n]: [string, number]) => `${render.wrap(render.c.cyan, escapeTerminalText(k))}:${n}`);
       const suffix = parts.length > 0
         ? ` ${render.wrap(render.c.dim, "—")} ${parts.join(render.wrap(render.c.dim, " · "))}`
         : "";
@@ -690,7 +695,7 @@ const statusCmd = program
       console.log(`\n${render.wrap(render.c.bold, "Federation")}`);
       if (f.instance) {
         const statusColor = f.instance.status === "active" ? render.c.green : render.c.yellow;
-        console.log(render.kv("Instance", `${f.instance.id}  ${render.wrap(render.c.dim, "(")}${f.instance.role ?? "—"}${render.wrap(render.c.dim, ", ")}${render.wrap(statusColor, f.instance.status ?? "—")}${render.wrap(render.c.dim, ")")}`));
+        console.log(render.kv("Instance", `${escapeTerminalText(String(f.instance.id ?? ""))}  ${render.wrap(render.c.dim, "(")}${escapeTerminalText(String(f.instance.role ?? "—"))}${render.wrap(render.c.dim, ", ")}${render.wrap(statusColor, escapeTerminalText(String(f.instance.status ?? "—")))}${render.wrap(render.c.dim, ")")}`));
       }
       if (f.peers) {
         const parts = federationPeerCountParts(f.peers);
@@ -886,19 +891,19 @@ statusCmd
     if (Array.isArray(o?.clientList) && o.clientList.length > 0) {
       console.log(`\n  ${render.wrap(render.c.dim, "Clients")}`);
       const cols: render.TableColumn[] = [
-        { label: "id", key: "id" },
-        { label: "name", key: "name", format: (v) => String(v ?? "—") },
-        { label: "registered_by", key: "registeredBy", format: (v) => String(v ?? "—") },
-        { label: "created_at", key: "createdAt", format: (v) => String(v ?? "—") },
+        { label: "id", key: "id", format: (v) => escapeTerminalText(String(v ?? "")) },
+        { label: "name", key: "name", format: (v) => escapeTerminalText(String(v ?? "—")) },
+        { label: "registered_by", key: "registeredBy", format: (v) => escapeTerminalText(String(v ?? "—")) },
+        { label: "created_at", key: "createdAt", format: (v) => escapeTerminalText(String(v ?? "—")) },
       ];
       console.log(render.table(cols, o.clientList as Array<Record<string, unknown>>));
     }
     if (Array.isArray(o?.idpList) && o.idpList.length > 0) {
       console.log(`\n  ${render.wrap(render.c.dim, "IdPs")}`);
       const cols: render.TableColumn[] = [
-        { label: "id", key: "id" },
-        { label: "name", key: "name", format: (v) => String(v ?? "—") },
-        { label: "issuer", key: "issuer", format: (v) => String(v ?? "—") },
+        { label: "id", key: "id", format: (v) => escapeTerminalText(String(v ?? "")) },
+        { label: "name", key: "name", format: (v) => escapeTerminalText(String(v ?? "—")) },
+        { label: "issuer", key: "issuer", format: (v) => escapeTerminalText(String(v ?? "—")) },
       ];
       console.log(render.table(cols, o.idpList as Array<Record<string, unknown>>));
     }
@@ -934,17 +939,11 @@ statusCmd
     if (b.lastExport) console.log(render.kv("Last export", render.relativeTime(b.lastExport)));
   });
 
-// ─── flair status --deep ──────────────────────────────────────────────────────
+// `flair status deep` adds verbose sections. Its optional `--bootstrap` posts to
+// `/BootstrapMemories` for each selected agent to measure context size.
 //
-// Deeper observability than the default `flair status` summary — full
-// per-section detail with no condensing. Optional --bootstrap measures
-// cold-start context bytes per agent (slow; calls /MemoryBootstrap once per
-// agent, admin-auth required).
-//
-// Addresses ops-yph: Nathan's 2026-04-22 ask for "how much storage does my
-// memory take, how much context are bootstraps pulling, what's the real usage
-// pattern" — questions the default `flair status` summarizes but doesn't
-// surface in full. Agents should be able to self-audit via this too.
+// Plain status summarizes instance health; deep status shows additional
+// per-section details and optional bootstrap measurements.
 
 
 statusCmd
@@ -956,8 +955,7 @@ statusCmd
     const opts = this.optsWithGlobals();
     const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts);
 
-    // Same local install-health facts the plain `status` renders, so `--deep`
-    // cannot end on "✅ no warnings" while the ops API is exposed (flair#852).
+    // `flair status deep` reports the same local ops API bind warning as plain status.
     const localWarnings = localOpsApiWarnings(baseUrl);
 
     if (!healthy) {
@@ -1058,7 +1056,7 @@ statusCmd
           .sort((a, b) => b[1] - a[1]);
         for (const [k, n] of entries) {
           const pct = ((n / memories.total) * 100).toFixed(1);
-          console.log(`  ${k.padEnd(28)} ${String(n).padStart(6)}  (${pct}%)`);
+          console.log(`  ${escapeTerminalText(k).padEnd(28)} ${String(n).padStart(6)}  (${pct}%)`);
         }
       }
       if (memories.byDurability) {
@@ -1067,7 +1065,7 @@ statusCmd
       }
       console.log(`Archived:     ${memories.archived ?? 0}`);
       console.log(`Expired:      ${memories.expired ?? 0}`);
-      if (healthData?.lastWrite) console.log(`Last write:   ${relativeTime(healthData.lastWrite)} (${healthData.lastWrite})`);
+      if (healthData?.lastWrite) console.log(`Last write:   ${relativeTime(healthData.lastWrite)} (${escapeTerminalText(String(healthData.lastWrite))})`);
     }
 
     const bm25DeepLine = formatBm25StatusLine(healthData?.bm25);
@@ -1079,16 +1077,19 @@ statusCmd
         console.log("\n═══ Agents ═══════════════════════════════════════");
         console.log(`Total:        ${agents.count}`);
         if (Array.isArray(agents.names) && agents.names.length > 0) {
-          console.log(`Names:        ${agents.names.join(", ")}`);
+          console.log(`Names:        ${agents.names.map((n: string) => escapeTerminalText(n)).join(", ")}`);
         }
         if (Array.isArray(agents.perAgent) && agents.perAgent.length > 0) {
-          const idW = Math.max(2, ...agents.perAgent.map((r: any) => (r.id ?? "").length));
+          const idW = Math.max(2, ...agents.perAgent.map((r: any) => escapeTerminalText(String(r.id ?? "")).length));
           console.log(`\n  ${"id".padEnd(idW)}  memories  hash_fb  24h  last_write`);
           for (const r of agents.perAgent) {
-            const fb = typeof r.hashFallback === "number" ? String(r.hashFallback) : "—";
-            const w24 = typeof r.writes24h === "number" ? String(r.writes24h) : "—";
+            const known = typeof r.memoryCount === "number";
+            const fb = !known ? "unknown" : typeof r.hashFallback === "number" ? String(r.hashFallback) : "—";
+            const w24 = !known ? "unknown" : typeof r.writes24h === "number" ? String(r.writes24h) : "—";
+            const mems = known ? String(r.memoryCount).padStart(8) : "unknown".padStart(8);
+            const lastWrite = known ? relativeTime(r.lastWriteAt) : "unknown";
             console.log(
-              `  ${(r.id ?? "").padEnd(idW)}  ${String(r.memoryCount).padStart(8)}  ${fb.padStart(7)}  ${w24.padStart(3)}  ${relativeTime(r.lastWriteAt)}`,
+              `  ${escapeTerminalText(String(r.id ?? "")).padEnd(idW)}  ${mems}  ${fb.padStart(7)}  ${w24.padStart(3)}  ${lastWrite}`,
             );
           }
         }
@@ -1097,7 +1098,7 @@ statusCmd
         console.log("Unregistered memory owners: unavailable — memory scan did not complete");
       } else if (Array.isArray(agents.unregisteredMemoryAuthors) && agents.unregisteredMemoryAuthors.length > 0) {
         const owners = agents.unregisteredMemoryAuthors.map(
-          (r: any) => `${r.id} (${r.memoryCount} ${r.memoryCount === 1 ? "memory" : "memories"})`,
+          (r: any) => `${escapeTerminalText(String(r.id ?? ""))} (${r.memoryCount} ${r.memoryCount === 1 ? "memory" : "memories"})`,
         );
         console.log(`Unregistered memory owners: ${owners.join(", ")}`);
       }
@@ -1121,7 +1122,7 @@ statusCmd
         const tok = info.tokenEstimate != null ? String(info.tokenEstimate) : "—";
         const mems = info.memoriesIncluded != null ? String(info.memoriesIncluded) : "—";
         const status = info.error ? info.error.slice(0, 40) : "ok";
-        console.log(`  ${agentId.padEnd(idW)}  ${bytesStr.padStart(9)}  ${tok.padStart(7)}  ${mems.padStart(4)}  ${status}`);
+        console.log(`  ${escapeTerminalText(agentId).padEnd(idW)}  ${bytesStr.padStart(9)}  ${tok.padStart(7)}  ${mems.padStart(4)}  ${status}`);
       }
     }
 
@@ -1137,7 +1138,7 @@ statusCmd
       console.log(`Total:        ${s.total} entries`);
       const entries = sortSoulKeyEntries(s.byKey ?? {});
       if (entries.length > 0) {
-        console.log(`Keys:         ${entries.map(([k, n]: [string, number]) => `${n} ${k}`).join(" / ")}`);
+        console.log(`Keys:         ${entries.map(([k, n]: [string, number]) => `${n} ${escapeTerminalText(k)}`).join(" / ")}`);
       }
     } else if (typeof healthData?.soulEntries === "number" && healthData.soulEntries > 0) {
       console.log("\n═══ Soul ═════════════════════════════════════════");
@@ -1164,7 +1165,7 @@ statusCmd
     if (healthData?.federation) {
       const f = healthData.federation;
       console.log("\n═══ Federation ═══════════════════════════════════");
-      if (f.instance) console.log(`Instance:     ${f.instance.id} (${f.instance.role ?? "—"}, ${f.instance.status ?? "—"})`);
+      if (f.instance) console.log(`Instance:     ${escapeTerminalText(String(f.instance.id ?? ""))} (${escapeTerminalText(String(f.instance.role ?? "—"))}, ${escapeTerminalText(String(f.instance.status ?? "—"))})`);
       if (f.peers) {
         const unknown = Number(f.peers.unknown ?? 0);
         const unknownBit = unknown > 0 ? `, ${unknown} unknown` : "";
@@ -1172,10 +1173,10 @@ statusCmd
       }
       if (typeof f.pendingTokens === "number" && f.pendingTokens > 0) console.log(`Pairing:      ${f.pendingTokens} unconsumed token(s)`);
       if (Array.isArray(f.peerList) && f.peerList.length > 0) {
-        const idW = Math.max(4, ...f.peerList.map((p: any) => (p.id ?? "").length));
+        const idW = Math.max(4, ...f.peerList.map((p: any) => escapeTerminalText(String(p.id ?? "")).length));
         console.log(`\n  ${"peer".padEnd(idW)}  ${"role".padEnd(5)}  ${"status".padEnd(13)}  ${"liveness".padEnd(13)}  last_sync`);
         for (const p of f.peerList) {
-          console.log(`  ${(p.id ?? "").padEnd(idW)}  ${(p.role ?? "—").padEnd(5)}  ${(p.status ?? "—").padEnd(13)}  ${(p.liveness ?? "—").padEnd(13)}  ${p.lastSyncAt ? `${relativeTime(p.lastSyncAt)} (${p.lastSyncAt})` : "never"}`);
+          console.log(`  ${escapeTerminalText(String(p.id ?? "")).padEnd(idW)}  ${escapeTerminalText(String(p.role ?? "—")).padEnd(5)}  ${escapeTerminalText(String(p.status ?? "—")).padEnd(13)}  ${escapeTerminalText(String(p.liveness ?? "—")).padEnd(13)}  ${p.lastSyncAt ? `${relativeTime(p.lastSyncAt)} (${escapeTerminalText(String(p.lastSyncAt))})` : "never"}`);
         }
       }
     } else {
@@ -1192,7 +1193,7 @@ statusCmd
       if (Array.isArray(o.clientList) && o.clientList.length > 0) {
         console.log(`\n  Clients:`);
         for (const c of o.clientList) {
-          console.log(`    ${c.id}  ${c.name ?? "—"}  ${c.registeredBy ?? "—"}  ${c.createdAt ?? "—"}`);
+          console.log(`    ${escapeTerminalText(String(c.id ?? ""))}  ${escapeTerminalText(String(c.name ?? "—"))}  ${escapeTerminalText(String(c.registeredBy ?? "—"))}  ${escapeTerminalText(String(c.createdAt ?? "—"))}`);
         }
       }
     }
@@ -1219,7 +1220,7 @@ statusCmd
     ];
     if (warnings.length > 0) {
       console.log("\n═══ Warnings ═════════════════════════════════════");
-      for (const w of warnings) console.log(`  ${w.level === "warn" ? "⚠" : "ℹ"} ${w.message}`);
+      for (const w of warnings) console.log(`  ${w.level === "warn" ? "⚠" : "ℹ"} ${escapeTerminalText(w.message)}`);
     } else {
       console.log("\n✅ no warnings");
     }

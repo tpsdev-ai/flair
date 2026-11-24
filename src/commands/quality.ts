@@ -661,10 +661,21 @@ export function computeQualityReport(
   // empty perAgent array (nothing to prove otherwise, and both scopes render
   // identically empty either way).
   const haveUsageCount = perAgentAll.every((r) => typeof r.usageCount === "number");
+  // Rows from a server whose Memory scan did not complete carry nulls in the
+  // memory-derived fields, not zeros. A rate or a quiet verdict computed from
+  // those would be a claim about data nobody read, so neither is reported.
+  const haveMemoryStats = perAgentAll.every(
+    (r) => typeof r.memoryCount === "number" && typeof r.writes24h === "number",
+  );
 
   // ── Signal density (write volume, + citation rate when the server supports it) ──
   let signalDensity: QualityReport["signalDensity"] = null;
-  if (havePerAgent && haveUsageCount) {
+  if (havePerAgent && !haveMemoryStats) {
+    gaps.push({
+      metric: "signalDensity",
+      reason: "per-agent memory counts unknown — the server's Memory scan did not complete",
+    });
+  } else if (havePerAgent && haveUsageCount) {
     signalDensity = {
       scope: "write-and-citation",
       perAgent: scopedAgents.map((r) => {
@@ -688,7 +699,12 @@ export function computeQualityReport(
 
   // ── Quiet agents (ops fact — not a trust signal) ──
   let quietAgents: QualityReport["quietAgents"] = null;
-  if (havePerAgent) {
+  if (havePerAgent && !haveMemoryStats) {
+    gaps.push({
+      metric: "quietAgents",
+      reason: "per-agent memory counts unknown — the server's Memory scan did not complete",
+    });
+  } else if (havePerAgent) {
     const rows: QualityAgentActivity[] = scopedAgents.map((r) => {
       const daysSinceLastWrite = r.lastWriteAt ? Math.floor((now - new Date(r.lastWriteAt).getTime()) / 86_400_000) : null;
       const quiet = daysSinceLastWrite === null ? true : daysSinceLastWrite >= QUALITY_QUIET_THRESHOLD_DAYS;
