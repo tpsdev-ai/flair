@@ -221,7 +221,7 @@ import { applyRepointPlan, repointSystemdUserUnit, restartOnLinux, type MainServ
 // Aliased: this file also declares its own FileSnapshot (flair#2040's raw-bytes
 // snapshot for byte-exact restores); this is atomic-write's regular-file snapshot.
 import { snapshotRegularFile, type AtomicWriteHooks, type FileSnapshot as AtomicFileSnapshot } from "./lib/atomic-write.js";
-import { preferVersionManagerAlias } from "./lib/node-alias-path.js";
+import { homebrewOptAlias, preferVersionManagerAlias } from "./lib/node-alias-path.js";
 import { stabilizeMqttNetworkKeyOrder } from "./lib/stabilize-mqtt-network.js";
 import { MQTT_DISABLED_CONFIG } from "./lib/mqtt-config.js";
 import { FABRIC_OPS_PORT, resolveOpsUrlFromTarget } from "./lib/ops-url.js";
@@ -6172,6 +6172,7 @@ function realRepointDeps(): RepointDeps {
     samePath: samePathCanonical,
     canonical: canonicalOr,
     treeVersion: (dir) => readFlairPackageAt(dir)?.version ?? null,
+    homebrewOptAlias: (nodeBin) => homebrewOptAlias(nodeBin),
   };
 }
 
@@ -6878,8 +6879,8 @@ export interface WriteInitLaunchdPlistDeps {
  *
  * `unchanged`, `not-repointed` and `refused` all mean NO plist write happened:
  * `unchanged` when the instance is already adopted with the pass-file shape
- * and already serves this CLI's tree, or pins another node for it (flair#1693 —
- * init must not downgrade it, and re-writing would only churn the file);
+ * and the re-point plan (src/lib/service-repoint.ts) has nothing to replace
+ * (flair#1693 — init must not downgrade it, and re-writing would only churn the file);
  * `not-repointed` when an adopted plist serves another tree but may not be
  * moved (flair#2034 — the detail names the file, what did not match and the
  * hand edit: a separately managed tree, a possible downgrade, a plist not
@@ -6911,8 +6912,8 @@ export type WriteInitLaunchdPlistResult =
  *   1. An on-disk plist that is provably ours IN THE PASS-FILE SHAPE is never
  *      regenerated. An adopted instance is never downgraded, and a re-run of
  *      init does not churn mtime / flap launchd state. Its runtime paths alone
- *      are re-pointed when it serves another npm-global tree (flair#2034,
- *      src/lib/service-repoint.ts); otherwise it is left byte-for-byte unchanged.
+ *      are re-pointed in the cases src/lib/service-repoint.ts lists (flair#2034);
+ *      otherwise it is left byte-for-byte unchanged.
  *   2. A plist that is provably another instance's (`foreign`) or cannot be
  *      attributed (`unattributable`) is refused, naming `flair doctor --fix`.
  *   3. Otherwise, resolve the pass file BEFORE writing anything: reuse an

@@ -35,7 +35,7 @@ mock.module("harper", () => ({
 // legitimately `await import(...)`s for real — that was the source of the
 // intermittent "35 tests failed" flake in mcp-handler.test.ts.
 
-const { registerMcpOAuthRoute, mcpRouteState, rateLimitedMcpHandler, readEffectiveMcpEnabled } = await import("../../resources/mcp-oauth.ts");
+const { registerMcpOAuthRoute, mcpRouteState, rateLimitedMcpHandler, readEffectiveMcpEnabled, withRequestedScope } = await import("../../resources/mcp-oauth.ts");
 const { __resetBucketsForTest } = await import("../../resources/rate-limit.ts");
 const { MULTI_WORKER_GUARD_HTTP_NAME } = await import("../../resources/multi-worker-guard.ts");
 
@@ -133,6 +133,37 @@ describe("registerMcpOAuthRoute — flag-OFF no-op", () => {
     const deps = makeDeps();
     await registerMcpOAuthRoute(deps);
     expect(withMCPAuthCalls[0].handler).not.toBe(deps.mcpHandler);
+  });
+});
+
+describe("the /mcp 401 challenge names the scopes to request (flair#3076)", () => {
+  const CHALLENGE = 'Bearer resource_metadata="https://flair.example.com/.well-known/oauth-protected-resource/mcp"';
+
+  async function mountedWith(answer: any) {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "1";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    const deps = makeDeps();
+    deps.loadWithMCPAuth = async () => () => async () => answer;
+    expect(await registerMcpOAuthRoute(deps)).toBe(true);
+    return httpCalls[0].handler;
+  }
+
+  it("the mounted listener adds scope to the guard's 401 Bearer challenge", async () => {
+    const listener = await mountedWith({ status: 401, headers: { "WWW-Authenticate": CHALLENGE, "Content-Type": "application/json" }, body: "{}" });
+    const res = await listener({}, () => ({ next: true }));
+    expect(res.status).toBe(401);
+    expect(res.headers["WWW-Authenticate"]).toBe(`${CHALLENGE}, scope="memory:read memory:write principal:read"`);
+    expect(res.headers["Content-Type"]).toBe("application/json");
+  });
+
+  it("leaves other answers, and a challenge that already names a scope, as they are", () => {
+    const ok = { status: 200, headers: { "Content-Type": "application/json" }, body: "{}" };
+    expect(withRequestedScope(ok)).toBe(ok);
+    const scoped = { status: 401, headers: { "WWW-Authenticate": `${CHALLENGE}, scope="x"` } };
+    expect(withRequestedScope(scoped)).toBe(scoped);
+    const basic = { status: 401, headers: { "WWW-Authenticate": "Basic" } };
+    expect(withRequestedScope(basic)).toBe(basic);
   });
 });
 
