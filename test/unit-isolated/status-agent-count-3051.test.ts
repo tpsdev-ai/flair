@@ -590,6 +590,7 @@ test("status federation escapes each stored instance and peer field; JSON keeps 
   }
 
   const json = await statusOutput(hostileDetail(), ["--json", "federation"]);
+  expect(json).toBe(JSON.stringify({ healthy: true, federation: hostileDetail().federation }, null, 2));
   const parsed = JSON.parse(json);
   expect(parsed).toEqual({ healthy: true, federation: hostileDetail().federation });
   expect(parsed.federation.instance.id).toBe(H);
@@ -612,6 +613,7 @@ test("status rem escapes the stored nightly timestamp; JSON keeps the same fixtu
   }
 
   const json = await statusOutput(detail, ["--json", "rem"]);
+  expect(json).toBe(JSON.stringify({ healthy: true, rem: detail.rem }, null, 2));
   const parsed = JSON.parse(json);
   expect(parsed).toEqual({ healthy: true, rem: detail.rem });
   expect(parsed.rem.lastNightlyAt).toBe(detail.rem.lastNightlyAt);
