@@ -1100,14 +1100,37 @@ export function inspectFederationShimNode(
   }
 }
 
+const XML_COMMENT_RE = /<!--[\s\S]*?-->/g;
+
+/**
+ * `text` with its XML comments removed, or null when they cannot be removed
+ * cleanly: removing them is repeated until the text stops changing, and a
+ * second pass that removes anything (a removal formed a new `<!--`) or a `<!--`
+ * left at the end (an unclosed comment) gives null.
+ */
+function stripXmlComments(text: string): string | null {
+  let out = text;
+  let changed = 0;
+  for (;;) {
+    const next = out.replace(XML_COMMENT_RE, "");
+    if (next === out) break;
+    if (++changed > 1) return null;
+    out = next;
+  }
+  return out.includes("<!--") ? null : out;
+}
+
 /**
  * Does the federation-sync unit file name `shimPath` as its program? Returns
  * the reason it does not, or null. A plist is read as XML structure after its
- * comments are removed, so a key inside a comment or a nested dict is not read.
+ * comments are removed (stripXmlComments), so a key inside a comment or a
+ * nested dict is not read.
  */
 function federationUnitExecsShim(plat: SchedulerPlatform, text: string, shimPath: string): string | null {
   if (plat === "darwin") {
-    const doc = readPlistStructure(text.replace(/<!--[\s\S]*?-->/g, ""));
+    const stripped = stripXmlComments(text);
+    if (stripped === null) return "its XML comments overlap or one is not closed";
+    const doc = readPlistStructure(stripped);
     if ("problem" in doc) return `it is not a plist flair can read (it has ${doc.problem})`;
     const label = doc.top.get("Label");
     if (label?.t !== "string" || label.v !== LAUNCHD_LABEL) return `its Label is not ${LAUNCHD_LABEL}`;

@@ -456,6 +456,26 @@ describe("flair#3056 — inspectFederationShimNode reads the unit and the shim f
     expect(inspectFederationShimNode(s.paths)).toBeNull();
   });
 
+  // Comment markup that one removal pass cannot clear: the unit file is not confirmed to run the shim.
+  const unclearComments: Array<[string, (unit: string, shim: string, other: string) => string]> = [
+    ["overlapping comment markup hides a ProgramArguments that names the shim", (unit, shim, other) =>
+      unit.replace(`<string>${shim}</string>`, `<string>${other}</string>`)
+        .replace("<dict>", `<dict>\n  <!<!---->-- <key>ProgramArguments</key><array><string>${shim}</string></array> -->`)],
+    ["overlapping comment markup sits before a ProgramArguments that names the shim", (unit) =>
+      unit.replace("<dict>", "<dict>\n  <!<!---->-- hidden -->")],
+    ["a comment is not closed", (unit) => unit.replace("</plist>", "</plist>\n<!-- not closed")],
+  ];
+  for (const [what, edit] of unclearComments) {
+    it(`darwin: null when ${what}`, () => {
+      const s = setup("darwin");
+      const unit = readFileSync(s.unitPath, "utf-8");
+      const changed = edit(unit, s.shim, join(s.root, "other-sync.sh"));
+      expect(changed).not.toBe(unit);
+      writeFileSync(s.unitPath, changed);
+      expect(inspectFederationShimNode(s.paths)).toBeNull();
+    });
+  }
+
   it("null when the shim runs a command the generated shim does not", () => {
     const s = setup("darwin");
     const shim = readFileSync(s.shim, "utf-8");

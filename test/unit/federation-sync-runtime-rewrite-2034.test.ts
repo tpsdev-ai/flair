@@ -221,6 +221,34 @@ describe("rewriteFederationSchedulerRuntime — macOS", () => {
     expect(readFileSync(f.shim, "utf-8")).toBe(before);
   });
 
+  // Comment markup that one removal pass cannot clear: flair could not confirm the plist execs the shim.
+  const unclearComments: Array<[string, (unit: string, entry: string) => string]> = [
+    ["overlapping comment markup hides a ProgramArguments that names the shim", (unit, entry) =>
+      unit.replace(entry, "<string>/usr/local/bin/my-sync</string>")
+        .replace("<dict>", `<dict>\n  <!<!---->-- <key>ProgramArguments</key><array>${entry}</array> -->`)],
+    ["overlapping comment markup sits before a ProgramArguments that names the shim", (unit) =>
+      unit.replace("<dict>", "<dict>\n  <!<!---->-- hidden -->")],
+    ["a comment is not closed", (unit) => unit.replace("</plist>", "</plist>\n<!-- not closed")],
+  ];
+  for (const [what, edit] of unclearComments) {
+    test(`a plist where ${what} is refused as unconfirmed`, () => {
+      const f = fixture();
+      enable(f, "darwin");
+      const unit = readFileSync(f.plist, "utf-8");
+      const entry = /<key>ProgramArguments<\/key>\s*<array>\s*(<string>[^<]*<\/string>)/.exec(unit)![1]!;
+      const changed = edit(unit, entry);
+      expect(changed).not.toBe(unit);
+      writeFileSync(f.plist, changed);
+      const before = readFileSync(f.shim, "utf-8");
+      const r = rewrite(f, "darwin");
+      expect(r.status).toBe("refused");
+      expect(r.detail).toContain(
+        `flair could not confirm that ${f.plist} execs the flair-generated shim: its XML comments overlap or one is not closed.`,
+      );
+      expect(readFileSync(f.shim, "utf-8")).toBe(before);
+    });
+  }
+
   test("a hand-changed shim (not the generated shape) is refused", () => {
     const f = fixture();
     enable(f, "darwin");
