@@ -237,21 +237,47 @@ describe("launchd lane init guard (flair#3100)", () => {
   // bytes -> cmp, mode -> the 0600 mode check, symlink (its own mode set to
   // 0600 with chmod -h) -> -L. A directory is refused by -f and by cmp.
   // Foreign ownership (-O) needs a second user and is not exercised here.
-  for (const [mode, what] of [
-    ["bytes", "a persisted file whose bytes differ from the source"],
-    ["mode", "a persisted file that is not mode 0600"],
-    ["symlink", "a persisted symlink"],
-    ["dir", "a persisted directory"],
-  ] as const) {
-    test.skipIf(process.platform !== "darwin")(
-      `${what} is refused before adoption`,
-      () => {
-        const { result, out } = runCase(mode, false);
-        expect(result.status).toBe(1);
-        expect(out).toContain("must be a runner-owned regular 0600 file identical to the source");
-        expect(out).not.toContain("REACHED-END");
-      },
-      60_000,
-    );
-  }
+  test.skipIf(process.platform !== "darwin")(
+    "a persisted file whose bytes differ from the source is refused before adoption",
+    () => {
+      const { result, out } = runCase("bytes", false);
+      expect(result.status).toBe(1);
+      expect(out).toContain("must be a runner-owned regular 0600 file identical to the source");
+      expect(out).not.toContain("REACHED-END");
+    },
+    60_000,
+  );
+
+  test.skipIf(process.platform !== "darwin")(
+    "a persisted file that is not mode 0600 is refused before adoption",
+    () => {
+      const { result, out } = runCase("mode", false);
+      expect(result.status).toBe(1);
+      expect(out).toContain("must be a runner-owned regular 0600 file identical to the source");
+      expect(out).not.toContain("REACHED-END");
+    },
+    60_000,
+  );
+
+  test.skipIf(process.platform !== "darwin")(
+    "a persisted symlink is refused before adoption",
+    () => {
+      const { result, out } = runCase("symlink", false);
+      expect(result.status).toBe(1);
+      expect(out).toContain("must be a runner-owned regular 0600 file identical to the source");
+      expect(out).not.toContain("REACHED-END");
+    },
+    60_000,
+  );
+
+  test.skipIf(process.platform !== "darwin")(
+    "a persisted directory is refused before adoption",
+    () => {
+      const { result, out } = runCase("dir", false);
+      expect(result.status).toBe(1);
+      expect(out).toContain("must be a runner-owned regular 0600 file identical to the source");
+      expect(out).not.toContain("REACHED-END");
+    },
+    60_000,
+  );
 });
