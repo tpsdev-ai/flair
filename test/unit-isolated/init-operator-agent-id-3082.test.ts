@@ -1,8 +1,8 @@
 /**
- * #3082 item 3: `flair init --agent-id` refuses an id that is the operator
- * identity BEFORE it creates a key or registers an Agent. The skill seed
- * refuses the same id, but init registers the agent first, so before this
- * preflight the refusal landed after both writes.
+ * #3082 item 3: `flair init --agent-id` refuses an id that is an administrator
+ * identity for the cluster BEFORE it creates a key or registers an Agent. init
+ * registers the agent before any later check, so without this preflight a
+ * refusal would land after both writes.
  *
  * Each case runs the real CLI against an in-memory ops/HTTP API that records
  * every request, so "no Agent insert" is the recorded API traffic, not an
@@ -56,18 +56,78 @@ function recordedRequests(home: string): Array<{ url: string; method: string; bo
   return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
 
+function requestBodies(home: string): any[] {
+  return recordedRequests(home).map((r) => (typeof r.body === "string" ? JSON.parse(r.body) : null)).filter(Boolean);
+}
+
 function expectRefused(home: string, result: ReturnType<typeof runInit>, id: string) {
   const out = result.stdout + result.stderr;
   expect(result.status, out).not.toBe(0);
-  expect(out).toContain(`"${id}" is the operator identity`);
+  expect(out).toContain(`"${id}" is an administrator identity for this cluster`);
   expect(out).toContain("Choose another --agent-id");
   // No key file, and no request of any kind reached the instance.
   expect(existsSync(join(home, "keys"))).toBe(false);
   expect(recordedRequests(home)).toEqual([]);
 }
 
-describe("flair init --agent-id refuses the operator identity before the agent key or Agent write (flair#3082)", () => {
-  test("remote init: the default operator id is refused", () => {
+/** A provisioning root holding every entry the deploy tarball lists. */
+function deployRoot(home: string): string {
+  const root = join(home, "root");
+  mkdirSync(join(root, "dist"), { recursive: true });
+  mkdirSync(join(root, "schemas"), { recursive: true });
+  for (const name of ["config.yaml", "package.json", "LICENSE", "README.md", "SECURITY.md"]) {
+    writeFileSync(join(root, name), "");
+  }
+  return root;
+}
+
+describe("flair init --agent-id refuses an administrator id before the agent key or Agent write (flair#3082)", () => {
+  test("remote provisioning: the default administrator id is refused before provisionFabric", () => {
+    const home = tempDir("opi-prov-admin-");
+    const result = runInit(home, [
+      "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
+      "--force", "--cluster-admin-user", "cluster-admin", "--cluster-admin-pass", "fixture-cluster-pass",
+      "--agent-id", "admin",
+      "--keys-dir", join(home, "keys"), "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
+    ], { FLAIR_ADMIN_USER: "operator-z", FIXTURE_LIST_USERS: JSON.stringify([
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+    ]) });
+    expectRefused(home, result, "admin");
+    // provisionFabric never ran: not even the deploy reached the instance.
+    expect(requestBodies(home).some((b: any) => b.operation === "deploy_component")).toBe(false);
+  });
+
+  test("remote provisioning: the cluster administrator id is refused before provisionFabric", () => {
+    const home = tempDir("opi-prov-cluster-");
+    const result = runInit(home, [
+      "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
+      "--force", "--cluster-admin-user", "cluster-admin", "--cluster-admin-pass", "fixture-cluster-pass",
+      "--agent-id", "cluster-admin",
+      "--keys-dir", join(home, "keys"), "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
+    ], { FIXTURE_LIST_USERS: JSON.stringify([
+      { username: "cluster-admin", role: { permission: { super_user: true } } },
+    ]) });
+    expectRefused(home, result, "cluster-admin");
+    expect(requestBodies(home).some((b: any) => b.operation === "deploy_component")).toBe(false);
+  });
+
+  test("remote provisioning: a non-administrator id proceeds", () => {
+    const home = tempDir("opi-prov-other-");
+    const root = deployRoot(home);
+    const result = runInit(home, [
+      "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
+      "--force", "--cluster-admin-user", "cluster-admin", "--cluster-admin-pass", "fixture-cluster-pass",
+      "--agent-id", "agent-a",
+      "--keys-dir", join(home, "keys"), "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
+    ], { FIXTURE_LIST_USERS: JSON.stringify([
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+    ]) }, root);
+    const out = result.stdout + result.stderr;
+    expect(out).not.toContain("administrator identity for this cluster");
+    expect(requestBodies(home).some((b: any) => b.operation === "deploy_component")).toBe(true);
+  }, 120_000);
+
+  test("remote init: the default administrator id is refused", () => {
     const home = tempDir("opi-remote-");
     const result = runInit(home, [
       "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
@@ -77,7 +137,7 @@ describe("flair init --agent-id refuses the operator identity before the agent k
     expectRefused(home, result, "admin");
   });
 
-  test("remote init: --admin-user names the operator for an already-running instance", () => {
+  test("remote init: --admin-user names the administrator for an already-running instance", () => {
     const home = tempDir("opi-remote-user-");
     const result = runInit(home, [
       "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
@@ -87,7 +147,7 @@ describe("flair init --agent-id refuses the operator identity before the agent k
     expectRefused(home, result, "operator-b");
   });
 
-  test("remote init: FLAIR_ADMIN_USER names the operator when no flag is given", () => {
+  test("remote init: FLAIR_ADMIN_USER names the administrator when no flag is given", () => {
     const home = tempDir("opi-remote-env-");
     const result = runInit(home, [
       "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
@@ -97,65 +157,7 @@ describe("flair init --agent-id refuses the operator identity before the agent k
     expectRefused(home, result, "operator-c");
   });
 
-  test("remote provisioning: the provisioned default operator id wins over FLAIR_ADMIN_USER and is refused", () => {
-    const home = tempDir("opi-remote-provision-");
-    // The provisioning leg packs this root, so it must hold every entry the
-    // deploy tarball lists.
-    const root = join(home, "root");
-    mkdirSync(join(root, "dist"), { recursive: true });
-    mkdirSync(join(root, "schemas"), { recursive: true });
-    for (const name of ["config.yaml", "package.json", "LICENSE", "README.md", "SECURITY.md"]) {
-      writeFileSync(join(root, name), "");
-    }
-    const result = runInit(home, [
-      "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
-      "--force", "--cluster-admin-user", "cluster-admin", "--cluster-admin-pass", "fixture-cluster-pass",
-      "--agent-id", "admin",
-      "--keys-dir", join(home, "keys"), "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
-    ], { FLAIR_ADMIN_USER: "operator-z", FIXTURE_LIST_USERS: JSON.stringify([
-      { username: "cluster-admin", role: { permission: { super_user: false } } },
-    ]) }, root);
-    const out = result.stdout + result.stderr;
-    expect(result.status, out).not.toBe(0);
-    expect(out).toContain('"admin" is the operator identity');
-    expect(out).toContain("Choose another --agent-id");
-    // Provisioning wrote a secret and deployed before this preflight; what it
-    // must not have done is create the agent key or insert the Agent row.
-    expect(existsSync(join(home, "keys"))).toBe(false);
-    const requests = recordedRequests(home);
-    const bodies = requests.map((r) => (typeof r.body === "string" ? JSON.parse(r.body) : null)).filter(Boolean);
-    expect(bodies.some((b: any) => b.operation === "deploy_component")).toBe(true);
-    expect(bodies.some((b: any) => b.table === "Agent")).toBe(false);
-  }, 120_000);
-
-  test("remote provisioning: an existing super_user cluster admin is the operator and its id is refused", () => {
-    const home = tempDir("opi-remote-provision-superuser-");
-    const root = join(home, "root");
-    mkdirSync(join(root, "dist"), { recursive: true });
-    mkdirSync(join(root, "schemas"), { recursive: true });
-    for (const name of ["config.yaml", "package.json", "LICENSE", "README.md", "SECURITY.md"]) {
-      writeFileSync(join(root, name), "");
-    }
-    const result = runInit(home, [
-      "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
-      "--force", "--cluster-admin-user", "cluster-admin", "--cluster-admin-pass", "fixture-cluster-pass",
-      "--agent-id", "cluster-admin",
-      "--keys-dir", join(home, "keys"), "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
-    ], { FIXTURE_LIST_USERS: JSON.stringify([
-      { username: "cluster-admin", role: { permission: { super_user: true } } },
-    ]) }, root);
-    const out = result.stdout + result.stderr;
-    expect(result.status, out).not.toBe(0);
-    expect(out).toContain('"cluster-admin" is the operator identity');
-    expect(out).toContain("Choose another --agent-id");
-    expect(existsSync(join(home, "keys"))).toBe(false);
-    const bodies = recordedRequests(home).map((r) => (typeof r.body === "string" ? JSON.parse(r.body) : null)).filter(Boolean);
-    expect(bodies.some((b: any) => b.operation === "deploy_component")).toBe(true);
-    expect(bodies.some((b: any) => b.operation === "add_user" && b.username === "admin")).toBe(false);
-    expect(bodies.some((b: any) => b.table === "Agent")).toBe(false);
-  }, 120_000);
-
-  test("local init: the default operator id is refused", () => {
+  test("local init: the default administrator id is refused", () => {
     const home = tempDir("opi-local-");
     const result = runInit(home, [
       "init", "--agent-id", "admin", "--data-dir", join(home, "data"), "--keys-dir", join(home, "keys"),
@@ -171,6 +173,6 @@ describe("flair init --agent-id refuses the operator identity before the agent k
       "--skip-start", "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
     ]);
     const out = result.stdout + result.stderr;
-    expect(out).not.toContain("is the operator identity");
+    expect(out).not.toContain("administrator identity for this cluster");
   }, 60_000);
 });

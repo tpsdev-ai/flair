@@ -13,5 +13,7 @@
   24h writes as "unknown", and neither table displays `usageCount`;
   `flair quality` reports no citation rate or quiet verdict for those rows.
 
-  `flair init --agent-id` refuses an id equal to the operator identity before it
-  writes a key or registers the agent.
+  `flair init --agent-id` refuses an id that names an administrator identity
+  for the cluster — the default administrator name, the cluster administrator
+  on the provisioning path, or the administrator name configured for an
+  already-running instance — before it writes a key or registers the agent.

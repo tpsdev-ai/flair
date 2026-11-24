@@ -275,16 +275,12 @@ async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, ad
 }
 
 /**
- * Refuse an `--agent-id` that is the operator identity, before any key or
- * Agent row is written. The skill seed refuses this id as well, but init
- * registers the agent first, so without this preflight its refusal lands after
- * both writes. `operator` is the EFFECTIVE Basic-auth administrator username
- * for this run (local and newly provisioned remote: DEFAULT_ADMIN_USER; an
- * existing remote: --admin-user, then FLAIR_ADMIN_USER, then the default).
+ * Refuse an `--agent-id` that names an administrator identity for this cluster,
+ * before any key or Agent write.
  */
-function refuseOperatorAgentId(agentId: string | undefined, operator: string): void {
-  if (!agentId || agentId !== operator) return;
-  console.error(`Error: --agent-id "${agentId}" is the operator identity for this instance (the Basic-auth administrator username).`);
+function refuseOperatorAgentId(agentId: string | undefined, administratorNames: string[]): void {
+  if (!agentId || !administratorNames.includes(agentId)) return;
+  console.error(`Error: --agent-id "${agentId}" is an administrator identity for this cluster.`);
   console.error("  Choose another --agent-id.");
   process.exit(1);
 }
@@ -403,10 +399,13 @@ addAdminPassOptions(
       const clusterAdminPass = opts.clusterAdminPass || process.env.FLAIR_CLUSTER_ADMIN_PASS;
       let flairAdminPass = opts.flairAdminPass || process.env.FLAIR_ADMIN_PASS;
       let didProvision = false;
-      let provisionedPrincipal: { adminUser: string; adminPass: string } | null = null;
 
       if (clusterAdminUser && clusterAdminPass) {
         // ── New provisioning path: deploy Flair to Fabric, wait, provision super_user ──
+        // Provisioning either reuses an existing super_user cluster admin or
+        // creates DEFAULT_ADMIN_USER, so both names are known before
+        // provisionFabric runs. Refuse either one here, before any write.
+        refuseOperatorAgentId(agentId, [clusterAdminUser, DEFAULT_ADMIN_USER]);
         if (!opts.force) {
           console.error("Error: --force is required with --target/--ops-target (remote init provisions a live Fabric instance)");
           console.error("  Pass --force to confirm this is intended.");
@@ -426,29 +425,26 @@ addAdminPassOptions(
         console.log(`Admin password written to ${secretPath}`);
 
         // Atomic provisioning: deploy + wait + provision user
-        const principal = await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass);
-        provisionedPrincipal = principal;
+        await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass);
         didProvision = true;
-        const opsUser = principal.adminUser;
-        const opsPass = principal.adminPass;
 
         // Hub instances (--remote) receive federation pair requests and need
         // the flair_pair_initiator role so bootstrap credentials can pass
         // platform auth before reaching the FederationPair resource handler.
         if (opts.remote) {
-          await ensureFlairPairInitiatorRole(opsUrl, opsUser, opsPass);
+          await ensureFlairPairInitiatorRole(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
         }
 
         // Every flair instance has agents, so provision the least-privilege
         // flair_agent role (idempotent, harmless until a user is assigned to it).
-        await ensureFlairAgentRole(opsUrl, opsUser, opsPass);
+        await ensureFlairAgentRole(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
         // THE FLIP (auth-rbac): provision the shared least-privilege flair-agent user.
         // This ACTIVATES the gate's per-agent de-elevation (verified non-admin agents
         // resolve to flair-agent instead of admin super_user). Safe now: #487 gave
         // every agent-facing resource its own allow* + resolveAgentAuth, so they no
         // longer rely on the admin super_user bypass. The gate also falls back to
         // admin if this user is ever absent, so de-elevation degrades gracefully.
-        await ensureFlairAgentUser(opsUrl, opsUser, opsPass);
+        await ensureFlairAgentUser(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
       } else {
         // ── Existing behavior: --admin-pass required for already-running Flair ──
         if (!opts.adminPass) {
@@ -466,13 +462,11 @@ addAdminPassOptions(
       }
 
       // flair#1345: only the already-running-instance leg honors --admin-user /
-      // FLAIR_ADMIN_USER — the provisioning leg authenticates as the principal
-      // provisionFabric reports: the cluster administrator when it was already a
-      // super_user, otherwise the DEFAULT_ADMIN_USER it created.
-      const adminUser = didProvision ? provisionedPrincipal!.adminUser : resolveAdminUser(opts.adminUser);
-      const adminPass = didProvision ? provisionedPrincipal!.adminPass : flairAdminPass;
-      refuseOperatorAgentId(agentId, adminUser);
-      const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+      // FLAIR_ADMIN_USER — the provisioning leg just CREATED the superuser as
+      // DEFAULT_ADMIN_USER via provisionFabric, so that name is ground truth.
+      const adminUser = didProvision ? DEFAULT_ADMIN_USER : resolveAdminUser(opts.adminUser);
+      if (!didProvision) refuseOperatorAgentId(agentId, [adminUser]);
+      const auth = `Basic ${Buffer.from(`${adminUser}:${flairAdminPass}`).toString("base64")}`;
       const role = opts.remote ? "hub" : undefined;
 
       // Generate or reuse keypair (only if --agent-id provided, or --remote needs
@@ -496,7 +490,7 @@ addAdminPassOptions(
             opsUrl,
             { instanceId, publicKey },
             adminUser,
-            adminPass,
+            flairAdminPass,
           );
         } catch (err: any) {
           // A refusal (two rows) or an unreachable ops API — both are this
@@ -542,7 +536,7 @@ addAdminPassOptions(
 
           // Seed agent via remote ops API
           console.log(`Seeding agent '${agentId}' on ${baseUrl}...`);
-          await seedAgentWithLocalHome(opsUrl, agentId, pubKeyB64url, adminUser, adminPass);
+          await seedAgentWithLocalHome(opsUrl, agentId, pubKeyB64url, adminUser, flairAdminPass);
           console.log(`Agent '${agentId}' registered on remote instance ✓`);
         } else {
           // No agentId -- generate throwaway keypair for FederationInstance row
@@ -557,7 +551,7 @@ addAdminPassOptions(
 
       // flair#2141 S2 — seed the org-wide using-flair skill on the remote
       // instance, as the operator. Idempotent; a refusal fails this run.
-      await seedUsingFlairSkillViaRest(baseUrl, adminUser, adminPass);
+      await seedUsingFlairSkillViaRest(baseUrl, adminUser, flairAdminPass);
 
       // Verify connectivity
       if (didProvision) {
@@ -591,9 +585,7 @@ addAdminPassOptions(
         const displayTarget = target || opsTarget;
         console.log(`\n✓ Flair hub deployed to ${displayTarget}`);
         console.log(`  Component: flair@${flavor}`);
-        console.log(`  Admin user: ${adminUser}` + (provisionedPrincipal?.adminUser === DEFAULT_ADMIN_USER
-          ? ` (pass written to ${join(resolveHome(), ".tps", "secrets", "flair-fabric-hdb")})`
-          : " (the existing super_user; its password is the one supplied for it)"));
+        console.log(`  Admin user: ${adminUser} (pass written to ${join(resolveHome(), ".tps", "secrets", "flair-fabric-hdb")})`);
         if (instanceId) console.log(`  Instance: ${instanceId} (role=${role})`);
         console.log(`  Federation: ready — run \`flair federation token\` to mint a pairing token`);
       } else {
@@ -610,7 +602,7 @@ addAdminPassOptions(
     // ── Local init (full one-command setup) ──
     // Local bootstrap always creates the operator as DEFAULT_ADMIN_USER, so the
     // check runs here, before any key or Agent write.
-    refuseOperatorAgentId(agentId, DEFAULT_ADMIN_USER);
+    refuseOperatorAgentId(agentId, [DEFAULT_ADMIN_USER]);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     // Resolve ONCE, here: the operator means "relative to my shell's cwd", but
     // Harper is spawned with cwd = the flair package directory, so a raw
