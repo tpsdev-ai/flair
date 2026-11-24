@@ -55,28 +55,29 @@ cat ~/.flair/data/log/hdb.log | tail -50     # Harper ≤ 5.1 only (see below)
 cat ~/.flair/data/log/system.log | tail -50   # Harper 5.2+ (live log)
 
 # Check logs (Linux)
-journalctl --user -u flair --since "10 minutes ago"
+tail -50 ~/.flair/data/log/system.log
 ```
 
 ### "Semantic search DEGRADED — embeddings not loaded"
 
 **Symptoms:** `flair doctor` or `flair init` reports `Semantic search DEGRADED — embeddings not loaded; recall-by-meaning will NOT work.` A paraphrase search doesn't recall a memory it should match by meaning; search only finds exact keyword overlaps.
 
-**Cause:** The in-process embeddings component (`harper-fabric-embeddings` / the nomic model) failed to initialize, so `SemanticSearch` fell back to a keyword-only scan. The most common cause on a fresh box is a **root-owned global install**: `sudo npm install -g @tpsdev-ai/flair` makes the package directory owned by root, but Harper runs as your user and gets `EACCES` when the embeddings component tries to download/symlink the model file under that package.
+**Cause:** The in-process embeddings component failed to initialize. Models download to `<data-dir>/models` (default `~/.flair/data/models`), or `FLAIR_MODELS_DIR` when set; check that directory's permissions and the error from `flair doctor`.
 
-**Fix — reinstall without sudo (recommended):**
+**If the installed native dependencies are missing, reinstall:**
 ```bash
-# Use a user-writable npm prefix so the package dir is yours (see README Quick Start)
+npm uninstall -g @tpsdev-ai/flair             # use the original prefix; a root-owned install may need sudo
 mkdir -p ~/.npm-global && npm config set prefix ~/.npm-global
 export PATH="$HOME/.npm-global/bin:$PATH"     # add to your shell rc to persist
-
-npm uninstall -g @tpsdev-ai/flair             # remove the root-owned copy (may need sudo to remove it)
 npm install -g @tpsdev-ai/flair               # reinstall, no sudo
+flair init                                     # on macOS, repoint an eligible launchd plist
 flair restart
-flair doctor                                  # should now report semantic search operational
+flair doctor
 ```
 
-**Other causes:** a missing native llama.cpp addon for your platform, or a corrupted/partial model download. `flair doctor` prints the underlying init error; `flair reembed` re-downloads the model and regenerates embeddings once the component loads.
+On macOS, check whether `flair init` reports that it re-pointed the plist; if it refused, follow the remedy it prints before restarting.
+
+**Other causes:** a missing native llama.cpp addon for your platform, or a corrupted/partial model download. `flair doctor` prints the underlying init error. Restart Flair to retry model initialization, then run `FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair reembed` to regenerate stored embeddings. Each affected agent needs its local signing key.
 
 **HuggingFace outage:** the model normally resolves from HuggingFace (`nomic-ai/nomic-embed-text-v1.5-GGUF`). If HF is down or 403/429-ing, point `FLAIR_MODELS_DIR` at a directory containing your own copy of `nomic-embed-text-v1.5.Q4_K_M.gguf` instead of waiting it out:
 ```bash
@@ -91,17 +92,20 @@ flair restart
 ```
 The `ci-models` release above is a first-party mirror of the same file (public, no auth required) that flair's own CI falls back to for the same reason — same-origin with GitHub, no dependency on HF's availability. Always verify the sha256 against the value printed here (or in `scripts/ci/model-checksums.txt` in the repo) before pointing Harper at a manually-downloaded file.
 
-### "Embeddings: hash-fallback (512-dim)"
+### "Embeddings hash-512d:N"
 
-**Symptoms:** `flair status` shows hash-fallback instead of nomic. Search returns poor results.
+**Symptoms:** `flair status` lists `hash-512d:N` under `Embeddings`. Search returns poor results.
 
 **Cause:** The nomic-embed-text model failed to load. Usually a missing native binary or corrupted model file.
 
 **Fix:**
 ```bash
 flair doctor    # shows the specific error
-flair reembed   # re-downloads model and regenerates embeddings
+flair restart  # retry model initialization
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair reembed --stale-only # regenerate stale embeddings across agents
 ```
+
+An agent without a local signing key is skipped; check the command output for skipped agents. One run reads at most 100,000 memories and does not page past them, so on a larger store some stale rows are not repaired ([#3086](https://github.com/tpsdev-ai/flair/issues/3086)).
 
 If `flair doctor` shows a native addon error:
 ```bash
@@ -122,7 +126,7 @@ flair restart
 **Fix:**
 ```bash
 # Verify the agent exists
-flair agent list
+flair agent list --admin-pass-file ~/.flair/admin-pass
 
 # Re-register the agent's public key
 flair agent rotate-key <agent-id>
@@ -184,7 +188,7 @@ remedies, and the wrong one loses a key.
 
 ```bash
 # Is this id an agent, or a federation instance?
-flair agent list
+flair agent list --admin-pass-file ~/.flair/admin-pass
 flair federation status
 
 # If it IS an agent and the file is corrupt, re-register a fresh keypair:
@@ -209,7 +213,6 @@ flair start
 
 # If it's another application, use a different port
 flair init --port 29926
-# Or edit ~/.flair/config.yaml and restart
 ```
 
 ### MCP server can't connect
@@ -225,7 +228,7 @@ flair status
 curl http://localhost:19926/Health
 
 # Is the agent registered?
-flair agent list
+flair agent list --admin-pass-file ~/.flair/admin-pass
 ```
 
 **Common fixes:**
@@ -238,7 +241,7 @@ flair agent list
 **Symptoms:** You wrote a memory but search doesn't find it.
 
 **Possible causes:**
-1. **Hash-fallback embeddings:** Check `flair status` — if embeddings are in hash mode, semantic search won't work properly. Fix with `flair reembed`.
+1. **Hash-fallback embeddings:** Check `flair status` — if embeddings are in hash mode, semantic search won't work properly. Restart to retry model initialization, then run `FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair reembed --stale-only` (requires each affected agent's local signing key).
 2. **Content safety flags:** The memory might have been flagged. Search for it directly: `flair memory list --agent <id>`.
 3. **`visibility: private`:** Only its author can find a `private` memory. This is the most common cause when one agent wrote the memory and another is searching for it, because **`private` is what a bare write lands on**: visibility defaults from durability (`permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private`), and a write with no `--durability` is `standard`. Check what the memory landed on with `flair memory list --agent <author> --json` (the table view doesn't show visibility, the JSON records do), then either search as its author, or rewrite it with `--visibility shared` so every agent on the instance can find it (no grant needed — non-private reads are open within the instance).
 4. **Dedup threshold:** If the content is very similar to an existing memory, it may have been deduplicated. Check with `flair memory list`.

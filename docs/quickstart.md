@@ -6,15 +6,15 @@ From zero to a persistent agent memory in five minutes.
 
 ## 0. Prerequisites
 
-**Node.js 22 or newer.** No Docker, no database to install, no API keys — Flair runs in a single process and computes embeddings locally.
+**Node.js `^22.18.0 || >=24.0.0`.** No Docker, no database to install, no API keys — Flair runs in a single process and computes embeddings locally.
 
 ```bash
-node --version   # v22.x.x or newer
+node --version   # v22.18.x or later 22.x, or v24+
 ```
 
 Need it? [nodejs.org](https://nodejs.org/), `nvm install 22`, or `brew install node`.
 
-**A user-writable npm global prefix.** Do not install Flair with `sudo`. A root-owned install cannot write the embedding model into its own package directory, and semantic search silently falls back to keyword-only matching. `nvm` gives you a user-owned prefix already; otherwise:
+**A user-writable npm global prefix** lets you install without sudo. The model downloads to `<data-dir>/models` (default `~/.flair/data/models`), or `FLAIR_MODELS_DIR` when set. `nvm` gives you a user-owned prefix already; otherwise:
 
 ```bash
 mkdir -p ~/.npm-global
@@ -44,9 +44,9 @@ First run does six things:
 
 1. Installs the embedded Harper memory store into `~/.flair/data/`.
 2. Downloads the local embedding model — about 80 MB, first run only.
-3. Starts Flair as a launchd / systemd service on port 19926.
+3. Starts Flair directly on port 19926. On macOS it also writes a launchd plist; on Linux it writes no systemd unit.
 4. Generates the agent's Ed25519 keypair in `~/.flair/keys/` and registers it.
-5. Wires every MCP client it detects — Claude Code, Cursor, Codex CLI, Gemini CLI — to `npx -y @tpsdev-ai/flair-mcp`, then smoke-tests it. `--no-mcp` skips this.
+5. Attempts to wire detected clients — Claude Code, Cursor, Codex CLI, Gemini CLI, Antigravity, and pi (a native extension) — and may run an MCP smoke test. `--no-mcp` skips wiring.
 6. Opens a short **soul wizard** so your agent knows who it is.
 
 It also saves the supplied or generated Harper admin password to `~/.flair/admin-pass` (mode 0600). Read the file when a command needs the password, and prefer `--admin-pass-file ~/.flair/admin-pass` over pasting it into a command line.
@@ -66,7 +66,7 @@ The soul wizard offers a few shapes:
      (s) Skip — set up later; `flair doctor` will nudge
 ```
 
-Pick the template that matches how you'll use the agent. Edit or replace any entry later with `flair soul set`. The wizard is skipped automatically in a non-interactive shell, and by `--skip-soul`.
+Pick the template that matches how you'll use the agent. Edit or replace any entry later with `flair soul set --admin-pass-file ~/.flair/admin-pass`. The wizard is skipped automatically in a non-interactive shell, and by `--skip-soul`.
 
 ## 3. Confirm it's running
 
@@ -79,8 +79,8 @@ Flair vX.Y.Z — ✓ running  PID 12345 · uptime 0m
   URL            http://127.0.0.1:19926
 
 Memory
-  Total          0
-  Durability     permanent:0 · persistent:0 · standard:0 · ephemeral:0
+  Total          1
+  Durability     permanent:0 · persistent:1 · standard:0 · ephemeral:0
   Archived       0
 
 Agents
@@ -100,9 +100,9 @@ Disk
   ✓ all checks passing
 ```
 
-You will also see a **Soul** section if you completed the wizard in step 2.
+The initial memory is the seeded `using-flair` skill. You will also see a **Soul** section if you completed the wizard in step 2.
 
-`✓` means healthy. `⚠` means something is worth looking at, and the warning names the command that fixes it. For `✗ unreachable`, see [troubleshooting.md](troubleshooting.md).
+`✓` means healthy. `⚠` means something is worth looking at, and the warning names the command that fixes it. For `🔴 unreachable`, see [troubleshooting.md](troubleshooting.md).
 
 ## 4. Write your first memory
 
@@ -124,7 +124,6 @@ Flair embedded the text locally on write. No network calls.
 ### Task summaries
 Use `flair memory write-task-summary --agent local --outcome merged --summary "Finished the task"` to save a persistent task summary and print its memory id.
 The optional `--ref <ref>` accepts a task, issue, or PR reference; omitted references use `unreferenced`. Outcomes are `merged`, `rejected`, or `abandoned`.
-Existing `--beads` callers remain supported as a deprecated alias; `--ref` takes precedence.
 
 ### Who can read it
 
@@ -164,14 +163,14 @@ flair search --agent local "native addon loading in sandboxed runtimes"
 
 ```
   Harper v5 sandbox blocks node:module but process.dlopen works
-  ( 2026-07-28 · standard · 100% )
+  ( 2026-07-28 · standard · <score>% )
 ```
 
-You searched for a concept, not the keywords. The line under each hit is its creation date, durability tier, and rank score.
+The seeded `using-flair` skill can also appear. The line under each hit is its creation date, durability tier, and score; scores vary.
 
-> **When stdout is not a terminal** — piped to another command, captured in a script, or run in CI — the same `flair search` command emits a JSON array instead of the formatted prose above. Each hit is an object with `id`, `text`, `createdAt`, `durability`, and `_score` fields. Add `--explain` to include an `_explain` ranking breakdown on each hit. Use `flair search --json` to force JSON output even in a terminal, or `flair memory search` for the raw JSON form in all contexts.
+> **When stdout is not a terminal** — piped to another command, captured in a script, or run in CI — the same `flair search` command emits a JSON array instead of the formatted prose above. Each hit is an object with `id`, `content`, `createdAt`, `durability`, and `_score` fields. Add `--explain` to include an `_explain` ranking breakdown on each hit. Use `flair search --json` to force JSON output even in a terminal, or `flair memory search` for the raw JSON form in all contexts.
 
-> The percentage is a **rank-fusion score, not a similarity**. It is normalized so the top result is always near 100%. Read it as ordering within these results, never as confidence that the match is good.
+> By default, the percentage is semantic similarity plus a small keyword-match boost. Hybrid search orders results by fused rank, so the first result need not have the highest percentage. It is not a probability that the memory answers the question.
 
 Add `--explain` to see the ranking inputs per hit — the raw score, the composite score under `--scoring composite`, and the record's durability, age and usage count. When output is JSON (`--json`, or any time stdout is not a terminal) the same breakdown arrives as an `_explain` object on each hit, so scripts get it too. Use `--limit`, `--tag`, `--since 7d` to narrow the search. `flair memory search` runs the same query but always prints raw JSON — use it when piping to a script.
 
@@ -211,6 +210,8 @@ Soul entries and relevant memories, in one block sized to a token budget. Paste 
 
 ## If you change your mind
 
+On macOS after a fresh init, run `flair restart` before `flair stop` to hand the directly started process to launchd ([#3067](https://github.com/tpsdev-ai/flair/issues/3067)).
+
 ```bash
 flair stop              # stop the service, keep data
 flair restart           # restart
@@ -218,5 +219,3 @@ flair uninstall         # remove the service, keep data and keys
 flair uninstall --purge # remove data, keys, secrets, schedulers, and client wiring
                         # (the npm package is left; `npm uninstall -g @tpsdev-ai/flair`)
 ```
-
-All reversible. Your memories aren't locked in.

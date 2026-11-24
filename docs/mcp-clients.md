@@ -22,7 +22,7 @@ created (`local` if you followed the quickstart unchanged).
 
 > **`flair: command not found` right after installing?** Your npm global prefix's bin dir isn't on PATH (common with a user prefix like `~/.npm-global`) — run `export PATH="$(npm prefix -g)/bin:$PATH"`, persist that line in your shell profile, and `flair doctor` will print the exact line for your shell any time.
 
-Flair runs as a local server at `http://127.0.0.1:19926` by default. The MCP server this page configures connects to it on demand via Ed25519-signed requests; nothing leaves your machine unless you explicitly route to a remote Flair instance.
+Flair listens on `127.0.0.1:19926` by default; the stdio client's default URL is `http://localhost:19926`. The MCP server this page configures connects to it on demand, signing with an Ed25519 key when one resolves and otherwise using configured administrator Basic credentials when available; nothing leaves your machine unless you explicitly route to a remote Flair instance.
 
 ## Two MCP paths
 
@@ -231,7 +231,7 @@ FLAIR_AGENT_ID = "my-project"
 
 For project-scoped trust (per Codex's MCP guide), the same block in `.codex/config.toml` at the project root.
 
-Restart your Codex CLI session and the `flair_*` tools become available to the agent.
+Restart your Codex CLI session and the Flair MCP tools become available to the agent.
 
 #### Auto-recall on session start (optional hook)
 
@@ -342,10 +342,14 @@ The following structured-payload details describe the HTTP bootstrap response an
 | Env var | Default | Notes |
 |---|---|---|
 | `FLAIR_AGENT_ID` | (none — required) | Must match `flair agent add <id>` |
-| `FLAIR_URL` | `http://127.0.0.1:19926` | Override for remote Flair instances |
+| `FLAIR_URL` | `http://localhost:19926` | Override for remote Flair instances |
 | `FLAIR_KEY_PATH` | `~/.flair/keys/<agent>.key` | Path to the Ed25519 private key; `flair agent add` creates a raw 32-byte seed. |
-
-The MCP server has no client-side flags beyond these env vars; everything else (timeouts, dedup thresholds, error classification) is opinionated defaults from the underlying [`@tpsdev-ai/flair-client`](../packages/flair-client) package.
+| `FLAIR_CLIENT` | (unset) | Claimed client label sent with requests |
+| `FLAIR_KEY_DIR` | `~/.flair/keys` | Directory searched for agent keys |
+| `FLAIR_ADMIN_USER` / `FLAIR_ADMIN_PASSWORD` | (unset) | Basic administrator credentials used when no signing key resolves |
+| `FLAIR_MCP_PARENT_POLL_MS` | `5000` | Parent-liveness poll interval; accepts 100–30000 ms |
+| `FLAIR_PRESENCE_HEARTBEAT_MS` | `180000` | Presence write interval; accepts 30000–900000 ms |
+| `FLAIR_PRESENCE_TIMEOUT_MS` | `3000` | Presence write timeout; accepts 500–10000 ms |
 
 ---
 
@@ -379,7 +383,7 @@ Future MCP-capable agent CLIs (and there are more landing every month) will work
 
 **"FLAIR_AGENT_ID is required" on startup.** Set it in the MCP server's `env` block (per snippets above). The CLI's own env doesn't propagate to the spawned MCP subprocess unless declared.
 
-**"connection_error: could not reach Flair at http://127.0.0.1:19926".** The Flair server isn't running. Run `flair status` to check; `flair start` to bring it up.
+**"connection_error (retriable): could not reach Flair at http://localhost:19926. Is it running?".** The client could not reach its configured URL. Check the URL and connectivity, then run `flair status`; use `flair start` if the instance is stopped.
 
 **"auth_error: …" on every call.** Read the reported cause. For `unknown_agent`, no Agent row exists: run `flair agent add <id>`. For `invalid_signature`, the signature did not verify against the stored public key. Check the signing key and the signed request first. For a confirmed key mismatch, `agent add` refuses a well-formed existing row. On the Flair host, `flair agent rotate-key <id>` writes a new private key on that host. That file must be on the client host before the MCP process can sign with it. `FLAIR_KEY_PATH` only names a path on the signing host; point it at that local file when the key is not in the default location, then restart the MCP process. `flair agent remove <id>` and then add again is the other path for a well-formed row. `flair agent remove` tries to delete that agent's Memory and Soul rows. Other auth errors follow the cause they name. A by-id 404 is fail-closed ownership, not an existence signal — [Hosted Flair auth](integrations.md#hosted-flair-auth--your-agent-got-a-404).
 

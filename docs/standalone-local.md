@@ -8,11 +8,11 @@ If you're starting from zero, begin with the [quickstart](quickstart.md). This p
 
 ## Install & deploy
 
-**Prerequisites:** Node.js 22+ (LTS or current). No Docker, no database, no API keys.
+**Prerequisites:** Node.js `^22.18.0 || >=24.0.0`. No Docker, no database, no API keys.
 
 ### 1. Install the CLI
 
-Use a **user-writable npm prefix** so the package directory is owned by you. A root-owned install (`sudo npm install -g`) breaks the embeddings component at runtime:
+Use a **user-writable npm prefix** to install without sudo:
 
 ```bash
 mkdir -p ~/.npm-global
@@ -22,34 +22,34 @@ export PATH="$HOME/.npm-global/bin:$PATH"  # add to your shell rc to persist
 npm install -g @tpsdev-ai/flair
 ```
 
-> ⚠️ **Never `sudo npm install -g @tpsdev-ai/flair`.** A root-owned install makes the package directory unwritable by the user Harper runs as. At runtime the embeddings component gets `EACCES` and semantic search silently degrades to keyword-only. `flair init` and `flair doctor` will warn you loudly.
+The embedding model downloads to `<data-dir>/models` (default `~/.flair/data/models`), or `FLAIR_MODELS_DIR` when set.
 
 ### 2. Bootstrap the instance
 
 ```bash
-flair init
+flair init --agent myagent
 ```
 
-`flair init` does everything in one step:
+`flair init --agent myagent`:
 
 1. Installs the embedded Harper (memory store) into `~/.flair/data/`.
 2. Downloads the local embedding model (~80 MB — first run only).
-3. Starts Flair as a launchd / systemd service on port `19926`.
-4. Creates a default agent identity (Ed25519 keypair, stored at `~/.flair/keys/<agent>.key`).
-5. Runs a smoke test to confirm semantic search works.
+3. Starts Flair directly on port `19926`; on macOS it also writes a launchd plist. Linux gets no systemd unit.
+4. Creates or reuses the named agent identity (Ed25519 keypair, stored at `~/.flair/keys/<agent>.key`).
+5. Checks semantic search and may run an MCP smoke test when wiring MCP clients.
 
 Useful flags:
 
 ```bash
 flair init --agent mybot           # name the agent (--agent-id also works)
-flair init --client claude-code    # wire one specific MCP client
-flair init --no-mcp                # instance + agent only, skip MCP wiring
-flair init --skip-smoke            # skip the MCP smoke test
+flair init --agent myagent --client claude-code    # wire one specific MCP client
+flair init --agent myagent --no-mcp                # instance + agent only, skip MCP wiring
+flair init --agent myagent --skip-smoke            # skip the MCP smoke test
 flair init --skip-start            # do not start Harper; with --agent, defer registration
 flair init --port 8000             # use a non-default port
 ```
 
-> **Non-interactive shell:** bare `flair init` with no `--agent` bootstraps the instance only and skips agent registration, MCP client wiring, and the smoke test. Pass flags explicitly: `flair init --agent <id> --client all`.
+> Bare `flair init` with no `--agent` bootstraps the instance only and skips agent registration, MCP client wiring, and the smoke test. Pass flags explicitly: `flair init --agent <id> --client all`.
 
 ### 3. Lifecycle management
 
@@ -62,11 +62,13 @@ flair uninstall --purge   # remove data, keys, secrets, schedulers, and client w
                           # (the npm package is left; `npm uninstall -g @tpsdev-ai/flair`)
 ```
 
-On macOS the service is a launchd plist at `~/Library/LaunchAgents/ai.tpsdev.flair.plist`. On Linux it is a systemd unit at `~/.config/systemd/user/flair.service`. Both auto-start on login/boot and restart on crash.
+On macOS init writes `~/Library/LaunchAgents/ai.tpsdev.flair.<hash>.plist`. Once loaded, launchd starts it on login and restarts it on crash. Linux init writes no systemd unit.
+
+On macOS after a fresh init, run `flair restart` before `flair stop` to hand the directly started process to launchd ([#3067](https://github.com/tpsdev-ai/flair/issues/3067)).
 
 ### Docker
 
-Flair does not have a foreground daemon mode today (`flair start` has no `--foreground` option and `flair init` always installs a service manager unit). There is no supported Docker recipe — run Flair directly on the host or use [Harper Fabric](https://www.harperdb.io/) for managed hosting.
+Flair does not have a foreground daemon mode today; `flair start` detaches Harper. There is no supported Docker recipe — run Flair directly on the host or use [Harper Fabric](https://www.harperdb.io/) for managed hosting.
 
 Embeddings run on CPU in any containerized environment (no Metal acceleration). Performance is acceptable for small-to-medium memory stores (< 10K memories).
 
@@ -124,16 +126,16 @@ Agents authenticate with **Ed25519 per-agent keys**:
 flair agent add myagent
 
 # List registered agents
-flair agent list
+flair agent list --admin-pass-file ~/.flair/admin-pass
 ```
 
-Every request to Flair is signed with the agent's private key. The signed payload is `agentId:timestamp:nonce:METHOD:/path` with a 30-second replay window and nonce deduplication. Unsigned requests are rejected.
+Agent requests use the agent's private key. The signed payload is `agentId:timestamp:nonce:METHOD:<path+query>` with a 30-second replay window and nonce deduplication.
 
 This guarantees **write isolation** (no agent can write as another) and identity-verified reads. Reads are intentionally more open: any verified agent on the same instance can read any other agent's non-private memories. Only `visibility: private` memories are owner-only. See [SECURITY.md](../SECURITY.md) for the full model.
 
 ### The private key
 
-- Lives at `~/.flair/keys/<agent>.key` (PKCS8 base64, mode `0600`).
+- Lives at `~/.flair/keys/<agent>.key` (raw 32-byte Ed25519 seed, mode `0600`).
 - **Stays on the host that owns the agent.** Don't copy it to another machine — register a new agent identity there.
 - **Don't check it into git.** Rotate first if compromised: `flair agent rotate-key <id>`.
 - `flair backup` excludes private keys by default. Back them up separately if you want offsite recovery.
@@ -150,10 +152,10 @@ See [secrets-and-keys.md](secrets-and-keys.md) for the full threat model and key
 flair status
 ```
 
-The **🟢** icon means everything is healthy. A **🟡** means something worth looking at; **🔴 unreachable** means the server isn't running.
+The **✓** icon means everything is healthy. A **⚠** means something worth looking at; **🔴 unreachable** means the health check failed.
 
 ```bash
-flair status --agent local     # full detail: memory counts, soul entries
+flair status --agent myagent     # full detail: memory counts, soul entries
 flair doctor                   # automated diagnosis + fix suggestions
 ```
 
@@ -165,7 +167,7 @@ flair memory add --agent myagent "Harper v5 sandbox blocks node:module but proce
 
 # Find it by meaning (not keywords)
 flair memory search --agent myagent "native addon loading in sandboxed runtimes"
-# → [0.67] Harper v5 sandbox blocks node:module but process.dlopen works
+# Prints raw JSON search results.
 ```
 
 ### Connectivity
@@ -234,7 +236,7 @@ flair backup-approval legacy-admit ~/flair-backup-20250101.json \
   --confirm-digest 3f5c...e1a9 --admin-pass-file ~/.flair/admin-pass
 
 # 3. Restore it.
-flair restore ~/flair-backup-20250101.json
+flair restore ~/flair-backup-20250101.json --admin-pass-file ~/.flair/admin-pass
 ```
 
 Approving, a confirmed legacy admission (with `--confirm-digest`) and revoking need operator credentials: the admin password, which the command checks as a super_user against this host's running Flair. It finds the operations port from `--ops-port`, `FLAIR_OPS_PORT`, the local config, or the HTTP port minus one. Approvals live in `~/.flair/approved-archives/`, which must be owned by you: its directories mode `0700` and its record and archive files mode `0600` (a private temp file left by an interrupted approval is ignored; any other entry is refused before the store creates anything). The store keeps a copy of each approved archive under its SHA-256 and a record of when and by whom it was approved. No REST route can approve, revoke, list or read it. `flair backup-approval list` shows the approvals and checks each stored copy; `flair backup-approval revoke <sha256>` withdraws one. Restore uses an approval, of either kind, only while it is unrevoked and its stored copy still hashes to the archive's digest, and it restores that stored copy.

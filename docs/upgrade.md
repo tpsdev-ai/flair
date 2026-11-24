@@ -19,7 +19,7 @@ There are two things you might be upgrading:
 ```bash
 # 1. Back up first, always
 #    --admin-pass-file keeps the secret out of ps and shell history.
-#    --output is required — the archive goes to a file, not stdout.
+#    --output is optional; default: ~/.flair/backups/flair-backup-<timestamp>.json.
 flair backup \
   --output ~/flair-backup-$(date +%Y%m%d).json \
   --admin-pass-file ~/.flair/admin-pass
@@ -304,9 +304,7 @@ Snapshotting data before upgrade...
    Pruned 1 older snapshot (keeping last 3)
 ```
 
-If you omit `--snapshot` (the default) and a data directory exists, `flair upgrade`
-prints a non-blocking recommendation instead of silently skipping it — it never
-prompts or blocks, so scripted/non-interactive upgrades are unaffected:
+When a data directory exists and no snapshot is selected, `flair upgrade` prints a recommendation:
 
 ```
 No pre-upgrade snapshot will be taken.
@@ -329,7 +327,7 @@ To capture one first: `flair snapshot create` (physical) or `flair backup` (logi
   or had indeterminate liveness has a short stop/start blip even with
   `--no-restart`; that flag controls the restart *after* the upgrade. (A native
   Harper backup operation, `get_backup`, was evaluated and rejected here — see the code comment
-  above `createDataSnapshot` in `src/cli.ts` for why: it backs up one table/schema at a
+  above `createDataSnapshot` in `src/commands/upgrade.ts` for why: it backs up one table/schema at a
   time over the running HTTP API, not the whole data directory, and would be strictly
   less complete than a plain file copy.)
 - **Failure is a hard stop when requested:** if you passed `--snapshot` and the
@@ -421,7 +419,7 @@ prove the boot-keyed re-embed actually finished. A Fabric instance that
 stayed split for days after 0.30.0 was the incident this closes.
 
 `--no-verify` skips this check together with the served-API check.
-`--verify-timeout` covers both. Token-only auth skips the stamp check
+`flair deploy --verify-timeout` covers both checks; `flair upgrade` exposes no timeout override. Token-only auth skips the stamp check
 (it needs Basic admin to read `/HealthDetail`) and says so.
 
 ### Post-deploy fleet verify
@@ -542,24 +540,23 @@ Two situations require a re-embed pass, and `flair doctor` will flag both:
   with the same embedding model, stored vectors may need to be regenerated to match
   what the new Harper build expects.
 
-`flair doctor` reports the counts:
+`flair doctor` reports a mixed embedding space as:
 
 ```
-⚠️  49 memories have hash-fallback embeddings (512-dim)
-   Current model produces 768-dim vectors
-   Run: flair reembed
+a non-current embedding model stamp was observed — the embedding leg is refused
+Reconcile to one space with: flair reembed --stale-only
 ```
 
 Fix with:
 
 ```bash
-flair reembed                 # all agents, all stale rows
-flair reembed --stale-only    # only mismatched-model-tag rows
-flair reembed --agent <id>    # scope to one agent
-flair reembed --dry-run       # show the count without writing
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair reembed # re-embed fetched rows; needs each agent's local key
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair reembed --stale-only
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair reembed --agent <id> # scope to one agent
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair reembed --agent <id> --dry-run # show the count without writing
 ```
 
-This runs in the background — the server stays available while it re-embeds. This is
+The CLI waits for the batched re-embed loop; the server stays available. This is
 also the step CI's `upgrade-smoke` job exercises directly: it upgrades a running
 instance from the latest published version to the candidate build, then runs
 `flair reembed` before asserting old memories are still searchable and new writes
@@ -575,13 +572,10 @@ if you want to see it scripted end-to-end.
   for any called-out breaking change before a major jump.
 - **Keys:** Ed25519 keypairs are version-independent. No key migration is ever needed
   between Flair versions.
-- **Config:** `~/.flair/config.yaml` format is additive — new options fall back to
-  defaults when absent, old options aren't removed out from under you.
+- **Config:** init rewrites `~/.flair/config.yaml` with `port`, `opsPort`, `opsBind`, and `httpBind`; other keys are dropped. Uninstall removes this file.
 - **Harper 5.2:** Starting with the release that pins Harper 5.2.0 (see CHANGELOG). This upgrade is **forward-only** — Harper 5.2 writes LZ4-compressed storage
-  that Harper 5.1.x cannot read. If you need to roll back, restore the pre-upgrade snapshot: `flair snapshot restore <path>` (use `flair snapshot list` to find available snapshots). Note this is the physical engine snapshot restore, distinct from `flair restore` which replays a logical JSON export and cannot recover a 5.1-incompatible data directory. Installing an older Harper version will not boot against a
-  5.2-written data directory. Flair automatically takes a snapshot when the Harper engine
-  minor version changes, so a valid snapshot will exist if you
-  upgraded via `flair upgrade`. Real snapshots for production datasets run hundreds of
+  that Harper 5.1.x cannot read. If you need to roll back, restore the pre-upgrade snapshot: `flair snapshot restore <path>` (use `flair snapshot list` to find available snapshots). Install the previous package before restoring (see [Downgrade](#downgrade)). This is the physical engine snapshot restore, distinct from `flair restore` which replays a logical JSON export and cannot recover a 5.1-incompatible data directory. Installing an older Harper version will not boot against a
+  5.2-written data directory. When upgrading Flair with an existing data directory, a Harper version change or unknown target engine forces a pre-upgrade snapshot unless `--no-engine-snapshot` is passed. Real snapshots for production datasets run hundreds of
   megabytes — plan disk capacity accordingly. Cleanup of old engine snapshots is manual;
   `flair snapshot list` shows available snapshots, and you can delete entries you no longer
   need (e.g. `rm ~/.flair/upgrade-snapshots/flair-data-<old>.tar.gz`).
@@ -595,9 +589,11 @@ If an upgrade causes problems immediately after upgrading (code-level, not data)
 npm install -g @tpsdev-ai/flair@<previous-version>
 flair restart
 
-# If data looks wrong, restore from your pre-upgrade backup
-flair restore ~/flair-backup-<date>.json
+# If data looks wrong, keep the pre-upgrade archive and its .sha256 sidecar together
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair restore ~/flair-backup-<date>.json
 ```
+
+A legacy logical backup without a `.sha256` sidecar needs [local approval](standalone-local.md#restoring-an-archive-written-before-digest-sidecars) before restore.
 
 `flair upgrade` selects automatic rollback after post-restart verification only
 when the result is neither `ok` nor `healthy-unverified` and a nonempty previous
@@ -708,22 +704,28 @@ flair#637 pre-upgrade snapshot exists for.
 #    when it ran, or list them yourself):
 flair snapshot list
 
-# 2. Restore it — this stops Flair, replaces ~/.flair/data, and restarts:
-flair snapshot restore ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz
-
-# 3. Install the previous version
+# 2. Stop the current engine, then install the previous version
+flair restart # macOS: hand a directly started instance to launchd before stopping
+flair stop
 npm install -g @tpsdev-ai/flair@<previous-version>
-flair restart
+```
+
+On macOS, continue only if `flair stop` succeeds. Move this instance's plist out of `~/Library/LaunchAgents` before restoring, and check that `lsof +D ~/.flair/data` shows no Harper process. Older restore commands can load a plist they find while stopping Flair.
+
+```bash
+# 3. Restore before starting the previous engine against the data
+FLAIR_ADMIN_PASS="${FLAIR_ADMIN_PASS:-${HDB_ADMIN_PASSWORD:-$(cat ~/.flair/admin-pass)}}" flair snapshot restore --data-dir ~/.flair/data --port <port> ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz
 
 # 4. Verify
 flair status
 flair doctor
 ```
 
-`flair snapshot restore` does the stop/replace/restart in one step (confirming before
-the destructive replace unless you pass `--yes`); the equivalent by hand is `flair
-stop && rm -rf ~/.flair/data && mkdir -p ~/.flair/data && tar -xzf
-<snapshot> -C ~/.flair/data && flair start`, in case you'd rather not use the command.
+`flair snapshot restore` confirms before replacing the data directory unless you pass `--yes`.
+
+This downgrade procedure covers the default `~/.flair/data` instance only. Older CLI releases can ignore `--data-dir` when the snapshot restore stops and restarts Flair, so it does not cover a custom data directory.
+
+On macOS, after verification, run `flair init` with the `--port` this instance uses, to recreate its launchd plist, then `flair restart` to load it.
 
 The only full rollback is restoring the pre-upgrade physical data-directory snapshot.
 `flair backup`/`restore` logically exports/imports only Agent, Memory and Soul rows

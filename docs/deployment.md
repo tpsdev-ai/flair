@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Run Flair on macOS, Linux, or Docker.
+Run Flair on macOS or Linux.
 
 ## macOS (Apple Silicon)
 
@@ -15,8 +15,8 @@ flair init
 - Download Harper and the nomic-embed-text embedding model
 - Create `~/.flair/` (config, data, keys)
 - Generate admin credentials
-- Install a launchd plist for auto-start on boot
-- Start the server
+- Write a launchd plist
+- Start the server directly
 
 ### Verify
 
@@ -27,7 +27,9 @@ flair doctor
 
 ### Auto-start
 
-`flair init` installs a launchd plist at `~/Library/LaunchAgents/ai.tpsdev.flair.plist`. Flair starts automatically on login and restarts if it crashes.
+`flair init` writes `~/Library/LaunchAgents/ai.tpsdev.flair.<hash>.plist` but starts Flair directly. Once the job is loaded, launchd starts it on login and restarts it on crash.
+
+On macOS after a fresh init, run `flair restart` before `flair stop` to hand the directly started process to launchd ([#3067](https://github.com/tpsdev-ai/flair/issues/3067)).
 
 ```bash
 # Manual control
@@ -44,7 +46,7 @@ Default port is `19926`. Override during init:
 flair init --port 8000
 ```
 
-Or edit `~/.flair/config.yaml` and restart.
+Choose the port at initial setup with `--port`. Editing `~/.flair/config.yaml` does not override Harper's saved port. Changing an existing instance also requires updating its service configuration; re-running init does not update an existing pass-file plist's port settings.
 
 ### MQTT
 
@@ -69,7 +71,7 @@ subscriptions.
 
 ### Prerequisites
 
-- Node.js >= 22
+- Node.js `^22.18.0 || >=24.0.0`
 - systemd (for auto-start)
 
 ### Install
@@ -79,7 +81,7 @@ npm install -g @tpsdev-ai/flair
 flair init
 ```
 
-Same as macOS — detects the platform and generates a systemd unit file instead of a launchd plist.
+`flair init` starts Harper directly; it writes no systemd unit.
 
 ### Verify
 
@@ -90,9 +92,14 @@ flair doctor
 
 ### Auto-start
 
-The systemd unit file is installed at `~/.config/systemd/user/flair.service`.
+For systemd auto-start, supply your own unit. The commands below assume you installed a user unit named `flair.service`.
+
+Enable that unit to start on login. To start it after reboot without a login, enable lingering for the account that owns it with `loginctl enable-linger <username>`.
 
 ```bash
+# Start on login
+systemctl --user enable flair
+
 # Manual control
 systemctl --user start flair
 systemctl --user stop flair
@@ -117,15 +124,7 @@ This runs a clean install in a container — useful for verifying the install pa
 
 ### Production Docker
 
-```dockerfile
-FROM node:22-slim
-RUN npm install -g @tpsdev-ai/flair
-RUN flair init --skip-soul
-EXPOSE 19926
-CMD ["flair", "start", "--foreground"]
-```
-
-Note: embeddings run on CPU in Docker (no Metal acceleration). Performance is acceptable for small-to-medium memory stores (< 10K memories). Thread count follows `FLAIR_EMBED_THREADS` (default `max(1, availableParallelism() − 1)`); pin it if the container CPU quota and the host you want to use disagree.
+Docker needs a foreground mode that Flair does not provide yet; `flair start` detaches Harper.
 
 ---
 
@@ -146,10 +145,9 @@ on the node — see [`docs/deploying-on-fabric.md`](deploying-on-fabric.md).
 ### SSH tunnel (simplest)
 
 ```bash
-ssh -f -N -L 19926:localhost:19926 your-server
+LOCAL_FLAIR_PORT=19927 # choose an unused local port
+ssh -f -N -o ExitOnForwardFailure=yes -L "${LOCAL_FLAIR_PORT}:localhost:19926" your-server && export FLAIR_URL="http://localhost:${LOCAL_FLAIR_PORT}"
 ```
-
-Then set `FLAIR_URL=http://localhost:19926` on the client.
 
 ### Direct network access
 
@@ -202,7 +200,7 @@ All configuration lives in `~/.flair/`:
 
 Flair reads four top-level keys from this file: `port`, `opsPort`, `opsBind`, and `httpBind`. `flair init` rewrites the file with those keys and drops anything else, including a `clustering:` or `logging:` block and any embedding-model key. Embedding threads, GPU layers, and the model directory are environment variables in the table below, not keys in this file.
 
-`clustering` and `logging` are not read from `~/.flair/config.yaml` or from `<dataDir>/harper-config.yaml` by anything in this repository, so they are not given a home here. Harper itself does read its own clustering and logging settings — from its `harperdb-config.yaml` — so configure those there, not here. Harper's generative `models:` block, when REM needs one, does belong in `<dataDir>/harper-config.yaml`. See [rem.md](rem.md).
+Configure Harper's clustering and logging in `<dataDir>/harper-config.yaml`, not `~/.flair/config.yaml`. Harper's generative `models:` block, when REM needs one, does belong in `<dataDir>/harper-config.yaml`. See [rem.md](rem.md).
 
 ```yaml
 # ~/.flair/config.yaml — only these keys are read. A later `flair init`
@@ -215,7 +213,7 @@ httpBind: 127.0.0.1    # HTTP bind host (see "Direct network access" above)
 
 ### Environment variables
 
-Set these in the Flair process environment (`~/Library/LaunchAgents/ai.tpsdev.flair.plist` on macOS, the systemd unit on Linux, the component env on Fabric).
+Set these in the Flair process environment (`~/Library/LaunchAgents/ai.tpsdev.flair.<hash>.plist` on macOS, an operator-supplied systemd unit on Linux, the component env on Fabric).
 
 | Variable | What it does | When to set it |
 |----------|--------------|----------------|
@@ -245,9 +243,13 @@ These are read by the Harper process at boot (same places as the table above: la
 # Backup all data (agents, memories, souls)
 flair backup --output ~/flair-backup-$(date +%Y%m%d).json --admin-pass-file ~/.flair/admin-pass
 
-# Restore to a fresh instance
-flair restore ~/flair-backup-20260405.json
+# Restore to an initialized instance; keep the archive's .sha256 sidecar beside it
+flair restore ~/flair-backup-20260405.json --admin-pass-file ~/.flair/admin-pass
 ```
+
+Archived agents must already exist on the target; see [restore limitations](standalone-local.md#backup--restore). Restore reports missing agents as failed and attempts the archive's Memory and Soul writes.
+
+Keep the archive and its `.sha256` sidecar together; a legacy archive without a sidecar needs [local approval](standalone-local.md#restoring-an-archive-written-before-digest-sidecars).
 
 Always backup before upgrades.
 
@@ -258,7 +260,7 @@ Concurrent deletes can cause `flair backup` to refuse publication on a count mis
 ## Uninstall
 
 ```bash
-flair uninstall           # stop the server and remove the launchd/systemd service; keep data and keys
+flair uninstall           # stop; remove the macOS launchd plist and ~/.flair/config.yaml; keep data and keys
 flair uninstall --purge   # also remove ~/.flair (data, keys, secrets), schedulers, and client wiring
 npm uninstall -g @tpsdev-ai/flair
 ```
