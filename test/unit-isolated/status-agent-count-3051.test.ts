@@ -451,7 +451,7 @@ test("the bootstrap table escapes the agent id it measured", async () => {
 });
 
 // ── An incomplete Memory scan reports unknown, never partial (flair#3082 item 2) ──
-test("a Memory scan that yields a row then throws: every per-agent value reads unknown, plain and deep", async () => {
+test("a Memory scan that yields a row then throws: every displayed per-agent value reads unknown, plain and deep", async () => {
   agentRows = [{ id: "agent-a" }];
   memoryRows = [memoryRow("m-1", "agent-a")];
   memoryScanFailure = "after";
@@ -475,7 +475,7 @@ test("a Memory scan that yields a row then throws: every per-agent value reads u
   expect(deep).not.toMatch(/agent-a\s+1\b/);
 });
 
-test("a Memory scan that throws before any row: every per-agent value reads unknown, plain and deep", async () => {
+test("a Memory scan that throws before any row: every displayed per-agent value reads unknown, plain and deep", async () => {
   agentRows = [{ id: "agent-a" }];
   memoryScanFailure = "before";
   const detail: any = await new HealthDetail().get();
