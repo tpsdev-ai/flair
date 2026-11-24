@@ -282,15 +282,19 @@ flair idp add \
 
 Discovery advertises these scope names:
 
-| Scope |
-|-------|
-| `memory:read` |
-| `memory:write` |
-| `memory:admin` |
-| `principal:read` |
-| `principal:admin` |
-| `connector:read` |
-| `connector:admin` |
+| Scope | `/mcp` tools that require it |
+|-------|------------------------------|
+| `memory:read` | `memory_search`, `memory_get`, `skill_search`, `skill_get`, `bootstrap`, `soul_get`, `attention` |
+| `memory:write` | `memory_store`, `memory_update`, `memory_delete`, `memory_basement`, `memory_restore`, `skill_store`, `flair_workspace_set`, `flair_orgevent`, `record_usage` |
+| `memory:admin` | none |
+| `principal:read` | `team_directory` |
+| `principal:admin` | `soul_set`, which then refuses the write (`soul_write_requires_operator`) |
+| `connector:read` | none |
+| `connector:admin` | none |
+
+The jwt-bearer grant above issues opaque `flair_at_` tokens, which native `/mcp` does not accept; `/mcp` accepts the access tokens from its own OAuth sign-in. For native `/mcp` tool calls, the access token must grant the tool's scope above. A missing `scope` claim grants no scope. A call missing its tool's scope returns HTTP 403 with a JSON-RPC `insufficient_scope` error naming the required scope and a `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"` challenge, before resolving the principal or running the tool. A permitted call runs with the mapped principal's authority.
+
+The `/mcp` 401 challenge names `memory:read memory:write principal:read`. Refresh preserves the scopes from sign-in; existing connectors missing a required scope must sign in again requesting it.
 
 ### JIT Provisioning
 

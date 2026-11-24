@@ -35,7 +35,7 @@ describe("embedded team_directory tools/call", () => {
 
   it("returns the published contact", async () => {
     seed();
-    const rpc = await parse(await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "team_directory", arguments: { id: "td-subject", limit: 1 } } }, { sub: "td-sub" })));
+    const rpc = await parse(await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "team_directory", arguments: { id: "td-subject", limit: 1 } } }, { sub: "td-sub", scope: "principal:read" })));
     expect(rpc.error).toBeUndefined();
     expect(rpc.result.isError).toBe(false);
     expect(rpc.result.structuredContent.entries.map((e: any) => e.agentId)).toEqual(["td-subject"]);
@@ -45,7 +45,7 @@ describe("embedded team_directory tools/call", () => {
 
   it("returns the tool error for a human reader", async () => {
     seed("human");
-    const rpc = await parse(await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "team_directory", arguments: {} } }, { sub: "td-sub" })));
+    const rpc = await parse(await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "team_directory", arguments: {} } }, { sub: "td-sub", scope: "principal:read" })));
     expect(rpc.error).toBeUndefined();
     expect(rpc.result.isError).toBe(true);
     expect(rpc.result.structuredContent).toEqual({ error: "team_directory_reader_not_active", status: 403 });
@@ -54,7 +54,7 @@ describe("embedded team_directory tools/call", () => {
 
   it("rejects a string limit before dispatch", async () => {
     seed();
-    const rpc = await parse(await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "team_directory", arguments: { limit: "1" } } }, { sub: "td-sub" })));
+    const rpc = await parse(await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "team_directory", arguments: { limit: "1" } } }, { sub: "td-sub", scope: "principal:read" })));
     expect(rpc.error.code).toBe(-32602);
     expect(rpc.result).toBeUndefined();
   });

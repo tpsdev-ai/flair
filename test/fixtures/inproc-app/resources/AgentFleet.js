@@ -380,11 +380,13 @@ async function mcpToolViaImpl(agentId, tool, args, isAdmin) {
 // The only production layer not in the loop is `withMCPAuth`'s RS256 JWT
 // verification itself (an @harperfast/oauth concern with its own coverage);
 // everything from `request.mcp.sub` down is the shipped code path.
-async function mcpRpc(sub, rpc, clientId) {
+async function mcpRpc(sub, rpc, clientId, scope) {
   const { mcpHandler } = await import("../node_modules/@tpsdev-ai/flair/dist/resources/mcp-handler.js");
   const mcp = {};
   if (sub != null) mcp.sub = sub;
   if (clientId != null) mcp.client_id = clientId;
+  // flair#3076: the token's granted scope (space-separated), as withMCPAuth passes it.
+  if (scope != null) mcp.scope = scope;
   const res = await mcpHandler({ method: "POST", mcp, body: JSON.stringify(rpc) });
   let parsed = null;
   try { parsed = res?.body ? JSON.parse(res.body) : null; } catch { parsed = { unparseable: String(res?.body).slice(0, 400) }; }
@@ -573,7 +575,7 @@ export class AgentFleet extends Resource {
       case "mcpTool":
         return run(() => mcpToolViaImpl(body.agentId, body.tool, body.args, body.isAdmin));
       case "mcpRpc":
-        return run(() => mcpRpc(body.sub, body.rpc, body.clientId));
+        return run(() => mcpRpc(body.sub, body.rpc, body.clientId, body.scope));
       case "buildContextWith":
         return run(() => buildContextWith(body.agentId));
       case "createWithNoContext":
