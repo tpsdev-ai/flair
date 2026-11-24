@@ -435,7 +435,9 @@ function codexScanValue(fragment: string, state: CodexValueState): CodexValueSta
       if (close === -1) return { depth, inStr };
       i = close + 3;
       // TOML lets one or two quote characters sit right before the closing delimiter (`""""`, `"""""`):
-      // they are content, and the delimiter is the last three. Six in a row is not valid TOML.
+      // they are content, and the delimiter is the last three. A sixth quote right after such a closer, inside a
+      // multiline string that is already open, is not valid TOML. (An empty value written as six quotes, x = """""",
+      // opens and closes in one step and is valid; this branch only runs once a string is open.)
       const q = inStr[0]!;
       for (let n = 0; n < 2 && fragment[i] === q; n++) i++;
       if (fragment[i] === q) return null;
