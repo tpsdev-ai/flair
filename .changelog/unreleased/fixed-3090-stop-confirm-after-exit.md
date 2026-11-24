@@ -1,1 +1,3 @@
-- When stopping a directly started instance whose launchd job was not loaded, `flair stop` now re-checks launchd and classifies the instance after the recorded pid exits. That path reports success only for `not-loaded` plus `NOT_RUNNING`; other observation results exit non-zero and name both states. ([#3090](https://github.com/tpsdev-ai/flair/issues/3090))
+- **With a launchd plist and an unloaded job, `flair stop` re-checks the job and instance after the recorded pid exits.** ([#3090](https://github.com/tpsdev-ai/flair/issues/3090))
+
+  > **Heads-up:** That path exits non-zero unless the re-check reads `not-loaded` and `NOT_RUNNING`.

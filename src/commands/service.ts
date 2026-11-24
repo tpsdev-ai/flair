@@ -287,11 +287,11 @@ async function stopDirectlyStartedFlair(port: number, dataDir: string, label: st
       }
       await waitForProcessExit(pid, cli.STARTUP_TIMEOUT_MS);
       removeStaleSidecarIfConfirmedDead(dataDir, pid);
-      // The recorded pid exiting is not proof that Flair is down: re-read the
-      // launchd job and the instance, and claim success only when the job is
-      // still not loaded and nothing serves the instance.
-      const managedAfter = observeLaunchdManagement(dataDir, port);
+      // The recorded pid exiting is not proof that Flair is down. Read the
+      // instance, then launchd so a load during the awaited probe is visible;
+      // require NOT_RUNNING and not-loaded.
       const after = classifyDaemonState(await gatherDaemonEvidence(port, dataDir), { port, dataDir });
+      const managedAfter = observeLaunchdManagement(dataDir, port);
       if (managedAfter.jobLoaded !== "not-loaded" || after.state !== "NOT_RUNNING") {
         console.error(
           `❌ flair stop: pid ${pid} exited, but Flair is not confirmed down for ${dataDir} — ` +

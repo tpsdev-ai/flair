@@ -151,11 +151,11 @@ setInterval(() => {}, 1000);
     writeFileSync(successorScript, opts.successor === "silent" ? `
 const fs = require('node:fs');
 const net = require('node:net');
+fs.writeFileSync(process.env.SUCCESSOR_PID_FILE, String(process.pid));
 function start() {
   const server = net.createServer(() => {});
   server.on('error', () => setTimeout(start, 25));
   server.listen(Number(process.env.HTTP_PORT), '127.0.0.1', () => {
-    fs.writeFileSync(process.env.SUCCESSOR_PID_FILE, String(process.pid));
     fs.writeFileSync(process.env.SUCCESSOR_READY_FILE, '1');
   });
 }
@@ -165,6 +165,7 @@ setInterval(() => {}, 1000);
 const fs = require('node:fs');
 const http = require('node:http');
 const body = fs.readFileSync(process.env.HEALTH_BODY_FILE, 'utf8');
+fs.writeFileSync(process.env.SUCCESSOR_PID_FILE, String(process.pid));
 function start() {
   const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -172,7 +173,6 @@ function start() {
   });
   server.on('error', () => setTimeout(start, 25));
   server.listen(Number(process.env.HTTP_PORT), '127.0.0.1', () => {
-    fs.writeFileSync(process.env.SUCCESSOR_PID_FILE, String(process.pid));
     fs.writeFileSync(process.env.SUCCESSOR_READY_FILE, '1');
   });
 }
@@ -273,11 +273,23 @@ setInterval(() => {}, 1000);
   return pid;
 }
 
-async function runStop(f: Fixture): Promise<{ out: string; code: number; elapsed: number }> {
+async function runStop(f: Fixture, loadDuringFinalEvidence = false): Promise<{ out: string; code: number; elapsed: number }> {
   const runner = join(f.home, "stop-runner.mjs");
   writeFileSync(runner, `
 const { program } = await import(${JSON.stringify(join(repoRoot, "src/cli.ts"))});
 Object.defineProperty(process, 'platform', { value: 'darwin' });
+${loadDuringFinalEvidence ? `
+const { writeFileSync } = await import('node:fs');
+const originalFetch = globalThis.fetch;
+let healthCalls = 0;
+globalThis.fetch = async (...args) => {
+  if (++healthCalls === 2) {
+    await Promise.resolve();
+    writeFileSync(process.env.LAUNCHCTL_STATE + '/loaded', '1');
+  }
+  return originalFetch(...args);
+};
+` : ''}
 await program.parseAsync(['bun', 'flair', 'stop', '--port', process.env.TEST_PORT]);
 `);
   const started = Date.now();
@@ -348,6 +360,20 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(result.out).toContain("now reads loaded");
     expect(result.out).not.toContain("stopped the directly started Flair");
     expect(result.out).toContain("flair doctor");
+  }, 30_000);
+
+  test("a job loaded during the final evidence gather is not reported as stopped", async () => {
+    const f = await makeFixture();
+    const pid = await startFlairStub(f);
+    writeFileSync(join(f.state, "pid"), String(pid));
+    const result = await runStop(f, true);
+    expect(existsSync(join(f.state, "loaded"))).toBe(true);
+    expect(result.code).toBe(1);
+    expect(result.out).toContain(`pid ${pid} exited, but Flair is not confirmed down`);
+    expect(result.out).toContain("now reads loaded");
+    expect(result.out).toContain("the instance reads NOT_RUNNING");
+    expect(result.out).not.toContain("stopped the directly started Flair");
+    expect(unloadCalls(f)).toEqual([]);
   }, 30_000);
 
   test("a successor serving /Health after the recorded pid exits is not reported as stopped", async () => {
