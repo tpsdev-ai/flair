@@ -23,6 +23,10 @@ import { Resource, server, transaction } from "harper";
 // way an application would — Flair ships `dist/`, and this module has no
 // dependencies of its own.
 import { agentContext, adminContext, internalContext, collectionResource } from "@tpsdev-ai/flair/server";
+// The public facade (package root). flair#3068: these ops drive it the way
+// an embedding application would, so the test can assert what each method
+// RETURNS against a real Harper resource rather than against a fake.
+import { Flair } from "@tpsdev-ai/flair";
 
 /**
  * Resolve a Flair RESOURCE by its REST path.
@@ -201,6 +205,55 @@ async function semanticRecallUnscoped(q, limit = 20) {
   if (r instanceof Response) return { status: r.status };
   const list = r?.results ?? r?.memories ?? r;
   return Array.isArray(list) ? list.map(summarise) : list;
+}
+
+/**
+ * flair#3068 — the facade's own methods, driven through a real Harper resource.
+ *
+ * `facadeRecall` returns whatever `recall()` resolved to, unchanged: the test
+ * asserts its shape, so the fixture must not normalise it away.
+ */
+async function facadeRecall(agentId, q, limit) {
+  const agent = new Flair(server).as(agentId);
+  return agent.recall(q, { limit });
+}
+
+/**
+ * `memory.get()` classified, so a missing row, a `Response`, an `{error,status}`
+ * object and a stored row are distinguishable to the test (JSON drops
+ * `undefined`, so the raw value cannot be asserted on).
+ */
+async function facadeGet(agentId, id, asAdmin) {
+  const flair = new Flair(server);
+  const agent = asAdmin === true ? flair.admin : flair.as(agentId);
+  const row = await agent.memory.get(id);
+  if (row === null) return { kind: "null" };
+  if (row === undefined) return { kind: "undefined" };
+  if (row instanceof Response) return { kind: "response", status: row.status };
+  if (row && typeof row === "object" && "error" in row) {
+    return { kind: "error-object", error: String(row.error), status: row.status ?? null };
+  }
+  return { kind: "row", id: row?.id, agentId: row?.agentId, content: row?.content };
+}
+
+/**
+ * `memory.search()` normalised to a plain array for counting. Works whether it
+ * resolves to an array (the documented shape) or to the resource's async
+ * iterable (the shape before flair#3068), so a RED run reports the ignored
+ * limit rather than an iteration failure.
+ */
+async function facadeSearch(agentId, opts) {
+  const agent = new Flair(server).as(agentId);
+  const rows = await agent.memory.search(opts);
+  const out = [];
+  if (Array.isArray(rows)) {
+    out.push(...rows);
+  } else if (rows && typeof rows[Symbol.asyncIterator] === "function") {
+    for await (const row of rows) out.push(row);
+  } else {
+    return { kind: typeof rows, count: 0, ids: [] };
+  }
+  return { kind: Array.isArray(rows) ? "array" : "iterable", count: out.length, ids: out.map((r) => r?.id) };
 }
 
 /** A single record by id, scoped to `agentId` — another agent's private record reads as absent. */
@@ -531,6 +584,12 @@ export class AgentFleet extends Resource {
         return run(() => maintainAsAdmin(body.agentId, body.body, body.undefinedKeys));
       case "adminGate":
         return run(() => adminGate(body.context));
+      case "facadeRecall":
+        return run(() => facadeRecall(body.agentId, body.q, body.limit));
+      case "facadeGet":
+        return run(() => facadeGet(body.agentId, body.id, body.asAdmin));
+      case "facadeSearch":
+        return run(() => facadeSearch(body.agentId, body.opts));
       default:
         return new Response(JSON.stringify({ error: `unknown op '${op}'` }), { status: 400 });
     }
