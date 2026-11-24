@@ -49,6 +49,36 @@ const ALLOWED: ReadonlyArray<{ file: string; variable: string; reason: string }>
     variable: "FLAIR_KEY_PATH",
     reason: "the in-process pi-flair client reads it",
   },
+  {
+    file: "test/integration/init-remote-ops.test.ts",
+    variable: "FLAIR_ADMIN_PASS",
+    reason: "runInitAction saves, deletes and restores it around the in-process init action so an ambient value cannot leak in",
+  },
+  {
+    file: "test/integration/init-remote-ops.test.ts",
+    variable: "FLAIR_CLUSTER_ADMIN_USER",
+    reason: "runInitAction saves, deletes and restores it around the in-process init action so an ambient value cannot leak in",
+  },
+  {
+    file: "test/integration/init-remote-ops.test.ts",
+    variable: "FLAIR_CLUSTER_ADMIN_PASS",
+    reason: "runInitAction saves, deletes and restores it around the in-process init action so an ambient value cannot leak in",
+  },
+  {
+    file: "test/integration/init-remote-ops.test.ts",
+    variable: "FLAIR_TARGET",
+    reason: "runInitAction saves, deletes and restores it around the in-process init action so an ambient value cannot leak in",
+  },
+  {
+    file: "test/integration/init-remote-ops.test.ts",
+    variable: "FLAIR_OPS_TARGET",
+    reason: "runInitAction saves, deletes and restores it around the in-process init action so an ambient value cannot leak in",
+  },
+  {
+    file: "test/integration/init-remote-ops.test.ts",
+    variable: "FLAIR_ADMIN_USER",
+    reason: "runInitAction saves, deletes and restores it around the in-process init action so an ambient value cannot leak in",
+  },
 ];
 
 // Sites whose key the scan cannot read, per (file, site text) with the number

@@ -820,21 +820,31 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
 // username, has to fail here; the handler-level cases above do not see the
 // action's own wiring.
 
-const INIT_ACTION_ENV_KEYS = [
-  "HOME",
-  "USERPROFILE",
-  "FLAIR_ADMIN_PASS",
-  "FLAIR_CLUSTER_ADMIN_USER",
-  "FLAIR_CLUSTER_ADMIN_PASS",
-  "FLAIR_TARGET",
-  "FLAIR_OPS_TARGET",
-  "FLAIR_ADMIN_USER",
-  "ROOTPATH",
-] as const;
+type InitActionEnv = {
+  HOME: string | undefined;
+  USERPROFILE: string | undefined;
+  FLAIR_ADMIN_PASS: string | undefined;
+  FLAIR_CLUSTER_ADMIN_USER: string | undefined;
+  FLAIR_CLUSTER_ADMIN_PASS: string | undefined;
+  FLAIR_TARGET: string | undefined;
+  FLAIR_OPS_TARGET: string | undefined;
+  FLAIR_ADMIN_USER: string | undefined;
+  ROOTPATH: string | undefined;
+};
 
 /** Run the in-process `flair init` action with HOME isolated to `home`. */
 async function runInitAction(args: string[], home: string): Promise<{ stdout: string; stderr: string; exitCode?: number }> {
-  const saved = INIT_ACTION_ENV_KEYS.map((key) => [key, process.env[key]] as const);
+  const saved: InitActionEnv = {
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+    FLAIR_ADMIN_PASS: process.env.FLAIR_ADMIN_PASS,
+    FLAIR_CLUSTER_ADMIN_USER: process.env.FLAIR_CLUSTER_ADMIN_USER,
+    FLAIR_CLUSTER_ADMIN_PASS: process.env.FLAIR_CLUSTER_ADMIN_PASS,
+    FLAIR_TARGET: process.env.FLAIR_TARGET,
+    FLAIR_OPS_TARGET: process.env.FLAIR_OPS_TARGET,
+    FLAIR_ADMIN_USER: process.env.FLAIR_ADMIN_USER,
+    ROOTPATH: process.env.ROOTPATH,
+  };
   const origExit = process.exit;
   const origLog = console.log;
   const origErr = console.error;
@@ -842,9 +852,13 @@ async function runInitAction(args: string[], home: string): Promise<{ stdout: st
   let stderr = "";
   let exitCode: number | undefined;
   process.env.HOME = home;
-  for (const key of INIT_ACTION_ENV_KEYS) {
-    if (key !== "HOME" && key !== "USERPROFILE") delete process.env[key];
-  }
+  delete process.env.FLAIR_ADMIN_PASS;
+  delete process.env.FLAIR_CLUSTER_ADMIN_USER;
+  delete process.env.FLAIR_CLUSTER_ADMIN_PASS;
+  delete process.env.FLAIR_TARGET;
+  delete process.env.FLAIR_OPS_TARGET;
+  delete process.env.FLAIR_ADMIN_USER;
+  delete process.env.ROOTPATH;
   console.log = (...parts: unknown[]) => { stdout += parts.map((part) => String(part)).join(" ") + "\n"; };
   console.error = (...parts: unknown[]) => { stderr += parts.map((part) => String(part)).join(" ") + "\n"; };
   process.exit = ((code?: number) => {
@@ -860,10 +874,24 @@ async function runInitAction(args: string[], home: string): Promise<{ stdout: st
     process.exit = origExit;
     console.log = origLog;
     console.error = origErr;
-    for (const [key, value] of saved) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
+    if (saved.HOME === undefined) delete process.env.HOME;
+    else process.env.HOME = saved.HOME;
+    if (saved.USERPROFILE === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = saved.USERPROFILE;
+    if (saved.FLAIR_ADMIN_PASS === undefined) delete process.env.FLAIR_ADMIN_PASS;
+    else process.env.FLAIR_ADMIN_PASS = saved.FLAIR_ADMIN_PASS;
+    if (saved.FLAIR_CLUSTER_ADMIN_USER === undefined) delete process.env.FLAIR_CLUSTER_ADMIN_USER;
+    else process.env.FLAIR_CLUSTER_ADMIN_USER = saved.FLAIR_CLUSTER_ADMIN_USER;
+    if (saved.FLAIR_CLUSTER_ADMIN_PASS === undefined) delete process.env.FLAIR_CLUSTER_ADMIN_PASS;
+    else process.env.FLAIR_CLUSTER_ADMIN_PASS = saved.FLAIR_CLUSTER_ADMIN_PASS;
+    if (saved.FLAIR_TARGET === undefined) delete process.env.FLAIR_TARGET;
+    else process.env.FLAIR_TARGET = saved.FLAIR_TARGET;
+    if (saved.FLAIR_OPS_TARGET === undefined) delete process.env.FLAIR_OPS_TARGET;
+    else process.env.FLAIR_OPS_TARGET = saved.FLAIR_OPS_TARGET;
+    if (saved.FLAIR_ADMIN_USER === undefined) delete process.env.FLAIR_ADMIN_USER;
+    else process.env.FLAIR_ADMIN_USER = saved.FLAIR_ADMIN_USER;
+    if (saved.ROOTPATH === undefined) delete process.env.ROOTPATH;
+    else process.env.ROOTPATH = saved.ROOTPATH;
   }
   return { stdout, stderr, exitCode };
 }
