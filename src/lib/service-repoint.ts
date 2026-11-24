@@ -45,16 +45,15 @@
  *   - the old tree's flair version (or this CLI's) cannot be read, is not strict
  *     semver, or is newer by semver ordering (0.57.0-beta.1 is older than 0.57.0)
  *     → refused: a downgrade cannot be ruled out;
- *   - it serves THIS CLI's tree with an existing, different node → a deliberate
- *     runtime pin (`pinned-node`): when the unit's other runtime paths exist it
- *     is left as it is, apart from the launchd Homebrew case below; a missing
- *     other runtime path is replaced in a launchd plist, keeping the pin,
- *     while a systemd unit is refused;
+ *   - with valid targets, it serves THIS CLI's tree with an existing, different
+ *     node and its other runtime paths exist → `pinned-node`, apart from the
+ *     launchd Homebrew case below; systemd refuses missing runtime paths;
  *   - launchd only: it serves this CLI's tree and one of its runtime paths no
  *     longer exists → the missing path is replaced (systemd: refused);
  *   - launchd only: it serves this CLI's tree with an existing node path in
  *     Homebrew's Cellar whose `opt/<formula>` alias resolves to the same
- *     binary → that node path is replaced by the alias (flair#3056).
+ *     binary → that node path is replaced by the alias, including in the same
+ *     write as a missing runtime path (flair#3056).
  *
  * Every refusal names the unit file, what did not match, and the remedy — the
  * paths to set by hand, an update, or a reinstall.

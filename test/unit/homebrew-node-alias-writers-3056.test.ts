@@ -23,7 +23,7 @@
  * writers touch are under the temp dir.
  */
 import { describe, test, expect } from "bun:test";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -158,6 +158,32 @@ describe("launchd plist writer: an adopted plist that records a Cellar node (fla
     expect(programArguments(after)).toEqual([b.launcher, opts.adminPassPath!, alias, b.harper]);
     // Only the node path changed.
     expect(after).toBe(adoptedPlist(b, opts, alias));
+  });
+
+  test("replaces a missing Harper entry and an eligible Cellar node in one write", async () => {
+    const b = brew();
+    const cellar = b.cellar("node@22", "22.11.0");
+    const alias = b.opt("node@22", "22.11.0");
+    const opts = plistOptions(b, otherNode(b));
+    const missingHarper = join(realpathSync(b.tree), "node_modules", "@harperfast", "harper", "dist", "bin", "harper.js");
+    const before = adoptedPlist(b, opts, cellar).replace(b.harper, missingHarper);
+    writeFileSync(opts.plistPath, before);
+    const writes: { path: string; content: string }[] = [];
+
+    const result = await writeInitLaunchdPlist(opts, {
+      atomic: {
+        rename: (from, to) => {
+          writes.push({ path: to, content: readFileSync(from, "utf-8") });
+          renameSync(from, to);
+        },
+      },
+    });
+
+    const expected = before.replace(cellar, alias).replace(missingHarper, b.harper);
+    expect(result.kind).toBe("repointed");
+    expect(writes).toEqual([{ path: opts.plistPath, content: expected }]);
+    expect(readFileSync(opts.plistPath, "utf-8")).toBe(expected);
+    expect(programArguments(expected)).toEqual([b.launcher, opts.adminPassPath!, alias, b.harper]);
   });
 
   test("a Cellar path whose opt alias now resolves to ANOTHER version is kept", async () => {

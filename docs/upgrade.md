@@ -160,17 +160,18 @@ exactly a shape flair supports:
 
 Apart from the Homebrew case below, a unit that serves this CLI's tree with a
 different, existing node is treated as a deliberate pin: `flair init` does not
-change that node path. When the unit's other runtime paths exist, init leaves
-the unit unchanged, and init and `flair doctor` report the pin with the hand edit
-that would move it. When one of them is missing, a plist has it set to this
-CLI's path for it, as the next sentence says, and a systemd unit is refused. A
-plist that already serves this CLI's tree has a missing runtime path replaced
-without the version check in the table, which applies only to a move between
-trees. In a plist or federation-sync shim that serves this CLI's tree and that
+change that node path. With valid target paths and existing other runtime
+paths, init leaves the unit unchanged and reports the pin; `flair doctor`
+reports the pin with the hand edit that would move it. A systemd unit with a
+missing runtime path is refused. A plist that already serves this CLI's tree
+has a missing runtime path replaced without the version check in the table,
+which applies only to a move between trees. In a plist or federation-sync shim that serves this CLI's tree and that
 `flair init` accepts for re-pointing (a plist must pass the macOS row of the
 table above), an existing node path in Homebrew's Cellar
 (`<prefix>/Cellar/<formula>/<version>/bin/node`) is replaced by
 `<prefix>/opt/<formula>/bin/node` when that alias resolves to the same binary.
+A plist can replace a missing runtime path and an eligible Cellar node in the
+same write.
 The write is atomic and
 lands only over the bytes it was planned from — the file is read as a regular
 file (a symlink is refused, not followed) whose bytes are valid UTF-8 (anything
