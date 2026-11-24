@@ -2,12 +2,17 @@
 //
 // `flair memory add` used to build its Memory id as `${agentId}-${Date.now()}`,
 // so two adds by one agent in the same millisecond PUT the same /Memory/<id>
-// and the server's upsert keeps a single row. This spawns the real CLI against
-// a mock HTTP server (pattern of cli-memory-add-provider-timeout-retry.test.ts)
-// and records every PUT path.
+// and the server's upsert keeps a single row.
 //
 // (1) with a frozen clock, two adds of different content PUT different ids;
-// (2) a provider-timeout retry replays the SAME id on both attempts.
+// (2) with a frozen clock, two task summaries call the API with different
+//     Memory paths;
+// (3) a provider-timeout retry replays the SAME id on both attempts.
+//
+// Cases (1) and (3) spawn the real CLI against a mock HTTP server (pattern of
+// cli-memory-add-provider-timeout-retry.test.ts) and record every PUT path.
+// Case (2) runs `memory write-task-summary` in-process through Commander with a
+// fake `api` and records the paths it is called with.
 
 import { describe, it, expect, beforeAll } from "bun:test";
 import { Command } from "commander";
@@ -112,7 +117,7 @@ describe("flair#3107: memory add ids", () => {
     }
   }, 30_000);
 
-  it("two task summaries in the same frozen millisecond PUT different ids", async () => {
+  it("two task summaries in the same frozen millisecond call the API with different Memory paths (in-process, fake api)", async () => {
     const puts: unknown[][] = [];
     const unused = (): never => { throw new Error("unexpected helper"); };
     bindCli({
