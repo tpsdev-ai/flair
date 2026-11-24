@@ -1054,19 +1054,43 @@ describe("wait-for-harper.mjs", () => {
   );
 
   test(
-    "(z) main rejects a credentialed URL for direct callers before any work",
+    "(z) main rejects a credentialed URL for direct callers before any Docker call or HTTP request",
     async () => {
-      const status = await main({
-        container: "harper-flair",
-        url: "http://user:pass@127.0.0.1:9/Health",
-        credentialsEnv: undefined,
-        budgetSeconds: 5,
-        pollIntervalMs: 100,
-        progressIntervalMs: 1000,
-        perRequestMs: 100,
-      });
+      // The stub docker is first on PATH and a live health server answers the
+      // URL's host and port, so any work main did first would be observable.
+      const box = sandbox();
+      const server = await health(STATUS(200));
+      const credentialed = server.url.replace("http://", "http://user:pass@");
+      const saved = { PATH: process.env.PATH, WAIT_STUB_DIR: process.env.WAIT_STUB_DIR };
+      process.env.PATH = `${box.bin}:${saved.PATH ?? ""}`;
+      process.env.WAIT_STUB_DIR = box.root;
+      let status: number;
+      try {
+        status = await main({
+          container: "harper-flair",
+          url: credentialed,
+          credentialsEnv: undefined,
+          budgetSeconds: 5,
+          pollIntervalMs: 100,
+          progressIntervalMs: 1000,
+          perRequestMs: 100,
+        });
+      } finally {
+        if (saved.PATH === undefined) delete process.env.PATH;
+        else process.env.PATH = saved.PATH;
+        if (saved.WAIT_STUB_DIR === undefined) delete process.env.WAIT_STUB_DIR;
+        else process.env.WAIT_STUB_DIR = saved.WAIT_STUB_DIR;
+      }
 
       expect(status).toBe(2);
+      expect(server.requests()).toBe(0);
+      let calls = "";
+      try {
+        calls = readFileSync(join(box.root, "docker-argv.log"), "utf8");
+      } catch {
+        // No log file: the stub was never called.
+      }
+      expect(calls).toBe("");
     },
     CASE_TIMEOUT_MS,
   );
