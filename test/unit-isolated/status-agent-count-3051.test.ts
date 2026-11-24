@@ -11,6 +11,8 @@
  * manager. Run in its own process because module mocks are process-global.
  */
 import { afterEach, beforeEach, expect, mock, setSystemTime, spyOn, test } from "bun:test";
+import { join } from "node:path";
+import { tempDir } from "../helpers/temp-dir.ts";
 
 const NOW = Date.parse("2026-11-22T12:00:00Z");
 const HOME = "/fixture/flair-3051";
@@ -18,6 +20,7 @@ let agentRows: Array<Record<string, unknown>> = [];
 let memoryRows: Array<Record<string, unknown>> = [];
 let memoryScanFailure: "before" | "after" | null = null;
 let authVerdict: Record<string, unknown> = { kind: "internal" };
+let realBridgeBase: string | null = null;
 const originalTransaction = (globalThis as any).transaction;
 
 function absent(): never { throw Object.assign(new Error("fixture path absent"), { code: "ENOENT" }); }
@@ -31,10 +34,10 @@ mock.module("node:fs", () => ({
   existsSync: () => false,
   readFileSync: absent,
   promises: {
-    stat: async () => absent(),
+    stat: async (p: string) => (realBridgeBase !== null && String(p) === realBridgeBase ? nativeFsp.stat(p) : absent()),
     open: async () => absent(),
     readFile: async () => absent(),
-    readdir: async () => absent(),
+    readdir: async (p: string) => (realBridgeBase !== null && String(p) === realBridgeBase ? nativeFsp.readdir(p) : absent()),
   },
 }));
 mock.module("harper", () => ({
@@ -109,6 +112,7 @@ mock.module("../../src/lib/npm-registry.js", () => ({
   resolveRegistryNotice: async () => ({}),
 }));
 
+const nativeFsp = await import("node:fs/promises");
 const { HealthDetail } = await import("../../resources/health.ts");
 const { Command } = await import("commander");
 const { bindCli, register } = await import("../../src/commands/status.ts");
@@ -357,10 +361,11 @@ test("duplicate-id and missing-id Agent rows: count, names and perAgent are one 
 });
 
 // ── Stored text reaches the terminal escaped (flair#3082 item 1) ──────────────
-// ESC, newline, DEL, a C1 control, a bidi override and U+2028 in a stored id
-// are shown as \u{...} escapes; ordinary non-ASCII text prints unchanged.
-const HOSTILE_ID = "\x1b[31mred\n\x7f\u0085\u202e\u2028";
-const HOSTILE_ESCAPED = "\\u{1b}[31mred\\u{0a}\\u{7f}\\u{85}\\u{202e}\\u{2028}";
+// ESC, newline, DEL, a C1 control, a bidi override, U+2028, a lone surrogate,
+// an unassigned code point and U+2029 in a stored id are shown as \u{...}
+// escapes; ordinary non-ASCII text prints unchanged.
+const HOSTILE_ID = "\x1b[31mred\n\x7f\u0085\u202e\u2028\ud800\u0378\u2029";
+const HOSTILE_ESCAPED = "\\u{1b}[31mred\\u{0a}\\u{7f}\\u{85}\\u{202e}\\u{2028}\\u{d800}\\u{378}\\u{2029}";
 const HOSTILE_UNREGISTERED_ID = "\u009bseed\n\x1b\u202e\u2028\x7f";
 const HOSTILE_UNREGISTERED_ESCAPED = "\\u{9b}seed\\u{0a}\\u{1b}\\u{202e}\\u{2028}\\u{7f}";
 const NORMAL_ID = "ágætis-vík";
@@ -388,7 +393,7 @@ test("plain status escapes a stored id in the names line, the table row and the 
   expect(output).toContain(HOSTILE_ESCAPED);
   expect(output).toContain(HOSTILE_UNREGISTERED_ESCAPED);
   expect(output).toContain(NORMAL_ID);
-  for (const raw of ["\x1b", "\x7f", "\u0085", "\u202e", "\u2028", "\u009b"]) {
+  for (const raw of ["\x1b", "\x7f", "\u0085", "\u202e", "\u2028", "\u009b", "\ud800", "\u0378", "\u2029"]) {
     expect(output.includes(raw)).toBe(false);
   }
 });
@@ -407,9 +412,23 @@ test("deep status escapes a stored id in the names line, the table row and the u
   expect(output).toContain(HOSTILE_ESCAPED);
   expect(output).toContain(HOSTILE_UNREGISTERED_ESCAPED);
   expect(output).toContain(NORMAL_ID);
-  for (const raw of ["\x1b", "\x7f", "\u0085", "\u202e", "\u2028", "\u009b"]) {
+  for (const raw of ["\x1b", "\x7f", "\u0085", "\u202e", "\u2028", "\u009b", "\ud800", "\u0378", "\u2029"]) {
     expect(output.includes(raw)).toBe(false);
   }
+});
+
+test("each non-printable category escapes; printable non-ASCII does not", async () => {
+  const { escapeTerminalText } = await import("../../src/lib/terminal-text.ts");
+  const cases: Array<[string, string]> = [
+    ["\x1b", "\\u{1b}"],
+    ["\u202e", "\\u{202e}"],
+    ["\ud800", "\\u{d800}"],
+    ["\u0378", "\\u{378}"],
+    ["\u2028", "\\u{2028}"],
+    ["\u2029", "\\u{2029}"],
+  ];
+  for (const [raw, escaped] of cases) expect(escapeTerminalText(raw)).toBe(escaped);
+  expect(escapeTerminalText(NORMAL_ID)).toBe(NORMAL_ID);
 });
 
 test("the bootstrap table escapes the agent id it measured", async () => {
@@ -469,8 +488,9 @@ test("a Memory scan that throws before any row: every per-agent value reads unkn
 });
 
 // ── The other stored text on the same human paths is escaped too ─────────────
-// Memory embedding-model names, Soul keys, federation instance and peer
-// fields, OAuth client fields, warning messages and raw timestamps.
+// Bridge-installed names, disk paths, the REM nightly timestamp, bootstrap
+// error text, embedding-model names, Soul keys, federation instance and peer
+// fields, OAuth client and IdP fields, warning messages and raw timestamps.
 const H = HOSTILE_ID;
 
 function hostileDetail() {
@@ -517,4 +537,91 @@ test("deep status escapes model names, raw times, Soul keys, federation and peer
   expect(output.split("\n").find((line) => line.trimStart().startsWith("⚠"))).toContain(HOSTILE_ESCAPED);
   expect(output.includes("\x1b")).toBe(false);
   expect(output.includes("\u202e")).toBe(false);
+});
+
+function hostileRemainingDetail() {
+  return {
+    ok: true,
+    agents: { count: 1, names: ["agent-a"], perAgent: [{ id: "agent-a", memoryCount: 0, hashFallback: 0, writes24h: 0, lastWriteAt: null }] },
+    bridges: { installed: [H], lastImport: null, lastExport: null },
+    disk: { dataDir: H, snapshotDir: H, dataBytes: 0, snapshotBytes: 0 },
+    rem: { lastNightlyAt: "2026-11-21T09:00:00.000Z" + H },
+  };
+}
+
+test("plain and deep status escape bridge names and disk paths; deep escapes the REM nightly timestamp", async () => {
+  for (const args of [[], ["deep"]]) {
+    const output = await statusOutput(hostileRemainingDetail(), args);
+    expect(lineWith(output, "Installed"), JSON.stringify(args)).toContain(HOSTILE_ESCAPED);
+    expect(lineWith(output, "Data"), JSON.stringify(args)).toContain(HOSTILE_ESCAPED);
+    expect(lineWith(output, "Snapshots"), JSON.stringify(args)).toContain(HOSTILE_ESCAPED);
+    for (const raw of ["\x1b", "\u202e", "\u2028", "\ud800", "\u0378", "\u2029"]) {
+      expect(output.includes(raw), JSON.stringify(args)).toBe(false);
+    }
+  }
+  const deep = await statusOutput(hostileRemainingDetail(), ["deep"]);
+  expect(lineWith(deep, "Last nightly")).toContain(`(${"2026-11-21T09:00:00.000Z"}${HOSTILE_ESCAPED})`);
+});
+
+test("deep status escapes bootstrap error text", async () => {
+  process.env.HDB_ADMIN_PASSWORD = "fixture-pass";
+  const fetchSpy = globalThis.fetch as any;
+  fetchSpy.mockRejectedValue(new Error("boom" + H));
+  try {
+    const output = await statusOutput(hostileRemainingDetail(), ["deep", "--bootstrap"]);
+    const row = output.split("\n").find((line) => line.startsWith("  agent-a") && line.includes("error")) ?? "";
+    expect(row).toContain(`boom${HOSTILE_ESCAPED}`);
+    expect(output.includes("\x1b")).toBe(false);
+  } finally {
+    delete process.env.HDB_ADMIN_PASSWORD;
+    fetchSpy.mockClear();
+  }
+});
+
+test("status auth escapes client and IdP fields", async () => {
+  process.env.FLAIR_OUTPUT = "human";
+  let output: string;
+  try {
+    output = await statusOutput({
+      oauth: {
+        clients: 1, idpConfigs: 1, activeTokens: 0,
+        clientList: [{ id: H, name: H, registeredBy: H, createdAt: H }],
+        idpList: [{ id: H, name: H, issuer: H }],
+      },
+    }, ["auth"]);
+  } finally {
+    delete process.env.FLAIR_OUTPUT;
+  }
+
+  const idpAt = output.indexOf("IdPs");
+  expect(idpAt).toBeGreaterThan(0);
+  const clientsSection = output.slice(output.indexOf("Clients"), idpAt);
+  const idpSection = output.slice(idpAt);
+  expect(clientsSection).toContain(`${HOSTILE_ESCAPED}  ${HOSTILE_ESCAPED}  ${HOSTILE_ESCAPED}  ${HOSTILE_ESCAPED}`);
+  expect(idpSection).toContain(`${HOSTILE_ESCAPED}  ${HOSTILE_ESCAPED}  ${HOSTILE_ESCAPED}`);
+  for (const raw of ["\x1b", "\u202e", "\u2028", "\ud800", "\u0378", "\u2029"]) {
+    expect(output.includes(raw)).toBe(false);
+  }
+});
+
+test("a real temporary bridge filename reaches the human line escaped", async () => {
+  const home = tempDir("bridge-3082-");
+  const base = join(home, "node_modules");
+  await nativeFsp.mkdir(base, { recursive: true });
+  const rawName = "flair-bridge-\u202e\u2028\u2029";
+  await nativeFsp.writeFile(join(base, rawName), "");
+  const previousCwd = process.cwd();
+  realBridgeBase = base;
+  process.chdir(home);
+  try {
+    const detail: any = await new HealthDetail().get();
+    expect(detail.bridges.installed).toContain(rawName);
+
+    const output = await statusOutput(detail, ["deep"]);
+    expect(lineWith(output, "Installed")).toContain("flair-bridge-\\u{202e}\\u{2028}\\u{2029}");
+    for (const raw of ["\u202e", "\u2028", "\u2029"]) expect(output.includes(raw)).toBe(false);
+  } finally {
+    realBridgeBase = null;
+    process.chdir(previousCwd);
+  }
 });

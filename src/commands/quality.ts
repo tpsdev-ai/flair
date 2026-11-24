@@ -661,9 +661,9 @@ export function computeQualityReport(
   // empty perAgent array (nothing to prove otherwise, and both scopes render
   // identically empty either way).
   const haveUsageCount = perAgentAll.every((r) => typeof r.usageCount === "number");
-  // Rows from a server whose Memory scan did not complete carry nulls in the
-  // memory-derived fields, not zeros. A rate or a quiet verdict computed from
-  // those would be a claim about data nobody read, so neither is reported.
+  // Rows whose memory-derived fields are absent or not a number carry no usable
+  // counts. A rate or a quiet verdict computed from those would be a claim about
+  // data nobody read, so neither is reported.
   const haveMemoryStats = perAgentAll.every(
     (r) => typeof r.memoryCount === "number" && typeof r.writes24h === "number",
   );
@@ -673,7 +673,7 @@ export function computeQualityReport(
   if (havePerAgent && !haveMemoryStats) {
     gaps.push({
       metric: "signalDensity",
-      reason: "per-agent memory counts unknown — the server's Memory scan did not complete",
+      reason: "per-agent memory fields unavailable",
     });
   } else if (havePerAgent && haveUsageCount) {
     signalDensity = {
@@ -702,7 +702,7 @@ export function computeQualityReport(
   if (havePerAgent && !haveMemoryStats) {
     gaps.push({
       metric: "quietAgents",
-      reason: "per-agent memory counts unknown — the server's Memory scan did not complete",
+      reason: "per-agent memory fields unavailable",
     });
   } else if (havePerAgent) {
     const rows: QualityAgentActivity[] = scopedAgents.map((r) => {

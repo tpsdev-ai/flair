@@ -10,14 +10,14 @@
  */
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { tempDir } from "../helpers/temp-dir.ts";
 
 const CLI = pathToFileURL(join(import.meta.dir, "../../src/cli.ts")).href;
 
-function runInit(home: string, args: string[], extraEnv: Record<string, string> = {}) {
+function runInit(home: string, args: string[], extraEnv: Record<string, string> = {}, cwd = home) {
   const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(FLAIR_|HARPER_|HDB_|FABRIC_|TPS_TEST_ROOT$|ROOTPATH$)/.test(key),
   ));
@@ -28,6 +28,7 @@ function runInit(home: string, args: string[], extraEnv: Record<string, string> 
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     globalThis.fetch = async (input, init) => {
       appendFileSync(log, JSON.stringify({ url: String(input), method: init?.method ?? "GET", body: init?.body ?? null }) + "\\n");
+      if (String(input).endsWith("/FederationPair")) return new Response("instanceId and publicKey required", { status: 400 });
       if (init && typeof init.body === "string" && init.body.startsWith("{")) {
         const body = JSON.parse(init.body);
         if (body.operation === "sql") return json([]);
@@ -39,7 +40,7 @@ function runInit(home: string, args: string[], extraEnv: Record<string, string> 
     await program.parseAsync(${JSON.stringify(args)}, { from: "user" });
   `;
   const result = spawnSync(process.execPath, ["-e", script], {
-    cwd: home,
+    cwd,
     env: { ...env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise init-operator-agent-id-3082 process fixture arguments" },
     encoding: "utf8",
     timeout: 60_000,
@@ -64,7 +65,7 @@ function expectRefused(home: string, result: ReturnType<typeof runInit>, id: str
   expect(recordedRequests(home)).toEqual([]);
 }
 
-describe("flair init --agent-id refuses the operator identity before any write (flair#3082)", () => {
+describe("flair init --agent-id refuses the operator identity before the agent key or Agent write (flair#3082)", () => {
   test("remote init: the default operator id is refused", () => {
     const home = tempDir("opi-remote-");
     const result = runInit(home, [
@@ -94,6 +95,35 @@ describe("flair init --agent-id refuses the operator identity before any write (
     ], { FLAIR_ADMIN_USER: "operator-c" });
     expectRefused(home, result, "operator-c");
   });
+
+  test("remote provisioning: the provisioned default operator id wins over FLAIR_ADMIN_USER and is refused", () => {
+    const home = tempDir("opi-remote-provision-");
+    // The provisioning leg packs this root, so it must hold every entry the
+    // deploy tarball lists.
+    const root = join(home, "root");
+    mkdirSync(join(root, "dist"), { recursive: true });
+    mkdirSync(join(root, "schemas"), { recursive: true });
+    for (const name of ["config.yaml", "package.json", "LICENSE", "README.md", "SECURITY.md"]) {
+      writeFileSync(join(root, name), "");
+    }
+    const result = runInit(home, [
+      "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
+      "--force", "--cluster-admin-user", "cluster-admin", "--cluster-admin-pass", "fixture-cluster-pass",
+      "--agent-id", "admin",
+      "--keys-dir", join(home, "keys"), "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
+    ], { FLAIR_ADMIN_USER: "operator-z" }, root);
+    const out = result.stdout + result.stderr;
+    expect(result.status, out).not.toBe(0);
+    expect(out).toContain('"admin" is the operator identity');
+    expect(out).toContain("Choose another --agent-id");
+    // Provisioning wrote a secret and deployed before this preflight; what it
+    // must not have done is create the agent key or insert the Agent row.
+    expect(existsSync(join(home, "keys"))).toBe(false);
+    const requests = recordedRequests(home);
+    const bodies = requests.map((r) => (typeof r.body === "string" ? JSON.parse(r.body) : null)).filter(Boolean);
+    expect(bodies.some((b: any) => b.operation === "deploy_component")).toBe(true);
+    expect(bodies.some((b: any) => b.table === "Agent")).toBe(false);
+  }, 120_000);
 
   test("local init: the default operator id is refused", () => {
     const home = tempDir("opi-local-");

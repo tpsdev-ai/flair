@@ -612,8 +612,10 @@ const statusCmd = program
         const nameStr = agents.names?.length > 0 ? ` ${render.wrap(render.c.dim, "—")} ${agents.names.map((n: string) => escapeTerminalText(n)).join(render.wrap(render.c.dim, ", "))}` : "";
         console.log(render.kv("Total", `${render.wrap(render.c.bold, String(agents.count))}${nameStr}`));
         if (Array.isArray(agents.perAgent) && agents.perAgent.length > 0) {
-          // Memory-derived values are unknown (null) on every row when the
-          // Memory scan did not complete: render "unknown", never a zero.
+          // When the Memory scan did not complete, every row's memory-derived
+          // value is null (unknown), never zero. The plain table displays
+          // memoryCount and lastWriteAt; the deep table displays those plus
+          // hashFallback and writes24h. usageCount is not displayed.
           const idCell = (v: unknown) => escapeTerminalText(String(v ?? ""));
           const countCell = (v: unknown) => (typeof v === "number" ? String(v) : "unknown");
           const lastWriteCell = (v: unknown, row: Record<string, unknown>) =>
@@ -718,7 +720,7 @@ const statusCmd = program
     if (healthData?.bridges) {
       const b = healthData.bridges;
       console.log(`\n${render.wrap(render.c.bold, "Bridges")}`);
-      if (Array.isArray(b.installed) && b.installed.length > 0) console.log(render.kv("Installed", b.installed.join(render.wrap(render.c.dim, ", "))));
+      if (Array.isArray(b.installed) && b.installed.length > 0) console.log(render.kv("Installed", b.installed.map((n: string) => escapeTerminalText(n)).join(render.wrap(render.c.dim, ", "))));
       if (b.lastImport) console.log(render.kv("Last import", render.relativeTime(b.lastImport)));
       if (b.lastExport) console.log(render.kv("Last export", render.relativeTime(b.lastExport)));
     } else {
@@ -728,8 +730,8 @@ const statusCmd = program
     if (healthData?.disk) {
       const d = healthData.disk;
       console.log(`\n${render.wrap(render.c.bold, "Disk")}`);
-      console.log(render.kv("Data", `${render.wrap(render.c.dim, d.dataDir)} ${render.wrap(render.c.dim, "—")} ${render.wrap(render.c.bold, render.humanBytes(d.dataBytes ?? 0))}`));
-      console.log(render.kv("Snapshots", `${render.wrap(render.c.dim, d.snapshotDir)} ${render.wrap(render.c.dim, "—")} ${render.wrap(render.c.bold, render.humanBytes(d.snapshotBytes ?? 0))}`));
+      console.log(render.kv("Data", `${render.wrap(render.c.dim, escapeTerminalText(String(d.dataDir ?? "")))} ${render.wrap(render.c.dim, "—")} ${render.wrap(render.c.bold, render.humanBytes(d.dataBytes ?? 0))}`));
+      console.log(render.kv("Snapshots", `${render.wrap(render.c.dim, escapeTerminalText(String(d.snapshotDir ?? "")))} ${render.wrap(render.c.dim, "—")} ${render.wrap(render.c.bold, render.humanBytes(d.snapshotBytes ?? 0))}`));
     }
 
     console.log("");
@@ -1121,7 +1123,7 @@ statusCmd
         const bytesStr = info.error ? "error" : humanBytes(info.bytes);
         const tok = info.tokenEstimate != null ? String(info.tokenEstimate) : "—";
         const mems = info.memoriesIncluded != null ? String(info.memoriesIncluded) : "—";
-        const status = info.error ? info.error.slice(0, 40) : "ok";
+        const status = info.error ? escapeTerminalText(info.error.slice(0, 40)) : "ok";
         console.log(`  ${escapeTerminalText(agentId).padEnd(idW)}  ${bytesStr.padStart(9)}  ${tok.padStart(7)}  ${mems.padStart(4)}  ${status}`);
       }
     }
@@ -1153,7 +1155,7 @@ statusCmd
       console.log(`Last restorative:  ${relativeTime(r.lastRestorativeAt)}`);
       const nightly = r.nightlyEnabled === true ? "enabled" : r.nightlyEnabled === false ? "disabled" : "unknown";
       console.log(`Nightly:           ${nightly}`);
-      if (r.lastNightlyAt) console.log(`Last nightly:      ${relativeTime(r.lastNightlyAt)} (${r.lastNightlyAt})`);
+      if (r.lastNightlyAt) console.log(`Last nightly:      ${relativeTime(r.lastNightlyAt)} (${escapeTerminalText(String(r.lastNightlyAt))})`);
       if (typeof r.pendingCandidates === "number") console.log(`Pending candidates: ${r.pendingCandidates}`);
       const ds = distillationStaleness(r);
       if (typeof r.pendingCandidates === "number" || ds.lastDistilledAt || ds.stale) {
@@ -1201,7 +1203,7 @@ statusCmd
     if (healthData?.bridges) {
       const b = healthData.bridges;
       console.log("\n═══ Bridges ══════════════════════════════════════");
-      if (Array.isArray(b.installed) && b.installed.length > 0) console.log(`Installed:    ${b.installed.join(", ")}`);
+      if (Array.isArray(b.installed) && b.installed.length > 0) console.log(`Installed:    ${b.installed.map((n: string) => escapeTerminalText(n)).join(", ")}`);
       if (b.lastImport) console.log(`Last import:  ${relativeTime(b.lastImport)}`);
       if (b.lastExport) console.log(`Last export:  ${relativeTime(b.lastExport)}`);
     }
@@ -1209,8 +1211,8 @@ statusCmd
     if (healthData?.disk) {
       const d = healthData.disk;
       console.log("\n═══ Disk ═════════════════════════════════════════");
-      console.log(`Data:         ${d.dataDir} — ${humanBytes(d.dataBytes ?? 0)}`);
-      console.log(`Snapshots:    ${d.snapshotDir} — ${humanBytes(d.snapshotBytes ?? 0)}`);
+      console.log(`Data:         ${escapeTerminalText(String(d.dataDir ?? ""))} — ${humanBytes(d.dataBytes ?? 0)}`);
+      console.log(`Snapshots:    ${escapeTerminalText(String(d.snapshotDir ?? ""))} — ${humanBytes(d.snapshotBytes ?? 0)}`);
       console.log(`Total:        ${humanBytes((d.dataBytes ?? 0) + (d.snapshotBytes ?? 0))}`);
     }
 

@@ -1108,13 +1108,27 @@ describe("per-agent memory stats unknown", () => {
     },
   });
 
-  test("no signal-density rate and no quiet verdict; both gaps name why", () => {
+  test("no signal-density rate and no quiet verdict; both gaps report the unavailable fields", () => {
     const r = computeQualityReport(true, fixture({ ...unknownRows(), memories: null }), { now: NOW });
 
     expect(r.signalDensity).toBeNull();
     expect(r.quietAgents).toBeNull();
-    expect(r.gaps.some((g) => g.metric === "signalDensity" && g.reason.includes("Memory scan did not complete"))).toBe(true);
-    expect(r.gaps.some((g) => g.metric === "quietAgents" && g.reason.includes("Memory scan did not complete"))).toBe(true);
+    expect(r.gaps.some((g) => g.metric === "signalDensity" && g.reason === "per-agent memory fields unavailable")).toBe(true);
+    expect(r.gaps.some((g) => g.metric === "quietAgents" && g.reason === "per-agent memory fields unavailable")).toBe(true);
+  });
+
+  test("a missing per-agent field reports the same unavailable gap, with no claimed cause", () => {
+    const data = fixture({
+      agents: {
+        count: 1,
+        perAgent: [{ id: "agent-a", memoryCount: 0, writes24h: null, hashFallback: 0, lastWriteAt: null, usageCount: 0 }],
+      },
+    });
+    const r = computeQualityReport(true, data, { now: NOW });
+
+    expect(r.signalDensity).toBeNull();
+    expect(r.quietAgents).toBeNull();
+    expect(r.gaps.every((g) => !g.reason.includes("scan"))).toBe(true);
   });
 
   test("a known row alongside an unknown one does not yield a partial report", () => {
