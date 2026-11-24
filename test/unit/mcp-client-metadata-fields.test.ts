@@ -85,6 +85,11 @@ describe("buildCimdDocument", () => {
     expect(doc.token_endpoint_auth_method).toBe(CIMD_TARGET_AUTH_METHOD);
   });
 
+  test("declares the scopes /mcp asks for (flair#3076)", () => {
+    const doc = buildCimdDocument({ clientId: CLIENT_ID, clientName: "agent-a", jwk: JWK });
+    expect(doc.scope).toBe("memory:read memory:write principal:read");
+  });
+
   test("redirect_uris is omitted (meaningless for a pure client_credentials agent)", () => {
     const doc = buildCimdDocument({ clientId: CLIENT_ID, clientName: "flint", jwk: JWK });
     expect("redirect_uris" in doc).toBe(false);
