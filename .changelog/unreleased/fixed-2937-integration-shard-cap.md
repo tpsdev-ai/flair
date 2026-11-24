@@ -1,1 +1,0 @@
-- **The integration shard jobs have a 51-minute timeout.** ([#2938](https://github.com/tpsdev-ai/flair/pull/2938))

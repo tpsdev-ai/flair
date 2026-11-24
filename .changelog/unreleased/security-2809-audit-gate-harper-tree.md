@@ -1,1 +1,0 @@
-- **The dependency audit gate requires vendor-pinned packages under Harper and their intervening directories to resolve inside Harper’s installed tree.** ([#2813](https://github.com/tpsdev-ai/flair/pull/2813))

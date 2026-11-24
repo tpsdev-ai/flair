@@ -1,1 +1,0 @@
-- **The MCP and n8n packages pin zod 4.6.7; the workspace lockfile resolves that version.** ([#2822](https://github.com/tpsdev-ai/flair/pull/2822))
