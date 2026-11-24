@@ -85,8 +85,10 @@ case "$verb" in
     echo "Could not find service \\"$2\\"" >&2
     exit 113 ;;
   unload)
-    if [ -f "$LAUNCHCTL_STATE/loaded" ]; then
+    rm -f "$LAUNCHCTL_STATE/loaded" "$LAUNCHCTL_STATE/later-loaded" "$LAUNCHCTL_STATE/later-fail" "$LAUNCHCTL_STATE/fail"
+    if [ -f "$LAUNCHCTL_STATE/pid" ]; then
       kill -TERM "$(cat "$LAUNCHCTL_STATE/pid")" 2>/dev/null
+      rm -f "$LAUNCHCTL_STATE/pid"
     fi
     exit 0 ;;
 esac
@@ -166,6 +168,21 @@ const fs = require('node:fs');
 const http = require('node:http');
 const body = fs.readFileSync(process.env.HEALTH_BODY_FILE, 'utf8');
 fs.writeFileSync(process.env.SUCCESSOR_PID_FILE, String(process.pid));
+// A real successor is a Flair instance: once it is up, it records its own pid
+// and identity sidecar, which is what a later flair stop acts on. The test
+// triggers that recording between the refused stop and the re-run.
+const record = setInterval(() => {
+  if (!fs.existsSync(process.env.SUCCESSOR_RECORD_TRIGGER)) return;
+  clearInterval(record);
+  fs.writeFileSync(process.env.FLAIR_PIDFILE, String(process.pid));
+  fs.writeFileSync(process.env.SIDECAR_FILE, JSON.stringify({
+    pid: process.pid,
+    startTimeMs: Math.round(Date.now() - process.uptime() * 1000),
+    port: Number(process.env.HTTP_PORT),
+    flairVersion: 'test',
+  }));
+  fs.writeFileSync(process.env.SUCCESSOR_RECORDED_FILE, '1');
+}, 25);
 function start() {
   const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -190,6 +207,9 @@ setInterval(() => {}, 1000);
         SUCCESSOR_SCRIPT: successorScript,
         SUCCESSOR_PID_FILE: join(f.home, "successor.pid"),
         SUCCESSOR_READY_FILE: join(f.home, "successor-ready"),
+        SIDECAR_FILE: join(f.dataDir, "flair-daemon.json"),
+        SUCCESSOR_RECORD_TRIGGER: join(f.home, "successor-record-trigger"),
+        SUCCESSOR_RECORDED_FILE: join(f.home, "successor-recorded"),
       } : {}),
     },
     stdout: "ignore", stderr: "ignore",
@@ -319,6 +339,12 @@ function unloadCalls(f: Fixture): string[] {
   return readFileSync(f.log, "utf8").split("\n").filter((line) => line.startsWith("unload "));
 }
 
+async function waitForFile(path: string, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path) && Date.now() < deadline) await Bun.sleep(10);
+  if (!existsSync(path)) throw new Error(`timed out waiting for ${path}`);
+}
+
 afterEach(() => {
   for (const child of fixture?.children ?? []) {
     try { child.kill("SIGKILL"); } catch { /* already gone */ }
@@ -347,7 +373,7 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(() => process.kill(pid, 0)).toThrow();
   }, 30_000);
 
-  test("a job that is loaded during the stop is not reported as stopped", async () => {
+  test("a job that is loaded during the stop is not reported as stopped, and a re-run takes the unload path", async () => {
     const f = await makeFixture();
     const pid = await startFlairStub(f);
     // The first `launchctl list` answers 113; after the recorded pid exits the
@@ -359,7 +385,17 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(result.out).toContain(`pid ${pid} exited, but Flair is not confirmed down`);
     expect(result.out).toContain("now reads loaded");
     expect(result.out).not.toContain("stopped the directly started Flair");
+    expect(result.out).toContain("Run 'flair stop' again to take the unload path.");
     expect(result.out).toContain("flair doctor");
+    expect(result.out).not.toContain("undefined");
+
+    // The named step: a second `flair stop` reads the job loaded and unloads it.
+    const again = await runStop(f);
+    expect(again.code).toBe(0);
+    expect(again.out).toContain("Flair stopped (launchd service unloaded)");
+    expect(unloadCalls(f)).toHaveLength(1);
+    expect(existsSync(join(f.state, "loaded"))).toBe(false);
+    expect(existsSync(join(f.state, "later-loaded"))).toBe(false);
   }, 30_000);
 
   test("a job loaded during the final evidence gather is not reported as stopped", async () => {
@@ -372,19 +408,35 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(result.out).toContain(`pid ${pid} exited, but Flair is not confirmed down`);
     expect(result.out).toContain("now reads loaded");
     expect(result.out).toContain("the instance reads NOT_RUNNING");
+    expect(result.out).toContain("Run 'flair stop' again to take the unload path.");
     expect(result.out).not.toContain("stopped the directly started Flair");
     expect(unloadCalls(f)).toEqual([]);
   }, 30_000);
 
-  test("a successor serving /Health after the recorded pid exits is not reported as stopped", async () => {
+  test("a successor serving /Health after the recorded pid exits is not reported as stopped, and a re-run stops it", async () => {
     const f = await makeFixture();
     const pid = await startFlairStub(f, { successor: "serving" });
     const result = await runStop(f);
     expect(result.code).toBe(1);
     expect(result.out).toContain(`pid ${pid} exited, but Flair is not confirmed down`);
     expect(result.out).toContain("the instance reads DISAGREEMENT");
+    expect(result.out).toContain(`a process is serving port ${f.port}, but the recorded pid ${pid} is not alive`);
+    expect(result.out).toContain("Run 'flair stop' again to stop the instance it now serves.");
     expect(result.out).not.toContain("stopped the directly started Flair");
     expect(result.out).toContain("flair doctor");
+
+    // The named step: once the successor has recorded itself as Flair does, a
+    // second `flair stop` verifies and signals it.
+    const successorPidFile = join(f.home, "successor.pid");
+    await waitForFile(successorPidFile);
+    writeFileSync(join(f.home, "successor-record-trigger"), "1");
+    await waitForFile(join(f.home, "successor-recorded"));
+    const again = await runStop(f);
+    const successorPid = Number(readFileSync(successorPidFile, "utf8"));
+    expect(again.code).toBe(0);
+    expect(again.out).toContain(`stopped the directly started Flair (pid ${successorPid})`);
+    expect(() => process.kill(successorPid, 0)).toThrow();
+    expect(unloadCalls(f)).toEqual([]);
   }, 30_000);
 
   test("a failed launchctl read after the recorded pid exits is not reported as stopped", async () => {
@@ -399,7 +451,8 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(result.out).toContain("now reads unknown");
     expect(result.out).toContain("the instance reads NOT_RUNNING");
     expect(result.out).not.toContain("stopped the directly started Flair");
-    expect(result.out).toContain("flair doctor");
+    expect(result.out).toContain("Inspect it with: flair doctor");
+    expect(result.out).not.toContain("Run 'flair stop' again");
   }, 30_000);
 
   test("a successor that accepts TCP but answers no HTTP after the recorded pid exits is not reported as stopped", async () => {
@@ -410,8 +463,10 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(result.out).toContain(`pid ${pid} exited, but Flair is not confirmed down`);
     expect(result.out).toContain("now reads not-loaded");
     expect(result.out).toContain("the instance reads UNKNOWN");
+    expect(result.out).toContain(`could not determine whether Flair is running: recorded pid ${pid} is not alive and the health check on port ${f.port} did not respond`);
     expect(result.out).not.toContain("stopped the directly started Flair");
-    expect(result.out).toContain("flair doctor");
+    expect(result.out).toContain("Inspect it with: flair doctor");
+    expect(result.out).not.toContain("Run 'flair stop' again");
   }, 30_000);
 
   test("a loaded job still takes the unload path", async () => {

@@ -293,10 +293,19 @@ async function stopDirectlyStartedFlair(port: number, dataDir: string, label: st
       const after = classifyDaemonState(await gatherDaemonEvidence(port, dataDir), { port, dataDir });
       const managedAfter = observeLaunchdManagement(dataDir, port);
       if (managedAfter.jobLoaded !== "not-loaded" || after.state !== "NOT_RUNNING") {
+        const afterDetail = "detail" in after && after.detail ? ` ${after.detail}` : "";
         console.error(
           `❌ flair stop: pid ${pid} exited, but Flair is not confirmed down for ${dataDir} — ` +
-          `the launchd job ${label} now reads ${managedAfter.jobLoaded ?? "unknown"} and the instance reads ${after.state}.`,
+          `the launchd job ${label} now reads ${managedAfter.jobLoaded ?? "unknown"} and the instance reads ${after.state}.${afterDetail}`,
         );
+        // Name the step that handles this observation; an unread job has no
+        // resolution step beyond the diagnostic (a re-run cannot read it
+        // either), so it keeps only the doctor hint.
+        if (managedAfter.jobLoaded === "loaded") {
+          console.error("   Run 'flair stop' again to take the unload path.");
+        } else if (managedAfter.jobLoaded === "not-loaded" && after.state === "DISAGREEMENT") {
+          console.error("   Run 'flair stop' again to stop the instance it now serves.");
+        }
         console.error("   Inspect it with: flair doctor");
         process.exit(1);
       }
