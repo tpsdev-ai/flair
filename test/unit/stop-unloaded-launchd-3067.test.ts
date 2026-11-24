@@ -168,9 +168,9 @@ const fs = require('node:fs');
 const http = require('node:http');
 const body = fs.readFileSync(process.env.HEALTH_BODY_FILE, 'utf8');
 fs.writeFileSync(process.env.SUCCESSOR_PID_FILE, String(process.pid));
-// A real successor is a Flair instance: once it is up, it records its own pid
-// and identity sidecar, which is what a later flair stop acts on. The test
-// triggers that recording between the refused stop and the re-run.
+// A successor started by flair records its own pid and identity sidecar, which
+// is what a later flair stop acts on. The test triggers that recording between
+// the refused stop and the re-run.
 const record = setInterval(() => {
   if (!fs.existsSync(process.env.SUCCESSOR_RECORD_TRIGGER)) return;
   clearInterval(record);

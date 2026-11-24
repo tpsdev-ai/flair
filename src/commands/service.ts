@@ -298,9 +298,7 @@ async function stopDirectlyStartedFlair(port: number, dataDir: string, label: st
           `❌ flair stop: pid ${pid} exited, but Flair is not confirmed down for ${dataDir} — ` +
           `the launchd job ${label} now reads ${managedAfter.jobLoaded ?? "unknown"} and the instance reads ${after.state}.${afterDetail}`,
         );
-        // Name the step that handles this observation; an unread job has no
-        // resolution step beyond the diagnostic (a re-run cannot read it
-        // either), so it keeps only the doctor hint.
+        // Name the step that handles this observation, next to the diagnostic.
         if (managedAfter.jobLoaded === "loaded") {
           console.error("   Run 'flair stop' again to take the unload path.");
         } else if (managedAfter.jobLoaded === "not-loaded" && after.state === "DISAGREEMENT") {
