@@ -19,8 +19,8 @@
  *     the Cellar) has the alias `<prefix>/opt/<formula>/bin/node`, where
  *     `<prefix>` is taken from the path (so /opt/homebrew and /usr/local both
  *     work) and `<formula>` is `node` or a versioned `node@NN`. `brew upgrade
- *     node` deletes the versioned Cellar directory and repoints `opt/node`,
- *     so the alias keeps naming an installed runtime.
+ *     node` repoints `opt/node` at the new version, and upgrade cleanup can
+ *     remove the old Cellar directory.
  *   - Volta: `$VOLTA_HOME | ~/.volta` + `/bin/node`. Considered, but a standard
  *     Volta install makes that path a link to `volta-shim`, whose realpath is
  *     not a node binary, so the equality check rejects it and the exact path is

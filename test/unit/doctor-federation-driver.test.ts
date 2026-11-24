@@ -364,7 +364,7 @@ describe("flair#3056 — describeScheduledDriverFinding with shimMissingNode", (
       expect(f.state).toBe("degraded");
       expect(f.isIssue).toBe(true);
       expect(f.message).toContain(missing.nodeBin);
-      expect(f.detail[0]).toBe(`${missing.unitPath} runs ${missing.shimPath}, whose exec line names ${missing.nodeBin}; that path does not exist.`);
+      expect(f.detail[0]).toBe(`${missing.unitPath} names ${missing.shimPath} as its program; the shim's exec line names ${missing.nodeBin}, which does not exist.`);
       expect(f.detail.join("\n")).toContain("Fix: flair init");
     });
   }
@@ -410,7 +410,7 @@ describe("flair#3056 — inspectFederationShimNode reads the unit and the shim f
   }
 
   for (const platform of ["darwin", "linux"] as const) {
-    it(`${platform}: names the node path when the unit runs the generated shim and the path does not exist`, () => {
+    it(`${platform}: names the node path when the unit file names the generated shim and the path does not exist`, () => {
       const s = setup(platform);
       expect(inspectFederationShimNode(s.paths)).toEqual({ unitPath: s.unitPath, shimPath: s.shim, nodeBin: s.nodeBin });
     });
@@ -422,7 +422,7 @@ describe("flair#3056 — inspectFederationShimNode reads the unit and the shim f
       expect(inspectFederationShimNode(s.paths)).toBeNull();
     });
 
-    it(`${platform}: null when the unit runs another program`, () => {
+    it(`${platform}: null when the unit file names another program`, () => {
       const s = setup(platform);
       const unit = readFileSync(s.unitPath, "utf-8");
       const other = join(s.root, "other-sync.sh");
@@ -434,6 +434,27 @@ describe("flair#3056 — inspectFederationShimNode reads the unit and the shim f
       expect(inspectFederationShimNode(s.paths)).toBeNull();
     });
   }
+
+  it("darwin: null when an XML comment names the shim but the top-level ProgramArguments runs another program", () => {
+    const s = setup("darwin");
+    const unit = readFileSync(s.unitPath, "utf-8");
+    const other = join(s.root, "other-sync.sh");
+    const decoy = `<dict>\n  <!-- <key>ProgramArguments</key><array><string>${s.shim}</string></array> -->`;
+    const changed = unit.replace(`<string>${s.shim}</string>`, `<string>${other}</string>`).replace("<dict>", decoy);
+    expect(changed.indexOf(s.shim)).toBeLessThan(changed.indexOf(other));
+    writeFileSync(s.unitPath, changed);
+    expect(inspectFederationShimNode(s.paths)).toBeNull();
+  });
+
+  it("darwin: null when the plist declares a Program key", () => {
+    const s = setup("darwin");
+    const unit = readFileSync(s.unitPath, "utf-8");
+    const other = join(s.root, "other-sync.sh");
+    const changed = unit.replace("<key>ProgramArguments</key>", `<key>Program</key>\n  <string>${other}</string>\n  <key>ProgramArguments</key>`);
+    expect(changed).not.toBe(unit);
+    writeFileSync(s.unitPath, changed);
+    expect(inspectFederationShimNode(s.paths)).toBeNull();
+  });
 
   it("null when the shim runs a command the generated shim does not", () => {
     const s = setup("darwin");

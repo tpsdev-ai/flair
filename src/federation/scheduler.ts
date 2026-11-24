@@ -64,11 +64,12 @@ import {
 import { resolve, dirname, isAbsolute } from "node:path";
 
 import { fileURLToPath } from "node:url";
-import { escapeXml, unescapeXml } from "../lib/xml-escape.js";
+import { escapeXml } from "../lib/xml-escape.js";
 import { snapshotRegularFile, writeFilesAtomically, type AtomicWriteHooks, type FileSnapshot } from "../lib/atomic-write.js";
 import { homebrewOptAlias, preferVersionManagerAlias, type AliasHooks } from "../lib/node-alias-path.js";
 import { compareVersions, isNpmGlobalFlairTree } from "../lib/tree-divergence.js";
 import { findFlairPackageDir } from "../lib/upgrade-exec-path.js";
+import { readPlistStructure } from "../lib/service-repoint.js";
 import {
   type SchedulerPlatform,
   type FirstRunVerification,
@@ -1050,7 +1051,7 @@ function readBoundedRegularFile(path: string): string | null {
 }
 
 export interface FederationShimMissingNode {
-  /** The scheduler unit file that runs the shim. */
+  /** The scheduler unit file that names the shim as its program. */
   unitPath: string;
   shimPath: string;
   /** The node path on the shim's exec line, which does not exist. */
@@ -1060,10 +1061,10 @@ export interface FederationShimMissingNode {
 /**
  * For `flair doctor` (flair#3056): the node path on the federation-sync shim's
  * exec line when that path does not exist (stat fails with ENOENT or ENOTDIR).
- * Returned only when the scheduler unit file runs `shimPath` and the shim runs
- * exactly the commands `flair federation sync enable` writes. null otherwise,
- * including when either file cannot be read through readBoundedRegularFile or
- * the stat fails another way.
+ * Returned only when the scheduler unit file names `shimPath` as its program
+ * (federationUnitExecsShim) and the shim runs exactly the commands `flair
+ * federation sync enable` writes. null otherwise, including when either file
+ * cannot be read through readBoundedRegularFile or the stat fails another way.
  */
 export function inspectFederationShimNode(
   opts: Pick<
@@ -1099,14 +1100,22 @@ export function inspectFederationShimNode(
   }
 }
 
-/** Does the federation-sync unit exec `shimPath`? Returns the reason it does not, or null. */
+/**
+ * Does the federation-sync unit file name `shimPath` as its program? Returns
+ * the reason it does not, or null. A plist is read as XML structure after its
+ * comments are removed, so a key inside a comment or a nested dict is not read.
+ */
 function federationUnitExecsShim(plat: SchedulerPlatform, text: string, shimPath: string): string | null {
   if (plat === "darwin") {
-    const label = /<key>Label<\/key>\s*<string>([^<]*)<\/string>/.exec(text);
-    if (!label || unescapeXml(label[1]!) !== LAUNCHD_LABEL) return `its Label is not ${LAUNCHD_LABEL}`;
-    const block = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text);
-    const args = block ? [...block[1]!.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => unescapeXml(m[1]!)) : [];
-    if (args.length !== 1 || resolve(args[0]!) !== resolve(shimPath)) {
+    const doc = readPlistStructure(text.replace(/<!--[\s\S]*?-->/g, ""));
+    if ("problem" in doc) return `it is not a plist flair can read (it has ${doc.problem})`;
+    const label = doc.top.get("Label");
+    if (label?.t !== "string" || label.v !== LAUNCHD_LABEL) return `its Label is not ${LAUNCHD_LABEL}`;
+    if (doc.top.has("Program")) return "it declares a Program key, which launchd runs instead of ProgramArguments[0]";
+    const block = doc.top.get("ProgramArguments");
+    const items = block?.t === "array" ? block.items : [];
+    const args = items.map((v) => (v.t === "string" ? v.v : `<${v.t}>`));
+    if (items.length !== 1 || items[0]!.t !== "string" || resolve(args[0]!) !== resolve(shimPath)) {
       return `its ProgramArguments are ${JSON.stringify(args)}, not [${JSON.stringify(shimPath)}]`;
     }
     return null;
@@ -1178,7 +1187,7 @@ export function rewriteFederationSchedulerRuntime(
     return refused(`could not read ${unitPath} (${err?.message ?? err}).`);
   }
   const notOurs = federationUnitExecsShim(plat, unitText, shimPath);
-  if (notOurs) return refused(`${unitPath} does not exec the flair-generated shim: ${notOurs}.`);
+  if (notOurs) return refused(`flair could not confirm that ${unitPath} execs the flair-generated shim: ${notOurs}.`);
   if (!exists(shimPath)) return refused(`${unitPath} execs ${shimPath}, which does not exist.`);
   // A regular file (never followed through a symlink), read once: the plan and
   // the pre-rename re-check both use these bytes.

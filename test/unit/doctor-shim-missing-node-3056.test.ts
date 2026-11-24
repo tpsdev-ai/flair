@@ -12,7 +12,7 @@
  *
  * Doctor names the node path on the shim's exec line when that path does not
  * exist, whatever the recorded last exit; it does not when the path exists
- * (an opt alias that moved to a newer version) or when the unit runs another
+ * (an opt alias that moved to a newer version) or when the unit file names another
  * program.
  */
 import { describe, it, expect } from "bun:test";
@@ -183,8 +183,8 @@ describe("flair doctor names the shim's missing node binary (flair#3056)", () =>
       const { section, calls } = runDoctor(f, await deadPort(), lastExit);
 
       expectFederationQueries(calls);
-      expect(section).toContain(`Federation sync driver DEGRADED — the node binary its shim execs does not exist (${nodeBin})`);
-      expect(section).toContain(`${f.unitPath} runs ${f.shim}, whose exec line names ${nodeBin}; that path does not exist.`);
+      expect(section).toContain(`Federation sync driver DEGRADED — the shim its unit file names execs a node binary that does not exist (${nodeBin})`);
+      expect(section).toContain(`${f.unitPath} names ${f.shim} as its program; the shim's exec line names ${nodeBin}, which does not exist.`);
       expect(section).toContain("Fix: flair init");
     }, CASE_BUDGET_MS);
   }
@@ -207,7 +207,7 @@ describe("flair doctor names the shim's missing node binary (flair#3056)", () =>
     expect(section).not.toContain("does not exist");
   }, CASE_BUDGET_MS);
 
-  it("does not attribute it to the shim when the unit runs another program", async () => {
+  it("does not attribute it to the shim when the unit file names another program", async () => {
     const root = tempDir("flair-3056-doctor-");
     const nodeBin = join(root, "homebrew", "Cellar", "node", "26.10.0_1", "bin", "node");
     const f = fixture(root, nodeBin);

@@ -205,6 +205,22 @@ describe("rewriteFederationSchedulerRuntime — macOS", () => {
     expect(readFileSync(f.shim, "utf-8")).toBe(before);
   });
 
+  test("a plist that names the shim only inside an XML comment is refused", () => {
+    const f = fixture();
+    enable(f, "darwin");
+    const unit = readFileSync(f.plist, "utf-8");
+    const entry = /<key>ProgramArguments<\/key>\s*<array>\s*(<string>[^<]*<\/string>)/.exec(unit)![1]!;
+    const decoy = unit
+      .replace(entry, "<string>/usr/local/bin/my-sync</string>")
+      .replace("<dict>", `<dict>\n  <!-- <key>ProgramArguments</key><array>${entry}</array> -->`);
+    writeFileSync(f.plist, decoy);
+    const before = readFileSync(f.shim, "utf-8");
+    const r = rewrite(f, "darwin");
+    expect(r.status).toBe("refused");
+    expect(r.detail).toContain(`its ProgramArguments are ["/usr/local/bin/my-sync"]`);
+    expect(readFileSync(f.shim, "utf-8")).toBe(before);
+  });
+
   test("a hand-changed shim (not the generated shape) is refused", () => {
     const f = fixture();
     enable(f, "darwin");

@@ -2663,8 +2663,8 @@ program
         const lastExit = d.status.installed && d.status.active === true
           ? queryLastExitStatus({ plat: d.status.platform, darwinTarget: d.darwinTarget, linuxServiceUnit: d.linuxServiceUnit })
           : null;
-        // flair#3056: set when the unit file runs the flair-generated shim and
-        // the node path on the shim's exec line does not exist.
+        // flair#3056: set when the unit file names the flair-generated shim as
+        // its program and the node path on the shim's exec line does not exist.
         const shimMissingNode = d.kind === "federation" && d.status.installed ? fedSched.inspectFederationShimNode() : null;
         const facts = {
           label: d.label,
