@@ -425,7 +425,7 @@ test("deep status escapes a stored id in the names line, the table row and the u
   }
 });
 
-test("each non-printable category escapes; printable non-ASCII does not", async () => {
+test("each escaped category escapes; other non-ASCII text does not", async () => {
   const { escapeTerminalText } = await import("../../src/lib/terminal-text.ts");
   const cases: Array<[string, string]> = [
     ["\x1b", "\\u{1b}"],
