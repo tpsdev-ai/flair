@@ -389,8 +389,10 @@ if [ "$scan_rc" -ne 1 ]; then
   exit 1
 fi
 cat "$INIT_LOG"
-# A failed init still reaches the ERR trap's diagnostics with init's exit code.
-if [ "$init_rc" -ne 0 ]; then (exit "$init_rc"); fi
+# Call on_error directly: /bin/bash 3.2 does not fire the ERR trap for this subshell.
+if [ "$init_rc" -ne 0 ]; then
+  (exit "$init_rc") || on_error
+fi
 if [ ! -f "$PASS_FILE" ] || [ -L "$PASS_FILE" ] || [ ! -O "$PASS_FILE" ] ||
    [ "$(stat -f '%Lp' "$PASS_FILE")" != "600" ] || ! cmp -s "$ADMIN_PASS_SOURCE_FILE" "$PASS_FILE"; then
   echo "admin-pass file ${PASS_FILE} must be a runner-owned regular 0600 file identical to the source after flair init" >&2
