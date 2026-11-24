@@ -519,7 +519,7 @@ export function register(program: Command): void {
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper ops API port (default: HTTP - 1)")
     .action(async (opts: any) => {
-      const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+      const adminPass = process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD;
       if (!adminPass) {
         console.error("❌ Admin password required (set FLAIR_ADMIN_PASS or HDB_ADMIN_PASSWORD).");
         process.exit(1);

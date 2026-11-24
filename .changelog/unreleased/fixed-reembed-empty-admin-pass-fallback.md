@@ -1,0 +1,2 @@
+- **Commands that read administrative credentials treat an empty FLAIR_ADMIN_PASS environment variable as unset, falling back to HDB_ADMIN_PASSWORD.**
+  Previously, nullish coalescing kept an empty string value for FLAIR_ADMIN_PASS (such as one loaded from an empty password file), preventing fallback to a configured HDB_ADMIN_PASSWORD and causing commands like flair reembed to exit with an admin password required error (#3093).

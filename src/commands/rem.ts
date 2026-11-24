@@ -1295,7 +1295,7 @@ export function register(program: Command): void {
       // hook before any cycle work. A refused FILE is reported as `Dedup: NOT
       // RUN` rather than issuing an agent-authed call that an agent key cannot
       // authorize.
-      const adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
+      const adminPass = opts.adminPass || process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD || "";
       // Every agent-scoped call is signed by the selected agent and nothing
       // else: the identity is pinned here (never FLAIR_AGENT_ID), and
       // signedOnly refuses FLAIR_TOKEN / FLAIR_ADMIN_PASS / the local

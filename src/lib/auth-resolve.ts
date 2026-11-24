@@ -1896,7 +1896,7 @@ export async function authedRequest(
       authHeader = `Bearer ${process.env.FLAIR_TOKEN}`;
       credSource = "env-token";
     } else if (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD) {
-      const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD!;
+      const adminPass = (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD)!;
       authHeader = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
       credSource = "env-admin";
     }

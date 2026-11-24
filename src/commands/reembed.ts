@@ -210,7 +210,7 @@ program
 
     // A call with neither --agent nor an admin password is a usage error; report
     // it before the server check below so the existing message is not masked.
-    const adminPassEnv = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+    const adminPassEnv = process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD;
     if (!agentId && !adminPassEnv) {
       console.error("❌ Admin password required when --agent is not specified (set FLAIR_ADMIN_PASS or HDB_ADMIN_PASSWORD)");
       process.exit(1);
@@ -375,7 +375,7 @@ program
       process.exit(1);
     }
 
-    const adminPassSingle = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+    const adminPassSingle = process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD;
     let allMemories: any[] = [];
     // flair#2561: the stamp of each re-embedded row is read back the way the
     // rows were listed: the operations API with administrator credentials,
