@@ -52,8 +52,13 @@ export function formatUnknownState(state: { entity: "memory" | "soul"; id: strin
     : `${state.entity} ${state.id}: absent from the verification read; the deadline fired before a complete response, so whether the write landed is unresolved and its state is unverified`;
 }
 
-/** The server release that first serves `GET /AdminMemoryCandidates/{agentId}`. */
-export const CANDIDATE_LIST_MIN_SERVER_VERSION = "0.63.0";
+/**
+ * The server release that first serves `GET /AdminMemoryCandidates/{agentId}`. This is a server-capability
+ * minimum, not a package version, so its name does not end in "version": in the files it scans,
+ * check-version-sync treats a declaration whose identifier ends in "version" and holds the target release as
+ * a version site the release must bump.
+ */
+export const CANDIDATE_LIST_FIRST_SERVER_RELEASE = "0.63.0";
 
 /** The page size restore asks the admin-only candidate route for. */
 export const CANDIDATE_LIST_LIMIT = 500;
@@ -334,7 +339,7 @@ function candidateListDefect(body: any): string | null {
 /** The candidate-route 404 guidance: the operator message when GET /AdminMemoryCandidates answers 404. */
 function candidateRoute404Guidance(err: ApiHttpError): string {
   return `restore lists leftover MemoryCandidate rows through GET /AdminMemoryCandidates on the restore target, and the target answered HTTP ${err.status}. `
-    + `That route is part of Flair server ${CANDIDATE_LIST_MIN_SERVER_VERSION}; if the target runs an older server, upgrade it to ${CANDIDATE_LIST_MIN_SERVER_VERSION} or newer, then retry. `
+    + `That route is part of Flair server ${CANDIDATE_LIST_FIRST_SERVER_RELEASE}; if the target runs an older server, upgrade it to ${CANDIDATE_LIST_FIRST_SERVER_RELEASE} or newer, then retry. `
     + "No target rows were deleted or written.";
 }
 
