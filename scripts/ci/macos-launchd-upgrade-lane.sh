@@ -352,6 +352,14 @@ log "Bring the instance up the product way (flair init, direct-spawned)"
 # destination on a stopped instance. Let init persist ~/.flair/admin-pass before doctor --fix writes the
 # #1573 pass-file launcher plist, which needs that file to start.
 ADMIN_PASS="${ADMIN_PASS:-}"
+# Flair's reader strips trailing whitespace, which the exact-value scan below
+# would not match; whitespace at either end is refused before the source is written.
+case "$ADMIN_PASS" in
+  [[:space:]]* | *[[:space:]])
+    echo "ADMIN_PASS must not begin or end with whitespace" >&2
+    exit 1
+    ;;
+esac
 if [ -z "$ADMIN_PASS" ]; then
   # Same generator init uses (base64url over 18 random bytes), invoked through
   # node so the value never appears on a command line anyone can read.

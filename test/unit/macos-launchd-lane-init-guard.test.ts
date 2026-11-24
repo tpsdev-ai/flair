@@ -47,13 +47,11 @@ function extractInitBlock(): string {
   const lines = readFileSync(LANE, "utf8").split("\n");
   const start = lines.indexOf('ADMIN_PASS="${ADMIN_PASS:-}"');
   if (start < 0) throw new Error(`start marker not found in ${LANE}`);
-  const anchor = lines.findIndex(
-    (line, index) => index > start && line.includes("still exists after cleanup"),
-  );
-  if (anchor < 0) throw new Error(`end anchor not found in ${LANE}`);
-  const end = lines.findIndex((line, index) => index > anchor && line.trim() === "fi");
+  // Ends before the HDB_ADMIN_PASSWORD export, so a deleted post-cleanup guard
+  // reaches the cases instead of failing this extraction.
+  const end = lines.indexOf('export HDB_ADMIN_PASSWORD="$ADMIN_PASS"', start);
   if (end < 0) throw new Error(`end marker not found in ${LANE}`);
-  return lines.slice(start, end + 1).join("\n");
+  return lines.slice(start, end).join("\n");
 }
 
 const STUB = `#!/usr/bin/env bash
@@ -105,16 +103,29 @@ case "\${STUB_MODE:-ok}" in
     chmod 600 "$PASS_FILE"
     echo "init ok"
     ;;
+  fifo)
+    mkfifo -m 600 "$PASS_FILE"
+    # Blocks until a reader opens the FIFO; the test kills it by this PID.
+    cat "$pass_file" > "$PASS_FILE" 2>/dev/null &
+    echo "$!" > "$FIFO_WRITER_PID"
+    echo "init ok"
+    ;;
+  trim)
+    value="$(sed 's/[[:space:]]*$//' "$pass_file")"
+    printf '%s\\n' "$value" > "$PASS_FILE"
+    chmod 600 "$PASS_FILE"
+    echo "init using $value"
+    ;;
 esac
 `;
 
 // The lane's shell options and the globals its wiring reads. dump_diagnostics
-// and extract_symptom inspect a real lane run, so they are stubbed.
+// and extract_symptom inspect a real lane run, so stubs print a marker instead.
 const HARNESS_HEAD = `set -Eeuo pipefail
 REGISTRY_PID=""
 ADMIN_PASS_SOURCE_DIR=""
-dump_diagnostics() { :; }
-extract_symptom() { :; }
+dump_diagnostics() { echo DIAGNOSTICS-DUMPED; }
+extract_symptom() { echo SYMPTOM-EXTRACTED; }
 `;
 
 // Runs after the lane's wiring: a case without an ERR trap removes the lane's.
@@ -130,7 +141,7 @@ if [ -e "$1" ]; then echo SOURCE-PRESENT-AFTER-BLOCK; fi
 echo REACHED-END
 `;
 
-type Mode = "ok" | "leak" | "fail" | "nopattern" | "bytes" | "mode" | "symlink" | "dir";
+type Mode = "ok" | "leak" | "fail" | "nopattern" | "bytes" | "mode" | "symlink" | "dir" | "fifo" | "trim";
 
 interface Scratch {
   root: string;
@@ -180,10 +191,26 @@ exit 64
   return dir;
 }
 
-function runCase(mode: Mode, errTrap: boolean, shell = "bash", foreignEuid = false) {
+/** A fake `rm` that exits 0 and removes nothing. */
+function writeNoopRm(root: string): string {
+  const dir = join(root, "fake-rm");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "rm"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(dir, "rm"), 0o755);
+  return dir;
+}
+
+interface CaseOptions {
+  foreignEuid?: boolean;
+  noopRm?: boolean;
+  adminPass?: string;
+}
+
+function runCase(mode: Mode, errTrap: boolean, shell = "bash", options: CaseOptions = {}) {
   const scratch = makeScratch();
   const pathDirs = [join(scratch.root, "bin"), process.env.PATH ?? ""];
-  if (foreignEuid) pathDirs.unshift(writeForeignId(scratch.root));
+  if (options.foreignEuid) pathDirs.unshift(writeForeignId(scratch.root));
+  if (options.noopRm) pathDirs.unshift(writeNoopRm(scratch.root));
   const result = spawnSync(shell, [join(scratch.root, "harness.sh")], {
     encoding: "utf8",
     env: {
@@ -194,8 +221,10 @@ function runCase(mode: Mode, errTrap: boolean, shell = "bash", foreignEuid = fal
       RUNNER_TEMP: scratch.runDir,
       PASS_FILE: scratch.passFile,
       SOURCE_MODES: join(scratch.root, "source-modes"),
+      FIFO_WRITER_PID: join(scratch.root, "fifo-writer.pid"),
       STUB_MODE: mode,
       HARNESS_ERR_TRAP: errTrap ? "1" : "0",
+      ...(options.adminPass === undefined ? {} : { ADMIN_PASS: options.adminPass }),
     },
     timeout: 30_000,
   });
@@ -211,6 +240,8 @@ describe("launchd lane init guard (flair#3100)", () => {
       const { result, out, scratch } = runCase("fail", false);
       expect(result.status).toBe(3);
       expect((out.match(/lane failed \(exit 3\)/g) ?? []).length).toBe(1);
+      expect((out.match(/DIAGNOSTICS-DUMPED/g) ?? []).length).toBe(1);
+      expect((out.match(/SYMPTOM-EXTRACTED/g) ?? []).length).toBe(1);
       expect(out).not.toContain("REACHED-END");
       expect(readdirSync(scratch.runDir)).toHaveLength(0);
     },
@@ -227,6 +258,8 @@ describe("launchd lane init guard (flair#3100)", () => {
       const { result, out } = runCase("fail", true, "/bin/bash");
       expect(result.status).toBe(3);
       expect((out.match(/lane failed \(exit 3\)/g) ?? []).length).toBe(1);
+      expect((out.match(/DIAGNOSTICS-DUMPED/g) ?? []).length).toBe(1);
+      expect((out.match(/SYMPTOM-EXTRACTED/g) ?? []).length).toBe(1);
       expect(out).not.toContain("REACHED-END");
     },
     60_000,
@@ -254,6 +287,23 @@ describe("launchd lane init guard (flair#3100)", () => {
       expect(out).toContain("withheld");
       expect(out).toContain("grep exit 2");
       expect(out).not.toContain("REACHED-END");
+    },
+    60_000,
+  );
+
+  // The trim stub persists and prints the value with trailing whitespace
+  // stripped, as Flair's reader does.
+  test(
+    "an ADMIN_PASS override with whitespace at either end is refused before the source is written or init runs",
+    () => {
+      for (const [mode, adminPass] of [["trim", "override-value "], ["ok", " override-value"]] as const) {
+        const { result, out, scratch } = runCase(mode, false, "bash", { adminPass });
+        expect(result.status).toBe(1);
+        expect(out).toContain("ADMIN_PASS must not begin or end with whitespace");
+        expect(out).not.toContain("override-value");
+        expect(readdirSync(scratch.runDir)).toHaveLength(0);
+        expect(readdirSync(join(scratch.root, "pass"))).toHaveLength(0);
+      }
     },
     60_000,
   );
@@ -320,12 +370,44 @@ describe("launchd lane init guard (flair#3100)", () => {
     60_000,
   );
 
+  // Darwin only, as above. A runner-owned 0600 FIFO fed the source's bytes,
+  // which cmp accepts, so -f is the check that refuses it.
+  test.skipIf(process.platform !== "darwin")(
+    "a persisted FIFO that carries the source's bytes is refused before adoption",
+    () => {
+      const { result, out, scratch } = runCase("fifo", false);
+      const pid = Number.parseInt(readFileSync(join(scratch.root, "fifo-writer.pid"), "utf8"), 10);
+      if (!(pid > 1)) throw new Error(`the fifo stub recorded no writer PID: ${pid}`);
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone: a reader opened the FIFO and the writer finished.
+      }
+      expect(result.status).toBe(1);
+      expect(out).toContain("must be a runner-owned regular 0600 file identical to the source");
+      expect(out).not.toContain("REACHED-END");
+    },
+    60_000,
+  );
+
+  // Darwin only, as above.
+  test.skipIf(process.platform !== "darwin")(
+    "a source directory left by a cleanup that reports success is refused",
+    () => {
+      const { result, out } = runCase("ok", false, "bash", { noopRm: true });
+      expect(result.status).toBe(1);
+      expect(out).toContain("still exists after cleanup");
+      expect(out).not.toContain("REACHED-END");
+    },
+    60_000,
+  );
+
   // Darwin only, as above. A fake `id` on PATH reports another effective uid, so
   // this fixture (a regular 0600 file identical to the source) fails only the owner check.
   test.skipIf(process.platform !== "darwin")(
     "a persisted file whose owner is not the effective uid is refused before adoption",
     () => {
-      const { result, out } = runCase("ok", false, "bash", true);
+      const { result, out } = runCase("ok", false, "bash", { foreignEuid: true });
       expect(result.status).toBe(1);
       expect(out).toContain("must be a runner-owned regular 0600 file identical to the source");
       expect(out).not.toContain("REACHED-END");
