@@ -201,14 +201,21 @@ async function run(
   timeoutMs = CASE_TIMEOUT_MS,
 ): Promise<Run> {
   const started = Date.now();
+  // A host shell startup file must not decide a case's result: bash reads
+  // BASH_ENV and POSIX sh reads ENV before a non-interactive script, so the
+  // stub would exit before it reads its fixture files. Keep PATH and the
+  // fixture variables the cases set explicitly.
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: `${box.bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+    WAIT_STUB_DIR: box.root,
+    HARPER_START_BUDGET_S: "",
+    ...env,
+  };
+  delete childEnv.BASH_ENV;
+  delete childEnv.ENV;
   const child = spawn("node", [SCRIPT, ...args], {
-    env: {
-      ...process.env,
-      PATH: `${box.bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
-      WAIT_STUB_DIR: box.root,
-      HARPER_START_BUDGET_S: "",
-      ...env,
-    },
+    env: childEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
@@ -301,6 +308,32 @@ describe("wait-for-harper.mjs", () => {
       expect(result.status).toBe(0);
       expect(result.output).toMatch(/Harper ready after \d+s/);
       expect(server.requests()).toBeGreaterThanOrEqual(3);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(a2) a host BASH_ENV that exits nonzero does not decide the readiness case",
+    async () => {
+      const dir = tempDir("flair-wait-harper-env-");
+      const bashEnv = join(dir, "bash-env.sh");
+      writeFileSync(bashEnv, "exit 7\n");
+      const server = await health((index, res) => {
+        res.statusCode = index >= 2 ? 200 : 503;
+        res.end();
+      });
+      const box = sandbox();
+      const prior = process.env.BASH_ENV;
+      process.env.BASH_ENV = bashEnv;
+      try {
+        const result = await run(box, ["--container", "harper-flair", ...WAIT_ARGS(server.url), "--budget-seconds", "20"]);
+
+        expect(result.status).toBe(0);
+        expect(result.output).toMatch(/Harper ready after \d+s/);
+      } finally {
+        if (prior === undefined) delete process.env.BASH_ENV;
+        else process.env.BASH_ENV = prior;
+      }
     },
     CASE_TIMEOUT_MS,
   );
