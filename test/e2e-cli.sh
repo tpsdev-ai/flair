@@ -71,6 +71,20 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
+echo "--- embedding readiness ---"
+# flair#3052: a test Harper's FIRST embedding can exceed the provider's own
+# ~20 s bound and answer 503 memory_provider_timeout (nothing written), so this
+# wait runs before the first write. Elapsed time and a hard attempt cap
+# (MAX_READINESS_ATTEMPTS) govern its retries and acceptance (a client-side
+# policy: an in-flight request or sleep can settle later), and, on success
+# (readiness confirmed and its cleanup done), records its duration in the job's
+# step summary when GITHUB_STEP_SUMMARY is set to a non-empty path.
+FLAIR_ADMIN_PASS="$ADMIN_PASS" node "${FLAIR_DIR}/scripts/ci/embedding-readiness.mjs" \
+  --base-url "http://localhost:${PORT}" \
+  --label "Integration Tests (E2E CLI)" \
+  --deadline-ms "${EMBEDDING_READY_DEADLINE_MS:-180000}"
+echo "PASS: embedding readiness"
+
 echo "--- status ---"
 "${FLAIR[@]}" status
 echo "PASS: status"

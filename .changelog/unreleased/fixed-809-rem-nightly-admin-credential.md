@@ -6,4 +6,4 @@
   fails the run at startup before any cycle work: the dedup step reports NOT
   RUN with the path and remedy, and the command exits nonzero on every path,
   including a paused cycle and a dry run. Re-run `flair rem nightly enable` on
-  an existing install to rewrite the shim.
+  an existing install to rewrite the shim. ([#2678](https://github.com/tpsdev-ai/flair/pull/2678))
