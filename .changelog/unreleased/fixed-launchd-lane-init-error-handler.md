@@ -1,1 +1,1 @@
-- **A failed `flair init` now prints its diagnostics in the macOS launchd lane.** The stock Bash 3.2 runner does not fire the error trap for the init subshell, so the lane calls its handler directly.
+- **In the macOS launchd lane, a failed `flair init` whose output passes the password scan now prints its diagnostics.** Stock macOS `/bin/bash` 3.2 does not fire the error trap for the init subshell, so the lane calls its handler directly.

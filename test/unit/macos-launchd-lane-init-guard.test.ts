@@ -1,11 +1,11 @@
 /**
  * macos-launchd-lane-init-guard.test.ts — flair#3100
  *
- * A failed `flair init` in the launchd adopt-then-upgrade lane must reach
- * on_error's diagnostics. The block under test is extracted from
- * scripts/ci/macos-launchd-upgrade-lane.sh itself (never copied), because the
- * macOS runner's stock /bin/bash 3.2 does NOT fire the ERR trap for
- * `(exit "$init_rc")` inside an `if` body; Bash 5 does.
+ * A failed `flair init` whose output passes the password scan must reach
+ * on_error's diagnostics in the launchd adopt-then-upgrade lane. The block
+ * under test is extracted from scripts/ci/macos-launchd-upgrade-lane.sh itself
+ * (never copied), because stock macOS /bin/bash 3.2 does NOT fire the ERR trap
+ * for `(exit "$init_rc")` inside an `if` body; Bash 5 does.
  */
 
 import { afterEach, describe, expect, test } from "bun:test";

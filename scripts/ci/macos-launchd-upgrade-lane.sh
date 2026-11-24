@@ -348,8 +348,8 @@ npm install -g "@tpsdev-ai/flair@${BASELINE_VERSION}"
 echo "installed: $(flair --version 2>&1 | tail -n1)"
 
 log "Bring the instance up the product way (flair init, direct-spawned)"
-# Supply a separate source: init refuses a pre-existing destination on a stopped
-# instance. Let init persist ~/.flair/admin-pass before doctor --fix writes the
+# Supply a separate source: the 0.62.0 baseline's init refuses a pre-existing
+# destination on a stopped instance. Let init persist ~/.flair/admin-pass before doctor --fix writes the
 # #1573 pass-file launcher plist, which needs that file to start.
 ADMIN_PASS="${ADMIN_PASS:-}"
 if [ -z "$ADMIN_PASS" ]; then
