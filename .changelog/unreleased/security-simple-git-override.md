@@ -1,1 +1,0 @@
-- **The workspace lockfile resolves simple-git 4.0.2 and `@simple-git/argv-parser` 2.0.1.** ([#2726](https://github.com/tpsdev-ai/flair/pull/2726))

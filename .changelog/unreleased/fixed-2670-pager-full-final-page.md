@@ -1,1 +1,0 @@
-- **A full final Memory page at the cap is accepted on the same evidence as an uncapped walk**: an empty read after its last id and rows read equal to the count (#2670). ([#2673](https://github.com/tpsdev-ai/flair/pull/2673))

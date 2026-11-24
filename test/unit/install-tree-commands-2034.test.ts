@@ -198,7 +198,7 @@ describe("runInstallTreeDoctorSection — counting", () => {
     }
   });
 
-  test("federation shim running another tree: one issue, fixed only when re-read as current", async () => {
+  test("federation shim the dry run would re-point: one issue, fixed only when re-read as current or as a node pin", async () => {
     const seq = (after: string) => {
       const out = ["would-rewrite", "rewritten", after];
       return () => ({ status: out.shift() as any, detail: "d" });
@@ -209,6 +209,12 @@ describe("runInstallTreeDoctorSection — counting", () => {
       quiet,
     );
     expect(fixedRun).toEqual({ issues: 1, fixed: 1 });
+    const pinnedRun = await runInstallTreeDoctorSection(
+      { autoFix: true, dryRun: false },
+      deps({ assess: () => assessment("same"), rewriteFederation: seq("pinned-node") }),
+      quiet,
+    );
+    expect(pinnedRun).toEqual({ issues: 1, fixed: 1 });
     const unverified = await runInstallTreeDoctorSection(
       { autoFix: true, dryRun: false },
       deps({ assess: () => assessment("same"), rewriteFederation: seq("would-rewrite") }),

@@ -443,8 +443,8 @@ export interface InstallTreeDoctorDeps {
  *   - `--fix` counts the divergence FIXED only after the unit was re-pointed,
  *     the instance restarted, and the serving tree re-proven to be this CLI's —
  *     "nothing to rewrite" or a failed restart is never a fix;
- *   - a federation-sync shim running another npm-global tree is one issue,
- *     fixed only when re-pointed AND re-read as current.
+ *   - a federation-sync shim the dry run would re-point is one issue, fixed
+ *     only when re-pointed AND re-read as current or as a node pin.
  *
  * Extracted from the action (like renderEmbedGpuDoctorFinding) so the counting
  * is exercised directly; the action passes the real adapters.
@@ -524,13 +524,14 @@ export async function runInstallTreeDoctorSection(
       break;
     case "would-rewrite": {
       issues++;
-      write(`  ${bad} the federation-sync shim runs another install tree — ${f.detail}`);
+      write(`  ${bad} the federation-sync shim would be re-pointed — ${f.detail}`);
       if (mode.autoFix && mode.dryRun) {
         write(`  ${info} ${render.wrap(render.c.dim, "[dry-run] would re-point the shim's exec line (the scheduler unit is not rewritten)")}`);
       } else if (mode.autoFix) {
         const r = deps.rewriteFederation(false);
         const verify = r.status === "rewritten" ? deps.rewriteFederation(true) : null;
-        if (verify?.status === "current") {
+        // A re-pointed Homebrew Cellar node that is not this CLI's node re-reads as a pin (flair#3056).
+        if (verify?.status === "current" || verify?.status === "pinned-node") {
           fixed++;
           write(`  ${ok} ${r.detail}`);
         } else {
@@ -2662,6 +2663,9 @@ program
         const lastExit = d.status.installed && d.status.active === true
           ? queryLastExitStatus({ plat: d.status.platform, darwinTarget: d.darwinTarget, linuxServiceUnit: d.linuxServiceUnit })
           : null;
+        // flair#3056: set when the unit file names the flair-generated shim as
+        // its program and the node path on the shim's exec line does not exist.
+        const shimMissingNode = d.kind === "federation" && d.status.installed ? fedSched.inspectFederationShimNode() : null;
         const facts = {
           label: d.label,
           enableCommand: d.enableCommand,
@@ -2669,6 +2673,7 @@ program
           installed: d.status.installed,
           active: d.status.active,
           lastExit,
+          shimMissingNode,
           stderrLogPath: d.stderrLogPath,
         };
         const finding = d.kind === "federation"
