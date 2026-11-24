@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -68,6 +69,26 @@ case "\${STUB_MODE:-ok}" in
     rm -f "$pass_file"
     echo "init wrote no pattern"
     ;;
+  bytes)
+    printf 'other\\n' > "$PASS_FILE"
+    chmod 600 "$PASS_FILE"
+    echo "init ok"
+    ;;
+  mode)
+    cp "$pass_file" "$PASS_FILE"
+    chmod 644 "$PASS_FILE"
+    echo "init ok"
+    ;;
+  symlink)
+    ln -s "$pass_file" "$PASS_FILE"
+    chmod -h 600 "$PASS_FILE"
+    echo "init ok"
+    ;;
+  dir)
+    mkdir "$PASS_FILE"
+    chmod 600 "$PASS_FILE"
+    echo "init ok"
+    ;;
 esac
 `;
 
@@ -89,7 +110,14 @@ if [ "\${HARNESS_ERR_TRAP:-0}" = "1" ]; then
 fi
 `;
 
-type Mode = "ok" | "leak" | "fail" | "nopattern";
+// Checked after the block and BEFORE the harness exits, so the EXIT trap cannot
+// hide a source directory the block left behind.
+const HARNESS_TAIL = `set -- "$RUNNER_TEMP"/flair-admin-pass.*
+if [ -e "$1" ]; then echo SOURCE-PRESENT-AFTER-BLOCK; fi
+echo REACHED-END
+`;
+
+type Mode = "ok" | "leak" | "fail" | "nopattern" | "bytes" | "mode" | "symlink" | "dir";
 
 interface Scratch {
   root: string;
@@ -114,7 +142,7 @@ function makeScratch(): Scratch {
   mkdirSync(join(root, "pass"));
   writeFileSync(join(binDir, "flair"), STUB);
   chmodSync(join(binDir, "flair"), 0o755);
-  writeFileSync(join(root, "harness.sh"), `${HARNESS_HEAD}${extractInitBlock()}\necho REACHED-END\n`);
+  writeFileSync(join(root, "harness.sh"), `${HARNESS_HEAD}${extractInitBlock()}\n${HARNESS_TAIL}`);
   return { root, runDir, passFile };
 }
 
@@ -135,7 +163,7 @@ function runCase(mode: Mode, errTrap: boolean, shell = "bash") {
     timeout: 30_000,
   });
   const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-  const value = existsSync(scratch.passFile) ? readFileSync(scratch.passFile, "utf8").trim() : "";
+  const value = existsSync(scratch.passFile) && lstatSync(scratch.passFile).isFile() ? readFileSync(scratch.passFile, "utf8").trim() : "";
   return { result, out, value, scratch };
 }
 
@@ -199,8 +227,31 @@ describe("launchd lane init guard (flair#3100)", () => {
       const { result, out, scratch } = runCase("ok", false);
       expect(result.status).toBe(0);
       expect(out).toContain("REACHED-END");
+      expect(out).not.toContain("SOURCE-PRESENT-AFTER-BLOCK");
       expect(readdirSync(scratch.runDir)).toHaveLength(0);
     },
     60_000,
   );
+
+  // Darwin only, as above. Each fixture fails exactly one destination check:
+  // bytes -> cmp, mode -> the 0600 mode check, symlink (its own mode set to
+  // 0600 with chmod -h) -> -L. A directory is refused by -f and by cmp.
+  // Foreign ownership (-O) needs a second user and is not exercised here.
+  for (const [mode, what] of [
+    ["bytes", "a persisted file whose bytes differ from the source"],
+    ["mode", "a persisted file that is not mode 0600"],
+    ["symlink", "a persisted symlink"],
+    ["dir", "a persisted directory"],
+  ] as const) {
+    test.skipIf(process.platform !== "darwin")(
+      `${what} is refused before adoption`,
+      () => {
+        const { result, out } = runCase(mode, false);
+        expect(result.status).toBe(1);
+        expect(out).toContain("must be a runner-owned regular 0600 file identical to the source");
+        expect(out).not.toContain("REACHED-END");
+      },
+      60_000,
+    );
+  }
 });
