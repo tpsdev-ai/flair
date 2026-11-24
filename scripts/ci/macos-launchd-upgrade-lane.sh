@@ -365,15 +365,13 @@ chmod 700 "$ADMIN_PASS_SOURCE_DIR"
 ADMIN_PASS_SOURCE_FILE="$ADMIN_PASS_SOURCE_DIR/admin-pass"
 # umask 077 + chmod: readAdminPassFileSecure refuses group/other bits.
 # The launcher checks the persisted file's mode; verify that file below.
-(
-  umask 077
-  # v0.59.0's plist writer omits the newline; v0.60.0's init adds it.
-  if version_lt "$BASELINE_VERSION" "0.60.0"; then
-    printf '%s' "$ADMIN_PASS" > "$ADMIN_PASS_SOURCE_FILE"
-  else
-    printf '%s\n' "$ADMIN_PASS" > "$ADMIN_PASS_SOURCE_FILE"
-  fi
-)
+# The source holds the secret plus a newline, the bytes init 0.60.0 and later
+# persist. An older baseline persists other bytes, so it is refused, not guessed.
+if version_lt "$BASELINE_VERSION" "0.60.0"; then
+  echo "::error::baseline ${BASELINE_VERSION} is older than 0.60.0; this lane supplies the admin secret in the form init 0.60.0 and later persist"
+  exit 1
+fi
+( umask 077; printf '%s\n' "$ADMIN_PASS" > "$ADMIN_PASS_SOURCE_FILE" )
 chmod 600 "$ADMIN_PASS_SOURCE_FILE"
 unset FLAIR_ADMIN_PASS HDB_ADMIN_PASSWORD
 flair init \
