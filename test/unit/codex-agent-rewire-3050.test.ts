@@ -167,6 +167,31 @@ describe("flair#3050 — Codex env is part of the already-wired check", () => {
   });
 });
 
+describe("flair#3050 — CRLF and an empty client", () => {
+  // Flair's exact section after an unrelated table, with CRLF endings throughout; CRLF is not recognized yet.
+  for (const env of [ENV_A, ENV_B]) {
+    it(`refuses an exact Flair section written with CRLF endings for ${env.FLAIR_AGENT_ID}, bytes unchanged`, () => {
+      const raw = seed(section(mcpServerSpec(), "agent-a", URL_A).replaceAll("\n", "\r\n"));
+      expect((Bun.TOML.parse(raw) as any).mcp_servers.flair.env.FLAIR_AGENT_ID).toBe("agent-a");
+      const res = wireCodex(env);
+      expect(res.message).toContain("(the [mcp_servers.flair] header is not the line Flair writes)");
+      expectRefusal(raw, res);
+    });
+  }
+
+  for (const existing of ["", section(mcpServerSpec(), "agent-a", URL_A)]) {
+    it(`omits an empty FLAIR_CLIENT when it ${existing ? "rewrites a section" : "appends a section"}`, () => {
+      seed(existing);
+      const res = wireCodex({ ...ENV_B, FLAIR_CLIENT: "" });
+      expect(res.ok).toBe(true);
+      const toml = readFileSync(cfgPath(), "utf-8");
+      const env = (Bun.TOML.parse(toml) as any).mcp_servers.flair.env;
+      expect(env).toEqual({ FLAIR_AGENT_ID: "agent-b", FLAIR_URL: URL_A });
+      expect(toml).not.toContain("FLAIR_CLIENT");
+    });
+  }
+});
+
 describe("flair#3050 round 5 — a foreign shape is refused, never rewritten", () => {
   // The pin decoder stops at these characters, so it would read only the version before them.
   for (const rest of [",local", "]local", "'local"]) {

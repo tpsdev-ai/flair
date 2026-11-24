@@ -135,6 +135,22 @@ test("a second init with a new agent rewires both Claude Code and Codex", () => 
 
 beforeAll(() => ensureCliBuild(), 120_000);
 
+test("init runs through runInit when the parent's NODE_OPTIONS names a missing preload", () => {
+  const { home } = fixture();
+  const previous = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = `--require=${join(tempDir("f3050-preload-"), "missing-preload.cjs")}`;
+  try {
+    const run = runInit(home, "agent-a");
+    expect(run.error).toBeUndefined();
+    expect(run.status, run.stdout + run.stderr).toBe(0);
+    expect(claudeAgent(home)).toBe("agent-a");
+    expect(codexAgent(home)).toBe("agent-a");
+  } finally {
+    if (previous === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = previous;
+  }
+}, 90_000);
+
 
 test("init fixture drops inherited deployment variables and supplies its credential", () => {
   const previous = process.env.FLAIR_INHERITED_FIXTURE;
