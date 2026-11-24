@@ -27,7 +27,7 @@
     },
     "packages/adk-flair-js": {
       "name": "@tpsdev-ai/adk-flair",
-      "version": "0.62.0",
+      "version": "0.63.0",
       "dependencies": {
         "@google/adk": "^2.0.0",
         "@google/genai": "^2.9.0",
@@ -52,7 +52,7 @@
     },
     "packages/flair-bench": {
       "name": "@tpsdev-ai/flair-bench",
-      "version": "0.62.0",
+      "version": "0.63.0",
       "bin": {
         "flair-bench": "dist/cli-shim.cjs",
       },
@@ -75,14 +75,14 @@
     },
     "packages/flair-client": {
       "name": "@tpsdev-ai/flair-client",
-      "version": "0.62.0",
+      "version": "0.63.0",
       "devDependencies": {
         "typescript": "5.9.3",
       },
     },
     "packages/flair-mcp": {
       "name": "@tpsdev-ai/flair-mcp",
-      "version": "0.62.0",
+      "version": "0.63.0",
       "bin": {
         "flair-mcp": "dist/mcp-shim.cjs",
         "flair-precompact": "dist/precompact-hook.js",
@@ -94,7 +94,7 @@
       },
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.32.0",
-        "@tpsdev-ai/flair-client": "0.62.0",
+        "@tpsdev-ai/flair-client": "0.63.0",
         "zod": "4.6.7",
       },
       "devDependencies": {
@@ -103,16 +103,16 @@
     },
     "packages/flair-tool-descriptors": {
       "name": "@tpsdev-ai/flair-tool-descriptors",
-      "version": "0.62.0",
+      "version": "0.63.0",
       "devDependencies": {
         "typescript": "5.9.3",
       },
     },
     "packages/langgraph-flair": {
       "name": "@tpsdev-ai/langgraph-flair",
-      "version": "0.62.0",
+      "version": "0.63.0",
       "dependencies": {
-        "@tpsdev-ai/flair-client": "0.62.0",
+        "@tpsdev-ai/flair-client": "0.63.0",
       },
       "devDependencies": {
         "@langchain/core": "1.1.48",
@@ -125,9 +125,9 @@
     },
     "packages/n8n-nodes-flair": {
       "name": "@tpsdev-ai/n8n-nodes-flair",
-      "version": "0.62.0",
+      "version": "0.63.0",
       "dependencies": {
-        "@tpsdev-ai/flair-client": "0.62.0",
+        "@tpsdev-ai/flair-client": "0.63.0",
         "zod": "4.6.7",
       },
       "devDependencies": {
@@ -144,10 +144,10 @@
     },
     "packages/openclaw-flair": {
       "name": "@tpsdev-ai/openclaw-flair",
-      "version": "0.62.0",
+      "version": "0.63.0",
       "dependencies": {
         "@sinclair/typebox": "0.34.48",
-        "@tpsdev-ai/flair-client": "0.62.0",
+        "@tpsdev-ai/flair-client": "0.63.0",
       },
       "devDependencies": {
         "openclaw-supported": "npm:openclaw@2026.9.6",
@@ -159,10 +159,10 @@
     },
     "packages/pi-flair": {
       "name": "@tpsdev-ai/pi-flair",
-      "version": "0.62.0",
+      "version": "0.63.0",
       "dependencies": {
         "@sinclair/typebox": "0.34.48",
-        "@tpsdev-ai/flair-client": "0.62.0",
+        "@tpsdev-ai/flair-client": "0.63.0",
       },
       "devDependencies": {
         "@earendil-works/pi-coding-agent": "0.84.2",
@@ -590,19 +590,19 @@
 
     "@noble/hashes": ["@noble/hashes@1.8.0", "", {}, "sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A=="],
 
-    "@node-llama-cpp/linux-arm64": ["@node-llama-cpp/linux-arm64@3.22.3", "", { "os": "linux", "cpu": [ "x64", "arm64", ], "libc": "glibc" }, "sha512-gfgVXMi2ptics3eJ+7iC+MRgvL3hrqcUPWaefXyOvbam1gIT6/oSPdNTt6OCf/yLab0obCVndW1GwzyfkSLz7w=="],
+    "@node-llama-cpp/linux-arm64": ["@node-llama-cpp/linux-arm64@3.22.3", "", { "os": "linux", "cpu": [ "x64", "arm64", ] }, "sha512-gfgVXMi2ptics3eJ+7iC+MRgvL3hrqcUPWaefXyOvbam1gIT6/oSPdNTt6OCf/yLab0obCVndW1GwzyfkSLz7w=="],
 
-    "@node-llama-cpp/linux-armv7l": ["@node-llama-cpp/linux-armv7l@3.22.3", "", { "os": "linux", "cpu": [ "arm", "x64", ], "libc": "glibc" }, "sha512-WinMR0E7r6Jr0BNXFf/3a1idlbyHuZclmeblLnAp/b4OZZa8Q3UZyJ1PSMgU9Md4IveHdg+tcvm1dmiyB9PcNg=="],
+    "@node-llama-cpp/linux-armv7l": ["@node-llama-cpp/linux-armv7l@3.22.3", "", { "os": "linux", "cpu": [ "arm", "x64", ] }, "sha512-WinMR0E7r6Jr0BNXFf/3a1idlbyHuZclmeblLnAp/b4OZZa8Q3UZyJ1PSMgU9Md4IveHdg+tcvm1dmiyB9PcNg=="],
 
-    "@node-llama-cpp/linux-riscv64": ["@node-llama-cpp/linux-riscv64@3.22.3", "", { "os": "linux", "cpu": "none", "libc": "glibc" }, "sha512-JhV6EM4uriNNSMg9m2tCf8cMaa5iQQxpYwpmmEVUtbwyw+nid8DuFUaOeLSHh5ogCt3kLzzJN1UTKUeGhVSY8g=="],
+    "@node-llama-cpp/linux-riscv64": ["@node-llama-cpp/linux-riscv64@3.22.3", "", { "os": "linux", "cpu": "none" }, "sha512-JhV6EM4uriNNSMg9m2tCf8cMaa5iQQxpYwpmmEVUtbwyw+nid8DuFUaOeLSHh5ogCt3kLzzJN1UTKUeGhVSY8g=="],
 
-    "@node-llama-cpp/linux-x64": ["@node-llama-cpp/linux-x64@3.22.3", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-g4lPKFwGoghQfKSDFVTtSFf+fqQalsU02nmYKU/YAaWs8j+K0d/yJrKN9uwDCh8LVyWR7HyZfgTph+8mam0K4Q=="],
+    "@node-llama-cpp/linux-x64": ["@node-llama-cpp/linux-x64@3.22.3", "", { "os": "linux", "cpu": "x64" }, "sha512-g4lPKFwGoghQfKSDFVTtSFf+fqQalsU02nmYKU/YAaWs8j+K0d/yJrKN9uwDCh8LVyWR7HyZfgTph+8mam0K4Q=="],
 
-    "@node-llama-cpp/linux-x64-cuda": ["@node-llama-cpp/linux-x64-cuda@3.22.3", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-GiI9a0r8EMUdhRWlyf4G+DD2ZOs9KXQnEe3fQyJVxlLLoK7VmZie3p98rewQNivG3w+NX9HiQxA+Yd77vS00/Q=="],
+    "@node-llama-cpp/linux-x64-cuda": ["@node-llama-cpp/linux-x64-cuda@3.22.3", "", { "os": "linux", "cpu": "x64" }, "sha512-GiI9a0r8EMUdhRWlyf4G+DD2ZOs9KXQnEe3fQyJVxlLLoK7VmZie3p98rewQNivG3w+NX9HiQxA+Yd77vS00/Q=="],
 
-    "@node-llama-cpp/linux-x64-cuda-ext": ["@node-llama-cpp/linux-x64-cuda-ext@3.22.3", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-CoIZK0klNNwLwEJHd2ajsJYXa5gxVm+mB60W7ZyRH2TavetTHz4eRuJot669CgamjG99BOwKS2mTD5Zq78jq5g=="],
+    "@node-llama-cpp/linux-x64-cuda-ext": ["@node-llama-cpp/linux-x64-cuda-ext@3.22.3", "", { "os": "linux", "cpu": "x64" }, "sha512-CoIZK0klNNwLwEJHd2ajsJYXa5gxVm+mB60W7ZyRH2TavetTHz4eRuJot669CgamjG99BOwKS2mTD5Zq78jq5g=="],
 
-    "@node-llama-cpp/linux-x64-vulkan": ["@node-llama-cpp/linux-x64-vulkan@3.22.3", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-z1hC3+eFnoQQsFY8SDQYRLyUQ1RWGStvd+5v5t5VuPngoqtbZj3CI/CaSrdmLPQof8eiAV5TNgbvNVDpMsaOyg=="],
+    "@node-llama-cpp/linux-x64-vulkan": ["@node-llama-cpp/linux-x64-vulkan@3.22.3", "", { "os": "linux", "cpu": "x64" }, "sha512-z1hC3+eFnoQQsFY8SDQYRLyUQ1RWGStvd+5v5t5VuPngoqtbZj3CI/CaSrdmLPQof8eiAV5TNgbvNVDpMsaOyg=="],
 
     "@node-llama-cpp/mac-arm64-metal": ["@node-llama-cpp/mac-arm64-metal@3.22.3", "", { "os": "darwin", "cpu": [ "x64", "arm64", ] }, "sha512-ExLCswWM0s3N6Ys9Y9Vk92QiKFo0QJlQtVn7zZ3IJrUucDjCd5PHQzchINjXvLDZcCi3jI0wYSuEJUy2D9QMBA=="],
 
@@ -746,7 +746,7 @@
 
     "@smithy/is-array-buffer": ["@smithy/is-array-buffer@2.2.0", "", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-GGP3O9QFD24uGeAXYUjwSTXARoqpZykHadOmA8G5vfJPK0/DC67qa//0qvqrJzL1xc8WQWX7/yc7fwudjPHPhA=="],
 
-    "@smithy/node-http-handler": ["@smithy/node-http-handler@4.7.3", "", { "dependencies": { "@smithy/core": "^3.24.3", "@smithy/types": "^4.14.2", "tslib": "^2.6.2" } }, "sha512-/jPhevcTFPMVl6KNjbaI47iOg1zxC7IsnX4PQDGVZKMFceOXtB8IEYaB7a9VvkP/3oC60WzTeKocvSI7vLT0vA=="],
+    "@smithy/node-http-handler": ["@smithy/node-http-handler@4.9.11", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-slbzbz8taEOzoXv/9y34YNBoE+ZHmddLykCgjDAjvMAsu2nM5s2Gzwa5OGF721tD8s+CKeFUBds5lSj9lcbuDg=="],
 
     "@smithy/signature-v4": ["@smithy/signature-v4@5.6.10", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-EXhWePm3SXJAX38npIy4TXL2Aex/OVgCClTjelN2QHw/U+8CQUH8C7AaxsVzQcYieYPseywn48s89DmvuGjiAg=="],
 
@@ -1620,7 +1620,7 @@
 
     "node-gyp-build-optional-packages": ["node-gyp-build-optional-packages@5.2.2", "", { "dependencies": { "detect-libc": "^2.0.1" }, "bin": { "node-gyp-build-optional-packages": "bin.js", "node-gyp-build-optional-packages-optional": "optional.js", "node-gyp-build-optional-packages-test": "build-test.js" } }, "sha512-s+w+rBWnpTMwSFbaE0UXsRlg7hU4FjekKU4eyAih5T8nJuNZT1nNsskXpxmeqSK9UzkBl6UgRlnKc8hz8IEqOw=="],
 
-    "node-llama-cpp": ["node-llama-cpp@3.22.3", "", { "dependencies": { "@huggingface/jinja": "^0.5.11", "async-retry": "^1.3.3", "bytes": "^3.1.2", "chalk": "^5.6.2", "chmodrp": "^1.0.2", "cmake-js": "^8.0.0", "cross-spawn": "^7.0.6", "env-var": "^7.5.0", "filenamify": "^6.0.0", "fs-extra": "^11.4.0", "ignore": "^7.0.4", "ipull": "^3.9.5", "is-unicode-supported": "^2.1.0", "lifecycle-utils": "^4.5.2", "log-symbols": "^7.0.1", "nanoid": "^5.1.6", "node-addon-api": "^8.9.2", "ora": "^9.3.0", "pretty-ms": "^9.3.0", "proper-lockfile": "^4.1.2", "semver": "^7.7.1", "simple-git": "^4.0.2", "slice-ansi": "^8.0.0", "stdout-update": "^4.0.1", "strip-ansi": "^7.2.0", "validate-npm-package-name": "^7.0.2", "which": "^6.0.1", "yargs": "^17.7.2" }, "optionalDependencies": { "@node-llama-cpp/linux-arm64": "3.22.3", "@node-llama-cpp/linux-armv7l": "3.22.3", "@node-llama-cpp/linux-riscv64": "3.22.3", "@node-llama-cpp/linux-x64": "3.22.3", "@node-llama-cpp/linux-x64-cuda": "3.22.3", "@node-llama-cpp/linux-x64-cuda-ext": "3.22.3", "@node-llama-cpp/linux-x64-vulkan": "3.22.3", "@node-llama-cpp/mac-arm64-metal": "3.22.3", "@node-llama-cpp/mac-x64": "3.22.3", "@node-llama-cpp/win-arm64": "3.22.3", "@node-llama-cpp/win-x64": "3.22.3", "@node-llama-cpp/win-x64-cuda": "3.22.3", "@node-llama-cpp/win-x64-cuda-ext": "3.22.3", "@node-llama-cpp/win-x64-vulkan": "3.22.3" }, "peerDependencies": { "typescript": ">=5.0.0" }, "optionalPeers": ["typescript"], "hasInstallScript": true, "bin": { "nlc": "dist/cli/cli.js", "node-llama-cpp": "dist/cli/cli.js" } }, "sha512-B1gM/ra5WwXFSd40fdiFCMC4+HHYz+1000Muoj7FBMdhsSuSxcbwbRNNvq9opgBLYYEqMu6Zo9BP/aIhq1XFLw=="],
+    "node-llama-cpp": ["node-llama-cpp@3.22.3", "", { "dependencies": { "@huggingface/jinja": "^0.5.11", "async-retry": "^1.3.3", "bytes": "^3.1.2", "chalk": "^5.6.2", "chmodrp": "^1.0.2", "cmake-js": "^8.0.0", "cross-spawn": "^7.0.6", "env-var": "^7.5.0", "filenamify": "^6.0.0", "fs-extra": "^11.4.0", "ignore": "^7.0.4", "ipull": "^3.9.5", "is-unicode-supported": "^2.1.0", "lifecycle-utils": "^4.5.2", "log-symbols": "^7.0.1", "nanoid": "^5.1.6", "node-addon-api": "^8.9.2", "ora": "^9.3.0", "pretty-ms": "^9.3.0", "proper-lockfile": "^4.1.2", "semver": "^7.7.1", "simple-git": "^4.0.2", "slice-ansi": "^8.0.0", "stdout-update": "^4.0.1", "strip-ansi": "^7.2.0", "validate-npm-package-name": "^7.0.2", "which": "^6.0.1", "yargs": "^17.7.2" }, "optionalDependencies": { "@node-llama-cpp/linux-arm64": "3.22.3", "@node-llama-cpp/linux-armv7l": "3.22.3", "@node-llama-cpp/linux-riscv64": "3.22.3", "@node-llama-cpp/linux-x64": "3.22.3", "@node-llama-cpp/linux-x64-cuda": "3.22.3", "@node-llama-cpp/linux-x64-cuda-ext": "3.22.3", "@node-llama-cpp/linux-x64-vulkan": "3.22.3", "@node-llama-cpp/mac-arm64-metal": "3.22.3", "@node-llama-cpp/mac-x64": "3.22.3", "@node-llama-cpp/win-arm64": "3.22.3", "@node-llama-cpp/win-x64": "3.22.3", "@node-llama-cpp/win-x64-cuda": "3.22.3", "@node-llama-cpp/win-x64-cuda-ext": "3.22.3", "@node-llama-cpp/win-x64-vulkan": "3.22.3" }, "peerDependencies": { "typescript": ">=5.0.0" }, "optionalPeers": ["typescript"], "bin": { "nlc": "dist/cli/cli.js", "node-llama-cpp": "dist/cli/cli.js" } }, "sha512-B1gM/ra5WwXFSd40fdiFCMC4+HHYz+1000Muoj7FBMdhsSuSxcbwbRNNvq9opgBLYYEqMu6Zo9BP/aIhq1XFLw=="],
 
     "node-stream-zip": ["node-stream-zip@1.16.0", "", {}, "sha512-ObaRrRoR8T68wF6suxHd7R4XQNamij6ZQHrwG7Dx1D2zeHcDNLsIOBcWrIwtDm7AsCXBguaPHgXhcjxDa2szrg=="],
 
@@ -2084,13 +2084,7 @@
 
     "@agoric/babel-generator/source-map": ["source-map@0.5.7", "", {}, "sha512-LbrmJOMUSdEVxIKvdcJzQC+nQhe8FUZQTXQy6+I75skNgn3OoQ0DZA8YnFa7gp8tqtL3KPf1kmo0R5DoApeSGQ=="],
 
-    "@aws-sdk/client-bedrock-runtime/@smithy/node-http-handler": ["@smithy/node-http-handler@4.9.11", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-slbzbz8taEOzoXv/9y34YNBoE+ZHmddLykCgjDAjvMAsu2nM5s2Gzwa5OGF721tD8s+CKeFUBds5lSj9lcbuDg=="],
-
-    "@aws-sdk/credential-provider-http/@smithy/node-http-handler": ["@smithy/node-http-handler@4.9.11", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-slbzbz8taEOzoXv/9y34YNBoE+ZHmddLykCgjDAjvMAsu2nM5s2Gzwa5OGF721tD8s+CKeFUBds5lSj9lcbuDg=="],
-
     "@aws-sdk/credential-provider-sso/@aws-sdk/token-providers": ["@aws-sdk/token-providers@3.1095.0", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/nested-clients": "^3.997.35", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-65SudS6y4nzaYHybtqcpm3sHe5jLhdMn68HRKS1nUx690BtQeaAQOoujQ+dpOjBATIVGVgKKjEP8tR+U06QJQA=="],
-
-    "@aws-sdk/nested-clients/@smithy/node-http-handler": ["@smithy/node-http-handler@4.9.11", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-slbzbz8taEOzoXv/9y34YNBoE+ZHmddLykCgjDAjvMAsu2nM5s2Gzwa5OGF721tD8s+CKeFUBds5lSj9lcbuDg=="],
 
     "@babel/generator/jsesc": ["jsesc@3.1.0", "", { "bin": { "jsesc": "bin/jsesc" } }, "sha512-/sM3dO2FOzXjKQhJuo0Q173wf2KOo8t4I8vHy6lF9poUp7bKT0/NHE8fPX23PwfhnykfqnC2xRxOnVw5XuGIaA=="],
 
@@ -2105,6 +2099,8 @@
     "@earendil-works/pi-ai/@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.91.1", "", { "dependencies": { "json-schema-to-ts": "^3.1.1" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["zod"], "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-LAmu761tSN9r66ixvmciswUj/ZC+1Q4iAfpedTfSVLeswRwnY3n2Nb6Tsk+cLPP28aLOPWeMgIuTuCcMC6W/iw=="],
 
     "@earendil-works/pi-ai/@google/genai": ["@google/genai@1.52.0", "", { "dependencies": { "google-auth-library": "^10.3.0", "p-retry": "^4.6.2", "protobufjs": "^7.5.4", "ws": "^8.18.0" }, "peerDependencies": { "@modelcontextprotocol/sdk": "^1.25.2" }, "optionalPeers": ["@modelcontextprotocol/sdk"] }, "sha512-gwSvbpiN/17O9TbsqSsE/OzZcpv5Fo4RQjdngGgogtuB9RsyJ8ZHhX5KjHj1bp5N9snN2eK8LDGXSaWW2hof8Q=="],
+
+    "@earendil-works/pi-ai/@smithy/node-http-handler": ["@smithy/node-http-handler@4.7.3", "", { "dependencies": { "@smithy/core": "^3.24.3", "@smithy/types": "^4.14.2", "tslib": "^2.6.2" } }, "sha512-/jPhevcTFPMVl6KNjbaI47iOg1zxC7IsnX4PQDGVZKMFceOXtB8IEYaB7a9VvkP/3oC60WzTeKocvSI7vLT0vA=="],
 
     "@earendil-works/pi-ai/openai": ["openai@6.40.0", "", { "peerDependencies": { "ws": "^8.18.0", "zod": "^3.25 || ^4.0" }, "optionalPeers": ["ws", "zod"] }, "sha512-MWtTjd/gQt4jpbji61NTgFWJLoY/PdRJ6wG9/ZDRMYNMlBKrCrSlkLI+KgHP1vR1qT6LKSAyAqIxno6lcK9JiA=="],
 

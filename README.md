@@ -311,20 +311,21 @@ Sign `agentId:timestamp:nonce:METHOD:/path` with the agent's private key. Protoc
 
 The second front door, and the one to take if your code already runs on Harper.
 
-Flair *is* a Harper component. Deploy it into the instance your application already runs in and call its resources directly — `await h.post({ agentId, content })` is a **method call**, not a network call. No second service to operate, no HTTP round trip, and no key to distribute: a caller in the same process is already inside the trust boundary and names the agent it is acting as, per call.
+Flair *is* a Harper component. Deploy it into the instance your application already runs in and call its facade directly — `await agent.memory.write(...)` is a **method call**, not a network call. No second service to operate, no HTTP round trip, and no key to distribute: a caller in the same process is already inside the trust boundary and names the agent it is acting as, per call.
 
 Adding it takes nothing away. The HTTP surface keeps serving MCP clients and remote agents exactly as before.
 
 ```javascript
 import { server } from "harper";
-import { agentContext, collectionResource } from "@tpsdev-ai/flair/dist/resources/in-process.js";
+import { Flair } from "@tpsdev-ai/flair";
 
-// The RESOURCE — auth, read-scoping, visibility, embedding.
-// Registry keys carry no leading slash: get("Memory"), never get("/Memory").
-const Memory = server.resources.get("Memory").Resource;
+const flair = new Flair(server);
+const agent = flair.as("mybot");
 
-const h = await collectionResource(Memory, agentContext("mybot"));
-await h.post({ agentId: "mybot", content: "...", durability: "standard" });
+await agent.memory.write("deploy runs at 0200 UTC", { durability: "standard" });
+const hits = await agent.recall("deploy schedule", { limit: 5 });   // an array of hits
+const record = await agent.memory.get(hits[0].id);                  // the stored row, or null
+const recent = await agent.memory.search({ limit: 10 });           // an array of at most 10 rows
 ```
 
 `databases.flair.Memory` is the **table** (raw storage); the exported `Memory` class is the **resource**, where auth, read-scoping, visibility and embedding live. `new Memory(...)` is not a substitute for `collectionResource` — a create needs a collection-bound instance only Harper can produce. Both helpers refuse a missing agent id rather than defaulting it, because a resource invoked with no context resolves to Flair's trusted `internal` verdict and runs unfiltered across every agent.
