@@ -1184,8 +1184,9 @@ function parseCodexInlineEnvTable(body: string): Map<string, string> | null {
     const end = body.indexOf(quote, i + 1);
     if (end === -1) return null;
     const value = parseCodexTomlValue(body.slice(i, end + 1));
-    if (value.state !== "value" || out.has(key)) return null;
-    out.set(key, value.value);
+    // An empty string is a value here; readCodexInlineEnvValue reads an empty value as absent.
+    if (value.state === "unreadable" || out.has(key)) return null;
+    out.set(key, value.state === "value" ? value.value : "");
     i = end + 1;
     skipSpace();
     if (i >= n) break;
@@ -2035,6 +2036,11 @@ function _wireCodex(env: WireEnv, testHooks?: CodexRewriteTestHooks): { ok: bool
           return { hold: settled.message };
         }
         const hasSection = shape.kind === "recognized";
+        // The pin guard reads the decoded spec; text after it would be replaced unread.
+        if (hasSection && decodeWiringSpec(shape.spec, FLAIR_MCP_PACKAGE)?.raw !== shape.spec) {
+          settled = { ok: false, message: codexForeignShapeMessage(display, "the args package argument has text after its pin") };
+          return { hold: settled.message };
+        }
         // The pin guard decides before a no-op, replacement or append.
         const decision = decidePinWrite({
           pkg: FLAIR_MCP_PACKAGE,

@@ -100,7 +100,7 @@ import { parseInstallerHookForm, parseUnpinnedInstallerHookForm } from "./lib/se
 export { parseInstallerHookForm, type InstallerHookForm } from "./lib/session-start-hook-form.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec } from "./lib/mcp-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "./lib/pin-write-guard.js";
-import { withConfigCriticalSection, type ConfigSectionOptions } from "./lib/config-critical-section.js";
+import { observeConfig, withConfigCriticalSection, type ConfigSectionOptions } from "./lib/config-critical-section.js";
 import {
   backupBytesTo,
   encodeConfig,
@@ -302,14 +302,15 @@ function findHookEntry(config: any): { groupIndex: number; hookIndex: number } |
   return null;
 }
 
+/** Validate the entry computeInstallDelta would replace (the first match); a later match is left untouched. */
 function installSourceRefusal(config: any, path: string): string | null {
-  for (const match of findHookMatches(config)) {
-    const command = config.hooks.SessionStart[match.groupIndex].hooks[match.hookIndex].command;
-    const source = parseInstallerHookForm(command) ?? parseLegacySessionStartHookCommand(command) ?? parseUnpinnedInstallerHookForm(command);
-    if (!source) return `SessionStart hook in ${path} is not a command form Flair's installer recognizes — left untouched`;
-    if (!isHookCommandValueSafe(source.agentId)) return unsafeAgentIdMessage(source.agentId);
-    if (source.flairUrl !== undefined && !isHookCommandValueSafe(source.flairUrl)) return unsafeFlairUrlMessage(source.flairUrl);
-  }
+  const match = findHookEntry(config);
+  if (!match) return null;
+  const command = config.hooks.SessionStart[match.groupIndex].hooks[match.hookIndex].command;
+  const source = parseInstallerHookForm(command) ?? parseLegacySessionStartHookCommand(command) ?? parseUnpinnedInstallerHookForm(command);
+  if (!source) return `SessionStart hook in ${path} is not a command form Flair's installer recognizes — left untouched`;
+  if (!isHookCommandValueSafe(source.agentId)) return unsafeAgentIdMessage(source.agentId);
+  if (source.flairUrl !== undefined && !isHookCommandValueSafe(source.flairUrl)) return unsafeFlairUrlMessage(source.flairUrl);
   return null;
 }
 
@@ -840,14 +841,19 @@ export function repinSessionStartHook(
   // writes NOTHING — not even a `.bak`. A precheck outcome that will write
   // enters the critical section; the in-lock decision re-checks the same facts
   // on the bytes it writes and can still refuse, in which case
-  // `backupOnWrite` takes no backup.
-  const preRead = readSettingsFile(path);
-  const pre = decideSessionStartHookRewrite(preRead.parsed, path, harness, preRead.parseError, opts);
-  if (pre.kind !== "update") {
-    if (pre.kind === "noop") {
-      return { ok: true, path, harness, action: "noop", message: pre.message, backupPath: null };
+  // `backupOnWrite` takes no backup. A non-regular target (a FIFO, a
+  // directory) skips this read (reading a FIFO can block) and goes to the
+  // primitive, which refuses it from its stat-based observation without reading it.
+  const observed = observeConfig(path);
+  if (!(observed.ok && observed.value.target.type === "other")) {
+    const preRead = readSettingsFile(path);
+    const pre = decideSessionStartHookRewrite(preRead.parsed, path, harness, preRead.parseError, opts);
+    if (pre.kind !== "update") {
+      if (pre.kind === "noop") {
+        return { ok: true, path, harness, action: "noop", message: pre.message, backupPath: null };
+      }
+      return { ok: pre.ok, path, harness, action: pre.kind, message: pre.message, backupPath: null };
     }
-    return { ok: pre.ok, path, harness, action: pre.kind, message: pre.message, backupPath: null };
   }
 
   let outcome: { action: HookRepinResult["action"]; message: string; ok: boolean } | null = null;

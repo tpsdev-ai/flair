@@ -180,9 +180,9 @@ export interface ConfigSectionOptions {
    *  refusal BEFORE `decide` runs: nothing is written. */
   backup?: (bytes: Uint8Array) => string | null | void;
   /** Invoked on the IN-LOCK bytes only after `decide` returns a write, before
-   *  the temp file is created. Returns the backup path (or null). Throwing
-   *  refuses the write with nothing written. A decision that does not write
-   *  (hold or noop) never takes this backup. */
+   *  the temp file is created. Returns the backup path (or null, which keeps a
+   *  path `backup` returned). Throwing refuses the write; the target is not
+   *  replaced. A decision that does not write (hold or noop) never takes this backup. */
   backupOnWrite?: (bytes: Uint8Array) => string | null | void;
   /** Maximum COMPLETE fresh attempts (default 3). */
   maxAttempts?: number;
@@ -860,9 +860,9 @@ export function withConfigCriticalSection(
       if (opts.backupOnWrite && bytes !== null) {
         try {
           const r = opts.backupOnWrite(bytes);
-          backupPath = typeof r === "string" ? r : null;
+          if (typeof r === "string") backupPath = r;
         } catch (err) {
-          return { status: "refused", path: targetPath, attempts, message: `backup failed after deciding to write: ${msg(err)} — nothing written.` };
+          return { status: "refused", path: targetPath, attempts, message: `backup failed after deciding to write: ${msg(err)} — target was not replaced.`, backupPath };
         }
       }
       if (opts.stage) {

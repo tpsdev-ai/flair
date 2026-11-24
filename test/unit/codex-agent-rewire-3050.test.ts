@@ -168,6 +168,18 @@ describe("flair#3050 — Codex env is part of the already-wired check", () => {
 });
 
 describe("flair#3050 round 5 — a foreign shape is refused, never rewritten", () => {
+  // The pin decoder stops at these characters, so it would read only the version before them.
+  for (const rest of [",local", "]local", "'local"]) {
+    it(`a package argument with ${JSON.stringify(rest)} after its pin is refused, not repinned`, () => {
+      const raw = seed(section(`${FLAIR_MCP_PACKAGE}@0.0.1${rest}`, "agent-a", URL_A));
+      const res = wireCodex(ENV_B);
+      expect(res.ok).toBe(false);
+      expect(res.message).toContain("~/.codex/config.toml (the args package argument has text after its pin)");
+      expectCodexConditionClauses(res.message);
+      expect(readFileSync(cfgPath(), "utf-8")).toBe(raw);
+      expect(readdirSync(join(isoHome, ".codex")).sort().join(",")).toBe("config.toml");
+    });
+  }
   it("an empty FLAIR_AGENT_ID after a matching assignment is refused", () => {
     const raw = seed([
       "[mcp_servers.flair]",

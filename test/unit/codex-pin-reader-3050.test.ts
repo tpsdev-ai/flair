@@ -21,6 +21,8 @@ for (const body of [
   'env = { FLAIR_AGENT_ID = agent-a junk }\n',
   'env = { FLAIR_AGENT_ID = 123 }\n',
   'env = { FLAIR_AGENT_ID = "agent-a" junk }\n',
+  'env = { FLAIR_AGENT_ID = "", OPTIONAL = "x" }\n',
+  'env = { FLAIR_AGENT_ID = "agent-a", FLAIR_AGENT_ID = "" }\n',
 ]) {
   it(`pin reader reports unknown identity for ${JSON.stringify(body)}`, () => {
     const result = read(head + body);
@@ -30,6 +32,11 @@ for (const body of [
 }
 it("pin reader retains identity after an indented array value", () => {
   const raw = head + 'data = [\n  ["one", "two"]\n]\nenv = { FLAIR_AGENT_ID = "agent-a" }\n';
+  expect((Bun.TOML.parse(raw) as any).mcp_servers.flair.env.FLAIR_AGENT_ID).toBe("agent-a");
+  expect(read(raw).noIdentity).toBe(false);
+});
+it("pin reader keeps the agent id beside an empty inline env value", () => {
+  const raw = head + 'env = { FLAIR_AGENT_ID = "agent-a", OPTIONAL = "" }\n';
   expect((Bun.TOML.parse(raw) as any).mcp_servers.flair.env.FLAIR_AGENT_ID).toBe("agent-a");
   expect(read(raw).noIdentity).toBe(false);
 });

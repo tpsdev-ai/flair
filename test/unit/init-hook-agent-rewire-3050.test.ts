@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -357,6 +358,39 @@ describe("repinSessionStartHook — a refusal after the precheck takes no backup
   });
 });
 
+describe("repinSessionStartHook — a non-regular settings path", () => {
+  it("a directory gets the primitive's refusal, not the precheck's read error", () => {
+    mkdirSync(path(), { recursive: true });
+    const result = repinSessionStartHook(home, "claude-code", undefined, { agentId: "agent-b" });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("is not a regular file");
+    expect(result.backupPath).toBeNull();
+    expect(readdirSync(path())).toEqual([]);
+    expect(settingsDirFiles()).toBe("settings.json");
+  });
+
+  it("a FIFO gets the primitive's refusal without blocking on a read", () => {
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const made = spawnSync("mkfifo", [path()], { encoding: "utf8", timeout: 5_000 });
+    expect(made.status).toBe(0); // a missing mkfifo must fail the case, not skip it
+    // A child with its own deadline: a read of the FIFO would block it until killed.
+    const script = `const { repinSessionStartHook } = await import(${JSON.stringify(join(import.meta.dir, "../../src/hook-install.ts"))});\n` +
+      `console.log(JSON.stringify(repinSessionStartHook(process.env.FIXTURE_HOME, "claude-code", undefined, { agentId: "agent-b" })));`;
+    const child = spawnSync(process.execPath, ["-e", script], {
+      env: { PATH: process.env.PATH ?? "", HOME: home, FIXTURE_HOME: home },
+      encoding: "utf8",
+      timeout: 20_000,
+      killSignal: "SIGKILL",
+    });
+    expect(child.signal, child.stderr).toBeNull();
+    expect(child.status, child.stderr).toBe(0);
+    const result = JSON.parse(child.stdout.trim().split("\n").at(-1)!);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("is not a regular file");
+    expect(result.backupPath).toBeNull();
+    expect(settingsDirFiles()).toBe("settings.json");
+  }, 30_000);
+});
 
 describe("SessionStart source commands", () => {
   for (const form of ["legacy", "installer"]) {
@@ -431,6 +465,36 @@ describe("hook install source guards", () => {
       const settingsPath = writeSettings(hookSettings(command));
       expect(installHook({ homeDir: home, harness: "claude-code", agentId: "agent-b", flairUrl: "http://localhost:19926" }).ok).toBe(true);
       expect(flairHookCommand(settingsPath)).toContain("FLAIR_AGENT_ID=agent-b");
+    });
+  }
+  // Install replaces the first marker match; a later custom hook naming the marker is not its source.
+  const custom = `echo ${SESSION_START_HOOK_MARKER} && echo custom`;
+  for (const dryRun of [false, true]) {
+    it(`validates the hook it replaces, not a later custom marker hook, dryRun=${dryRun}`, () => {
+      const settingsPath = writeSettings({ hooks: { SessionStart: [
+        { hooks: [{ type: "command", command: flairCommand("agent-a") }] },
+        { hooks: [{ type: "command", command: custom }] },
+      ] } });
+      const before = readFileSync(settingsPath, "utf8");
+      const result = installHook({ homeDir: home, harness: "claude-code", agentId: "agent-b", flairUrl: "http://localhost:19926", dryRun });
+      expect(result.ok).toBe(true);
+      expect(result.delta?.action).toBe("update");
+      const groups = JSON.parse(readFileSync(settingsPath, "utf8")).hooks.SessionStart;
+      if (dryRun) expect(readFileSync(settingsPath, "utf8")).toBe(before);
+      else expect(groups[0].hooks[0].command).toContain("FLAIR_AGENT_ID=agent-b");
+      expect(groups[1]).toEqual({ hooks: [{ type: "command", command: custom }] });
+    });
+    it(`still refuses when the hook it would replace is the custom one, dryRun=${dryRun}`, () => {
+      const settingsPath = writeSettings({ hooks: { SessionStart: [
+        { hooks: [{ type: "command", command: custom }] },
+        { hooks: [{ type: "command", command: flairCommand("agent-a") }] },
+      ] } });
+      const before = readFileSync(settingsPath, "utf8");
+      const result = installHook({ homeDir: home, harness: "claude-code", agentId: "agent-b", flairUrl: "http://localhost:19926", dryRun });
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("not a command form Flair's installer recognizes");
+      expect(readFileSync(settingsPath, "utf8")).toBe(before);
+      expect(settingsDirFiles()).toBe("settings.json");
     });
   }
 });

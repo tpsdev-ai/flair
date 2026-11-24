@@ -44,7 +44,7 @@ function fixture(): Fixture {
 function childEnv(home: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined || /^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$)/.test(key)) continue;
+    if (value === undefined || /^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$|NODE_OPTIONS$)/.test(key)) continue;
     env[key] = value;
   }
   env.HOME = home;
@@ -55,8 +55,9 @@ function childEnv(home: string): Record<string, string> {
 }
 
 function runInit(home: string, agent: string) {
+  const env = childEnv(home);
   return spawnSync(
-    nodeBin(),
+    nodeBin({ env }),
     [
       CLI, "init", "--skip-start",
       "--agent", agent,
@@ -66,7 +67,7 @@ function runInit(home: string, agent: string) {
     ],
     {
       cwd: ROOT,
-      env: childEnv(home),
+      env,
       encoding: "utf8",
       timeout: 45_000,
       killSignal: "SIGKILL",
@@ -137,13 +138,20 @@ beforeAll(() => ensureCliBuild(), 120_000);
 
 test("init fixture drops inherited deployment variables and supplies its credential", () => {
   const previous = process.env.FLAIR_INHERITED_FIXTURE;
+  const previousNodeOptions = process.env.NODE_OPTIONS;
   process.env.FLAIR_INHERITED_FIXTURE = "inherited";
+  // Node exits at startup when NODE_OPTIONS names a missing --require preload.
+  process.env.NODE_OPTIONS = `--require=${join(tempDir("f3050-preload-"), "missing-preload.cjs")}`;
   try {
     const env = childEnv("fixture-home");
+    expect(() => nodeBin({ env })).not.toThrow();
     expect(env.FLAIR_INHERITED_FIXTURE).toBeUndefined();
+    expect(env.NODE_OPTIONS).toBeUndefined();
     expect(env.FLAIR_ADMIN_PASS).toBe(ADMIN_PASS);
   } finally {
     if (previous === undefined) delete process.env.FLAIR_INHERITED_FIXTURE;
     else process.env.FLAIR_INHERITED_FIXTURE = previous;
+    if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = previousNodeOptions;
   }
-});
+}, 30_000);
