@@ -58,7 +58,7 @@ for (const [kind, version] of ["json", "codex", "continuity", "hook", "legacy"].
         : `FLAIR_AGENT_ID=old npx -y -p ${spec} flair-session-start`;
       const path = join(root, kind === "json" ? ".claude.json" : kind === "codex" ? ".codex/config.toml" : ".claude/settings.json");
       const raw = kind === "json" ? JSON.stringify({ mcpServers: { flair: { command: "npx", args: ["-y", spec] } } })
-        : kind === "codex" ? `[mcp_servers.flair]\ncommand = "npx"\nargs = ["-y", "${spec}"]\n`
+        : kind === "codex" ? `[mcp_servers.flair]\ncommand = "npx"\nargs = ["-y", "${spec}"]\n\n[mcp_servers.flair.env]\nFLAIR_AGENT_ID = "old"\nFLAIR_URL = "http://127.0.0.1:9"\n`
         : JSON.stringify({ hooks: { [kind === "continuity" ? "Stop" : "SessionStart"]: [{ hooks: [{ type: "command", command }] }] } });
       mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, raw); seen.length = 0;
       const env = { FLAIR_AGENT_ID: "new", FLAIR_URL: "http://127.0.0.1:19926" };

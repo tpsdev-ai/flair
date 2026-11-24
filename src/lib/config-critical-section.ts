@@ -41,11 +41,15 @@
  *      intact ("nothing written"); a failure AFTER it is a COMMITTED write
  *      with a cleanup warning, never reported as "nothing written".
  *
- * BACKUP SEMANTICS. `opts.backup` runs on the IN-LOCK bytes BEFORE `decide` on
- * every call that reaches the read — INCLUDING calls whose decision ends up
- * noop or held. A backup of the current bytes is never wrong; the churn is the
- * price of backing up before parsing. It is skipped only where the read is
- * skipped: an absent destination, or a non-regular one (refused above).
+ * BACKUP SEMANTICS. Two opt-in hooks, both on the IN-LOCK bytes and only when
+ * a file exists: `opts.backup` runs BEFORE `decide` on every call that reaches
+ * the read — including calls whose decision ends up noop or held; the churn is
+ * the price of backing up before parsing. `opts.backupOnWrite` runs only after
+ * `decide` returns a write, so on its own it leaves no backup for a decision
+ * that does not write (hold or noop). `opts.backup` runs before `decide` and may
+ * return null without backing up (a caller can back up only unparseable bytes
+ * there), so a parseable hold or noop can leave no backup. Either is skipped where the read is skipped: an
+ * absent destination, or a non-regular one (refused above).
  *   6. FRESH-ATTEMPT PROTOCOL: another cooperative writer's committed
  *      replacement changes the target inode, so a waiting writer's in-lock
  *      comparison FAILS and it is HELD — by design, never waived. The
@@ -175,6 +179,11 @@ export interface ConfigSectionOptions {
    *  Returns the backup path (or null). Throwing short-circuits to a named
    *  refusal BEFORE `decide` runs: nothing is written. */
   backup?: (bytes: Uint8Array) => string | null | void;
+  /** Invoked on the IN-LOCK bytes only after `decide` returns a write, before
+   *  the temp file is created. Returns the backup path (or null, which keeps a
+   *  path `backup` returned). Throwing refuses the write; the target is not
+   *  replaced. A decision that does not write (hold or noop) never takes this backup. */
+  backupOnWrite?: (bytes: Uint8Array) => string | null | void;
   /** Maximum COMPLETE fresh attempts (default 3). */
   maxAttempts?: number;
   /** Lock acquisition: bounded retry (default 40 × 50 ms). */
@@ -843,8 +852,19 @@ export function withConfigCriticalSection(
         return { status: "noop", path: targetPath, attempts, message: decision.noop, backupPath };
       }
 
-      // 5. WRITE. Stage under the SAME lock before replacing the target.
+      // 5. WRITE. Take the post-decision backup, then stage under the SAME lock
+      //    before replacing the target. A held/refused/noop decision above
+      //    returned already, so this hook takes no backup; any earlier
+      //    `opts.backup` may have declined to back up (it can return null).
       let stageCleanup: (() => void) | undefined;
+      if (opts.backupOnWrite && bytes !== null) {
+        try {
+          const r = opts.backupOnWrite(bytes);
+          if (typeof r === "string") backupPath = r;
+        } catch (err) {
+          return { status: "refused", path: targetPath, attempts, message: `backup failed after deciding to write: ${msg(err)} — target was not replaced.`, backupPath };
+        }
+      }
       if (opts.stage) {
         try {
           const staged = opts.stage(decision.write, obs);

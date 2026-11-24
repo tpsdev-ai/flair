@@ -3,11 +3,7 @@
  * (boundary) and T5 (byte goldens + backup semantics).
  *
  * Every writer of Codex's ~/.codex/config.toml must go through ONE critical
- * section. T3 pins that boundary at the source; T5 pins that the bytes written
- * are EXACTLY the ones the pure TOML helpers produced before the migration
- * (append / replace / create / remove), plus the `.bak` semantics: a 0600
- * sibling on every call where the file EXISTS (write, no-op and held
- * included), and NONE when the file is first created.
+ * section. T3 checks that boundary; T5 checks emitted bytes and backups.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
@@ -139,14 +135,14 @@ describe("T5 — byte goldens (the helpers' output, unchanged)", () => {
     expect(readFileSync(bakPath(), "utf-8")).toBe(before);
   });
 
-  it("ALREADY (current pin) is a no-op on the bytes but takes a backup", () => {
+  it("ALREADY (current pin) preserves bytes without a backup", () => {
     seed(OTHER + "\n" + goldenBlock(ENV) + "\n");
     const before = readFileSync(cfgPath(), "utf-8");
     const r = wireCodex(ENV);
     expect(r.ok).toBe(true);
     expect(r.message).toBe("Codex: already wired in ~/.codex/config.toml");
     expect(readFileSync(cfgPath(), "utf-8")).toBe(before);
-    expect(existsSync(bakPath())).toBe(true);
+    expect(existsSync(bakPath())).toBe(false);
   });
 
   it("REMOVE (unwire) writes exactly removeCodexFlairBlock's output", () => {

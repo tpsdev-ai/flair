@@ -38,6 +38,7 @@ import {
   type ClientId,
   type PiSettingsScan,
 } from "./install/clients.js";
+import { parseInstallerHookForm } from "./lib/session-start-hook-form.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec } from "./lib/mcp-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "./lib/pin-write-guard.js";
 import { withConfigCriticalSection } from "./lib/config-critical-section.js";
@@ -139,6 +140,14 @@ const HOOK_VALUE_SAFE_RE = /^[A-Za-z0-9._:/-]+$/;
 
 export function isHookCommandValueSafe(value: string): boolean {
   return typeof value === "string" && HOOK_VALUE_SAFE_RE.test(value);
+}
+
+export function unsafeAgentIdMessage(agentId: string): string {
+  return `agent id '${agentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`;
+}
+
+export function unsafeFlairUrlMessage(flairUrl: string): string {
+  return `Flair URL '${flairUrl}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`;
 }
 
 /**
@@ -281,18 +290,19 @@ export function hookCommandDiscardsStderr(command: string): boolean {
   return command.includes("2>/dev/null") || command.includes("2>&-");
 }
 
-/**
- * The EXACT unwrapped shape Flair wrote before #1007. Recognising it precisely
- * (not "anything containing the marker") is what lets `flair doctor --fix`
- * upgrade a hook we know we authored while never rewriting one a user placed
- * or edited themselves.
- */
+/** Match the bare legacy structure before a repair validates its values.
+ *  The marker alone cannot show that a command is safe to rebuild. */
 const LEGACY_SESSION_START_HOOK_RE =
   /^FLAIR_AGENT_ID=([^\s'"]+)(?: FLAIR_URL=([^\s'"]+))? npx -y @tpsdev-ai\/flair-mcp flair-session-start$/;
 
 export function parseLegacySessionStartHookCommand(command: string): { agentId: string; flairUrl?: string } | null {
   if (typeof command !== "string") return null;
-  const m = command.trim().match(LEGACY_SESSION_START_HOOK_RE);
+  const trimmed = command.trim();
+  // flair#3050 round 5: a chained or extended command (`&&`, `;`, `|`, a
+  // substitution or redirection) is not the bare legacy shape, even when
+  // the chain is attached to a value (`FLAIR_AGENT_ID=agent-a&& npx ...`).
+  if (/[;&|`$()<>]/.test(trimmed)) return null;
+  const m = trimmed.match(LEGACY_SESSION_START_HOOK_RE);
   if (!m) return null;
   return { agentId: m[1]!, flairUrl: m[2] };
 }
@@ -2093,7 +2103,9 @@ export function inspectSessionStartHook(
   const command = found.command;
   const ours = isFlairHookCommand(command);
   const silenced = hookCommandIsSilenced(command);
-  const upgradable = parseLegacySessionStartHookCommand(command) !== null;
+  const legacy = parseLegacySessionStartHookCommand(command);
+  const upgradable = legacy !== null && isHookCommandValueSafe(legacy.agentId) &&
+    (legacy.flairUrl === undefined || isHookCommandValueSafe(legacy.flairUrl));
 
   if (!ours || opts.probe === false) {
     return { path: found.path, present: true, command, ours, silenced, upgradable, execution: null };
@@ -2179,16 +2191,28 @@ export function upgradeSessionStartHookCommand(homeDir: string, settingsPath?: s
           if (!Array.isArray(hooks)) continue;
           for (const hook of hooks) {
             if (typeof hook?.command !== "string" || !hook.command.includes(SESSION_START_HOOK_MARKER)) continue;
-            // Already absorbing its own failures — nothing to repair, whether we
-            // wrote it or the user did. Checked BEFORE the legacy match so a second
-            // run is a clean no-op rather than "that isn't the command we wrote".
-            if (hookCommandIsSilenced(hook.command)) {
+            const installer = parseInstallerHookForm(hook.command);
+            const legacy = parseLegacySessionStartHookCommand(hook.command);
+            const source = installer ?? legacy;
+            if (!source) {
+              outcome = { ok: false, path, changed: false, message: `the SessionStart hook in ${path} is not a command form doctor can rewrite (the installer form or the pre-#1007 bare form) — leaving it untouched` };
+              return { hold: outcome.message };
+            }
+            if (!isHookCommandValueSafe(source.agentId)) {
+              outcome = { ok: false, path, changed: false, message: unsafeAgentIdMessage(source.agentId) };
+              return { hold: outcome.message };
+            }
+            if (source.flairUrl !== undefined && !isHookCommandValueSafe(source.flairUrl)) {
+              outcome = { ok: false, path, changed: false, message: unsafeFlairUrlMessage(source.flairUrl) };
+              return { hold: outcome.message };
+            }
+            // Validate the source before the idempotent return.
+            if (installer && hookCommandIsSilenced(hook.command)) {
               outcome = { ok: true, path, changed: false, message: `SessionStart hook in ${path} is already current` };
               return { noop: outcome.message };
             }
-            const legacy = parseLegacySessionStartHookCommand(hook.command);
             if (!legacy) {
-              outcome = { ok: false, path, changed: false, message: `the SessionStart hook in ${path} is not the command Flair wrote — leaving it untouched` };
+              outcome = { ok: false, path, changed: false, message: `the SessionStart hook in ${path} is not in the bare legacy command form — leaving it untouched` };
               return { hold: outcome.message };
             }
             // flair#1778 2c-i-a3: the repair rewrites the entry to a version-
@@ -2220,7 +2244,7 @@ export function upgradeSessionStartHookCommand(homeDir: string, settingsPath?: s
         outcome = { ok: false, path, changed: false, message: `no Flair SessionStart hook found in ${path}` };
         return { hold: outcome.message };
       },
-      { backup: (bytes) => backupBytesTo(path, bytes) },
+      { backupOnWrite: (bytes) => backupBytesTo(path, bytes) },
     );
     if (result.status === "written") {
       return { ok: true, path, changed: true, message: `rewrote the SessionStart hook in ${path} so a failure to resolve stays silent` };

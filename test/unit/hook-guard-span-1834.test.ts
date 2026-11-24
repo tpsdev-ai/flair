@@ -10,22 +10,17 @@
  * the writer replaces the real pin, so an AHEAD real pin is LOWERED (or a stale
  * real pin is needlessly HELD).
  *
- * THE FIX. Hand the guard exactly the span the write replaces: the captured
- * `form.pkgSpec` (repinSessionStartHook) / the same captured span when the
- * existing command is a form (installHook).
- *
- * RED on 609a4c82: the decoy-behind/AHEAD case re-pins and LOWERS the real pin;
- * the mirror (decoy-ahead/stale) is HELD instead of re-pinned.
+ * Source values containing package decoys are now refused before rebuilding.
+ * The pin reader still captures the package argument rather than a decoy.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { repinSessionStartHook, installHook, hookSettingsPath } from "../../src/hook-install.ts";
-import { FLAIR_MCP_PACKAGE, flairCliVersion } from "../../src/lib/mcp-spec.ts";
+import { FLAIR_MCP_PACKAGE } from "../../src/lib/mcp-spec.ts";
 
-const CURRENT_VER = flairCliVersion();
 const STALE_VER = "0.0.0"; // behind the running CLI
 const AHEAD_VER = "9.9.9"; // ahead of the running CLI
 const AGENT = "hookbot";
@@ -66,8 +61,8 @@ const install = () => installHook({ homeDir: isoHome, harness: "claude-code", ag
 
 // ── the guard must read the CAPTURED span, not a decoy in the id ────────────
 
-describe("flair#1834 PR-H round 2 — repinSessionStartHook: the guard reads the captured span", () => {
-  it("decoy BEHIND in the id + real pin AHEAD → HOLD, bytes identical (never lowered)", () => {
+describe("flair#1834 PR-H round 2 — repinSessionStartHook: unsafe source ids are refused", () => {
+  it("decoy BEHIND in the id + real pin AHEAD → source refusal", () => {
     const id = `ghost@${FLAIR_MCP_PACKAGE}@${STALE_VER}`;
     const before = claudeCmd(`FLAIR_AGENT_ID=${id}`, AHEAD_VER);
     writeHook(before);
@@ -76,27 +71,29 @@ describe("flair#1834 PR-H round 2 — repinSessionStartHook: the guard reads the
     const res = repinSessionStartHook(isoHome, "claude-code");
 
     expect(res.action).toBe("hold");
-    expect(res.message).toContain("holding");
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain("cannot be safely written");
     expect(readFileSync(hookSettingsPath(isoHome, "claude-code"), "utf-8")).toBe(original);
     expect(readHookCommand()).toContain(`-p ${FLAIR_MCP_PACKAGE}@${AHEAD_VER} `);
   });
 
-  it("MIRROR: decoy AHEAD in the id + real pin stale → the re-pin SUCCEEDS (id byte-identical)", () => {
+  it("decoy AHEAD in the id + real pin stale → source refusal", () => {
     const id = `ghost@${FLAIR_MCP_PACKAGE}@${AHEAD_VER}`;
     const before = claudeCmd(`FLAIR_AGENT_ID=${id}`, STALE_VER);
     writeHook(before);
 
     const res = repinSessionStartHook(isoHome, "claude-code");
 
-    expect(res.action).toBe("update");
-    // Only the real `-p` pin moved; the identity is byte-identical.
-    expect(readHookCommand()).toBe(claudeCmd(`FLAIR_AGENT_ID=${id}`, CURRENT_VER));
+    expect(res.action).toBe("hold");
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain("cannot be safely written");
+    expect(readHookCommand()).toBe(before);
     expect(readHookCommand()).toContain(`FLAIR_AGENT_ID=${id} `);
   });
 });
 
-describe("flair#1834 PR-H round 2 — installHook: the guard reads the captured span", () => {
-  it("decoy BEHIND in the id + real pin AHEAD → HELD, bytes identical (never lowered)", () => {
+describe("flair#1834 PR-H round 2 — installHook: unsafe source ids are refused", () => {
+  it("decoy BEHIND in the id + real pin AHEAD → source refusal", () => {
     const id = `ghost@${FLAIR_MCP_PACKAGE}@${STALE_VER}`;
     const before = claudeCmd(`FLAIR_AGENT_ID=${id}`, AHEAD_VER);
     const path = writeHook(before);
@@ -104,20 +101,23 @@ describe("flair#1834 PR-H round 2 — installHook: the guard reads the captured 
 
     const res = install();
 
-    expect(res.message).toContain("holding");
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain("cannot be safely written");
+    expect(readdirSync(join(isoHome, ".claude"))).toEqual(["settings.json"]);
     expect(readFileSync(path, "utf-8")).toBe(original);
     expect(readHookCommand()).toContain(`-p ${FLAIR_MCP_PACKAGE}@${AHEAD_VER} `);
   });
 
-  it("MIRROR: decoy AHEAD in the id + real pin stale → the repair SUCCEEDS", () => {
+  it("decoy AHEAD in the id + real pin stale → source refusal", () => {
     const id = `ghost@${FLAIR_MCP_PACKAGE}@${AHEAD_VER}`;
     const before = claudeCmd(`FLAIR_AGENT_ID=${id}`, STALE_VER);
     writeHook(before);
 
     const res = install();
 
-    expect(res.message).toContain("updated");
-    // installHook rebuilds the canonical form for the caller's identity/pin.
-    expect(readHookCommand()).toBe(claudeCmd(`FLAIR_AGENT_ID=${AGENT} FLAIR_URL=${URL}`, CURRENT_VER));
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain("cannot be safely written");
+    expect(readdirSync(join(isoHome, ".claude"))).toEqual(["settings.json"]);
+    expect(readHookCommand()).toBe(before);
   });
 });

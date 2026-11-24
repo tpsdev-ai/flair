@@ -331,6 +331,31 @@ describe("lock hygiene", () => {
     expect(readFileSync(cfg, "utf-8")).toBe("BASE");
     expect(existsSync(lockPath())).toBe(false);
   });
+
+  it("(e) backupOnWrite returning null keeps the path backup returned", () => {
+    writeConfig("BASE");
+    const res = withConfigCriticalSection(cfg, () => ({ write: enc("NEW") }), {
+      backup: () => "/backup/first.bak",
+      backupOnWrite: () => null,
+    });
+    expect(res.status).toBe("written");
+    expect(res.backupPath).toBe("/backup/first.bak");
+    expect(readFileSync(cfg, "utf-8")).toBe("NEW");
+  });
+
+  it("(f) a backupOnWrite FAILURE keeps the earlier backup path and replaces nothing", () => {
+    writeConfig("BASE");
+    const res = withConfigCriticalSection(cfg, () => ({ write: enc("NEW") }), {
+      backup: () => "/backup/first.bak",
+      backupOnWrite: () => { throw new Error("no space"); },
+    });
+    expect(res.status).toBe("refused");
+    expect(res.backupPath).toBe("/backup/first.bak");
+    expect(res.message).toContain("backup failed after deciding to write: no space");
+    expect(res.message).toContain("target was not replaced");
+    expect(readFileSync(cfg, "utf-8")).toBe("BASE");
+    expect(existsSync(lockPath())).toBe(false);
+  });
 });
 
 // ── metadata ────────────────────────────────────────────────────────────────

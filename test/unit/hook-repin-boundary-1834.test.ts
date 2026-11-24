@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { repinSessionStartHook, hookSettingsPath, type Harness } from "../../src/hook-install.ts";
+import { buildSessionStartHookCommand } from "../../src/doctor-client.ts";
 import { refreshOwnedPins, ownedPinRefreshShouldReport } from "../../src/lib/owned-pins.ts";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec } from "../../src/lib/mcp-spec.ts";
 import { parseSemverCore } from "../../src/fabric-upgrade.ts";
@@ -153,14 +154,15 @@ describe("T11d — each valid installer form re-pins, identity and URL intact", 
   }
 });
 
-// ── T11e — legacy unpinned form is a HOLD in repin ─────────────────────────
+// ── T11e — the legacy unpinned form is MIGRATED (flair#3050 round 3) ───────
 
-describe("T11e — the legacy unpinned (no -p) form -> HOLD", () => {
-  it("held, byte-identical (base returns a quiet skip)", () => {
+describe("T11e — the legacy unpinned (no -p) form is pinned", () => {
+  it("re-pins it to the installer form instead of holding or skipping", () => {
     writeHook("claude-code", [`FLAIR_AGENT_ID=a npx -y ${FLAIR_MCP_PACKAGE} flair-session-start`]);
-    const before = raw("claude-code");
     const r = repinSessionStartHook(home, "claude-code");
-    expect(r.action).toBe("hold");
-    expect(raw("claude-code")).toBe(before);
+    expect(r.action).toBe("update");
+    expect(r.message).toContain(`pinned the SessionStart hook in ${path("claude-code")} to ${CURRENT}`);
+    const after = JSON.parse(raw("claude-code")).hooks.SessionStart[0].hooks[0].command as string;
+    expect(after).toBe(buildSessionStartHookCommand("a", undefined, { harness: "claude-code" }));
   });
 });

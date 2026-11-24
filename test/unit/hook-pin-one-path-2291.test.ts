@@ -189,7 +189,7 @@ describe("flair#2291 — init --skip-hook writes no hook", () => {
 describe("flair#2291 — the finding reads the named pin span", () => {
   const DECOY_AGENT = `${AGENT}:${FLAIR_MCP_PACKAGE}@${INSTALLED}`;
 
-  it("hook status reports the named stale pin; init re-pins and keeps the agent id", async () => {
+  it("hook status reports the named stale pin; init refuses the unsafe source id", async () => {
     const command = installerCommand("claude-code", DECOY_AGENT, STALE);
     expect(command.indexOf(`${FLAIR_MCP_PACKAGE}@${INSTALLED}`)).toBeGreaterThan(-1);
     expect(command.indexOf(`${FLAIR_MCP_PACKAGE}@${INSTALLED}`)).toBeLessThan(command.indexOf(`${FLAIR_MCP_PACKAGE}@${STALE}`));
@@ -200,8 +200,8 @@ describe("flair#2291 — the finding reads the named pin span", () => {
     expect(status.out).toContain(`command names older pin flair-mcp@${STALE}`);
 
     const init = await runCli(initArgs("claude-code"));
-    expect(init.out).toContain(`re-pinned the SessionStart hook in ${path}`);
-    expect(hookCommands("claude-code")).toEqual([installerCommand("claude-code", DECOY_AGENT, INSTALLED)]);
+    expect(init.out).toContain("cannot be safely written");
+    expect(hookCommands("claude-code")).toEqual([command]);
   }, CASE_MS);
 
   it("the doctor catalog fails on the named stale pin", () => {
@@ -211,6 +211,31 @@ describe("flair#2291 — the finding reads the named pin span", () => {
     expect(hook?.status).toBe("fail");
     expect(hook?.detail ?? "").toContain(`pinned to flair-mcp@${STALE}`);
   });
+
+  it("a decoy inside FLAIR_URL does not hide the real -p pin from the finding", async () => {
+    const decoyUrl = `http://127.0.0.1:19926/${FLAIR_MCP_PACKAGE}@${INSTALLED}`;
+    const command = `sh -c 'out=$(FLAIR_AGENT_ID=${AGENT} FLAIR_URL=${decoyUrl} npx -y -p ${FLAIR_MCP_PACKAGE}@${STALE} flair-session-start 2>/dev/null) && printf %s "$out" || true'`;
+    const path = writeHookGroups("claude-code", [[command]]);
+
+    const status = await runCli(statusArgs("claude-code"));
+    expect(status.code).toBe(1);
+    expect(status.out).toContain(`command names older pin flair-mcp@${STALE}`);
+
+    const init = await runCli(initArgs("claude-code"));
+    expect(init.out).toContain("cannot be safely written");
+    expect(hookCommands("claude-code")).toEqual([command]);
+  }, CASE_MS);
+
+  it("an AHEAD real pin stays held when a safe source id is re-pointed", async () => {
+    const AHEAD = "9.9.9";
+    const command = installerCommand("claude-code", "agent-c", AHEAD);
+    const path = writeHookGroups("claude-code", [[command]]);
+
+    const init = await runCli(initArgs("claude-code"));
+    expect(init.out).toContain(`re-pointed the SessionStart hook in ${path} to agent '${AGENT}'`);
+    expect(init.out).not.toContain("and re-pinned it");
+    expect(hookCommands("claude-code")).toEqual([installerCommand("claude-code", AGENT, AHEAD)]);
+  }, CASE_MS);
 });
 
 describe("flair#2291 — ambiguous hook shapes are held and reported", () => {

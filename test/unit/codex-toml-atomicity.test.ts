@@ -95,7 +95,7 @@ describe("T1a — torn read (EMPIRICAL and HOST-DEPENDENT on the pre-fix baselin
     for (let run = 0; run < RUNS; run++) {
       const o = await runRaceWithCoverage(async (): Promise<RaceOutcome> => {
         mkdirSync(dir(), { recursive: true });
-        const oldText = staleSection("@tpsdev-ai/flair-mcp@0.0.1") + `# ${PAD}\n`;
+        const oldText = staleSection("@tpsdev-ai/flair-mcp@0.0.1") + `[pad]\n# ${PAD}\n`;
         writeFileSync(cfgPath(), oldText, "utf-8");
         const oldLen = Buffer.byteLength(oldText);
 
@@ -138,7 +138,7 @@ describe("T1a — torn read (EMPIRICAL and HOST-DEPENDENT on the pre-fix baselin
 describe("T1b — exception mid-write", () => {
   it("a failure AFTER the temp exists leaves the target byte-identical and no staging temp behind", () => {
     mkdirSync(dir(), { recursive: true });
-    const before = staleSection("@tpsdev-ai/flair-mcp@0.0.1") + `# ${PAD}\n`;
+    const before = staleSection("@tpsdev-ai/flair-mcp@0.0.1") + `[pad]\n# ${PAD}\n`;
     writeFileSync(cfgPath(), before, "utf-8");
     const beforeHash = createHash("sha256").update(readFileSync(cfgPath())).digest("hex");
 
@@ -165,7 +165,7 @@ describe("T1b — exception mid-write", () => {
 describe("T1c — SIGKILL after fsync, before rename", () => {
   it("leaves the target byte-identical; the orphaned temp + lock are reported", async () => {
     mkdirSync(dir(), { recursive: true });
-    const before = staleSection("@tpsdev-ai/flair-mcp@0.0.1") + `# ${PAD}\n`;
+    const before = staleSection("@tpsdev-ai/flair-mcp@0.0.1") + `[pad]\n# ${PAD}\n`;
     writeFileSync(cfgPath(), before, "utf-8");
     const beforeHash = createHash("sha256").update(readFileSync(cfgPath())).digest("hex");
 

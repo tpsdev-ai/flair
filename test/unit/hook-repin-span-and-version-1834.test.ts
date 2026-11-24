@@ -62,34 +62,29 @@ function readHookCommand(): string {
   return cfg?.hooks?.SessionStart?.[0]?.hooks?.[0]?.command ?? "";
 }
 
-describe("flair#1834 PR-H round 2 — the re-pin substitutes the CAPTURED span, not the first match", () => {
-  it("an id that EMBEDS the package spec: id byte-identical, the -p pin advanced", () => {
+describe("flair#1834 PR-H round 2 — the re-pin validates source values before substitution", () => {
+  it("an id that embeds the package spec is refused", () => {
     const id = `ghost@${FLAIR_MCP_PACKAGE}@${STALE_VER}`;
     const before = claudeCmd(`FLAIR_AGENT_ID=${id}`, STALE_VER);
     writeHook(before);
 
     const res = repinSessionStartHook(isoHome, "claude-code");
-    expect(res.action).toBe("update");
-
-    const after = readHookCommand();
-    // ONLY the -p pin moved; the identity is byte-identical.
-    expect(after).toBe(claudeCmd(`FLAIR_AGENT_ID=${id}`, CURRENT_VER));
-    expect(after).toContain(`FLAIR_AGENT_ID=${id} `);
-    expect(after).toContain(`-p ${FLAIR_MCP_PACKAGE}@${CURRENT_VER} `);
+    expect(res.action).toBe("hold");
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain("cannot be safely written");
+    expect(readHookCommand()).toBe(before);
   });
 
-  it("a URL that EMBEDS the package spec: URL byte-identical, the -p pin advanced", () => {
+  it("a URL that embeds the package spec is refused", () => {
     const url = `http://127.0.0.1:19926/${FLAIR_MCP_PACKAGE}@${STALE_VER}`;
     const before = claudeCmd(`FLAIR_AGENT_ID=ghost FLAIR_URL=${url}`, STALE_VER);
     writeHook(before);
 
     const res = repinSessionStartHook(isoHome, "claude-code");
-    expect(res.action).toBe("update");
-
-    const after = readHookCommand();
-    expect(after).toBe(claudeCmd(`FLAIR_AGENT_ID=ghost FLAIR_URL=${url}`, CURRENT_VER));
-    expect(after).toContain(`FLAIR_URL=${url} `);
-    expect(after).toContain(`-p ${FLAIR_MCP_PACKAGE}@${CURRENT_VER} `);
+    expect(res.action).toBe("hold");
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain("cannot be safely written");
+    expect(readHookCommand()).toBe(before);
   });
 
   it("CONTROL: a normal form re-pins with identity and URL intact", () => {

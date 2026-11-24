@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { repinCodexPin, wireCodex } from "../../src/install/clients.ts";
 import { readClientMcpBlock } from "../../src/doctor-client.ts";
@@ -48,17 +48,29 @@ function fixture(raw: string, check: (home: string, path: string) => void): void
 }
 
 for (const [label, args] of forms) {
-  test(`B1 wireCodex refreshes ${label} and reports the real pin`, () => {
+  const canonical = label === "basic";
+  test(canonical
+    ? `B1 wireCodex refreshes ${label} and reports the real pin`
+    : `B1 pin readers report the real pin; wireCodex refuses the noncanonical ${label} form`, () => {
     const raw = config(args(old));
     fixture(raw, (home, path) => {
       expect(readClientMcpBlock("codex", home).present).toBe(true);
       expect(readOwnedPins(home).find((f) => f.target.id === "codex")?.pin).toBe("0.0.1");
       expect(mcpClientPinFindings(home).find((f) => f.reading.target.id === "codex")?.reading.pin).toBe("0.0.1");
       const result = wireCodex(env);
-      expect(result.ok).toBe(true);
-      expect(result.message).toContain("refreshed pin");
-      expect(readOwnedPins(home).find((f) => f.target.id === "codex")?.pin).toBe(flairCliVersion());
-      expect(readFileSync(`${path}.bak`, "utf8")).toBe(raw);
+      if (canonical) {
+        expect(result.ok).toBe(true);
+        expect(result.message).toContain("refreshed pin");
+        expect(readOwnedPins(home).find((f) => f.target.id === "codex")?.pin).toBe(flairCliVersion());
+        expect(readFileSync(`${path}.bak`, "utf8")).toBe(raw);
+      } else {
+        // flair#3050 round 5: only the exact tomlSnippet shape is rewritten.
+        expect(result.ok).toBe(false);
+        expect(result.message).toContain("Flair edits Codex's config only when its content meets all of these conditions:");
+        expect(result.message).toContain("(4) an existing [mcp_servers.flair] section is exactly the shape Flair writes: edit it, or remove it");
+        expect(readFileSync(path, "utf8")).toBe(raw);
+        expect(existsSync(`${path}.bak`)).toBe(false);
+      }
     });
   });
 
@@ -92,20 +104,29 @@ for (const [label, args] of forms) {
       fixture(raw, (home, path) => {
         expect(readOwnedPins(home).find((f) => f.target.id === "codex")?.pin).toBe(pin);
         expect(mcpClientPinFindings(home).find((f) => f.reading.target.id === "codex")?.reading.pin).toBe(pin);
+        const result = wireCodex(env);
+        if (label === "basic") {
+          expect(result.message).toContain("holding");
+          expect(result.message).toContain(pin);
+          expect(result.message).not.toContain("@unknown");
+          expect(readFileSync(path, "utf8")).toBe(raw);
+          expect(existsSync(`${path}.bak`)).toBe(false);
+        } else {
+          expect(result.ok).toBe(false);
+          expect(result.message).toContain("Flair edits Codex's config only when its content meets all of these conditions:");
+          expect(readFileSync(path, "utf8")).toBe(raw);
+          expect(existsSync(`${path}.bak`)).toBe(false);
+        }
         if (pin === "9.9.9") {
           // Wiring has its own guard; exercise the pin-only writer's guard too.
+          // (Run after the init refusal so its backup cannot mask the absence
+          // of one on the refusal above.)
           const refresh = repinCodexPin(path, "Codex");
           expect(refresh.kind).toBe("hold");
           expect(refresh.line).toContain(`keeping pinned ${pin}`);
           expect(refresh.line).toContain("never lowered");
           expect(readFileSync(path, "utf8")).toBe(raw);
         }
-        const result = wireCodex(env);
-        expect(result.message).toContain("holding");
-        expect(result.message).toContain(pin);
-        expect(result.message).not.toContain("@unknown");
-        expect(readFileSync(path, "utf8")).toBe(raw);
-        expect(readFileSync(`${path}.bak`, "utf8")).toBe(raw);
         if (pin === "9.9.9") {
           const doctor = offlineDoctor(home);
           for (const args of [[], ["--fix", "--dry-run"], ["--fix"]]) {
@@ -136,15 +157,17 @@ for (const [label, raw] of [
   ["unterminated string", config(`args = ["${old}]`)],
   ["invalid unicode escape", config(`args = ["${pkg}@\\uD800"]`)],
 ] as const) {
-  test(`B1 writer and doctor hold ${label}`, () => {
+  test(`B1 writer refuses and doctor holds ${label}`, () => {
     fixture(raw, (home, path) => {
       expect(readOwnedPins(home).find((f) => f.target.id === "codex")?.pin).toBe("unknown");
-      expect(wireCodex(env).message).toContain("holding");
+      const refused = wireCodex(env);
+      expect(refused.ok).toBe(false);
+      expect(refused.message).toContain("Flair edits Codex's config only when its content meets all of these conditions:");
       const doctor = offlineDoctor(home);
       expect(doctor(["--fix", "--dry-run"])).not.toContain("Would re-pin the MCP server block");
       expect(doctor(["--fix"])).not.toContain("re-pinned Codex");
       expect(readFileSync(path, "utf8")).toBe(raw);
-      expect(readFileSync(`${path}.bak`, "utf8")).toBe(raw);
+      expect(existsSync(`${path}.bak`)).toBe(false);
     });
   }, 60_000);
 }

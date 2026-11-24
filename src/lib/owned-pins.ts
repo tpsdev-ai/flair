@@ -30,9 +30,13 @@ import {
   fixSessionStartHook,
   hookHarnessFromSettingsPath,
   isFlairHookCommand,
+  isHookCommandValueSafe,
+  parseLegacySessionStartHookCommand,
   SESSION_START_HOOK_INVOCATION_RE,
   readClientMcpBlock,
   sessionStartHookHint,
+  unsafeAgentIdMessage,
+  unsafeFlairUrlMessage,
   type ApplyOrReportResult,
 } from "../doctor-client.js";
 import {
@@ -47,6 +51,7 @@ import {
   hookInstallHint,
   parseInstallerHookForm,
   hookSettingsPath,
+  sessionStartHookShapeRefusal,
   repinSessionStartHook,
   SUPPORTED_HARNESSES,
   type Harness,
@@ -399,14 +404,76 @@ export function applyOrRepinSessionStartHook(
   const existing = checkSessionStartHook(homeDir, settingsPath);
   if (existing.present) {
     const harness = hookHarnessFromSettingsPath(existing.path);
+    // flair#3050 round 3: validate the entry's SHAPE before ANY no-op or
+    // pin-finding branch. A foreign-shaped entry used to reach a branch that
+    // returned ok:true (an existing pin finding, or the id already matching).
+    const shapeRefusal = sessionStartHookShapeRefusal(existing.path);
+    if (shapeRefusal) return { applied: false, ok: false, message: shapeRefusal };
     const finding = sessionStartHookPinFindings(homeDir).find(
       (f) => f.reading.target.id === harness,
     );
+    if (finding?.reading.held) {
+      return { applied: false, ok: false, message: finding.reading.held };
+    }
+    const command = existing.command ?? "";
+    // Reuse the existing readers for the identity Flair's entry carries: the
+    // strict installer form first, then the pre-#1007 bare form.
+    const installer = parseInstallerHookForm(command);
+    const legacy = installer ? null : parseLegacySessionStartHookCommand(command);
+    if (!installer && !legacy) {
+      // A pin finding means the writer can name the shape it refuses; without
+      // one, name the unreadable identity. Both write nothing (flair#3050 r3).
+      // Call the RAW writer, not the guarded refresh: its pre-lock check names
+      // a non-installer command as a refusal, while the guarded path reports a
+      // tag/range/unknown pin as a policy hold with ok:true.
+      if (finding) {
+        const repin = repinSessionStartHook(homeDir, harness);
+        return { applied: false, ok: repin.ok, message: repin.message };
+      }
+      return {
+        applied: false,
+        ok: false,
+        message: `could not read the agent id from the SessionStart hook in ${existing.path} — left untouched`,
+      };
+    }
+    const wiredAgentId = installer ? installer.agentId : legacy!.agentId;
+    const wiredUrl = installer ? installer.flairUrl : legacy!.flairUrl;
+    // flair#3050 round 5: validate the EXISTING values of either form with the
+    // builder's own rule before it permits a no-op or a rewrite of the supported
+    // form. An unsafe id or URL is a named refusal, not "already wired".
+    if (!isHookCommandValueSafe(wiredAgentId)) {
+      return { applied: false, ok: false, message: unsafeAgentIdMessage(wiredAgentId) };
+    }
+    if (wiredUrl !== undefined && wiredUrl !== "" && !isHookCommandValueSafe(wiredUrl)) {
+      return { applied: false, ok: false, message: unsafeFlairUrlMessage(wiredUrl) };
+    }
+    const isLegacy = installer === null;
+    if (wiredAgentId !== agentId) {
+      if (skip) {
+        return {
+          applied: false,
+          ok: false,
+          message: `SessionStart hook in ${existing.path} names agent '${wiredAgentId}' (--skip-hook)`,
+        };
+      }
+      const rewire = repinSessionStartHook(homeDir, harness, undefined, { agentId });
+      return {
+        applied: rewire.action === "update",
+        ok: rewire.ok && rewire.action === "update",
+        message: rewire.message,
+      };
+    }
+    // The pre-#1007 bare legacy hook is migrated even when its id already matches:
+    // reporting "already wired" would leave it running unpinned.
+    if (isLegacy) {
+      if (skip) {
+        return { applied: false, ok: false, message: `SessionStart hook in ${existing.path} not re-pinned (--skip-hook)` };
+      }
+      const repin = repinSessionStartHookGuarded(homeDir, harness);
+      return { applied: repin.action === "update", ok: repin.ok, message: repin.message };
+    }
     if (!finding) {
       return { applied: false, ok: true, message: `SessionStart hook already wired in ${existing.path}` };
-    }
-    if (finding.reading.held) {
-      return { applied: false, ok: false, message: finding.reading.held };
     }
     if (skip) {
       return { applied: false, ok: false, message: `SessionStart hook in ${existing.path} not re-pinned (--skip-hook)` };

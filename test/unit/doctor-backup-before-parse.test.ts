@@ -1,12 +1,8 @@
 /**
  * doctor-backup-before-parse.test.ts — flair#1778 slice 2c-i-c, fixture C6.
  *
- * The existing backup-before-parse fixtures (test/unit/hook-install.test.ts)
- * drive the HOOK-INSTALL writers only, so a mutation on a DOCTOR writer cannot
- * fail them. This adds the doctor-writer counterpart: malformed settings bytes
- * → the migrated doctor writer REFUSES by name, writes NOTHING to the target,
- * and the sibling `<path>.bak` holds the malformed bytes EXACTLY (the backup
- * runs on the IN-LOCK bytes BEFORE the parse, exactly like `installHook`).
+ * A doctor-writer mutation needs its own fixture; hook-install tests do not
+ * exercise these writers. Malformed bytes are backed up before refusal.
  *
  * FAILS-ON-MAIN (292a1152): the raw doctor writers took no backup on the parse
  * failure, so `<path>.bak` would not exist.
