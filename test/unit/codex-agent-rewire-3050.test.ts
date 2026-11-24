@@ -707,7 +707,21 @@ describe("Codex fallback definition guard", () => {
       expect(wireCodex(ENV_B).ok).toBe(true);
     });
   }
-  // Six quotes in a row are not a valid closer, so the scan refuses rather than guess where the string ends.
+  // An empty multiline string written as six quotes opens and closes in one step: a valid value the scan accepts.
+  for (const [what, value] of [
+    ["an empty basic multiline string", 'x = """"""\n'],
+    ["an empty basic multiline string before a comment", 'x = """""" # c\n'],
+    ["an empty literal multiline string", "x = ''''''\n"],
+    ["an empty literal multiline string before a comment", "x = '''''' # c\n"],
+  ] as const) {
+    it(`wires after a section followed by ${what}`, () => {
+      const raw = seed(tomlSnippet(ENV_A) + "\n\n[other]\n" + value);
+      expect((Bun.TOML.parse(raw) as any).other.x).toBe("");
+      expect(wireCodex(ENV_B).ok).toBe(true);
+    });
+  }
+  // A sixth quote right after a closer, in a multiline string that is already open, is not valid TOML,
+  // so the scan refuses rather than guess where the string ends.
   for (const [what, tail] of [
     ["a basic string closed by six quotes", 'x = """a""""""\n'],
     ["a basic string closed by six quotes before a comment", 'x = """a"""""" # "\n'],
