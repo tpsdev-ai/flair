@@ -1,1 +1,0 @@
-- **The workspace lockfile resolves body-parser 2.4.0.** ([#2822](https://github.com/tpsdev-ai/flair/pull/2822))
