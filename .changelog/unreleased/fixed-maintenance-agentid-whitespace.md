@@ -1,1 +1,0 @@
-- **Admin memory maintenance refuses an `agentId` with surrounding whitespace.** A padded value used to name an agent that matched no row, so the run silently did nothing; it is now a 400, as it already is for a present `undefined`, `null`, non-string or blank value. ([#2737](https://github.com/tpsdev-ai/flair/pull/2737))

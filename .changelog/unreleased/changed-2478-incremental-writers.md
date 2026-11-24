@@ -1,1 +1,0 @@
-- Visibility backfill and promotion stamps update only their own fields under the per-id Memory lock shared with owner PUT/PATCH. ([#2633](https://github.com/tpsdev-ai/flair/pull/2633))

@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-Entries for the next release live as **fragment files** under [`.changelog/unreleased/`](.changelog/unreleased/) —
+Write ordinary release entries as **fragment files** under [`.changelog/unreleased/`](.changelog/unreleased/) —
 one file per change, so two pull requests never edit the same lines and never conflict here.
 
 Add `.changelog/unreleased/<category>-<slug>.md` containing your entry exactly as it should read
@@ -17,6 +17,1169 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 `scripts/release.sh` assembles them into a `## [X.Y.Z]` section and deletes them as part of the
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
+
+## [0.63.0] - 2026-11-24
+
+### Added
+
+- `soul.changed` and `skill.changed` OrgEvents are appended in the same transaction as each version appended by Flair's Soul and skill application writers, with an allowlisted `detail` and no hashes for private skills. ([#2677](https://github.com/tpsdev-ai/flair/pull/2677))
+
+- OrgEvent resource writes refuse reserved kinds (`soul.changed`, `skill.changed`) and the `instruction-change:` id prefix; stored checks and mutations share an owned transaction. With an admin credential and a verified operations endpoint, `flair doctor` names stored events that carry a reserved marker but fail the reader rule. ([#2631](https://github.com/tpsdev-ai/flair/pull/2631))
+
+- **Office-wide Presence, slice 2: a spoke can push its agents' presence,
+  behind a default-off flag.**
+  `FLAIR_FEDERATION_PRESENCE_SEND` (default off) makes `flair federation sync`
+  push the `Presence` rows stamped with this instance as their
+  `originatorInstanceId` to its hub, after the `Memory`, `Soul`, `Agent` and
+  `Relationship` tables. `Presence` has no `updatedAt`, so its rows are
+  selected by their own `lastHeartbeatAt` / `activityUpdatedAt` cursor against
+  a per-table watermark, clamped to scan time, less a 30 s overlap (floor
+  zero). The watermark is kept on the local `Peer` row (`presenceLastSyncAt`);
+  after confirmed contact, the sender attempts to write a candidate clamped to
+  scan time and capped below retryable or indeterminate rows.
+  A row dated more than 5 minutes ahead is not sent. With the flag off the
+  sender sends no Presence records. ([#2638](https://github.com/tpsdev-ai/flair/pull/2638))
+
+- `flair doctor` now reports skill subjects whose newest instruction version is a delete tombstone while the skill's Memory row is still open-live (the skill writer's predicate: not archived, not expired, no `validTo`). ([#2663](https://github.com/tpsdev-ai/flair/pull/2663))
+
+- **`flair backup-approval` lets the operator approve backup archives on the restoring host, including archives written before digest sidecars.**
+  Approvals live in `~/.flair/approved-archives/`, owned by the operator:
+  directories mode 0700, and managed record and archive files mode 0600
+  (a private temp file an interrupted approval left is ignored). Any other
+  entry is refused, before the store creates anything. The
+  store keeps a copy of each approved archive under its SHA-256 and a record
+  of the approval time and operator. No REST route can approve, revoke, list
+  or read it. `approve` verifies an archive against its `.sha256` sidecar.
+  `legacy-admit` prints a sidecar-free archive's SHA-256 and approves it only
+  when the operator repeats that digest with `--confirm-digest`. `list`
+  checks each stored copy, and `revoke` withdraws an approval. Approving
+  (including a confirmed legacy admission) and revoking need operator
+  credentials, checked as a super_user against this host's operations API,
+  whose port comes from `--ops-port`, `FLAIR_OPS_PORT`, the local config, or
+  the HTTP port minus one. `flair restore` admits an archive with no sidecar
+  only when this host holds an unrevoked approval for its digest whose stored
+  copy still hashes to it, and restores that stored copy. An approval of
+  either kind admits those bytes. A sidecar-backed archive needs no
+  approval: a matching sidecar alone admits it. An approval authorizes those bytes until it is
+  revoked. It does not show where they came from or that a sidecar-free
+  archive is unchanged since it was written (flair#2664).
+
+  > **Heads-up:** to restore an archive without a sidecar, first run
+  > `flair backup-approval legacy-admit <archive>` on the restoring host,
+  > check the SHA-256 it prints, then run it again with
+  > `--confirm-digest <sha256>`. ([#2707](https://github.com/tpsdev-ai/flair/pull/2707))
+
+- **A restore-archive validator checks a backup's exact bytes and its Memory promotion fields.**
+  The validator hashes an archive's bytes (SHA-256) and parses that same
+  buffer once, as strict UTF-8 JSON. It refuses a repeated object key at any
+  depth, a repeated row id within a collection, and rows `flair restore`
+  already refuses. Selected Memory rows need string content. Their promotion
+  fields are checked when present: `promotionStatus` must be a declared
+  value, an approved verdict needs a non-empty `promotedAt` and `promotedBy`,
+  and a `promotionContentHash` must bind the archived content. Rows with no
+  promotion fields, and otherwise valid verdicts without a hash, are admitted. Each row is reported as
+  bound, legacy-unbound (a verdict with no binding, which readers suppress)
+  or unpromoted. One failing row refuses the whole selection. `flair restore`
+  applies the archive checks before any request; it does not apply the Memory
+  promotion checks (flair#2664). ([#2690](https://github.com/tpsdev-ai/flair/pull/2690), [#2707](https://github.com/tpsdev-ai/flair/pull/2707))
+
+- **Internal integrity custody and commit-fence primitives for the scheduled integrity watcher; no command, route or baseline is reachable yet.**
+
+  Commits, tombstones and recovery share one custody lock. Generation commits
+  and tombstones stage an intent marker before publication. Open refuses
+  retained generation entries without CURRENT and symlinked generations.
+  New custody refuses an existing registry (#971). ([#2961](https://github.com/tpsdev-ai/flair/pull/2961))
+
+### Changed
+
+- **Embedding writers write under the per-id Memory lock shared with owner PUT and PATCH.**
+
+  The HTTP re-embed (`PATCH /Memory/<id>` with both embedding fields `null`)
+  holds the id's lock from its first read through its commit, under its own
+  hold-warning phase name, `patch-reembed`. As before, it writes only the
+  embedding fields (`embedding`, `embeddingModel`, `embeddedContentHash`,
+  `updatedAt`), and gives a legacy row that has no `instanceToken` one in the
+  same update. Once one of its attempts has committed and no read-back has
+  shown the write, every exit of the same request other than a later
+  verified success (a provider timeout, a refusal, a 409 for a changed row,
+  a thrown error such as the write-stamp notifier's after a commit) answers
+  `503 write_outcome_unknown` and fences the id, instead of an answer that
+  says nothing was written; a retry that finds the row gone answers 404.
+
+  The embedding-stamp migration's `.content`-suffix fallback computes its
+  vector first, then takes the id's lock with one non-waiting acquisition
+  per attempt (a retry acquires it again). On a held id, an id with an
+  unresolved write outcome, or a store with no lock, that attempt writes
+  nothing and is logged, and the row is left uncounted; the next scan decides
+  whether it is still stale. After an earlier attempt for the same row
+  committed unconfirmed, the log says the outcome is unknown.
+  Holding the lock, it writes only if the committed row is the one it
+  embedded, and reads the committed row back before the release. A re-embed
+  request the migration delegates over HTTP that is refused `503`
+  (`memory_busy`, `write_outcome_unknown`, `memory_provider_timeout`) is logged
+  and the row is left uncounted; `write_outcome_unknown` can mean the request's
+  own write could not be read back and may have committed.
+
+  The embedding backfill that follows a successful HTTP Memory write signed
+  by a verified Ed25519 agent (a Basic-admin write returns from the auth
+  middleware before that step and starts none) also computes its vector
+  first and takes the id's lock with one non-waiting acquisition per
+  attempt (a retry acquires it again); a held id or an id with an
+  unresolved write outcome is skipped and logged, and after an earlier
+  unconfirmed attempt of the same backfill an exit that ends without a
+  verified write logs the outcome as unconfirmed. Holding the lock, it
+  writes only if the committed row's text is the text it embedded, and it
+  reads the committed row back, text included, before the release. If that
+  read-back is readable and finds the text changed, its retry compares the
+  row's stored vector with the vector it staged, component by component:
+  both finite and within 1e-6 of the larger magnitude, or of 1 below
+  magnitude 1, which accepts a float32 copy of a component in float32 range
+  (a non-finite component never matches). It does not use the stored text
+  hash, which a row with an empty owner does not have; on a match beside the changed text it re-embeds the
+  current text, within at most 3 attempts. An unreadable read-back, or the
+  attempts exhausted, leaves the outcome logged as unconfirmed. The
+  migration's fallback does the same, leaving such a row uncounted for the
+  next scan (#2478). ([#2743](https://github.com/tpsdev-ai/flair/pull/2743))
+
+- **A federated Memory merge and the batch reindex take the per-id Memory write lock shared with owner PUT and PATCH.**
+
+  `POST /FederationSync` builds the merged Memory row first, then takes the
+  id's lock, once and without waiting, around its write. Under the lock it
+  reads the row in its transaction and decides the write from it: for an
+  existing row, the fields where the merged row differs from it, as an
+  incremental update (a row carrying an attribute the merge strips is
+  rewritten whole). The existing whole-row check then compares that row with
+  the row the merge was built from, and the merge confirms that row before its
+  commit. The lock does not serialize the merge against a PUT that joined
+  another transaction, which can commit after that PUT releases the lock. A
+  record whose lock is held, whose id carries an unresolved write outcome, or
+  whose store has no lock writes nothing and is skipped as
+  `merge_target_busy`: the skip is returned in the response's refused list and
+  classified retryable, and the sync log row records it in its skipped reasons
+  when that best-effort write succeeds.
+
+  `POST /MemoryReindex` takes each id's lock, once and without waiting, around
+  its re-PUT. A row it cannot lock writes nothing and is counted in the
+  result's `skipped` total; `skippedSamples` lists up to five of those ids.
+  The admin `_reindex` PUT runs under the same lock as an ordinary PUT and
+  confirms the committed row after its own-committed write. ([#2784](https://github.com/tpsdev-ai/flair/pull/2784))
+
+- **The ordinary (non-skill) feed write-back, the feed dedup repair and both `lastReflected` stamps write under the per-id Memory lock shared with owner PUT and PATCH.**
+
+  > **Heads-up:** `POST /FeedMemories` can now answer `503 memory_busy` (the id
+  > is held past the request's wait budget), `503 write_outcome_unknown` (an
+  > earlier write to the id has an unresolved outcome) or
+  > `503 memory_lock_unavailable` (the store has no lock). The lock is per Harper
+  > process: writes through another process are not serialized by it.
+
+  The ordinary (non-skill) write-back of `POST /FeedMemories` takes the target
+  id's lock and commits before releasing it. An omitted id is generated; a
+  caller-supplied id can contend. The feed write is a foreground client write: a
+  held id waits its budget and can answer `503 memory_busy`, with the caller id
+  and nothing else; an id marked outcome-unknown answers
+  `503 write_outcome_unknown`. The authored replacement and its committed-row
+  confirmation are unchanged.
+
+  The dedup expiry repair (`POST /FeedMemories` matching an ephemeral row with
+  no expiry) takes the id's lock with one non-waiting acquisition, re-reads the
+  committed row under it, and writes only `expiresAt`. A held id, an
+  outcome-unknown marker or a store with no lock skips the repair and logs it;
+  the response is the normal allowlisted feed response derived from the
+  matched, unrepaired row, with inline pointer fields removed; fields the
+  response does not select (an unsupplied `contentHash`, for example) are
+  absent. A later feed write repairs it only if the row still matches and still
+  lacks an expiry.
+
+  The `lastReflected` stamps — on a new row's `derivedFrom` sources and on the
+  sources a reflection run read — take each source id's lock with one
+  non-waiting acquisition, read the committed row under it, and write only
+  `lastReflected`. A held source is skipped and logged; the stamp remains
+  best-effort and never fails the request.
+
+  Each converted writer reads the committed row under the lock and confirms the
+  committed row before the release. When the committed row does not show the
+  staged write, feed ingest answers `409 feed_write_unconfirmed` and the dedup
+  repair answers `409 feed_dedup_target_changed`; the best-effort
+  `lastReflected` stamps log a skip. The lock remains per process. ([#2777](https://github.com/tpsdev-ai/flair/pull/2777))
+
+- Visibility backfill and promotion stamps update only their own fields under the per-id Memory lock shared with owner PUT/PATCH. ([#2633](https://github.com/tpsdev-ai/flair/pull/2633))
+
+- **The maintenance archive/expiry action and the usage-count bump take the per-id Memory lock shared with owner PUT and PATCH.**
+
+  `POST /MemoryMaintenance` takes the id's lock, once and without waiting,
+  around each row's archive/expiry action. An archived row is written as an
+  incremental update of `archived` and `archivedAt`; an expired row and its
+  pointer row are deleted in one owned
+  transaction. The action decides on the committed row read under the lock,
+  commits before releasing, and re-reads the committed row afterwards: an
+  archive whose staged fields are not on that row is reported as skipped, and
+  a delete whose row is still there is reported as skipped.
+
+  A usage contribution (POST /RecordUsage and citation-on-write) takes the
+  memory id's lock before the usage-ledger lock, so the count bump's
+  read-modify-write runs on a row that an ordinary owner PUT, PATCH or DELETE
+  in the same Harper process, which holds the lock until it commits, cannot
+  change under it. Not serialized with it: a composed PUT that commits after
+  releasing its lock, and a raw operations write. The count bump writes
+  `usageCount` and the helper's commit marker.
+
+  A run or contribution that cannot take the lock — a held id, an id whose
+  last write's outcome is unresolved, or a store with no lock — writes
+  nothing for that row and reports it: maintenance counts it in `skipped`,
+  and the usage writer logs the skip. A skipped usage contribution is not
+  credited, so the memory's count can undercount by that contribution. ([#2773](https://github.com/tpsdev-ai/flair/pull/2773), [#2891](https://github.com/tpsdev-ai/flair/pull/2891))
+
+- **The synthetic CI migration and the operator purge write under the per-id Memory lock shared with owner PUT and PATCH.**
+
+  The synthetic CI migration — registered only when
+  `FLAIR_ENABLE_TEST_MIGRATIONS` is exactly `1` — takes the row's lock with one
+  non-waiting acquisition around its re-stamp of `source`. A held row, a row
+  with an unresolved write outcome or a store with no lock writes nothing and
+  is logged; the row stays pending for the next scan.
+
+  `POST /MemoryPurge` takes the sorted per-id locks of its whole target set
+  with the owner budget, re-resolves the set under them, and holds them across
+  the row deletes, their deletion-history records and their commits. A set held
+  for the whole budget answers `503 memory_busy` with the caller id and nothing
+  else; a set that keeps changing through all three attempts is refused `409
+  memory_purge_targets_changed`.
+
+  `POST /AgentSeed` writes no existing Memory row: its starter memories are
+  creates under a fresh id, so it takes no lock.
+
+  The lock remains per process. ([#2779](https://github.com/tpsdev-ai/flair/pull/2779))
+
+- Newly stamped promotion verdicts carry a server-only `promotionContentHash` bound to the stored text. ([#2633](https://github.com/tpsdev-ai/flair/pull/2633))
+
+- **`flair backup` writes a SHA-256 digest beside each archive; `flair restore` refuses a mismatched digest, and a missing one without an approval.**
+  Backup publishes `<archive>.sha256`, the `sha256sum` line for the
+  archive's exact bytes, together with the archive. The previous sidecar is
+  removed before the archive is replaced and the new one is written after
+  it, so a crash of one backup never leaves the sidecar it wrote beside
+  other bytes. Two backups writing the same path at once are not
+  serialized; restore refuses a mismatched pair they leave.
+  Before any request, in every mode including `--dry-run`, restore reads the
+  archive once, hashes and parses that one buffer with the restore-archive
+  validator, and compares the hash with the sidecar. An archive with no
+  sidecar is admitted only through an approval on the restoring host (see
+  the backup approval entry). The validator also
+  refuses a repeated JSON key or row id. The sidecar detects a damaged,
+  truncated or mismatched file; it does not prove who wrote the archive
+  (flair#2664).
+
+  > **Heads-up:** `flair restore` refuses backups without a sidecar
+  > until you approve each one on
+  > the restoring host with `flair backup-approval legacy-admit` (see the
+  > backup approval entry). Keep each new archive's `.sha256` file with it
+  > when you copy or move the archive. ([#2707](https://github.com/tpsdev-ai/flair/pull/2707))
+
+- **`soul_set` is not in the embedded `/mcp` handler's `tools/list` for an agent.**
+  That route authenticates callers with OAuth bearer tokens: a token subject
+  mapped to an Agent acts as an agent principal, and the soul write policy's
+  source-authorization step refuses an agent principal, so the call answers 403
+  `soul_write_requires_operator`. The advertised list now omits `soul_set` for
+  those callers. Listing resolves the caller the way a call does, except that it
+  never JIT-provisions. An agent's soul is changed by the operator, on the
+  agent's behalf (flair#2689). ([#2745](https://github.com/tpsdev-ai/flair/pull/2745))
+
+- **The embedded `/mcp` handler's `tools/list` answers a caller whose principal lookup fails or whose mapping is refused with an error.**
+  When the token subject's credential or principal cannot be read, or its
+  mapping is refused (for example, the principal is deactivated), `tools/list`
+  returns the same JSON-RPC error as a `tools/call` of a known tool by that
+  caller, and no tool list. A subject with no mapping still gets a tool list
+  (flair#2760). ([#2776](https://github.com/tpsdev-ai/flair/pull/2776))
+
+- **The CLI's shared REST helper now reports a failed request with a bounded one-line reason instead of the whole response body.**
+  Apart from a refused redirect and a credential-less 403, which keep their own
+  messages, the message reads `HTTP <status>`, then the JSON body's `error`,
+  `code` or `message` string, or else an excerpt of the body. Either is one
+  line: line breaks become spaces, other control characters are removed, and
+  text past 200 characters is cut to at most 200 characters, after which
+  `...` is appended. When the
+  helper builds that message from a response body it read and `FLAIR_DEBUG` is
+  set, it also writes that body's display form to stderr, encoded as one JSON
+  string (#2764).
+
+  In the message and that stderr line, the credential values the CLI reads from
+  the request's Authorization header (the header value, the part after its
+  scheme, a Basic header's decoded `user:password` and password, a TPS-Ed25519
+  signature) are replaced with `[redacted]` in the text the server supplied. A
+  Basic header in the form Flair's server accepts, and a TPS-Ed25519 header,
+  are read with the server's own grammar. When the header names the Basic,
+  Bearer or TPS-Ed25519 scheme but no credential can be read from it, the
+  server's non-empty text is shown as `[body withheld]` instead (an empty body
+  stays empty and the message is the status alone). The stderr line shows a
+  JSON body re-serialized, or withheld when it cannot be, and the request path
+  percent-decoded (withheld when it does not decode or holds a control
+  character). Redaction removes the request's credential values from the text
+  the server supplied (literal, inside any JSON string, percent-encoded); text
+  the CLI writes itself (the `HTTP <status>: ` prefix, the debug line's labels,
+  a caller's `Error: ` prefix) is never altered, so a credential that matches
+  the CLI's own wording, or matches only once that wording is joined to the
+  server's text, is not covered.
+
+  An HTTP error response whose body mentions `fetch failed` or `unable to
+  connect` is no longer treated as a failed connection: the CLI no longer
+  retries it on the port in `~/.flair/config.yaml` or reports the instance as
+  unreachable. ([#2772](https://github.com/tpsdev-ai/flair/pull/2772))
+
+- **The dependency audit gate accepts harper's bundled dependencies as vendor evidence.**
+  Releases without `npm-shrinkwrap.json` are verified through the consumer install's
+  package-lock (`inBundle`) and harper's `bundleDependencies`. On such a release a
+  vendor-pinned node under harper blocks when the package-lock does not mark it
+  `inBundle`, or when its top-level package under harper is neither a bundled package
+  nor in a bundled package's dependency closure. On every release, a vendor-pinned
+  node under harper whose package.json resolves outside harper's installed tree blocks.
+  The gate's `FIXED-FOR-BUN-ONLY` output line is renamed `NOT-REPORTED-BY-BUN`. ([#2783](https://github.com/tpsdev-ai/flair/pull/2783))
+
+- **Harper is pinned to 5.3.6.**
+  The copies Harper bundles inside its own package are not described by
+  `bun.lock` and are not replaced by root overrides. `node scripts/ci/list-harper-bundled.mjs`
+  lists installed bundled copies and their versions. ([#2803](https://github.com/tpsdev-ai/flair/pull/2803))
+
+- **The global-install gate measures Flair's installed dependency graph.** `scripts/check-global-install-lockfile.mjs` starts at the installed `@tpsdev-ai/flair` package and resolves each dependency its packages declare the way Node does, counting each resolved package directory once; bundled `node_modules` copies are reached that way and unrelated packages in the prefix are not. The count is compared to the reviewed floor in `.github/install-weight-budget.json`, and a nonzero or missing npm exit status fails before the tree is evaluated. npm's "added N packages" summary is reported for information only, because it omits the copies harper now ships as `bundleDependencies`. ([#2803](https://github.com/tpsdev-ai/flair/pull/2803))
+
+- **The CLI spawn-budget gate reads a spawn's deadline only from an options object literal written in the call.** Where the call takes an argv array before its options (`Bun.spawn`, `Bun.spawnSync`, `spawn`, `spawnSync`, `execFile`, `execFileSync`), the options count only after an array literal there, because `Bun.spawn({ cmd }, …)` and `spawnSync(command, options, …)` ignore a later argument. The options argument, once parentheses and `as`/`satisfies`/`!` are removed, must be the literal itself, with no spread, computed key, method, accessor or `__proto__` key and exactly one `timeout: <value>` property whose value passes the gate's numeric-literal rule. An options identifier is no deadline whatever it holds, and so is a literal that breaks these rules, such as `{ env: { timeout: 5000 } }`, or a larger expression such as `{ timeout: 5000 } && {}`. ([#2800](https://github.com/tpsdev-ai/flair/pull/2800))
+
+- **The bake-time dependency gate checks a range at the version bun.lock
+  resolves it to.** `node scripts/check-dep-ages.mjs` age-checks ranged entries
+  in `dependencies`, `devDependencies`, `optionalDependencies` and `overrides`
+  — the root package.json and each `packages/<name>/package.json` — against the same minimum release
+  age and keep-current list as exact pins. An `npm:` alias range is checked at
+  the version installed under the alias. A top-level override range is checked
+  at every installed copy of its package, a nested one at the copies installed
+  below its enclosing packages; an override range with no installed copy in
+  that scope is listed, with nothing to check. A range the gate cannot resolve
+  fails the gate; a fresh resolved version is reported with its publish date.
+  The gate reads the root package.json and each `packages/<name>/package.json`;
+  a `bun.lock` workspace outside those fails the gate, as does a missing
+  `bun.lock` when the root package.json declares `workspaces`.
+  A `devDependencies` entry the gate refuses (a dist-tag such as `latest`, a
+  `v`-prefixed version, surrounding whitespace), a non-string specifier or a
+  non-object `devDependencies` value fails the gate, naming the manifest and
+  the field, as in `dependencies` and `optionalDependencies`.
+  Exact pins are checked as before; exact `devDependencies` pins are still not
+  checked.
+  Non-empty or malformed `resolutions` in root or workspace manifests are refused.
+  `--ci` refuses `FLAIR_DEP_MIN_AGE_DAYS` and `FLAIR_DEP_KEEP_CURRENT` when set;
+  local runs without `--ci` retain both knobs. ([#2791](https://github.com/tpsdev-ai/flair/pull/2791))
+
+- **A non-GET/HEAD request through the CLI's shared REST sender that reaches its deadline reports an unknown outcome, never a failure, and exits 3.** `FLAIR_REQUEST_TIMEOUT_MS` sets the whole-request deadline (the request and the response body read): an integer from 1 to 3600000 ms, default 300000. The REM work routes `POST /MemoryMaintenance`, `POST /ReflectMemories`, `POST /MemoryDedupStats` and `POST /AutoPromoteCandidates` use one deadline instead, default 1800000 ms, which `FLAIR_REM_REQUEST_TIMEOUT_MS` overrides (same range). An empty or whitespace-only value of either variable is unset. A GET or HEAD that expires fails; a non-GET/HEAD request that expires raises `ApiRequestOutcomeUnknown` and is not retried. `flair rem light`, `flair rem rapid`, `flair rem restorative`, `flair rem promote`, `flair rem reject` and `flair rem nightly run-once` print the unknown outcome and exit 3; `flair rem restore` reports `unresolved` and exits 3, and does not write a table and record id again in that run after any unknown write to it; `flair federation prune --apply` prints one line per peer whose DELETE is unknown, keeps it out of the error count, and exits 3. A command that lets the error propagate reports it at the top level as `Unknown outcome:` and exits 3. Writes the CLI sends with a bare `fetch` (the ops API and `authFetch`) are outside this deadline mechanism. A nightly log append that fails after an unknown write still exits 3 and prints the log failure. A completed post-restore verification reports whether each unknown memory or soul id was present in its read and what an id-only check cannot decide; candidate readback is a follow-up (flair#2789). ([#2839](https://github.com/tpsdev-ai/flair/pull/2839))
+
+- **The CLI spawn-budget gate masks JSX text before matching spawn calls and reading deadlines.** In every file kind the gate scans that TypeScript parses JSX in — `.tsx` and `.jsx`, and `.js`, `.mjs` and `.cjs` (parsed as `ScriptKind.JS`) — each JSX text node is replaced from `pos` to `end` with spaces, keeping every line break TypeScript counts (`\n`, `\r`, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR) and the total length, so an apostrophe, a quote or `//` in that text no longer opens a string or comment in the gate's text-based walks and drops the call or case around it. A JSX attribute's string value is a TypeScript string literal, which the literal masker already handles. The comment masker keeps the same four characters and ends a `//` comment at any of them, and the gate's line-based walks treat all four as line breaks, so a case after a `//` comment ended by `\r`, U+2028 or U+2029 is no longer dropped. ([#2820](https://github.com/tpsdev-ai/flair/pull/2820))
+
+- **`@tpsdev-ai/n8n-nodes-flair` declares its `@langchain/core` peer range as `>=0.3.0 <2`.** ([#2831](https://github.com/tpsdev-ai/flair/pull/2831))
+
+- **The changelog guard reports a fragment claiming an npm-install-only advisory as fixed in the forms fix, fixes, fixed and fixing (#2828).** ([#2830](https://github.com/tpsdev-ai/flair/pull/2830))
+
+- **`allowAdmin` admits the `internal` verdict only when the context carries `internalContext()`'s marker and no request headers.**
+
+  A call that reaches the gate with no context is refused there. The gate's
+  decision for an `agent` or `anonymous` verdict is unchanged. A resource's
+  handler can apply its own rules after the gate.
+
+  > **Heads-up:** pass `internalContext()` for a deliberate elevated in-process call. ([#2843](https://github.com/tpsdev-ai/flair/pull/2843))
+
+- **The CLI spawn-budget gate attributes spawns in JSX attributes and directly assigned, unannotated variable arrows with simple parameters.** A JSX attribute's string value is blanked between its quotes in either quote style before the gate's text-based case and helper walks, so an attribute that ends in a backslash no longer makes the closing quote look escaped and drops the case around the spawn. The body of a directly assigned, unannotated variable arrow with simple parameters is its AST extent, so a spawn on the `=>` line, on the next line, or inside a parenthesized multi-line body belongs to the arrow, and a case calling the arrow without a budget is reported. A case's reported line is the line its `test(`/`it(` starts on. An added `spawn-no-timeout` key is reported as a re-key when it pairs one-to-one with a removed key of identical file, fingerprint, kind and occurrence and the scanned working-tree file is byte-identical to the trusted base blob; the case-level kinds keep strict identity. ([#2930](https://github.com/tpsdev-ai/flair/pull/2930))
+
+- **Docs-freshness can waive a fragment when the PR event login matches `renovate[bot]` and every changed Git basename is `package.json`, `bun.lock`, `bun.lockb`, `package-lock.json`, or `npm-shrinkwrap.json`.**
+
+  During release PR preparation, `feat` and `fix` commits since the tag selected by
+  `git describe` enter Dependencies when their recorded author name matches
+  `renovate[bot]` and every changed Git basename matches that list (#2872). ([#2905](https://github.com/tpsdev-ai/flair/pull/2905))
+
+- **A test-only hold at the start of a migration cycle, for observing boot-seeded progress.** A
+  successfully claimed hold pauses after taking the cycle lock and before reading the state file.
+  A go file, timeout, or marker I/O failure ends the hold. ([#2906](https://github.com/tpsdev-ai/flair/pull/2906))
+
+- **The audit allowlist checks parsed Git snapshots before applying its severity cap.** `added` must be a real calendar date on or before the first commit day containing the id in those snapshots, comparing ids case-insensitively; an entry over its cap requires a dated `overCapApproval`. ([#2902](https://github.com/tpsdev-ai/flair/pull/2902))
+
+- **The dependency audit gate accepts several allowlist entries for one advisory, for example one per install source or dependency chain.**
+  An entry is identified by its `ghsa`, `package`, `sources` and `introducedBy`. At most one
+  entry per advisory and package may name `bun` or the root npm-install observation. When an
+  advisory has several entries, each entry that names another consumer install must have an
+  `introducedBy` chain that resolves to one node there, a reported node blocks unless exactly one
+  entry's chain resolves to it, and an entry that covers no reported location in a source it
+  names is stale even when another entry for the same advisory is in use. An entry classed
+  `vendor-pinned` that names the `bun` source blocks, because bun.lock resolves through the root
+  `overrides`.
+  Every required entry field must be a string (and `sources` a non-empty array): an object or array
+  in, say, `introducedBy` is refused rather than read as present. A malformed allowlist fails the
+  run before any advisory is matched against it. ([#2892](https://github.com/tpsdev-ai/flair/pull/2892))
+
+- **Owner-targeted memory maintenance searches Memory by its indexed `agentId` condition.** The item loop now supplies that condition to the read instead of scanning the whole table; a fleet-wide admin run still scans every row. ([#2737](https://github.com/tpsdev-ai/flair/pull/2737))
+
+- **Flair sets Harper's MQTT listeners off in a component deployment's configuration and requests the shared workers' restart.**
+  `flair deploy` and `flair upgrade --target` send the MQTT-off configuration
+  (`set_configuration`: `mqtt.network.port`, `mqtt.network.securePort` and
+  `mqtt.webSocket` off) to the target's operations API before deploying,
+  replicated with the deploy; if the target refuses it, or names a cluster node
+  that did not take it, nothing is deployed. When Flair is an isolated
+  application (a fresh isolated deploy restarts only its own worker; Harper
+  restarts every worker for an application it finds already active), they
+  request the shared worker threads' restart (`restart_service`, Harper's pool
+  scope; on its own for a standalone instance) and follow Harper's job: a job
+  read that does not succeed, a job that does not complete, a completion
+  message that is not exactly Harper's for that job, a replicated result
+  without its node list, or a node the result lists without Harper's
+  completed-job message fails the command. After the deploy's restart they read the saved configuration back:
+  an answer that is not a recognizable root configuration is reported as not
+  confirmed, and a configuration that does not read off fails, named by field
+  and category. They report exactly what they set and requested: "MQTT
+  listeners configured off on <nodes>; shared workers restart requested (...);
+  the saved configuration on <host> reads off. Listeners stop when each node's
+  workers restart; flair does not probe them. To confirm on a node, connect an
+  MQTT client to its MQTT ports or WebSocket path." `--keep-mqtt-config` skips
+  all of it; `--no-restart` and `--no-verify` (on both commands) skip the
+  restart request and the read-back. Both commands take
+  `--ops-target` / `FLAIR_OPS_TARGET`; the target and the operations API URL
+  must be http or https URLs with a host and only scheme, host, port and path
+  (anything else is refused before anything is printed or sent), and the
+  operations API calls follow no redirect. `flair doctor` reports an instance
+  whose saved configuration starts an MQTT listener and names the operation
+  that sets the listeners off in the configuration (Flair's default); it says,
+  on every path, that it reads the configuration, not the running listeners,
+  which may still serve their previous configuration until their workers
+  restart. An answer that is not a recognizable root configuration, or a
+  redirected read, is NOT RUN.
+
+  > **Heads-up:** to keep an MQTT configuration you turned on deliberately, pass
+  > `--keep-mqtt-config` to `flair deploy` / `flair upgrade --target`. ([#2730](https://github.com/tpsdev-ai/flair/pull/2730))
+
+- **The table-subscription policy applies to every subscription transport, to publish and to retained publish.**
+  On a table topic, MQTT SUBSCRIBE (`<Table>/#` or `<Table>/<id>`), PUBLISH,
+  retained PUBLISH (which writes or deletes the row) and a session's last-will
+  follow the same rule as SSE and WebSocket subscriptions: administrators and
+  trusted internal callers only. UNSUBSCRIBE, which only ends a subscription the
+  session holds, is not guarded. Over MQTT 5 a refused SUBSCRIBE gets SUBACK
+  `0x87` when Harper admits the session (Harper may instead refuse it at
+  CONNECT). A refused PUBLISH at QoS 1 or 2 gets that code on PUBACK or
+  PUBREC, with an optional reason string for a non-admin agent; a refused QoS 0
+  PUBLISH gets no answer. MQTT 3.1.1 has only SUBACK `0x80`; its PUBACK carries
+  no reason code, so a PUBACK alone cannot tell a refused PUBLISH from an
+  accepted one. A refused publish reaches no subscriber, and a refused retained
+  publish leaves the row as it was. A last-will is decided when Harper publishes
+  it: as its session's own publish when the session drops, and as a caller
+  without a valid credential when Harper replays the eligible stored wills at a
+  worker start (Harper drops an expired scoped-token will before this guard), so
+  a replayed will on a table topic is refused. The guard decides the contexts
+  Harper may take from a guarded call's arguments, read as Harper reads them —
+  every listed reading for `connect()`, `subscribe()` and `publish()`, every
+  marked candidate for `put()`/`delete()` — and all must be admitted. For each
+  it resolves the caller, except a replayed will record, which is decided as a
+  caller without a valid credential without calling the resolver; a resolved
+  caller is decided by one shared policy function, and a caller that cannot be
+  resolved is refused directly. The guarded calls are each table's `connect()`,
+  `subscribe()` and `publish()`, and its `put()`/`delete()` when an argument
+  Harper may take as the context carries the markers of an MQTT session's
+  context or a replayed will record; every other `put()`/`delete()` call passes
+  through with its arguments and keeps its write rules. The guard's boundary is
+  protocol-layer callers, whose contexts Harper constructs; in-process code is
+  trusted, and the guard makes no claim about objects an in-process caller
+  crafts. A call that Harper's MQTT layer makes without an HTTP request (its TCP
+  and TLS listeners) resolves, everywhere flair resolves a caller, as one
+  without a valid credential, as does a requestless context still carrying
+  Harper's `authorize: true`, and a requestless context carrying Harper's
+  `checkPermission` marker, as Harper's native MCP application component
+  builds for its tools (the marker stays after Harper clears `authorize`).
+  When an operator configures Harper's native MCP component, its
+  `resources/subscribe` is refused at the guarded entry for every table
+  subscription, and its application tools (`get_`, `search_`, `create_`,
+  `update_`, `delete_`) resolve, everywhere flair resolves a caller, in the
+  resource's authorization hooks and in its handlers, as a caller without a
+  valid credential, administrators included, until a principal bridge from
+  Harper's MCP session to a flair caller exists. Flair's
+  feed resources (`/FeedMemories`, `/FeedSouls`) and the BM25 index now read
+  table changes in-process through `subscribeInProcess`, with their own
+  subscriber rules as before. ([#2720](https://github.com/tpsdev-ai/flair/pull/2720))
+
+### Removed
+
+- **The Soul `adk:` compatibility bridge is removed; refusals now come from the generic checks.**
+
+  Authorized Soul resource POST/PUT with a non-empty `scopeTag` or non-empty
+  `tags` array in the request body, and authorized PATCH with those fields in
+  the merged row after its stored-row checks, receive
+  `soul_scope_fields_not_writable`.
+  A learned-text refusal reports `soul_value_is_learned_content` for a
+  non-empty exact value match with stored Memory or MemoryCandidate text for
+  the target agent. ([#2918](https://github.com/tpsdev-ai/flair/pull/2918))
+
+### Fixed
+
+- **Native MCP boot checks the component's effective `mcp.enabled`.** When Flair's flag is on and the degraded-start check passes, the boot guard refuses registration unless that value is true and `mcp.issuer` passes the boot guard’s origin validation.
+
+  > **Heads-up:** An installation may still have `FLAIR_MCP_OAUTH=1`. When `mcp.enabled` is `${FLAIR_MCP_OAUTH}`, set `FLAIR_MCP_OAUTH=true` and `FLAIR_MCP_ISSUER` to a bare HTTP(S) origin, then restart. `1`, `yes`, and `on` do not enable `@harperfast/oauth`. ([#2282](https://github.com/tpsdev-ai/flair/pull/2282))
+
+- **Soul replay writers report the refused row.**
+
+  Soul has no dedicated or enforced per-user scope field. A write that would
+  store a non-empty `scopeTag` or a non-empty `tags` array is refused by name,
+  when earlier guards permit the request: HTTP 403 with
+  `soul_scope_fields_not_writable`, for operator and internal writes on POST,
+  PUT and PATCH. POST and PUT check the request body; PATCH checks the merged
+  row. `flair restore` and `flair import` report a Soul row refused with this
+  error, with the row's id (#1540). ([#2898](https://github.com/tpsdev-ai/flair/pull/2898), [#2918](https://github.com/tpsdev-ai/flair/pull/2918))
+
+- **Memory maintenance refuses an admin-supplied `agentId` that is not a non-blank string, and a non-dry agent-scoped run reads only that agent's pointer rows.**
+  An admin run is fleet-wide only when the request body has no `agentId` field. A supplied value that is not a non-blank string (a present `undefined`, `null`, empty, blank, or non-string) is refused with 400 before any cleanup runs, so nothing is removed. In a non-dry run, a run scoped to one agent searches `MemoryHostSource` by its indexed `authorId` instead of scanning the table and filtering in process, and a fleet-wide admin run still scans every pointer row; a dry run skips the pointer sweep. For every request still accepted (an absent `agentId`, a string id that is non-blank, equal to its trimmed form, and accepted by the agent-id rule, or any non-admin request), counts, removals, and the post-commit read are unchanged (#2084). ([#2723](https://github.com/tpsdev-ai/flair/pull/2723), [#2752](https://github.com/tpsdev-ai/flair/pull/2752))
+
+- **Memory maintenance scopes its orphan-pointer sweep to the run's owner.**
+
+  A non-admin run, and an admin run that names an agent, considers only pointer
+  rows whose stamped author is that agent; a pointer with an empty author is
+  outside such a run. Fleet-wide admin maintenance considers every pointer row,
+  so it also removes an empty-author orphan pointer (#2084). A dry run skips the
+  sweep.
+
+  The run counts a pointer as removed only when a read after its commit finds
+  the pointer gone. A pointer replaced after the sweep's final confirmation
+  read, by a write whose transaction takes its time after the sweep's first
+  read, stays stored and is not counted; a write whose transaction took its time
+  before that read and commits after the confirmation read is not covered. ([#2713](https://github.com/tpsdev-ai/flair/pull/2713))
+
+- **Basement and restore of a non-skill memory write under the per-id Memory lock they hold.**
+
+  For a non-skill row, `POST /MemoryArchive` takes the id's lock (and the lock
+  of the row its `supersedes` names, which the write may close: for its owner
+  or an admin after the commit on a best-effort basis, a failed close logged;
+  under a write grant staged in the write's transaction, so a failed close
+  aborts the write; a non-admin write whose stored predecessor is missing
+  closes nothing) after its first read. Holding it, the archive re-reads the
+  row and writes it in one transaction, then confirms the stored row's
+  identity and its archive fields (`archived`, `archivedAt`, `archivedBy`)
+  before it answers. While the archive holds the id, an owner `PUT` or
+  `PATCH` of it waits within its budget and, if the hold outlasts it, answers
+  `503 memory_busy` (an id with an unresolved write outcome answers
+  `503 write_outcome_unknown` first). When the archive cannot take the lock,
+  it writes nothing and answers the lock's refusal:
+  `503 memory_lock_unavailable` for a store with no lock, else
+  `503 write_outcome_unknown` for an id with an unresolved write outcome, else
+  `503 memory_busy` once the lock stays held for that budget. A stored row
+  that does not hold the archive fields after the commit answers
+  `409 stored_row_changed`. A skill row keeps the existing `Memory.put` path
+  and its skill-state refusals (`skill_state_requires_delete` for
+  `archived: true`). ([#2805](https://github.com/tpsdev-ai/flair/pull/2805))
+
+- **A locked memory transaction runs every staged write's post-commit confirmation, even when an earlier confirmation throws.**
+
+  Each staged write's confirmation resumes that write's body and opens its
+  gate; a body whose confirmation throws no longer stops the confirmations
+  that follow it. The transaction still fails with the first thrown error,
+  after every confirmation has run, so a committed write is not reported as
+  not committed (#2478). ([#2805](https://github.com/tpsdev-ai/flair/pull/2805))
+
+- **Owner DELETE and Memory POSTs naming an id or a `supersedes` target take the per-id Memory write lock.**
+
+  Past the refusals that need no row, a `DELETE /Memory/<id>` reads the row with
+  no lock held, then takes the id's lock, which covers its authorization, its
+  write and its owned transaction's commit. Deleting a skill row closes the
+  skill's live head, which for an older version is another row: the DELETE locks
+  that head too, and when the head it reads under the locks is not one it holds,
+  it writes nothing and tries again, at most 3 attempts in all, then answers
+  `503 memory_busy`.
+  A `POST /Memory` that names an id
+  or a `supersedes` reference takes the lock for each id it names, the reference
+  under the id it resolves to, and holds it across its read, decision and write
+  and the superseded row's close; an untagged POST naming a skill row takes it
+  and then inherits the tag. Its non-skill row writes join an open request
+  transaction, which commits after the lock is released. While it holds the
+  lock, a dedup-probe or embedding provider call still pending at the bound, or
+  answering after it, is refused once the event loop runs again: the POST
+  answers `503 memory_provider_timeout` and writes nothing. A provider that
+  never yields the event loop can prevent any response. The DELETE, or a POST
+  that takes the lock, writes nothing and answers `503 memory_busy` when it
+  cannot acquire the lock within the owner wait budget,
+  `503 write_outcome_unknown` for an id whose last write has an unresolved
+  outcome, and `503 memory_lock_unavailable` when the store has no lock. ([#2787](https://github.com/tpsdev-ai/flair/pull/2787))
+
+- Restore verification compares the promotion content binding: when the archived row contains `promotionContentHash`, a restore read missing it fails, naming the field, instead of verifying clean. ([#2633](https://github.com/tpsdev-ai/flair/pull/2633))
+
+- **A Memory `POST` whose body is not one JSON object is refused with a named 400
+  `body_must_be_object` instead of an unnamed 500.** An array, `null`, a string or a
+  number body now answers the named refusal before any write path runs, and stores
+  nothing. ([#2634](https://github.com/tpsdev-ai/flair/pull/2634))
+
+- **Derive the CI keep-going unit-lane budget from the first-step timestamp when the recorded start is usable.**
+  Otherwise keep the fixed budget. The install step also has a timeout (flair#2619). ([#2637](https://github.com/tpsdev-ai/flair/pull/2637))
+
+- **Presence refuses a keyless PUT/PATCH before it reaches the store.**
+
+  An authenticated administrator's keyless PUT/PATCH gets 400
+  `presence_target_required`; a non-admin agent's collection PUT/PATCH gets the
+  owner guard's named 403; an anonymous request gets 401 (#2624). ([#2626](https://github.com/tpsdev-ai/flair/pull/2626))
+
+- **An ordinary, non-skill Memory DELETE confirms row removal before answering success.**
+
+  It retries a removal that did not land and refuses exhausted attempts as
+  `409 delete_not_applied` (#2632). The skill path closes the live head instead. ([#2636](https://github.com/tpsdev-ai/flair/pull/2636))
+
+- **Targetless Presence PUT/PATCH and DELETE are refused.** An administrator's keyless
+  PUT/PATCH with body `id: ""` and no other usable target, or keyless DELETE,
+  gets 400 `presence_target_required` (#2639). ([#2640](https://github.com/tpsdev-ai/flair/pull/2640))
+
+- **A versioned skill DELETE (a skill-tagged Memory DELETE of any row except a reserved seed row) now confirms its version close before answering success.** (#2642) ([#2644](https://github.com/tpsdev-ai/flair/pull/2644))
+
+- **An AgentSeed reports the stored Agent and Soul rows, not its own staged write.**
+
+  For attempted creates, `created` / `soulCreated` mean the stored row matches
+  every field of this seed's staged row, including generated timestamps and Soul
+  provenance. Otherwise, including an independent concurrent seed with the same
+  input but different generated fields, or an entry found before staging,
+  `alreadyExisted` / `soulAlreadyExisted` apply; the response does not claim a write
+  that may not have landed (#2645). ([#2654](https://github.com/tpsdev-ai/flair/pull/2654))
+
+- **Before answering success, an AgentSeed confirms each starter memory it wrote in a fresh committed read and returns the stored rows.** A committed row that does not show the seed's write, or a failed read, answers `500 agent_seed_unconfirmed` (#2645). ([#2890](https://github.com/tpsdev-ai/flair/pull/2890))
+
+- **A retried auto-promote stamps the unstamped Memory row an earlier sweep recorded on its candidate instead of writing a second row.** The sweep reuses that row only when the recording was persisted and the row's `id` and `instanceToken` equal the recorded ones, its `agentId` is the sweeping agent, `promotionStatus` is unset, it is not archived, its `content` equals the claim, its `visibility` and `durability` equal what the sweep writes, and its `tags` include every promotion tag; otherwise the sweep writes and stamps a new row. The stamp re-checks these fields under the per-id Memory lock, and a row that no longer passes is refused with its candidate left pending. No other field is compared, and a same-id Memory write keeps the incarnation token (#2645). ([#2661](https://github.com/tpsdev-ai/flair/pull/2661))
+
+- **An ordinary Memory owner `PATCH` compares retained request fields with its staged write after commit.** A mismatch answers the named 409 `stored_row_changed` (#2645). ([#2648](https://github.com/tpsdev-ai/flair/pull/2648))
+
+- **A skill update that supersedes a version confirms the predecessor close before answering success.**
+
+  A newer write to the same skill row could make Harper skip the queued close
+  while the successor and version committed, leaving two live heads after a
+  200. The close is now confirmed in a fresh committed read, re-applied from
+  that read with the row identity and caller authority re-checked, and refused
+  when the close cannot be confirmed (#2645). ([#2650](https://github.com/tpsdev-ai/flair/pull/2650))
+
+- **A skill update reports success when a later update or delete closed its successor in order before the update's confirmation.**
+
+  Success requires its predecessor close to be confirmed and the version chain to show that later version superseding or deleting this successor in order (#2645). ([#2650](https://github.com/tpsdev-ai/flair/pull/2650))
+
+- **Write-back checks staged values after commit, including omitted fields for full-row plans.**
+
+  Post-commit mismatches retry only idempotent plans; non-idempotent plans end
+  with an unconfirmed outcome (#2653). ([#2655](https://github.com/tpsdev-ai/flair/pull/2655))
+
+- **A Memory `POST` that owns its transaction checks its committed row.** An in-process POST with no caller transaction commits on its own, then confirms the incarnation token and its staged `agentId`, `content`, `visibility` and `durability` (a skill POST also `summary`, `trigger`, `metadata` and `tags`). A same-id replacement that changes the row's identity and is observed by that check answers 409 (`stored_row_changed` for an ordinary POST, `skill_target_changed` for a skill POST); an unreadable row answers 503 `write_outcome_unknown`. An ordinary POST, or a skill POST that creates a subject, inside an open caller or request transaction stays joined and checks the committed identity before the commit; its post-commit verification is deferred (#2656 slice B). In such a transaction, a skill POST that supersedes a version first reads without staging a write, then commits in a transaction it owns and is checked after that commit (#2645). ([#2658](https://github.com/tpsdev-ai/flair/pull/2658), [#2650](https://github.com/tpsdev-ai/flair/pull/2650))
+
+- **Owned-transaction writers confirm their write after the commit.**
+
+  Agent-key registration, first-time pairing, the re-embed vector refresh, the
+  IdP credential touch and the `.content`-suffix migration re-read the committed
+  row after their transaction commits. A readable mismatch retries within the
+  site's bound, if any; an unreadable verification stops. An unconfirmed
+  migration write is uncounted; a later scan decides pending state (#2656). ([#2657](https://github.com/tpsdev-ai/flair/pull/2657))
+
+- **The admin `_reindex` re-PUT commits its own transaction and reads the committed row back before answering success.**
+
+  A `PUT /Memory/<id>` carrying `_reindex: true` no longer joins the request's
+  transaction. After its commit it reads the row: a row that does not show the
+  re-PUT answers `409 stored_row_changed`, and a failed read answers
+  `503 write_outcome_unknown`. In v0.62.0 it joined the request's transaction
+  and answered success without that read, so a same-id write committing
+  between its last check and the request's commit could leave the stored row
+  without the re-PUT while the re-PUT answered success. ([#2891](https://github.com/tpsdev-ai/flair/pull/2891))
+
+- **Federation takes an existing Agent's key and home only from its home instance, and does not set admin roles or create configured admin agents.**
+
+  A record from another peer that would change an existing row's `publicKey`
+  or home (`originatorInstanceId`) is skipped whole as `agent_identity_not_from_home`
+  (non-retryable). A new Agent row from a peer is stored without
+  `role: "admin"` or `admin: true`, and an existing row keeps its stored admin
+  state. A record that would create a row whose id the receiver's
+  `FLAIR_ADMIN_AGENTS` names is skipped as `agent_admin_id_not_federated`
+  (non-retryable). A record an earlier check refuses keeps that check's reason
+  (#2665).
+
+  > **Heads-up:** an Agent row with no stored home (a missing, null or empty
+  > `originatorInstanceId`) takes no key change from a peer, and a sync does not create an agent whose id `FLAIR_ADMIN_AGENTS`
+  > names. The receiving instance's administrator can write the key, or create
+  > the agent, through its operations API. ([#2674](https://github.com/tpsdev-ai/flair/pull/2674))
+
+- **A Presence row refused because the hub's receipt flag was off is offered again after receipt is enabled.** The sender caps its Presence watermark below a row the hub refused with `presence_receive_disabled`, as it does for a retryable refusal, so the next sync re-offers that row without a new heartbeat. Against a hub that keeps Presence receipt off, a home row refused for that reason is offered again on each sync. ([#2671](https://github.com/tpsdev-ai/flair/pull/2671))
+
+- **Federation sync rejects a batch response whose merged and skipped counts add up to more records than it offered.**
+
+  The check now applies to Memory, Soul, Agent and Relationship batches as well
+  as Presence, and the error names the table and both counts (#2667). ([#2676](https://github.com/tpsdev-ai/flair/pull/2676))
+
+- **A full final Memory page at the cap is accepted on the same evidence as an uncapped walk**: an empty read after its last id and rows read equal to the count (#2670). ([#2673](https://github.com/tpsdev-ai/flair/pull/2673))
+
+- **`flair rem nightly run-once` prints a failed pending-candidate count as
+  `Pending: unknown (<reason>)` instead of `Pending: 0`.** The failure is listed
+  under `Errors:`, so the run's status is `failed` and the command exits 1. A
+  successful query still prints its exact count, and a run with no admin credential
+  prints the count as unknown when it reaches the candidate-count step. In `rem-nightly.jsonl` an unknown
+  count is `{ "state": "unknown", "reason": "..." }`, and the snapshot's
+  `metadata.json` records `pendingCandidateCount: null`. `flair rem restore`
+  now reports an unrecognised operations-API response body as an error
+  instead of as no leftover candidates (#2680). ([#2683](https://github.com/tpsdev-ai/flair/pull/2683))
+
+- **`flair rem restore --apply` stops before deleting or writing any row when it
+  cannot list the agent's current memory candidates.** The run reports
+  `fetch-candidates: <error>` under `Errors:`, its status is `failed`, and the
+  command exits 1, leaving the agent's memories, souls and candidates as they
+  were (#2687). ([#2704](https://github.com/tpsdev-ai/flair/pull/2704))
+
+- **A2A `message/stream` delivers OrgEvents for `params.agentId`, which a non-admin caller may set only to its own agent id.**
+
+  The stream reads the agent's OrgEvent catch-up in process with the
+  requesting caller's own identity. It sends an `org.event` frame for each
+  event targeted at that agent or carrying no targets, not expired, and
+  created after the stream's opening position. The opening position follows
+  every event of the millisecond the stream opened. The stream keeps its own
+  cursor and does not move the agent's catch-up watermark. A `task.status`
+  frame follows when the existing status helper finds a status, which it may
+  infer from the event's summary. A non-admin request naming another agent
+  is refused with the code and message `message/send` uses (`-32001`
+  `Forbidden`); the detail names the method. An admin may name another
+  agent. Polling stops when the client disconnects. A read refused or failing
+  while the stream is open ends it with one `error` frame, and an event for
+  the task named in `params.taskId` with a terminal status ends it.
+  docs/api-reference.md now lists the A2A methods. It states that the
+  caller match applies to `message/send` and `message/stream` only, that an
+  authenticated caller can request the unfiltered `tasks/list` board, and
+  that the board comes from the YAML issue files when any exist, otherwise
+  from `issues.jsonl` (#2688). ([#2716](https://github.com/tpsdev-ai/flair/pull/2716))
+
+- **Agent PUT is an administrator operation that updates an existing agent, keeping its stored `createdAt` and `publicKey`; an agent updates its own record with PATCH.** For a request that reaches the Agent PUT handler, a target id outside the agent-id rule is refused 400 before the handler's authorization and existence checks (authentication, routing and Harper's resource admission can refuse earlier); for a valid id, a PUT from any other verified agent is refused 403 (`agent_put_admin_only` when the record exists), and an administrator's PUT to an id with no stored row (and no body `id` that disagrees with the URL's) is refused 404 `agent_put_requires_existing`; `POST /AgentSeed` is a creation path, the one the refusal names, and `POST /Agent/` also creates a row (administrators only). An administrator's PUT is a full replacement: the id comes from the URL (a trusted in-process PUT with no URL target uses its body id), `createdAt`, `publicKey`, `originatorInstanceId` and the receiver federation fields are kept from the stored row, `updatedAt` is set by the handler, and `role` and `admin` are reconciled; every other field comes from the body, so an ordinary field it omits (`status` and `role` included) is not kept. The replacement is built from a re-read of the row in the PUT's own write transaction: a deletion or a key rotation committed after the PUT's first read and before that re-read is seen (a deleted agent is refused with the same 404, a rotated key is kept), and one whose transaction takes its time after the re-read is applied after the PUT's write. For a non-admin PATCH, an admin-status change is decided from the `role` of the row the guard reads and the role that row would have once the body is merged and reconciled; the `admin` mirror is not read as authority, and an administrator's change whose transaction takes its time after that read is applied after the PATCH. A key is rotated by `flair agent rotate-key`, an `update` through Harper's operations API. `flair restore` writes archived Agent rows through this PUT, so an Agent row whose agent exists on the target is written with the PUT's field rules (the target's stored `createdAt`, `publicKey`, `originatorInstanceId` and federation fields kept, `updatedAt` set, `role` and `admin` reconciled), and restore's read-back verifies that row's id only; one whose agent is absent is refused 404, so restoring agents into a fresh instance still needs a creation route (flair#2703). ([#2700](https://github.com/tpsdev-ai/flair/pull/2700))
+
+- **The launchd launcher moves aside an `hdb.pid` naming a live process shown not to be Flair, so Flair restarts after pid reuse (flair#2697).**
+
+  After an unclean shutdown, `<ROOTPATH>/hdb.pid` can name a pid the OS has since given to another process, such as a system daemon. At startup Harper reads that pid with `parseInt` and exits 4 (`Harper is already running`) when it is non-zero, is not Harper's own pid or a recognised PID-1 init process, and `process.kill(pid, 0)` succeeds or fails only for lack of permission (a process of another user). launchd's KeepAlive then retried without end and Flair did not come back.
+
+  The launcher now acts only on a positive pid read as Harper reads it (`123junk` is pid 123, `junk123` is no pid). It counts the pid alive as Harper does, including a process of another user. It leaves every other `hdb.pid` to Harper's own check: no digits, zero, a negative value (which Harper passes to `process.kill`, where it names a process group), a file containing a NUL byte, or any non-ASCII byte before the digits (the parse runs with `LC_ALL=C` whatever the locale, so a leading no-break space, which `parseInt` skips, gives the launcher no pid).
+
+  It moves `hdb.pid` aside only on positive evidence that the live process is not this instance. Its command line as `ps` reports it must be non-empty and not `node`/`bun` followed by a Harper entry path, and must contain neither `harper` (in any case) nor the data directory. In addition, one of these must hold: the process runs as another user than the launcher; `lsof` is not installed; or `lsof` succeeds with a listing that includes the process's working directory and reports no file under the data directory (an exit-0 listing can omit an open file, which this check cannot detect). A failed or killed `lsof`, or a listing that is empty or lacks the working directory, counts as no evidence. After the admin-pass checks pass and just before it execs Harper, the launcher links `hdb.pid` to `hdb.pid.stale-<epoch seconds>` (or `.<n>` after it when that name is taken), removes `hdb.pid`, and prints one line naming the pid and the evidence. The link (`ln -n -P`) never replaces an existing name. If a file or a symlink appears at that name meanwhile, the link fails. If a real directory appears there, the launcher removes the link `ln` placed inside it, checks the removal, and treats the move as failed. On a failed move the launcher does not remove `hdb.pid`; it prints one line, naming any link it could not remove, and execs Harper, whose own check decides from the `hdb.pid` present when it starts. Flair does not read the `hdb.pid.stale-*` copies; they are kept for diagnosis and can be deleted.
+
+  In every other case the launcher leaves `hdb.pid` in place, as before. That covers a live process that might be this instance (for example a Harper whose node path contains a space), and any `node`/`bun` process running a Harper entry path. For that last case the flair#2056 refusal (exit 0) still applies when no `flair-daemon.json` sidecar disagrees; otherwise Harper's own check decides. Harper itself is unchanged. ([#2701](https://github.com/tpsdev-ai/flair/pull/2701))
+
+- **A live replay (`flair rem restore --apply` without `--dry-run`) writes to one resolved target and carries the admin credential it resolved.** The writes go to `FLAIR_URL`'s scheme, host, port and path (a loopback host pinned to 127.0.0.1), or to the local instance when it is unset; each Memory, Soul and candidate read, delete and write of a live replay carries `--admin-pass`, `--admin-pass-file` or the default, so no local admin-password file is needed when a flag gives one.
+
+  A non-loopback dry run without either flag reads signed-only: `FLAIR_ADMIN_PASS` and the local admin-password file are read only for a loopback target. Restore refuses a target URL carrying user info, a query or a fragment, prints none of their values, and does not follow redirects (#2708). ([#2718](https://github.com/tpsdev-ai/flair/pull/2718), [#2793](https://github.com/tpsdev-ai/flair/pull/2793))
+
+- **MemoryReindex confirms re-indexed rows with one agent-scoped index scan per agent instead of an index walk per row.**
+  After the re-index writes commit, one `agentId` index scan per agent builds the set of listed ids, and each written id is checked against that set. A written id the set does not contain is still reported as `unconfirmed` with the same message and fields; a failed index scan counts every written id of that agent as an error and includes up to five of them as samples. (#2709) ([#2719](https://github.com/tpsdev-ai/flair/pull/2719))
+
+- **An auto-promotion whose candidate update throws is reported from the candidate's state at a fresh read, and a later sweep can adopt its recorded memory.** `POST /AutoPromoteCandidates` used to list such a promotion under `promoted` without knowing the candidate's state. After the update throws, the sweep now reads the candidate back. A candidate read back `pending` is listed under a new `incomplete` field as `{ memoryId, candidateId, error }`. One read back promoted on this memory with this reviewer is listed under `promoted`. Any other state, or a failed read, is listed under a new `unconfirmed` field: the promotion on this memory was not confirmed, and `readBack` says what the read found. The read-back establishes only the candidate's state at that moment, not whether this update was the write that produced it. Neither list counts toward `promoted` or `count`. The per-call `limit` now counts every memory write attempt, rejected or thrown attempts included, plus every recorded memory the sweep stamps or adopts. A later sweep can adopt the memory recorded on a candidate that is still pending when three conditions hold: the memory's identity is present on the candidate, the memory still passes the sweep's identity checks, and it carries the sweep's own approval (`promotionStatus` `approved`, `promotedBy` `machine:adk-auto-promote`, a `promotionContentHash` matching its content, and a `promotedAt`). It adopts it only after taking the memory's write lock and finding all three still hold on a fresh read, and it holds the lock while it updates the candidate. Before this change the sweep wrote a second promoted memory instead. Candidate updates now run in their own transaction. The REM runner records the incomplete and unconfirmed counts on its log row, and `flair rem nightly run-once` prints them on the `Auto-promoted:` line, which now labels the server's skipped count `skipped`. A newly written auto-promoted memory now gets a random id, as `PromoteMemoryCandidate` already does (#2714). ([#2715](https://github.com/tpsdev-ai/flair/pull/2715))
+
+- **A2A `message/stream` accepts requests that send `Accept: text/event-stream`.**
+
+  Harper's REST layer dispatches a request with that header as CONNECT, not
+  POST. The connect override forwards ANY POST whose body is a non-array object
+  with string `jsonrpc` and `method` fields to post (including
+  `"jsonrpc": "1.0"`); every other request keeps the default connect handling.
+  post's answer is returned as post gives it: an SSE stream for an admitted
+  `message/stream`, JSON-RPC objects for other methods and for refusals.
+  `docs/api-reference.md` documents the header on `message/stream` (#2717). ([#2731](https://github.com/tpsdev-ai/flair/pull/2731))
+
+- **Admin memory maintenance refuses an `agentId` outside Flair's agent-id rule.** A value such as `agent/name` or a 65-character id used to be accepted as the run's target; it is now refused before any cleanup runs, in a dry run too. An admin run's refused `agentId` gets 400 `agentId must be a string matching ^[a-zA-Z0-9_-]{1,64}$`. A non-admin run still ignores the field. ([#2752](https://github.com/tpsdev-ai/flair/pull/2752))
+
+- **A credential-less signed-only request refused with 403 gets a hint naming the agent key, not `FLAIR_ADMIN_PASS`, if no agent key succeeds on retry.**
+
+  A signed-only request (for example `flair rem restore --apply --dry-run` to
+  a non-loopback target given neither `--admin-pass` nor `--admin-pass-file`)
+  does not send the admin password. When it goes out with no Authorization
+  header, the instance answers 403, and no key in the keys directory gets a
+  successful answer on the retry, the error now says the admin password is not
+  sent on this path and names where the agent key goes: the named agent's key
+  path, or the keys directory when no agent is named. The wording of the other
+  credential-less 403 hints is unchanged.
+
+  A credential-less 403 with an empty body (`Content-Length: 0`), signed-only
+  or not, is now handled like one with a body: the keys in the keys directory
+  are tried, and if none succeeds the error carries the same hint. In 0.62.0
+  it was reported as a bare `HTTP 403` and no key was tried (#2749). ([#2751](https://github.com/tpsdev-ai/flair/pull/2751))
+
+- **A skill update whose undo could not be confirmed now says its
+  outcome must be checked.** The 500 `skill_update_compensation_failed` message
+  no longer says a close did not land; the update's version and event may
+  persist. ([#2778](https://github.com/tpsdev-ai/flair/pull/2778))
+
+- **A live replay (`flair rem restore --apply` without `--dry-run`) lists leftover candidates on its write target.** The admin-only `GET /AdminMemoryCandidates/{agentId}` route returns one agent's candidate ids in id order, up to `limit` per page, with `after=<id>` for the next page, and fails the request (`candidate_id_unusable`) rather than leave out a row it reads without a usable id. A live replay reads every page before any target-row delete or write, and is refused before them when it gets no complete listing (for example a malformed reply, a page that cannot move the cursor, a repeated id or a failed request).
+
+  > **Heads-up:** a live replay needs a restore target running Flair 0.63.0 or newer. A target that answers the candidate request with HTTP 404 is refused, and the error names 0.63.0 as the version that adds the route. ([#2793](https://github.com/tpsdev-ai/flair/pull/2793))
+
+- **An admin maintenance refusal for an `agentId` outside the agent-id rule names the remedies for a legacy stored id.** The 400 keeps its status and error text and now carries a `remedy`: run that agent's own authenticated non-admin maintenance when the stored id can authenticate (the signed TPS-Ed25519 header cannot carry a colon or whitespace), which reaches its rows; for an id the header cannot represent, run fleet-wide maintenance, which reaches that agent's rows and also expires and archives other agents' eligible rows; an admin-scoped run needs a conforming id. `flair doctor` states next to its re-registration and `flair agent remove` remedy that `flair agent remove` deletes the agent's Memory and Soul rows, and names the same two maintenance options, including that a maintenance run deletes the agent's expired ephemeral Memory rows. Docs match. ([#2795](https://github.com/tpsdev-ai/flair/pull/2795))
+
+- **A Memory row refused because it was locked is re-offered on a later sync once its backoff is due and the source is still eligible.**
+  The sender keeps one pending row per (hub, Memory, record) in `FederationRetry` when the hub's refusal is retryable, and offers it again while its valid pending row is due and the source is still eligible, independent of its sync cursor, so the refusal no longer waits for the row itself to change. A source the sync cursor selects that also has a valid pending row reserves its attempt before the send; a malformed retry row is reported and left as stored. A first non-retryable refusal creates no retry row; an existing pending row becomes terminal, and the retry path in one sender run does not select it again (a later row update can still select it through the ordinary cursor; concurrent sender runs for one peer are not serialized — a separate issue). A due valid pending retry row whose source is deleted or private is recorded as a terminal outcome instead of being offered. The federation sync response also reports whether its SyncLog `put` returned (true) or threw (false, the row's state unconfirmed) (#2797, #2792). ([#2818](https://github.com/tpsdev-ai/flair/pull/2818))
+
+- **An unconfirmed ordinary feed write or dedup expiry repair records the id's outcome-unknown marker inside its lock (flair#2806, flair#2807).**
+
+  The ordinary `POST /FeedMemories` write-back records the marker before the
+  lock is released when its committed-row read-back fails or does not show the
+  write — the `409 feed_write_unconfirmed` answer — and the dedup expiry repair
+  does the same when its post-commit confirmation read fails or does not show
+  its expiry on the matched row. A later owner PUT, PATCH or DELETE of that id,
+  and a later feed request that reaches the ordinary write-back for it, answer
+  `503 write_outcome_unknown` until the process restarts. ([#2811](https://github.com/tpsdev-ai/flair/pull/2811))
+
+- **Each timeout variable is validated only for the requests it governs.** A request that passes its own explicit deadline is validated and returned before `FLAIR_REQUEST_TIMEOUT_MS` is read, and `FLAIR_REM_REQUEST_TIMEOUT_MS` is read only for the four REM work routes; an invalid value of one variable no longer refuses a request governed by another (flair#2789). ([#2839](https://github.com/tpsdev-ai/flair/pull/2839))
+
+- **The migration state, snapshot and export files are written atomically.**
+  Each is written to a temporary file in its own directory, created with mode
+  0600 (the process umask can only remove bits), and renamed into place after the temporary file's data is flushed to disk, so
+  once the target exists a concurrent reader sees the old file or the new one,
+  never a truncated or half-written one (before the first rename there is no
+  file to read). If a step after the temporary file is created fails, the write
+  attempts to remove that file and rethrows. (#2840) ([#2846](https://github.com/tpsdev-ai/flair/pull/2846))
+
+- **A migration reports the rows whose write it could not confirm instead of
+  counting them as done.** A row whose post-commit verification read did not
+  show the write is left out of `rowsDone` unless a later attempt's write is
+  verified. The synthetic CI migration, the visibility backfill and the
+  embedding stamp's `.content`-suffix re-embed report such a row, from a
+  returned batch and from a throw in the synthetic or visibility batch or the
+  `.content`-suffix retry read, as `rowsUnconfirmed` (a count) and
+  `unconfirmedIds` (up to 100 ids, shown to admin callers) in `/HealthDetail`.
+  The runner attempts to write them to the migration state file when the run
+  completes and when it halts, except on a `pre-flight integrity check failed`
+  halt, which updates `/HealthDetail` only. State-file writes are
+  best-effort. The embedding stamp's loopback PATCH path reports a 503
+  `write_outcome_unknown` row as unconfirmed. A
+  listed id is cleared once a later batch verifies its write or a later read
+  answers `at-target` (the row needs no further write from this migration) or
+  `no-row`. The runner writes
+  at most 100 ids into the state file's record, and a later cycle starts from
+  the record it reads back, so ids beyond those 100 are carried only in its
+  count. (#2840) ([#2846](https://github.com/tpsdev-ai/flair/pull/2846))
+
+- **`GET /AdminMemoryCandidates/{agentId}` refuses an agent id that Harper's path parsing changed, instead of listing another agent's candidates (#2845).**
+  When the text after a path id's first dot is `json`, `csv`, `cbor` or `msgpack`, Harper's path parsing drops the dot and that text, so a request for `agent.json` (the dot raw or encoded) reaches the route as `agent`. An admin's request of that kind is now answered with `400 agent_id_rewritten`, naming the requested and the received id. `GET /WorkspaceLatest/{agentId}`, `GET` and `POST /AgentReadPosition/{agentId}`, `GET` and `POST /OrgEventCatchup/{participantId}`, `GET /MessageInbox/{to}`, `GET /MessageDeadLetter/{from}`, `GET /AgentCard/{agentId}` and `GET /MCPClientMetadata/{agentId}` answer such a request the same way once it passes the route's existing authentication check; the two `POST` forms advance no read position for it. A request whose path id reaches the route unchanged is answered as before. ([#2852](https://github.com/tpsdev-ai/flair/pull/2852))
+
+- **The feed write path records the id's outcome-unknown marker when storage withholds a write result (flair#2857).**
+
+  The ordinary `POST /FeedMemories` write-back and the dedup expiry repair mark
+  the id outcome-unknown when the raw table returns a `Response` instead of the
+  row, and answer the `500 write_response_withheld` refusal. A confirmed write
+  records no marker. ([#2916](https://github.com/tpsdev-ai/flair/pull/2916))
+
+- **An ordinary superseding Memory `POST` releases its predecessor lock before
+  citation processing, removing the self-held-lock skip.** ([#2917](https://github.com/tpsdev-ai/flair/pull/2917))
+
+- **Requests reaching TPS-Ed25519 authentication whose raw targets WHATWG URL parsing would rewrite receive `400 non_canonical_request_target` (#2861).**
+  The signature is verified over the target exactly as received. The candidate listing refuses a target whose parsed query would differ before reading that query. ([#2913](https://github.com/tpsdev-ai/flair/pull/2913))
+
+- **`@tpsdev-ai/n8n-nodes-flair` declares its `@langchain/classic` peer range as `>=1.0.0 <2`.** ([#2925](https://github.com/tpsdev-ai/flair/pull/2925))
+
+- **A migration state write requires a live handle for the state file's migration lock.**
+
+  The writer accepts only the handle returned by a successful migration-lock
+  acquisition, read from module-private identity, and refuses a forged object,
+  a released handle, a handle for a different lock path, or a lock file that
+  the descriptor recheck finds no longer held by that handle, with a named
+  error. Lock-file acquisition,
+  replacement and release are serialized by a directory mutex published as a
+  populated directory; a dead mutex generation is recovered by unlinking only
+  its owner entry, and the recovering process must then win publication of its
+  own directory. A complete holder record is published by hard link, and a dead
+  local holder's record is replaced with an atomic rename. A record that cannot
+  be read or parsed is not treated as stale. Another live local pid is not
+  displaced by age; a holder recorded on another host is still judged by age
+  (single-host guard, #2866).
+
+  > **Heads-up:** Stop every older Flair process that writes migration state before upgrading. An unreadable lock record is refused, not reclaimed; remove it by hand only after no writer is running. ([#2929](https://github.com/tpsdev-ai/flair/pull/2929))
+
+- **`flair federation prune --apply` now deletes the Peer row.**
+  It previously sent the delete to the admin view's GET-only route, so no peer
+  was removed. Each delete now targets the admin-only `/Peer/{id}` resource and
+  is confirmed by reading the row back: after a successful DELETE, an absent
+  row is a deletion and a present row is an error. A refused DELETE is an
+  error; a failed read-back after a successful DELETE is an unknown outcome. ([#2912](https://github.com/tpsdev-ai/flair/pull/2912))
+
+- **The CLI's `api()` fallback now requires a recognised connect-phase error code.** ([#2869](https://github.com/tpsdev-ai/flair/issues/2869))
+
+  When no request deadline has expired, for a non-GET/HEAD request whose fetch fails without a recognised connect-phase code, or whose successful response's body read fails, the unknown-outcome error names the requested origin and says the write may have been applied; the request is not replayed on the alternate configured port. When another port is configured for the fallback, a write refuses a redirect instead of following it. ([#2911](https://github.com/tpsdev-ai/flair/pull/2911))
+
+- **A retry row the federation sender reopens after a terminal outcome is stored with null or absent terminal fields and re-offered like any pending row.**
+  The sync sender writes `resolution`, `completedAt` and `bound` as null on every write that sets a retry row to pending, and reports a retry-row write as unconfirmed when its read-back is pending but still has a non-null value in one of those fields (#2874). ([#2882](https://github.com/tpsdev-ai/flair/pull/2882))
+
+- **Federation reserves pending Memory retry attempts per batch.** Later batches not reached because an earlier batch failed leave their rows' attempts and last attempt time as stored. ([#2904](https://github.com/tpsdev-ai/flair/pull/2904))
+
+- **A malformed non-pending row observed by the pre-outcome read is reported and left as stored.**
+  Before the outcome writes for a sent Memory batch, the sender reads each stored retry row whatever its state. A row that breaks a sender convention is reported with its id and the malformed field and left as stored; the outcome write is skipped for it. The sender's offer check treats a pending row with a non-null `resolution`, `completedAt` or `bound` as malformed too, matching the write read-back (#2877). ([#2914](https://github.com/tpsdev-ai/flair/pull/2914))
+
+- **`flair federation verify` reports a failed canary push as a failed verification.**
+
+  A definitive canary write failure, an initial canary push that returns an
+  error, and a `--peer` name that matches no listed peer use the
+  `verification-failed` kind and a non-zero exit code. A peer that was verified
+  missing the memory remains `diverged`. When a failed verification leaves an
+  unknown-outcome cleanup request, its summary gives the count. ([#2915](https://github.com/tpsdev-ai/flair/pull/2915))
+
+- **Migration re-checks retain unconfirmed ids for unrecognized answers and log types without answer content; a later verified batch can clear those ids.** During re-check, the migration runner keeps an unconfirmed id for any answer other than at-target or no-row and logs an unrecognized answer's type and, for strings, its length. A later verified batch can clear the id. ([#2903](https://github.com/tpsdev-ai/flair/pull/2903))
+
+- **`flair uninstall --purge` removes a client-config `.bak` copy that carries Flair's entry.**
+  Unwiring a client snapshots an existing config to a sibling `<config>.bak` when that copy is
+  written. Purge moves a pre-existing snapshot into an exclusively created private hold directory
+  before the unwiring write and restores it before the sweep; when the hold or restore fails, the
+  client or its backup sweep is skipped and reported. When the hold and restore succeed, purge
+  deletes a snapshot that carries Flair's entry — `mcpServers.flair`, a pi `packages` source or
+  `extensions` entry that is Flair's own (`npm:@tpsdev-ai/pi-flair` or a local path inside the
+  pi-flair package), or Codex's `[mcp_servers.flair]` header — listing the path under `Removed`;
+  a snapshot with no Flair entry may be the user's own copy and stays byte-identical, and its bytes
+  (or, for a symlink, the link itself) survive the unwiring write. When the hold and restore succeed
+  and the scan runs, a snapshot that cannot be read, a JSON snapshot that cannot be parsed, and a pi
+  snapshot with no Flair-owned entry but with `pi-flair` in a `packages` string/object `source`
+  string or string `extensions` entry are listed under
+  `Not checked` and left in place; a failed hold or restore is reported under `Left (failed)`
+  instead. Purging a home other than the resolved caller home resolves pi under that home; a
+  `PI_CODING_AGENT_DIR` override is then ignored and reported. A run with failed or unverified
+  leftovers exits non-zero. Plain `flair uninstall` keeps every backup. ([#2896](https://github.com/tpsdev-ai/flair/pull/2896))
+
+- **Published docs now link to repository-only Markdown files on GitHub.** Design,
+  contribution and package README links use GitHub URLs. Mentions of project/host
+  files and the repository changelog are explicitly exempted. The docs-freshness
+  gate checks non-exempt local Markdown references against npm's pack file list. ([#2907](https://github.com/tpsdev-ai/flair/pull/2907))
+
+- **Commands that take `--admin-pass` now also accept `--admin-pass-file`.** ([#2894](https://github.com/tpsdev-ai/flair/pull/2894))
+
+- **`flair import` counts a row as imported only when its write returned a 2xx response.**
+  A row whose write returns any other status, except a Soul scope-field refusal (HTTP 403
+  for a row that supplies scope fields), is counted as failed and reported with its id,
+  HTTP status and a recognized write-guard error name, when present; a run with a failed row and no unknown
+  outcome exits 1.
+  A write with no answer before its deadline is an unknown outcome, reported and exited 3.
+  Non-connect-phase fetch failures and failed reads of successful write responses are also
+  unknown outcomes.
+  ([#2919](https://github.com/tpsdev-ai/flair/pull/2919))
+
+- **Pi unwire matches trimmed npm specs and resolved package paths (#2908).**
+  Npm ownership trims the spec after literal `npm:` before matching the package name
+  and optional nonempty suffix without internal whitespace. Pi-local paths are normalized
+  before matching `node_modules/@tpsdev-ai/pi-flair/` segments.
+  In successful unwire/no-op results, entries are identified by their position, not their value. ([#2910](https://github.com/tpsdev-ai/flair/pull/2910))
+
+- **A skill-tagged `POST /FeedMemories` write takes the id's per-memory write lock (flair#2927).**
+
+  This entry point records outcome-unknown markers only for the ids this write
+  attempted, when storage withholds its write result, rollback cannot be confirmed,
+  or the refusal body has no readable error code.
+  The live head it would close is resolved before the acquisition and included
+  in the lock set; the head is resolved again under
+  the locks, and a head outside that set releases and retries. `409
+  skill_head_moved` is returned only if the resolved head stays outside the held
+  set through the final attempt. ([#2934](https://github.com/tpsdev-ai/flair/pull/2934))
+
+- **Replace restore and REM restore stop before deleting anything when a Soul row they would replay supplies a non-empty `scopeTag` or `tags` array.**
+
+  The server refuses that write, so a refused replay no longer removes the live
+  Soul row first. Replace mode checks the archived rows it replays; REM checks
+  the snapshot rows and the live rows captured in its pre-restore snapshot.
+  A refused row is named with its id and the run exits non-zero without
+  deleting or writing target rows. When the same id is refused in both the
+  snapshot and the live rows, the message names both sources and gives both
+  remedies. Merge restore deletes nothing and is not affected (#2931). ([#2935](https://github.com/tpsdev-ai/flair/pull/2935), [#2942](https://github.com/tpsdev-ai/flair/pull/2942))
+
+- **An admin `_reindex` re-PUT notifies the embedding-space guard of its attempted stamp once the owned transaction returns, before its post-commit read-back.** The read-back determines whether that stamp remains stored, so a read-back refusal no longer leaves a foreign `embeddingModel` attempt unreported and the guard reads `mixed` as it does after the same write without the fault (#2932). ([#2936](https://github.com/tpsdev-ai/flair/pull/2936))
+
+- **The integration shard jobs have a 51-minute timeout.** ([#2938](https://github.com/tpsdev-ai/flair/pull/2938))
+
+- **`flair restore --replace` checks the learned-content rule before it deletes anything.**
+
+  The server refuses a Soul write whose `value` equals a same-agent Memory
+  `content` or MemoryCandidate `claim`. Replace mode refuses the run when a
+  non-empty archived Soul value equals the content of a live Memory row its
+  deletes leave in place, or the claim of a live MemoryCandidate. A row either
+  the scope-field or the learned-content rule would refuse stops the run before
+  any delete and exits non-zero: a scope-field refusal names the archived Soul
+  row and the archive-edit remedy, and a learned-content refusal names the Soul
+  id, the matching Memory or candidate row and the remedy. A Memory DELETE the
+  server refuses stops the run before any Soul row is deleted; for a Memory the
+  run already deleted, or whose DELETE outcome is unknown, it attempts write-back
+  when a later Memory DELETE fails, verifies each successful PUT, and reports
+  any PUT or verification failure by id. Restore DELETE and PUT requests refuse a redirect instead
+  of following it: the run names the status and sends no request to the
+  redirect location. A Memory or candidate
+  listing that cannot be read refuses the run before any delete, when
+  a non-empty archived Soul value requires that read; refusals already
+  collected are printed before that error. A refused Soul write now
+  reports the server's error name when the body carries one (#2941). ([#2942](https://github.com/tpsdev-ai/flair/pull/2942))
+
+- **The `Memory` skill-version create/update writes take the per-memory write lock (flair#2950).**
+
+  A skill `PUT`/`POST` create or update that names an id or addresses a stored
+  row locks the row it addresses and the live head it would close, through the
+  same sorted per-id lock helper as a skill-tagged `POST /FeedMemories` write.
+  The skill writer returns an existing addressed or live-head id it must lock,
+  and the verb (`put()`/`post()`) re-acquires the extended set; the writer
+  resolves the live head under the locks. A fresh skill `POST` with a
+  server-allocated id takes no per-id lock. Its pre-confirmation work runs after
+  the Memory lock releases.
+
+  > **Heads-up:** two responses callers may now see. A `PUT`, or a `POST` that
+  > names an id, whose body cannot be structured-cloned is refused with
+  > `400 memory_body_uncloneable` (any memory write, not only skills). A Memory
+  > skill create or update returns `409 skill_head_moved` when the live head keeps
+  > moving across its lock attempts, as skill-tagged `POST /FeedMemories` already does. ([#3024](https://github.com/tpsdev-ai/flair/pull/3024))
+
+- **A non-credential server answer to an agent-key fallback attempt is now final, and the fallback refuses redirects.**
+  In `src/lib/auth-resolve.ts`, every request the tier-5 fallback sends refuses
+  redirects, so a 3xx is that request's final answer. The floor moves to the next
+  candidate key file when the Ed25519 authentication middleware refused the
+  credential itself (its 401 codes), when an attempt that does not follow
+  redirects fails in the connect phase, or when that candidate's key file
+  cannot be read or decoded as an Ed25519 key (it is skipped before anything is
+  sent). Failures after a key is loaded (nonce, signing) are final. Otherwise
+  the answer is final: a failed HTTP response whose body was read is thrown
+  with its status and any error code in that body, and a refused redirect is
+  thrown with its status before any body is read (#2955). ([#2957](https://github.com/tpsdev-ai/flair/pull/2957))
+
+- **The audit gate pins each severity's lifetime ceiling in code.** The policy block may lower a cap but cannot raise one, and the gate fails when a severity is missing, invalid or above its pinned ceiling (#2973). ([#2983](https://github.com/tpsdev-ai/flair/pull/2983))
+
+- **The dependency audit gate checks allowlist history from a pinned start at a fixed path.** `.github/audit-allowlist.json` must be JSON with an `entries` array at the pinned commit and every descendant in HEAD’s ancestry. An id’s first day is the earliest UTC day of a commit introducing it with no prior occurrence in ancestry within the pinned lineage; ids compare case-insensitively. Missing lineage or shallow history fails the gate. ([#2987](https://github.com/tpsdev-ai/flair/pull/2987))
+
+- **Migration boot reports lock refusals classified as errors.**
+  Mutex release failures during acquisition are errors, including after finding a holder.
+  A later acquisition by the same process can reclaim its abandoned record and mutex generation after a post-publication release failure. ([#2981](https://github.com/tpsdev-ai/flair/pull/2981))
+
+- **A Soul PUT that fails schema validation now returns the validator's 400 with its field message instead of a 500 append error.** The instruction-version transaction still aborts on both paths, so no new row or version commits. ([#2996](https://github.com/tpsdev-ai/flair/pull/2996))
+
+- **Integrity commits and tombstones check recorded custody identities around publication.**
+  A detected change refuses an unpublished write or reports an uncertain
+  published outcome. Initialization and the publication staging file are
+  outside these identity comparisons. Changes between or after checks are not covered. ([#2988](https://github.com/tpsdev-ai/flair/pull/2988))
+
+- **Integrity custody bounds generation numbers to the twelve-digit filename format and stops exporting `readCurrentPointer`.**
+
+  The custody acceptance test runs on a supported temporary filesystem; its skip
+  reason uses a best-effort filesystem label with an "unknown" fallback. ([#2984](https://github.com/tpsdev-ai/flair/pull/2984))
+
+- **A BigInt agent id or A2A message answers a caller error instead of the server's generic error.** POST /Agent and POST /AgentSeed answer 400 with the key-registration string remedy, an A2A message with a BigInt answers -32602 naming `message`, and A2A reports a missing OrgEvent validator with its own error code. ([#3006](https://github.com/tpsdev-ai/flair/pull/3006))
+
+- **`/mcp` holds the issuer check on each request, not only at registration.**
+  When the live OAuth configuration is missing, disabled, or its issuer stops
+  matching `FLAIR_MCP_ISSUER`, `/mcp` requests get a named refusal and remedy,
+  and the admin Instance page reports that refusal instead of the mounted URL.
+  When `FLAIR_MCP_ISSUER` is set and the configuration is missing or disabled,
+  the remedy names a valid OAuth provider (client ID, client secret and
+  redirect URI) alongside `FLAIR_MCP_OAUTH` and `FLAIR_MCP_ISSUER`.
+  The 503 response carries the OAuth wrapper's denial CORS headers. ([#3046](https://github.com/tpsdev-ai/flair/pull/3046))
+
+- `flair stop` now stops the directly started Flair when the launchd job is not loaded (the state a fresh `flair init` leaves behind), instead of unloading a job that was never loaded and waiting the full 60-second startup budget for a process the unload never signalled. On that not-loaded path it names the path it took, and refuses without signalling when the recorded pid is not verifiably Flair's.
+
+- **Nightly REM `run-once` now reads the admin password from the owner-only
+  file path baked into the scheduler shim, so the dedup-cluster step can
+  authenticate.** `flair rem nightly enable` resolves the absolute path at
+  enable time (override with `--admin-pass-file`); the shim passes the path
+  as one quoted argument, never the value. A missing, empty, or too-open file
+  fails the run at startup before any cycle work: the dedup step reports NOT
+  RUN with the path and remedy, and the command exits nonzero on every path,
+  including a paused cycle and a dry run. Re-run `flair rem nightly enable` on
+  an existing install to rewrite the shim. ([#2678](https://github.com/tpsdev-ai/flair/pull/2678))
+
+- **The admin decision for a signed agent request uses the Agent row the signature is verified against, plus `FLAIR_ADMIN_AGENTS`.**
+  The request gate and the per-resource verifier both decide from that one row
+  (`role: "admin"`) or the configured admin ids, on every request. Nothing about
+  admin status is kept between requests, so a role change, a removed Agent row, or
+  a new row under the same id applies to the next request on every worker thread,
+  whichever path wrote it: the Agent resource, the operations API, or a federation
+  merge. Memory maintenance, consolidation, reflection and auto-promote first admit
+  a request whose `tpsAgentIsAdmin` annotation is already true, without reading a
+  row. The check they make next, which the reindex endpoint and a reindex write
+  also make, keeps the gate's decision for a request the gate verified, and
+  decides any other annotated caller (a Basic credential or an in-process context)
+  from its Agent row read at that moment plus `FLAIR_ADMIN_AGENTS`. ([#2712](https://github.com/tpsdev-ai/flair/pull/2712))
+
+- **Agent-id refusals describe undefined, Symbols and unserializable values.**
+  A BigInt or an unsafe integer gets the string remedy. Undefined, a Symbol or
+  a non-finite number is shown as `String(id)`. Serialization failures identify
+  arrays as arrays and other values by type. ([#3019](https://github.com/tpsdev-ai/flair/pull/3019), [#3010](https://github.com/tpsdev-ai/flair/pull/3010))
+
+- **A refused auto-promotion stamp no longer marks the candidate promoted.** When the isolated stamp reports failure, the sweep records `stamp_refused` and leaves the candidate pending. ([#2651](https://github.com/tpsdev-ai/flair/pull/2651))
+
+- **`flair federation verify` no longer lets an expired cleanup request hide the local delete or a verification error.** When the cleanup archive PUT crosses its deadline, the command records the unknown outcome, still sends the local `DELETE /Memory/<id>`, and after cleanup prints an `Unknown outcome:` line for each recorded request and exits 3. The federation sync that follows the archive PUT uses a bare `fetch`, so its timeout is an ordinary error outside this rule. If the verification itself failed with a definite error, that error is printed too. ([#2839](https://github.com/tpsdev-ai/flair/pull/2839))
+
+- **`flair help <command> <subcommand>` now prints that subcommand's help.** It
+  used to print the parent command's help, so `flair help presence set` showed
+  `flair presence`'s flags instead of the `set` flags. An unknown path prints the
+  deepest command that matched plus an `unknown command` line and exits non-zero. ([#2895](https://github.com/tpsdev-ai/flair/pull/2895))
+
+- **`flair init` retries the using-flair skill write when the instance reports an embedding provider timeout.** After the instance refuses that write with 503 `memory_provider_timeout`, init waits 2 s and runs the seed again if its existing 180 s bound on the write leaves time for the wait. When that bound leaves no time for another wait, passes before a retried write, or ends a write that got no answer, init reports `skill_seed_write_failed` with the attempts and the time spent.
+
+- **Admin memory maintenance refuses an `agentId` with surrounding whitespace.** A padded value used to name an agent that matched no row, so the run silently did nothing; it is now a 400, as it already is for a present `undefined`, `null`, non-string or blank value. ([#2737](https://github.com/tpsdev-ai/flair/pull/2737))
+
+- **A configured MCP issuer that differs from FLAIR_MCP_ISSUER now stops /mcp from mounting, with a remedy, instead of mounting with tokens that cannot verify.**
+
+  The shipped `mcp.issuer: ${FLAIR_MCP_ISSUER}` form is unaffected, and a
+  trailing slash alone is not a difference. ([#3034](https://github.com/tpsdev-ai/flair/pull/3034))
+
+- **`flair memory add` retries a write the embedding provider timed out on.** A `503 memory_provider_timeout` refusal states nothing was written, so the command replays the same memory id up to two more times; after that it exits 1 with one `memory add:` error line. Every other failure is unchanged.
+
+- **The MQTT-off deploy progress line adds its cluster phrase only when the replicated answer lists cluster nodes.** A replicated answer without a node list now names only the target, and the final report's peer list is empty. ([#2738](https://github.com/tpsdev-ai/flair/pull/2738))
+
+- **The OAuth consent form's POST applies the consent page's scope and client checks before it issues an authorization code.**
+  An approve on `POST /OAuthAuthorize` now answers 400 `invalid_scope` for a scope
+  the server does not advertise, then 400 `invalid_client` when no `OAuthClient`
+  record exists for `client_id`: the same checks, order and bodies as
+  `GET /OAuthAuthorize`. Both run before authentication, and nothing is stored on
+  a refusal. A blank scope is stored as `memory:read`, the scope the consent page
+  renders for it. A deny still answers the `access_denied` redirect and issues no
+  code. ([#2702](https://github.com/tpsdev-ai/flair/pull/2702))
+
+- **The OAuth authorization endpoints and the authorization-code exchange require S256 PKCE; the discovery metadata lists S256 as the supported method.**
+  After the earlier request, scope and client checks pass, `GET /OAuthAuthorize`
+  and its Approve (`POST /OAuthAuthorize`) answer 400 `invalid_request` when
+  `code_challenge` is missing, empty or not exactly 43 base64url characters, or when
+  `code_challenge_method` is not `S256`: the consent page is not rendered and no
+  authorization code is stored. On the POST this check runs before
+  authentication. After redirect-URI validation passes, a Deny still answers the
+  `access_denied` redirect and issues no code. The authorization-code exchange at `POST /OAuthToken` redeems a code
+  only with a `code_verifier` whose S256 hash matches the challenge stored with
+  it. A code stored without an S256 challenge is `invalid_grant`; for an
+  otherwise valid, unused code carrying an S256 challenge, a missing verifier is
+  `invalid_request`. ([#2711](https://github.com/tpsdev-ai/flair/pull/2711), [#2706](https://github.com/tpsdev-ai/flair/pull/2706))
+
+- **The A2A message/send and agent-key-register OrgEvent rows are validated before staging.** Their caller-derived fields are coerced to the schema's types where they are assigned; a failure answers HTTP 500 with JSON-RPC error `-32000` and `data.error: org_event_row_invalid` for A2A, or 503 `registration_unavailable` for key registration and commits nothing. The migration ledger and graph-heal OrgEvent writers validate their rows too. ([#3003](https://github.com/tpsdev-ai/flair/pull/3003))
+
+- **The owner-scoped write guard checks the body `id` of a non-admin agent's addressed write for every id type.**
+  The owner-scoped write guard refuses a non-admin agent's addressed POST, PUT
+  or PATCH whose body `id` is present, not null, not a string or number and not
+  the addressed key with 400 `id_target_mismatch`, and checks each object element of an array
+  body as it checks the body itself (#2551). ([#2681](https://github.com/tpsdev-ai/flair/pull/2681))
+
+- **An internal server-minimum constant no longer stops the 0.63.0 release's version check.**
+  No behavior change for anyone running Flair.
+
+- **`flair rem restore` retries a memory write refused with `503 memory_provider_timeout` once.** A write refused with any other error or status, or refused with the same timeout again, is recorded as failed as before, and the restore's output names the rows it retried.
+
+  The post-restore verification still compares the agent's memory and soul ids with the snapshot's, reporting expected ids that are missing and ids the snapshot does not hold. ([#2771](https://github.com/tpsdev-ai/flair/pull/2771))
+
+- **`flair rem nightly run-once` prints `Memories:` and `Souls:` as `unknown (<reason>)` when that read fails, not as `0`.**
+  A failed read is listed under `Errors:` and the run reports failed; a successful read prints its exact count. ([#2753](https://github.com/tpsdev-ai/flair/pull/2753))
+
+- **The shared Renovate preset uses `rangeStrategy: "replace"`.** (flair#2871). ([#2924](https://github.com/tpsdev-ai/flair/pull/2924))
+
+- **Restore refuses an archive row these admission checks reject before deleting the live copy.**
+  Archive admission conservatively refuses a row id containing `.` because a suffix such as `.json` or `.content` can be read as a content type or an attribute selector, and it checks a row restore writes against that table's GraphQL schema: a required column the write does not supply (for Agent, createdAt and publicKey are copied from the stored row, and the resource refuses when no stored row exists), or a present non-null column holding the wrong JS type. Each schema-type refusal names the row, the field and the expected type; a dotted-id refusal names the row and the field. Restore stops before any request.
+
+  > **Heads-up:** `flair restore`, with or without `--replace`, now refuses the whole archive when any
+  > agents, souls or memories row has an id containing `.`, naming that row. It stops before any
+  > request, so nothing is deleted. ([#2969](https://github.com/tpsdev-ai/flair/pull/2969))
+
+- **Non-dry-run `flair restore --replace` refuses filesystem skill sources before any delete.**
+  In non-dry-run replace mode a `skill-assignment` row whose `metadata.source` is a filesystem path is refused: the server decides that source's durability from its own environment, which the CLI cannot know. Non-path sources are durable in both predicates; the copied rule still checks `optOut` for them. Each refusal names the row and the remedy. Archive admission refuses a Soul row without a non-empty `agentId` as `invalid-row` before the preflight runs. A concurrent same-agent write between the preflight and the PUT is not covered. ([#2969](https://github.com/tpsdev-ai/flair/pull/2969))
+
+- **A schema validation failure on the instruction-version record or its event is now a server error.** Their caller-derived fields are coerced to the schema's types where they are assigned, so a failure is a server defect; both rows are validated with their table's own validator before staging, and a failure aborts the write with its existing 5xx response and commits nothing. A Memory successor or close row carries the caller's fields without that coercion and keeps its 400 at commit. ([#2999](https://github.com/tpsdev-ai/flair/pull/2999), [#3003](https://github.com/tpsdev-ai/flair/pull/3003))
+
+- **`flair status` and `flair status deep` build their agent total, names and table from one Agent-id map.** An admin sees memory authors without an Agent record on a separate labelled line; with no Agent registered that line still renders, and an incomplete Memory scan reports the list unavailable rather than empty or partial. An operator seed whose author has no Agent record no longer appears as an unexplained agent row.
+
+### Security
+
+- **The dependency audit gate refuses to resolve Harper bundle dependency names with an `@` inside a package-name segment.** ([#2813](https://github.com/tpsdev-ai/flair/pull/2813))
+
+- **The dependency audit gate requires vendor-pinned packages under Harper and their intervening directories to resolve inside Harper’s installed tree.** ([#2813](https://github.com/tpsdev-ai/flair/pull/2813))
+
+- **The dependency bake-time gate checks node-forge 1.4.3 and joi 17.13.9 without version exemptions.** ([#2972](https://github.com/tpsdev-ai/flair/pull/2972))
+
+- **The workspace lockfile resolves body-parser 2.4.0.** ([#2822](https://github.com/tpsdev-ai/flair/pull/2822))
+
+- **flair-bench pins node-llama-cpp 3.22.3, whose simple-git dependency range is `^4.0.2`.** ([#3029](https://github.com/tpsdev-ai/flair/pull/3029))
+
+- **The workspace lockfile resolves ip-address 10.7.4 and fastify 5.12.7.**
+  Root overrides do not replace Harper’s bundled dependencies. ([#2780](https://github.com/tpsdev-ai/flair/pull/2780), [#2803](https://github.com/tpsdev-ai/flair/pull/2803))
+
+- **flair-mcp pins `@modelcontextprotocol/sdk` 1.32.0; the workspace lockfile resolves hono 4.13.16.** ([#2742](https://github.com/tpsdev-ai/flair/pull/2742))
+
+- **The workspace lockfile resolves simple-git 4.0.2 and `@simple-git/argv-parser` 2.0.1.** ([#2726](https://github.com/tpsdev-ai/flair/pull/2726))
+
+- **The workspace lockfile resolves undici 8.12.2 and fast-uri 4.2.3.**
+  Root overrides do not replace Harper’s bundled dependencies. ([#2827](https://github.com/tpsdev-ai/flair/pull/2827))
+
+- **The MCP and n8n packages pin zod 4.6.7; the workspace lockfile resolves that version.** ([#2822](https://github.com/tpsdev-ai/flair/pull/2822))
 
 ## [0.62.0] - 2026-10-17
 

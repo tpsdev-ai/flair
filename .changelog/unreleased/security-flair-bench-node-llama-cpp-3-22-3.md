@@ -1,1 +1,0 @@
-- **flair-bench pins node-llama-cpp 3.22.3, whose simple-git dependency range is `^4.0.2`.** ([#3029](https://github.com/tpsdev-ai/flair/pull/3029))
