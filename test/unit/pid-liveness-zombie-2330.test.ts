@@ -35,9 +35,10 @@ describe("flair#2330 — the probe retries a failed or empty state read if time 
     expect(probePidLiveness(LIVE_PID, readFailingThen(9, "Z")).kind).toBe("alive");
   });
 
-  test("a pid that exits between the signal-0 probe and the state read is gone", () => {
-    // Signal 0 succeeds on the zombie, then the process is reaped before the
-    // state read; the re-probe must report ESRCH rather than leave it alive.
+  test("a pid that disappears between the signal-0 probe and the state read reads as gone (simulated)", () => {
+    // The state reader returns null and the second `kill` is injected with
+    // ESRCH: the live test-runner pid is simulated to disappear after the
+    // failed reads, and the re-probe must report it gone rather than alive.
     const realKill = process.kill;
     let calls = 0;
     const spy = spyOn(process, "kill").mockImplementation((pid, signal) => {

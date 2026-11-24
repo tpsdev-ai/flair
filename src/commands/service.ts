@@ -304,10 +304,10 @@ async function stopDirectlyStartedFlair(port: number, dataDir: string, label: st
         } else if (
           managedAfter.jobLoaded === "not-loaded" && after.state === "RUNNING"
         ) {
-          // A re-run resolves only when the classifier verified the serving
-          // process against hdb.pid and the identity sidecar, which is what
-          // RUNNING reports.
-          console.error("   Run 'flair stop' again to stop the instance it now serves (it has recorded its identity).");
+          // A re-run resolves only when the classifier verified the recorded
+          // pid against hdb.pid and the identity sidecar, which is what
+          // RUNNING reports. It does not establish that the pid owns the port.
+          console.error("   Run 'flair stop' again to stop the verified recorded pid (the instance has recorded its identity).");
         }
         console.error("   Inspect it with: flair doctor");
         process.exit(1);

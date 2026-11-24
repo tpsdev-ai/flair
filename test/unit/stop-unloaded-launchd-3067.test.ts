@@ -105,10 +105,14 @@ exit 0
 /** A directly started instance: serves Flair's /Health, records its pid, dies on SIGTERM.
  *  With `successor: "serving"`, SIGTERM closes its listener and keeps the process
  *  alive until a successor it spawns answers /Health on the same port, so that
- *  successor is serving when the recorded pid exits. With `successor: "silent"`
- *  the successor accepts TCP but never answers /Health. The stub exits once the
- *  successor reports ready, or after 5 seconds whether or not it did. */
-async function startFlairStub(f: Fixture, opts: { successor?: "serving" | "silent" } = {}): Promise<number> {
+ *  successor is serving when the recorded pid exits; the successor records its
+ *  own pid and sidecar only once the test writes `successor-record-trigger`.
+ *  With `successor: "serving-recorded"` it records them before it starts
+ *  listening, so they are on disk before the first stop's final evidence read.
+ *  With `successor: "silent"` the successor accepts TCP but never answers
+ *  /Health. The stub exits once the successor reports ready, or after 5 seconds
+ *  whether or not it did. */
+async function startFlairStub(f: Fixture, opts: { successor?: "serving" | "serving-recorded" | "silent" } = {}): Promise<number> {
   const script = join(f.home, "flair-stub.cjs");
   writeFileSync(script, `
 const fs = require('node:fs');
@@ -169,11 +173,10 @@ const http = require('node:http');
 const body = fs.readFileSync(process.env.HEALTH_BODY_FILE, 'utf8');
 fs.writeFileSync(process.env.SUCCESSOR_PID_FILE, String(process.pid));
 // Simulated startup writes: Harper records its pid in hdb.pid, while Flair
-// records the identity sidecar. A later flair stop acts on that pair. The test
-// triggers both writes between the refused stop and the re-run.
-const record = setInterval(() => {
-  if (!fs.existsSync(process.env.SUCCESSOR_RECORD_TRIGGER)) return;
-  clearInterval(record);
+// records the identity sidecar. A later flair stop acts on that pair. In the
+// "serving" mode the test triggers both writes; in "serving-recorded" they
+// land here, before the listener starts, so they precede the ready file.
+const record = () => {
   fs.writeFileSync(process.env.FLAIR_PIDFILE, String(process.pid));
   fs.writeFileSync(process.env.SIDECAR_FILE, JSON.stringify({
     pid: process.pid,
@@ -182,7 +185,12 @@ const record = setInterval(() => {
     flairVersion: 'test',
   }));
   fs.writeFileSync(process.env.SUCCESSOR_RECORDED_FILE, '1');
-}, 25);
+};
+${opts.successor === "serving-recorded" ? "record();" : `const recorder = setInterval(() => {
+  if (!fs.existsSync(process.env.SUCCESSOR_RECORD_TRIGGER)) return;
+  clearInterval(recorder);
+  record();
+}, 25);`}
 function start() {
   const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -424,7 +432,7 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(result.out).toContain(`a process is serving port ${f.port}, but the recorded pid ${pid} is not alive`);
     expect(result.out).not.toContain("stopped the directly started Flair");
     expect(result.out).toContain("flair doctor");
-    expect(result.out).not.toContain("Run 'flair stop' again to stop the instance it now serves");
+    expect(result.out).not.toContain("Run 'flair stop' again to stop the verified recorded pid");
 
     const successorPidFile = join(f.home, "successor.pid");
     await waitForFile(successorPidFile);
@@ -434,13 +442,31 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     const beforeRecording = await runStop(f);
     expect(beforeRecording.code).toBe(1);
     expect(beforeRecording.out).not.toContain("stopped the directly started Flair");
-    expect(beforeRecording.out).not.toContain("Run 'flair stop' again to stop the instance it now serves");
+    expect(beforeRecording.out).not.toContain("Run 'flair stop' again to stop the verified recorded pid");
     expect(() => process.kill(successorPid, 0)).not.toThrow();
 
     // Once the simulated startup writes have recorded the successor (Harper's
     // pid, Flair's identity sidecar), a re-run verifies and signals it.
     writeFileSync(join(f.home, "successor-record-trigger"), "1");
     await waitForFile(join(f.home, "successor-recorded"));
+    const again = await runStop(f);
+    expect(again.code).toBe(0);
+    expect(again.out).toContain(`stopped the directly started Flair (pid ${successorPid})`);
+    expect(() => process.kill(successorPid, 0)).toThrow();
+    expect(unloadCalls(f)).toEqual([]);
+  }, 30_000);
+
+  test("a successor that records its identity before the final evidence read is RUNNING, names the resolving step, and a re-run stops its verified pid", async () => {
+    const f = await makeFixture();
+    const pid = await startFlairStub(f, { successor: "serving-recorded" });
+    const result = await runStop(f);
+    expect(result.code).toBe(1);
+    expect(result.out).toContain(`pid ${pid} exited, but Flair is not confirmed down`);
+    expect(result.out).toContain("the instance reads RUNNING");
+    expect(result.out).toContain("Run 'flair stop' again to stop the verified recorded pid (the instance has recorded its identity).");
+    expect(result.out).not.toContain("stopped the directly started Flair");
+
+    const successorPid = Number(readFileSync(join(f.home, "successor.pid"), "utf8"));
     const again = await runStop(f);
     expect(again.code).toBe(0);
     expect(again.out).toContain(`stopped the directly started Flair (pid ${successorPid})`);
