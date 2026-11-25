@@ -16,6 +16,9 @@ import { join } from "node:path";
 import nacl from "tweetnacl";
 import { tempDir } from "../helpers/temp-dir";
 import { KEYLESS_SEARCH_LIMIT, bindCli, keylessTruncationNotice, register } from "../../src/commands/reembed.ts";
+import { getModelId } from "../../resources/embeddings-provider.ts";
+
+const patched: string[] = [];
 
 const realFetch = globalThis.fetch;
 const realExit = process.exit;
@@ -33,10 +36,22 @@ function rows(count: number): Record<string, unknown>[] {
   return Array.from({ length: count }, (_, i) => ({ id: `m-${i}`, content: "a memory", embeddingModel: "model-1" }));
 }
 
-async function run(seed: Record<string, unknown>[]): Promise<{ exitCode: number | null; logs: string[] }> {
-  globalThis.fetch = (async (url: unknown) => {
-    if (String(url).endsWith("/Health")) {
+async function run(seed: Record<string, unknown>[], dryRun = true): Promise<{ exitCode: number | null; logs: string[] }> {
+  patched.length = 0;
+  globalThis.fetch = (async (url: unknown, init: unknown) => {
+    const href = String(url);
+    if (href.endsWith("/Health")) {
       return Response.json({ version: "test", capabilities: ["memory-reembed-patch"] });
+    }
+    const method = String((init as { method?: unknown } | null)?.method ?? "GET").toUpperCase();
+    if (method === "PATCH") {
+      const id = decodeURIComponent(href.split("/").pop() ?? "");
+      patched.push(id);
+      return Response.json({ id });
+    }
+    if (method === "GET" && href.includes("/Memory/")) {
+      const id = decodeURIComponent(href.split("/").pop() ?? "");
+      return Response.json({ id, embeddingModel: getModelId() });
     }
     return Response.json({ results: seed });
   }) as typeof fetch;
@@ -60,7 +75,9 @@ async function run(seed: Record<string, unknown>[]): Promise<{ exitCode: number 
   try {
     const program = new Command().exitOverride();
     register(program);
-    await program.parseAsync(["reembed", "--agent", "agent-a", "--port", "1", "--dry-run"], { from: "user" });
+    const args = ["reembed", "--agent", "agent-a", "--port", "1", "--stale-only"];
+    if (dryRun) args.push("--dry-run");
+    await program.parseAsync(args, { from: "user" });
   } catch (err) {
     if (!(err instanceof Error) || !err.message.startsWith("EXIT:")) throw err;
   } finally {
@@ -81,3 +98,13 @@ test("one row below the limit prints no notice and returns normally", async () =
   expect(exitCode).toBeNull();
   expect(logs.some((line) => line.includes("more rows may exist"))).toBe(false);
 }, 10_000);
+
+test("without --dry-run the limit still processes its candidate, prints the notice once and exits 1", async () => {
+  const current = getModelId();
+  const seed = rows(KEYLESS_SEARCH_LIMIT).map((row) => ({ ...row, embeddingModel: current }));
+  seed[seed.length - 1] = { ...seed[seed.length - 1], embeddingModel: "model-1" };
+  const { exitCode, logs } = await run(seed, false);
+  expect(patched).toEqual([`m-${KEYLESS_SEARCH_LIMIT - 1}`]);
+  expect(logs.filter((line) => line === keylessTruncationNotice(KEYLESS_SEARCH_LIMIT))).toHaveLength(1);
+  expect(exitCode).toBe(1);
+}, 30_000);

@@ -2,8 +2,8 @@
  * reembed-paging-3086.test.ts — `flair reembed`'s Memory reads against a real
  * ephemeral Harper (flair#3086).
  *
- * The admin paths read every Memory page before the first write, keyed on the
- * primary key (`id` greater than the last id seen, sorted by `id`). These cases
+ * The admin paths read Memory rows page by page before the first write, keyed on
+ * the primary key (`id` greater than the last id seen, sorted by `id`). These cases
  * use a page size of 3, seed rows across agents, insert a row between two page
  * reads, and re-embed a stale row that sits beyond the first page through the
  * same per-row path the command uses.
@@ -125,7 +125,7 @@ afterAll(async () => {
 
 const keyPath = (agent: Agent) => join(home, ".flair", "keys", `${agent.id}.key`);
 
-describe("flair#3086: flair reembed reads every Memory page", () => {
+describe("flair#3086: flair reembed reads Memory rows page by page", () => {
   test("a page size of 3 returns every id exactly once on both admin conditions", async () => {
     const rows = [
       ...Array.from({ length: 5 }, (_, i) => fixtureRow(`p1-a-${i + 1}`, agentA.id)),

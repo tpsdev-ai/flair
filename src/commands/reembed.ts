@@ -92,10 +92,14 @@ export const KEYLESS_SEARCH_LIMIT = 10_000;
 
 /** One line naming what the keyless listing read and the remedy. */
 export function keylessTruncationNotice(read: number): string {
-  return `⚠️ Read ${read} memories via /SemanticSearch; more rows may exist. Set FLAIR_ADMIN_PASS so reembed reads every row through the operations API.`;
+  return `⚠️ Read ${read} memories via /SemanticSearch; more rows may exist. Set FLAIR_ADMIN_PASS so reembed reads through the operations API.`;
 }
 
-/** Hard bound on the keyset loop; 10M rows at the default page size. */
+/**
+ * Hard bound on the keyset loop: 10,000 pages of 1,000 rows. Hitting it throws
+ * before any write, so the command exits non-zero instead of reporting a
+ * complete read.
+ */
 const MAX_MEMORY_READ_PAGES = 10_000;
 
 export type MemoryReadCondition = {
@@ -120,8 +124,10 @@ export type MemoryRowPageRead = {
  * conditions search accepts `sort: { attribute, descending }`
  * (node_modules/harper/validation/searchValidator.ts:38-48); a primary-key
  * sort scans the primary store in key order
- * (node_modules/harper/resources/Table.ts:5919-5921). The whole read finishes
- * before the first re-embed write.
+ * (node_modules/harper/resources/Table.ts:5919-5921). A page that is not an
+ * array of rows with strictly increasing ids throws, so an error object or a
+ * malformed page does not read as an empty result. The whole read finishes
+ * before the first re-embed write, and it stops after MAX_MEMORY_READ_PAGES.
  */
 export async function readAllMemoryRows(opts: {
   opsPort: string | number;
@@ -160,14 +166,28 @@ export async function readAllMemoryRows(opts: {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const raw = await res.json() as unknown;
-    const page = Array.isArray(raw) ? raw : ((raw as { results?: unknown[] })?.results ?? []);
-    for (const row of page) rows.push(row as Record<string, unknown>);
-    if (page.length < pageSize) return { rows, pages };
-    const last = page[page.length - 1] as { id?: unknown } | null;
-    if (typeof last?.id !== "string" || last.id.length === 0) {
-      throw new Error(`page ${pages} did not end with a row id`);
+    const page = Array.isArray(raw)
+      ? raw
+      : raw !== null && typeof raw === "object" && Array.isArray((raw as { results?: unknown }).results)
+        ? (raw as { results: unknown[] }).results
+        : null;
+    if (page === null) {
+      throw new Error(`page ${pages}: response is neither an array nor an object with a results array`);
     }
-    lastId = last.id;
+    const seen: Record<string, unknown>[] = [];
+    for (const row of page) {
+      const id = (row as { id?: unknown } | null)?.id;
+      if (typeof id !== "string" || id.length === 0) {
+        throw new Error(`page ${pages}: row without a non-empty string id`);
+      }
+      if (lastId !== undefined && Buffer.compare(Buffer.from(id), Buffer.from(lastId)) <= 0) {
+        throw new Error(`page ${pages}: ids do not strictly increase`);
+      }
+      lastId = id;
+      seen.push(row as Record<string, unknown>);
+    }
+    rows.push(...seen);
+    if (page.length < pageSize) return { rows, pages };
   }
   throw new Error(`stopped after ${MAX_MEMORY_READ_PAGES} pages`);
 }
@@ -374,22 +394,25 @@ program
       // vector index — exactly what we need when the goal is to replace every
       // embedding with a freshly-computed one. Without this path, `flair
       // reembed` could not recover from the very condition it exists to fix.
-      // Reads every page before the first write (flair#3086).
+      // Reads the pages before the first write (flair#3086). The read stops at
+      // MAX_MEMORY_READ_PAGES pages and exits non-zero without writing.
       const opsPort = resolveOpsPort(opts);
       const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
       const readStoredModel = opsStoredModelReader(opsPort, opsAuth);
-      // Harper rejects empty-value conditions ("not indexed for nulls"). Use
-      // `createdAt > 1970-01-01` as the "select all" pattern: every Memory row
-      // has a createdAt, the index is built, and the comparison is total.
+      // The first page selects every row by id alone. An empty condition list
+      // is refused (node_modules/harper/validation/searchValidator.ts:54), and
+      // Harper's own select-all is the primary key above the bottom of its key
+      // order (node_modules/harper/resources/Table.ts:5975-5976). `id > 0` is
+      // that bound: the key encoding ranks strings above positive numbers (the
+      // ordered-binary bundled with Harper, index.js:2-11), so every string id
+      // is admitted, whatever its createdAt.
       let allMemories: any[];
       let readPages: number;
       try {
         ({ rows: allMemories, pages: readPages } = await readAllMemoryRows({
           opsPort,
           opsAuth,
-          conditions: [
-            { search_attribute: "createdAt", search_type: "greater_than", search_value: "1970-01-01" },
-          ],
+          conditions: [{ search_attribute: "id", search_type: "greater_than", search_value: 0 }],
         }));
       } catch (err) {
         console.error(`❌ Failed to fetch memories via ops API: ${(err as Error).message}`);

@@ -1,2 +1,0 @@
-- **`flair reembed` reads every Memory page on both administrator paths before the first re-embed write.**
-  The all-agent and single-agent administrator reads page keyed on the Memory primary key (`id` greater than the last id seen) and report how many memories and pages they read. The keyless single-agent listing has no paging parameter: when `/SemanticSearch` returns exactly its 10,000-row limit, the command prints a notice naming the count and the `FLAIR_ADMIN_PASS` remedy, then exits 1.
