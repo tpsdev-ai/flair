@@ -2,11 +2,13 @@
  * reembed-read-validation-3086.test.ts — `flair reembed`'s page validation
  * (flair#3086).
  *
- * A 200 response is only used when it is an array of rows with non-empty
- * string ids that strictly increase across the read. Anything else — an error
- * object, a row without an id, ids that go backwards — throws before the first
- * write, on both administrator branches. A local stub operations server answers
- * the CLI; no Harper is involved.
+ * A 200 response is only used when it is an array of rows, or an object whose
+ * `results` is an array of rows; every row must carry a non-empty string `id`
+ * and `agentId` and a string `content`, and ids must strictly increase across
+ * the read. Anything else — an error object, a row missing one of those fields,
+ * ids that go backwards — throws before the first write, on both administrator
+ * branches. A local stub operations server answers the CLI; no Harper is
+ * involved.
  */
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { createServer, type Server } from "node:http";
@@ -17,6 +19,7 @@ import { join } from "node:path";
 import nacl from "tweetnacl";
 import { tempDir } from "../helpers/temp-dir";
 import { bindCli, register } from "../../src/commands/reembed.ts";
+import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const realExit = process.exit;
 const realLog = console.log;
@@ -27,6 +30,8 @@ type Scenario = { name: string; body: unknown };
 const ROWS: Scenario[] = [
   { name: "a 200 error object", body: { error: "partial read" } },
   { name: "a row without an id", body: [{ agentId: "agent-a", content: "a memory", embeddingModel: "old" }] },
+  { name: "a row without a content", body: [{ id: "m-1", agentId: "agent-a", embeddingModel: "old" }] },
+  { name: "a row without an agentId", body: [{ id: "m-1", content: "a memory", embeddingModel: "old" }] },
   {
     name: "ids that go backwards",
     body: [
@@ -54,6 +59,17 @@ beforeAll(async () => {
       if (req.method === "PATCH") {
         patched.push(req.url ?? "");
         res.end(JSON.stringify({ id: decodeURIComponent((req.url ?? "").split("/").pop() ?? "") }));
+        return;
+      }
+      let operation: unknown;
+      try {
+        operation = (JSON.parse(requestBody) as { operation?: unknown }).operation;
+      } catch {
+        operation = undefined;
+      }
+      if (operation === "search_by_id") {
+        const ids = (JSON.parse(requestBody) as { ids?: string[] }).ids ?? [];
+        res.end(JSON.stringify(ids.map((id) => ({ id, embeddingModel: getModelId() }))));
         return;
       }
       res.end(JSON.stringify(body));
@@ -116,4 +132,17 @@ for (const scenario of ROWS) {
       expect(logs.some((line) => line.includes("Re-embedding complete"))).toBe(false);
     }, 10_000);
   }
+}
+
+const ENVELOPE_ROW = { id: "m-1", agentId: "agent-a", content: "a memory", embeddingModel: "old" };
+
+for (const agent of [undefined, "agent-a"]) {
+  const branch = agent ? "single-agent with an admin password" : "all-agent";
+  test(`a results envelope re-embeds its stale row on the ${branch} path`, async () => {
+    body = { results: [ENVELOPE_ROW] };
+    const { exitCode, logs } = await run(agent);
+    expect(exitCode).toBeNull();
+    expect(patched).toEqual(["/Memory/m-1"]);
+    expect(logs.some((line) => line.includes("Re-embedding complete: 1 updated, 0 errors"))).toBe(true);
+  }, 10_000);
 }

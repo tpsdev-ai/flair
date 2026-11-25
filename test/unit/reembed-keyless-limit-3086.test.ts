@@ -15,7 +15,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { tempDir } from "../helpers/temp-dir";
-import { KEYLESS_SEARCH_LIMIT, bindCli, keylessTruncationNotice, register } from "../../src/commands/reembed.ts";
+import { KEYLESS_SEARCH_LIMIT, bindCli, register } from "../../src/commands/reembed.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const patched: string[] = [];
@@ -87,10 +87,13 @@ async function run(seed: Record<string, unknown>[], dryRun = true): Promise<{ ex
   return { exitCode, logs };
 }
 
-test("exactly the limit prints the truncation notice and exits 1", async () => {
+test("exactly the limit prints one notice naming the count and the remedy, and exits 1", async () => {
   const { exitCode, logs } = await run(rows(KEYLESS_SEARCH_LIMIT));
   expect(exitCode).toBe(1);
-  expect(logs).toContain(keylessTruncationNotice(KEYLESS_SEARCH_LIMIT));
+  const notices = logs.filter((line) => line.includes("more rows may exist"));
+  expect(notices).toHaveLength(1);
+  expect(notices[0]).toContain(String(KEYLESS_SEARCH_LIMIT));
+  expect(notices[0]).toContain("FLAIR_ADMIN_PASS");
 }, 10_000);
 
 test("one row below the limit prints no notice and returns normally", async () => {
@@ -105,6 +108,9 @@ test("without --dry-run the limit still processes its candidate, prints the noti
   seed[seed.length - 1] = { ...seed[seed.length - 1], embeddingModel: "model-1" };
   const { exitCode, logs } = await run(seed, false);
   expect(patched).toEqual([`m-${KEYLESS_SEARCH_LIMIT - 1}`]);
-  expect(logs.filter((line) => line === keylessTruncationNotice(KEYLESS_SEARCH_LIMIT))).toHaveLength(1);
+  const notices = logs.filter((line) => line.includes("more rows may exist"));
+  expect(notices).toHaveLength(1);
+  expect(notices[0]).toContain(String(KEYLESS_SEARCH_LIMIT));
+  expect(notices[0]).toContain("FLAIR_ADMIN_PASS");
   expect(exitCode).toBe(1);
 }, 30_000);

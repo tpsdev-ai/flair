@@ -96,9 +96,9 @@ export function keylessTruncationNotice(read: number): string {
 }
 
 /**
- * Hard bound on the keyset loop: 10,000 pages of 1,000 rows. Hitting it throws
- * before any write, so the command exits non-zero instead of reporting a
- * complete read.
+ * Hard bound on the keyset loop: 10,000 pages of 1,000 rows. The read refuses
+ * when the last page it may read (page 10,000) comes back full, because more
+ * rows may follow; a shorter page at that bound is a complete read.
  */
 const MAX_MEMORY_READ_PAGES = 10_000;
 
@@ -126,24 +126,29 @@ export type MemoryRowPageRead = {
  * (node_modules/harper/validation/searchValidator.ts:38-48); a primary-key
  * sort scans the primary store in key order
  * (node_modules/harper/resources/Table.ts:5919-5921). A page that is not an
- * array of rows with strictly increasing ids throws, so an error object or a
- * malformed page does not read as an empty result. The whole read finishes
- * before the first re-embed write, and it stops after MAX_MEMORY_READ_PAGES.
+ * array of rows with a non-empty string `id`, a non-empty string `agentId` and
+ * a string `content`, or whose ids do not strictly increase, throws, so an
+ * error object or a malformed page does not read as an empty result. The whole
+ * read finishes before the first re-embed write, and it refuses when its last
+ * page (MAX_MEMORY_READ_PAGES) comes back full.
  */
 export async function readAllMemoryRows(opts: {
   opsPort: string | number;
   opsAuth: string;
   conditions: MemoryReadCondition[];
   pageSize?: number;
+  /** Pages the read may request; callers other than tests use the default. */
+  maxPages?: number;
 }): Promise<MemoryRowPageRead> {
   const pageSize = opts.pageSize ?? REEMBED_READ_PAGE_SIZE;
+  const maxPages = opts.maxPages ?? MAX_MEMORY_READ_PAGES;
   if (!Number.isInteger(pageSize) || pageSize < 1) {
     throw new Error(`invalid page size ${pageSize}`);
   }
   const rows: Record<string, unknown>[] = [];
   let lastId: string | undefined;
   let pages = 0;
-  while (pages < MAX_MEMORY_READ_PAGES) {
+  while (pages < maxPages) {
     pages++;
     const conditions: MemoryReadCondition[] = [...opts.conditions];
     if (lastId !== undefined) {
@@ -181,6 +186,13 @@ export async function readAllMemoryRows(opts: {
       if (typeof id !== "string" || id.length === 0) {
         throw new Error(`page ${pages}: row without a non-empty string id`);
       }
+      const rowAgentId = (row as { agentId?: unknown } | null)?.agentId;
+      if (typeof rowAgentId !== "string" || rowAgentId.length === 0) {
+        throw new Error(`page ${pages}: row without a non-empty string agentId`);
+      }
+      if (typeof (row as { content?: unknown } | null)?.content !== "string") {
+        throw new Error(`page ${pages}: row without a string content`);
+      }
       if (lastId !== undefined && Buffer.compare(Buffer.from(id), Buffer.from(lastId)) <= 0) {
         throw new Error(`page ${pages}: ids do not strictly increase`);
       }
@@ -190,7 +202,7 @@ export async function readAllMemoryRows(opts: {
     rows.push(...seen);
     if (page.length < pageSize) return { rows, pages };
   }
-  throw new Error(`stopped after ${MAX_MEMORY_READ_PAGES} pages`);
+  throw new Error(`stopped after ${maxPages} pages`);
 }
 
 /**
@@ -395,8 +407,9 @@ program
       // vector index — exactly what we need when the goal is to replace every
       // embedding with a freshly-computed one. Without this path, `flair
       // reembed` could not recover from the very condition it exists to fix.
-      // Reads the pages before the first write (flair#3086). The read stops at
-      // MAX_MEMORY_READ_PAGES pages and exits non-zero without writing.
+      // Reads the pages before the first write (flair#3086). The read refuses
+      // when its last page (MAX_MEMORY_READ_PAGES) comes back full, and the
+      // command exits non-zero without writing.
       const opsPort = resolveOpsPort(opts);
       const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
       const readStoredModel = opsStoredModelReader(opsPort, opsAuth);

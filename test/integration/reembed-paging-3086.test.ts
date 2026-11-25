@@ -215,3 +215,33 @@ describe("flair#3086: flair reembed reads Memory rows page by page", () => {
     expect((await read("p3-d-7")).embeddingModel).toBe(BARE_MODEL_ID);
   }, 180_000);
 });
+
+describe("flair#3086: the page bound", () => {
+  test("a full page at the bound is refused", async () => {
+    const rows = Array.from({ length: 6 }, (_, i) => fixtureRow(`p4-e-${i + 1}`, agentA.id));
+    await op({ operation: "insert", database: "flair", table: "Memory", records: rows });
+
+    await expect(readAllMemoryRows({
+      opsPort: opsPort(),
+      opsAuth: adminAuth(),
+      conditions: [prefix("p4-")],
+      pageSize: 3,
+      maxPages: 2,
+    })).rejects.toThrow("stopped after 2 pages");
+  }, 120_000);
+
+  test("a short page at the bound completes the read", async () => {
+    const rows = Array.from({ length: 4 }, (_, i) => fixtureRow(`p5-e-${i + 1}`, agentA.id));
+    await op({ operation: "insert", database: "flair", table: "Memory", records: rows });
+
+    const pageRead = await readAllMemoryRows({
+      opsPort: opsPort(),
+      opsAuth: adminAuth(),
+      conditions: [prefix("p5-")],
+      pageSize: 3,
+      maxPages: 2,
+    });
+    expect(pageRead.pages).toBe(2);
+    expect(ids(pageRead.rows)).toEqual(rows.map((row) => String(row.id)).sort());
+  }, 120_000);
+});
