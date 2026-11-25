@@ -436,10 +436,10 @@ def test_handle_tool_call_store_persists_via_request(configured_provider):
 
 
 def test_store_memory_percent_encodes_id_in_path(ed25519_key_file, monkeypatch):
-    """#1970: a Memory id (agent id + generated suffix) with reserved URL
-    characters reaches the wire as ONE percent-encoded path segment. Before #1970
-    the raw id was interpolated into the path, so '#' started a fragment, '?' a
-    query, and '/' split it into extra segments."""
+    """#1970: for a Memory id (agent id + generated suffix) with reserved URL
+    characters, the encoded path passed to `_request` is ONE percent-encoded
+    path segment. Before #1970 the raw id was interpolated into the path, so '#'
+    started a fragment, '?' a query, and '/' split it into extra segments."""
     from urllib.parse import quote, unquote
 
     agent = "ag#1?x/y%z w"
