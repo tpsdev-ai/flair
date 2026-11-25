@@ -9,8 +9,7 @@
  * directory's parent) is snapshotted before and after; the snapshot holds entry
  * names, each file's SHA-256 content hash and each symlink's target — not modes,
  * timestamps or reads — so it shows no entry added or removed and no file
- * content or link target changed. "no `fetch` call was made" is the empty log
- * file.
+ * content or link target changed. With no `fetch` call, no log file is created.
  *
  * Valid ids on the same paths are covered elsewhere: `flair import` by
  * agent-home-creation-paths-2474.test.ts, `flair init` by
@@ -136,6 +135,17 @@ describe("flair#3119 — an invalid agent id is refused before its keys director
       const baseline = snapshotTree(home);
       const result = runCli(home, [
         "init", "--agent-id", id, "--skip-start",
+        "--data-dir", join(home, "data"), "--keys-dir", join(home, "keys"),
+        "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
+      ]);
+      expectRefused(home, result, id, baseline);
+    }, 60_000);
+
+    test(`flair init --agent refuses the agent id ${JSON.stringify(id)} on the local path`, () => {
+      const home = tempDir("iid-init-alias-local-");
+      const baseline = snapshotTree(home);
+      const result = runCli(home, [
+        "init", "--agent", id, "--skip-start",
         "--data-dir", join(home, "data"), "--keys-dir", join(home, "keys"),
         "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
       ]);

@@ -211,7 +211,7 @@ addAdminPassOptions(
     const agentId = data.agent?.id;
     // Only a missing agent.id (absent or null) means "no agent ID in export".
     // A supplied string, including the empty string, goes through the shared
-    // rule below; a supplied non-string is refused just above.
+    // rule below; a supplied non-string is refused just below.
     if (agentId === undefined || agentId === null) { console.error("Error: no agent ID in export"); process.exit(1); }
     // A present non-string id is refused before the shared rule: String(0) or
     // String(123) would itself match the rule, so the shared message would
