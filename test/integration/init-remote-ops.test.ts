@@ -509,10 +509,15 @@ async function startRecordingServer(): Promise<{
 const SAFE_METHOD = new Set(["GET", "HEAD", "OPTIONS"]);
 const READ_ONLY_OPERATION = new Set(["list_users", "list_roles"]);
 
-/** Safe methods and POSTs to opsURL with list_users or list_roles pass this guard. */
+/**
+ * Safe methods and POSTs to opsURL with list_users or list_roles pass this guard.
+ * callOpsApi posts to the ops URL with one trailing slash, so both sides drop a
+ * trailing slash before they are compared.
+ */
 function isStateChanging(call: { method: string; url: string; operation?: string }, opsURL: string): boolean {
   if (SAFE_METHOD.has(call.method)) return false;
-  return !(call.method === "POST" && new URL(call.url).href === new URL(opsURL).href &&
+  const normalize = (url: string) => new URL(url).href.replace(/\/$/, "");
+  return !(call.method === "POST" && normalize(call.url) === normalize(opsURL) &&
     call.operation !== undefined && READ_ONLY_OPERATION.has(call.operation));
 }
 
@@ -537,6 +542,10 @@ describe("isStateChanging", () => {
     expect(check("OPTIONS", undefined, "http://127.0.0.1:19926/Memory/probe")).toBe(false);
     expect(check("POST", "list_users")).toBe(false);
     expect(check("POST", "list_users", "http://127.0.0.1:19926/Memory/probe")).toBe(true);
+    // An ops URL with a path, as HARPER_OPS_URL may set it: callOpsApi posts to it with one trailing slash.
+    const pathOps = "http://127.0.0.1:19925/ops";
+    expect(isStateChanging({ method: "POST", url: `${pathOps}/`, operation: "list_users" }, pathOps)).toBe(false);
+    expect(isStateChanging({ method: "POST", url: "http://127.0.0.1:19925/opsx/", operation: "list_users" }, pathOps)).toBe(true);
   });
 
   test("records HTTP methods and paths and classifies REST and ops requests", async () => {
