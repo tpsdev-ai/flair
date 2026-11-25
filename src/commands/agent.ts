@@ -574,7 +574,7 @@ export function register(program: Command): void {
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .action(async (id: string, opts) => {
       // flair#2359 — the ONE agent-ID rule, before any key file is read or
-      // written, and before any `fetch` call.
+      // written, and before any `fetch` call made by the command action.
       if (!isValidAgentId(id)) {
         console.error(`Error: ${invalidAgentIdMessage(id)}`);
         process.exit(1);

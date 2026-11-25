@@ -221,7 +221,7 @@ addAdminPassOptions(
       process.exit(1);
     }
     // flair#2359 — the ONE agent-ID rule, before the keys directory is created
-    // or any key file is written, and before any `fetch` call.
+    // or any key file is written, and before any `fetch` call made by the command action.
     if (!isValidAgentId(agentId)) {
       console.error(`Error: ${invalidAgentIdMessage(agentId)}`);
       process.exit(1);

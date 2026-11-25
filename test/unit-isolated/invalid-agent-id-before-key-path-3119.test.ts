@@ -2,7 +2,7 @@
  * flair#3119 — `flair import`, `flair init` (local and `--target`) and
  * `flair agent rotate-key` refuse an id that fails the shared agent-ID rule
  * (src/lib/agent-id-rule.ts) before the keys directory or any key file is
- * created or written, and before any `fetch` call was made.
+ * created or written, and before the command action makes any `fetch` call.
  *
  * Each case runs the real CLI in a HOME-isolated child whose overridden `fetch`
  * records every `fetch` call to a file and answers 200. The home tree (the keys
