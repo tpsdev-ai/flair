@@ -1,0 +1,1 @@
+- **`flair import`, `flair init` and `flair agent rotate-key` refuse an invalid agent id before their own key file writes or `fetch` calls.**

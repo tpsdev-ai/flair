@@ -19,6 +19,7 @@ import {
   sendJsonRequest,
 } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import { SOUL_SCOPE_FIELDS_REFUSAL, suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
 import * as render from "../render.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -208,7 +209,23 @@ addAdminPassOptions(
     }
 
     const agentId = data.agent?.id;
-    if (!agentId) { console.error("Error: no agent ID in export"); process.exit(1); }
+    // Only a missing agent.id (absent or null) means "no agent ID in export".
+    // A supplied string, including the empty string, goes through the shared
+    // rule below; a supplied non-string is refused just below.
+    if (agentId === undefined || agentId === null) { console.error("Error: no agent ID in export"); process.exit(1); }
+    // A present non-string id is refused before the shared rule: String(0) or
+    // String(123) would itself match the rule, so the shared message would
+    // wrongly say the id violates it. A type message states the actual refusal.
+    if (typeof agentId !== "string") {
+      console.error(`Error: agent id in export must be a string (got ${typeof agentId})`);
+      process.exit(1);
+    }
+    // flair#2359 — the ONE agent-ID rule, before the keys directory is created
+    // or any key file is written, and before any `fetch` call made by the command action.
+    if (!isValidAgentId(agentId)) {
+      console.error(`Error: ${invalidAgentIdMessage(agentId)}`);
+      process.exit(1);
+    }
 
     console.log(`Importing agent '${agentId}'...`);
 
