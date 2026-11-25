@@ -74,9 +74,7 @@ jobs:
 
       - name: Install linux-x64 native binary for embeddings
         run: |
-          LLAMA_NATIVE_VERSION="$(node scripts/ci/llama-native-version.mjs)"
-          [[ "$LLAMA_NATIVE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::node-llama-cpp version in bun.lock is not x.y.z"; exit 1; }
-          bun add --no-save "@node-llama-cpp/linux-x64@${LLAMA_NATIVE_VERSION}"
+          node scripts/ci/install-llama-native.mjs
 
       - name: Build Flair resources and CLI
         run: bun run build && bun run build:cli

@@ -1,9 +1,6 @@
 #!/usr/bin/env node
-// The single source of truth for the `@node-llama-cpp/<platform>` native
-// binaries CI installs: the version `node-llama-cpp` resolves to in `bun.lock`
-// (flair#3133). A floating `@3` resolves to the newest 3.x at run time, which
-// can be newer than the lockfile's `node-llama-cpp` and can even be a tarball
-// npm is not serving yet.
+// Read the checkout native version from bun.lock (flair#3133).
+// Floating versions can drift from the checkout resolution.
 
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -21,14 +18,13 @@ export const LOCKFILE = resolve(ROOT, "bun.lock");
 // `node-llama-cpp/chalk` or `harper-fabric-embeddings/node-llama-cpp`.
 const RESOLVED = /^[ \t]*"node-llama-cpp"[ \t]*:[ \t]*\[[ \t]*"node-llama-cpp@([^"]+)"/gm;
 
-/** The only version shape that may reach an npm spec. */
+/** Accepted version shape for native installs. */
 export const SEMVER = /^[0-9]+\.[0-9]+\.[0-9]+$/;
 
 /**
  * The version `node-llama-cpp` resolves to in `lockText`.
  *
- * Throws a named error unless there is exactly one such resolution: a stale or
- * split lockfile must stop CI with a diagnosis, never silently pick one.
+ * Throws a named error for a missing or duplicate resolution.
  */
 export function readLlamaNativeVersion(lockText) {
   const versions = [...lockText.matchAll(RESOLVED)].map(match => match[1]);

@@ -1,14 +1,8 @@
 #!/usr/bin/env node
-// The node-llama-cpp version an npm-installed flair actually uses, read from
-// the directory it was installed into (flair#3133). CI installs the matching
-// @node-llama-cpp/<platform> native binary there; that directory resolves its
-// own tree, which can differ from this checkout's bun.lock (the migration
-// baseline is an older release).
-//
-// The lookup resolves from the install root, the installed flair package, and
-// that package's harper-fabric-embeddings (hoisted or nested) — the places the
-// installed tree loads its modules from. A directory with no node-llama-cpp
-// install fails with a named error instead of installing a floating version.
+// Select the first resolvable native package, then the family package, using
+// these roots for each: install root, installed Flair, nested embeddings,
+// hoisted embeddings (flair#3133).
+// Installed trees can resolve a different version from the checkout lockfile.
 
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -20,7 +14,7 @@ import { SEMVER } from "./llama-native-version.mjs";
 export const DEFAULT_PACKAGE = "@node-llama-cpp/linux-x64";
 export const FAMILY_PACKAGE = "node-llama-cpp";
 
-/** The directories a resolved module is loaded from, nearest first. */
+/** Fixed search order within each package name. */
 export function resolutionRoots(dir) {
   const root = resolve(dir);
   return [
@@ -42,7 +36,7 @@ function manifestOf(root, packageName) {
     const candidate = join(dir, "package.json");
     if (existsSync(candidate)) {
       const manifest = JSON.parse(readFileSync(candidate, "utf8"));
-      if (manifest.name === packageName) return manifest;
+      if (manifest.name === packageName) return { manifest, source: candidate };
       break;
     }
     if (dirname(dir) === dir) break;
@@ -50,47 +44,44 @@ function manifestOf(root, packageName) {
   throw new Error(`llama-installed-version: could not read ${packageName}'s package.json from ${root}`);
 }
 
-/**
- * The installed version of `packageName` under `dir`.
- *
- * Returns null when no root resolves it; rethrows any other failure (an
- * unreadable or malformed package is not an absent one).
- */
-export function findInstalledVersion(dir, packageName) {
+/** First resolvable manifest for this package, or null when absent. */
+export function findInstalledPackage(dir, packageName) {
   for (const root of resolutionRoots(dir)) {
-    let manifest;
+    let found;
     try {
-      manifest = manifestOf(root, packageName);
+      found = manifestOf(root, packageName);
     } catch (error) {
       if (error?.code === "MODULE_NOT_FOUND" || error?.code === "ERR_MODULE_NOT_FOUND") continue;
       throw error;
     }
-    if (typeof manifest.version !== "string") {
+    if (typeof found.manifest.version !== "string") {
       throw new Error(`llama-installed-version: ${packageName} in ${root} has no version`);
     }
-    return manifest.version;
+    return { version: found.manifest.version, source: found.source };
   }
   return null;
 }
 
-/**
- * The native version an npm-installed flair under `dir` uses: the installed
- * platform package, else the installed `node-llama-cpp` package.
- *
- * Throws a named error when neither is installed: an unknown version stops the
- * step instead of installing a floating one.
- */
-export function readLlamaInstalledVersion(dir, packageName = DEFAULT_PACKAGE) {
-  const version = findInstalledVersion(dir, packageName) ?? findInstalledVersion(dir, FAMILY_PACKAGE);
-  if (version === null) {
+export function findInstalledVersion(dir, packageName) {
+  return findInstalledPackage(dir, packageName)?.version ?? null;
+}
+
+/** Native package across the fixed roots, then family across the same roots. */
+export function readLlamaInstalledPackage(dir, packageName = DEFAULT_PACKAGE) {
+  const found = findInstalledPackage(dir, packageName) ?? findInstalledPackage(dir, FAMILY_PACKAGE);
+  if (found === null) {
     throw new Error(
       `llama-installed-version: ${packageName} and ${FAMILY_PACKAGE} are not installed under ${resolve(dir)}`,
     );
   }
-  if (!SEMVER.test(version)) {
-    throw new Error(`llama-installed-version: installed ${packageName} version "${version}" is not x.y.z`);
+  if (!SEMVER.test(found.version)) {
+    throw new Error(`llama-installed-version: installed version "${found.version}" in ${found.source} is not x.y.z`);
   }
-  return version;
+  return found;
+}
+
+export function readLlamaInstalledVersion(dir, packageName = DEFAULT_PACKAGE) {
+  return readLlamaInstalledPackage(dir, packageName).version;
 }
 
 const isEntryPoint =
