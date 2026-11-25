@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { load } from "js-yaml";
 import { ROOT, readLlamaNativeVersion } from "../../scripts/ci/llama-native-version.mjs";
 import { readLlamaInstalledPackage, readLlamaInstalledVersion } from "../../scripts/ci/llama-installed-version.mjs";
 import { checkWorkflows } from "../../scripts/ci/check-llama-native-pin.mjs";
@@ -170,5 +171,26 @@ describe("check-llama-native-pin", () => {
 
   test("accepts the repository workflows", () => {
     expect(checkWorkflows(join(ROOT, ".github/workflows"))).toEqual([]);
+  });
+
+  test("pins installer calls per workflow and the lint gate step", () => {
+    for (const [file, count] of Object.entries({
+      "test.yml": 7,
+      "migration-ci-lanes.yml": 5,
+      "smoke.yml": 1,
+      "federation-compat.yml": 1,
+    })) {
+      const text = readFileSync(join(ROOT, ".github/workflows", file), "utf8");
+      const calls = text.split(/\r?\n/).filter(line =>
+        !line.trim().startsWith("#") && /\bnode\s+(?:"\$GITHUB_WORKSPACE\/)?scripts\/ci\/install-llama-native\.mjs\b/.test(line),
+      );
+      expect({ file, count: calls.length }).toEqual({ file, count });
+    }
+    const workflow = load(readFileSync(join(ROOT, ".github/workflows/test.yml"), "utf8")) as {
+      jobs: Record<string, { steps: { run?: string }[] }>;
+    };
+    expect(workflow.jobs["cli-spawn-budgets"].steps.some(step =>
+      step.run?.trim() === "node scripts/ci/check-llama-native-pin.mjs",
+    )).toBe(true);
   });
 });
