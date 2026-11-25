@@ -213,6 +213,13 @@ addAdminPassOptions(
     // A supplied value of any kind, including the empty string, goes through
     // the shared rule below.
     if (agentId === undefined || agentId === null) { console.error("Error: no agent ID in export"); process.exit(1); }
+    // A present non-string id is refused before the shared rule: String(0) or
+    // String(123) would itself match the rule, so the shared message would
+    // wrongly say the id violates it. A type message states the actual refusal.
+    if (typeof agentId !== "string") {
+      console.error(`Error: agent id in export must be a string (got ${typeof agentId})`);
+      process.exit(1);
+    }
     // flair#2359 — the ONE agent-ID rule, before the keys directory is created
     // or any key file is written, and before any request.
     if (!isValidAgentId(agentId)) {

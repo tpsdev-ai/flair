@@ -2,14 +2,15 @@
  * flair#3119 — `flair import`, `flair init` (local and `--target`) and
  * `flair agent rotate-key` refuse an id that fails the shared agent-ID rule
  * (src/lib/agent-id-rule.ts) before the keys directory or any key file is
- * created or written, and before any request.
+ * created or written, and before any `fetch` call was made.
  *
- * Each case runs the real CLI in a HOME-isolated child whose `fetch` records
- * every request to a file and answers 200. The home tree (the keys directory's
- * parent) is snapshotted before and after; the snapshot holds entry names, each
- * file's SHA-256 content hash and each symlink's target — not modes, timestamps
- * or reads — so it shows no entry added or removed and no file content or link
- * target changed. "No request sent" is the empty request log.
+ * Each case runs the real CLI in a HOME-isolated child whose overridden `fetch`
+ * records every `fetch` call to a file and answers 200. The home tree (the keys
+ * directory's parent) is snapshotted before and after; the snapshot holds entry
+ * names, each file's SHA-256 content hash and each symlink's target — not modes,
+ * timestamps or reads — so it shows no entry added or removed and no file
+ * content or link target changed. "no `fetch` call was made" is the empty log
+ * file.
  *
  * Valid ids on the same paths are covered elsewhere: `flair import` by
  * agent-home-creation-paths-2474.test.ts, `flair init` by
@@ -85,12 +86,21 @@ function requestsSent(home: string): number {
   return text.trim().split("\n").filter(Boolean).length;
 }
 
-function expectRefused(home: string, result: ReturnType<typeof runCli>, id: string, tree: string[]): void {
+function expectRefusedWith(
+  home: string,
+  result: ReturnType<typeof runCli>,
+  tree: string[],
+  message: string,
+): void {
   const out = result.stdout + result.stderr;
   expect(result.status, out).toBe(1);
-  expect(out).toContain(`Error: invalid agent id ${JSON.stringify(id)}: ${RULE_TEXT}`);
+  expect(out).toContain(message);
   expect(snapshotTree(home)).toEqual(tree);
   expect(requestsSent(home)).toBe(0);
+}
+
+function expectRefused(home: string, result: ReturnType<typeof runCli>, id: string, tree: string[]): void {
+  expectRefusedWith(home, result, tree, `Error: invalid agent id ${JSON.stringify(id)}: ${RULE_TEXT}`);
 }
 
 const BAD_IDS = ["agent/one", ".."];
@@ -142,6 +152,40 @@ describe("flair#3119 — an invalid agent id is refused before its keys director
         "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
       ]);
       expectRefused(home, result, id, baseline);
+    }, 60_000);
+
+    test(`flair init --target --cluster-admin-user --agent-id refuses the agent id ${JSON.stringify(id)} on the provisioning leg`, () => {
+      const home = tempDir("iid-init-provision-");
+      const baseline = snapshotTree(home);
+      const result = runCli(home, [
+        "init", "--target", "http://127.0.0.1:1", "--ops-target", "http://127.0.0.1:1",
+        "--cluster-admin-user", "cluster-admin-a", "--cluster-admin-pass", "throwaway-cluster-pass",
+        "--force", "--agent-id", id,
+        "--keys-dir", join(home, "keys"),
+        "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
+      ]);
+      expectRefused(home, result, id, baseline);
+    }, 60_000);
+  }
+});
+/**
+ * A present non-string id in an export is refused before the shared rule:
+ * `String(0)` and `String(123)` each match the rule, so a rule message would
+ * misdescribe the refusal.
+ */
+describe("flair#3119 — a present non-string agent id in an export is refused", () => {
+  for (const id of [0, 123]) {
+    test(`flair import refuses the numeric agent id ${id}`, () => {
+      const home = tempDir("iid-nonstring-import-");
+      const exportPath = join(home, "export.json");
+      writeFileSync(exportPath, JSON.stringify({ type: "agent-export", agent: { id }, souls: [], memories: [] }));
+      const baseline = snapshotTree(home);
+      const result = runCli(home, [
+        "import", exportPath,
+        "--port", "1", "--ops-target", "http://127.0.0.1:1",
+        "--admin-pass", ADMIN_PASS, "--keys-dir", join(home, "keys"),
+      ]);
+      expectRefusedWith(home, result, baseline, "Error: agent id in export must be a string (got number)");
     }, 60_000);
   }
 });
