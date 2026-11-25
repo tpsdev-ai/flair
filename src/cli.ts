@@ -5521,7 +5521,8 @@ export function probePidLiveness(
  * `deadlineMs` passes; return whether `gone` was read and the last read
  * (flair#2330). This is `flair doctor`'s stop wait.
  *
- * If both state reads fail, that poll stays `alive`.
+ * If both state reads fail and the pid still answers signal 0, that poll stays
+ * `alive`; an ESRCH at the re-probe reports it `gone`.
  * Check expiry before each read; an admitted read gets at least 1s to finish.
  * Readers honoring their timeout allow deadline + 1s, plus scheduling and subprocess overhead.
  */
