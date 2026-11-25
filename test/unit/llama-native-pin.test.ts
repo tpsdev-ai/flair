@@ -145,16 +145,14 @@ describe("check-llama-native-pin", () => {
     expect(checkWorkflows(dir)).toEqual({ installs: 1, violations: [] });
   });
 
-  test("accepts either script inline", () => {
+  test("flags an inline substitution: a failed script leaves an empty version, not a stopped step", () => {
     const dir = fixture({
-      "a.yml": single('bun add --no-save "@node-llama-cpp/linux-x64@$(node scripts/ci/llama-native-version.mjs)"'),
-      "b.yml": single(
-        'npm install --no-save "@node-llama-cpp/linux-x64@$(node scripts/ci/llama-installed-version.mjs \"$BASE_DIR\")"',
-      ),
+      "test.yml": single('bun add --no-save "@node-llama-cpp/linux-x64@$(node scripts/ci/llama-native-version.mjs)"'),
     });
     const result = checkWorkflows(dir);
-    expect(result.installs).toBe(2);
-    expect(result.violations).toEqual([]);
+    expect(result.installs).toBe(1);
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0].reason).toMatch(/inline substitution is not checked/);
   });
 
   test("flags a variable that is not format-checked before the install", () => {
@@ -192,9 +190,11 @@ describe("check-llama-native-pin", () => {
 
   test("counts every install in a line", () => {
     const dir = fixture({
-      "test.yml": single(
-        'bun add --no-save "@node-llama-cpp/linux-x64@$(node scripts/ci/llama-native-version.mjs)" "@node-llama-cpp/mac-arm64-metal@3.22.3"',
-      ),
+      "test.yml": block([
+        'LLAMA_NATIVE_VERSION="$(node scripts/ci/llama-native-version.mjs)"',
+        '[[ "$LLAMA_NATIVE_VERSION" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] || { echo "::error::bad"; exit 1; }',
+        'bun add --no-save "@node-llama-cpp/linux-x64@${LLAMA_NATIVE_VERSION}" "@node-llama-cpp/mac-arm64-metal@3.22.3"',
+      ]),
     });
     const result = checkWorkflows(dir);
     expect(result.installs).toBe(2);

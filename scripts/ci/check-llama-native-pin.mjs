@@ -11,10 +11,12 @@
 // to the tree it installs into: a lockfile bump leaves the literal stale, and
 // an npm-installed directory resolves its own tree, not this checkout's.
 //
-// Either form is accepted inline (`$(node …)`) or through a variable assigned
-// from one of those scripts earlier in the same step. A variable must also be
-// checked against `^[0-9]+\.[0-9]+\.[0-9]+$` between the assignment and the
-// install, the way the migration baseline step checks its own version.
+// Each form is accepted through a variable assigned from one of those scripts
+// earlier in the same step, and that variable must be checked against
+// `^[0-9]+\.[0-9]+\.[0-9]+$` between the assignment and the install, the way
+// the migration baseline step checks its own version. An inline `$(node …)`
+// is not accepted: when the script exits non-zero the shell still runs the
+// install, with an empty version.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -103,7 +105,7 @@ function findGuard(lines, from, to, name) {
 function classify(expr, lines, stepStart, at) {
   if (expr === null) return { version: null, reason: "no version" };
   if (expr.kind === "substitution") {
-    return allowedScript(expr.body) ? null : { version: expr.text, reason: "not a version script" };
+    return { version: expr.text, reason: "inline substitution is not checked against ^x.y.z$ in the step" };
   }
   if (expr.kind === "variable") {
     const assigned = findAssignment(lines, stepStart, at, expr.name);
