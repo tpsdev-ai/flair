@@ -653,7 +653,7 @@ program
     }
     const bin = harper.path;
 
-    const adminPass = envAdminPass() || "";
+    const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
     // flair#670/#863: this fallback path (no launchd plist) sets no
     // HARPER_SET_CONFIG, so the ops bind has to be re-asserted explicitly on
     // every spawn — see buildDirectSpawnEnv. The escape hatch on this path is

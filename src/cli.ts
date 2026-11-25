@@ -8638,7 +8638,7 @@ async function startFlairDirect(port: number, dataDir: string): Promise<number |
   // Without this, `flair init --admin-pass X` (which only exports HDB_*
   // to the initial Harper spawn) followed by `flair restart` would silently
   // drop admin credentials — any subsequent auth'd call returns 401.
-  const adminPass = envAdminPass() || "";
+  const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
   // flair#863: the same env `flair start` builds, from the same builder — this
   // path sets no HARPER_SET_CONFIG, and Harper RESTORES the pre-SET_CONFIG
   // original for every key SET_CONFIG had forced whenever that variable is
