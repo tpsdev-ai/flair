@@ -293,10 +293,25 @@ async function stopDirectlyStartedFlair(port: number, dataDir: string, label: st
       const after = classifyDaemonState(await gatherDaemonEvidence(port, dataDir), { port, dataDir });
       const managedAfter = observeLaunchdManagement(dataDir, port);
       if (managedAfter.jobLoaded !== "not-loaded" || after.state !== "NOT_RUNNING") {
+        const afterDetail = "detail" in after && after.detail ? ` ${after.detail}` : "";
         console.error(
           `❌ flair stop: pid ${pid} exited, but Flair is not confirmed down for ${dataDir} — ` +
-          `the launchd job ${label} now reads ${managedAfter.jobLoaded ?? "unknown"} and the instance reads ${after.state}.`,
+          `the launchd job ${label} now reads ${managedAfter.jobLoaded ?? "unknown"} and the instance reads ${after.state}.${afterDetail}`,
         );
+        // Name the step that handles this observation, next to the diagnostic.
+        if (managedAfter.jobLoaded === "loaded") {
+          console.error("   Run 'flair stop' again to take the unload path.");
+        } else if (
+          managedAfter.jobLoaded === "not-loaded" && after.state === "RUNNING"
+        ) {
+          // This step prints only when the job reads not-loaded and the
+          // instance reads RUNNING: the classifier verified the hdb.pid pid
+          // against the identity sidecar (pid and start time), found it alive,
+          // and got Flair's /Health. A re-run that reads the same job state and
+          // verified pid signals that pid. RUNNING does not establish that the
+          // pid owns the port.
+          console.error("   Run 'flair stop' again to stop the verified recorded pid (the instance has recorded its identity).");
+        }
         console.error("   Inspect it with: flair doctor");
         process.exit(1);
       }
