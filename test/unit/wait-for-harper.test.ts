@@ -1119,8 +1119,7 @@ describe("wait-for-harper.mjs", () => {
     CASE_TIMEOUT_MS,
   );
 
-  // A step's shell commands with comment lines dropped and backslash
-  // continuations joined, each split into whitespace-separated words.
+  // A step's shell text is tokenized for syntactic presence after dropping comments and joining continuations, without proving execution.
   const commandsOf = (run: string): string[][] =>
     run
       .split("\n")
@@ -1138,7 +1137,7 @@ describe("wait-for-harper.mjs", () => {
     return at === -1 ? undefined : words[at + 1];
   };
 
-  test("(i) both workflows run the waiter as a command", () => {
+  test("(i) both workflows contain a syntactically active waiter command without proving execution", () => {
     interface Step {
       name?: string;
       if?: unknown;
