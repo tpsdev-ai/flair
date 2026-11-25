@@ -505,16 +505,94 @@ async function startRecordingServer(): Promise<{
   };
 }
 
-/** The operations that change cluster state. */
-const WRITE_OPERATION = /^(deploy_component|add_|alter_|insert|upsert|update|delete|drop_)/;
+/** HTTP methods this guard treats as safe. */
+const SAFE_METHOD = new Set(["GET", "HEAD", "OPTIONS"]);
+const READ_ONLY_OPERATION = new Set(["list_users", "list_roles"]);
 
-/** Assert no recorded request carried a write operation. */
-function expectNoWriteOperation(seen: { operation?: string }[], label: string): void {
-  const writes = seen
-    .map((call) => call.operation)
-    .filter((operation): operation is string => operation !== undefined && WRITE_OPERATION.test(operation));
-  expect(writes, `${label}: no write operation may be sent before the refusal`).toEqual([]);
+/**
+ * Safe methods and POSTs to opsURL with list_users or list_roles pass this guard.
+ * callOpsApi posts to the ops URL with one trailing slash, so both sides drop a
+ * trailing slash before they are compared.
+ */
+function isStateChanging(call: { method: string; url: string; operation?: string }, opsURL: string): boolean {
+  if (SAFE_METHOD.has(call.method)) return false;
+  const normalize = (url: string) => new URL(url).href.replace(/\/$/, "");
+  return !(call.method === "POST" && normalize(call.url) === normalize(opsURL) &&
+    call.operation !== undefined && READ_ONLY_OPERATION.has(call.operation));
 }
+
+/** Assert that no recorded request is classified as a write. */
+function expectNoWriteRequest(seen: { method: string; url: string; operation?: string }[], label: string, opsURL: string): void {
+  const writes = seen
+    .filter((call) => isStateChanging(call, opsURL))
+    .map((call) => `${call.method} ${new URL(call.url).pathname}${call.operation === undefined ? "" : ` (${call.operation})`}`);
+  expect(writes, `${label}: no request classified as a write may be sent before the refusal`).toEqual([]);
+}
+
+describe("isStateChanging", () => {
+  test("flags REST writes and ops writes, and passes safe methods and read-only ops", () => {
+    const opsURL = "http://127.0.0.1:19925";
+    const check = (method: string, operation?: string, url = opsURL) => isStateChanging({ method, url, operation }, opsURL);
+    expect(check("PUT")).toBe(true);
+    expect(check("DELETE")).toBe(true);
+    expect(check("POST")).toBe(true);
+    expect(check("POST", "add_user")).toBe(true);
+    expect(check("GET")).toBe(false);
+    expect(check("HEAD", undefined, "http://127.0.0.1:19926/Memory/probe")).toBe(false);
+    expect(check("OPTIONS", undefined, "http://127.0.0.1:19926/Memory/probe")).toBe(false);
+    expect(check("POST", "list_users")).toBe(false);
+    expect(check("POST", "list_users", "http://127.0.0.1:19926/Memory/probe")).toBe(true);
+    // An ops URL with a path, as HARPER_OPS_URL may set it: callOpsApi posts to it with one trailing slash.
+    const pathOps = "http://127.0.0.1:19925/ops";
+    expect(isStateChanging({ method: "POST", url: `${pathOps}/`, operation: "list_users" }, pathOps)).toBe(false);
+    expect(isStateChanging({ method: "POST", url: "http://127.0.0.1:19925/opsx/", operation: "list_users" }, pathOps)).toBe(true);
+  });
+
+  test("records HTTP methods and paths and classifies REST and ops requests", async () => {
+    const server = await startRecordingServer();
+    const opsURL = `${server.url}/ops`;
+    const recorder = installRecorder({ user: "admin", pass: "test123" });
+    const cases = [
+      { method: "POST", path: "/ops", operation: "list_users", write: false },
+      { method: "POST", path: "/ops", operation: "list_roles", write: false },
+      { method: "POST", path: "/ops", operation: "add_user", write: true },
+      { method: "PUT", path: "/Memory/probe", write: true },
+      { method: "PATCH", path: "/Memory/probe", write: true },
+      { method: "POST", path: "/Memory/probe", operation: "list_users", write: true },
+      { method: "GET", path: "/Memory/probe", write: false },
+      { method: "HEAD", path: "/Memory/probe", write: false },
+      { method: "OPTIONS", path: "/Memory/probe", write: false },
+    ];
+    try {
+      for (const entry of cases) {
+        const response = await fetch(`${server.url}${entry.path}`, {
+          method: entry.method,
+          ...(entry.operation === undefined ? {} : {
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ operation: entry.operation }),
+          }),
+          signal: AbortSignal.timeout(5_000),
+        });
+        expect(response.status).toBe(200);
+        await response.text();
+      }
+      expect(recorder.all).toHaveLength(cases.length);
+      expect(server.requests).toHaveLength(cases.length);
+      for (const [index, entry] of cases.entries()) {
+        const record = recorder.all[index];
+        expect({ method: record.method, path: new URL(record.url).pathname, operation: record.operation })
+          .toEqual({ method: entry.method, path: entry.path, operation: entry.operation });
+        expect(server.requests[index]).toEqual({ method: entry.method, path: entry.path, operation: entry.operation });
+        const check = () => expectNoWriteRequest([record], `${entry.method} ${entry.path}`, opsURL);
+        if (entry.write) expect(check).toThrow();
+        else expect(check).not.toThrow();
+      }
+    } finally {
+      recorder.restore();
+      await server.close();
+    }
+  }, 20_000);
+});
 
 describe("flair#3106 — reserved principal refusal (real Harper)", () => {
   let harper: HarperInstance;
@@ -561,7 +639,7 @@ describe("flair#3106 — reserved principal refusal (real Harper)", () => {
     // Refused before any filesystem or cluster write: the isolated home is
     // still empty, and the action sent no write operation.
     expect(readdirSync(home)).toEqual([]);
-    expectNoWriteOperation(recorder.all, "reserved-principal refusal");
+    expectNoWriteRequest(recorder.all, "reserved-principal refusal", harper.opsURL);
 
     const after = await harperOps(harper, "admin", "test123", { operation: "list_users" });
     expect(after.status).toBe(200);
@@ -592,7 +670,7 @@ describe("flair#3106 — reserved principal refusal (real Harper)", () => {
     expect(out.stderr).toContain("different cluster administrator");
     expect(out.stderr).not.toContain("Choose another --agent-id");
     expect(readdirSync(home)).toEqual([]);
-    expectNoWriteOperation(recorder.all, "reserved-principal/agent-ID overlap refusal");
+    expectNoWriteRequest(recorder.all, "reserved-principal/agent-ID overlap refusal", harper.opsURL);
   }, 150_000);
 });
 
@@ -646,12 +724,12 @@ interface RecordedCall { user: string; pass: string; path: string; operation?: s
  */
 function installRecorder(deployAuth: { user: string; pass: string }): {
   calls: RecordedCall[];
-  all: { url: string; authz: string | null; operation?: string }[];
+  all: { url: string; method: string; authz: string | null; operation?: string }[];
   deployAuthOk: () => boolean;
   restore: () => void;
 } {
   const calls: RecordedCall[] = [];
-  const all: { url: string; authz: string | null; operation?: string }[] = [];
+  const all: { url: string; method: string; authz: string | null; operation?: string }[] = [];
   let deployAuthOk = false;
   const prev = globalThis.fetch;
   globalThis.fetch = (async (input: any, init?: any) => {
@@ -661,7 +739,8 @@ function installRecorder(deployAuth: { user: string; pass: string }): {
     const bodyText = typeof init?.body === "string" ? init.body : null;
     let operation: string | undefined;
     try { operation = bodyText === null ? undefined : JSON.parse(bodyText)?.operation; } catch { operation = undefined; }
-    all.push({ url, authz: authz === "" ? null : authz, operation });
+    const method = String(init?.method ?? (typeof input === "object" ? input.method : undefined) ?? "GET").toUpperCase();
+    all.push({ url, method, authz: authz === "" ? null : authz, operation });
     if (operation === "deploy_component") {
       deployAuthOk = authz === basic(deployAuth.user, deployAuth.pass);
       if (!deployAuthOk) throw new Error("deploy_component did not carry the cluster administrator's Basic auth");
@@ -1227,7 +1306,7 @@ describe("flair#3106 — already-running instance leg (real Harper)", () => {
     expect(out.stderr).toContain("different admin user");
     expect(out.stderr).toContain("--admin-user");
     expect(readdirSync(home)).toEqual([]);
-    expectNoWriteOperation(recorder.all, "reserved-principal refusal on the already-running leg");
+    expectNoWriteRequest(recorder.all, "reserved-principal refusal on the already-running leg", harper.opsURL);
 
     const after = await harperOps(harper, "admin", "test123", { operation: "list_users" });
     expect(after.status).toBe(200);
