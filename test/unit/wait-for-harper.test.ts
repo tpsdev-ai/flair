@@ -1119,25 +1119,62 @@ describe("wait-for-harper.mjs", () => {
     CASE_TIMEOUT_MS,
   );
 
-  test("(i) both workflows call the waiter", () => {
+  // A step's shell commands with comment lines dropped and backslash
+  // continuations joined, each split into whitespace-separated words.
+  const commandsOf = (run: string): string[][] =>
+    run
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n")
+      .replace(/\\\n/g, " ")
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/).filter((word) => word !== ""))
+      .filter((words) => words.length > 0);
+  const WAITER = '"$GITHUB_WORKSPACE/scripts/ci/wait-for-harper.mjs"';
+  const waiterCalls = (run: string | undefined): string[][] =>
+    commandsOf(run ?? "").filter((words) => words[0] === "node" && words[1] === WAITER);
+  const argAfter = (words: string[], flag: string): string | undefined => {
+    const at = words.indexOf(flag);
+    return at === -1 ? undefined : words[at + 1];
+  };
+
+  test("(i) both workflows run the waiter as a command", () => {
     interface Step {
       name?: string;
+      if?: unknown;
       run?: string;
       env?: Record<string, string>;
     }
     interface Workflow {
-      jobs: Record<string, { steps?: Step[] }>;
+      jobs: Record<string, { if?: unknown; steps?: Step[] }>;
     }
     const read = (path: string) => loadYaml(readFileSync(join(REPO, ".github", "workflows", path), "utf8")) as Workflow;
 
-    const integration = read("test.yml").jobs["test-integration"]?.steps?.find((step) => step.name?.startsWith("Start Harper"));
-    expect(integration?.run).toContain("scripts/ci/wait-for-harper.mjs");
-    expect(integration?.run).toContain("--credentials-env HARPER_START_CREDENTIALS");
+    const integrationJob = read("test.yml").jobs["test-integration"];
+    const integration = integrationJob?.steps?.find((step) => step.name?.startsWith("Start Harper"));
+    expect(integrationJob?.if).toBeUndefined();
+    expect(integration?.if).toBeUndefined();
+    const integrationCalls = waiterCalls(integration?.run);
+    expect(integrationCalls.length).toBe(1);
+    expect(argAfter(integrationCalls[0] ?? [], "--container")).toBe("harper-flair");
+    expect(argAfter(integrationCalls[0] ?? [], "--credentials-env")).toBe("HARPER_START_CREDENTIALS");
     expect(integration?.env?.HARPER_START_CREDENTIALS).toBe("admin:admin123");
 
-    const smoke = read("smoke.yml").jobs["smoke"]?.steps?.find((step) => step.name?.startsWith("Start Flair"));
-    expect(smoke?.run).toContain("scripts/ci/wait-for-harper.mjs");
-    expect(smoke?.run).toContain("--container harper-flair-smoke");
+    const smokeJob = read("smoke.yml").jobs["smoke"];
+    const smoke = smokeJob?.steps?.find((step) => step.name?.startsWith("Start Flair"));
+    expect(smokeJob?.if).toBeUndefined();
+    expect(smoke?.if).toBeUndefined();
+    const smokeCalls = waiterCalls(smoke?.run);
+    expect(smokeCalls.length).toBe(1);
+    expect(argAfter(smokeCalls[0] ?? [], "--container")).toBe("harper-flair-smoke");
     expect(smoke?.env?.HARPER_START_BUDGET_S).toBe("300");
+  });
+
+  test("(i) a commented-out or echoed waiter line is not a call", () => {
+    const call = `node ${WAITER} \\\n  --container harper-flair \\\n  --url http://localhost:9926/Health`;
+    expect(waiterCalls(call).length).toBe(1);
+    const commented = call.split("\n").map((line) => `# ${line}`).join("\n");
+    expect(waiterCalls(commented)).toEqual([]);
+    expect(waiterCalls(`echo ${call}`)).toEqual([]);
   });
 });

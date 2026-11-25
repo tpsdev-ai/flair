@@ -505,16 +505,39 @@ async function startRecordingServer(): Promise<{
   };
 }
 
-/** The operations that change cluster state. */
-const WRITE_OPERATION = /^(deploy_component|add_|alter_|insert|upsert|update|delete|drop_)/;
+/** HTTP methods that do not change state. */
+const SAFE_METHOD = new Set(["GET", "HEAD", "OPTIONS"]);
+/** Ops API operations that only read; the ops API sends every operation as a POST. */
+const READ_ONLY_OPERATION = new Set(["list_users", "list_roles"]);
 
-/** Assert no recorded request carried a write operation. */
-function expectNoWriteOperation(seen: { operation?: string }[], label: string): void {
-  const writes = seen
-    .map((call) => call.operation)
-    .filter((operation): operation is string => operation !== undefined && WRITE_OPERATION.test(operation));
-  expect(writes, `${label}: no write operation may be sent before the refusal`).toEqual([]);
+/**
+ * A request is state-changing unless its method is safe or it is an ops POST
+ * whose operation is read-only. REST writes (PUT/POST/PATCH/DELETE on a
+ * resource path) carry no `operation`, so they count as writes too.
+ */
+function isStateChanging(call: { method: string; operation?: string }): boolean {
+  if (SAFE_METHOD.has(call.method)) return false;
+  return !(call.method === "POST" && call.operation !== undefined && READ_ONLY_OPERATION.has(call.operation));
 }
+
+/** Assert no recorded request changed state. */
+function expectNoWriteRequest(seen: { method: string; url: string; operation?: string }[], label: string): void {
+  const writes = seen
+    .filter(isStateChanging)
+    .map((call) => `${call.method} ${new URL(call.url).pathname}${call.operation === undefined ? "" : ` (${call.operation})`}`);
+  expect(writes, `${label}: no state-changing request may be sent before the refusal`).toEqual([]);
+}
+
+describe("isStateChanging", () => {
+  test("flags REST writes and ops writes, and passes safe methods and read-only ops", () => {
+    expect(isStateChanging({ method: "PUT" })).toBe(true);
+    expect(isStateChanging({ method: "DELETE" })).toBe(true);
+    expect(isStateChanging({ method: "POST" })).toBe(true);
+    expect(isStateChanging({ method: "POST", operation: "add_user" })).toBe(true);
+    expect(isStateChanging({ method: "GET" })).toBe(false);
+    expect(isStateChanging({ method: "POST", operation: "list_users" })).toBe(false);
+  });
+});
 
 describe("flair#3106 — reserved principal refusal (real Harper)", () => {
   let harper: HarperInstance;
@@ -561,7 +584,7 @@ describe("flair#3106 — reserved principal refusal (real Harper)", () => {
     // Refused before any filesystem or cluster write: the isolated home is
     // still empty, and the action sent no write operation.
     expect(readdirSync(home)).toEqual([]);
-    expectNoWriteOperation(recorder.all, "reserved-principal refusal");
+    expectNoWriteRequest(recorder.all, "reserved-principal refusal");
 
     const after = await harperOps(harper, "admin", "test123", { operation: "list_users" });
     expect(after.status).toBe(200);
@@ -592,7 +615,7 @@ describe("flair#3106 — reserved principal refusal (real Harper)", () => {
     expect(out.stderr).toContain("different cluster administrator");
     expect(out.stderr).not.toContain("Choose another --agent-id");
     expect(readdirSync(home)).toEqual([]);
-    expectNoWriteOperation(recorder.all, "reserved-principal/agent-ID overlap refusal");
+    expectNoWriteRequest(recorder.all, "reserved-principal/agent-ID overlap refusal");
   }, 150_000);
 });
 
@@ -646,12 +669,12 @@ interface RecordedCall { user: string; pass: string; path: string; operation?: s
  */
 function installRecorder(deployAuth: { user: string; pass: string }): {
   calls: RecordedCall[];
-  all: { url: string; authz: string | null; operation?: string }[];
+  all: { url: string; method: string; authz: string | null; operation?: string }[];
   deployAuthOk: () => boolean;
   restore: () => void;
 } {
   const calls: RecordedCall[] = [];
-  const all: { url: string; authz: string | null; operation?: string }[] = [];
+  const all: { url: string; method: string; authz: string | null; operation?: string }[] = [];
   let deployAuthOk = false;
   const prev = globalThis.fetch;
   globalThis.fetch = (async (input: any, init?: any) => {
@@ -661,7 +684,8 @@ function installRecorder(deployAuth: { user: string; pass: string }): {
     const bodyText = typeof init?.body === "string" ? init.body : null;
     let operation: string | undefined;
     try { operation = bodyText === null ? undefined : JSON.parse(bodyText)?.operation; } catch { operation = undefined; }
-    all.push({ url, authz: authz === "" ? null : authz, operation });
+    const method = String(init?.method ?? (typeof input === "object" ? input.method : undefined) ?? "GET").toUpperCase();
+    all.push({ url, method, authz: authz === "" ? null : authz, operation });
     if (operation === "deploy_component") {
       deployAuthOk = authz === basic(deployAuth.user, deployAuth.pass);
       if (!deployAuthOk) throw new Error("deploy_component did not carry the cluster administrator's Basic auth");
@@ -1227,7 +1251,7 @@ describe("flair#3106 — already-running instance leg (real Harper)", () => {
     expect(out.stderr).toContain("different admin user");
     expect(out.stderr).toContain("--admin-user");
     expect(readdirSync(home)).toEqual([]);
-    expectNoWriteOperation(recorder.all, "reserved-principal refusal on the already-running leg");
+    expectNoWriteRequest(recorder.all, "reserved-principal refusal on the already-running leg");
 
     const after = await harperOps(harper, "admin", "test123", { operation: "list_users" });
     expect(after.status).toBe(200);
