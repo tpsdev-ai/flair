@@ -2,8 +2,9 @@
  * agent-key-file-3077.test.ts — the shared agent-key file policy (flair#3077
  * slice A) on real files in a temp root.
  *
- * Covered (POSIX): a missing keys directory is created 0700 and observed at
- * that mode before anything else touches it; an existing 0755 directory the current user
+ * Covered (POSIX): a missing keys directory is requested with mode 0700 (the
+ * umask may make it narrower) and observed at 0700 with zero umask before
+ * anything else touches it; an existing 0755 directory the current user
  * owns is tightened with one notice line, while an owned 0500 keeps its mode;
  * a symlinked directory or key is refused; an existing key with group/world
  * bits is refused before its bytes are read; positive partial writes resume;
@@ -49,7 +50,7 @@ function tempEntries(dir: string): string[] {
   return readdirSync(dir).filter((name) => name.includes(".tmp-"));
 }
 
-test("a missing keys directory is created 0700 before anything else touches it", () => {
+test("a missing keys directory requested with mode 0700 is observed at 0700 with zero umask before anything else touches it", () => {
   const dir = keysDir();
   const observed: number[] = [];
   setAgentKeyFileTestHooks({

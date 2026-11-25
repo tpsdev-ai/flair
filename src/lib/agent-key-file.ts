@@ -6,10 +6,10 @@
  * `flair mcp grant` still write key files themselves (slice B).
  *
  * POSIX policy:
- *   - the keys directory is created 0700; an existing directory owned by the
- *     current user is tightened to 0700 when it has group or world bits, with
- *     one notice line; a symlink, a non-directory, or a directory owned by
- *     another user is refused.
+ *   - the keys directory is requested with mode 0700 (the umask may make it
+ *     narrower); an existing directory owned by the current user is tightened
+ *     to 0700 when it has group or world bits, with one notice line; a symlink,
+ *     a non-directory, or a directory owned by another user is refused.
  *   - a new key is written to a unique temp file in the keys directory
  *     (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600), fsynced, then published with a
  *     hard link at the final path, so an occupied path is never overwritten.
@@ -92,8 +92,9 @@ function modeText(mode: number): string {
 }
 
 /**
- * Create `keysDir` 0700 when missing; tighten an existing directory the
- * current user owns; refuse a symlink, a non-directory, or another owner.
+ * Request mode 0700 for missing `keysDir` (the umask may make it narrower);
+ * tighten an existing directory the current user owns; refuse a symlink,
+ * a non-directory, or another owner.
  */
 export function ensureAgentKeysDir(keysDir: string): void {
   if (WIN32) {
