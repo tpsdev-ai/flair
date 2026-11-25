@@ -7,7 +7,7 @@ Flair owns **identity**. Flair does **not** own arbitrary secrets. This page dra
 For each registered agent, Flair stores:
 
 - A **public key** in the `Agent` table (server-side; used to verify signed requests).
-- A **private key** at `~/.flair/keys/<agent>.key` on the host that owns that agent — the raw 32-byte Ed25519 seed. `flair init --agent <id>`, `flair agent add <id>`, `flair principal add`, and `flair import` create a new key owner-only (`0600`) from the first byte; an existing key wider than owner-only is refused with `chmod 600 <path>` and left unchanged. On POSIX, the keys directory is created or tightened to `0700`. On Windows owner-only cannot be verified.
+- A **private key** at `~/.flair/keys/<agent>.key` on the host that owns that agent — the raw 32-byte Ed25519 seed. `flair init --agent <id>`, `flair agent add <id>`, `flair principal add`, and `flair import` create a new key owner-only (`0600`) from the first byte; on POSIX, an existing key wider than owner-only is refused with `chmod 600 <path>` and left unchanged, and the keys directory is created or tightened to `0700`. On Windows owner-only cannot be verified.
 
 Agents sign requests to Flair with this key. The server verifies signatures against the registered public key. The signed payload is `<agentId>:<timestamp>:<nonce>:<METHOD>:<path+query>` with a 30-second replay window and nonce dedup — replays inside that window are rejected.
 
