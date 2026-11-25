@@ -1,42 +1,43 @@
 /**
- * agent-key-file.ts — the one place an agent private-key file is created or
- * reused (flair#3077 slice A).
- *
- * The five paths that provision an agent key (`flair agent add`, local
+ * agent-key-file.ts — the shared agent private-key file helper for the five
+ * provisioning paths (flair#3077 slice A): `flair agent add`, local
  * `flair init --agent/--agent-id`, remote `flair init --target ... --agent-id`,
- * `flair principal add`, `flair import`) used to mkdir the keys directory with
- * default permissions, create the key at the umask default and chmod it
- * afterwards, and reuse an existing key whatever its mode. This module makes
- * the private key owner-only from the first byte and refuses a wider existing
- * key instead of changing it.
+ * `flair principal add`, and `flair import`. `flair agent rotate-key` and
+ * `flair mcp grant` still write key files themselves (slice B).
  *
  * POSIX policy:
  *   - the keys directory is created 0700; an existing directory owned by the
- *     current user is tightened to 0700 with one notice line; a symlink, a
- *     non-directory, or a directory owned by another user is refused.
- *   - a new key is opened O_CREAT|O_EXCL at 0600 before any byte is written;
- *     a failed write removes only the file this call created.
+ *     current user is tightened to 0700 when it has group or world bits, with
+ *     one notice line; a symlink, a non-directory, or a directory owned by
+ *     another user is refused.
+ *   - a new key is written to a unique temp file in the keys directory
+ *     (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600), fsynced, then published with a
+ *     hard link at the final path, so an occupied path is never overwritten.
  *   - an existing key is checked on the OPENED DESCRIPTOR: a regular file,
  *     owned by the current user, with no group/world bits. It is read and left
- *     untouched; a wider file is refused before its bytes are read.
+ *     untouched; a file with group or world bits is refused before its bytes
+ *     are read.
  *
- * win32: mode bits do not establish owner-only there, so today's create and
- * reuse behaviour is kept and nothing is refused for permissions.
+ * win32: mode bits do not establish owner-only there; the create path sets the
+ * mode and the reuse path neither checks nor sets it.
  */
+import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
   constants,
   fchmodSync,
   fstatSync,
+  fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   unlinkSync,
-  writeFileSync,
   writeSync,
 } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 /** A refusal is operator-facing: the caller prints the message and exits 1. */
 export class AgentKeyFileRefusal extends Error {
@@ -50,14 +51,27 @@ export class AgentKeyFileRefusal extends Error {
 export interface AgentKeyFileTestHooks {
   /** Runs with the created key's descriptor before the first byte is written. */
   beforeFirstWrite?: (fd: number) => void;
-  /** Replaces the seed write, so a test can fail it. */
-  writeSeedFile?: (fd: number, bytes: Buffer) => void;
+  /** Replaces the seed write and returns the byte count a real write would. */
+  writeSeedFile?: (fd: number, bytes: Buffer) => number;
+  /** Runs after the keys directory is created, before anything else touches it. */
+  afterKeysDirCreate?: (dir: string) => void;
+  /** Runs with the opened key descriptor immediately before its bytes are read. */
+  beforeKeyRead?: (fd: number) => void;
+  /** Runs after the temp key is complete and before it is linked into place. */
+  beforePublish?: (tempPath: string, finalPath: string) => void;
 }
 
 let testHooks: AgentKeyFileTestHooks | undefined;
 
+/** Test-only override for the uid the helper expects to own the key paths. */
+let expectedOwnerUid: number | undefined;
+
 export function setAgentKeyFileTestHooks(hooks: AgentKeyFileTestHooks | undefined): void {
   testHooks = hooks;
+}
+
+export function setAgentKeyFileExpectedOwnerUid(uid: number | undefined): void {
+  expectedOwnerUid = uid;
 }
 
 export interface AgentKeyFileContents {
@@ -77,6 +91,7 @@ function errnoCode(error: unknown): string | undefined {
 }
 
 function currentUid(): number | undefined {
+  if (expectedOwnerUid !== undefined) return expectedOwnerUid;
   return typeof process.getuid === "function" ? process.getuid() : undefined;
 }
 
@@ -99,10 +114,10 @@ export function ensureAgentKeysDir(keysDir: string): void {
     st = lstatSync(keysDir);
   } catch (error) {
     if (errnoCode(error) !== "ENOENT") throw error;
+    // The directory is owner-only from creation: the umask can only narrow the
+    // mode, never widen it past 0700. No later chmod is involved.
     mkdirSync(keysDir, { recursive: true, mode: 0o700 });
-    // mkdir's mode is narrowed by the umask; the directory was created by this
-    // call, so nothing else has observed it at a wider mode.
-    chmodSync(keysDir, 0o700);
+    testHooks?.afterKeysDirCreate?.(keysDir);
     return;
   }
 
@@ -186,6 +201,7 @@ export function readExistingAgentKey(privateKeyPath: string): Uint8Array | null 
           `run chmod 600 ${privateKeyPath} to make it owner-only`,
       );
     }
+    testHooks?.beforeKeyRead?.(fd);
     return new Uint8Array(readFileSync(fd));
   } finally {
     closeSync(fd);
@@ -193,38 +209,62 @@ export function readExistingAgentKey(privateKeyPath: string): Uint8Array | null 
 }
 
 /**
- * Create a new key file at 0600 from the first byte, refusing to overwrite an
- * existing path. A failed write removes only the file this call created.
+ * Create a new key file at 0600 from the first byte, refusing to replace an
+ * existing path. The bytes go to a unique temp file in the same directory and
+ * are published with a hard link, so an occupied path is never overwritten.
+ * On failure only this call's temp file is removed.
  */
 export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8Array): void {
-  if (WIN32) {
-    writeFileSync(privateKeyPath, data, { mode: 0o600 });
-    chmodSync(privateKeyPath, 0o600);
-    return;
-  }
-
-  const fd = openSync(privateKeyPath, "wx", 0o600);
+  const bytes = Buffer.from(data);
+  const tempPath = join(
+    dirname(privateKeyPath),
+    `.${basename(privateKeyPath)}.tmp-${randomBytes(8).toString("hex")}`,
+  );
+  let fd: number | undefined;
   try {
+    fd = openSync(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW, 0o600);
     // The open mode is narrowed by the umask; set it exactly, still before the
     // first byte, so the protection is the mode the file is created with.
     fchmodSync(fd, 0o600);
-    const bytes = Buffer.from(data);
     testHooks?.beforeFirstWrite?.(fd);
-    (testHooks?.writeSeedFile ?? ((target: number, value: Buffer) => writeSync(target, value)))(fd, bytes);
+    const writer = testHooks?.writeSeedFile ?? ((target: number, value: Buffer) => writeSync(target, value));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const written = writer(fd, bytes.subarray(offset));
+      if (written <= 0) {
+        throw new Error(
+          `short write to key file ${privateKeyPath}: wrote ${written} bytes with ${bytes.length - offset} left`,
+        );
+      }
+      offset += written;
+    }
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    testHooks?.beforePublish?.(tempPath, privateKeyPath);
+    // linkSync fails with EEXIST when the final path appeared while this call
+    // was writing its temp file; the caller then re-reads that file.
+    linkSync(tempPath, privateKeyPath);
   } catch (error) {
-    try {
-      closeSync(fd);
-    } catch {
-      /* already failing */
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* already failing */
+      }
     }
     try {
-      unlinkSync(privateKeyPath);
+      unlinkSync(tempPath);
     } catch {
-      /* best effort: remove only the file this call created */
+      /* best effort: remove only the temp file this call created */
     }
     throw error;
   }
-  closeSync(fd);
+  try {
+    unlinkSync(tempPath);
+  } catch {
+    /* the published key is complete; a leftover temp file is mode 0600 */
+  }
 }
 
 /**

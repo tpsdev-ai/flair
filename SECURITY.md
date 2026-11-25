@@ -144,11 +144,12 @@ are restricted to admin-only.
 ### Key Storage
 
 Private keys at `~/.flair/keys/<agentId>.key` are created owner-only
-(`0600`) from the first byte by `flair agent add`, `flair init` (local and
-remote agent provisioning), `flair principal add` and `flair import`. On POSIX
-the keys directory is created or tightened to `0700`; an existing key wider
-than owner-only is refused with `chmod 600 <path>`. On Windows owner-only
-cannot be verified, so the mode is set but not checked. Legacy path
+(`0600`) from the first byte on POSIX by `flair agent add`, `flair init` (local
+and remote agent provisioning), `flair principal add` and `flair import`. On
+POSIX the keys directory is created `0700`, and an owned directory with group
+or world bits is tightened to `0700`; an existing key with group or world bits
+is refused with `chmod 600 <path>`. On Windows the create path sets the mode
+and the reuse path neither checks nor sets it. Legacy path
 `~/.tps/secrets/flair/<agentId>-priv.key` is also supported.
 
 ### Key Generation
