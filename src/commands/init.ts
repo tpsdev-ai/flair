@@ -20,6 +20,7 @@ import {
   resolveInitAdminPasswordSource,
 } from "../lib/init-admin-pass.js";
 import { canonicalLexicalPath } from "../lib/daemon-liveness.js";
+import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { planRedirectMigration, renderRedirectMigration } from "../lib/mcp-oauth-env.js";
@@ -289,11 +290,19 @@ function refuseReservedPrincipal(name: string, role: string, flag: string): void
 }
 
 /**
- * Refuse an `--agent-id` that names an administrator username reserved by this init path,
- * before any key or Agent write.
+ * Refuse an `--agent-id` that violates the shared agent-ID rule, or that names
+ * an administrator username reserved by this init path, before the keys
+ * directory or any key file is created or written, and before any `fetch` call made by the command action.
  */
 function refuseOperatorAgentId(agentId: string | undefined, administratorNames: string[]): void {
-  if (!agentId || !administratorNames.includes(agentId)) return;
+  // Only an OMITTED id means "no agent ID supplied". A supplied id,
+  // including the empty string, goes through the shared rule below.
+  if (agentId === undefined) return;
+  if (!isValidAgentId(agentId)) {
+    console.error(`Error: ${invalidAgentIdMessage(agentId)}`);
+    process.exit(1);
+  }
+  if (!administratorNames.includes(agentId)) return;
   console.error(`Error: --agent-id "${agentId}" is an administrator username reserved by this init path.`);
   console.error("  Choose another --agent-id.");
   process.exit(1);
