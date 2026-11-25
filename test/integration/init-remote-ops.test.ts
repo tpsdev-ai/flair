@@ -797,6 +797,7 @@ describe("flair#3106 — existing super_user branch (real Harper)", () => {
     const recorder = installRecorder({ user: "cluster-north", pass: "cluster-north-pass" });
     const home = mkdtempSync(join(tmpDir, "home-"));
     const savedProfile = process.env.USERPROFILE;
+    const savedHome = process.env.HOME;
     try {
       const out = await runInitAction(initArgs(harper, {
         clusterUser: "cluster-north",
@@ -824,6 +825,7 @@ describe("flair#3106 — existing super_user branch (real Harper)", () => {
       expect(out.envDuringAction.HOME).toBe(home);
       expect(out.envDuringAction.USERPROFILE).toBe(home);
       expect(process.env.USERPROFILE).toBe(savedProfile);
+      expect(process.env.HOME).toBe(savedHome);
       const hint = hintOf(out.stdout);
       expect(hint).toContain("cluster administrator password");
       expect(hint).not.toContain(secretPath);
