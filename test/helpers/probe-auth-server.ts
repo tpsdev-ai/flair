@@ -56,7 +56,7 @@ export class ProbeAuthServer {
   /** Write a 32-byte Ed25519 seed to `<keysDir>/<agentId>.key`; register the
    *  matching public key on the mock instance when `register` is true. */
   writeKey(keysDir: string, agentId: string, register: boolean, keypair: nacl.SignKeyPair = nacl.sign.keyPair()): nacl.SignKeyPair {
-    writeFileSync(join(keysDir, `${agentId}.key`), Buffer.from(keypair.secretKey.slice(0, 32)));
+    writeFileSync(join(keysDir, `${agentId}.key`), Buffer.from(keypair.secretKey.slice(0, 32)), { mode: 0o600 });
     if (register) this.registeredPub.set(agentId, keypair.publicKey);
     return keypair;
   }
