@@ -205,7 +205,7 @@ describe("flair#3086: flair reembed reads every Memory page", () => {
       return stamp !== CURRENT_MODEL_ID && stamp !== BARE_MODEL_ID;
     });
     expect(ids(candidates)).toEqual(stale.map((row) => String(row.id)).sort());
-    // p3-d-6 is on page 3, past the first page of 3.
+    // p3-d-6 is the last stale row, on page 2, past the first page of 3.
     expect(ids(candidates)).toContain("p3-d-6");
 
     const readStoredModel = opsStoredModelReader(opsPort(), adminAuth());
