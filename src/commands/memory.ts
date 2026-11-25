@@ -11,6 +11,7 @@
  * Do not import src/cli.ts from here — that would cycle and pull the
  * non-strict entry into the strict check.
  */
+import { randomUUID } from "node:crypto";
 import { Command, Option } from "commander";
 import * as render from "../render.js";
 import { resolveAdminUser, addAdminPassOptions } from "../lib/auth-resolve.js";
@@ -160,7 +161,9 @@ export function register(program: Command): void {
         console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
         process.exit(2);
       }
-      const memId = `${agentId}-${Date.now()}`;
+      // flair#3107: one id per command, random so same-millisecond adds do not
+      // collide; computed once so the retry loop below replays it.
+      const memId = `${agentId}-${randomUUID()}`;
       const body: any = {
         id: memId, agentId, content, durability: opts.durability || "standard",
         tags: opts.tags ? String(opts.tags).split(",").map((x: string) => x.trim()).filter(Boolean) : undefined,
@@ -272,7 +275,7 @@ export function register(program: Command): void {
       const content = lines.join("\n");
 
       const { agentId, source } = resolveSigningAgentId(opts, "memory write-task-summary");
-      const memId = `${opts.agent}-task-${opts.beads}-${Date.now()}`;
+      const memId = `${opts.agent}-task-${opts.beads}-${randomUUID()}`;
       const body: any = {
         id: memId,
         agentId: opts.agent,
