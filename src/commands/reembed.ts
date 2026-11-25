@@ -242,7 +242,49 @@ export function agentStoredModelReader(baseUrl: string, agentId: string, keyPath
  * flair#2561: the server answers `{ id, updatedAt }`. The row counts as
  * re-embedded when that response names this row and the stored row then
  * carries `intendedModel`, read with `readStoredModel`.
+ *
+ * flair#3128: `reembedRowOutcome` also returns a short reason label (HTTP
+ * status or error message) that the command counts once per distinct value.
  */
+export type ReembedRowOutcome = { ok: boolean; reason?: string };
+
+export async function reembedRowOutcome(
+  baseUrl: string,
+  agentId: string,
+  keyPath: string,
+  id: string,
+  intendedModel: string,
+  readStoredModel: StoredModelReader,
+): Promise<ReembedRowOutcome> {
+  let res: Response;
+  try {
+    res = await authFetch(baseUrl, agentId, keyPath, "PATCH", `/Memory/${encodeRecordId(id)}`, {
+      embedding: null, embeddingModel: null,
+    });
+  } catch (err) {
+    return { ok: false, reason: `PATCH failed: ${errorText(err)}` };
+  }
+  if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return { ok: false, reason: "PATCH response was not JSON" };
+  }
+  if ((body as { id?: unknown } | null)?.id !== id) {
+    return { ok: false, reason: "PATCH response did not name the row" };
+  }
+  let stored: unknown;
+  try {
+    stored = await readStoredModel(id);
+  } catch (err) {
+    return { ok: false, reason: `stored model read failed: ${errorText(err)}` };
+  }
+  if (stored === intendedModel) return { ok: true };
+  return { ok: false, reason: `stored embeddingModel is ${typeof stored === "string" && stored.length > 0 ? stored : "missing"}` };
+}
+
+/** `reembedRow` as a boolean: true when the row's stored stamp names `intendedModel`. */
 export async function reembedRow(
   baseUrl: string,
   agentId: string,
@@ -251,18 +293,17 @@ export async function reembedRow(
   intendedModel: string,
   readStoredModel: StoredModelReader,
 ): Promise<boolean> {
-  const res = await authFetch(baseUrl, agentId, keyPath, "PATCH", `/Memory/${encodeRecordId(id)}`, {
-    embedding: null, embeddingModel: null,
-  });
-  if (!res.ok) return false;
-  let body: unknown;
-  try {
-    body = await res.json();
-  } catch {
-    return false;
-  }
-  if ((body as { id?: unknown } | null)?.id !== id) return false;
-  return (await readStoredModel(id)) === intendedModel;
+  return (await reembedRowOutcome(baseUrl, agentId, keyPath, id, intendedModel, readStoredModel)).ok;
+}
+
+function errorText(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.length > 0 ? message : "unknown error";
+}
+
+/** One line per distinct failure reason, with the rows that share it (flair#3128). */
+function failureReasonLines(reasons: Map<string, number>, remedy: string): string[] {
+  return [...reasons].map(([reason, count]) => `  ❌ ${count} row(s) not updated: ${reason} — ${remedy}`);
 }
 
 /**
@@ -456,6 +497,8 @@ program
       // Process each agent
       let totalProcessed = 0;
       let totalErrors = 0;
+      const errorsByReason = new Map<string, number>();
+      const skippedAgents: string[] = [];
       const agentCount = byAgent.size;
       let agentIndex = 0;
 
@@ -468,6 +511,9 @@ program
         const privPath = privKeyPath(agent, keysDir);
         if (!existsSync(privPath)) {
           console.error(`  ❌ Key not found: ${privPath} — skipping`);
+          // --dry-run writes nothing and keeps its previous exit: a skip only
+          // fails the run when the run would have re-embedded the rows.
+          if (!dryRun) skippedAgents.push(agent);
           continue;
         }
 
@@ -479,20 +525,39 @@ program
           const batch = memories.slice(i, i + batchSize);
           for (const memory of batch) {
             try {
-              if (await reembedRow(baseUrl, agent, privPath, memory.id, currentModel, readStoredModel)) processed++;
-              else errors++;
-            } catch { errors++; }
+              const outcome = await reembedRowOutcome(baseUrl, agent, privPath, memory.id, currentModel, readStoredModel);
+              if (outcome.ok) processed++;
+              else {
+                const reason = outcome.reason ?? "unknown failure";
+                errors++;
+                errorsByReason.set(reason, (errorsByReason.get(reason) ?? 0) + 1);
+              }
+            } catch (err) {
+              errors++;
+              const reason = `unexpected error: ${errorText(err)}`;
+              errorsByReason.set(reason, (errorsByReason.get(reason) ?? 0) + 1);
+            }
           }
           const pct = Math.round(((i + batch.length) / memories.length) * 100);
           process.stdout.write(`  \r  Re-embedded ${processed}/${memories.length} (${pct}%)${errors > 0 ? ` [${errors} errors]` : ""}`);
           if (i + batchSize < memories.length) await new Promise(r => setTimeout(r, delayMs));
         }
-        console.log(`\n  ✅ Agent ${agent}: ${processed} updated, ${errors} errors`);
+        console.log(`\n  ${errors > 0 ? "❌" : "✅"} Agent ${agent}: ${processed} updated, ${errors} errors`);
         totalProcessed += processed;
         totalErrors += errors;
       }
 
-      console.log(`\n\n✅ Re-embedding complete: ${totalProcessed} updated, ${totalErrors} errors`);
+      const failed = totalErrors > 0 || skippedAgents.length > 0;
+      console.log(
+        `\n\n${failed ? "❌" : "✅"} Re-embedding complete: ${totalProcessed} updated, ${totalErrors} errors${skippedAgents.length > 0 ? `, ${skippedAgents.length} skipped agent${skippedAgents.length === 1 ? "" : "s"}` : ""}`,
+      );
+      for (const line of failureReasonLines(errorsByReason, "re-run `flair reembed` after fixing the cause")) console.log(line);
+      for (const skippedAgent of skippedAgents) {
+        console.log(
+          `  ❌ Agent ${skippedAgent} skipped: key not found — create or restore that agent's key, then re-run \`flair reembed --agent ${skippedAgent}\``,
+        );
+      }
+      if (failed) process.exit(1);
       return;
     }
 
@@ -546,6 +611,17 @@ program
     // the listing may have been cut off, so the run must say so and fail.
     const keylessTruncated = !adminPassSingle && allMemories.length === KEYLESS_SEARCH_LIMIT;
 
+    // flair#3129: the keyless listing's read scope includes every other agent's
+    // non-private rows (resources/memory-read-scope.ts). Only this agent's rows
+    // are candidates — a PATCH as this agent to another agent's row is refused
+    // — so drop the others before the candidate and up-to-date counts.
+    const keylessListed = allMemories.length;
+    let otherAgentRows = 0;
+    if (!adminPassSingle) {
+      allMemories = allMemories.filter((m: any) => m.agentId === agentId);
+      otherAgentRows = keylessListed - allMemories.length;
+    }
+
     const candidates = allMemories.filter((m: any) => {
       if (!m.content) return false;
       if (staleOnly) return !m.embeddingModel || !isCurrentSpace(m.embeddingModel);
@@ -556,12 +632,13 @@ program
     const skipped = allMemories.length - total;
 
     console.log(`Candidates for re-embedding: ${total}`);
+    if (otherAgentRows > 0) console.log(`Skipped (other agents): ${otherAgentRows}`);
     if (skipped > 0) console.log(`Skipped (up-to-date): ${skipped}`);
 
     if (dryRun || total === 0) {
       if (total === 0) console.log("\n✅ All memories are up-to-date!");
       if (keylessTruncated) {
-        console.log(keylessTruncationNotice(allMemories.length));
+        console.log(keylessTruncationNotice(keylessListed));
         process.exit(1);
       }
       return;
@@ -570,25 +647,35 @@ program
     console.log("");
     let processed = 0;
     let errors = 0;
+    const errorsByReason = new Map<string, number>();
 
     for (let i = 0; i < candidates.length; i += batchSize) {
       const batch = candidates.slice(i, i + batchSize);
       for (const memory of batch) {
         try {
-          if (await reembedRow(baseUrl, agentId, privPath, memory.id, currentModel, readStoredModel)) processed++;
-          else errors++;
-        } catch { errors++; }
+          const outcome = await reembedRowOutcome(baseUrl, agentId, privPath, memory.id, currentModel, readStoredModel);
+          if (outcome.ok) processed++;
+          else {
+            const reason = outcome.reason ?? "unknown failure";
+            errors++;
+            errorsByReason.set(reason, (errorsByReason.get(reason) ?? 0) + 1);
+          }
+        } catch (err) {
+          errors++;
+          const reason = `unexpected error: ${errorText(err)}`;
+          errorsByReason.set(reason, (errorsByReason.get(reason) ?? 0) + 1);
+        }
       }
       const pct = Math.round(((i + batch.length) / total) * 100);
       process.stdout.write(`\rRe-embedded ${processed}/${total} (${pct}%)${errors > 0 ? ` [${errors} errors]` : ""}`);
       if (i + batchSize < candidates.length) await new Promise(r => setTimeout(r, delayMs));
     }
 
-    console.log(`\n\n✅ Re-embedding complete: ${processed} updated, ${errors} errors`);
-    if (keylessTruncated) {
-      console.log(keylessTruncationNotice(allMemories.length));
-      process.exit(1);
-    }
+    const failed = errors > 0;
+    console.log(`\n\n${failed ? "❌" : "✅"} Re-embedding complete: ${processed} updated, ${errors} errors`);
+    for (const line of failureReasonLines(errorsByReason, `re-run \`flair reembed --agent ${agentId}\` after fixing the cause`)) console.log(line);
+    if (keylessTruncated) console.log(keylessTruncationNotice(keylessListed));
+    if (failed || keylessTruncated) process.exit(1);
   });
 
 }

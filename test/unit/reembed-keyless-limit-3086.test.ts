@@ -33,7 +33,9 @@ afterEach(() => {
 });
 
 function rows(count: number): Record<string, unknown>[] {
-  return Array.from({ length: count }, (_, i) => ({ id: `m-${i}`, content: "a memory", embeddingModel: "model-1" }));
+  // A `POST /SemanticSearch` listing carries each row's agentId; flair#3129
+  // reads it to keep only this agent's rows.
+  return Array.from({ length: count }, (_, i) => ({ id: `m-${i}`, agentId: "agent-a", content: "a memory", embeddingModel: "model-1" }));
 }
 
 async function run(seed: Record<string, unknown>[], dryRun = true): Promise<{ exitCode: number | null; logs: string[] }> {

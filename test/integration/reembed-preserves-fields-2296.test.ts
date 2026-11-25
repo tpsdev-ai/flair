@@ -291,11 +291,12 @@ describe("flair#2296: flair reembed", () => {
     for (const row of [...before.values(), ...refused.values()]) expect(await read(row.id)).toEqual(row);
 
     const r = runReembed(["--batch-size", "1", "--delay-ms", "0"]);
-    expect(r.code, r.out).toBe(0);
+    expect(r.code, r.out).toBe(1);
     expect(r.out).toContain(`✅ Agent ${agentA.id}: 1 updated, 0 errors`);
     expect(r.out).toContain(`✅ Agent ${agentB.id}: 1 updated, 0 errors`);
-    expect(r.out).toContain(`✅ Agent ${unregistered.id}: 0 updated, 1 errors`);
-    expect(r.out).toContain("Re-embedding complete: 2 updated, 1 errors");
+    expect(r.out).toContain(`❌ Agent ${unregistered.id}: 0 updated, 1 errors`);
+    expect(r.out).toContain("❌ Re-embedding complete: 2 updated, 1 errors");
+    expect(r.out).toMatch(/1 row\(s\) not updated: HTTP \d+/);
     for (const row of before.values()) await expectOnlyEmbeddingChanged(row);
     for (const row of refused.values()) expect(await read(row.id)).toEqual(row);
   }, 240_000);

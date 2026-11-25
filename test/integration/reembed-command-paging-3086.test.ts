@@ -285,7 +285,15 @@ function assertReadBodies(agentId: string | undefined): void {
 for (const path of [{ name: "all-agent", agentId: undefined }, { name: "single-agent with an admin password", agentId: AGENT_ID }]) {
   test(`the ${path.name} path reads its rows in 3 pages and re-embeds the 3 stale rows`, async () => {
     const { code, stdout, stderr } = await runReembed(path.agentId);
-    expect(code, stderr.slice(0, 800)).toBe(0);
+    if (path.agentId) {
+      expect(code, stderr.slice(0, 800)).toBe(0);
+    } else {
+      // This HOME holds only the tested agent's key, so the all-agent run
+      // skips the second agent and its outcome is a failure (flair#3128).
+      expect(code, stderr.slice(0, 800)).toBe(1);
+      expect(stdout).toContain(`Agent ${OTHER_AGENT_ID} skipped: key not found`);
+      expect(stdout).toContain("create or restore that agent's key");
+    }
     assertReadsBeforeFirstPatch(PAGES);
     assertReadBodies(path.agentId);
     const readRows = path.agentId ? TOTAL_ROWS : ALL_ROWS;

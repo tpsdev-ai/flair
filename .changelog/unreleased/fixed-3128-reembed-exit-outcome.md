@@ -1,0 +1,2 @@
+- **`flair reembed` exits non-zero when a row was not updated or an agent was skipped, and names the failures and the remedy.**
+  The final summary drops the success marker on any failed or skipped run, reports each distinct row-failure reason once with the number of rows it covers, and lists each skipped agent with the remedy (create or restore that agent's key, then re-run `flair reembed --agent <id>`). A clean run keeps its previous output and exit 0, and `--dry-run` is unchanged.
