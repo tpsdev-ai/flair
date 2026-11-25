@@ -19,6 +19,7 @@ import {
   sendJsonRequest,
 } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import { SOUL_SCOPE_FIELDS_REFUSAL, suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
 import * as render from "../render.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -209,6 +210,12 @@ addAdminPassOptions(
 
     const agentId = data.agent?.id;
     if (!agentId) { console.error("Error: no agent ID in export"); process.exit(1); }
+    // flair#2359 — the ONE agent-ID rule, before any key path is built or any
+    // key file is written.
+    if (!isValidAgentId(agentId)) {
+      console.error(`Error: ${invalidAgentIdMessage(agentId)}`);
+      process.exit(1);
+    }
 
     console.log(`Importing agent '${agentId}'...`);
 
