@@ -571,6 +571,54 @@ test("plain and deep status escape bridge names and disk paths; deep escapes the
   expect(lineWith(deep, "Last nightly")).toContain(`(${"2026-11-21T09:00:00.000Z"}${HOSTILE_ESCAPED})`);
 });
 
+test("status federation escapes each stored instance and peer field; JSON keeps the same fixture byte-identical", async () => {
+  process.env.FLAIR_OUTPUT = "human";
+  let human: string;
+  try {
+    human = await statusOutput(hostileDetail(), ["federation"]);
+  } finally {
+    delete process.env.FLAIR_OUTPUT;
+  }
+
+  expect(lineWith(human, "Instance")).toContain(`${HOSTILE_ESCAPED}  (${HOSTILE_ESCAPED}, ${HOSTILE_ESCAPED})`);
+  const peerRow = human.split("\n").find((line) => line.includes("2026-11-21T10:00:00.000Z")) ?? "";
+  // peer id, role, status, liveness and the raw last-sync timestamp each carry the fixture.
+  expect(peerRow.split(HOSTILE_ESCAPED).length - 1).toBe(5);
+  expect(peerRow).toContain(`(2026-11-21T10:00:00.000Z${HOSTILE_ESCAPED})`);
+  for (const raw of ["\x1b", "\u202e", "\u2028", "\ud800", "\u0378", "\u2029"]) {
+    expect(human.includes(raw)).toBe(false);
+  }
+
+  const json = await statusOutput(hostileDetail(), ["--json", "federation"]);
+  expect(json).toBe(JSON.stringify({ healthy: true, federation: hostileDetail().federation }, null, 2));
+  const parsed = JSON.parse(json);
+  expect(parsed).toEqual({ healthy: true, federation: hostileDetail().federation });
+  expect(parsed.federation.instance.id).toBe(H);
+  expect(parsed.federation.peerList[0]).toEqual(hostileDetail().federation.peerList[0]);
+});
+
+test("status rem escapes the stored nightly timestamp; JSON keeps the same fixture byte-identical", async () => {
+  const detail = { ok: true, rem: { lastNightlyAt: "2026-11-21T09:00:00.000Z" + H, nightlyEnabled: true, pendingCandidates: 0 } };
+  process.env.FLAIR_OUTPUT = "human";
+  let human: string;
+  try {
+    human = await statusOutput(detail, ["rem"]);
+  } finally {
+    delete process.env.FLAIR_OUTPUT;
+  }
+
+  expect(lineWith(human, "Last nightly")).toContain(`(2026-11-21T09:00:00.000Z${HOSTILE_ESCAPED})`);
+  for (const raw of ["\x1b", "\u202e", "\u2028", "\ud800", "\u0378", "\u2029"]) {
+    expect(human.includes(raw)).toBe(false);
+  }
+
+  const json = await statusOutput(detail, ["--json", "rem"]);
+  expect(json).toBe(JSON.stringify({ healthy: true, rem: detail.rem }, null, 2));
+  const parsed = JSON.parse(json);
+  expect(parsed).toEqual({ healthy: true, rem: detail.rem });
+  expect(parsed.rem.lastNightlyAt).toBe(detail.rem.lastNightlyAt);
+});
+
 test("deep status escapes bootstrap error text", async () => {
   process.env.HDB_ADMIN_PASSWORD = "fixture-pass";
   const fetchSpy = globalThis.fetch as any;

@@ -179,6 +179,9 @@ describe("buildCimdDocument vs the REAL published resolveCimdClient", () => {
     expect(resolved.token_endpoint_auth_method).toBe("private_key_jwt");
     expect(resolved.jwks.keys).toHaveLength(1);
     expect(resolved.jwks.keys[0].x).toBe(jwk.x);
+    // flair#3076: the client the plugin resolves carries the document's scope,
+    // which its client_credentials grant puts on the token.
+    expect(resolved.scope).toBe("memory:read memory:write principal:read");
   });
 
   test("negative: allowedHosts not configured — the real validator rejects our document even though it fetched fine (#161's fail-closed gate)", async () => {
