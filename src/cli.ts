@@ -4140,13 +4140,30 @@ export async function waitForFlairRestart(
   throw new Error(`Flair did not respond within ${maxWaitMs / 1000}s`);
 }
 
+/**
+ * The Harper user provisioning selected for the rest of a remote `flair init`
+ * run, and the password that user has.
+ *
+ * `created` is true when provisioning set this user's password to the chosen
+ * Flair admin password (which init writes to the admin-pass file):
+ * `add_user` created `admin`, or `alter_user` reset an `admin` that already
+ * existed. It is false when the run reused an existing super_user cluster
+ * administrator, in which case `password` is the cluster administrator's own
+ * password that the operator supplied.
+ */
+export interface ProvisionedFabricPrincipal {
+  username: string;
+  password: string;
+  created: boolean;
+}
+
 export async function provisionFabric(
   target: string,
   opsTarget: string,
   clusterAdminUser: string,
   clusterAdminPass: string,
   flairAdminPass: string,
-): Promise<void> {
+): Promise<ProvisionedFabricPrincipal> {
   const projectRoot = process.cwd();
 
   // 1. Build and deploy component tarball. `target` is the served URL this
@@ -4193,7 +4210,11 @@ export async function provisionFabric(
   }
 
   if (clusterAdminIsSuperUser) {
-    console.log(`Cluster admin '${clusterAdminUser}' is already a super_user — skipping user provisioning`);
+    // Reuse branch: the cluster administrator is already a super_user, so the
+    // later calls authenticate as that administrator with the password the
+    // operator supplied; this run did not create `admin`.
+    console.log(`Cluster admin '${clusterAdminUser}' is already a super_user — reusing it as the init principal`);
+    return { username: clusterAdminUser, password: clusterAdminPass, created: false };
   } else {
     console.log(`Provisioning Harper user 'admin' as super_user...`);
     try {
@@ -4218,10 +4239,12 @@ export async function provisionFabric(
           active: true,
         }, clusterAdminUser, clusterAdminPass);
         console.log("User 'admin' updated ✓");
+        return { username: "admin", password: flairAdminPass, created: true };
       } else {
         throw err;
       }
     }
+    return { username: "admin", password: flairAdminPass, created: true };
   }
 }
 
@@ -4927,6 +4950,7 @@ bindInitCli({
   ensureFlairAgentRole,
   ensureFlairAgentUser,
   ensureFlairPairInitiatorRole,
+  FLAIR_AGENT_USERNAME,
   flairPackageDir,
   harperBin,
   harperConfigPath,

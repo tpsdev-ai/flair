@@ -54,6 +54,7 @@ export type InitCli = {
   ensureFlairAgentRole: (...args: any[]) => any;
   ensureFlairAgentUser: (...args: any[]) => any;
   ensureFlairPairInitiatorRole: (...args: any[]) => any;
+  FLAIR_AGENT_USERNAME: string;
   flairPackageDir: (...args: any[]) => any;
   harperBin: (...args: any[]) => any;
   harperConfigPath: (...args: any[]) => any;
@@ -275,6 +276,18 @@ async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, ad
 }
 
 /**
+ * Refuse the reserved shared agent account as an administrator input on either
+ * remote-init leg, before any filesystem or cluster write. `role` and `flag`
+ * name the leg's input, so the remedy points at the operator's own flag.
+ */
+function refuseReservedPrincipal(name: string, role: string, flag: string): void {
+  if (name !== cli.FLAIR_AGENT_USERNAME) return;
+  console.error(`Error: '${cli.FLAIR_AGENT_USERNAME}' is a reserved Flair account and cannot be the ${role}.`);
+  console.error(`  Use a different ${role} (${flag}).`);
+  process.exit(1);
+}
+
+/**
  * Refuse an `--agent-id` that names an administrator username reserved by this init path,
  * before any key or Agent write.
  */
@@ -332,6 +345,204 @@ function initLaunchdExitCode(kind: string): number {
 
 function repointMainServiceUnit(...args: any[]): any {
   return cli.repointMainServiceUnit(...args);
+}
+
+/**
+ * The Harper principal a remote init run authenticates its later calls as.
+ *
+ * On the provisioning leg this is what `provisionFabric` selected: when
+ * `list_users` shows the cluster administrator is a super_user it reuses that
+ * administrator (`created: false`, password = the one the operator supplied);
+ * otherwise it creates or updates `admin` (`created: true`, password = the
+ * chosen Flair admin password init wrote to the admin-pass file). On the
+ * already-running-instance leg it is the instance's admin user.
+ */
+export interface RemoteInitPrincipal {
+  username: string;
+  password: string;
+  created: boolean;
+}
+
+/**
+ * The `flair init` summary's password line, which must name the password the
+ * principal actually has: the chosen Flair admin password that init wrote to
+ * `adminPassPath` when provisioning created or updated `admin`, otherwise the
+ * cluster administrator password this run supplied. `principal.created` decides,
+ * never the username: a reused super_user may itself be named `admin`.
+ */
+export function adminPasswordHintLine(principal: RemoteInitPrincipal, adminPassPath: string): string {
+  if (principal.created) {
+    return `  Admin password: the chosen Flair admin password, written to ${adminPassPath}`;
+  }
+  return "  Admin password: the cluster administrator password this run supplied";
+}
+
+export interface RemoteInitLaterOptions {
+  baseUrl: string;
+  opsUrl: string;
+  /** `--remote`: the instance answers federation pair requests as a hub. */
+  remote: boolean;
+  /**
+   * Provisioning leg only: create/align the flair_agent role and the shared
+   * flair-agent user (plus the flair_pair_initiator role with `--remote`) before
+   * the agent seed, and verify the instance with `/FederationInstance` instead
+   * of `/Health`.
+   */
+  provisioned: boolean;
+  agentId?: string;
+  keysDir?: string;
+}
+
+/**
+ * The calls a `flair init` run makes after provisioning. On the provisioning
+ * leg they are the flair_agent role and shared agent user (plus the
+ * flair_pair_initiator role and the federation-instance reconcile with
+ * `--remote`), the agent seed with `--agent-id`, the org-wide skill seed and
+ * the verification read; every one authenticates as the `principal`
+ * provisioning returned. On the already-running-instance leg only the
+ * `/Health` connectivity check sends no Authorization header; the other calls
+ * authenticate as that principal too.
+ */
+export async function finishRemoteInit(
+  principal: RemoteInitPrincipal,
+  opts: RemoteInitLaterOptions,
+): Promise<{ instanceId?: string; privPath?: string }> {
+  const { baseUrl, opsUrl, remote, provisioned, agentId } = opts;
+  const adminUser = principal.username;
+  const adminPass = principal.password;
+  const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+  const role = remote ? "hub" : undefined;
+
+  if (provisioned) {
+    // Hub instances (--remote) receive federation pair requests and need
+    // the flair_pair_initiator role so bootstrap credentials can pass
+    // platform auth before reaching the FederationPair resource handler.
+    if (remote) {
+      await ensureFlairPairInitiatorRole(opsUrl, adminUser, adminPass);
+    }
+
+    // Every flair instance has agents, so provision the least-privilege
+    // flair_agent role (idempotent, harmless until a user is assigned to it).
+    await ensureFlairAgentRole(opsUrl, adminUser, adminPass);
+    // THE FLIP (auth-rbac): provision the shared least-privilege flair-agent user.
+    // This ACTIVATES the gate's per-agent de-elevation (verified non-admin agents
+    // resolve to flair-agent instead of admin super_user). Safe now: #487 gave
+    // every agent-facing resource its own allow* + resolveAgentAuth, so they no
+    // longer rely on the admin super_user bypass. The gate also falls back to
+    // admin if this user is ever absent, so de-elevation degrades gracefully.
+    await ensureFlairAgentUser(opsUrl, adminUser, adminPass);
+  }
+
+  // Generate or reuse keypair (only if --agent-id provided, or --remote needs
+  // a public key for the FederationInstance row)
+  let pubKeyB64url: string | undefined;
+  let privPath: string | undefined;
+  let instanceId: string | undefined;
+
+  // Reconcile the federation Instance identity row if --remote (hub role).
+  // flair#1883: this used to INSERT a row with a fresh random id on every
+  // run, so a hub that had already answered a `GET /FederationInstance`
+  // (which find-or-creates a `spoke` row) ended up with TWO rows and no
+  // canonical identity. Reconciling keeps the row peers already know.
+  // It runs before the agent seed so the agent's home is the hub's id.
+  const reconcileHubInstance = async (publicKey: string): Promise<void> => {
+    instanceId = randomUUID();
+    console.log(`Reconciling federation Instance (role=${role}) via ops API...`);
+    let reconciled: { action: string; id: string };
+    try {
+      reconciled = await reconcileFederationInstanceViaOpsApi(
+        opsUrl,
+        { instanceId, publicKey },
+        adminUser,
+        adminPass,
+      );
+    } catch (err: any) {
+      // A refusal (two rows) or an unreachable ops API — both are this
+      // command failing, and both already name what to do.
+      console.error(`Error: ${err?.message ?? err}`);
+      process.exit(1);
+    }
+    instanceId = reconciled.id;
+    if (reconciled.action === "created") {
+      console.log(`Federation Instance created: ${reconciled.id} (role=${role}) ✓`);
+    } else if (reconciled.action === "updated") {
+      console.log(`Federation Instance reconciled: ${reconciled.id} is now role=${role} (id and key kept) ✓`);
+    } else {
+      console.log(`Federation Instance already role=${role}: ${reconciled.id} — no change ✓`);
+    }
+  };
+
+  if (agentId || role) {
+    const keysDir: string = opts.keysDir ?? defaultKeysDir();
+    mkdirSync(keysDir, { recursive: true });
+
+    if (agentId) {
+      privPath = privKeyPath(agentId, keysDir);
+      const pubPath = pubKeyPath(agentId, keysDir);
+
+      if (existsSync(privPath!)) {
+        console.log(`Reusing existing key: ${privPath}`);
+        const seed = new Uint8Array(readFileSync(privPath!));
+        const kp = nacl.sign.keyPair.fromSeed(seed);
+        pubKeyB64url = b64url(kp.publicKey);
+      } else {
+        console.log("Generating Ed25519 keypair...");
+        const kp = nacl.sign.keyPair();
+        const seed = kp.secretKey.slice(0, 32);
+        writeFileSync(privPath!, Buffer.from(seed));
+        chmodSync(privPath!, 0o600);
+        writeFileSync(pubPath, Buffer.from(kp.publicKey));
+        pubKeyB64url = b64url(kp.publicKey);
+        console.log(`Keypair written: ${privPath} ✓`);
+      }
+
+      if (role) await reconcileHubInstance(pubKeyB64url!);
+
+      // Seed agent via remote ops API
+      console.log(`Seeding agent '${agentId}' on ${baseUrl}...`);
+      await seedAgentWithLocalHome(opsUrl, agentId, pubKeyB64url, adminUser, adminPass);
+      console.log(`Agent '${agentId}' registered on remote instance ✓`);
+    } else {
+      // No agentId -- generate throwaway keypair for FederationInstance row
+      console.log("Generating federation instance keypair...");
+      const kp = nacl.sign.keyPair();
+      pubKeyB64url = b64url(kp.publicKey);
+      if (role) await reconcileHubInstance(pubKeyB64url!);
+    }
+  } else {
+    console.log("No --agent-id provided -- skipping agent registration");
+  }
+
+  // flair#2141 S2 — seed the org-wide using-flair skill on the remote
+  // instance, as the operator. Idempotent; a refusal fails this run.
+  await seedUsingFlairSkillViaRest(baseUrl, adminUser, adminPass);
+
+  // Verify connectivity
+  if (provisioned) {
+    // Use /FederationInstance with Basic auth (not /Health which false-401s on Fabric)
+    console.log("Verifying remote connectivity...");
+    const verifyRes = await fetch(`${baseUrl}/FederationInstance`, {
+      headers: { Authorization: auth },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!verifyRes.ok) {
+      const body = await verifyRes.text().catch(() => "");
+      console.error(`Remote verification failed (${verifyRes.status}): ${body}`);
+      process.exit(1);
+    }
+    console.log("✓ Hub ready at " + baseUrl);
+  } else {
+    // Existing behavior: /Health check (already-running Flair)
+    console.log("Verifying remote connectivity...");
+    const verifyRes = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
+    if (!verifyRes.ok) {
+      console.error(`Remote health check failed: ${verifyRes.status}`);
+      process.exit(1);
+    }
+    console.log("Remote Flair instance healthy ✓");
+  }
+
+  return { instanceId, privPath };
 }
 
 export function register(program: Command): void {
@@ -399,9 +610,18 @@ addAdminPassOptions(
       const clusterAdminPass = opts.clusterAdminPass || process.env.FLAIR_CLUSTER_ADMIN_PASS;
       let flairAdminPass = opts.flairAdminPass || process.env.FLAIR_ADMIN_PASS;
       let didProvision = false;
+      let provisionedPrincipal: RemoteInitPrincipal | undefined;
 
       if (clusterAdminUser && clusterAdminPass) {
         // ── New provisioning path: deploy Flair to Fabric, wait, provision super_user ──
+        // The reserved shared agent account must never be used as this run's
+        // administrator input on either leg: init authenticates its later calls
+        // as the run's principal, and without this guard provisioning could
+        // change that account through add_user or alter_user on
+        // FLAIR_AGENT_USERNAME (ensureFlairAgentUser), out from under the agent
+        // gate. Refuse it first, before the agent-ID check and every filesystem
+        // or cluster write.
+        refuseReservedPrincipal(clusterAdminUser, "cluster administrator", "--cluster-admin-user");
         // Provisioning either reuses an existing super_user cluster admin or
         // creates or updates DEFAULT_ADMIN_USER, so both names are known before
         // provisionFabric runs. Refuse either one here, before any write.
@@ -417,36 +637,31 @@ addAdminPassOptions(
           flairAdminPass = randomBytes(24).toString("base64url");
         }
 
-        // Write the flair admin pass to secrets directory
-        const secretsDir = join(resolveHome(), ".tps", "secrets");
-        mkdirSync(secretsDir, { recursive: true });
-        const secretPath = join(secretsDir, "flair-fabric-hdb");
-        writeFileSync(secretPath, flairAdminPass + "\n", { mode: 0o600 });
-        console.log(`Admin password written to ${secretPath}`);
-
-        // Atomic provisioning: deploy + wait + provision user
-        await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass);
+        // Atomic provisioning: deploy + wait + provision user. The returned
+        // principal is the one this run set up: the existing super_user cluster
+        // administrator when list_users reports the operator's cluster admin as
+        // a super_user, else the `admin` user this run created (or updated).
+        const provisioned: RemoteInitPrincipal = await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass);
+        provisionedPrincipal = provisioned;
         didProvision = true;
 
-        // Hub instances (--remote) receive federation pair requests and need
-        // the flair_pair_initiator role so bootstrap credentials can pass
-        // platform auth before reaching the FederationPair resource handler.
-        if (opts.remote) {
-          await ensureFlairPairInitiatorRole(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
+        // Persist the chosen Flair admin password only when provisioning set it
+        // on the principal. A reused cluster administrator keeps its own
+        // password, so the file must not claim the chosen one. A write failure
+        // stays fatal and lands before the success summary.
+        if (provisioned.created) {
+          const secretsDir = join(resolveHome(), ".tps", "secrets");
+          mkdirSync(secretsDir, { recursive: true });
+          const secretPath = join(secretsDir, "flair-fabric-hdb");
+          writeFileSync(secretPath, flairAdminPass + "\n", { mode: 0o600 });
+          console.log(`Admin password written to ${secretPath}`);
         }
-
-        // Every flair instance has agents, so provision the least-privilege
-        // flair_agent role (idempotent, harmless until a user is assigned to it).
-        await ensureFlairAgentRole(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
-        // THE FLIP (auth-rbac): provision the shared least-privilege flair-agent user.
-        // This ACTIVATES the gate's per-agent de-elevation (verified non-admin agents
-        // resolve to flair-agent instead of admin super_user). Safe now: #487 gave
-        // every agent-facing resource its own allow* + resolveAgentAuth, so they no
-        // longer rely on the admin super_user bypass. The gate also falls back to
-        // admin if this user is ever absent, so de-elevation degrades gracefully.
-        await ensureFlairAgentUser(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
       } else {
         // ── Existing behavior: --admin-pass required for already-running Flair ──
+        // On this leg the run's principal is --admin-user (or its default), so
+        // the reserved-principal refusal must cover that name too, before any
+        // filesystem or cluster write.
+        refuseReservedPrincipal(resolveAdminUser(opts.adminUser), "admin user", "--admin-user");
         if (!opts.adminPass) {
           console.error("Error: --admin-pass is required with --target/--ops-target (remote init without --cluster-admin-user/--cluster-admin-pass)");
           console.error("  Use --cluster-admin-user and --cluster-admin-pass for automated Fabric provisioning.");
@@ -462,138 +677,39 @@ addAdminPassOptions(
       }
 
       // flair#1345: only the already-running-instance leg honors --admin-user /
-      // FLAIR_ADMIN_USER — the provisioning leg just CREATED the superuser as
-      // DEFAULT_ADMIN_USER via provisionFabric, so that name is ground truth.
-      const adminUser = didProvision ? DEFAULT_ADMIN_USER : resolveAdminUser(opts.adminUser);
-      if (!didProvision) refuseOperatorAgentId(agentId, [adminUser]);
-      const auth = `Basic ${Buffer.from(`${adminUser}:${flairAdminPass}`).toString("base64")}`;
-      const role = opts.remote ? "hub" : undefined;
-
-      // Generate or reuse keypair (only if --agent-id provided, or --remote needs
-      // a public key for the FederationInstance row)
-      let pubKeyB64url: string | undefined;
-      let privPath: string | undefined;
-      let instanceId: string | undefined;
-
-      // Reconcile the federation Instance identity row if --remote (hub role).
-      // flair#1883: this used to INSERT a row with a fresh random id on every
-      // run, so a hub that had already answered a `GET /FederationInstance`
-      // (which find-or-creates a `spoke` row) ended up with TWO rows and no
-      // canonical identity. Reconciling keeps the row peers already know.
-      // It runs before the agent seed so the agent's home is the hub's id.
-      const reconcileHubInstance = async (publicKey: string): Promise<void> => {
-        instanceId = randomUUID();
-        console.log(`Reconciling federation Instance (role=${role}) via ops API...`);
-        let reconciled: { action: string; id: string };
-        try {
-          reconciled = await reconcileFederationInstanceViaOpsApi(
-            opsUrl,
-            { instanceId, publicKey },
-            adminUser,
-            flairAdminPass,
-          );
-        } catch (err: any) {
-          // A refusal (two rows) or an unreachable ops API — both are this
-          // command failing, and both already name what to do.
-          console.error(`Error: ${err?.message ?? err}`);
-          process.exit(1);
-        }
-        instanceId = reconciled.id;
-        if (reconciled.action === "created") {
-          console.log(`Federation Instance created: ${reconciled.id} (role=${role}) ✓`);
-        } else if (reconciled.action === "updated") {
-          console.log(`Federation Instance reconciled: ${reconciled.id} is now role=${role} (id and key kept) ✓`);
-        } else {
-          console.log(`Federation Instance already role=${role}: ${reconciled.id} — no change ✓`);
-        }
+      // FLAIR_ADMIN_USER; provisioning uses the returned principal.
+      const principal: RemoteInitPrincipal = provisionedPrincipal ?? {
+        username: resolveAdminUser(opts.adminUser),
+        password: flairAdminPass!,
+        created: false,
       };
-
-      if (agentId || role) {
-        const keysDir: string = opts.keysDir ?? defaultKeysDir();
-        mkdirSync(keysDir, { recursive: true });
-
-        if (agentId) {
-          privPath = privKeyPath(agentId, keysDir);
-          const pubPath = pubKeyPath(agentId, keysDir);
-
-          if (existsSync(privPath!)) {
-            console.log(`Reusing existing key: ${privPath}`);
-            const seed = new Uint8Array(readFileSync(privPath!));
-            const kp = nacl.sign.keyPair.fromSeed(seed);
-            pubKeyB64url = b64url(kp.publicKey);
-          } else {
-            console.log("Generating Ed25519 keypair...");
-            const kp = nacl.sign.keyPair();
-            const seed = kp.secretKey.slice(0, 32);
-            writeFileSync(privPath!, Buffer.from(seed));
-            chmodSync(privPath!, 0o600);
-            writeFileSync(pubPath, Buffer.from(kp.publicKey));
-            pubKeyB64url = b64url(kp.publicKey);
-            console.log(`Keypair written: ${privPath} ✓`);
-          }
-
-          if (role) await reconcileHubInstance(pubKeyB64url!);
-
-          // Seed agent via remote ops API
-          console.log(`Seeding agent '${agentId}' on ${baseUrl}...`);
-          await seedAgentWithLocalHome(opsUrl, agentId, pubKeyB64url, adminUser, flairAdminPass);
-          console.log(`Agent '${agentId}' registered on remote instance ✓`);
-        } else {
-          // No agentId -- generate throwaway keypair for FederationInstance row
-          console.log("Generating federation instance keypair...");
-          const kp = nacl.sign.keyPair();
-          pubKeyB64url = b64url(kp.publicKey);
-          if (role) await reconcileHubInstance(pubKeyB64url!);
-        }
-      } else {
-        console.log("No --agent-id provided -- skipping agent registration");
-      }
-
-      // flair#2141 S2 — seed the org-wide using-flair skill on the remote
-      // instance, as the operator. Idempotent; a refusal fails this run.
-      await seedUsingFlairSkillViaRest(baseUrl, adminUser, flairAdminPass);
-
-      // Verify connectivity
-      if (didProvision) {
-        // Use /FederationInstance with Basic auth (not /Health which false-401s on Fabric)
-        console.log("Verifying remote connectivity...");
-        const verifyRes = await fetch(`${baseUrl}/FederationInstance`, {
-          headers: { Authorization: auth },
-          signal: AbortSignal.timeout(5000),
-        });
-        if (!verifyRes.ok) {
-          const body = await verifyRes.text().catch(() => "");
-          console.error(`Remote verification failed (${verifyRes.status}): ${body}`);
-          process.exit(1);
-        }
-        console.log("✓ Hub ready at " + baseUrl);
-      } else {
-        // Existing behavior: /Health check (already-running Flair)
-        console.log("Verifying remote connectivity...");
-        const verifyRes = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
-        if (!verifyRes.ok) {
-          console.error(`Remote health check failed: ${verifyRes.status}`);
-          process.exit(1);
-        }
-        console.log("Remote Flair instance healthy ✓");
-      }
-
+      if (!didProvision) refuseOperatorAgentId(agentId, [principal.username]);
+      const { instanceId, privPath } = await finishRemoteInit(principal, {
+        baseUrl,
+        opsUrl,
+        remote: !!opts.remote,
+        provisioned: didProvision,
+        agentId,
+        keysDir: opts.keysDir,
+      });
       // Print summary
       if (didProvision) {
         const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf-8"));
         const flavor = pkg.version || "(unknown)";
         const displayTarget = target || opsTarget;
+        const adminPassPath = join(resolveHome(), ".tps", "secrets", "flair-fabric-hdb");
         console.log(`\n✓ Flair hub deployed to ${displayTarget}`);
         console.log(`  Component: flair@${flavor}`);
-        console.log(`  Admin user: ${adminUser} (pass written to ${join(resolveHome(), ".tps", "secrets", "flair-fabric-hdb")})`);
-        if (instanceId) console.log(`  Instance: ${instanceId} (role=${role})`);
+        console.log(`  Admin user: ${principal.username}`);
+        console.log(adminPasswordHintLine(principal, adminPassPath));
+        if (instanceId) console.log(`  Instance: ${instanceId} (role=hub)`);
         console.log(`  Federation: ready — run \`flair federation token\` to mint a pairing token`);
       } else {
         console.log(`\n✅ Remote Flair initialized`);
         if (agentId) console.log(`   Agent ID:    ${agentId}`);
         console.log(`   Target:      ${baseUrl}`);
         if (agentId) console.log(`   Private key: ${privPath}`);
-        if (role) console.log(`   Role:         ${role}`);
+        if (opts.remote) console.log(`   Role:         hub`);
         console.log(`\n   Export: FLAIR_URL=${baseUrl}`);
       }
       return;
