@@ -127,10 +127,19 @@ describe("flair#3107 on a real Harper", () => {
     });
     await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", () => r()));
     const proxyUrl = `http://127.0.0.1:${(proxy.address() as any).port}`;
+    const T = Date.now();
+    const aRun = add("agent-3107-b", "memory A: written by session A", proxyUrl, T, "refused add A");
     try {
-      const T = Date.now();
-      const aRun = add("agent-3107-b", "memory A: written by session A", proxyUrl, T, "refused add A");
-      await aRefusedSignal;
+      // A may exit before its first PUT reaches the proxy (a refused credential,
+      // a parse error). Waiting only on aRefusedSignal would hold the case to
+      // the 150 s timeout; race it against A's completion and fail fast with
+      // A's own output.
+      const early = await Promise.race([aRefusedSignal.then(() => null), aRun.then((r) => r)]);
+      if (early !== null) {
+        throw new Error(
+          `session A finished (exit ${early.code}) before its first PUT was refused\nstdout:\n${early.stdout}\nstderr:\n${early.stderr}`,
+        );
+      }
       const b = await add("agent-3107-b", "memory B: written by session B", proxyUrl, T, "add B");
       const rowsAfterB = await rowsFor("agent-3107-b");
       releaseA.fn();
@@ -142,6 +151,10 @@ describe("flair#3107 on a real Harper", () => {
       expect(rows.length).toBe(2);
       expect(rows.map((r) => r.content)).toContain("memory A: written by session A");
     } finally {
+      // Release the retry latch, let A finish, then close the proxy — in that
+      // order, even when B or an assertion threw first.
+      releaseA.fn();
+      await aRun.catch(() => {});
       await new Promise<void>((r) => proxy.close(() => r()));
     }
   }, 150_000);

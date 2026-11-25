@@ -13,6 +13,7 @@ import { SigningIdentitySource } from "../lib/signing-identity.js";
 import * as render from "../render.js";
 import { EMBEDDING_STAMP_ID, describeStampOutstanding, resolveCurrentModelId } from "../stamp-outstanding.js";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 export type QualityCli = {
   api: (...args: any[]) => any;
@@ -1173,7 +1174,10 @@ export async function fetchPreviousQualitySnapshot(
  *  surfacing that as a clear error, same as every other write path here. */
 
 async function storeQualitySnapshot(agentId: string, agentIdSource: SigningIdentitySource, baseUrl: string, subject: string, snapshot: QualitySnapshotCore): Promise<string> {
-  const memId = `${agentId}-quality-snapshot-${Date.now()}`;
+  // flair#3115: the PUT is an upsert, so a millisecond suffix made two --emit
+  // runs in the same millisecond overwrite one row; the uuid suffix keeps the
+  // two writes apart.
+  const memId = `${agentId}-quality-snapshot-${randomUUID()}`;
   const body: Record<string, unknown> = {
     id: memId,
     agentId,
