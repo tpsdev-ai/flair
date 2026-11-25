@@ -54,6 +54,7 @@ export type InitCli = {
   ensureFlairAgentRole: (...args: any[]) => any;
   ensureFlairAgentUser: (...args: any[]) => any;
   ensureFlairPairInitiatorRole: (...args: any[]) => any;
+  FLAIR_AGENT_USERNAME: string;
   flairPackageDir: (...args: any[]) => any;
   harperBin: (...args: any[]) => any;
   harperConfigPath: (...args: any[]) => any;
@@ -605,6 +606,15 @@ addAdminPassOptions(
         // creates or updates DEFAULT_ADMIN_USER, so both names are known before
         // provisionFabric runs. Refuse either one here, before any write.
         refuseOperatorAgentId(agentId, [clusterAdminUser, DEFAULT_ADMIN_USER]);
+        // The reserved shared agent account must never be the principal: init's
+        // later steps authenticate as the cluster administrator and issue
+        // alter_user on FLAIR_AGENT_USERNAME, which would change that account's
+        // role out from under the agent gate.
+        if (clusterAdminUser === cli.FLAIR_AGENT_USERNAME) {
+          console.error(`Error: '${cli.FLAIR_AGENT_USERNAME}' is a reserved Flair account and cannot be the cluster administrator.`);
+          console.error("  Use a different cluster administrator (--cluster-admin-user).");
+          process.exit(1);
+        }
         if (!opts.force) {
           console.error("Error: --force is required with --target/--ops-target (remote init provisions a live Fabric instance)");
           console.error("  Pass --force to confirm this is intended.");
@@ -616,19 +626,25 @@ addAdminPassOptions(
           flairAdminPass = randomBytes(24).toString("base64url");
         }
 
-        // Write the flair admin pass to secrets directory
-        const secretsDir = join(resolveHome(), ".tps", "secrets");
-        mkdirSync(secretsDir, { recursive: true });
-        const secretPath = join(secretsDir, "flair-fabric-hdb");
-        writeFileSync(secretPath, flairAdminPass + "\n", { mode: 0o600 });
-        console.log(`Admin password written to ${secretPath}`);
-
         // Atomic provisioning: deploy + wait + provision user. The returned
         // principal is the one this run set up: the existing super_user cluster
         // administrator when list_users reports the operator's cluster admin as
         // a super_user, else the `admin` user this run created (or updated).
-        provisionedPrincipal = await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass);
+        const provisioned: RemoteInitPrincipal = await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass);
+        provisionedPrincipal = provisioned;
         didProvision = true;
+
+        // Persist the chosen Flair admin password only when provisioning set it
+        // on the principal. A reused cluster administrator keeps its own
+        // password, so the file must not claim the chosen one. A write failure
+        // stays fatal and lands before the success summary.
+        if (provisioned.created) {
+          const secretsDir = join(resolveHome(), ".tps", "secrets");
+          mkdirSync(secretsDir, { recursive: true });
+          const secretPath = join(secretsDir, "flair-fabric-hdb");
+          writeFileSync(secretPath, flairAdminPass + "\n", { mode: 0o600 });
+          console.log(`Admin password written to ${secretPath}`);
+        }
       } else {
         // ── Existing behavior: --admin-pass required for already-running Flair ──
         if (!opts.adminPass) {

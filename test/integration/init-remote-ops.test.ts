@@ -8,7 +8,7 @@
  */
 
 import { describe, test, expect, beforeAll, beforeEach, afterEach, afterAll, mock } from "bun:test";
-import { existsSync, readFileSync, rmSync, mkdirSync, writeFileSync, mkdtempSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, mkdirSync, writeFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -70,9 +70,6 @@ afterEach(() => {
   // inherit a deleted working directory.
   process.chdir(originalCwd);
   try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-  // Clean up secret file if written
-  const secretPath = join(process.env.HOME || "/tmp", ".tps", "secrets", "flair-fabric-hdb");
-  try { rmSync(secretPath, { force: true }); } catch {}
 });
 
 afterAll(() => {
@@ -450,6 +447,64 @@ describe("CLI --force + --cluster-admin-user validation", () => {
 
 const REAL_FETCH = globalThis.fetch;
 
+/**
+ * Start a Harper this file owns. These suites create and drop users, so they
+ * must never run against an external `HARPER_HTTP_URL`: refuse there before the
+ * first fixture write. `stopHarper` already leaves an external instance alone.
+ */
+async function startLocalHarper(): Promise<HarperInstance> {
+  const inst = await startHarper();
+  if (inst.external) {
+    throw new Error(
+      "init-remote-ops: this suite creates and drops Harper users, so it refuses an external instance (HARPER_HTTP_URL is set)",
+    );
+  }
+  return inst;
+}
+
+describe("flair#3106 — reserved principal refusal (real Harper)", () => {
+  let harper: HarperInstance;
+
+  beforeAll(async () => {
+    harper = await startLocalHarper();
+    const role = await harperOps(harper, "admin", "test123", { operation: "add_role", role: "super-role", permission: { super_user: true } });
+    expect([200, 409], role.text).toContain(role.status);
+    const user = await harperOps(harper, "admin", "test123", {
+      operation: "add_user", username: "flair-agent", password: "reserved-pass", role: "super-role", active: true,
+    });
+    expect([200, 409], user.text).toContain(user.status);
+  }, 180_000);
+
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
+
+  test("refuses a cluster administrator named flair-agent before any write", async () => {
+    const before = await harperOps(harper, "admin", "test123", { operation: "list_users" });
+    expect(before.status).toBe(200);
+    const beforeRow = ((before.body as any[]) ?? []).find((u) => u.username === "flair-agent");
+    expect(beforeRow, "the reserved super_user must exist").toBeTruthy();
+
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const out = await runInitAction(initArgs(harper, {
+      clusterUser: "flair-agent",
+      clusterPass: "reserved-pass",
+      flairPass: "unused-reserved-pass",
+      agentId: "agent-reserved",
+      keysDir: join(tmpDir, "keys-reserved"),
+    }), home);
+
+    expect(out.exitCode).toBe(1);
+    expect(out.stderr).toContain("'flair-agent' is a reserved Flair account");
+    expect(out.stderr).toContain("different cluster administrator");
+    // Refused before any filesystem write: the isolated home is still empty.
+    expect(readdirSync(home)).toEqual([]);
+
+    const after = await harperOps(harper, "admin", "test123", { operation: "list_users" });
+    expect(after.status).toBe(200);
+    const afterRow = ((after.body as any[]) ?? []).find((u) => u.username === "flair-agent");
+    expect(afterRow, "the reserved account's role must be unchanged").toEqual(beforeRow);
+  }, 150_000);
+});
+
 const basic = (user: string, pass: string) => "Basic " + btoa(`${user}:${pass}`);
 
 interface RecordedCall { user: string; pass: string; path: string; operation?: string }
@@ -567,7 +622,7 @@ describe("flair#3106 — existing super_user branch (real Harper)", () => {
   let harper: HarperInstance;
 
   beforeAll(async () => {
-    harper = await startHarper();
+    harper = await startLocalHarper();
     // A super_user whose name is not `admin`, so a later call that falls back
     // to the default name is both a wrong user and a wrong password.
     const role = await harperOps(harper, "admin", "test123", { operation: "add_role", role: "super-role", permission: { super_user: true } });
@@ -610,6 +665,7 @@ describe("flair#3106 — existing super_user branch (real Harper)", () => {
   test("reused super_user: the action authenticates every later call as it and prints the cluster-administrator hint", async () => {
     const recorder = installRecorder({ user: "cluster-north", pass: "cluster-north-pass" });
     const home = mkdtempSync(join(tmpDir, "home-"));
+    const savedProfile = process.env.USERPROFILE;
     try {
       const out = await runInitAction(initArgs(harper, {
         clusterUser: "cluster-north",
@@ -627,8 +683,16 @@ describe("flair#3106 — existing super_user branch (real Harper)", () => {
       const principal: RemoteInitPrincipal = { username: "cluster-north", password: "cluster-north-pass", created: false };
       await expectWritesLanded(harper, principal, "agent-north-action");
 
+      // The reused super_user keeps its own password, so this run writes no
+      // admin-pass file: the chosen Flair admin password was never set on it.
       const secretPath = join(home, ".tps", "secrets", "flair-fabric-hdb");
-      expect(readFileSync(secretPath, "utf8") === "supplied-north\n", "the admin-pass file must hold the chosen Flair admin password").toBe(true);
+      expect(existsSync(secretPath), "a reused principal must not get an admin-pass file").toBe(false);
+      // The action ran with both home variables pointing at its isolated home,
+      // and restored them afterwards. The win32 branch in resolveHome() itself
+      // is not exercised on Linux; this pins the assignment and the restore.
+      expect(out.envDuringAction.HOME).toBe(home);
+      expect(out.envDuringAction.USERPROFILE).toBe(home);
+      expect(process.env.USERPROFILE).toBe(savedProfile);
       const hint = hintOf(out.stdout);
       expect(hint).toContain("cluster administrator password");
       expect(hint).not.toContain(secretPath);
@@ -644,7 +708,7 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
   let harper: HarperInstance;
 
   beforeAll(async () => {
-    harper = await startHarper();
+    harper = await startLocalHarper();
     // A second super_user so Harper will let `admin` go (it refuses to drop the
     // last one), then a non-super cluster administrator that may add users.
     const superRole = await harperOps(harper, "admin", "test123", { operation: "add_role", role: "super-role", permission: { super_user: true } });
@@ -733,8 +797,16 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
   }, 120_000);
 
   test("created admin: the action creates admin and authenticates every later call as it", async () => {
-    const dropped = await harperOps(harper, "cluster-south", "cluster-south-pass", { operation: "drop_user", username: "admin" });
-    expect(dropped.status, `drop_user admin: ${dropped.text.slice(0, 200)}`).toBe(200);
+    // Establish an absent `admin` here rather than relying on an earlier case
+    // in this suite: read first, drop only when present, then confirm absent.
+    const listed = await harperOps(harper, "cluster-south", "cluster-south-pass", { operation: "list_users" });
+    expect(listed.status, `list_users: ${listed.text.slice(0, 200)}`).toBe(200);
+    if (((listed.body as any[]) ?? []).some((u) => u.username === "admin")) {
+      const dropped = await harperOps(harper, "cluster-south", "cluster-south-pass", { operation: "drop_user", username: "admin" });
+      expect(dropped.status, `drop_user admin: ${dropped.text.slice(0, 200)}`).toBe(200);
+    }
+    const absent = await harperOps(harper, "cluster-south", "cluster-south-pass", { operation: "list_users" });
+    expect(((absent.body as any[]) ?? []).some((u) => u.username === "admin"), "admin must be absent before the action").toBe(false);
 
     const recorder = installRecorder({ user: "cluster-east", pass: "cluster-east-pass" });
     const home = mkdtempSync(join(tmpDir, "home-"));
@@ -775,7 +847,7 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
     }
   }, 150_000);
 
-  test("reused super_user named admin: the action uses its own password and prints the cluster-administrator hint", async () => {
+  test("reused super_user named admin: the action leaves the saved credential untouched and its password still authenticates", async () => {
     const seeded = await harperOps(harper, "cluster-east", "cluster-east-pass", {
       operation: "add_user", username: "admin", password: "reused-admin-pass", role: "super_user", active: true,
     });
@@ -788,11 +860,15 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
 
     const recorder = installRecorder({ user: "admin", pass: "reused-admin-pass" });
     const home = mkdtempSync(join(tmpDir, "home-"));
+    // Start with a saved credential file holding the administrator's own
+    // password, and omit --flair-admin-pass so init generates one internally.
+    const secretPath = join(home, ".tps", "secrets", "flair-fabric-hdb");
+    mkdirSync(join(home, ".tps", "secrets"), { recursive: true });
+    writeFileSync(secretPath, "reused-admin-pass\n", { mode: 0o600 });
     try {
       const out = await runInitAction(initArgs(harper, {
         clusterUser: "admin",
         clusterPass: "reused-admin-pass",
-        flairPass: "supplied-west",
         agentId: "agent-west-action",
         keysDir: join(tmpDir, "keys-west-action"),
       }), home);
@@ -805,8 +881,13 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
       const principal: RemoteInitPrincipal = { username: "admin", password: "reused-admin-pass", created: false };
       await expectWritesLanded(harper, principal, "agent-west-action");
 
-      const secretPath = join(home, ".tps", "secrets", "flair-fabric-hdb");
-      expect(readFileSync(secretPath, "utf8") === "supplied-west\n", "the admin-pass file must hold the chosen Flair admin password").toBe(true);
+      // Provisioning reused the existing administrator, so init must not
+      // overwrite the saved credential with the Flair admin password it never
+      // set on the instance.
+      expect(readFileSync(secretPath, "utf8"), "the saved credential must be unchanged").toBe("reused-admin-pass\n");
+      // Compare in-test that the saved value still authenticates; never print it.
+      const authenticated = await harperOps(harper, "admin", "reused-admin-pass", { operation: "list_users" });
+      expect(authenticated.status, `the saved credential no longer authenticates: ${authenticated.text.slice(0, 120)}`).toBe(200);
       const hint = hintOf(out.stdout);
       expect(hint).toContain("cluster administrator password");
       expect(hint).not.toContain(secretPath);
@@ -821,7 +902,7 @@ describe("flair#3106 — existing admin update path (real Harper)", () => {
   let harper: HarperInstance;
 
   beforeAll(async () => {
-    harper = await startHarper();
+    harper = await startLocalHarper();
     // `admin` already exists on a fresh instance, so a non-super cluster
     // administrator drives provisionFabric's add_user -> "already exists" ->
     // alter_user branch.
@@ -883,7 +964,7 @@ describe("flair#3106 — already-running instance leg (real Harper)", () => {
   let harper: HarperInstance;
 
   beforeAll(async () => {
-    harper = await startHarper();
+    harper = await startLocalHarper();
     // A nondefault super_user with its own password: this leg must use the
     // operator's `--admin-user`/`--admin-pass`, not the instance's `admin`.
     const role = await harperOps(harper, "admin", "test123", { operation: "add_role", role: "super-role", permission: { super_user: true } });
@@ -910,6 +991,9 @@ describe("flair#3106 — already-running instance leg (real Harper)", () => {
         "--keys-dir", join(tmpDir, "keys-live"),
       ], home);
       expect(out.exitCode).toBeUndefined();
+      // The already-running leg provisions no principal, so it writes no
+      // admin-pass file; it authenticates with the operator's --admin-pass.
+      expect(existsSync(join(home, ".tps", "secrets", "flair-fabric-hdb"))).toBe(false);
       // HOME isolation does not cover in-process helpers: every request must
       // target THIS ephemeral instance, never a default port elsewhere.
       expect(
@@ -959,7 +1043,13 @@ type InitActionEnv = {
 };
 
 /** Run the in-process `flair init` action with HOME isolated to `home`. */
-async function runInitAction(args: string[], home: string): Promise<{ stdout: string; stderr: string; exitCode?: number }> {
+async function runInitAction(args: string[], home: string): Promise<{
+  stdout: string;
+  stderr: string;
+  exitCode?: number;
+  /** HOME/USERPROFILE as the action saw them, captured before restore. */
+  envDuringAction: { HOME: string | undefined; USERPROFILE: string | undefined };
+}> {
   const saved: InitActionEnv = {
     HOME: process.env.HOME,
     USERPROFILE: process.env.USERPROFILE,
@@ -977,7 +1067,9 @@ async function runInitAction(args: string[], home: string): Promise<{ stdout: st
   let stdout = "";
   let stderr = "";
   let exitCode: number | undefined;
+  let envDuringAction: { HOME: string | undefined; USERPROFILE: string | undefined } = { HOME: undefined, USERPROFILE: undefined };
   process.env.HOME = home;
+  process.env.USERPROFILE = home;
   delete process.env.FLAIR_ADMIN_PASS;
   delete process.env.FLAIR_CLUSTER_ADMIN_USER;
   delete process.env.FLAIR_CLUSTER_ADMIN_PASS;
@@ -997,6 +1089,7 @@ async function runInitAction(args: string[], home: string): Promise<{ stdout: st
     const message = err instanceof Error ? err.message : String(err);
     if (!message.includes("process.exit")) throw err;
   } finally {
+    envDuringAction = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
     process.exit = origExit;
     console.log = origLog;
     console.error = origErr;
@@ -1019,14 +1112,14 @@ async function runInitAction(args: string[], home: string): Promise<{ stdout: st
     if (saved.ROOTPATH === undefined) delete process.env.ROOTPATH;
     else process.env.ROOTPATH = saved.ROOTPATH;
   }
-  return { stdout, stderr, exitCode };
+  return { stdout, stderr, exitCode, envDuringAction };
 }
 
 const hintOf = (stdout: string): string =>
   stdout.split("\n").find((line) => line.startsWith("  Admin password:")) ?? "";
 
 const initArgs = (h: HarperInstance, opts: {
-  clusterUser: string; clusterPass: string; flairPass: string; agentId: string; keysDir: string;
+  clusterUser: string; clusterPass: string; flairPass?: string; agentId: string; keysDir: string;
 }): string[] => [
   "--target", h.httpURL,
   "--ops-target", h.opsURL,
@@ -1034,7 +1127,7 @@ const initArgs = (h: HarperInstance, opts: {
   "--force",
   "--cluster-admin-user", opts.clusterUser,
   "--cluster-admin-pass", opts.clusterPass,
-  "--flair-admin-pass", opts.flairPass,
+  ...(opts.flairPass === undefined ? [] : ["--flair-admin-pass", opts.flairPass]),
   "--agent-id", opts.agentId,
   "--keys-dir", opts.keysDir,
 ];

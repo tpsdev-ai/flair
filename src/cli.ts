@@ -4950,6 +4950,7 @@ bindInitCli({
   ensureFlairAgentRole,
   ensureFlairAgentUser,
   ensureFlairPairInitiatorRole,
+  FLAIR_AGENT_USERNAME,
   flairPackageDir,
   harperBin,
   harperConfigPath,
