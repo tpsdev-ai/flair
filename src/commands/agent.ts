@@ -573,8 +573,8 @@ export function register(program: Command): void {
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .action(async (id: string, opts) => {
-      // flair#2359 — the ONE agent-ID rule, before any key path is built or any
-      // key file is read or written.
+      // flair#2359 — the ONE agent-ID rule, before any key file is read or
+      // written, and before any request.
       if (!isValidAgentId(id)) {
         console.error(`Error: ${invalidAgentIdMessage(id)}`);
         process.exit(1);

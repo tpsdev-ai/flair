@@ -209,9 +209,12 @@ addAdminPassOptions(
     }
 
     const agentId = data.agent?.id;
-    if (!agentId) { console.error("Error: no agent ID in export"); process.exit(1); }
-    // flair#2359 — the ONE agent-ID rule, before any key path is built or any
-    // key file is written.
+    // Only a missing agent.id (absent or null) means "no agent ID in export".
+    // A supplied value of any kind, including the empty string, goes through
+    // the shared rule below.
+    if (agentId === undefined || agentId === null) { console.error("Error: no agent ID in export"); process.exit(1); }
+    // flair#2359 — the ONE agent-ID rule, before the keys directory is created
+    // or any key file is written, and before any request.
     if (!isValidAgentId(agentId)) {
       console.error(`Error: ${invalidAgentIdMessage(agentId)}`);
       process.exit(1);

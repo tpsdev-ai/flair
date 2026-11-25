@@ -290,11 +290,13 @@ function refuseReservedPrincipal(name: string, role: string, flag: string): void
 
 /**
  * Refuse an `--agent-id` that violates the shared agent-ID rule, or that names
- * an administrator username reserved by this init path, before any key or
- * Agent write.
+ * an administrator username reserved by this init path, before the keys
+ * directory or any key file is created or written, and before any request.
  */
 function refuseOperatorAgentId(agentId: string | undefined, administratorNames: string[]): void {
-  if (!agentId) return;
+  // Only an OMITTED id means "no agent ID supplied". A supplied value of any
+  // kind, including the empty string, goes through the shared rule below.
+  if (agentId === undefined) return;
   if (!isValidAgentId(agentId)) {
     console.error(`Error: ${invalidAgentIdMessage(agentId)}`);
     process.exit(1);

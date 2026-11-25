@@ -1,12 +1,15 @@
 /**
  * flair#3119 — `flair import`, `flair init` (local and `--target`) and
  * `flair agent rotate-key` refuse an id that fails the shared agent-ID rule
- * (src/lib/agent-id-rule.ts) BEFORE any key path is built.
+ * (src/lib/agent-id-rule.ts) before the keys directory or any key file is
+ * created or written, and before any request.
  *
  * Each case runs the real CLI in a HOME-isolated child whose `fetch` records
  * every request to a file and answers 200. The home tree (the keys directory's
- * parent) is snapshotted before and after, so "no entry created or changed" is
- * the tree itself, and "no request sent" is the empty request log.
+ * parent) is snapshotted before and after; the snapshot holds entry names, each
+ * file's SHA-256 content hash and each symlink's target — not modes, timestamps
+ * or reads — so it shows no entry added or removed and no file content or link
+ * target changed. "No request sent" is the empty request log.
  *
  * Valid ids on the same paths are covered elsewhere: `flair import` by
  * agent-home-creation-paths-2474.test.ts, `flair init` by
@@ -92,7 +95,7 @@ function expectRefused(home: string, result: ReturnType<typeof runCli>, id: stri
 
 const BAD_IDS = ["agent/one", ".."];
 
-describe("flair#3119 — an invalid agent id is refused before its key path is built", () => {
+describe("flair#3119 — an invalid agent id is refused before its keys directory or key file is created", () => {
   for (const id of BAD_IDS) {
     test(`flair import refuses the export's agent id ${JSON.stringify(id)}`, () => {
       const home = tempDir("iid-import-");
@@ -141,4 +144,61 @@ describe("flair#3119 — an invalid agent id is refused before its key path is b
       expectRefused(home, result, id, baseline);
     }, 60_000);
   }
+});
+/**
+ * A supplied empty id is a supplied value: it must reach the shared rule, not
+ * the "omitted" branches of `flair import` and `flair init`.
+ */
+describe("flair#3119 — a supplied empty agent id is refused by the shared rule", () => {
+  const INVALID_EMPTY = `Error: invalid agent id "": ${RULE_TEXT}`;
+
+  test("flair import refuses an empty agent id in the export", () => {
+    const home = tempDir("iid-empty-import-");
+    const exportPath = join(home, "export.json");
+    writeFileSync(exportPath, JSON.stringify({ type: "agent-export", agent: { id: "" }, souls: [], memories: [] }));
+    const baseline = snapshotTree(home);
+    const result = runCli(home, [
+      "import", exportPath,
+      "--port", "1", "--ops-target", "http://127.0.0.1:1",
+      "--admin-pass", ADMIN_PASS, "--keys-dir", join(home, "keys"),
+    ]);
+    expectRefused(home, result, "", baseline);
+    expect(result.stdout + result.stderr).toContain(INVALID_EMPTY);
+  }, 60_000);
+
+  test("flair init --agent-id refuses an empty agent id on the local path", () => {
+    const home = tempDir("iid-empty-init-local-");
+    const baseline = snapshotTree(home);
+    const result = runCli(home, [
+      "init", "--agent-id", "", "--skip-start",
+      "--data-dir", join(home, "data"), "--keys-dir", join(home, "keys"),
+      "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
+    ]);
+    expectRefused(home, result, "", baseline);
+  }, 60_000);
+
+  test("flair init --target --agent-id refuses an empty agent id on the already-running remote leg", () => {
+    const home = tempDir("iid-empty-init-remote-");
+    const baseline = snapshotTree(home);
+    const result = runCli(home, [
+      "init", "--target", "http://127.0.0.1:1", "--ops-target", "http://127.0.0.1:1",
+      "--force", "--admin-pass", ADMIN_PASS, "--agent-id", "",
+      "--keys-dir", join(home, "keys"),
+      "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
+    ]);
+    expectRefused(home, result, "", baseline);
+  }, 60_000);
+
+  test("flair init --target --cluster-admin-user --agent-id refuses an empty agent id on the provisioning leg", () => {
+    const home = tempDir("iid-empty-init-provision-");
+    const baseline = snapshotTree(home);
+    const result = runCli(home, [
+      "init", "--target", "http://127.0.0.1:1", "--ops-target", "http://127.0.0.1:1",
+      "--cluster-admin-user", "cluster-admin-a", "--cluster-admin-pass", "throwaway-cluster-pass",
+      "--force", "--agent-id", "",
+      "--keys-dir", join(home, "keys"),
+      "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
+    ]);
+    expectRefused(home, result, "", baseline);
+  }, 60_000);
 });
