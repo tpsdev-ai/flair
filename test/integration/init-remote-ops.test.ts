@@ -8,7 +8,8 @@
  */
 
 import { describe, test, expect, beforeAll, beforeEach, afterEach, afterAll, mock } from "bun:test";
-import { existsSync, readFileSync, readdirSync, rmSync, mkdirSync, writeFileSync, mkdtempSync, chmodSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, mkdirSync, writeFileSync, mkdtempSync, chmodSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
@@ -1027,49 +1028,6 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
     }
   }, 150_000);
 
-  test.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
-    "created admin: a failed admin-pass write is fatal and prints no success summary",
-    async () => {
-      const home = mkdtempSync(join(tmpDir, "home-"));
-      const secretsDir = join(home, ".tps", "secrets");
-      mkdirSync(secretsDir, { recursive: true });
-      const clusterPass = "cluster-east-pass";
-      const chosenPass = "chosen-fatal-write-9f3a";
-      const recorder = installRecorder({ user: "cluster-east", pass: clusterPass });
-      // An unwritable secrets directory makes the post-provision write throw.
-      // Root ignores the mode, so this case only runs for a non-root user.
-      chmodSync(secretsDir, 0o500);
-      let out: Awaited<ReturnType<typeof runInitAction>>;
-      try {
-        out = await runInitAction(initArgs(harper, {
-          clusterUser: "cluster-east",
-          clusterPass,
-          flairPass: chosenPass,
-          agentId: "agent-fatal",
-          keysDir: join(tmpDir, "keys-fatal"),
-        }), home, { rethrow: false });
-      } finally {
-        chmodSync(secretsDir, 0o700);
-        recorder.restore();
-      }
-
-      expect(out.error, "the action must fail when the admin-pass write fails").toBeInstanceOf(Error);
-      expect((out.error as NodeJS.ErrnoException | undefined)?.code, "the failure must be the admin-pass write").toBe("EACCES");
-      expect((out.error as Error | undefined)?.message ?? "", "the failure must name the admin-pass file").toContain("flair-fabric-hdb");
-      expect(
-        recorder.all.some((call) => call.operation === "deploy_component"),
-        "the action must have provisioned before the write failed",
-      ).toBe(true);
-      expect(out.exitCode ?? 1, "the action must not report success").not.toBe(0);
-      expect(out.stdout, "no success summary may be printed").not.toContain("Flair hub deployed");
-      expect(out.stdout, "no admin-pass write may be reported").not.toContain("Admin password written");
-      expect(out.stdout, "the chosen password must not reach stdout").not.toContain(chosenPass);
-      expect(out.stderr, "the chosen password must not reach stderr").not.toContain(chosenPass);
-      expect(out.stdout, "the cluster administrator password must not reach stdout").not.toContain(clusterPass);
-      expect(out.stderr, "the cluster administrator password must not reach stderr").not.toContain(clusterPass);
-    },
-    150_000,
-  );
 });
 
 describe("flair#3106 — existing admin update path (real Harper)", () => {
@@ -1233,6 +1191,254 @@ describe("flair#3106 — already-running instance leg (real Harper)", () => {
     expect(after.status).toBe(200);
     const afterRow = ((after.body as any[]) ?? []).find((u) => u.username === "flair-agent");
     expect(afterRow, "the reserved account's role must be unchanged").toEqual(beforeRow);
+  }, 150_000);
+});
+
+// ─── flair#3130: credential save ordering around a real cluster change ────────
+//
+// A remote provisioning run must save the generated Flair administrator
+// password before the cluster change that applies it, keep it when the change
+// fails, leave an existing file unchanged on failure, and refuse when the
+// existing-user read fails. These drive the command action against a spawned
+// Harper; the deploy upload is the only short-circuited step (see
+// installRecorder).
+describe("flair#3130 — remote init credential ordering (real Harper)", () => {
+  let harper: HarperInstance;
+  const WRITER = { user: "cluster-writer", pass: "cluster-writer-pass" };
+  const READER = { user: "cluster-reader", pass: "cluster-reader-pass" };
+  const BLIND = { user: "cluster-blind", pass: "cluster-blind-pass" };
+
+  const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
+
+  beforeAll(async () => {
+    harper = await startLocalHarper();
+    const roles: [string, Record<string, unknown>][] = [
+      ["writer-role", { super_user: false, operations: ["list_users", "add_user", "alter_user", "drop_user", "list_roles"] }],
+      ["reader-role", { super_user: false, operations: ["list_users", "list_roles"] }],
+      ["blind-role", { super_user: false, operations: ["list_roles"] }],
+    ];
+    for (const [role, permission] of roles) {
+      const created = await harperOps(harper, "admin", "test123", { operation: "add_role", role, permission });
+      expect([200, 409], created.text).toContain(created.status);
+    }
+    for (const [user, role] of [[WRITER.user, "writer-role"], [READER.user, "reader-role"], [BLIND.user, "blind-role"]] as const) {
+      const created = await harperOps(harper, "admin", "test123", {
+        operation: "add_user", username: user, password: `${user}-pass`, role, active: true,
+      });
+      expect([200, 409], created.text).toContain(created.status);
+    }
+  }, 180_000);
+
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
+
+  test("a failed credential save changes nothing on the cluster", async () => {
+    // The seeded admin/test123 account is the cluster state a failed save must
+    // leave untouched.
+    const before = await harperOps(harper, "admin", "test123", { operation: "list_users" });
+    expect(before.status).toBe(200);
+
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretPath = join(home, ".tps", "secrets", "flair-fabric-hdb");
+    // A directory in the credential file's place is not writable as a file for
+    // any uid (root included), so this is a real unwritable target.
+    mkdirSync(secretPath, { recursive: true });
+    const chosenPass = "chosen-fatal-write-9f3a";
+    const recorder = installRecorder(WRITER);
+    let out: Awaited<ReturnType<typeof runInitAction>>;
+    try {
+      out = await runInitAction(initArgs(harper, {
+        clusterUser: WRITER.user,
+        clusterPass: WRITER.pass,
+        flairPass: chosenPass,
+        agentId: "agent-fatal",
+        keysDir: join(tmpDir, "keys-fatal"),
+      }), home, { rethrow: false });
+    } finally {
+      recorder.restore();
+    }
+
+    expect(out.exitCode, "the action must exit non-zero when the credential save fails").toBe(1);
+    expect(out.stderr, "the failure must name the credential file").toContain(secretPath);
+    expect(out.stderr, "the failure must name the remedy").toContain("Remedy");
+    expect(out.stderr, "the refusal must say the cluster was untouched").toContain("cluster was not changed");
+
+    // Nothing on the cluster may change: not even the component deploy.
+    expectNoWriteOperation(recorder.all, "failed credential save");
+
+    // Proven by logging in: the seeded admin keeps its password, and the
+    // chosen one was never applied.
+    const after = await harperOps(harper, "admin", "test123", { operation: "list_users" });
+    expect(after.status).toBe(200);
+    const chosen = await harperOps(harper, "admin", chosenPass, { operation: "list_users" });
+    expect(chosen.status, "the chosen password must not have been applied").toBeGreaterThanOrEqual(400);
+
+    expect(out.stdout, "the chosen password must not reach stdout").not.toContain(chosenPass);
+    expect(out.stderr, "the chosen password must not reach stderr").not.toContain(chosenPass);
+  }, 150_000);
+
+  test("a failed cluster change after the save keeps the saved password for a re-run", async () => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretPath = join(home, ".tps", "secrets", "flair-fabric-hdb");
+    const chosenPass = "saved-then-failed-4c7e";
+
+    // The reader may list users but not update them: the save must succeed,
+    // the cluster change must fail, and the value must remain usable.
+    const recorder = installRecorder(READER);
+    let out: Awaited<ReturnType<typeof runInitAction>>;
+    try {
+      out = await runInitAction(initArgs(harper, {
+        clusterUser: READER.user,
+        clusterPass: READER.pass,
+        flairPass: chosenPass,
+        agentId: "agent-saved",
+        keysDir: join(tmpDir, "keys-saved"),
+      }), home, { rethrow: false });
+    } finally {
+      recorder.restore();
+    }
+
+    expect(out.error, "the action must fail when the cluster change fails").toBeInstanceOf(Error);
+    expect(out.stderr, "the failure must name the saved file").toContain(secretPath);
+    expect(out.stderr, "init must say the saved value is kept").toContain("saved password is kept");
+    expect(
+      recorder.all.some((call) => call.operation === "deploy_component"),
+      "the cluster change must have been attempted after the save",
+    ).toBe(true);
+
+    // Read first, stat second (no check-then-use).
+    const saved = readFileSync(secretPath, "utf8");
+    const savedMode = statSync(secretPath).mode & 0o777;
+    expect(savedMode, "the saved credential must be owner-only").toBe(0o600);
+    expect(saved.length, "the saved credential must hold the chosen value").toBe(chosenPass.length + 1);
+    expect(sha256(saved), "the saved credential must hold the chosen value").toBe(sha256(chosenPass + "\n"));
+
+    // The failed change left the cluster's admin alone.
+    expect((await harperOps(harper, "admin", "test123", { operation: "list_users" })).status).toBe(200);
+
+    // A re-run can use the saved value.
+    const recovered = saved.trimEnd();
+    const recorder2 = installRecorder(WRITER);
+    try {
+      const rerun = await runInitAction(initArgs(harper, {
+        clusterUser: WRITER.user,
+        clusterPass: WRITER.pass,
+        flairPass: recovered,
+        agentId: "agent-saved-rerun",
+        keysDir: join(tmpDir, "keys-saved-rerun"),
+      }), home);
+      expect(rerun.exitCode, "the re-run must succeed with the saved value").toBeUndefined();
+    } finally {
+      recorder2.restore();
+    }
+    const login = await harperOps(harper, "admin", recovered, { operation: "list_users" });
+    expect(login.status, "the re-run must apply the saved value").toBe(200);
+
+    expect(out.stdout).not.toContain(chosenPass);
+    expect(out.stderr).not.toContain(chosenPass);
+  }, 180_000);
+
+  test("an existing credential file is unchanged when the cluster change fails", async () => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretsDir = join(home, ".tps", "secrets");
+    const secretPath = join(secretsDir, "flair-fabric-hdb");
+    const previous = "previous-credential-1b2c\n";
+    mkdirSync(secretsDir, { recursive: true });
+    writeFileSync(secretPath, previous, { mode: 0o600 });
+    const previousHash = sha256(previous);
+
+    const recorder = installRecorder(READER);
+    let out: Awaited<ReturnType<typeof runInitAction>>;
+    try {
+      out = await runInitAction(initArgs(harper, {
+        clusterUser: READER.user,
+        clusterPass: READER.pass,
+        flairPass: "replacement-that-must-not-land-8d1f",
+        agentId: "agent-existing",
+        keysDir: join(tmpDir, "keys-existing"),
+      }), home, { rethrow: false });
+    } finally {
+      recorder.restore();
+    }
+
+    expect(out.error, "the action must fail when the cluster change fails").toBeInstanceOf(Error);
+    expect(out.stderr, "init must say the existing file was left alone").toContain("existing credential file");
+    expect(recorder.all.some((call) => call.operation === "deploy_component"), "the change was attempted").toBe(true);
+
+    const after = readFileSync(secretPath, "utf8");
+    const afterMode = statSync(secretPath).mode & 0o777;
+    expect(afterMode, "the existing credential must stay owner-only").toBe(0o600);
+    expect(sha256(after), "the existing credential must be byte-for-byte unchanged").toBe(previousHash);
+    expect(readdirSync(secretsDir), "no staged file may be left behind").toEqual(["flair-fabric-hdb"]);
+  }, 150_000);
+
+  test("a failed existing-user check refuses with no cluster write", async () => {
+    const before = await harperOps(harper, WRITER.user, WRITER.pass, { operation: "list_users" });
+    expect(before.status).toBe(200);
+    const beforeAdmin = ((before.body as any[]) ?? []).find((u) => u.username === "admin");
+    expect(beforeAdmin, "the admin row must exist before the run").toBeTruthy();
+
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const recorder = installRecorder(BLIND);
+    let out: Awaited<ReturnType<typeof runInitAction>>;
+    try {
+      out = await runInitAction(initArgs(harper, {
+        clusterUser: BLIND.user,
+        clusterPass: BLIND.pass,
+        flairPass: "chosen-blind-7a3d",
+        agentId: "agent-blind",
+        keysDir: join(tmpDir, "keys-blind"),
+      }), home, { rethrow: false });
+    } finally {
+      recorder.restore();
+    }
+
+    expect(out.error, "the action must fail when the existing-user read fails").toBeInstanceOf(Error);
+    expect(
+      (out.error as Error | undefined)?.message ?? "",
+      "the failure must name the existing-user read",
+    ).toContain("Could not read the cluster's existing users");
+
+    // The read that failed happens before the first write; nothing may follow.
+    expectNoWriteOperation(recorder.all, "failed existing-user check");
+
+    // The cluster is untouched: the admin row is unchanged.
+    const after = await harperOps(harper, WRITER.user, WRITER.pass, { operation: "list_users" });
+    expect(after.status).toBe(200);
+    const afterAdmin = ((after.body as any[]) ?? []).find((u) => u.username === "admin");
+    expect(afterAdmin, "the admin row must be unchanged by a refused run").toEqual(beforeAdmin);
+  }, 150_000);
+
+  test("the normal path writes a 0600 credential whose password logs in", async () => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretPath = join(home, ".tps", "secrets", "flair-fabric-hdb");
+    const chosenPass = "normal-path-credential-6e2a";
+
+    const recorder = installRecorder(WRITER);
+    let out: Awaited<ReturnType<typeof runInitAction>>;
+    try {
+      out = await runInitAction(initArgs(harper, {
+        clusterUser: WRITER.user,
+        clusterPass: WRITER.pass,
+        flairPass: chosenPass,
+        agentId: "agent-normal",
+        keysDir: join(tmpDir, "keys-normal"),
+      }), home);
+    } finally {
+      recorder.restore();
+    }
+
+    expect(out.exitCode).toBeUndefined();
+    // Read first, stat second.
+    const saved = readFileSync(secretPath, "utf8");
+    const savedMode = statSync(secretPath).mode & 0o777;
+    expect(savedMode, "the credential must be owner-only").toBe(0o600);
+    expect(saved.length).toBe(chosenPass.length + 1);
+    expect(sha256(saved), "the credential must hold the chosen value").toBe(sha256(chosenPass + "\n"));
+    expect(hintOf(out.stdout), "the summary must name the credential file").toContain(secretPath);
+
+    // Proven by logging in, never by printing the value.
+    const login = await harperOps(harper, "admin", saved.trimEnd(), { operation: "list_users" });
+    expect(login.status, "the saved password must log in").toBe(200);
   }, 150_000);
 });
 

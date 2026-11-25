@@ -34,6 +34,7 @@ import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { ensureAgentKeysDir, readOrCreateAgentKey } from "../lib/agent-key-file.js";
+import { stageRemoteAdminPassword, type RemoteAdminPassStage } from "../lib/remote-admin-pass.js";
 
 import { join, resolve } from "node:path";
 import { localPortState } from "../lib/init-tcp-probe.js";
@@ -651,23 +652,56 @@ addAdminPassOptions(
           flairAdminPass = randomBytes(24).toString("base64url");
         }
 
-        // Atomic provisioning: deploy + wait + provision user. The returned
-        // principal is the one this run set up: the existing super_user cluster
-        // administrator when list_users reports the operator's cluster admin as
-        // a super_user, else the `admin` user this run created (or updated).
-        const provisioned: RemoteInitPrincipal = await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass);
+        // Atomic provisioning: save the credential, deploy + wait, provision
+        // user. The returned principal is the one this run set up: the existing
+        // super_user cluster administrator when list_users reports the
+        // operator's cluster admin as a super_user, else the `admin` user this
+        // run created (or updated).
+        const secretPath = join(resolveHome(), ".tps", "secrets", "flair-fabric-hdb");
+        let stagedAdminPass: RemoteAdminPassStage | undefined;
+        let saveAttempted = false;
+        let saveApplied = false;
+        let provisioned: RemoteInitPrincipal;
+        try {
+          provisioned = await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass, {
+            // Before the first cluster write, and only when this run will set
+            // `admin`'s password. A throw here leaves the cluster unchanged.
+            beforeAdminPasswordApplied: () => {
+              saveAttempted = true;
+              stagedAdminPass = stageRemoteAdminPassword(secretPath, flairAdminPass!, writeAdminPassFile);
+            },
+            afterAdminPasswordApplied: () => {
+              saveApplied = true;
+              stagedAdminPass!.confirm();
+            },
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (saveAttempted && !stagedAdminPass) {
+            console.error(`Error: could not save the Flair administrator password to ${secretPath}: ${message}`);
+            console.error(`  Remedy: make ${secretPath} a writable regular file you own (mode 0600), then run init again.`);
+            console.error("  The cluster was not changed.");
+            process.exit(1);
+          }
+          if (saveApplied) {
+            console.error(`Error: the cluster was changed but the saved credential at ${secretPath} could not be confirmed: ${message}`);
+            console.error(`  Remedy: write the Flair administrator password to ${secretPath} (mode 0600), then run init again.`);
+            process.exit(1);
+          }
+          if (stagedAdminPass) {
+            stagedAdminPass.abort();
+            console.error(`Error: Fabric provisioning failed after the Flair administrator password was saved: ${message}`);
+            if (stagedAdminPass.hadExistingFile) {
+              console.error(`  The existing credential file at ${secretPath} was left unchanged.`);
+            } else {
+              console.error(`  The saved password is kept at ${secretPath}; reuse it on the next run.`);
+            }
+          }
+          throw err;
+        }
         provisionedPrincipal = provisioned;
         didProvision = true;
-
-        // Persist the chosen Flair admin password only when provisioning set it
-        // on the principal. A reused cluster administrator keeps its own
-        // password, so the file must not claim the chosen one. A write failure
-        // stays fatal and lands before the success summary.
         if (provisioned.created) {
-          const secretsDir = join(resolveHome(), ".tps", "secrets");
-          mkdirSync(secretsDir, { recursive: true });
-          const secretPath = join(secretsDir, "flair-fabric-hdb");
-          writeFileSync(secretPath, flairAdminPass + "\n", { mode: 0o600 });
           console.log(`Admin password written to ${secretPath}`);
         }
       } else {
