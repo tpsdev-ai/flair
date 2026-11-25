@@ -6,8 +6,8 @@
  * Memory is seeded with 2,003 rows in one operations insert: 2,000 already
  * current and 3 stale rows whose ids sort last (page 3 of 3). A recording proxy
  * sits between the CLI and Harper, so the test can assert the printed read count
- * and page count, that the stale rows are re-embedded, and that every operations
- * read request arrives before the first Memory PATCH.
+ * and page count, that the stale rows are re-embedded, and that all three
+ * operations page reads arrive before the first Memory PATCH.
  *
  * Throwaway HOME + data dir, ephemeral ports; the administrator password is
  * never printed. Each request target is asserted to be this test's instance.

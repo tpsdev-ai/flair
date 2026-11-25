@@ -115,9 +115,10 @@ export type MemoryRowPageRead = {
 
 /**
  * Read the Memory rows matching `conditions`, one page at a time (flair#3086).
- * Keyset paging on the primary key: each page asks for rows whose `id` is
- * greater than the last id seen, sorted by `id`, so a row inserted or deleted
- * between pages does not shift the rows after it or repeat one already read.
+ * Keyset paging on the primary key: from the second page on, each page asks for
+ * rows whose `id` is greater than the last id seen, sorted by `id`, so a row
+ * inserted or deleted between pages does not shift the rows after it or repeat
+ * one already read.
  *
  * Harper's operations API forwards `limit`, `offset` and `sort` to Table.search
  * (node_modules/harper/dataLayer/harperBridge/ResourceBridge.ts:109-113); the
