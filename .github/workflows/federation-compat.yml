@@ -152,7 +152,7 @@ jobs:
       # startup crash. The compat test installs the same for the
       # npm-installed baseline's own temp directory itself (platform-gated).
       - name: Install linux-x64 native binary for embeddings (HEAD build)
-        run: bun add --no-save @node-llama-cpp/linux-x64@3
+        run: bun add --no-save @node-llama-cpp/linux-x64@3.22.3
 
       - name: Build Flair resources and CLI
         run: bun run build && bun run build:cli

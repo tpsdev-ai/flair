@@ -1,0 +1,1 @@
+- **CI installs each `@node-llama-cpp/<platform>` native binary at the version `node-llama-cpp` resolves to in the lockfile.** A static check fails a workflow that installs the package without that exact pin.
