@@ -96,9 +96,11 @@ export function keylessTruncationNotice(read: number): string {
 }
 
 /**
- * Hard bound on the keyset loop: 10,000 pages of 1,000 rows. The read refuses
- * when the last page it may read (page 10,000) comes back full, because more
- * rows may follow; a shorter page at that bound is a complete read.
+ * Default and largest page cap for the keyset loop: 10,000 pages. The CLI reads
+ * pages of REEMBED_READ_PAGE_SIZE (1,000) rows; a caller may pass a smaller
+ * `maxPages` and any positive whole `pageSize`. The read refuses when page
+ * `maxPages` holds at least `pageSize` rows, because more rows may follow; a
+ * shorter page at that bound is a complete read.
  */
 const MAX_MEMORY_READ_PAGES = 10_000;
 
