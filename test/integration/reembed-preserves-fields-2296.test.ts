@@ -281,24 +281,24 @@ describe("flair#2296: flair reembed", () => {
     expect(Object.keys(fixtureRow("x", "y")).sort()).toEqual([...MEMORY_ATTRIBUTES].sort());
   });
 
-  test("all-agents path; --dry-run writes nothing; a refused row is counted as an error", async () => {
+  test("all-agents path; --dry-run writes nothing; an owner with no Agent row is re-embedded", async () => {
     const before = await seedRows([fixtureRow("all-a", agentA.id), fixtureRow("all-b", agentB.id)]);
-    const refused = await seedRows([fixtureRow("all-d", unregistered.id)]);
+    const noAgentRow = await seedRows([fixtureRow("all-d", unregistered.id)]);
 
     const dry = runReembed(["--dry-run"]);
     expect(dry.code, dry.out).toBe(0);
     expect(dry.out).toContain(`Agent 1/3: ${agentA.id}`);
-    for (const row of [...before.values(), ...refused.values()]) expect(await read(row.id)).toEqual(row);
+    for (const row of [...before.values(), ...noAgentRow.values()]) expect(await read(row.id)).toEqual(row);
 
     const r = runReembed(["--batch-size", "1", "--delay-ms", "0"]);
-    expect(r.code, r.out).toBe(1);
+    expect(r.code, r.out).toBe(0);
     expect(r.out).toContain(`✅ Agent ${agentA.id}: 1 updated, 0 errors`);
     expect(r.out).toContain(`✅ Agent ${agentB.id}: 1 updated, 0 errors`);
-    expect(r.out).toContain(`❌ Agent ${unregistered.id}: 0 updated, 1 errors`);
-    expect(r.out).toContain("❌ Re-embedding complete: 2 updated, 1 errors");
-    expect(r.out).toMatch(/1 row\(s\) not updated: HTTP \d+/);
+    expect(r.out).toContain(`✅ Agent ${unregistered.id}: 1 updated, 0 errors`);
+    expect(r.out).toContain("✅ Re-embedding complete: 3 updated, 0 errors");
+    expect(r.out).not.toContain("row(s) not updated");
     for (const row of before.values()) await expectOnlyEmbeddingChanged(row);
-    for (const row of refused.values()) expect(await read(row.id)).toEqual(row);
+    for (const row of noAgentRow.values()) await expectOnlyEmbeddingChanged(row);
   }, 240_000);
 
   test("single-agent path, including a skill row; --dry-run writes nothing", async () => {

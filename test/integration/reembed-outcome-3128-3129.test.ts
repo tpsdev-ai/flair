@@ -6,14 +6,20 @@
  * A recording proxy in front of Harper refuses one Memory PATCH on request, so
  * each path (all-agent, single-agent with an administrator password) can be
  * run with a failing write: the run exits non-zero and its summary names the
- * count and the reason. A clean run keeps the previous output and exits 0. An
- * all-agent run whose HOME lacks one agent's key exits non-zero and names the
- * agent and the remedy.
+ * count and the reason. A clean run keeps the previous output and exits 0.
+ *
+ * The all-agent run sends every re-embed PATCH with the administrator
+ * credential it lists rows with, so it re-embeds rows whose owner has no local
+ * key: a registered agent without a key file, the `skill:using-flair` row the
+ * skill seed writes as the administrator, and rows of an owner with no Agent
+ * row. For each row this file compares the full stored state read through the
+ * ops API before and after: the model stamp is new, while agentId and every
+ * provenance/authority field are byte-identical.
  *
  * Without FLAIR_ADMIN_PASS, `reembed --agent <id>` lists rows with
  * POST /SemanticSearch, whose read scope includes other agents' non-private
- * rows: this file seeds one such row for each of two other agents and asserts
- * the run neither counts nor writes them, and reports the skipped count.
+ * rows: this file seeds such rows for other agents and asserts the run neither
+ * counts nor writes them, and reports the skipped count.
  *
  * Throwaway HOMEs, ephemeral ports, the boot migration trigger omitted, no
  * assertion reads a vector. Each request target is asserted to be this test's
@@ -30,13 +36,16 @@ import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } f
 import { componentWithoutMigrationBoot, type ComposedComponent } from "../helpers/component-without-migration-boot";
 import { ensureCliBuild, spawnCli } from "../helpers/build-cli-once";
 import { getModelId } from "../../resources/embeddings-provider.ts";
+import { currentSeed, runSkillSeed, SEED_SKILL_ID, skillSeedRestIo } from "../../src/lib/skill-seed.js";
 
 const AGENT_A = "r3o-agent-a";
 const AGENT_B = "r3o-agent-b";
 const AGENT_C = "r3o-agent-c";
+const OWNER_NO_AGENT = "r3o-owner-no-agent";
 const A_ROWS = ["r3o-a-1", "r3o-a-2"];
 const B_ROW = "r3o-b-1";
 const C_ROW = "r3o-c-1";
+const D_ROWS = ["r3o-d-1", "r3o-d-2"];
 const REFUSED_ROW = A_ROWS[0];
 
 const agentA = { id: AGENT_A, ...nacl.sign.keyPair() };
@@ -79,20 +88,48 @@ function memoryRow(id: string, agentId: string, visibility: string): Record<stri
     embeddingModel: "old-model",
     visibility,
     archived: false,
+    // Server-owned fields a re-embed must leave untouched.
+    instanceToken: `token-${id}`,
+    provenance: JSON.stringify({ v: 1, verified: { agentId, timestamp: "2021-03-01T00:00:00.000Z", receivedAt: "2021-03-01T00:00:00.000Z" } }),
+    originatorInstanceId: "instance-r3o",
+    promotionStatus: "approved",
+    promotedAt: "2021-03-03T00:00:00.000Z",
+    promotedBy: agentId,
+    promotionContentHash: `hash-${id}`,
+    writeBackWriteId: `write-back-${id}`,
   };
 }
 
-async function rowState(id: string): Promise<{ embeddingModel: unknown; updatedAt: unknown }> {
+async function rowState(id: string): Promise<Record<string, unknown>> {
   const rows = await op({
     operation: "search_by_id",
     database: "flair",
     table: "Memory",
     ids: [id],
-    get_attributes: ["id", "embeddingModel", "updatedAt"],
+    get_attributes: ["*"],
   });
   expect(rows[0]?.id).toBe(id);
   return rows[0];
 }
+
+/** Fields a re-embed can change: vector, stamp, timestamps, text hash, legacy token. */
+const REEMBED_MUTABLE = new Set(["embedding", "embeddingModel", "updatedAt", "embeddedContentHash", "instanceToken"]);
+
+/** The stored row without the fields a re-embed is allowed to change. */
+function identityState(row: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(row).filter(([key]) => !REEMBED_MUTABLE.has(key)));
+}
+
+const FIELDS_THAT_MUST_NOT_MOVE = [
+  "agentId",
+  "provenance",
+  "originatorInstanceId",
+  "promotionStatus",
+  "promotedAt",
+  "promotedBy",
+  "promotionContentHash",
+  "writeBackWriteId",
+] as const;
 
 /** A reverse proxy that records every Memory PATCH and can refuse one row's. */
 async function startProxy(target: string): Promise<number> {
@@ -170,10 +207,18 @@ beforeAll(async () => {
       ...A_ROWS.map((id) => memoryRow(id, AGENT_A, "private")),
       memoryRow(B_ROW, AGENT_B, "public"),
       memoryRow(C_ROW, AGENT_C, "public"),
+      ...D_ROWS.map((id) => memoryRow(id, OWNER_NO_AGENT, "public")),
     ],
   });
+  // The row `flair init` seeds, written by the same seed call the init path
+  // uses, owned by the administrator that runs it.
+  const seeded = await runSkillSeed(
+    skillSeedRestIo({ baseUrl: harper.httpURL, user: harper.admin.username, pass: harper.admin.password }),
+    currentSeed(),
+  );
+  if (seeded.kind !== "ok") throw new Error(`skill seed failed: ${JSON.stringify(seeded)}`);
   proxyPort = await startProxy(harper.httpURL);
-}, 240_000);
+}, 300_000);
 
 afterAll(async () => {
   for (const server of servers) await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -184,7 +229,7 @@ afterAll(async () => {
 
 type Run = { code: number | null; stdout: string; stderr: string };
 
-async function runReembed(args: string[], home: string, admin: boolean): Promise<Run> {
+async function runReembed(args: string[], home: string, admin: boolean | string): Promise<Run> {
   patchUrls.length = 0;
   const base = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(FLAIR_|HARPER_|HDB_|FABRIC_)/.test(key)));
   const env: Record<string, string | undefined> = {
@@ -195,7 +240,7 @@ async function runReembed(args: string[], home: string, admin: boolean): Promise
   };
   if (admin) {
     env.FLAIR_ADMIN_USER = harper.admin.username;
-    env.FLAIR_ADMIN_PASS = harper.admin.password;
+    env.FLAIR_ADMIN_PASS = typeof admin === "string" ? admin : harper.admin.password;
   }
   const child = spawnCli([...args, "--port", String(proxyPort), "--batch-size", "1", "--delay-ms", "0"], {
     env,
@@ -216,7 +261,7 @@ test("a clean all-agent run exits 0 with the unchanged summary", async () => {
   refusePatchId = null;
   const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true);
   expect(code, stderr.slice(0, 800)).toBe(0);
-  expect(stdout).toContain("✅ Re-embedding complete: 4 updated, 0 errors");
+  expect(stdout).toContain("✅ Re-embedding complete: 7 updated, 0 errors");
   expect(stdout).not.toContain("❌");
   expect(stdout).not.toContain("row(s) not updated");
 }, 240_000);
@@ -234,7 +279,7 @@ test("a refused write in the all-agent path exits 1 and names the count and reas
   refusePatchId = REFUSED_ROW;
   const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true);
   expect(code, stderr.slice(0, 800)).toBe(1);
-  expect(stdout).toContain("❌ Re-embedding complete: 3 updated, 1 errors");
+  expect(stdout).toContain("❌ Re-embedding complete: 6 updated, 1 errors");
   expect(stdout).toContain("1 row(s) not updated: HTTP 500");
   expect(stdout).not.toContain("✅ Re-embedding complete");
 }, 240_000);
@@ -248,40 +293,69 @@ test("a refused write in the single-agent path exits 1 and names the count and r
   expect(stdout).not.toContain("✅ Re-embedding complete");
 }, 240_000);
 
-test("an all-agent run with one agent's key missing exits 1 and names the agent and the remedy", async () => {
+test("the admin all-agent run re-embeds rows whose owners have no key and leaves their identity fields byte-identical", async () => {
   refusePatchId = null;
-  const before = await rowState(C_ROW);
+  const ids = [A_ROWS[1], C_ROW, ...D_ROWS, SEED_SKILL_ID];
+  const before = new Map<string, Record<string, unknown>>();
+  for (const id of ids) before.set(id, await rowState(id));
+
   const { code, stdout, stderr } = await runReembed(["reembed"], homeMissingC, true);
-  expect(code, stderr.slice(0, 800)).toBe(1);
-  expect(stdout).toContain("❌ Re-embedding complete: 3 updated, 0 errors, 1 skipped agent");
-  expect(stdout).toContain(`Agent ${AGENT_C} skipped: key not found`);
-  expect(stdout).toContain("create or restore that agent's key");
-  expect(stdout).toContain(`flair reembed --agent ${AGENT_C}`);
-  expect(await rowState(C_ROW)).toEqual(before);
+  expect(code, stderr.slice(0, 800)).toBe(0);
+  expect(stdout).toContain("✅ Re-embedding complete: 7 updated, 0 errors");
+  expect(stdout).not.toContain("skipped");
+
+  for (const id of ids) {
+    const prior = before.get(id)!;
+    const after = await rowState(id);
+    expect(after.embeddingModel, `${id}: new model stamp`).toBe(getModelId());
+    for (const field of FIELDS_THAT_MUST_NOT_MOVE) {
+      expect(after[field], `${id}: ${field} unchanged`).toBe(prior[field]);
+    }
+    expect(identityState(after), `${id}: every other stored field unchanged`).toEqual(identityState(prior));
+    expect(patchUrls).toContain(`/Memory/${encodeURIComponent(id)}`);
+  }
 }, 240_000);
 
-test("a --dry-run all-agent run with a missing key keeps the previous exit and summary", async () => {
+test("a wrong administrator password exits non-zero before any row changes", async () => {
+  refusePatchId = null;
+  const ids = [...A_ROWS, B_ROW, C_ROW, ...D_ROWS, SEED_SKILL_ID];
+  const before = new Map<string, Record<string, unknown>>();
+  for (const id of ids) before.set(id, await rowState(id));
+
+  const { code } = await runReembed(["reembed"], homeMissingC, "definitely-not-the-admin-password");
+  expect(code).toBe(1);
+  for (const id of ids) {
+    expect(await rowState(id), id).toEqual(before.get(id)!);
+  }
+}, 240_000);
+
+test("a --dry-run all-agent run counts rows without needing any owner's key", async () => {
   refusePatchId = null;
   const { code, stdout, stderr } = await runReembed(["reembed", "--dry-run"], homeMissingC, true);
   expect(code, stderr.slice(0, 800)).toBe(0);
   expect(stdout).toContain("✅ Re-embedding complete: 0 updated, 0 errors");
-  expect(stdout).not.toContain("skipped: key not found");
+  expect(stdout).not.toContain("Key not found");
+  expect(patchUrls).toEqual([]);
 }, 240_000);
 
 test("keyless single-agent skips other agents' listed rows without counting or writing them", async () => {
   refusePatchId = null;
-  const beforeB = await rowState(B_ROW);
-  const beforeC = await rowState(C_ROW);
+  const otherIds = [B_ROW, C_ROW, ...D_ROWS, SEED_SKILL_ID];
+  const before = new Map<string, Record<string, unknown>>();
+  for (const id of otherIds) before.set(id, await rowState(id));
   const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeOnlyA, false);
   expect(code, stderr.slice(0, 800)).toBe(0);
   expect(stdout).toContain("Candidates for re-embedding: 2");
-  expect(stdout).toContain("Skipped (other agents): 2");
+  expect(stdout).toContain(`Skipped (other agents): ${otherIds.length}`);
   expect(stdout).toContain(`✅ Re-embedding complete: 2 updated, 0 errors`);
-  expect(await rowState(B_ROW)).toEqual(beforeB);
-  expect(await rowState(C_ROW)).toEqual(beforeC);
-  expect(patchUrls.filter((url) => url === `/Memory/${B_ROW}` || url === `/Memory/${C_ROW}`)).toEqual([]);
+  for (const id of otherIds) {
+    expect(await rowState(id), id).toEqual(before.get(id)!);
+    expect(patchUrls).not.toContain(`/Memory/${encodeURIComponent(id)}`);
+  }
 }, 240_000);
 
 test("the seeded rows are current after the runs (the re-embeds the assertions relied on)", async () => {
-  for (const id of [...A_ROWS, B_ROW]) expect((await rowState(id)).embeddingModel).toBe(getModelId());
+  for (const id of [...A_ROWS, B_ROW, C_ROW, ...D_ROWS, SEED_SKILL_ID]) {
+    expect((await rowState(id)).embeddingModel, id).toBe(getModelId());
+  }
 }, 60_000);

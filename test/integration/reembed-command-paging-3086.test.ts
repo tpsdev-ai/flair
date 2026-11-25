@@ -9,7 +9,8 @@
  * between the CLI and Harper, so the test can assert each operations read
  * body (conditions, sort, projection, page limit, cursor), the printed read and
  * skipped counts, that the stale rows are re-embedded, that the second agent's
- * stale row is untouched on the single-agent run, and that all three
+ * stale row is re-embedded on the all-agent run and untouched on the
+ * single-agent run, and that all three
  * operations page reads arrive before the first Memory PATCH.
  *
  * Throwaway HOME + data dir, ephemeral ports; the administrator password is
@@ -283,17 +284,11 @@ function assertReadBodies(agentId: string | undefined): void {
 }
 
 for (const path of [{ name: "all-agent", agentId: undefined }, { name: "single-agent with an admin password", agentId: AGENT_ID }]) {
-  test(`the ${path.name} path reads its rows in 3 pages and re-embeds the 3 stale rows`, async () => {
+  test(`the ${path.name} path reads its rows in 3 pages and re-embeds its stale rows`, async () => {
     const { code, stdout, stderr } = await runReembed(path.agentId);
-    if (path.agentId) {
-      expect(code, stderr.slice(0, 800)).toBe(0);
-    } else {
-      // This HOME holds only the tested agent's key, so the all-agent run
-      // skips the second agent and its outcome is a failure (flair#3128).
-      expect(code, stderr.slice(0, 800)).toBe(1);
-      expect(stdout).toContain(`Agent ${OTHER_AGENT_ID} skipped: key not found`);
-      expect(stdout).toContain("create or restore that agent's key");
-    }
+    // The all-agent run sends each PATCH with the administrator credential it
+    // listed rows with, so this HOME's single key does not matter.
+    expect(code, stderr.slice(0, 800)).toBe(0);
     assertReadsBeforeFirstPatch(PAGES);
     assertReadBodies(path.agentId);
     const readRows = path.agentId ? TOTAL_ROWS : ALL_ROWS;
@@ -306,6 +301,6 @@ for (const path of [{ name: "all-agent", agentId: undefined }, { name: "single-a
       expect(stdout).not.toContain("Candidates for re-embedding");
     }
     for (const id of STALE_IDS) expect(await storedStamp(id)).toBe(CURRENT_MODEL_ID);
-    if (path.agentId) expect(await storedStamp(OTHER_STALE_ID)).toBe("old-model");
+    expect(await storedStamp(OTHER_STALE_ID)).toBe(path.agentId ? "old-model" : CURRENT_MODEL_ID);
   }, 300_000);
 }

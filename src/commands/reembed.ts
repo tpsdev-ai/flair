@@ -264,6 +264,44 @@ export async function reembedRowOutcome(
   } catch (err) {
     return { ok: false, reason: `PATCH failed: ${errorText(err)}` };
   }
+  return reembedOutcomeFromResponse(res, id, intendedModel, readStoredModel);
+}
+
+/**
+ * flair#3128: the same re-embed PATCH and readback with the administrator
+ * credential the all-agent run lists rows with. Its two-field body is
+ * identical to `reembedRowOutcome`'s, so it changes only the embedding, the
+ * model stamp, `updatedAt`, the embedded-text hash and a missing legacy
+ * `instanceToken`; it never needs, or looks for, the owner's key.
+ */
+export async function adminReembedRowOutcome(
+  baseUrl: string,
+  opsAuth: string,
+  id: string,
+  intendedModel: string,
+  readStoredModel: StoredModelReader,
+): Promise<ReembedRowOutcome> {
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}/Memory/${encodeRecordId(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: opsAuth },
+      body: JSON.stringify({ embedding: null, embeddingModel: null }),
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch (err) {
+    return { ok: false, reason: `PATCH failed: ${errorText(err)}` };
+  }
+  return reembedOutcomeFromResponse(res, id, intendedModel, readStoredModel);
+}
+
+/** The readback and reason classification both re-embed paths share. */
+async function reembedOutcomeFromResponse(
+  res: Response,
+  id: string,
+  intendedModel: string,
+  readStoredModel: StoredModelReader,
+): Promise<ReembedRowOutcome> {
   if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
   let body: unknown;
   try {
@@ -494,11 +532,13 @@ program
         byAgent.get(agent)!.push(m);
       }
 
-      // Process each agent
+      // Process each agent. The run already holds the administrator credential
+      // that listed these rows, and the re-embed PATCH changes no owner,
+      // provenance or authority field, so the same credential authorizes every
+      // row's write; no agent key is needed.
       let totalProcessed = 0;
       let totalErrors = 0;
       const errorsByReason = new Map<string, number>();
-      const skippedAgents: string[] = [];
       const agentCount = byAgent.size;
       let agentIndex = 0;
 
@@ -506,16 +546,6 @@ program
         agentIndex++;
         console.log(`\nAgent ${agentIndex}/${agentCount}: ${agent}`);
         console.log(`  Memories to re-embed: ${memories.length}`);
-
-        const keysDir = defaultKeysDir();
-        const privPath = privKeyPath(agent, keysDir);
-        if (!existsSync(privPath)) {
-          console.error(`  ❌ Key not found: ${privPath} — skipping`);
-          // --dry-run writes nothing and keeps its previous exit: a skip only
-          // fails the run when the run would have re-embedded the rows.
-          if (!dryRun) skippedAgents.push(agent);
-          continue;
-        }
 
         if (dryRun) continue;
 
@@ -525,7 +555,7 @@ program
           const batch = memories.slice(i, i + batchSize);
           for (const memory of batch) {
             try {
-              const outcome = await reembedRowOutcome(baseUrl, agent, privPath, memory.id, currentModel, readStoredModel);
+              const outcome = await adminReembedRowOutcome(baseUrl, opsAuth, memory.id, currentModel, readStoredModel);
               if (outcome.ok) processed++;
               else {
                 const reason = outcome.reason ?? "unknown failure";
@@ -547,16 +577,11 @@ program
         totalErrors += errors;
       }
 
-      const failed = totalErrors > 0 || skippedAgents.length > 0;
+      const failed = totalErrors > 0;
       console.log(
-        `\n\n${failed ? "❌" : "✅"} Re-embedding complete: ${totalProcessed} updated, ${totalErrors} errors${skippedAgents.length > 0 ? `, ${skippedAgents.length} skipped agent${skippedAgents.length === 1 ? "" : "s"}` : ""}`,
+        `\n\n${failed ? "❌" : "✅"} Re-embedding complete: ${totalProcessed} updated, ${totalErrors} errors`,
       );
       for (const line of failureReasonLines(errorsByReason, "re-run `flair reembed` after fixing the cause")) console.log(line);
-      for (const skippedAgent of skippedAgents) {
-        console.log(
-          `  ❌ Agent ${skippedAgent} skipped: key not found — create or restore that agent's key, then re-run \`flair reembed --agent ${skippedAgent}\``,
-        );
-      }
       if (failed) process.exit(1);
       return;
     }
