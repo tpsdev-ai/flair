@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Select the first resolvable native package, then the family package, using
+// Read the first resolvable native package's own manifest, then the family's, using
 // these roots for each: install root, installed Flair, nested embeddings,
 // hoisted embeddings (flair#3133).
 // Installed trees can resolve a different version from the checkout lockfile.
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { basename, dirname, join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { SEMVER } from "./llama-native-version.mjs";
@@ -26,22 +26,25 @@ export function resolutionRoots(dir) {
 }
 
 /**
- * The package.json of `packageName` as loaded from `root`: resolve the entry
- * point, then walk up to the manifest without leaving the package directory.
- * (`exports` may hide `./package.json`, so it is not resolvable directly.)
+ * Read the resolved package's own manifest.
+ * `exports` may hide `./package.json`, so resolve the entry point first.
  */
 function manifestOf(root, packageName) {
   const entry = createRequire(join(root, "noop.cjs")).resolve(packageName);
-  for (let dir = dirname(entry); basename(dir) !== "node_modules"; dir = dirname(dir)) {
-    const candidate = join(dir, "package.json");
-    if (existsSync(candidate)) {
+  const parts = entry.split(sep);
+  const modules = parts.lastIndexOf("node_modules");
+  const name = parts[modules + 1];
+  const end = modules + (name?.startsWith("@") ? 3 : 2);
+  if (modules !== -1 && name && end < parts.length) {
+    const candidate = join(parts.slice(0, end).join(sep), "package.json");
+    try {
       const manifest = JSON.parse(readFileSync(candidate, "utf8"));
       if (manifest.name === packageName) return { manifest, source: candidate };
-      break;
+    } catch (error) {
+      throw new Error(`llama-installed-version: could not read ${packageName}'s own manifest ${candidate}: ${error.message}`);
     }
-    if (dirname(dir) === dir) break;
   }
-  throw new Error(`llama-installed-version: could not read ${packageName}'s package.json from ${root}`);
+  throw new Error(`llama-installed-version: could not read ${packageName}'s own package.json from ${root}`);
 }
 
 /** First resolvable manifest for this package, or null when absent. */

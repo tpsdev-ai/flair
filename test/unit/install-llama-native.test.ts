@@ -59,9 +59,9 @@ describe("install-llama-native", () => {
   for (const version of ["3", "3.22.3-beta", "3.22.3;echo bad", "3.22.3\n"]) {
     test(`refuses malformed version ${JSON.stringify(version)} before running`, () => {
       const lockfile = join(fixture(), "bun.lock");
-      writeFileSync(lockfile, `"node-llama-cpp": ["node-llama-cpp@${version}"]`);
+      writeFileSync(lockfile, JSON.stringify({ packages: { "node-llama-cpp": [`node-llama-cpp@${version}`] } }));
       const { calls, runner } = recordingRunner();
-      expect(() => installLlamaNative([], { runner, log, lockfile })).toThrow(/install-llama-native:.*not x.y.z/s);
+      expect(() => installLlamaNative([], { runner, log, lockfile })).toThrow(/install-llama-native: llama-native-version: malformed packages/);
       expect(calls).toEqual([]);
     });
   }

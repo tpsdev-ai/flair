@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Read the checkout native version from bun.lock (flair#3133).
+// Validate the node-llama-cpp packages entry in bun.lock (flair#3133).
 // Floating versions can drift from the checkout resolution.
 
 import { readFileSync } from "node:fs";
@@ -11,29 +11,55 @@ export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 /** The repository lockfile the version is read from. */
 export const LOCKFILE = resolve(ROOT, "bun.lock");
 
-// A resolved package entry in bun.lock's `packages` map:
-//   "node-llama-cpp": ["node-llama-cpp@3.22.3", ...],
-// A workspace dependency declaration (`"node-llama-cpp": "3.22.3",`) is not a
-// resolution and does not match; neither does a nested key such as
-// `node-llama-cpp/chalk` or `harper-fabric-embeddings/node-llama-cpp`.
-const RESOLVED = /^[ \t]*"node-llama-cpp"[ \t]*:[ \t]*\[[ \t]*"node-llama-cpp@([^"]+)"/gm;
-
 /** Accepted version shape for native installs. */
 export const SEMVER = /^[0-9]+\.[0-9]+\.[0-9]+$/;
 
-/**
- * The version `node-llama-cpp` resolves to in `lockText`.
- *
- * Throws a named error for a missing or duplicate resolution.
- */
-export function readLlamaNativeVersion(lockText) {
-  const versions = [...lockText.matchAll(RESOLVED)].map(match => match[1]);
-  if (versions.length !== 1) {
-    throw new Error(
-      `llama-native-version: expected exactly one resolved "node-llama-cpp" entry in bun.lock, found ${versions.length}`,
-    );
+function stripTrailingCommas(text) {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+    } else if (char === '"') {
+      inString = true;
+    } else if (char === ",") {
+      let next = i + 1;
+      while (/\s/.test(text[next] ?? "") && next < text.length) next++;
+      if (text[next] === "}" || text[next] === "]") continue;
+    }
+    result += char;
   }
-  return versions[0];
+  return result;
+}
+
+/** Validate the packages entry and return its x.y.z version. */
+export function readLlamaNativeVersion(lockText) {
+  let lock;
+  try {
+    lock = JSON.parse(stripTrailingCommas(lockText));
+  } catch (error) {
+    throw new Error(`llama-native-version: invalid bun.lock: ${error.message}`);
+  }
+  // Workspace declarations and nested package keys do not select the root resolution.
+  const packages = lock?.packages;
+  if (!packages || typeof packages !== "object" || Array.isArray(packages)) {
+    throw new Error("llama-native-version: missing or malformed packages map in bun.lock");
+  }
+  if (!Object.hasOwn(packages, "node-llama-cpp")) {
+    throw new Error('llama-native-version: missing packages["node-llama-cpp"] in bun.lock');
+  }
+  const entry = packages["node-llama-cpp"];
+  const match = Array.isArray(entry) && typeof entry[0] === "string"
+    ? /^node-llama-cpp@([0-9]+\.[0-9]+\.[0-9]+)$/.exec(entry[0])
+    : null;
+  if (!match || entry[0] !== match[0]) {
+    throw new Error('llama-native-version: malformed packages["node-llama-cpp"] in bun.lock: expected ["node-llama-cpp@x.y.z", ...]');
+  }
+  return match[1];
 }
 
 const isEntryPoint =

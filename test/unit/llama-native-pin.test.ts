@@ -43,15 +43,31 @@ describe("llama-native-version", () => {
     expect(readLlamaNativeVersion(lock)).toBe(resolved as string);
   });
 
-  test("rejects a missing resolution with a named error", () => {
-    expect(() => readLlamaNativeVersion('{"node-llama-cpp": "3.22.3"}')).toThrow(
-      /llama-native-version: expected exactly one resolved.*found 0/,
-    );
+  test("rejects a missing packages map with a named error", () => {
+    expect(() => readLlamaNativeVersion('{}')).toThrow(/llama-native-version: missing or malformed packages map/);
   });
 
-  test("rejects duplicate resolutions with a named error", () => {
-    const text = '"node-llama-cpp": ["node-llama-cpp@3.22.3"],\n"node-llama-cpp": ["node-llama-cpp@3.21.0"]';
-    expect(() => readLlamaNativeVersion(text)).toThrow(/llama-native-version:.*found 2/);
+  test("rejects a missing packages entry despite a lookalike elsewhere", () => {
+    const text = '{"packages": {}, "elsewhere": {\n"node-llama-cpp": ["node-llama-cpp@9.9.9"]}}';
+    expect(() => readLlamaNativeVersion(text)).toThrow(/llama-native-version: missing packages\["node-llama-cpp"\]/);
+  });
+
+  test("reads the packages entry despite a lookalike elsewhere", () => {
+    const text = '{"packages": {\n"node-llama-cpp": ["node-llama-cpp@3.22.3"]}, "elsewhere": {\n"node-llama-cpp": ["node-llama-cpp@9.9.9"]}}';
+    expect(readLlamaNativeVersion(text)).toBe("3.22.3");
+  });
+
+  for (const entry of [null, {}, [], "node-llama-cpp@3.22.3", [1], ["other@3.22.3"], ["node-llama-cpp@3"], ["node-llama-cpp@3.22.3\n"]]) {
+    test(`rejects malformed packages entry ${JSON.stringify(entry)}`, () => {
+      const text = JSON.stringify({ packages: { "node-llama-cpp": entry } });
+      expect(() => readLlamaNativeVersion(text)).toThrow(/llama-native-version: malformed packages\["node-llama-cpp"\]/);
+    });
+  }
+
+  test("preserves comma and closing brace inside a string while removing trailing commas", () => {
+    const note = JSON.stringify('escaped " quote,} and slash \\,}');
+    const text = `{"note": ${note}, "packages": {"node-llama-cpp": ["node-llama-cpp@3.22.3",],},}`;
+    expect(readLlamaNativeVersion(text)).toBe("3.22.3");
   });
 });
 
@@ -80,6 +96,28 @@ describe("llama-installed-version real manifests", () => {
       });
     });
   }
+
+  test("reads the package manifest when the entry point has a nested manifest", () => {
+    const dir = fixture({
+      [`node_modules/${native}/package.json`]: JSON.stringify({ name: native, version: "3.18.1", exports: "./dist/index.js" }),
+      [`node_modules/${native}/dist/index.js`]: "",
+      [`node_modules/${native}/dist/package.json`]: JSON.stringify({ name: native, version: "9.9.9" }),
+    });
+    const result = spawnSync("node", [join(ROOT, "scripts/ci/llama-installed-version.mjs"), dir], { encoding: "utf8" });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("3.18.1");
+  });
+
+  test("rejects a scope manifest when the scoped package's own manifest is missing", () => {
+    const dir = fixture({
+      [`node_modules/${native}/index.js`]: "",
+      "node_modules/@node-llama-cpp/package.json": JSON.stringify({ name: native, version: "9.9.9" }),
+    });
+    expect(() => readLlamaInstalledPackage(dir)).toThrow(/llama-installed-version: could not read .*own manifest/);
+    const result = spawnSync("node", [join(ROOT, "scripts/ci/llama-installed-version.mjs"), dir], { encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("llama-installed-version: could not read");
+  });
 
   test("absence names the searched directory and packages", () => {
     const dir = fixture({});
