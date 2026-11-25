@@ -14,6 +14,8 @@
  *
  * Throwaway HOME + data dir, ephemeral ports; the administrator password is
  * never printed. Each request target is asserted to be this test's instance.
+ * The instance runs without the boot migration trigger, so the embedding-stamp
+ * migration cannot re-embed the seeded stale rows during the test.
  */
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { createServer, type Server } from "node:http";
@@ -23,11 +25,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { componentWithoutMigrationBoot, type ComposedComponent } from "../helpers/component-without-migration-boot";
 import { ensureCliBuild, spawnCli } from "../helpers/build-cli-once";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const CURRENT_MODEL_ID = getModelId();
-const ADMIN_PASS = "test123";
 const AGENT_ID = "p6-agent-a";
 const OTHER_AGENT_ID = "p6-agent-b";
 const TOTAL_ROWS = 2_003;
@@ -36,6 +38,7 @@ const STALE_IDS = ["p6-z-0001", "p6-z-0002", "p6-z-0003"];
 const OTHER_STALE_ID = "p6-b-0001";
 const PAGE_SIZE = 1_000;
 const PAGES = 3;
+let component: ComposedComponent;
 let harper: HarperInstance;
 let home: string;
 
@@ -163,7 +166,8 @@ beforeAll(async () => {
   const keysDir = join(home, ".flair", "keys");
   mkdirSync(keysDir, { recursive: true });
   writeFileSync(join(keysDir, `${AGENT_ID}.key`), agent.secretKey.slice(0, 32), { mode: 0o600 });
-  harper = await startHarper();
+  component = componentWithoutMigrationBoot();
+  harper = await startHarper({ cwd: component.dir, harperBinDir: component.sourceRoot });
   for (const url of [new URL(harper.httpURL), new URL(harper.opsURL)]) {
     expect(url.hostname).toBe("127.0.0.1");
     expect(["9925", "9926"]).not.toContain(url.port);
@@ -186,6 +190,7 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const server of servers) await new Promise<void>((resolve) => server.close(() => resolve()));
   if (harper) await stopHarper(harper);
+  component?.cleanup();
   if (home) rmSync(home, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
@@ -209,7 +214,8 @@ async function runReembed(agentId?: string): Promise<{ code: number | null; stdo
     ...process.env,
     HOME: home,
     FLAIR_OPS_PORT: String(opsProxyPort),
-    FLAIR_ADMIN_PASS: ADMIN_PASS,
+    FLAIR_ADMIN_USER: harper.admin.username,
+    FLAIR_ADMIN_PASS: harper.admin.password,
     NO_COLOR: "1",
   };
   const child = spawnCli(args, { env, timeout: 180_000 });
