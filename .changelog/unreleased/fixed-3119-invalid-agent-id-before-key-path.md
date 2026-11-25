@@ -1,1 +1,1 @@
-- **`flair import`, `flair init` and `flair agent rotate-key` refuse an id outside the shared agent-ID rule before any key file write or request.**
+- **`flair import`, `flair init` and `flair agent rotate-key` refuse an id outside the shared agent-ID rule before any key file write or `fetch` call.**

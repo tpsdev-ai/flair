@@ -75,7 +75,7 @@ function snapshotTree(root: string): string[] {
   return out;
 }
 
-/** How many requests the child's `fetch` recorded (none creates no log file). */
+/** How many `fetch` calls the child recorded; no log file means 0. */
 function requestsSent(home: string): number {
   let text = "";
   try {
