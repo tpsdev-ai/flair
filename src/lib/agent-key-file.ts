@@ -63,15 +63,8 @@ export interface AgentKeyFileTestHooks {
 
 let testHooks: AgentKeyFileTestHooks | undefined;
 
-/** Test-only override for the uid the helper expects to own the key paths. */
-let expectedOwnerUid: number | undefined;
-
 export function setAgentKeyFileTestHooks(hooks: AgentKeyFileTestHooks | undefined): void {
   testHooks = hooks;
-}
-
-export function setAgentKeyFileExpectedOwnerUid(uid: number | undefined): void {
-  expectedOwnerUid = uid;
 }
 
 export interface AgentKeyFileContents {
@@ -91,7 +84,6 @@ function errnoCode(error: unknown): string | undefined {
 }
 
 function currentUid(): number | undefined {
-  if (expectedOwnerUid !== undefined) return expectedOwnerUid;
   return typeof process.getuid === "function" ? process.getuid() : undefined;
 }
 
@@ -212,17 +204,31 @@ export function readExistingAgentKey(privateKeyPath: string): Uint8Array | null 
  * Create a new key file at 0600 from the first byte, refusing to replace an
  * existing path. The bytes go to a unique temp file in the same directory and
  * are published with a hard link, so an occupied path is never overwritten.
- * On failure only this call's temp file is removed.
+ * A temp name that is already taken is retried with a new random suffix; the
+ * occupying entry is left untouched. On failure the temp file this call
+ * created is removed, best effort.
  */
 export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8Array): void {
   const bytes = Buffer.from(data);
-  const tempPath = join(
-    dirname(privateKeyPath),
-    `.${basename(privateKeyPath)}.tmp-${randomBytes(8).toString("hex")}`,
-  );
+  const tempPrefix = `.${basename(privateKeyPath)}.tmp-`;
+  const maxTempAttempts = 5;
   let fd: number | undefined;
+  let tempPath = "";
+  let tempCreated = false;
+  let attempt = 0;
+  while (fd === undefined) {
+    attempt += 1;
+    const candidate = join(dirname(privateKeyPath), `${tempPrefix}${randomBytes(8).toString("hex")}`);
+    try {
+      fd = openSync(candidate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW, 0o600);
+      tempPath = candidate;
+      tempCreated = true;
+    } catch (error) {
+      if (errnoCode(error) === "EEXIST" && attempt < maxTempAttempts) continue;
+      throw error;
+    }
+  }
   try {
-    fd = openSync(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW, 0o600);
     // The open mode is narrowed by the umask; set it exactly, still before the
     // first byte, so the protection is the mode the file is created with.
     fchmodSync(fd, 0o600);
@@ -253,10 +259,12 @@ export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8A
         /* already failing */
       }
     }
-    try {
-      unlinkSync(tempPath);
-    } catch {
-      /* best effort: remove only the temp file this call created */
+    if (tempCreated) {
+      try {
+        unlinkSync(tempPath);
+      } catch {
+        /* best effort: remove only the temp file this call created */
+      }
     }
     throw error;
   }

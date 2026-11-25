@@ -6,12 +6,13 @@
  * before anything else touches it; an existing 0755 directory the current user
  * owns is tightened with one notice line, while an owned 0500 keeps its mode;
  * a symlinked directory or key is refused; an existing key with group/world
- * bits is refused before any byte is read; short and zero-byte writes fail and
- * leave no file behind; a file that appears at the final path while the temp
- * file is being written is reused, not overwritten; and owned-by-another-user,
- * non-directory and non-regular paths are refused.
+ * bits is refused before its bytes are read; a short or zero-byte write fails
+ * and removes the temp file this call created, best effort; a file that
+ * appears at the final path while the temp file is being written is reused,
+ * not overwritten; and owned-by-another-user, non-directory and non-regular
+ * paths are refused.
  */
-import { describe, expect, test, spyOn } from "bun:test";
+import { afterEach, describe, expect, mock, test, spyOn } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
@@ -33,9 +34,12 @@ import {
   ensureAgentKeysDir,
   readExistingAgentKey,
   readOrCreateAgentKey,
-  setAgentKeyFileExpectedOwnerUid,
   setAgentKeyFileTestHooks,
 } from "../../src/lib/agent-key-file.ts";
+
+afterEach(() => {
+  mock.restore();
+});
 
 function keysDir(): string {
   return join(tempDir("flair-keyfile-3077-"), "keys");
@@ -106,16 +110,12 @@ test("a keys path that is a regular file is refused", () => {
 });
 
 test("a keys directory owned by another user is refused", () => {
-  const uid = process.getuid?.();
-  if (uid === undefined) return;
+  if (typeof process.getuid !== "function") return;
+  const uid = process.getuid();
   const dir = keysDir();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  setAgentKeyFileExpectedOwnerUid(uid + 1);
-  try {
-    expect(() => ensureAgentKeysDir(dir)).toThrow(/not owned by the current user/);
-  } finally {
-    setAgentKeyFileExpectedOwnerUid(undefined);
-  }
+  spyOn(process, "getuid").mockReturnValue(uid + 1);
+  expect(() => ensureAgentKeysDir(dir)).toThrow(/not owned by the current user/);
 });
 
 test("a symlinked key file is refused", () => {
@@ -128,7 +128,7 @@ test("a symlinked key file is refused", () => {
   expect(() => readExistingAgentKey(link)).toThrow(/symlink/);
 });
 
-test("an existing key with group/world bits is refused before any byte is read and is left untouched", () => {
+test("an existing key with group/world bits is refused before its bytes are read and is left untouched", () => {
   const dir = keysDir();
   ensureAgentKeysDir(dir);
   const keyPath = join(dir, "wide.key");
@@ -153,18 +153,14 @@ test("an existing key with group/world bits is refused before any byte is read a
 });
 
 test("a key file owned by another user is refused", () => {
-  const uid = process.getuid?.();
-  if (uid === undefined) return;
+  if (typeof process.getuid !== "function") return;
+  const uid = process.getuid();
   const dir = keysDir();
   ensureAgentKeysDir(dir);
   const keyPath = join(dir, "other.key");
   writeFileSync(keyPath, Buffer.alloc(32), { mode: 0o600 });
-  setAgentKeyFileExpectedOwnerUid(uid + 1);
-  try {
-    expect(() => readExistingAgentKey(keyPath)).toThrow(/owned by another user/);
-  } finally {
-    setAgentKeyFileExpectedOwnerUid(undefined);
-  }
+  spyOn(process, "getuid").mockReturnValue(uid + 1);
+  expect(() => readExistingAgentKey(keyPath)).toThrow(/owned by another user/);
 });
 
 test("a key path that is a directory is refused", () => {
