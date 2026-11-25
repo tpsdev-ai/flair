@@ -616,10 +616,11 @@ addAdminPassOptions(
         // ── New provisioning path: deploy Flair to Fabric, wait, provision super_user ──
         // The reserved shared agent account must never be used as this run's
         // administrator input on either leg: init authenticates its later calls
-        // as the run's principal, and provisioning also issues alter_user on
-        // FLAIR_AGENT_USERNAME, which would change that account's role out from
-        // under the agent gate. Refuse it first, before the agent-ID check and
-        // every filesystem or cluster write.
+        // as the run's principal, and without this guard provisioning could
+        // change that account through add_user or alter_user on
+        // FLAIR_AGENT_USERNAME (ensureFlairAgentUser), out from under the agent
+        // gate. Refuse it first, before the agent-ID check and every filesystem
+        // or cluster write.
         refuseReservedPrincipal(clusterAdminUser, "cluster administrator", "--cluster-admin-user");
         // Provisioning either reuses an existing super_user cluster admin or
         // creates or updates DEFAULT_ADMIN_USER, so both names are known before
