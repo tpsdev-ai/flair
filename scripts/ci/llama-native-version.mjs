@@ -21,6 +21,9 @@ export const LOCKFILE = resolve(ROOT, "bun.lock");
 // `node-llama-cpp/chalk` or `harper-fabric-embeddings/node-llama-cpp`.
 const RESOLVED = /^[ \t]*"node-llama-cpp"[ \t]*:[ \t]*\[[ \t]*"node-llama-cpp@([^"]+)"/gm;
 
+/** The only version shape that may reach an npm spec. */
+export const SEMVER = /^[0-9]+\.[0-9]+\.[0-9]+$/;
+
 /**
  * The version `node-llama-cpp` resolves to in `lockText`.
  *
@@ -50,7 +53,11 @@ const isEntryPoint =
 if (isEntryPoint) {
   try {
     const lockfile = process.argv[2] ? resolve(process.argv[2]) : LOCKFILE;
-    process.stdout.write(`${readLlamaNativeVersion(readFileSync(lockfile, "utf8"))}\n`);
+    const version = readLlamaNativeVersion(readFileSync(lockfile, "utf8"));
+    if (!SEMVER.test(version)) {
+      throw new Error(`llama-native-version: resolved version "${version}" is not x.y.z`);
+    }
+    process.stdout.write(`${version}\n`);
   } catch (error) {
     process.stderr.write(`${error?.message ?? error}\n`);
     process.exitCode = 1;

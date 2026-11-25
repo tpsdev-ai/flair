@@ -110,7 +110,10 @@ jobs:
       - run: sfw bun install --frozen-lockfile
 
       - name: Install linux-x64 native binary for embeddings (HEAD build)
-        run: bun add --no-save @node-llama-cpp/linux-x64@3.22.3
+        run: |
+          LLAMA_NATIVE_VERSION="$(node scripts/ci/llama-native-version.mjs)"
+          [[ "$LLAMA_NATIVE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::node-llama-cpp version in bun.lock is not x.y.z"; exit 1; }
+          bun add --no-save "@node-llama-cpp/linux-x64@${LLAMA_NATIVE_VERSION}"
 
       - run: bun run build && bun run build:cli
 
@@ -223,7 +226,9 @@ jobs:
           BASE_DIR=$(mktemp -d)
           ( cd "$BASE_DIR" && npm init -y > /dev/null )
           ( cd "$BASE_DIR" && npm install "@tpsdev-ai/flair@${BASELINE_VERSION}" )
-          ( cd "$BASE_DIR" && npm install --no-save @node-llama-cpp/linux-x64@3.22.3 )
+          LLAMA_NATIVE_VERSION="$(node "$GITHUB_WORKSPACE/scripts/ci/llama-installed-version.mjs" "$BASE_DIR")"
+          [[ "$LLAMA_NATIVE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::node-llama-cpp installed under $BASE_DIR is not x.y.z"; exit 1; }
+          ( cd "$BASE_DIR" && npm install --no-save "@node-llama-cpp/linux-x64@${LLAMA_NATIVE_VERSION}" )
           BASE_FLAIR="node $BASE_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
           echo "Baseline (previously published): ${BASELINE_VERSION} — HEAD (PR build): ${HEAD_VERSION}"
 
@@ -299,7 +304,9 @@ jobs:
           HEAD_DIR=$(mktemp -d)
           ( cd "$HEAD_DIR" && npm init -y > /dev/null )
           ( cd "$HEAD_DIR" && npm install "$TGZ_PATH" )
-          ( cd "$HEAD_DIR" && npm install --no-save @node-llama-cpp/linux-x64@3.22.3 )
+          LLAMA_NATIVE_VERSION="$(node "$GITHUB_WORKSPACE/scripts/ci/llama-installed-version.mjs" "$HEAD_DIR")"
+          [[ "$LLAMA_NATIVE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::node-llama-cpp installed under $HEAD_DIR is not x.y.z"; exit 1; }
+          ( cd "$HEAD_DIR" && npm install --no-save "@node-llama-cpp/linux-x64@${LLAMA_NATIVE_VERSION}" )
           HEAD_FLAIR="node $HEAD_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
           NEW=$(node -p "require('$HEAD_DIR/node_modules/@tpsdev-ai/flair/package.json').version")
           [[ "$NEW" == "$HEAD_VERSION" ]] || { echo "::error::expected ${HEAD_VERSION} in node_modules, got ${NEW}"; exit 1; }
@@ -699,7 +706,10 @@ jobs:
       - run: sfw bun install --frozen-lockfile
 
       - name: Install linux-x64 native binary for embeddings
-        run: bun add --no-save @node-llama-cpp/linux-x64@3.22.3
+        run: |
+          LLAMA_NATIVE_VERSION="$(node scripts/ci/llama-native-version.mjs)"
+          [[ "$LLAMA_NATIVE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::node-llama-cpp version in bun.lock is not x.y.z"; exit 1; }
+          bun add --no-save "@node-llama-cpp/linux-x64@${LLAMA_NATIVE_VERSION}"
 
       - run: bun run build && bun run build:cli
 
@@ -739,7 +749,9 @@ jobs:
           HEAD_DIR=$(mktemp -d)
           ( cd "$HEAD_DIR" && npm init -y > /dev/null )
           ( cd "$HEAD_DIR" && npm install "$TGZ_PATH" )
-          ( cd "$HEAD_DIR" && npm install --no-save @node-llama-cpp/linux-x64@3.22.3 )
+          LLAMA_NATIVE_VERSION="$(node "$GITHUB_WORKSPACE/scripts/ci/llama-installed-version.mjs" "$HEAD_DIR")"
+          [[ "$LLAMA_NATIVE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::node-llama-cpp installed under $HEAD_DIR is not x.y.z"; exit 1; }
+          ( cd "$HEAD_DIR" && npm install --no-save "@node-llama-cpp/linux-x64@${LLAMA_NATIVE_VERSION}" )
           FLAIR="node $HEAD_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
           # cwd = $HEAD_DIR for every CLI call: harperBin() falls back to
           # process.cwd()/node_modules for the npm-hoisted harper,

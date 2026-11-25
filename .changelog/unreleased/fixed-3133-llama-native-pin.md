@@ -1,1 +1,1 @@
-- **CI installs each `@node-llama-cpp/<platform>` native binary at the version `node-llama-cpp` resolves to in the lockfile.** A static check fails a workflow that installs the package without that exact pin.
+- **CI reads each `@node-llama-cpp/<platform>` native binary version at run time.** In this checkout the version is the one `node-llama-cpp` resolves to in `bun.lock`; in an npm-installed directory it is the version that directory resolved. A static check fails a workflow that names a literal, bare, range or `@latest` version (flair#3133).
