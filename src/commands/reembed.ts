@@ -82,6 +82,97 @@ export function opsStoredModelReader(opsPort: string | number, opsAuth: string):
 }
 
 /**
+ * Rows per `search_by_conditions` page when reading Memory for a re-embed.
+ * Passed as `readAllMemoryRows`'s `pageSize` so tests can use a small page.
+ */
+export const REEMBED_READ_PAGE_SIZE = 1000;
+
+/** Row limit of the single keyless `POST /SemanticSearch` listing. */
+export const KEYLESS_SEARCH_LIMIT = 10_000;
+
+/** One line naming what the keyless listing read and the remedy. */
+export function keylessTruncationNotice(read: number): string {
+  return `⚠️ Read ${read} memories via /SemanticSearch; more rows may exist. Set FLAIR_ADMIN_PASS so reembed reads every row through the operations API.`;
+}
+
+/** Hard bound on the keyset loop; 10M rows at the default page size. */
+const MAX_MEMORY_READ_PAGES = 10_000;
+
+export type MemoryReadCondition = {
+  search_attribute: string;
+  search_type: string;
+  search_value: unknown;
+};
+
+export type MemoryRowPageRead = {
+  rows: Record<string, unknown>[];
+  pages: number;
+};
+
+/**
+ * Read the Memory rows matching `conditions`, one page at a time (flair#3086).
+ * Keyset paging on the primary key: each page asks for rows whose `id` is
+ * greater than the last id seen, sorted by `id`, so a row inserted or deleted
+ * between pages does not shift the rows after it or repeat one already read.
+ *
+ * Harper's operations API forwards `limit`, `offset` and `sort` to Table.search
+ * (node_modules/harper/dataLayer/harperBridge/ResourceBridge.ts:109-113); the
+ * conditions search accepts `sort: { attribute, descending }`
+ * (node_modules/harper/validation/searchValidator.ts:38-48); a primary-key
+ * sort scans the primary store in key order
+ * (node_modules/harper/resources/Table.ts:5919-5921). The whole read finishes
+ * before the first re-embed write.
+ */
+export async function readAllMemoryRows(opts: {
+  opsPort: string | number;
+  opsAuth: string;
+  conditions: MemoryReadCondition[];
+  pageSize?: number;
+}): Promise<MemoryRowPageRead> {
+  const pageSize = opts.pageSize ?? REEMBED_READ_PAGE_SIZE;
+  if (!Number.isInteger(pageSize) || pageSize < 1) {
+    throw new Error(`invalid page size ${pageSize}`);
+  }
+  const rows: Record<string, unknown>[] = [];
+  let lastId: string | undefined;
+  let pages = 0;
+  while (pages < MAX_MEMORY_READ_PAGES) {
+    pages++;
+    const conditions: MemoryReadCondition[] = [...opts.conditions];
+    if (lastId !== undefined) {
+      conditions.push({ search_attribute: "id", search_type: "greater_than", search_value: lastId });
+    }
+    const res = await fetch(`http://127.0.0.1:${opts.opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: opts.opsAuth },
+      body: JSON.stringify({
+        operation: "search_by_conditions",
+        database: "flair",
+        table: "Memory",
+        operator: "and",
+        conditions,
+        sort: { attribute: "id" },
+        // Not "*": every page would carry every row's embedding vector.
+        get_attributes: ["id", "agentId", "content", "embeddingModel"],
+        limit: pageSize,
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const raw = await res.json() as unknown;
+    const page = Array.isArray(raw) ? raw : ((raw as { results?: unknown[] })?.results ?? []);
+    for (const row of page) rows.push(row as Record<string, unknown>);
+    if (page.length < pageSize) return { rows, pages };
+    const last = page[page.length - 1] as { id?: unknown } | null;
+    if (typeof last?.id !== "string" || last.id.length === 0) {
+      throw new Error(`page ${pages} did not end with a row id`);
+    }
+    lastId = last.id;
+  }
+  throw new Error(`stopped after ${MAX_MEMORY_READ_PAGES} pages`);
+}
+
+/**
  * A StoredModelReader that reads the row with a signed `GET /Memory/<id>` as
  * the agent whose key signs the re-embed PATCH (the single-agent path without
  * administrator credentials).
@@ -283,32 +374,28 @@ program
       // vector index — exactly what we need when the goal is to replace every
       // embedding with a freshly-computed one. Without this path, `flair
       // reembed` could not recover from the very condition it exists to fix.
+      // Reads every page before the first write (flair#3086).
       const opsPort = resolveOpsPort(opts);
       const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
       const readStoredModel = opsStoredModelReader(opsPort, opsAuth);
       // Harper rejects empty-value conditions ("not indexed for nulls"). Use
       // `createdAt > 1970-01-01` as the "select all" pattern: every Memory row
       // has a createdAt, the index is built, and the comparison is total.
-      const searchRes = await fetch(`http://127.0.0.1:${opsPort}/`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: opsAuth },
-        body: JSON.stringify({
-          operation: "search_by_conditions",
-          database: "flair",
-          table: "Memory",
-          operator: "and",
-          conditions: [{ search_attribute: "createdAt", search_type: "greater_than", search_value: "1970-01-01" }],
-          get_attributes: ["*"],
-          limit: 100000,
-        }),
-        signal: AbortSignal.timeout(60_000),
-      });
-      if (!searchRes.ok) {
-        console.error(`❌ Failed to fetch memories via ops API: ${searchRes.status}`);
+      let allMemories: any[];
+      let readPages: number;
+      try {
+        ({ rows: allMemories, pages: readPages } = await readAllMemoryRows({
+          opsPort,
+          opsAuth,
+          conditions: [
+            { search_attribute: "createdAt", search_type: "greater_than", search_value: "1970-01-01" },
+          ],
+        }));
+      } catch (err) {
+        console.error(`❌ Failed to fetch memories via ops API: ${(err as Error).message}`);
         process.exit(1);
       }
-      const raw = await searchRes.json() as unknown;
-      const allMemories: any[] = Array.isArray(raw) ? raw : ((raw as { results?: any[] })?.results ?? []);
+      console.log(`Read ${allMemories.length} memories in ${readPages} page(s)`);
 
       // Group by agentId
       const byAgent = new Map<string, any[]>();
@@ -377,6 +464,7 @@ program
 
     const adminPassSingle = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
     let allMemories: any[] = [];
+    let readPages = 0;
     // flair#2561: the stamp of each re-embedded row is read back the way the
     // rows were listed: the operations API with administrator credentials,
     // else a signed GET as this agent.
@@ -385,28 +473,20 @@ program
       const opsPort = resolveOpsPort(opts);
       const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPassSingle}`).toString("base64")}`;
       readStoredModel = opsStoredModelReader(opsPort, opsAuth);
-      const searchRes = await fetch(`http://127.0.0.1:${opsPort}/`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: opsAuth },
-        body: JSON.stringify({
-          operation: "search_by_value",
-          database: "flair",
-          table: "Memory",
-          search_attribute: "agentId",
-          search_value: agentId,
-          get_attributes: ["*"],
-        }),
-        signal: AbortSignal.timeout(60_000),
-      });
-      if (!searchRes.ok) {
-        console.error(`❌ Failed to fetch memories via ops API: ${searchRes.status}`);
+      try {
+        ({ rows: allMemories, pages: readPages } = await readAllMemoryRows({
+          opsPort,
+          opsAuth,
+          conditions: [{ search_attribute: "agentId", search_type: "equals", search_value: agentId }],
+        }));
+      } catch (err) {
+        console.error(`❌ Failed to fetch memories via ops API: ${(err as Error).message}`);
         process.exit(1);
       }
-      const raw = await searchRes.json() as unknown;
-      allMemories = Array.isArray(raw) ? raw : ((raw as { results?: any[] })?.results ?? []);
+      console.log(`Read ${allMemories.length} memories in ${readPages} page(s)`);
     } else {
       const searchRes = await authFetch(baseUrl, agentId, privPath, "POST", "/SemanticSearch", {
-        agentId, limit: 10000,
+        agentId, limit: KEYLESS_SEARCH_LIMIT,
       });
       if (!searchRes.ok) {
         console.error(`❌ Failed to fetch memories: ${searchRes.status}`);
@@ -415,6 +495,10 @@ program
       const data = await searchRes.json() as { results?: any[] };
       allMemories = data.results ?? [];
     }
+    // The keyless /SemanticSearch call has no paging parameter (see
+    // resources/SemanticSearch.ts): exactly `KEYLESS_SEARCH_LIMIT` rows means
+    // the listing may have been cut off, so the run must say so and fail.
+    const keylessTruncated = !adminPassSingle && allMemories.length === KEYLESS_SEARCH_LIMIT;
 
     const candidates = allMemories.filter((m: any) => {
       if (!m.content) return false;
@@ -425,12 +509,15 @@ program
     const total = candidates.length;
     const skipped = allMemories.length - total;
 
-    console.log(`Total memories: ${allMemories.length}`);
     console.log(`Candidates for re-embedding: ${total}`);
     if (skipped > 0) console.log(`Skipped (up-to-date): ${skipped}`);
 
     if (dryRun || total === 0) {
       if (total === 0) console.log("\n✅ All memories are up-to-date!");
+      if (keylessTruncated) {
+        console.log(keylessTruncationNotice(allMemories.length));
+        process.exit(1);
+      }
       return;
     }
 
@@ -452,6 +539,10 @@ program
     }
 
     console.log(`\n\n✅ Re-embedding complete: ${processed} updated, ${errors} errors`);
+    if (keylessTruncated) {
+      console.log(keylessTruncationNotice(allMemories.length));
+      process.exit(1);
+    }
   });
 
 }
