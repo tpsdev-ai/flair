@@ -225,7 +225,7 @@ async function runReembed(agentId?: string): Promise<{ code: number | null; stdo
   child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
   const code = await new Promise<number | null>((resolve, reject) => {
     child.on("error", reject);
-    child.on("exit", (exitCode) => resolve(exitCode));
+    child.on("close", (exitCode) => resolve(exitCode));
   });
   return { code, stdout, stderr };
 }

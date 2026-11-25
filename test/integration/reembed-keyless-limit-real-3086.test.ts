@@ -119,7 +119,7 @@ async function runKeylessReembed(): Promise<{ code: number | null; stdout: strin
   child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
   const code = await new Promise<number | null>((resolve, reject) => {
     child.on("error", reject);
-    child.on("exit", (exitCode) => resolve(exitCode));
+    child.on("close", (exitCode) => resolve(exitCode));
   });
   // The keyless path lists with /SemanticSearch; the operations path prints its page count.
   expect(stdout).not.toContain("page(s)");
