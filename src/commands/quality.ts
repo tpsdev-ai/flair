@@ -13,6 +13,7 @@ import { SigningIdentitySource } from "../lib/signing-identity.js";
 import * as render from "../render.js";
 import { EMBEDDING_STAMP_ID, describeStampOutstanding, resolveCurrentModelId } from "../stamp-outstanding.js";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 export type QualityCli = {
   api: (...args: any[]) => any;
@@ -661,10 +662,21 @@ export function computeQualityReport(
   // empty perAgent array (nothing to prove otherwise, and both scopes render
   // identically empty either way).
   const haveUsageCount = perAgentAll.every((r) => typeof r.usageCount === "number");
+  // Rows whose memoryCount or writes24h is absent or not a number carry no
+  // usable counts. A rate or a quiet verdict computed from either count would
+  // be a claim about data nobody read, so neither is reported.
+  const haveMemoryStats = perAgentAll.every(
+    (r) => typeof r.memoryCount === "number" && typeof r.writes24h === "number",
+  );
 
   // ── Signal density (write volume, + citation rate when the server supports it) ──
   let signalDensity: QualityReport["signalDensity"] = null;
-  if (havePerAgent && haveUsageCount) {
+  if (havePerAgent && !haveMemoryStats) {
+    gaps.push({
+      metric: "signalDensity",
+      reason: "per-agent memory fields unavailable",
+    });
+  } else if (havePerAgent && haveUsageCount) {
     signalDensity = {
       scope: "write-and-citation",
       perAgent: scopedAgents.map((r) => {
@@ -688,7 +700,12 @@ export function computeQualityReport(
 
   // ── Quiet agents (ops fact — not a trust signal) ──
   let quietAgents: QualityReport["quietAgents"] = null;
-  if (havePerAgent) {
+  if (havePerAgent && !haveMemoryStats) {
+    gaps.push({
+      metric: "quietAgents",
+      reason: "per-agent memory fields unavailable",
+    });
+  } else if (havePerAgent) {
     const rows: QualityAgentActivity[] = scopedAgents.map((r) => {
       const daysSinceLastWrite = r.lastWriteAt ? Math.floor((now - new Date(r.lastWriteAt).getTime()) / 86_400_000) : null;
       const quiet = daysSinceLastWrite === null ? true : daysSinceLastWrite >= QUALITY_QUIET_THRESHOLD_DAYS;
@@ -1157,7 +1174,10 @@ export async function fetchPreviousQualitySnapshot(
  *  surfacing that as a clear error, same as every other write path here. */
 
 async function storeQualitySnapshot(agentId: string, agentIdSource: SigningIdentitySource, baseUrl: string, subject: string, snapshot: QualitySnapshotCore): Promise<string> {
-  const memId = `${agentId}-quality-snapshot-${Date.now()}`;
+  // flair#3115: the PUT is an upsert, so a millisecond suffix made two --emit
+  // runs in the same millisecond overwrite one row; the uuid suffix keeps the
+  // two writes apart.
+  const memId = `${agentId}-quality-snapshot-${randomUUID()}`;
   const body: Record<string, unknown> = {
     id: memId,
     agentId,

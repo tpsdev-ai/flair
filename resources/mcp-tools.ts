@@ -59,6 +59,7 @@ import { resolveVersion } from "./version.js";
 import { agentContext, adminContext, collectionResource } from "./in-process.js";
 import { unionUsageMemoryIds } from "./usage-ids.js";
 import { SKILL_TAG, isSkillWrite } from "./skill-write.js";
+import { MCP_TOOL_SCOPES } from "./mcp-tool-scopes.js";
 import {
   NATIVE_TOOL_DESCRIPTORS,
   toMcpToolDef,
@@ -1634,6 +1635,18 @@ const LIST_GATES: Record<string, (agent: ResolvedAgent) => Promise<boolean>> = {
 for (const name of Object.keys(LIST_GATES)) {
   if (!Object.prototype.hasOwnProperty.call(TOOLS, name)) {
     throw new Error(`tools/list gate names a tool that is not in TOOLS: ${name}`);
+  }
+}
+
+// flair#3076: each tool requires the scope MCP_TOOL_SCOPES lists for it, so the
+// table and TOOLS must name the same tools.
+{
+  const unscoped = Object.keys(TOOLS).filter((name) => !Object.prototype.hasOwnProperty.call(MCP_TOOL_SCOPES, name));
+  const unserved = Object.keys(MCP_TOOL_SCOPES).filter((name) => !Object.prototype.hasOwnProperty.call(TOOLS, name));
+  if (unscoped.length > 0 || unserved.length > 0) {
+    throw new Error(
+      `MCP_TOOL_SCOPES does not match TOOLS: no scope for [${unscoped.join(", ")}]; not in TOOLS [${unserved.join(", ")}]`,
+    );
   }
 }
 
