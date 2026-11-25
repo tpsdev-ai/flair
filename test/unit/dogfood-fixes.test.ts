@@ -50,7 +50,7 @@ describe("Dogfood fixes", () => {
       expect(output).toContain("Admin password required");
     });
 
-    it("reembed's updated credential read treats empty FLAIR_ADMIN_PASS as unset and falls back to HDB_ADMIN_PASSWORD (#3093)", () => {
+    it("reembed's updated credential read omits 'Admin password required' when empty FLAIR_ADMIN_PASS is set (#3093)", () => {
       const output = run(`${FLAIR_BIN} reembed --stale-only --dry-run`, {
         HOME: TEST_DIR,
         FLAIR_URL: "http://127.0.0.1:19999", // no Harper running
