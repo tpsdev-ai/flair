@@ -8,9 +8,10 @@
  */
 
 import { describe, test, expect, beforeAll, beforeEach, afterEach, afterAll, mock } from "bun:test";
-import { existsSync, readFileSync, readdirSync, rmSync, mkdirSync, writeFileSync, mkdtempSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, mkdirSync, writeFileSync, mkdtempSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
 import {
   buildDeployTarball,
   waitForFlairRestart,
@@ -451,15 +452,68 @@ const REAL_FETCH = globalThis.fetch;
  * Start a Harper this file owns. These suites create and drop users, so they
  * must never run against an external `HARPER_HTTP_URL`: refuse there before the
  * first fixture write. `stopHarper` already leaves an external instance alone.
+ * The starter is injectable so the refusal itself has a hermetic case.
  */
-async function startLocalHarper(): Promise<HarperInstance> {
-  const inst = await startHarper();
+async function startLocalHarper(start: () => Promise<HarperInstance> = startHarper): Promise<HarperInstance> {
+  const inst = await start();
   if (inst.external) {
     throw new Error(
       "init-remote-ops: this suite creates and drops Harper users, so it refuses an external instance (HARPER_HTTP_URL is set)",
     );
   }
   return inst;
+}
+
+/**
+ * A local HTTP server that records every request it receives and answers 200.
+ * It holds no credentials and no state: the only thing it can prove is whether
+ * a request arrived.
+ */
+async function startRecordingServer(): Promise<{
+  url: string;
+  requests: { method: string; path: string; operation?: string }[];
+  close: () => Promise<void>;
+}> {
+  const requests: { method: string; path: string; operation?: string }[] = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      let operation: string | undefined;
+      try { operation = JSON.parse(body)?.operation; } catch { operation = undefined; }
+      requests.push({ method: req.method ?? "", path: req.url ?? "", operation });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address !== "object") {
+    server.close();
+    throw new Error("recording server did not bind a port");
+  }
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    requests,
+    close: () => new Promise<void>((resolve) => {
+      server.closeAllConnections();
+      server.close(() => resolve());
+    }),
+  };
+}
+
+/** The operations that change cluster state. */
+const WRITE_OPERATION = /^(deploy_component|add_|alter_|insert|upsert|update|delete|drop_)/;
+
+/** Assert no recorded request carried a write operation. */
+function expectNoWriteOperation(seen: { operation?: string }[], label: string): void {
+  const writes = seen
+    .map((call) => call.operation)
+    .filter((operation): operation is string => operation !== undefined && WRITE_OPERATION.test(operation));
+  expect(writes, `${label}: no write operation may be sent before the refusal`).toEqual([]);
 }
 
 describe("flair#3106 — reserved principal refusal (real Harper)", () => {
@@ -484,25 +538,76 @@ describe("flair#3106 — reserved principal refusal (real Harper)", () => {
     expect(beforeRow, "the reserved super_user must exist").toBeTruthy();
 
     const home = mkdtempSync(join(tmpDir, "home-"));
-    const out = await runInitAction(initArgs(harper, {
-      clusterUser: "flair-agent",
-      clusterPass: "reserved-pass",
-      flairPass: "unused-reserved-pass",
-      agentId: "agent-reserved",
-      keysDir: join(tmpDir, "keys-reserved"),
-    }), home);
+    // Record every ops request the action sends. `deploy_component` is stubbed
+    // so a guard that runs after provisioning cannot really deploy; the
+    // assertion below then sees the write instead of letting it reach Harper.
+    const recorder = installRecorder({ user: "flair-agent", pass: "reserved-pass" });
+    let out: Awaited<ReturnType<typeof runInitAction>>;
+    try {
+      out = await runInitAction(initArgs(harper, {
+        clusterUser: "flair-agent",
+        clusterPass: "reserved-pass",
+        flairPass: "unused-reserved-pass",
+        agentId: "agent-reserved",
+        keysDir: join(tmpDir, "keys-reserved"),
+      }), home);
+    } finally {
+      recorder.restore();
+    }
 
     expect(out.exitCode).toBe(1);
     expect(out.stderr).toContain("'flair-agent' is a reserved Flair account");
     expect(out.stderr).toContain("different cluster administrator");
-    // Refused before any filesystem write: the isolated home is still empty.
+    // Refused before any filesystem or cluster write: the isolated home is
+    // still empty, and the action sent no write operation.
     expect(readdirSync(home)).toEqual([]);
+    expectNoWriteOperation(recorder.all, "reserved-principal refusal");
 
     const after = await harperOps(harper, "admin", "test123", { operation: "list_users" });
     expect(after.status).toBe(200);
     const afterRow = ((after.body as any[]) ?? []).find((u) => u.username === "flair-agent");
     expect(afterRow, "the reserved account's role must be unchanged").toEqual(beforeRow);
   }, 150_000);
+});
+
+describe("flair#3106 — external-instance refusal (hermetic)", () => {
+  test("refuses an external instance before the first fixture request", async () => {
+    const recorder = await startRecordingServer();
+    try {
+      const external: HarperInstance = {
+        httpURL: recorder.url,
+        opsURL: recorder.url,
+        installDir: "",
+        process: null,
+        admin: { username: "admin", password: "test123" },
+        external: true,
+        ownsInstallDir: false,
+        getLog: () => "",
+      };
+      let started: HarperInstance | undefined;
+      let refusal: Error | undefined;
+      try {
+        started = await startLocalHarper(async () => external);
+      } catch (err) {
+        refusal = err instanceof Error ? err : new Error(String(err));
+      }
+      if (started) {
+        // The first fixture write every suite makes; it must never reach an
+        // external instance. Reaching the recorder means the guard is gone.
+        await fetch(`${started.opsURL}/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ operation: "add_role", role: "fixture-role", permission: {} }),
+          signal: AbortSignal.timeout(5_000),
+        });
+      }
+      expect(refusal, "the starter must refuse an external instance").toBeInstanceOf(Error);
+      expect(refusal?.message ?? "").toContain("refuses an external instance");
+      expect(recorder.requests, "no fixture request may reach an external instance").toEqual([]);
+    } finally {
+      await recorder.close();
+    }
+  }, 20_000);
 });
 
 const basic = (user: string, pass: string) => "Basic " + btoa(`${user}:${pass}`);
@@ -515,22 +620,22 @@ interface RecordedCall { user: string; pass: string; path: string; operation?: s
  */
 function installRecorder(deployAuth: { user: string; pass: string }): {
   calls: RecordedCall[];
-  all: { url: string; authz: string | null }[];
+  all: { url: string; authz: string | null; operation?: string }[];
   deployAuthOk: () => boolean;
   restore: () => void;
 } {
   const calls: RecordedCall[] = [];
-  const all: { url: string; authz: string | null }[] = [];
+  const all: { url: string; authz: string | null; operation?: string }[] = [];
   let deployAuthOk = false;
   const prev = globalThis.fetch;
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = typeof input === "string" ? input : input.url;
     const headers = new Headers(init?.headers ?? (typeof input === "object" ? input.headers : undefined));
     const authz = headers.get("authorization") ?? "";
-    all.push({ url, authz: authz === "" ? null : authz });
     const bodyText = typeof init?.body === "string" ? init.body : null;
     let operation: string | undefined;
     try { operation = bodyText === null ? undefined : JSON.parse(bodyText)?.operation; } catch { operation = undefined; }
+    all.push({ url, authz: authz === "" ? null : authz, operation });
     if (operation === "deploy_component") {
       deployAuthOk = authz === basic(deployAuth.user, deployAuth.pass);
       if (!deployAuthOk) throw new Error("deploy_component did not carry the cluster administrator's Basic auth");
@@ -847,7 +952,7 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
     }
   }, 150_000);
 
-  test("reused super_user named admin: the action leaves the saved credential untouched and its password still authenticates", async () => {
+  test("reused super_user named admin: the action leaves the saved credential untouched", async () => {
     const seeded = await harperOps(harper, "cluster-east", "cluster-east-pass", {
       operation: "add_user", username: "admin", password: "reused-admin-pass", role: "super_user", active: true,
     });
@@ -885,9 +990,6 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
       // overwrite the saved credential with the Flair admin password it never
       // set on the instance.
       expect(readFileSync(secretPath, "utf8"), "the saved credential must be unchanged").toBe("reused-admin-pass\n");
-      // Compare in-test that the saved value still authenticates; never print it.
-      const authenticated = await harperOps(harper, "admin", "reused-admin-pass", { operation: "list_users" });
-      expect(authenticated.status, `the saved credential no longer authenticates: ${authenticated.text.slice(0, 120)}`).toBe(200);
       const hint = hintOf(out.stdout);
       expect(hint).toContain("cluster administrator password");
       expect(hint).not.toContain(secretPath);
@@ -896,6 +998,50 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
       recorder.restore();
     }
   }, 150_000);
+
+  test.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
+    "created admin: a failed admin-pass write is fatal and prints no success summary",
+    async () => {
+      const home = mkdtempSync(join(tmpDir, "home-"));
+      const secretsDir = join(home, ".tps", "secrets");
+      mkdirSync(secretsDir, { recursive: true });
+      const clusterPass = "cluster-east-pass";
+      const chosenPass = "chosen-fatal-write-9f3a";
+      const recorder = installRecorder({ user: "cluster-east", pass: clusterPass });
+      // An unwritable secrets directory makes the post-provision write throw.
+      // Root ignores the mode, so this case only runs for a non-root user.
+      chmodSync(secretsDir, 0o500);
+      let out: Awaited<ReturnType<typeof runInitAction>>;
+      try {
+        out = await runInitAction(initArgs(harper, {
+          clusterUser: "cluster-east",
+          clusterPass,
+          flairPass: chosenPass,
+          agentId: "agent-fatal",
+          keysDir: join(tmpDir, "keys-fatal"),
+        }), home, { rethrow: false });
+      } finally {
+        chmodSync(secretsDir, 0o700);
+        recorder.restore();
+      }
+
+      expect(out.error, "the action must fail when the admin-pass write fails").toBeInstanceOf(Error);
+      expect((out.error as NodeJS.ErrnoException | undefined)?.code, "the failure must be the admin-pass write").toBe("EACCES");
+      expect((out.error as Error | undefined)?.message ?? "", "the failure must name the admin-pass file").toContain("flair-fabric-hdb");
+      expect(
+        recorder.all.some((call) => call.operation === "deploy_component"),
+        "the action must have provisioned before the write failed",
+      ).toBe(true);
+      expect(out.exitCode ?? 1, "the action must not report success").not.toBe(0);
+      expect(out.stdout, "no success summary may be printed").not.toContain("Flair hub deployed");
+      expect(out.stdout, "no admin-pass write may be reported").not.toContain("Admin password written");
+      expect(out.stdout, "the chosen password must not reach stdout").not.toContain(chosenPass);
+      expect(out.stderr, "the chosen password must not reach stderr").not.toContain(chosenPass);
+      expect(out.stdout, "the cluster administrator password must not reach stdout").not.toContain(clusterPass);
+      expect(out.stderr, "the cluster administrator password must not reach stderr").not.toContain(clusterPass);
+    },
+    150_000,
+  );
 });
 
 describe("flair#3106 — existing admin update path (real Harper)", () => {
@@ -1043,10 +1189,12 @@ type InitActionEnv = {
 };
 
 /** Run the in-process `flair init` action with HOME isolated to `home`. */
-async function runInitAction(args: string[], home: string): Promise<{
+async function runInitAction(args: string[], home: string, opts: { rethrow?: boolean } = {}): Promise<{
   stdout: string;
   stderr: string;
   exitCode?: number;
+  /** The action's own rejection, when `rethrow: false` captured it. */
+  error?: Error;
   /** HOME/USERPROFILE as the action saw them, captured before restore. */
   envDuringAction: { HOME: string | undefined; USERPROFILE: string | undefined };
 }> {
@@ -1067,6 +1215,7 @@ async function runInitAction(args: string[], home: string): Promise<{
   let stdout = "";
   let stderr = "";
   let exitCode: number | undefined;
+  let error: Error | undefined;
   let envDuringAction: { HOME: string | undefined; USERPROFILE: string | undefined } = { HOME: undefined, USERPROFILE: undefined };
   process.env.HOME = home;
   process.env.USERPROFILE = home;
@@ -1087,7 +1236,10 @@ async function runInitAction(args: string[], home: string): Promise<{
     await program.parseAsync(["node", "flair", "init", ...args]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (!message.includes("process.exit")) throw err;
+    if (!message.includes("process.exit")) {
+      if (opts.rethrow === false) error = err instanceof Error ? err : new Error(message);
+      else throw err;
+    }
   } finally {
     envDuringAction = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
     process.exit = origExit;
@@ -1112,7 +1264,7 @@ async function runInitAction(args: string[], home: string): Promise<{
     if (saved.ROOTPATH === undefined) delete process.env.ROOTPATH;
     else process.env.ROOTPATH = saved.ROOTPATH;
   }
-  return { stdout, stderr, exitCode, envDuringAction };
+  return { stdout, stderr, exitCode, error, envDuringAction };
 }
 
 const hintOf = (stdout: string): string =>

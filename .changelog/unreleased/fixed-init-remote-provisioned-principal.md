@@ -14,6 +14,7 @@
   instance.
 
   The admin-pass file is written after provisioning and only when provisioning
-  created or updated `admin`; a reused cluster administrator keeps its own
-  saved credential untouched. The reserved shared agent account
-  (`flair-agent`) is refused as the cluster administrator before any write.
+  created or updated `admin`; when provisioning reuses an existing
+  administrator, init does not write the admin-pass file and leaves an existing
+  one unchanged. The reserved shared agent account (`flair-agent`) is refused as
+  the cluster administrator before any write.
