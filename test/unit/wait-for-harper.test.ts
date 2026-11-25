@@ -1119,7 +1119,8 @@ describe("wait-for-harper.mjs", () => {
     CASE_TIMEOUT_MS,
   );
 
-  // A step's shell text is tokenized for syntactic presence after dropping comments and joining continuations, without proving execution.
+  // Match waiter and argument tokens after removing full-line comments and joining continuations.
+  // Shell syntax and execution are unproved; an inline comment can hold the tokens.
   const commandsOf = (run: string): string[][] =>
     run
       .split("\n")
@@ -1137,7 +1138,7 @@ describe("wait-for-harper.mjs", () => {
     return at === -1 ? undefined : words[at + 1];
   };
 
-  test("(i) both workflows contain a syntactically active waiter command without proving execution", () => {
+  test("both workflows contain matching waiter-command tokens without proving execution", () => {
     interface Step {
       name?: string;
       if?: unknown;

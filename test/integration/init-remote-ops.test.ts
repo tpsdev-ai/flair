@@ -533,6 +533,8 @@ describe("isStateChanging", () => {
     expect(check("POST")).toBe(true);
     expect(check("POST", "add_user")).toBe(true);
     expect(check("GET")).toBe(false);
+    expect(check("HEAD", undefined, "http://127.0.0.1:19926/Memory/probe")).toBe(false);
+    expect(check("OPTIONS", undefined, "http://127.0.0.1:19926/Memory/probe")).toBe(false);
     expect(check("POST", "list_users")).toBe(false);
     expect(check("POST", "list_users", "http://127.0.0.1:19926/Memory/probe")).toBe(true);
   });
@@ -549,6 +551,8 @@ describe("isStateChanging", () => {
       { method: "PATCH", path: "/Memory/probe", write: true },
       { method: "POST", path: "/Memory/probe", operation: "list_users", write: true },
       { method: "GET", path: "/Memory/probe", write: false },
+      { method: "HEAD", path: "/Memory/probe", write: false },
+      { method: "OPTIONS", path: "/Memory/probe", write: false },
     ];
     try {
       for (const entry of cases) {
