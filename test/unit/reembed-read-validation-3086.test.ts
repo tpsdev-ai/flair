@@ -7,8 +7,9 @@
  * and `agentId` and a string `content`, and ids must strictly increase across
  * the read. Anything else — an error object, a row missing one of those fields,
  * ids that go backwards — throws before the first write, on both administrator
- * branches. A local stub operations server answers the CLI; no Harper is
- * involved.
+ * branches. A page cap passed to the reader that is not a whole number from 1
+ * to the hard bound throws before any request. A local stub operations server
+ * answers the CLI; no Harper is involved.
  */
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { createServer, type Server } from "node:http";
@@ -18,7 +19,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { tempDir } from "../helpers/temp-dir";
-import { bindCli, register } from "../../src/commands/reembed.ts";
+import { bindCli, readAllMemoryRows, register } from "../../src/commands/reembed.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const realExit = process.exit;
@@ -45,6 +46,7 @@ let server: Server;
 let port: number;
 let body: unknown;
 const patched: string[] = [];
+let opsRequests = 0;
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -61,6 +63,7 @@ beforeAll(async () => {
         res.end(JSON.stringify({ id: decodeURIComponent((req.url ?? "").split("/").pop() ?? "") }));
         return;
       }
+      opsRequests += 1;
       let operation: unknown;
       try {
         operation = (JSON.parse(requestBody) as { operation?: unknown }).operation;
@@ -146,3 +149,23 @@ for (const agent of [undefined, "agent-a"]) {
     expect(logs.some((line) => line.includes("Re-embedding complete: 1 updated, 0 errors"))).toBe(true);
   }, 10_000);
 }
+
+const CAP_CONDITION = [{ search_attribute: "agentId", search_type: "equals", search_value: "agent-a" }];
+
+test("a page cap above the hard bound is refused before any read", async () => {
+  body = [];
+  opsRequests = 0;
+  await expect(readAllMemoryRows({ opsPort: port, opsAuth: "Basic stub", conditions: CAP_CONDITION, maxPages: 10_001 }))
+    .rejects.toThrow("invalid page cap 10001");
+  expect(opsRequests).toBe(0);
+}, 10_000);
+
+test("a page cap that is not a whole number from 1 up is refused before any read", async () => {
+  body = [];
+  opsRequests = 0;
+  for (const maxPages of [0, -1, 1.5]) {
+    await expect(readAllMemoryRows({ opsPort: port, opsAuth: "Basic stub", conditions: CAP_CONDITION, maxPages }))
+      .rejects.toThrow("invalid page cap");
+  }
+  expect(opsRequests).toBe(0);
+}, 10_000);

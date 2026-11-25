@@ -137,13 +137,20 @@ export async function readAllMemoryRows(opts: {
   opsAuth: string;
   conditions: MemoryReadCondition[];
   pageSize?: number;
-  /** Pages the read may request; callers other than tests use the default. */
+  /**
+   * Pages the read may request: a whole number from 1 to MAX_MEMORY_READ_PAGES,
+   * which lowers the bound and never raises it (anything else throws before the
+   * first request). Callers other than tests use the default.
+   */
   maxPages?: number;
 }): Promise<MemoryRowPageRead> {
   const pageSize = opts.pageSize ?? REEMBED_READ_PAGE_SIZE;
   const maxPages = opts.maxPages ?? MAX_MEMORY_READ_PAGES;
   if (!Number.isInteger(pageSize) || pageSize < 1) {
     throw new Error(`invalid page size ${pageSize}`);
+  }
+  if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > MAX_MEMORY_READ_PAGES) {
+    throw new Error(`invalid page cap ${maxPages}: must be a whole number from 1 to ${MAX_MEMORY_READ_PAGES}`);
   }
   const rows: Record<string, unknown>[] = [];
   let lastId: string | undefined;
@@ -414,7 +421,7 @@ program
       const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
       const readStoredModel = opsStoredModelReader(opsPort, opsAuth);
       // The first page selects every row by id alone. An empty condition list
-      // is refused (node_modules/harper/validation/searchValidator.ts:54), and
+      // is refused (node_modules/harper/validation/searchValidator.ts:50-51), and
       // Harper's own select-all is the primary key above the bottom of its key
       // order (node_modules/harper/resources/Table.ts:5975-5976). `id > 0` is
       // that bound: the key encoding ranks strings above positive numbers (the
