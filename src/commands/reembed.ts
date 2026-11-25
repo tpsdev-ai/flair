@@ -44,9 +44,10 @@ function resolveOpsPort(...args: any[]): any {
 
 /**
  * flair#2561: reads the `embeddingModel` stored on Memory row `id`, resolving
- * undefined when the read fails or returns no such row. `flair reembed` reads
- * the stamp from the stored row after each re-embed PATCH, because the PATCH
- * response carries no embedding field.
+ * undefined when the response carries no stamp for that row, and throwing when
+ * the read request or its JSON fails, so a failed read is not reported as a
+ * missing stamp. `flair reembed` reads the stamp from the stored row after each
+ * re-embed PATCH, because the PATCH response carries no embedding field.
  */
 export type StoredModelReader = (id: string) => Promise<unknown>;
 
@@ -57,25 +58,20 @@ export type StoredModelReader = (id: string) => Promise<unknown>;
  */
 export function opsStoredModelReader(opsPort: string | number, opsAuth: string): StoredModelReader {
   return async (id) => {
-    let rows: unknown;
-    try {
-      const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: opsAuth },
-        body: JSON.stringify({
-          operation: "search_by_id",
-          database: "flair",
-          table: "Memory",
-          ids: [id],
-          get_attributes: ["id", "embeddingModel"],
-        }),
-        signal: AbortSignal.timeout(20_000),
-      });
-      if (!res.ok) return undefined;
-      rows = await res.json();
-    } catch {
-      return undefined;
-    }
+    const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: opsAuth },
+      body: JSON.stringify({
+        operation: "search_by_id",
+        database: "flair",
+        table: "Memory",
+        ids: [id],
+        get_attributes: ["id", "embeddingModel"],
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const rows: unknown = await res.json();
     const row = Array.isArray(rows) ? rows.find((r) => (r as { id?: unknown } | null)?.id === id) : undefined;
     return (row as { embeddingModel?: unknown } | undefined)?.embeddingModel;
   };
@@ -221,14 +217,9 @@ export async function readAllMemoryRows(opts: {
  */
 export function agentStoredModelReader(baseUrl: string, agentId: string, keyPath: string): StoredModelReader {
   return async (id) => {
-    let row: unknown;
-    try {
-      const res = await authFetch(baseUrl, agentId, keyPath, "GET", `/Memory/${encodeRecordId(id)}`);
-      if (!res.ok) return undefined;
-      row = await res.json();
-    } catch {
-      return undefined;
-    }
+    const res = await authFetch(baseUrl, agentId, keyPath, "GET", `/Memory/${encodeRecordId(id)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const row: unknown = await res.json();
     const record = row as { id?: unknown; embeddingModel?: unknown } | null;
     return record?.id === id ? record.embeddingModel : undefined;
   };

@@ -91,10 +91,16 @@ test("opsStoredModelReader reads only the row's id and embeddingModel through th
 
 test.each([
   ["a 401", () => Response.json({ error: "unauthorized" }, { status: 401 })],
-  ["no row", () => Response.json([])],
-  ["another row", () => Response.json([{ id: "y", embeddingModel: "gguf:model" }])],
   ["a body that is not JSON", () => new Response("ok", { status: 200 })],
   ["a request that fails", () => { throw new Error("connection refused"); }],
+])("opsStoredModelReader throws for %s", async (_label, response) => {
+  stubFetch(response);
+  await expect(opsStoredModelReader(1, "Basic abc")("x")).rejects.toThrow();
+}, 10_000);
+
+test.each([
+  ["no row", () => Response.json([])],
+  ["another row", () => Response.json([{ id: "y", embeddingModel: "gguf:model" }])],
 ])("opsStoredModelReader answers undefined for %s", async (_label, response) => {
   stubFetch(response);
   expect(await opsStoredModelReader(1, "Basic abc")("x")).toBeUndefined();
@@ -112,10 +118,14 @@ test("agentStoredModelReader reads the row with a signed GET as the agent", asyn
 
 test.each([
   ["a 404", () => Response.json({ error: "not_found" }, { status: 404 })],
-  ["another row", () => Response.json({ id: "y", embeddingModel: "gguf:model" })],
   ["a body that is not JSON", () => new Response("ok", { status: 200 })],
   ["a request that fails", () => { throw new Error("connection refused"); }],
-])("agentStoredModelReader answers undefined for %s", async (_label, response) => {
+])("agentStoredModelReader throws for %s", async (_label, response) => {
   stubFetch(response);
+  await expect(agentStoredModelReader("http://127.0.0.1:1", "agent-a", keyFile())("x")).rejects.toThrow();
+}, 10_000);
+
+test("agentStoredModelReader answers undefined for another row", async () => {
+  stubFetch(() => Response.json({ id: "y", embeddingModel: "gguf:model" }));
   expect(await agentStoredModelReader("http://127.0.0.1:1", "agent-a", keyFile())("x")).toBeUndefined();
 }, 10_000);

@@ -3,10 +3,11 @@
  * the keyless listing's row ownership, through the real CLI and a real
  * ephemeral Harper (flair#3128, flair#3129).
  *
- * A recording proxy in front of Harper refuses one Memory PATCH on request, so
- * each path (all-agent, single-agent with an administrator password) can be
- * run with a failing write: the run exits non-zero and its summary names the
- * count and the reason. A clean run keeps the previous output and exits 0.
+ * A recording proxy in front of Harper refuses chosen Memory PATCH requests
+ * with a per-row status, and can break a row's readback GET, so each path can
+ * be run with a failing write or readback: the run exits non-zero and its
+ * summary names the count and the reason. A clean run keeps the previous output
+ * and exits 0.
  *
  * The all-agent run sends every re-embed PATCH with the administrator
  * credential it lists rows with, so it re-embeds rows whose owner has no local
@@ -22,8 +23,10 @@
  * counts nor writes them, and reports the skipped count.
  *
  * Throwaway HOMEs, ephemeral ports, the boot migration trigger omitted, no
- * assertion reads a vector. Each request target is asserted to be this test's
- * instance.
+ * assertion reads a vector. Each request target is this test's instance: both
+ * Harper base URLs are asserted to be 127.0.0.1 on ports other than 9925 and
+ * 9926, the CLI's HTTP requests go through the recording proxy, and its ops
+ * reads use the instance's ops port.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createServer, type Server } from "node:http";
@@ -48,6 +51,9 @@ const C_ROW = "r3o-c-1";
 const D_ROWS = ["r3o-d-1", "r3o-d-2"];
 const REFUSED_ROW = A_ROWS[0];
 
+/** The Memory path a re-embed PATCH or readback GET for `id` requests. */
+const rowPath = (id: string) => `/Memory/${encodeURIComponent(id)}`;
+
 const agentA = { id: AGENT_A, ...nacl.sign.keyPair() };
 const agentB = { id: AGENT_B, ...nacl.sign.keyPair() };
 const agentC = { id: AGENT_C, ...nacl.sign.keyPair() };
@@ -58,7 +64,8 @@ let homeAllKeys: string;
 let homeMissingC: string;
 let homeOnlyA: string;
 let proxyPort = 0;
-let refusePatchId: string | null = null;
+let refusedPatches = new Map<string, number>();
+let refusedReadbacks = new Map<string, number>();
 const patchUrls: string[] = [];
 const servers: Server[] = [];
 
@@ -131,17 +138,20 @@ const FIELDS_THAT_MUST_NOT_MOVE = [
   "writeBackWriteId",
 ] as const;
 
-/** A reverse proxy that records every Memory PATCH and can refuse one row's. */
+/** A reverse proxy that records every Memory PATCH and can refuse chosen rows' writes or readbacks. */
 async function startProxy(target: string): Promise<number> {
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", async () => {
       const payload = Buffer.concat(chunks);
-      if (req.method === "PATCH") patchUrls.push(req.url ?? "");
-      if (refusePatchId && req.method === "PATCH" && req.url === `/Memory/${refusePatchId}`) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "write refused" }));
+      const url = req.url ?? "";
+      if (req.method === "PATCH") patchUrls.push(url);
+      const refused = req.method === "PATCH" ? refusedPatches : req.method === "GET" ? refusedReadbacks : undefined;
+      const refusedStatus = refused?.get(url);
+      if (refusedStatus !== undefined) {
+        res.writeHead(refusedStatus, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "refused by the test proxy" }));
         return;
       }
       const headers: Record<string, string> = {};
@@ -257,8 +267,13 @@ async function runReembed(args: string[], home: string, admin: boolean | string)
   return { code, stdout, stderr };
 }
 
+function resetRefusals(): void {
+  refusedPatches = new Map();
+  refusedReadbacks = new Map();
+}
+
 test("a clean all-agent run exits 0 with the unchanged summary", async () => {
-  refusePatchId = null;
+  resetRefusals();
   const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true);
   expect(code, stderr.slice(0, 800)).toBe(0);
   expect(stdout).toContain("✅ Re-embedding complete: 7 updated, 0 errors");
@@ -267,7 +282,7 @@ test("a clean all-agent run exits 0 with the unchanged summary", async () => {
 }, 240_000);
 
 test("a clean single-agent run exits 0 with the unchanged summary", async () => {
-  refusePatchId = null;
+  resetRefusals();
   const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeAllKeys, true);
   expect(code, stderr.slice(0, 800)).toBe(0);
   expect(stdout).toContain("Candidates for re-embedding: 2");
@@ -276,7 +291,8 @@ test("a clean single-agent run exits 0 with the unchanged summary", async () => 
 }, 240_000);
 
 test("a refused write in the all-agent path exits 1 and names the count and reason", async () => {
-  refusePatchId = REFUSED_ROW;
+  resetRefusals();
+  refusedPatches.set(rowPath(REFUSED_ROW), 500);
   const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true);
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stdout).toContain("❌ Re-embedding complete: 6 updated, 1 errors");
@@ -285,7 +301,8 @@ test("a refused write in the all-agent path exits 1 and names the count and reas
 }, 240_000);
 
 test("a refused write in the single-agent path exits 1 and names the count and reason", async () => {
-  refusePatchId = REFUSED_ROW;
+  resetRefusals();
+  refusedPatches.set(rowPath(REFUSED_ROW), 500);
   const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeAllKeys, true);
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stdout).toContain("❌ Re-embedding complete: 1 updated, 1 errors");
@@ -293,9 +310,34 @@ test("a refused write in the single-agent path exits 1 and names the count and r
   expect(stdout).not.toContain("✅ Re-embedding complete");
 }, 240_000);
 
+test("the summary reports each distinct failure reason once with its row count", async () => {
+  resetRefusals();
+  refusedPatches.set(rowPath(A_ROWS[0]), 500);
+  refusedPatches.set(rowPath(A_ROWS[1]), 500);
+  refusedPatches.set(rowPath(B_ROW), 503);
+  const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true);
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  expect(stdout).toContain("❌ Re-embedding complete: 4 updated, 3 errors");
+  expect(stdout).toContain("2 row(s) not updated: HTTP 500");
+  expect(stdout).toContain("1 row(s) not updated: HTTP 503");
+  expect(stdout).not.toContain("3 row(s) not updated");
+  expect(stdout).not.toContain("✅ Re-embedding complete");
+}, 240_000);
+
+test("a successful PATCH whose readback fails exits non-zero and does not count the row", async () => {
+  resetRefusals();
+  refusedReadbacks.set(rowPath(A_ROWS[0]), 500);
+  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeOnlyA, false);
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  expect(stdout).toContain("❌ Re-embedding complete: 1 updated, 1 errors");
+  expect(stdout).toContain("1 row(s) not updated: stored model read failed: HTTP 500");
+  expect(stdout).not.toContain("✅ Re-embedding complete");
+  expect((await rowState(A_ROWS[0])).embeddingModel).toBe(getModelId());
+}, 240_000);
+
 test("the admin all-agent run re-embeds rows whose owners have no key and leaves their identity fields byte-identical", async () => {
-  refusePatchId = null;
-  const ids = [A_ROWS[1], C_ROW, ...D_ROWS, SEED_SKILL_ID];
+  resetRefusals();
+  const ids = [...A_ROWS, B_ROW, C_ROW, ...D_ROWS, SEED_SKILL_ID];
   const before = new Map<string, Record<string, unknown>>();
   for (const id of ids) before.set(id, await rowState(id));
 
@@ -312,12 +354,12 @@ test("the admin all-agent run re-embeds rows whose owners have no key and leaves
       expect(after[field], `${id}: ${field} unchanged`).toBe(prior[field]);
     }
     expect(identityState(after), `${id}: every other stored field unchanged`).toEqual(identityState(prior));
-    expect(patchUrls).toContain(`/Memory/${encodeURIComponent(id)}`);
+    expect(patchUrls).toContain(rowPath(id));
   }
 }, 240_000);
 
 test("a wrong administrator password exits non-zero before any row changes", async () => {
-  refusePatchId = null;
+  resetRefusals();
   const ids = [...A_ROWS, B_ROW, C_ROW, ...D_ROWS, SEED_SKILL_ID];
   const before = new Map<string, Record<string, unknown>>();
   for (const id of ids) before.set(id, await rowState(id));
@@ -330,7 +372,7 @@ test("a wrong administrator password exits non-zero before any row changes", asy
 }, 240_000);
 
 test("a --dry-run all-agent run counts rows without needing any owner's key", async () => {
-  refusePatchId = null;
+  resetRefusals();
   const { code, stdout, stderr } = await runReembed(["reembed", "--dry-run"], homeMissingC, true);
   expect(code, stderr.slice(0, 800)).toBe(0);
   expect(stdout).toContain("✅ Re-embedding complete: 0 updated, 0 errors");
@@ -339,7 +381,7 @@ test("a --dry-run all-agent run counts rows without needing any owner's key", as
 }, 240_000);
 
 test("keyless single-agent skips other agents' listed rows without counting or writing them", async () => {
-  refusePatchId = null;
+  resetRefusals();
   const otherIds = [B_ROW, C_ROW, ...D_ROWS, SEED_SKILL_ID];
   const before = new Map<string, Record<string, unknown>>();
   for (const id of otherIds) before.set(id, await rowState(id));
@@ -350,7 +392,7 @@ test("keyless single-agent skips other agents' listed rows without counting or w
   expect(stdout).toContain(`✅ Re-embedding complete: 2 updated, 0 errors`);
   for (const id of otherIds) {
     expect(await rowState(id), id).toEqual(before.get(id)!);
-    expect(patchUrls).not.toContain(`/Memory/${encodeURIComponent(id)}`);
+    expect(patchUrls).not.toContain(rowPath(id));
   }
 }, 240_000);
 
