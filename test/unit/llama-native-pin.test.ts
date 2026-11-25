@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ROOT, readLlamaNativeVersion } from "../../scripts/ci/llama-native-version.mjs";
 import { readLlamaInstalledVersion } from "../../scripts/ci/llama-installed-version.mjs";
-import { checkWorkflows, scanWorkflowPins } from "../../scripts/ci/check-llama-native-pin.mjs";
+import { checkWorkflows } from "../../scripts/ci/check-llama-native-pin.mjs";
 
 const dirs: string[] = [];
 afterEach(() => {
