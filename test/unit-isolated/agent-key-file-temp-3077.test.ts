@@ -10,8 +10,8 @@
  *     descriptor before the refusal.
  *
  * Isolated: this file owns its `node:crypto` and `node:fs` mocks (only
- * `randomBytes` and a counting `readFileSync` are replaced; every other export
- * is the real one), because both seams are inside
+ * `randomBytes`, `readFileSync`, `fsyncSync` and `linkSync` are replaced; every
+ * other export is the real one), because both seams are inside
  * src/lib/agent-key-file.ts.
  */
 import { beforeEach, describe, expect, mock, test } from "bun:test";
@@ -35,9 +35,20 @@ mock.module("node:crypto", () => ({
 }));
 
 let readFileSyncCalls = 0;
+let publicationEvents: string[] = [];
+let syncFailure = false;
 
 mock.module("node:fs", () => ({
   ...realFs,
+  fsyncSync: (fd: number) => {
+    publicationEvents.push("fsync");
+    if (syncFailure) throw new Error("fixture fsync failure");
+    realFs.fsyncSync(fd);
+  },
+  linkSync: (existingPath: string, newPath: string) => {
+    publicationEvents.push("link");
+    realFs.linkSync(existingPath, newPath);
+  },
   readFileSync: ((...args: Parameters<typeof realFs.readFileSync>) => {
     readFileSyncCalls += 1;
     return realFs.readFileSync(...args);
@@ -53,6 +64,8 @@ beforeEach(() => {
   constantFill = null;
   randomCalls = 0;
   readFileSyncCalls = 0;
+  publicationEvents = [];
+  syncFailure = false;
 });
 
 function keysDir(): string {
@@ -120,5 +133,33 @@ describe("flair#3077 — the wide-mode refusal happens before a read", () => {
     expect(() => readExistingAgentKey(keyPath)).toThrow(/chmod 600 /);
 
     expect(readFileSyncCalls).toBe(0);
+  });
+});
+
+describe("flair#3077 — sync before publication", () => {
+  test("the temp file is fsynced before the publication link", () => {
+    const dir = keysDir();
+    ensureAgentKeysDir(dir);
+    const keyPath = join(dir, "synced.key");
+    const seed = Buffer.alloc(32, 5);
+
+    createAgentKeyFile(keyPath, seed);
+
+    expect(publicationEvents).toEqual(["fsync", "link"]);
+    expect(realFs.readFileSync(keyPath).equals(seed)).toBe(true);
+    expect(tempEntries(dir)).toHaveLength(0);
+  });
+
+  test("a throwing fsync leaves no published key or temp file", () => {
+    const dir = keysDir();
+    ensureAgentKeysDir(dir);
+    const keyPath = join(dir, "sync-failure.key");
+    syncFailure = true;
+
+    expect(() => createAgentKeyFile(keyPath, Buffer.alloc(32, 5))).toThrow("fixture fsync failure");
+
+    expect(publicationEvents).toEqual(["fsync"]);
+    expect(realFs.existsSync(keyPath)).toBe(false);
+    expect(tempEntries(dir)).toHaveLength(0);
   });
 });

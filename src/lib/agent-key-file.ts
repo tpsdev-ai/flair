@@ -47,7 +47,7 @@ export class AgentKeyFileRefusal extends Error {
   }
 }
 
-/** Test-only observation points; production leaves these unset. */
+/** Test hooks; production leaves these unset. */
 export interface AgentKeyFileTestHooks {
   /** Runs with the created key's descriptor before the first byte is written. */
   beforeFirstWrite?: (fd: number) => void;
@@ -136,8 +136,8 @@ export function ensureAgentKeysDir(keysDir: string): void {
 }
 
 /**
- * Read an existing key after checking the opened descriptor, or return null
- * when the path does not exist. A symlink or any other unsafe file refuses.
+ * Read an existing key, or return null when the path does not exist. On POSIX,
+ * check the opened descriptor and refuse symlinks. Windows reads by path.
  */
 export function readExistingAgentKey(privateKeyPath: string): Uint8Array | null {
   if (WIN32) {
@@ -248,8 +248,8 @@ export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8A
     closeSync(fd);
     fd = undefined;
     testHooks?.beforePublish?.(tempPath, privateKeyPath);
-    // linkSync fails with EEXIST when the final path appeared while this call
-    // was writing its temp file; the caller then re-reads that file.
+    // linkSync fails with EEXIST when the final path appears before publication;
+    // the caller then re-reads that file.
     linkSync(tempPath, privateKeyPath);
   } catch (error) {
     if (fd !== undefined) {

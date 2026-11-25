@@ -2,14 +2,14 @@
  * agent-key-file-3077.test.ts — the shared agent-key file policy (flair#3077
  * slice A) on real files in a temp root.
  *
- * Covered: a missing keys directory is created 0700 and observed at that mode
- * before anything else touches it; an existing 0755 directory the current user
+ * Covered (POSIX): a missing keys directory is created 0700 and observed at
+ * that mode before anything else touches it; an existing 0755 directory the current user
  * owns is tightened with one notice line, while an owned 0500 keeps its mode;
  * a symlinked directory or key is refused; an existing key with group/world
- * bits is refused before its bytes are read; a short or zero-byte write fails
- * and removes the temp file this call created, best effort; a file that
- * appears at the final path while the temp file is being written is reused,
- * not overwritten; and owned-by-another-user, non-directory and non-regular
+ * bits is refused before its bytes are read; positive partial writes resume;
+ * zero-byte and throwing writes fail and remove the temp file this call
+ * created, best effort; an owner-only key that appears before
+ * publication is reused, not overwritten; and owned-by-another-user, non-directory and non-regular
  * paths are refused.
  */
 import { afterEach, describe, expect, mock, test, spyOn } from "bun:test";
@@ -284,6 +284,34 @@ test("a file that appears at the final path before publish is reused, not overwr
   expect(Buffer.from(contents!.bytes).equals(raced)).toBe(true);
   const bytes = readFileSync(keyPath);
   expect(bytes.equals(raced)).toBe(true);
+  expect(tempEntries(dir)).toHaveLength(0);
+});
+
+test.skipIf(process.platform === "win32")("a wide key appearing before publication is refused before reading and left untouched", () => {
+  const dir = keysDir();
+  ensureAgentKeysDir(dir);
+  const keyPath = join(dir, "raced-wide.key");
+  const raced = Buffer.alloc(32, 9);
+  let reads = 0;
+  setAgentKeyFileTestHooks({
+    beforePublish: (_tempPath, finalPath) => {
+      writeFileSync(finalPath, raced, { mode: 0o600 });
+      chmodSync(finalPath, 0o644);
+    },
+    beforeKeyRead: () => {
+      reads += 1;
+    },
+  });
+  try {
+    expect(() => readOrCreateAgentKey(keyPath, () => Buffer.alloc(32, 1))).toThrow(
+      `run chmod 600 ${keyPath} to make it owner-only`,
+    );
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(reads).toBe(0);
+  expect(readFileSync(keyPath).equals(raced)).toBe(true);
+  expect(statSync(keyPath).mode & 0o777).toBe(0o644);
   expect(tempEntries(dir)).toHaveLength(0);
 });
 
