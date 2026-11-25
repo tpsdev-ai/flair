@@ -131,8 +131,8 @@ export type MemoryRowPageRead = {
  * array of rows with a non-empty string `id`, a non-empty string `agentId` and
  * a string `content`, or whose ids do not strictly increase, throws, so an
  * error object or a malformed page does not read as an empty result. The whole
- * read finishes before the first re-embed write, and it refuses when its last
- * page (MAX_MEMORY_READ_PAGES) comes back full.
+ * read finishes before the first re-embed write, and it refuses when page
+ * `maxPages` (default MAX_MEMORY_READ_PAGES) holds at least `pageSize` rows.
  */
 export async function readAllMemoryRows(opts: {
   opsPort: string | number;
