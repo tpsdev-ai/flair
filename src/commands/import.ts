@@ -21,7 +21,8 @@ import {
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { SOUL_SCOPE_FIELDS_REFUSAL, suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
 import * as render from "../render.js";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { ensureAgentKeysDir, readOrCreateAgentKey, type AgentKeyFileContents } from "../lib/agent-key-file.js";
 import nacl from "tweetnacl";
 
 /** The fixed error names Flair's write guards return for a Soul or Memory
@@ -214,26 +215,29 @@ addAdminPassOptions(
 
     // Register agent (generates new key if export doesn't include one)
     const keysDir = opts.keysDir ?? defaultKeysDir();
-    mkdirSync(keysDir, { recursive: true });
     const privPath = privKeyPath(agentId, keysDir);
 
-    if (data.privateKey && !existsSync(privPath)) {
-      // Restore exported key
-      writeFileSync(privPath, data.privateKey);
-      chmodSync(privPath, 0o600);
-      console.log(`  Key restored: ${privPath}`);
-    } else if (!existsSync(privPath)) {
-      // Generate new key
-      const kp = nacl.sign.keyPair();
-      writeFileSync(privPath, Buffer.from(kp.secretKey.slice(0, 32)));
-      chmodSync(privPath, 0o600);
-      console.log(`  New key generated: ${privPath}`);
+    let keyFile: AgentKeyFileContents;
+    try {
+      ensureAgentKeysDir(keysDir);
+      keyFile = readOrCreateAgentKey(privPath, () => {
+        if (data.privateKey) return data.privateKey;
+        const kp = nacl.sign.keyPair();
+        return Buffer.from(kp.secretKey.slice(0, 32));
+      });
+    } catch (err: unknown) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+
+    if (keyFile.created) {
+      console.log(data.privateKey ? `  Key restored: ${privPath}` : `  New key generated: ${privPath}`);
     } else {
       console.log(`  Using existing key: ${privPath}`);
     }
 
     // Read public key for registration
-    const seed = readFileSync(privPath);
+    const seed = Buffer.from(keyFile.bytes);
     const decodedSeed = seed.length === 32 ? seed : Buffer.from(seed.toString("utf-8").trim(), "base64");
     const pubKey = decodedSeed.length === 32
       ? nacl.sign.keyPair.fromSeed(new Uint8Array(decodedSeed)).publicKey

@@ -37,6 +37,7 @@ import {
 } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { resolveLocalDeleteInstance } from "../lib/local-delete-instance.js";
+import { ensureAgentKeysDir, readOrCreateAgentKey, type AgentKeyFileContents } from "../lib/agent-key-file.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import {
   agentHomeEndpoint,
@@ -393,24 +394,28 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      mkdirSync(keysDir, { recursive: true });
       const privPath = privKeyPath(id, keysDir);
       const pubPath = pubKeyPath(id, keysDir);
       let pubKeyB64url: string;
 
-      if (existsSync(privPath)) {
-        console.log(`Reusing existing key: ${privPath}`);
-        const seed = new Uint8Array(readFileSync(privPath));
-        const kp = nacl.sign.keyPair.fromSeed(seed);
-        pubKeyB64url = b64url(kp.publicKey);
-      } else {
-        const kp = nacl.sign.keyPair();
-        const seed = kp.secretKey.slice(0, 32);
-        writeFileSync(privPath, Buffer.from(seed));
-        chmodSync(privPath, 0o600);
+      let keyFile: AgentKeyFileContents;
+      try {
+        ensureAgentKeysDir(keysDir);
+        keyFile = readOrCreateAgentKey(privPath, () => {
+          const kp = nacl.sign.keyPair();
+          return Buffer.from(kp.secretKey.slice(0, 32));
+        });
+      } catch (err: unknown) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      const kp = nacl.sign.keyPair.fromSeed(new Uint8Array(keyFile.bytes));
+      pubKeyB64url = b64url(kp.publicKey);
+      if (keyFile.created) {
         writeFileSync(pubPath, Buffer.from(kp.publicKey));
-        pubKeyB64url = b64url(kp.publicKey);
         console.log(`Keypair written: ${privPath}`);
+      } else {
+        console.log(`Reusing existing key: ${privPath}`);
       }
 
       await seedAgentWithLocalHome(seedOpsTarget, id, pubKeyB64url, adminUser, adminPass);

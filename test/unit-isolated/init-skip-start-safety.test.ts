@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ensureCliBuild } from "../helpers/build-cli-once.ts";
@@ -22,7 +22,7 @@ function fixture(installed = false) {
 }
 
 type Fixture = ReturnType<typeof fixture>;
-function runInit(f: Fixture, args: string[], listener: "unknown" | "foreign" | "local" | "foreign-ops" | "many" = "unknown", occupied = true, credential: "explicit" | "saved" = "explicit", httpOccupied = occupied, runtime: "node" | "bun" = "node") {
+function runInit(f: Fixture, args: string[], listener: "unknown" | "foreign" | "local" | "foreign-ops" | "many" = "unknown", occupied = true, credential: "explicit" | "saved" = "explicit", httpOccupied = occupied, runtime: "node" | "bun" = "node", observeFirstWrite?: string) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$)/.test(key),
   ));
@@ -32,13 +32,18 @@ function runInit(f: Fixture, args: string[], listener: "unknown" | "foreign" | "
   const argv = ["init", "--port", String(HTTP_PORT), "--ops-port", String(OPS_PORT),
     "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md", ...args];
   const script = `
+    ${observeFirstWrite ? "process.umask(0);" : ""}
     ${runtime === "bun" ? `
     const { mock } = await import("bun:test");
     const socketLimitPath = ${JSON.stringify(pathToFileURL(join(ROOT, "dist/lib/socket-path-limit.js")).href)};
     const socketLimit = await import(socketLimitPath);
     mock.module(socketLimitPath, () => ({ ...socketLimit, opsSocketPathRefusal: () => null }));
     ` : ""}
-    const { appendFileSync } = await import("node:fs");
+    const { appendFileSync, fstatSync } = await import("node:fs");
+    ${observeFirstWrite
+      ? `const keyFile = await import(${JSON.stringify(pathToFileURL(join(ROOT, "dist/lib/agent-key-file.js")).href)});
+    keyFile.setAgentKeyFileTestHooks({ beforeFirstWrite: (fd) => appendFileSync(${JSON.stringify(observeFirstWrite)}, String(fstatSync(fd).mode & 0o777) + "\\n") });`
+      : ""}
     const { EventEmitter } = await import("node:events");
     const net = await import("node:net");
     net.default.createConnection = ({ port }) => {
@@ -283,6 +288,38 @@ describe("local init skip-start safety through the built CLI", () => {
     expect(result.stderr).not.toContain("attribution to this data directory");
     expect(requests(f).every(r => r.authorization === null)).toBe(true);
     expectNoSetup(f);
+  }, 30_000);
+
+  test("--agent with --skip-start refuses a wider existing key and leaves it unchanged", () => {
+    const f = fixture(true);
+    const keyDir = join(f.home, ".flair", "keys");
+    mkdirSync(keyDir, { recursive: true });
+    const keyPath = join(keyDir, "canary.key");
+    const prior = Buffer.alloc(32, 3);
+    writeFileSync(keyPath, prior);
+    chmodSync(keyPath, 0o644);
+
+    const result = runInit(f, ["--skip-start", "--agent", "canary"]);
+
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stderr).toContain(`chmod 600 ${keyPath}`);
+    expect(readFileSync(keyPath).equals(prior)).toBe(true);
+    expect(requests(f)).toEqual([]);
+    expect(statSync(keyPath).mode & 0o777).toBe(0o644);
+  }, 30_000);
+
+  test("--agent with --skip-start creates a fresh key at 0600 at its first write under a zero umask", () => {
+    const f = fixture(true);
+    const observed = join(f.home, "first-write.txt");
+
+    const result = runInit(f, ["--skip-start", "--agent", "canary"], "unknown", true, "explicit", true, "node", observed);
+
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    const modes = readFileSync(observed, "utf8").trim().split("\n").map(Number);
+    expect(modes).toEqual([0o600]);
+    expect(statSync(join(f.home, ".flair", "keys", "canary.key")).mode & 0o777).toBe(0o600);
   }, 30_000);
 
 });
