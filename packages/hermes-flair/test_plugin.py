@@ -465,8 +465,8 @@ def test_store_memory_percent_encodes_id_in_path(ed25519_key_file, monkeypatch):
 
 def test_store_memory_ids_do_not_collide_in_one_millisecond(configured_provider, monkeypatch):
     """#3115: the generated id used to be `agent-<epoch ms>`, so two stores in
-    the same millisecond PUT the same path (an upsert keeps one row). With the
-    clock frozen, two stores of different content must carry distinct ids and
+    the same millisecond PUT the same path (an upsert keeps one row). With
+    `time.time()` frozen, two stores of different content must carry distinct ids and
     each write path must name its own body id."""
     from urllib.parse import quote, unquote
 

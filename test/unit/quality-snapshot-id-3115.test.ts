@@ -2,7 +2,7 @@
 //
 // `flair quality --emit` stored its snapshot under
 // `${agentId}-quality-snapshot-${Date.now()}` and PUT it as an upsert, so two
-// emits by one agent in the same millisecond kept one row. With a frozen clock,
+// emits by one agent in the same millisecond kept one row. With `Date.now()` frozen,
 // two emits must PUT distinct ids, and each PUT path must name its own body id.
 // Driven in-process through the `quality --emit` action, with the module's API
 // seam bound to a recorder.
@@ -13,7 +13,7 @@ import { bindCli, register } from "../../src/commands/quality.ts";
 import { encodeRecordId } from "../../src/lib/record-id-path.js";
 
 describe("flair#3115: quality snapshot ids", () => {
-  it("two --emit runs in the same frozen millisecond PUT distinct snapshot ids, each path naming its body id", async () => {
+  it("two --emit runs with Date.now() frozen to one millisecond PUT distinct snapshot ids, each path naming its body id", async () => {
     const puts: Array<{ path: string; body: any }> = [];
     const unused = (): never => { throw new Error("unexpected helper"); };
     bindCli({

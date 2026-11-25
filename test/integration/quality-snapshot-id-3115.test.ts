@@ -3,7 +3,7 @@
 // `flair quality --emit` stored its snapshot under
 // `${agentId}-quality-snapshot-${Date.now()}` and PUT it as an upsert, so two
 // emits by one agent in the same millisecond kept one row. This spawns the real
-// CLI against a real ephemeral Harper with the clock frozen to one millisecond
+// CLI against a real ephemeral Harper with `Date.now()` frozen to one millisecond
 // and checks that the agent's Memory rows hold BOTH snapshot rows.
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
