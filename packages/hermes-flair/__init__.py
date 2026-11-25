@@ -583,7 +583,8 @@ class FlairMemoryProvider(MemoryProvider):
             durability = "standard"
         # #1970: the id is generated, but a caller may pin it (a test drives the
         # REAL request path with a dot-segment id to prove nothing is sent).
-        # #3115: two stores in the same millisecond must not upsert one row.
+        # #3115: two stores with generated ids in the same millisecond must not
+        # share a PUT target.
         if memory_id is None:
             memory_id = f"{self._agent_id}-{uuid.uuid4()}"
         body = {
