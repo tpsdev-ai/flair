@@ -17,4 +17,5 @@
   created or updated `admin`; when provisioning reuses an existing
   administrator, init does not write the admin-pass file and leaves an existing
   one unchanged. The reserved shared agent account (`flair-agent`) is refused as
-  the cluster administrator before any write.
+  either leg's administrator input (a cluster administrator or `--admin-user`)
+  before any write.

@@ -568,6 +568,32 @@ describe("flair#3106 — reserved principal refusal (real Harper)", () => {
     const afterRow = ((after.body as any[]) ?? []).find((u) => u.username === "flair-agent");
     expect(afterRow, "the reserved account's role must be unchanged").toEqual(beforeRow);
   }, 150_000);
+
+  test("refuses the reserved principal before the agent-ID check when both names overlap", async () => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    // deploy_component is stubbed so a guard that runs after provisioning cannot
+    // really deploy; the assertion below then sees the write instead.
+    const recorder = installRecorder({ user: "flair-agent", pass: "reserved-pass" });
+    let out: Awaited<ReturnType<typeof runInitAction>>;
+    try {
+      out = await runInitAction(initArgs(harper, {
+        clusterUser: "flair-agent",
+        clusterPass: "reserved-pass",
+        flairPass: "unused-reserved-pass",
+        agentId: "flair-agent",
+        keysDir: join(tmpDir, "keys-overlap"),
+      }), home);
+    } finally {
+      recorder.restore();
+    }
+
+    expect(out.exitCode).toBe(1);
+    expect(out.stderr).toContain("'flair-agent' is a reserved Flair account");
+    expect(out.stderr).toContain("different cluster administrator");
+    expect(out.stderr).not.toContain("Choose another --agent-id");
+    expect(readdirSync(home)).toEqual([]);
+    expectNoWriteOperation(recorder.all, "reserved-principal/agent-ID overlap refusal");
+  }, 150_000);
 });
 
 describe("flair#3106 — external-instance refusal (hermetic)", () => {
@@ -1119,6 +1145,10 @@ describe("flair#3106 — already-running instance leg (real Harper)", () => {
       operation: "add_user", username: "ops-distinct", password: "ops-distinct-pass", role: "super-role", active: true,
     });
     expect([200, 409], user.text).toContain(user.status);
+    const reserved = await harperOps(harper, "admin", "test123", {
+      operation: "add_user", username: "flair-agent", password: "reserved-pass", role: "super-role", active: true,
+    });
+    expect([200, 409], reserved.text).toContain(reserved.status);
   }, 180_000);
 
   afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
@@ -1165,6 +1195,42 @@ describe("flair#3106 — already-running instance leg (real Harper)", () => {
     } finally {
       recorder.restore();
     }
+  }, 150_000);
+
+  test("refuses --admin-user flair-agent before any write and leaves its role unchanged", async () => {
+    const before = await harperOps(harper, "admin", "test123", { operation: "list_users" });
+    expect(before.status).toBe(200);
+    const beforeRow = ((before.body as any[]) ?? []).find((u) => u.username === "flair-agent");
+    expect(beforeRow, "the reserved super_user must exist").toBeTruthy();
+
+    const recorder = installRecorder({ user: "flair-agent", pass: "reserved-pass" });
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    let out: Awaited<ReturnType<typeof runInitAction>>;
+    try {
+      out = await runInitAction([
+        "--target", harper.httpURL,
+        "--ops-target", harper.opsURL,
+        "--force",
+        "--admin-user", "flair-agent",
+        "--admin-pass", "reserved-pass",
+        "--agent-id", "agent-reserved-live",
+        "--keys-dir", join(tmpDir, "keys-reserved-live"),
+      ], home);
+    } finally {
+      recorder.restore();
+    }
+
+    expect(out.exitCode).toBe(1);
+    expect(out.stderr).toContain("'flair-agent' is a reserved Flair account");
+    expect(out.stderr).toContain("different admin user");
+    expect(out.stderr).toContain("--admin-user");
+    expect(readdirSync(home)).toEqual([]);
+    expectNoWriteOperation(recorder.all, "reserved-principal refusal on the already-running leg");
+
+    const after = await harperOps(harper, "admin", "test123", { operation: "list_users" });
+    expect(after.status).toBe(200);
+    const afterRow = ((after.body as any[]) ?? []).find((u) => u.username === "flair-agent");
+    expect(afterRow, "the reserved account's role must be unchanged").toEqual(beforeRow);
   }, 150_000);
 });
 

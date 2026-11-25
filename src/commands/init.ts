@@ -276,6 +276,18 @@ async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, ad
 }
 
 /**
+ * Refuse the reserved shared agent account as an administrator input on either
+ * remote-init leg, before any filesystem or cluster write. `role` and `flag`
+ * name the leg's input, so the remedy points at the operator's own flag.
+ */
+function refuseReservedPrincipal(name: string, role: string, flag: string): void {
+  if (name !== cli.FLAIR_AGENT_USERNAME) return;
+  console.error(`Error: '${cli.FLAIR_AGENT_USERNAME}' is a reserved Flair account and cannot be the ${role}.`);
+  console.error(`  Use a different ${role} (${flag}).`);
+  process.exit(1);
+}
+
+/**
  * Refuse an `--agent-id` that names an administrator username reserved by this init path,
  * before any key or Agent write.
  */
@@ -602,19 +614,17 @@ addAdminPassOptions(
 
       if (clusterAdminUser && clusterAdminPass) {
         // ── New provisioning path: deploy Flair to Fabric, wait, provision super_user ──
+        // The reserved shared agent account must never be used as this run's
+        // administrator input on either leg: init authenticates its later calls
+        // as the run's principal, and provisioning also issues alter_user on
+        // FLAIR_AGENT_USERNAME, which would change that account's role out from
+        // under the agent gate. Refuse it first, before the agent-ID check and
+        // every filesystem or cluster write.
+        refuseReservedPrincipal(clusterAdminUser, "cluster administrator", "--cluster-admin-user");
         // Provisioning either reuses an existing super_user cluster admin or
         // creates or updates DEFAULT_ADMIN_USER, so both names are known before
         // provisionFabric runs. Refuse either one here, before any write.
         refuseOperatorAgentId(agentId, [clusterAdminUser, DEFAULT_ADMIN_USER]);
-        // The reserved shared agent account must never be the principal: init's
-        // later steps authenticate as the cluster administrator and issue
-        // alter_user on FLAIR_AGENT_USERNAME, which would change that account's
-        // role out from under the agent gate.
-        if (clusterAdminUser === cli.FLAIR_AGENT_USERNAME) {
-          console.error(`Error: '${cli.FLAIR_AGENT_USERNAME}' is a reserved Flair account and cannot be the cluster administrator.`);
-          console.error("  Use a different cluster administrator (--cluster-admin-user).");
-          process.exit(1);
-        }
         if (!opts.force) {
           console.error("Error: --force is required with --target/--ops-target (remote init provisions a live Fabric instance)");
           console.error("  Pass --force to confirm this is intended.");
@@ -647,6 +657,10 @@ addAdminPassOptions(
         }
       } else {
         // ── Existing behavior: --admin-pass required for already-running Flair ──
+        // On this leg the run's principal is --admin-user (or its default), so
+        // the reserved-principal refusal must cover that name too, before any
+        // filesystem or cluster write.
+        refuseReservedPrincipal(resolveAdminUser(opts.adminUser), "admin user", "--admin-user");
         if (!opts.adminPass) {
           console.error("Error: --admin-pass is required with --target/--ops-target (remote init without --cluster-admin-user/--cluster-admin-pass)");
           console.error("  Use --cluster-admin-user and --cluster-admin-pass for automated Fabric provisioning.");
