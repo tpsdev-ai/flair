@@ -17,11 +17,12 @@
  * up an HTTP server in place of the operations API.
  */
 import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, fstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { program } from "../../src/cli.js";
+import { setAgentKeyFileTestHooks } from "../../src/lib/agent-key-file.js";
 
 let tmpHome: string;
 let keysDir: string;
@@ -189,5 +190,46 @@ describe("flair#2433/#2473 — principal add's home assignment on insert is crea
     expect(lastErrors.join("\n")).toContain("originator_instance_immutable: the stored home differs from the resolved local ID");
     expect(updates).toHaveLength(1);
     expect(storedRows[0].originatorInstanceId, "the row's home changed").toBeNull();
+  });
+});
+
+describe("flair#3077 — principal add checks the existing key file before reuse", () => {
+  test("a 0644 key is refused before any registration and stays byte-for-byte unchanged", async () => {
+    const id = "wide-key-3077";
+    mkdirSync(keysDir, { recursive: true });
+    const keyPath = join(keysDir, `${id}.key`);
+    const prior = Buffer.alloc(32, 7);
+    writeFileSync(keyPath, prior);
+    chmodSync(keyPath, 0o644);
+
+    expect(await principalAdd(id, opsPort())).toBe(1);
+
+    expect(lastErrors.join("\n")).toContain(`chmod 600 ${keyPath}`);
+    expect(readFileSync(keyPath).equals(prior)).toBe(true);
+    expect(inserts).toHaveLength(0);
+    expect(updates).toHaveLength(0);
+    expect(statSync(keyPath).mode & 0o777).toBe(0o644);
+  });
+
+  test("a fresh key is 0600 at its first write under a zero umask", async () => {
+    const id = "first-write-3077";
+    const keyPath = join(keysDir, `${id}.key`);
+    const observed: number[] = [];
+    setAgentKeyFileTestHooks({
+      beforeFirstWrite: (fd) => {
+        observed.push(fstatSync(fd).mode & 0o777);
+      },
+    });
+    const previous = process.umask(0);
+    let code: number;
+    try {
+      code = await principalAdd(id, opsPort());
+    } finally {
+      process.umask(previous);
+      setAgentKeyFileTestHooks(undefined);
+    }
+    expect(code).toBe(0);
+    expect(observed).toEqual([0o600]);
+    expect(statSync(keyPath).mode & 0o777).toBe(0o600);
   });
 });
