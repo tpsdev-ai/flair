@@ -436,10 +436,10 @@ def test_handle_tool_call_store_persists_via_request(configured_provider):
 
 
 def test_store_memory_percent_encodes_id_in_path(ed25519_key_file, monkeypatch):
-    """#1970: a Memory id (agent id + timestamp) with reserved URL characters
-    reaches the wire as ONE percent-encoded path segment. Before #1970 the raw
-    id was interpolated into the path, so '#' started a fragment, '?' a query,
-    and '/' split it into extra segments."""
+    """#1970: a Memory id (agent id + generated suffix) with reserved URL
+    characters reaches the wire as ONE percent-encoded path segment. Before #1970
+    the raw id was interpolated into the path, so '#' started a fragment, '?' a
+    query, and '/' split it into extra segments."""
     from urllib.parse import quote, unquote
 
     agent = "ag#1?x/y%z w"
@@ -461,6 +461,28 @@ def test_store_memory_percent_encodes_id_in_path(ed25519_key_file, monkeypatch):
     assert "?" not in segment
     assert "#" not in segment
     assert unquote(segment) == body_id
+
+
+def test_store_memory_ids_do_not_collide_in_one_millisecond(configured_provider, monkeypatch):
+    """#3115: the generated id used to be `agent-<epoch ms>`, so two stores in
+    the same millisecond PUT the same path (an upsert keeps one row). With the
+    clock frozen, two stores of different content must carry distinct ids and
+    each write path must name its own body id."""
+    from urllib.parse import quote, unquote
+
+    monkeypatch.setattr(flair_plugin.time, "time", lambda: 1_800_000_000.0)
+    ids = []
+    with patch.object(configured_provider, "_request", return_value={"ok": True}) as m:
+        for content in ("first distinct fact", "second distinct fact"):
+            configured_provider.handle_tool_call("flair_store", {"content": content})
+            method, path = m.call_args.args[0], m.call_args.args[1]
+            body = m.call_args.kwargs["json_body"]
+            assert method == "PUT"
+            segment = path[len("/Memory/"):]
+            assert segment == quote(body["id"], safe="")
+            assert unquote(segment) == body["id"]
+            ids.append(body["id"])
+    assert ids[0] != ids[1]
 
 
 def test_encode_record_id_refuses_dot_segments(monkeypatch):
