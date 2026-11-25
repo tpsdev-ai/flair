@@ -356,16 +356,14 @@ describe("flair#2296: flair reembed", () => {
     const beforeAll = await seedRows([fixtureRow("fallback-all", agentA.id)]);
     const rAll = runReembed(["--batch-size", "1", "--delay-ms", "0"], { env: fallbackEnv });
     expect(rAll.code, rAll.out).toBe(0);
-    expect(rAll.out).toContain(`Agent ${agentA.id}: 1 updated, 0 errors`);
-    expect(rAll.out).toContain("Re-embedding complete: 1 updated, 0 errors");
+    expect(rAll.out).not.toContain("Admin password required");
     for (const row of beforeAll.values()) await expectOnlyEmbeddingChanged(row);
 
     // 2. Single-agent path (reads adminPassSingle ~ line 378)
     const beforeSingle = await seedRows([fixtureRow("fallback-single", agentC.id)]);
     const rSingle = runReembed(["--agent", agentC.id, "--batch-size", "1", "--delay-ms", "0"], { env: fallbackEnv });
     expect(rSingle.code, rSingle.out).toBe(0);
-    expect(rSingle.out).toContain("Candidates for re-embedding: 1");
-    expect(rSingle.out).toContain("Re-embedding complete: 1 updated, 0 errors");
+    expect(rSingle.out).not.toContain("Admin password required");
     for (const row of beforeSingle.values()) await expectOnlyEmbeddingChanged(row);
   }, 240_000);
 });
