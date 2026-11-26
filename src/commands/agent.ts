@@ -41,9 +41,11 @@ import {
   AgentKeyFileRefusal,
   createAgentKeyBackup,
   ensureAgentKeysDir,
+  isAgentKeyRotationBackup,
   readAgentKeyForRotation,
   readOrCreateAgentKey,
   replaceAgentKeyFile,
+  rotationBackupStamp,
   stageAgentKeyFile,
   type AgentKeyFileContents,
 } from "../lib/agent-key-file.js";
@@ -128,7 +130,7 @@ export function removeAgentKeyFiles(agentId: string, keysDir: string): { removed
   let backups: string[] = [];
   try {
     backups = readdirSync(keysDir).filter((name) =>
-      name.startsWith(`${agentId}.key.bak.`) ||
+      isAgentKeyRotationBackup(name, `${agentId}.key`) ||
       (name.startsWith(`.${agentId}.key.tmp-`) && /^[0-9a-f]{16}$/.test(name.slice(`.${agentId}.key.tmp-`.length))),
     );
   } catch { /* keys directory resolution failed */ }
@@ -394,11 +396,6 @@ async function readAgentPublicKeyAfterUpdate(
     return { ok: false, reason: "the read returned no public key" };
   }
   return { ok: true, publicKey: row.publicKey };
-}
-
-/** UTC filename stamp without colons or periods; sorts by time. */
-function rotationBackupStamp(): string {
-  return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
 function quotePosixPath(path: string): string {

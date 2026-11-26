@@ -4,6 +4,7 @@ import { existsSync, readFileSync, lstatSync, mkdirSync, mkdtempSync, realpathSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bindCli, register, removeAgentKeyFiles, type AgentCli } from "../../src/commands/agent.js";
+import { rotationBackupStamp } from "../../src/lib/agent-key-file.js";
 import { setInstancePairOsReadsForTests } from "../../src/lib/local-instance-pair.js";
 
 let dir: string;
@@ -76,10 +77,13 @@ describe("removeAgentKeyFiles (flair#2479)", () => {
     expect(existsSync(key)).toBe(true);
   });
   test("removes timestamped backups and preserves another agent's file and an external symlink target", () => {
-    const backups = ["2031-02-03T04-05-06-007Z", "2031-02-03T04-05-07-008Z"]
+    const backups = [new Date("2031-02-03T04:05:06.007Z"), new Date("2031-02-03T04:05:07.008Z")]
+      .map(date => rotationBackupStamp(date))
       .map(stamp => join(keysDir, `agent-a.key.bak.${stamp}`));
     for (const backup of backups) writeFileSync(backup, "old seed");
     const canonicalBackups = backups.map(path => realpathSync(path));
+    const notes = join(keysDir, "agent-a.key.bak.notes");
+    writeFileSync(notes, "keep notes");
     const other = join(keysDir, "agent-b.key.bak.2031-02-03T04-05-06-007Z");
     const target = join(dir, "target");
     writeFileSync(other, "other seed");
@@ -89,6 +93,7 @@ describe("removeAgentKeyFiles (flair#2479)", () => {
 
     const result = removeAgentKeyFiles("agent-a", keysDir);
 
+    expect(readFileSync(notes, "utf8")).toBe("keep notes");
     expect(result.manual).toBe(false);
     expect(result.removed.sort()).toEqual(canonicalBackups.sort());
     for (const backup of backups) expect(existsSync(backup)).toBe(false);
@@ -119,6 +124,10 @@ describe("removeAgentKeyFiles (flair#2479)", () => {
     test(`agent remove retains staging keys: ${keepKeys}`, async () => {
       const staged = join(keysDir, ".agent-a.key.tmp-0123456789abcdef");
       writeFileSync(staged, "replacement seed");
+      const backup = join(keysDir, `agent-a.key.bak.${rotationBackupStamp()}`);
+      const notes = join(keysDir, "agent-a.key.bak.notes");
+      writeFileSync(backup, "old seed");
+      writeFileSync(notes, "keep notes");
       setInstancePairOsReadsForTests({
         listeners: () => ({ kind: "listeners", pids: [2479] }),
         birth: () => ({ kind: "birth", id: "2479@simulated" }),
@@ -159,6 +168,9 @@ describe("removeAgentKeyFiles (flair#2479)", () => {
           ...(keepKeys ? ["--keep-keys"] : []),
         ], { from: "user" });
         expect(existsSync(staged)).toBe(keepKeys);
+        expect(existsSync(backup)).toBe(keepKeys);
+        expect(readFileSync(notes, "utf8")).toBe("keep notes");
+        if (keepKeys) expect(readFileSync(backup, "utf8")).toBe("old seed");
         if (keepKeys) expect(readFileSync(staged, "utf8")).toBe("replacement seed");
       } finally {
         setInstancePairOsReadsForTests(null);

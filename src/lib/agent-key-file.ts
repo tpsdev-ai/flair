@@ -62,6 +62,7 @@ export interface AgentKeyFileTestHooks {
   beforeKeyRead?: (fd: number) => void;
   /** Runs after the temp key is complete and before it is linked into place. */
   beforePublish?: (tempPath: string, finalPath: string) => void;
+  syncKeysDir?: (fd: number) => void;
 }
 
 let testHooks: AgentKeyFileTestHooks | undefined;
@@ -383,13 +384,49 @@ export function createAgentKeyBackup(privateKeyPath: string, data: Uint8Array): 
   }
 }
 
+/** UTC filename stamp without colons or periods; sorts by time. */
+export function rotationBackupStamp(date = new Date()): string {
+  return date.toISOString().replace(/[:.]/g, "-");
+}
+
+export function isAgentKeyRotationBackup(name: string, privateKeyName: string): boolean {
+  const prefix = `${privateKeyName}.bak.`;
+  if (!name.startsWith(prefix)) return false;
+  const stamp = name.slice(prefix.length);
+  const [date, time] = stamp.split("T");
+  if (!time) return false;
+  const parsed = new Date(`${date}T${time.slice(0, 8).replace(/-/g, ":")}.${time.slice(9)}`);
+  return Number.isFinite(parsed.getTime()) && rotationBackupStamp(parsed) === stamp;
+}
+
+function syncAgentKeysDir(privateKeyPath: string): void {
+  // Windows cannot open directories for fsync.
+  if (WIN32) return;
+  const fd = openSync(dirname(privateKeyPath), constants.O_RDONLY | constants.O_DIRECTORY | NOFOLLOW);
+  try {
+    (testHooks?.syncKeysDir ?? fsyncSync)(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /**
  * Write `data` to a unique 0600 temp file beside `privateKeyPath` and leave it
  * staged. A failure sends nothing and attempts to remove only the temp file
  * this call created (best effort).
  */
 export function stageAgentKeyFile(privateKeyPath: string, data: string | Uint8Array): string {
-  return writeAgentKeyTemp(privateKeyPath, Buffer.from(data));
+  const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data));
+  try {
+    // Persist the staged name before Flair can accept the new public key.
+    syncAgentKeysDir(privateKeyPath);
+    return tempPath;
+  } catch (error) {
+    try { unlinkSync(tempPath); } catch { /* best effort */ }
+    throw new AgentKeyFileRefusal(
+      `flair could not sync keys directory ${dirname(privateKeyPath)} (${error instanceof Error ? error.message : String(error)}); check the directory and filesystem, then retry rotation`,
+    );
+  }
 }
 
 /**
@@ -399,6 +436,11 @@ export function stageAgentKeyFile(privateKeyPath: string, data: string | Uint8Ar
 export function replaceAgentKeyFile(privateKeyPath: string, stagedPath: string): void {
   testHooks?.beforePublish?.(stagedPath, privateKeyPath);
   renameSync(stagedPath, privateKeyPath);
+  try {
+    syncAgentKeysDir(privateKeyPath);
+  } catch (error) {
+    console.error(`Warning: flair could not sync keys directory ${dirname(privateKeyPath)} (${error instanceof Error ? error.message : String(error)}); the new private key is in place at ${privateKeyPath}.`);
+  }
 }
 
 /**

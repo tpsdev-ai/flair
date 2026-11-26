@@ -260,6 +260,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
   let updateBodies: any[];
   let authHeaders: string[];
   let requestCount: number;
+  let rotationEvents: string[];
 
   beforeEach(async () => {
     tmpDir = makeTmpDir();
@@ -272,6 +273,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
     updateBodies = [];
     authHeaders = [];
     requestCount = 0;
+    rotationEvents = [];
 
     stagedInode = 0;
     stagedBytes = Buffer.alloc(0);
@@ -285,12 +287,13 @@ describe("agent rotate-key (real command, POSIX)", () => {
       authHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
       const parsed = JSON.parse(String(init?.body));
       if (parsed.operation === "update" && parsed.table === "Agent") {
+        rotationEvents.push("update");
         updateBodies.push(parsed);
         const staged = stagedOf(keysDir);
         expect(staged).toHaveLength(1);
         stagedBytes = readFileSync(staged[0]);
         expect(publicKeyOfSeed(stagedBytes)).toBe(parsed.records[0].publicKey);
-        expect(modeOf(staged[0])).toBe(0o600);
+        if (process.platform !== "win32") expect(modeOf(staged[0])).toBe(0o600);
         stagedInode = Number(statSync(staged[0]).ino);
         if (opsMode === "update-500") return Response.json({ error: "refused" }, { status: 500 });
         if (opsMode !== "update-no-change") storedPublicKey = String(parsed.records[0].publicKey);
@@ -337,13 +340,80 @@ describe("agent rotate-key (real command, POSIX)", () => {
     const backups = backupsOf(keysDir, id).filter(path => path !== earlier);
     expect(backups).toHaveLength(1);
     expect(readFileSync(backups[0]).equals(oldSeed)).toBe(true);
-    expect(modeOf(backups[0])).toBe(0o600);
+    if (process.platform !== "win32") expect(modeOf(backups[0])).toBe(0o600);
     expect(readFileSync(legacy, "utf8")).toBe("legacy");
     expect(readFileSync(earlier, "utf8")).toBe("earlier");
     expect(publicKeyOfSeed(readFileSync(privPath))).toBe(storedPublicKey);
     expect(Number(statSync(privPath).ino)).toBe(stagedInode);
     expect(updateBodies).toHaveLength(1);
     expect(stagedOf(keysDir)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === "win32")("syncs the staged directory before the update and the installed directory after rename", async () => {
+    const oldSeed = seedCurrentKey();
+    let syncs = 0;
+    setAgentKeyFileTestHooks({
+      syncKeysDir: (fd) => {
+        expect(fstatSync(fd).isDirectory()).toBe(true);
+        if (++syncs === 1) {
+          expect(stagedOf(keysDir)).toHaveLength(1);
+          expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+          rotationEvents.push("staged sync");
+        } else {
+          expect(stagedOf(keysDir)).toEqual([]);
+          expect(Number(statSync(privPath).ino)).toBe(stagedInode);
+          expect(publicKeyOfSeed(readFileSync(privPath))).toBe(storedPublicKey);
+          rotationEvents.push("installed sync");
+        }
+        fs.fsyncSync(fd);
+      },
+      beforePublish: () => { rotationEvents.push("rename"); },
+    });
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(0);
+    expect(syncs).toBe(2);
+    expect(rotationEvents).toEqual(["staged sync", "update", "rename", "installed sync"]);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a failed staging directory sync before sending an update", async () => {
+    const oldSeed = seedCurrentKey();
+    let syncs = 0;
+    setAgentKeyFileTestHooks({ syncKeysDir: () => {
+      syncs += 1;
+      throw new Error("directory sync fixture failure");
+    } });
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(1);
+    expect(syncs).toBe(1);
+    expect(requestCount).toBe(0);
+    expect(updateBodies).toHaveLength(0);
+    expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+    expect(stagedOf(keysDir)).toEqual([]);
+    expect(result.stderr).toContain(`flair could not sync keys directory ${keysDir}`);
+    expect(result.stderr).toContain("No update was sent; the current key is unchanged");
+    expect(result.stderr).toContain("check the directory and filesystem, then retry rotation");
+  });
+
+  it.skipIf(process.platform === "win32")("warns after an installed directory sync fails and keeps the new key in place", async () => {
+    seedCurrentKey();
+    let syncs = 0;
+    setAgentKeyFileTestHooks({ syncKeysDir: (fd) => {
+      if (++syncs === 2) throw new Error("installed directory sync fixture failure");
+      fs.fsyncSync(fd);
+    } });
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(0);
+    expect(syncs).toBe(2);
+    expect(publicKeyOfSeed(readFileSync(privPath))).toBe(storedPublicKey);
+    expect(stagedOf(keysDir)).toEqual([]);
+    expect(result.stderr).toContain(`Warning: flair could not sync keys directory ${keysDir}`);
+    expect(result.stderr).toContain(`the new private key is in place at ${privPath}`);
   });
 
   it("refuses a backup that fails the read-back check before sending an update", async () => {
@@ -358,7 +428,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
     expect(requestCount).toBe(0);
   });
 
-  it("(a) an existing 0644 key rotates to 0600: the new key and backup are created 0600; the warning prints", async () => {
+  it("(a) replaces the current key and backs it up; checks POSIX modes and warning", async () => {
     const oldSeed = seedCurrentKey(0o644);
     const observedModes: number[] = [];
     setAgentKeyFileTestHooks({
@@ -368,11 +438,11 @@ describe("agent rotate-key (real command, POSIX)", () => {
     const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
 
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("has group or world permission bits and is being replaced");
+    if (process.platform !== "win32") expect(result.stdout).toContain("has group or world permission bits and is being replaced");
     expect(observedModes.length).toBeGreaterThanOrEqual(2);
-    expect(observedModes.every((mode) => mode === 0o600)).toBe(true);
+    if (process.platform !== "win32") expect(observedModes.every((mode) => mode === 0o600)).toBe(true);
     expect(Number(statSync(privPath).ino)).toBe(stagedInode);
-    expect(modeOf(privPath)).toBe(0o600);
+    if (process.platform !== "win32") expect(modeOf(privPath)).toBe(0o600);
     expect(readFileSync(privPath).equals(stagedBytes)).toBe(true);
     const newSeed = readFileSync(privPath);
     expect(newSeed.length).toBe(32);
@@ -380,7 +450,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
     const backups = backupsOf(keysDir, id);
     expect(backups.length).toBe(1);
     expect(backups[0]).toMatch(/\.bak\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/);
-    expect(modeOf(backups[0])).toBe(0o600);
+    if (process.platform !== "win32") expect(modeOf(backups[0])).toBe(0o600);
     expect(readFileSync(backups[0]).equals(oldSeed)).toBe(true);
 
     expect(updateBodies.length).toBe(1);
@@ -408,7 +478,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
     expect(readFileSync(backups[0]).equals(oldSeed)).toBe(true);
   });
 
-  it("(c) Flair refuses the update: the current key is byte-identical and the staged 0600 key is kept and named", async () => {
+  it("(c) Flair refuses the update: the current key is byte-identical and the staged key is kept and named", async () => {
     const oldSeed = seedCurrentKey();
     opsMode = "update-500";
 
@@ -418,7 +488,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
     expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
     const staged = stagedOf(keysDir);
     expect(staged.length).toBe(1);
-    expect(modeOf(staged[0])).toBe(0o600);
+    if (process.platform !== "win32") expect(modeOf(staged[0])).toBe(0o600);
     expect(result.stderr).toContain(staged[0]);
     expect(result.stderr).toContain("Flair may now hold the new public key");
     expect(result.stderr).toContain("is unchanged");
@@ -434,11 +504,11 @@ describe("agent rotate-key (real command, POSIX)", () => {
     expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
     const staged = stagedOf(keysDir);
     expect(staged.length).toBe(1);
-    expect(modeOf(staged[0])).toBe(0o600);
+    if (process.platform !== "win32") expect(modeOf(staged[0])).toBe(0o600);
     expect(result.stderr).toContain("does not match the new key");
   });
 
-  it("(e) a failed rename keeps the staged key, 0600, and its public key is the one Flair stored", async () => {
+  it("(e) a failed rename keeps the staged key and its public key is the one Flair stored", async () => {
     const oldSeed = seedCurrentKey();
     setAgentKeyFileTestHooks({
       beforePublish: (_tempPath, finalPath) => {
@@ -452,7 +522,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
     expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
     const staged = stagedOf(keysDir);
     expect(staged.length).toBe(1);
-    expect(modeOf(staged[0])).toBe(0o600);
+    if (process.platform !== "win32") expect(modeOf(staged[0])).toBe(0o600);
     expect(publicKeyOfSeed(readFileSync(staged[0]))).toBe(storedPublicKey);
     expect(result.stderr).toContain(staged[0]);
   });
@@ -537,7 +607,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
       const staged = stagedOf(keysDir);
       expect(staged).toHaveLength(1);
       expect(readFileSync(staged[0]).equals(stagedBytes)).toBe(true);
-      expect(modeOf(staged[0])).toBe(0o600);
+      if (process.platform !== "win32") expect(modeOf(staged[0])).toBe(0o600);
       expect(publicKeyOfSeed(stagedBytes)).toBe(storedPublicKey);
       expect(result.stderr).toContain(staged[0]);
       expect(result.stderr).toContain(privPath);
@@ -584,7 +654,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
       expect(existsSync(staged[0])).toBe(false);
       expect(readFileSync(privPath).equals(recovery === "move" ? seed : oldSeed)).toBe(true);
       expect(publicKeyOfSeed(readFileSync(privPath))).toBe(storedPublicKey);
-      expect(modeOf(privPath)).toBe(0o600);
+      if (process.platform !== "win32") expect(modeOf(privPath)).toBe(0o600);
       expect(readdirSync(keysDir).sort()).toEqual(entriesBefore);
       expect(readFileSync(sentinel, "utf8")).toBe("keep");
       expect(readdirSync(tmpDir).sort()).toEqual(["keys", "keys space ' $ ; `", "sentinel"].sort());
@@ -594,10 +664,12 @@ describe("agent rotate-key (real command, POSIX)", () => {
   it("tightens a wide-mode keys directory before the request", async () => {
     seedCurrentKey();
     chmodSync(keysDir, 0o755);
-    setAgentKeyFileTestHooks({ beforeFirstWrite: () => expect(modeOf(keysDir)).toBe(0o700) });
+    setAgentKeyFileTestHooks({ beforeFirstWrite: () => {
+      if (process.platform !== "win32") expect(modeOf(keysDir)).toBe(0o700);
+    } });
     const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
     expect(result.code).toBe(0);
-    expect(modeOf(keysDir)).toBe(0o700);
+    if (process.platform !== "win32") expect(modeOf(keysDir)).toBe(0o700);
     expect(updateBodies).toHaveLength(1);
   });
 
