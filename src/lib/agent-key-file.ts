@@ -211,9 +211,9 @@ export function readExistingAgentKey(privateKeyPath: string): Uint8Array | null 
 }
 
 /**
- * Read the key being rotated through one no-follow descriptor. A symlink, a
- * non-regular file or another owner's file is refused. A mode wider than
- * owner-only is reported, not refused: rotation replaces the file.
+ * On POSIX, read through a no-follow descriptor and refuse symlinks,
+ * non-regular files and foreign owners; Windows reads by path.
+ * A wide POSIX mode is reported; successful rotation replaces the file.
  */
 export function readAgentKeyForRotation(privateKeyPath: string): AgentKeyForRotation | null {
   if (WIN32) {

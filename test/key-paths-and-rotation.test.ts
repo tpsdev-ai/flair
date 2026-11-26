@@ -13,7 +13,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
+import * as fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import nacl from "tweetnacl";
 import { program } from "../src/cli.js";
 import { setAgentKeyFileTestHooks } from "../src/lib/agent-key-file.js";
@@ -24,31 +25,6 @@ function makeTmpDir(): string {
   const dir = join(tmpdir(), `flair-keyrot-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir, { recursive: true });
   return dir;
-}
-
-type Handler = (req: IncomingMessage, body: string, res: ServerResponse) => void;
-
-function startMockServer(handler: Handler): Promise<{ server: Server; url: string; port: number }> {
-  return new Promise((resolve) => {
-    const server = createServer((req, res) => {
-      let body = "";
-      req.on("data", (c) => (body += c));
-      req.on("end", () => handler(req, body, res));
-    });
-    server.listen(0, "127.0.0.1", () => {
-      const port = (server.address() as any).port;
-      resolve({ server, url: `http://127.0.0.1:${port}`, port });
-    });
-  });
-}
-
-function stopServer(server: Server): Promise<void> {
-  return new Promise((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
-}
-
-function jsonRes(res: ServerResponse, status: number, data: unknown) {
-  res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(data));
 }
 
 function b64url(bytes: Uint8Array): string {
@@ -265,19 +241,23 @@ describe("plugin key resolution", () => {
   });
 });
 
-describe("agent rotate-key (real command)", () => {
+describe("agent rotate-key (real command, POSIX)", () => {
   const id = "agent-a";
   let tmpDir: string;
   let keysDir: string;
   let privPath: string;
   let pubPath: string;
-  let opsServer: { server: Server; url: string; port: number };
-  let httpServer: { server: Server; url: string; port: number };
-  let opsMode: "update-ok" | "update-500" | "update-no-change";
+  const opsServer = { port: 19101 };
+  const httpServer = { port: 19102 };
+  let fetchSpy: ReturnType<typeof spyOn<typeof globalThis, "fetch">>;
+  let restoreFixture: (() => void) | undefined;
+  let stagedInode: number;
+  let stagedBytes: Buffer;
+  let opsMode: "update-ok" | "update-500" | "update-no-change" | "transport-failure" | "read-failure";
   let storedPublicKey: string;
   let updateBodies: any[];
   let authHeaders: string[];
-  let opsRequestCount: number;
+  let requestCount: number;
 
   beforeEach(async () => {
     tmpDir = makeTmpDir();
@@ -289,34 +269,43 @@ describe("agent rotate-key (real command)", () => {
     storedPublicKey = "";
     updateBodies = [];
     authHeaders = [];
-    opsRequestCount = 0;
+    requestCount = 0;
 
-    opsServer = await startMockServer((req, body, res) => {
-      opsRequestCount += 1;
-      authHeaders.push(req.headers.authorization ?? "");
-      let parsed: any = {};
-      try { parsed = JSON.parse(body || "{}"); } catch { return jsonRes(res, 400, { error: "bad json" }); }
+    stagedInode = 0;
+    stagedBytes = Buffer.alloc(0);
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input, init) => {
+      requestCount += 1;
+      const url = String(input);
+      if (url.startsWith(`http://127.0.0.1:${httpServer.port}/`)) {
+        return Response.json({ id });
+      }
+      expect(url).toBe(`http://127.0.0.1:${opsServer.port}/`);
+      authHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
+      const parsed = JSON.parse(String(init?.body));
       if (parsed.operation === "update" && parsed.table === "Agent") {
         updateBodies.push(parsed);
-        if (opsMode === "update-500") return jsonRes(res, 500, { error: "refused" });
-        if (opsMode === "update-ok") storedPublicKey = String(parsed.records[0].publicKey);
-        return jsonRes(res, 200, { updated_hashes: opsMode === "update-ok" ? 1 : 0 });
+        const staged = stagedOf(keysDir);
+        expect(staged).toHaveLength(1);
+        stagedBytes = readFileSync(staged[0]);
+        expect(publicKeyOfSeed(stagedBytes)).toBe(parsed.records[0].publicKey);
+        expect(modeOf(staged[0])).toBe(0o600);
+        stagedInode = Number(statSync(staged[0]).ino);
+        if (opsMode === "update-500") return Response.json({ error: "refused" }, { status: 500 });
+        if (opsMode !== "update-no-change") storedPublicKey = String(parsed.records[0].publicKey);
+        if (opsMode === "transport-failure") throw new TypeError("update response unavailable");
+        return Response.json({ updated_hashes: opsMode === "update-no-change" ? 0 : 1 });
       }
-      if (parsed.operation === "search_by_value" && parsed.table === "Agent") {
-        return jsonRes(res, 200, [{ id: parsed.search_value, name: parsed.search_value, publicKey: storedPublicKey }]);
-      }
-      return jsonRes(res, 200, {});
-    });
-
-    httpServer = await startMockServer((_req, _body, res) => {
-      jsonRes(res, 200, { id });
-    });
+      expect(parsed.operation).toBe("search_by_value");
+      if (opsMode === "read-failure") return new Response("read unavailable", { status: 503 });
+      return Response.json([{ id: parsed.search_value, name: parsed.search_value, publicKey: storedPublicKey }]);
+    }) as typeof fetch);
   });
 
-  afterEach(async () => {
+  afterEach(() => {
+    restoreFixture?.();
+    restoreFixture = undefined;
     setAgentKeyFileTestHooks(undefined);
-    await stopServer(opsServer.server);
-    await stopServer(httpServer.server);
+    fetchSpy.mockRestore();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -338,15 +327,18 @@ describe("agent rotate-key (real command)", () => {
     const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
 
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("readable by other users and is being replaced");
+    expect(result.stdout).toContain("has group or world permission bits and is being replaced");
     expect(observedModes.length).toBeGreaterThanOrEqual(2);
     expect(observedModes.every((mode) => mode === 0o600)).toBe(true);
+    expect(Number(statSync(privPath).ino)).toBe(stagedInode);
     expect(modeOf(privPath)).toBe(0o600);
+    expect(readFileSync(privPath).equals(stagedBytes)).toBe(true);
     const newSeed = readFileSync(privPath);
     expect(newSeed.length).toBe(32);
     expect(newSeed.equals(oldSeed)).toBe(false);
     const backups = backupsOf(keysDir, id);
     expect(backups.length).toBe(1);
+    expect(backups[0]).toMatch(/\.bak\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/);
     expect(modeOf(backups[0])).toBe(0o600);
     expect(readFileSync(backups[0]).equals(oldSeed)).toBe(true);
 
@@ -437,7 +429,7 @@ describe("agent rotate-key (real command)", () => {
     expect(result.stderr).toContain(backups[0]);
   });
 
-  it("(g) a symlinked current key is refused and its target is unchanged", async () => {
+  it("(g) on POSIX a symlinked current key is refused and its target is unchanged", async () => {
     const target = join(tmpDir, "target.key");
     const pair = newPair();
     writeFileSync(target, pair.seed);
@@ -449,6 +441,163 @@ describe("agent rotate-key (real command)", () => {
     expect(result.stderr).toContain("is a symlink");
     expect(readFileSync(target).equals(pair.seed)).toBe(true);
     expect(stagedOf(keysDir).length).toBe(0);
-    expect(opsRequestCount).toBe(0);
+    expect(requestCount).toBe(0);
   });
+  it("refuses the backup name selected by a fixed UTC clock", async () => {
+    const oldSeed = seedCurrentKey();
+    const clock = spyOn(Date.prototype, "toISOString").mockReturnValue("2031-02-03T04:05:06.007Z");
+    restoreFixture = () => clock.mockRestore();
+    const backup = `${privPath}.bak.2031-02-03T04-05-06-007Z`;
+    const occupied = Buffer.alloc(32, 0xA7);
+    writeFileSync(backup, occupied);
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(1);
+    expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+    expect(readFileSync(backup).equals(occupied)).toBe(true);
+    expect(backupsOf(keysDir, id)).toEqual([backup]);
+    expect(stagedOf(keysDir)).toEqual([]);
+    expect(result.stderr).toContain(backup);
+    expect(requestCount).toBe(0);
+    expect(updateBodies).toHaveLength(0);
+  });
+
+  it("a staging failure leaves the current key and backup and sends no request", async () => {
+    const oldSeed = seedCurrentKey();
+    let writes = 0;
+    setAgentKeyFileTestHooks({ beforeFirstWrite: () => {
+      if (++writes === 2) throw new Error("staging fixture failure");
+    } });
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(1);
+    expect(writes).toBe(2);
+    expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+    expect(stagedOf(keysDir)).toEqual([]);
+    expect(result.stderr).toContain(privPath);
+    expect(result.stderr).toContain("could not stage");
+    expect(backupsOf(keysDir, id)).toHaveLength(1);
+    expect(readFileSync(backupsOf(keysDir, id)[0]).equals(oldSeed)).toBe(true);
+    expect(requestCount).toBe(0);
+    expect(updateBodies).toHaveLength(0);
+  });
+
+  for (const failure of ["transport-failure", "read-failure"] as const) {
+    it(`keeps and names the staged key after ${failure}`, async () => {
+      const oldSeed = seedCurrentKey();
+      opsMode = failure;
+
+      const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+      expect(result.code).toBe(1);
+      expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+      const staged = stagedOf(keysDir);
+      expect(staged).toHaveLength(1);
+      expect(readFileSync(staged[0]).equals(stagedBytes)).toBe(true);
+      expect(modeOf(staged[0])).toBe(0o600);
+      expect(publicKeyOfSeed(stagedBytes)).toBe(storedPublicKey);
+      expect(result.stderr).toContain(staged[0]);
+      expect(result.stderr).toContain(privPath);
+      expect(requestCount).toBe(failure === "transport-failure" ? 1 : 2);
+      expect(updateBodies).toHaveLength(1);
+    });
+  }
+
+  for (const recovery of ["move", "delete"] as const) {
+    it(`runs the printed ${recovery} recovery commands through sh`, async () => {
+      keysDir = join(tmpDir, "keys space ' $ ; `");
+      mkdirSync(keysDir);
+      privPath = join(keysDir, `${id}.key`);
+      pubPath = join(keysDir, `${id}.pub`);
+      const oldSeed = seedCurrentKey();
+      const sentinel = join(tmpDir, "sentinel");
+      writeFileSync(sentinel, "keep");
+      opsMode = "update-500";
+      const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+      expect(result.code).toBe(1);
+      const staged = stagedOf(keysDir);
+      expect(staged).toHaveLength(1);
+      const seed = readFileSync(staged[0]);
+      const quoted = (path: string) => "'" + path.split("'").join("'\\''") + "'";
+      const move = `mv -- ${quoted(staged[0])} ${quoted(privPath)}`;
+      const chmod = `chmod -- 600 ${quoted(privPath)}`;
+      const remove = `rm -- ${quoted(staged[0])}`;
+      expect(result.stderr).toContain(`place: ${move}, then ${chmod}.`);
+      expect(result.stderr).toContain(`file: ${remove}.`);
+      const printedMove = result.stderr.split("place: ")[1].split(", then ")[0];
+      const printedChmod = result.stderr.split(", then ")[1].split(". If it does not")[0];
+      const printedRemove = result.stderr.split("delete the staged file: ")[1].slice(0, -1);
+      const entriesBefore = readdirSync(keysDir).filter(name => !name.includes(".tmp-")).sort();
+      const command = recovery === "move" ? `${printedMove} && ${printedChmod}` : printedRemove;
+      const shell = spawnSync("sh", ["-c", 'eval "$FLAIR_TEST_RECOVERY_COMMAND"'], {
+        cwd: tmpDir, encoding: "utf8", timeout: 2_000,
+        env: {
+          ...process.env, FLAIR_TEST_RECOVERY_COMMAND: command,
+          FLAIR_TEST_ALLOW_BUN_HARPER: "Exercise printed recovery commands through the POSIX shell",
+        },
+      });
+      expect(shell.stderr).toBe("");
+      expect(shell.status).toBe(0);
+      expect(existsSync(staged[0])).toBe(false);
+      expect(readFileSync(privPath).equals(recovery === "move" ? seed : oldSeed)).toBe(true);
+      expect(modeOf(privPath)).toBe(0o600);
+      expect(readdirSync(keysDir).sort()).toEqual(entriesBefore);
+      expect(readFileSync(sentinel, "utf8")).toBe("keep");
+      expect(readdirSync(tmpDir).sort()).toEqual(["keys", "keys space ' $ ; `", "sentinel"].sort());
+    });
+  }
+
+  it("tightens a wide-mode keys directory before the request", async () => {
+    seedCurrentKey();
+    chmodSync(keysDir, 0o755);
+    setAgentKeyFileTestHooks({ beforeFirstWrite: () => expect(modeOf(keysDir)).toBe(0o700) });
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+    expect(result.code).toBe(0);
+    expect(modeOf(keysDir)).toBe(0o700);
+    expect(updateBodies).toHaveLength(1);
+  });
+
+  it("on POSIX refuses a symlinked keys directory before a request", async () => {
+    const oldSeed = seedCurrentKey();
+    const realKeysDir = keysDir;
+    keysDir = join(tmpDir, "linked-keys");
+    symlinkSync(realKeysDir, keysDir);
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("is a symlink");
+    expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+    expect(readdirSync(realKeysDir)).toEqual([`${id}.key`]);
+    expect(requestCount).toBe(0);
+  });
+
+  it("refuses a non-regular current key before a request", async () => {
+    mkdirSync(privPath);
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("not a regular file");
+    expect(statSync(privPath).isDirectory()).toBe(true);
+    expect(stagedOf(keysDir)).toEqual([]);
+    expect(requestCount).toBe(0);
+  });
+
+  it("refuses a foreign owner from the opened descriptor before a request", async () => {
+    const oldSeed = seedCurrentKey();
+    const originalFstat = fs.fstatSync;
+    const fixture = spyOn(fs, "fstatSync").mockImplementation(((fd: number) => {
+      const st = originalFstat(fd);
+      Object.defineProperty(st, "uid", { value: process.getuid!() + 1 });
+      return st;
+    }) as typeof fs.fstatSync);
+    restoreFixture = () => fixture.mockRestore();
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+    expect(result.code).toBe(1);
+    expect(fixture).toHaveBeenCalled();
+    expect(result.stderr).toContain("owned by another user");
+    expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+    expect(stagedOf(keysDir)).toEqual([]);
+    expect(requestCount).toBe(0);
+  });
+
 });

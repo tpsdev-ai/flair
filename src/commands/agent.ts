@@ -393,9 +393,13 @@ async function readAgentPublicKeyAfterUpdate(
   return { ok: true, publicKey: row.publicKey };
 }
 
-/** `<key>.bak.<UTC timestamp>`: safe on every filesystem, sorts by time. */
+/** UTC filename stamp without colons or periods; sorts by time. */
 function rotationBackupStamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function quotePosixPath(path: string): string {
+  return "'" + path.replace(/'/g, "'\\''") + "'";
 }
 
 /** A kept staged key after the update request was sent but the rename did not run. */
@@ -403,8 +407,8 @@ function rotationStagedKeyMessage(id: string, stagedPath: string, currentPath: s
   return (
     `Error: ${detail} Flair may now hold the new public key for '${id}'. ` +
     `The current private key ${currentPath} is unchanged. The new private key is kept at ${stagedPath}. ` +
-    `If Flair holds the new public key, move it into place: mv ${stagedPath} ${currentPath}, then chmod 600 ${currentPath}. ` +
-    `If it does not, delete the staged file: rm ${stagedPath}.`
+    `If Flair holds the new public key, move it into place: mv -- ${quotePosixPath(stagedPath)} ${quotePosixPath(currentPath)}, then chmod -- 600 ${quotePosixPath(currentPath)}. ` +
+    `If it does not, delete the staged file: rm -- ${quotePosixPath(stagedPath)}.`
   );
 }
 
@@ -720,9 +724,8 @@ export function register(program: Command): void {
       const currentPrivPath = privKeyPath(id, keysDir);
       const currentPubPath = pubKeyPath(id, keysDir);
 
-      // Read the current key once, through a no-follow descriptor, before
-      // anything writes. A wide mode is reported but not refused: rotation
-      // replaces the file.
+      // Read before writing: POSIX uses a no-follow descriptor; Windows reads by path.
+      // A wide POSIX mode is reported; successful rotation replaces the file.
       let current: ReturnType<typeof readAgentKeyForRotation>;
       try {
         current = readAgentKeyForRotation(currentPrivPath);
@@ -734,7 +737,7 @@ export function register(program: Command): void {
         throw err;
       }
       if (current?.widerThanOwnerOnly) {
-        console.log(`Old key ${currentPrivPath} was readable by other users and is being replaced.`);
+        console.log(`Old key ${currentPrivPath} has group or world permission bits and is being replaced.`);
       }
 
       // Generate new keypair
@@ -767,7 +770,7 @@ export function register(program: Command): void {
         stagedPrivPath = stageAgentKeyFile(currentPrivPath, newSeed);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.error(`Error: could not stage the new private key for '${id}': ${message}. No update was sent; the current key is unchanged.`);
+        console.error(`Error: could not stage the new private key next to ${currentPrivPath}: ${message}. No update was sent; the current key is unchanged.`);
         process.exit(1);
       }
 

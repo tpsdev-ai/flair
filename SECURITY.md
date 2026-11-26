@@ -151,9 +151,9 @@ and renames it over the current key once Flair holds its public key). On
 POSIX the keys directory is requested with mode `0700` (the umask may make it
 narrower), and an owned directory with group or world bits is tightened to
 `0700`; on the create and reuse paths an existing key with group or world
-bits is refused with `chmod 600 <path>`, while rotation reports it and
-replaces the file. On Windows mode bits do not establish owner-only. Legacy
-path `~/.tps/secrets/flair/<agentId>-priv.key` is also supported.
+bits is refused with `chmod 600 <path>`, while rotation reports it. A successful
+rotation replaces the file; a failed update leaves it. On Windows mode bits
+do not establish owner-only. Legacy path `~/.tps/secrets/flair/<agentId>-priv.key` is also supported.
 
 ### Key Generation
 

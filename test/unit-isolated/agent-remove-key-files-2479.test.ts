@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { removeAgentKeyFiles } from "../../src/commands/agent.js";
@@ -73,4 +73,26 @@ describe("removeAgentKeyFiles (flair#2479)", () => {
     expect(removeAgentKeyFiles("bad.id", keysDir)).toEqual({ removed: [], manual: true });
     expect(existsSync(key)).toBe(true);
   });
+  test("removes timestamped backups and preserves another agent's file and an external symlink target", () => {
+    const backups = ["2031-02-03T04-05-06-007Z", "2031-02-03T04-05-07-008Z"]
+      .map(stamp => join(keysDir, `agent-a.key.bak.${stamp}`));
+    for (const backup of backups) writeFileSync(backup, "old seed");
+    const canonicalBackups = backups.map(path => realpathSync(path));
+    const other = join(keysDir, "agent-b.key.bak.2031-02-03T04-05-06-007Z");
+    const target = join(dir, "target");
+    writeFileSync(other, "other seed");
+    writeFileSync(target, "target seed");
+    const link = join(keysDir, "agent-a.key.bak.2031-02-03T04-05-08-009Z");
+    symlinkSync(target, link);
+
+    const result = removeAgentKeyFiles("agent-a", keysDir);
+
+    expect(result.manual).toBe(false);
+    expect(result.removed.sort()).toEqual(canonicalBackups.sort());
+    for (const backup of backups) expect(existsSync(backup)).toBe(false);
+    expect(readFileSync(other, "utf8")).toBe("other seed");
+    expect(readFileSync(target, "utf8")).toBe("target seed");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+  });
+
 });
