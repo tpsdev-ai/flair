@@ -170,7 +170,7 @@ addAdminPassOptions(
     };
 
     let rawOutputPath: string;
-    if (opts.output) {
+    if (opts.output !== undefined) {
       rawOutputPath = opts.output;
     } else {
       const exportsDir = join(resolveHome(), ".flair", "exports");
