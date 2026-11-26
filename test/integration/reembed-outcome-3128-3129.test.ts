@@ -3,9 +3,11 @@
  * the keyless listing's row ownership, through the real CLI and a real
  * ephemeral Harper (flair#3128, flair#3129).
  *
- * The CLI runs against Harper's real HTTP and ops ports, so the all-agent pair
- * proof reads the real OS listener table. The unproven-pair case stubs that
- * read unavailable; the other pair cases use the real table. A `node --import`
+ * The successful, instance-id and unproven-pair cases target Harper's real
+ * HTTP and ops ports, so the all-agent pair proof reads the real OS listener
+ * table; the unproven-pair case stubs that read unavailable. The
+ * unrecorded-pair, foreign-port and equal-port cases point `--port` at a
+ * separate listener. A `node --import`
  * preload records every fetch the child sends and can refuse a chosen Memory
  * PATCH, fail a readback GET or ops `search_by_id`, or answer a 2xx readback
  * with a malformed body, so each path can be run with a failing write or
@@ -16,9 +18,9 @@
  * credential it lists rows with, so it re-embeds rows whose owner has no local
  * key: a registered agent without a key file, the `skill:using-flair` row the
  * skill seed writes as the administrator, and rows of an owner with no Agent
- * row. For each row this file compares the full stored state read through the
- * ops API before and after: the model stamp is new, while agentId and every
- * provenance/authority field are byte-identical.
+ * row. The success case compares the full stored state of the initial Memory
+ * rows read through the ops API before and after: the model stamp is new, while
+ * agentId and every provenance/authority field are byte-identical.
  *
  * Without FLAIR_ADMIN_PASS, `reembed --agent <id>` lists rows with
  * POST /SemanticSearch, whose read scope includes other agents' non-private
@@ -75,9 +77,11 @@ let homeUnpaired: string;
 let homeNewline: string;
 let foreignPort = 0;
 let unpairedListenerPort = 0;
+let equalPortListenerPort = 0;
 let logDir = "";
 let runSeq = 0;
 let listenerAuthorizations: string[] = [];
+let listenerRequests: string[] = [];
 let listenerPatches: string[] = [];
 const servers: Server[] = [];
 
@@ -177,6 +181,7 @@ async function startListener(instanceRows: unknown[]): Promise<number> {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
+      listenerRequests.push(`${port} ${req.method} ${req.url}`);
       if (req.headers.authorization) listenerAuthorizations.push(`${port} ${req.method} ${req.url}`);
       if (req.method === "PATCH") listenerPatches.push(`${port} ${req.url ?? ""}`);
       res.setHeader("Content-Type", "application/json");
@@ -249,9 +254,11 @@ beforeAll(async () => {
   });
   for (const home of [homeAllKeys, homeMissingC]) writePairConfig(home, realHttpPort(), realOpsPort());
   listenerAuthorizations = [];
+  listenerRequests = [];
   listenerPatches = [];
   foreignPort = await startListener([{ id: "r3o-other-instance" }]);
   unpairedListenerPort = await startListener([{ id: "r3o-instance" }]);
+  equalPortListenerPort = await startListener([{ id: "r3o-instance" }]);
   writePairConfig(homeForeign, foreignPort, realOpsPort());
 }, 300_000);
 
@@ -352,7 +359,7 @@ test("a configured pair whose HTTP port is a foreign listener refuses and sends 
   for (const id of before.keys()) expect(await rowState(id), id).toEqual(before.get(id)!);
 }, 240_000);
 
-test("a proven pair whose HTTP port reports a different instance id refuses with the instance-id remedy and no PATCH", async () => {
+test("an all-agent run whose HTTP port reports a different instance id refuses with the instance-id remedy and no PATCH", async () => {
   const { code, stdout, stderr, fetches } = await runReembed(["reembed"], homeAllKeys, true, {
     env: { FLAIR_TEST_REWRITE_HTTP_INSTANCE_JSON: JSON.stringify([{ id: "r3o-different-instance" }]) },
   });
@@ -374,6 +381,19 @@ test("an unproven pair refuses with nothing sent to the HTTP port", async () => 
   expect(stderr).toContain("not proven to pair");
   expect(stdout).not.toContain("Re-embedding complete");
   for (const id of before.keys()) expect(await rowState(id), id).toEqual(before.get(id)!);
+}, 240_000);
+
+test("a target whose HTTP and ops ports are the same port refuses before any request", async () => {
+  expect(listenerRequests.filter((entry) => entry.startsWith(`${equalPortListenerPort} `))).toEqual([]);
+  const { code, stdout, stderr } = await runReembed(["reembed"], homeUnpaired, true, {
+    ports: { http: equalPortListenerPort, ops: equalPortListenerPort },
+  });
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  expect(stderr).toContain(`the target names HTTP port ${equalPortListenerPort} and ops port ${equalPortListenerPort}, which are the same port`);
+  expect(stderr).toContain("The HTTP and ops ports must differ");
+  expect(listenerRequests.filter((entry) => entry.startsWith(`${equalPortListenerPort} `))).toEqual([]);
+  expect(listenerAuthorizations.filter((entry) => entry.startsWith(`${equalPortListenerPort} `))).toEqual([]);
+  expect(stdout).not.toContain("Re-embedding complete");
 }, 240_000);
 
 test("a clean single-agent run exits 0 with the unchanged summary", async () => {
@@ -435,6 +455,44 @@ test("a stored model string with a newline renders as one failure reason line", 
   const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) not updated:"));
   expect(reasonLines).toHaveLength(1);
   expect(reasonLines[0]).toContain("stored embeddingModel is wrong\\nmodel");
+}, 240_000);
+
+test("a stored model string with a carriage return renders as one escaped failure entry", async () => {
+  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeAllKeys, true, {
+    env: {
+      FLAIR_TEST_REWRITE_OPS_READBACK_JSON: JSON.stringify({
+        [A_ROWS[0]]: JSON.stringify([{ id: A_ROWS[0], embeddingModel: "wrong\rmodel" }]),
+      }),
+    },
+  });
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) not updated:"));
+  expect(reasonLines).toHaveLength(1);
+  expect(reasonLines[0]).toContain("stored embeddingModel is wrong\\rmodel");
+}, 240_000);
+
+test("a stored model string with another C0 control character renders as one escaped failure entry", async () => {
+  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeAllKeys, true, {
+    env: {
+      FLAIR_TEST_REWRITE_OPS_READBACK_JSON: JSON.stringify({
+        [A_ROWS[0]]: JSON.stringify([{ id: A_ROWS[0], embeddingModel: "wrong\u0007model" }]),
+      }),
+    },
+  });
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) not updated:"));
+  expect(reasonLines).toHaveLength(1);
+  expect(reasonLines[0]).toContain("stored embeddingModel is wrong\\x07model");
+}, 240_000);
+
+test("a thrown error message with a newline renders as one escaped failure entry", async () => {
+  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeAllKeys, true, {
+    env: { FLAIR_TEST_THROW_PATCH_JSON: JSON.stringify({ [rowPath(A_ROWS[0])]: "boom\nline two" }) },
+  });
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) not updated:"));
+  expect(reasonLines).toHaveLength(1);
+  expect(reasonLines[0]).toContain("PATCH failed: boom\\nline two");
 }, 240_000);
 
 test("a successful PATCH whose readback fails exits non-zero and does not count the row", async () => {

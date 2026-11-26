@@ -116,8 +116,8 @@ beforeAll(async () => {
     expect(url.hostname).toBe("127.0.0.1");
     expect(["9925", "9926"]).not.toContain(url.port);
   }
-  // The all-agent run sends the administrator credential to the HTTP port only
-  // for a pair the instance's configuration records: record this instance's.
+  // This fixture records the instance's port pair in config so the all-agent
+  // run addresses this instance.
   writeFileSync(
     join(home, ".flair", "config.yaml"),
     `port: ${new URL(harper.httpURL).port}\nopsPort: ${new URL(harper.opsURL).port}\n`,

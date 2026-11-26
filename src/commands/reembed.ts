@@ -452,12 +452,17 @@ const REEMBED_DERIVED_TARGET_REMEDY =
 const REEMBED_IDENTITY_MISMATCH_REMEDY =
   "The two ports report different instance ids; point both at one instance.";
 
+/** The remedy for a target whose HTTP and ops ports are the same port. */
+const REEMBED_EQUAL_PORTS_REMEDY =
+  "The HTTP and ops ports must differ; pass --port and FLAIR_OPS_PORT (or --ops-port) with two different ports.";
+
 /** Why the all-agent run refused its target pair (flair#3135); one reason per condition (flair#3128). */
 export type ReembedTargetRefusalReason =
   | { kind: "one-sided"; supplied: "HTTP" | "ops"; missing: "HTTP" | "ops" }
   | { kind: "listener-table-unavailable" }
   | { kind: "pair-mismatch"; source: "configured" | "named" | "derived" }
   | { kind: "identity-mismatch" }
+  | { kind: "equal-ports" }
   | { kind: "unproven"; remedy: string | undefined };
 
 /** Picks the remedy for every target-pair refusal; one remedy per condition. */
@@ -473,6 +478,8 @@ export function reembedTargetRefusalRemedy(reason: ReembedTargetRefusalReason): 
           : REEMBED_DERIVED_TARGET_REMEDY;
     case "identity-mismatch":
       return REEMBED_IDENTITY_MISMATCH_REMEDY;
+    case "equal-ports":
+      return REEMBED_EQUAL_PORTS_REMEDY;
     case "unproven":
       return reason.remedy ?? "This CLI could not prove the local port pair; check the ops endpoint's configuration and listener visibility.";
   }
@@ -496,6 +503,12 @@ async function reembedTargetPairRefusal(
 ): Promise<string | null> {
   const refusal = (detail: string, reason: ReembedTargetRefusalReason): string =>
     `❌ flair reembed stopped before its first write: ${ambiguousInstanceTargetError()} — ${detail}\n   ${reembedTargetRefusalRemedy(reason)}`;
+  if (target.httpPort === target.opsPort) {
+    return refusal(
+      `the target names HTTP port ${target.httpPort} and ops port ${target.opsPort}, which are the same port`,
+      { kind: "equal-ports" },
+    );
+  }
   const authorization = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
   const proof = await proveLocalInstancePair(target.opsPort, authorization);
   if (proof.kind !== "proven") {

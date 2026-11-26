@@ -12,6 +12,8 @@
  *   - FLAIR_TEST_PAIR_OS_READS_UNAVAILABLE=1 stubs the OS listener table to
  *     `unavailable` through `setInstancePairOsReadsForTests`.
  *   - FLAIR_TEST_REFUSE_PATCH_JSON maps a `/Memory/<id>` path to a status.
+ *   - FLAIR_TEST_THROW_PATCH_JSON maps a `/Memory/<id>` path to a message; a
+ *     PATCH to it throws an Error carrying that message.
  *   - FLAIR_TEST_REFUSE_GET_JSON maps a `/Memory/<id>` path to a status.
  *   - FLAIR_TEST_REFUSE_OPS_READBACK_JSON maps a Memory id to a status for a
  *     `search_by_id` answer.
@@ -40,6 +42,7 @@ function jsonMap(name: string): Record<string, unknown> {
 const logPath = process.env.FLAIR_TEST_FETCH_LOG;
 const eventsPath = process.env.FLAIR_TEST_FETCH_EVENTS;
 const refusePatches = jsonMap("FLAIR_TEST_REFUSE_PATCH_JSON");
+const throwPatches = jsonMap("FLAIR_TEST_THROW_PATCH_JSON");
 const refuseGets = jsonMap("FLAIR_TEST_REFUSE_GET_JSON");
 const refuseOpsReadbacks = jsonMap("FLAIR_TEST_REFUSE_OPS_READBACK_JSON");
 const rewriteOpsReadbacks = jsonMap("FLAIR_TEST_REWRITE_OPS_READBACK_JSON");
@@ -73,6 +76,9 @@ globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestIni
 
   const answer = async (): Promise<Response> => {
     const patchStatus = refusePatches[url.pathname];
+    if (method === "PATCH" && throwPatches[url.pathname] !== undefined) {
+      throw new Error(String(throwPatches[url.pathname]));
+    }
     if (method === "PATCH" && patchStatus !== undefined) {
       return new Response(JSON.stringify({ error: "refused by the test" }), {
         status: Number(patchStatus), headers: { "content-type": "application/json" },
