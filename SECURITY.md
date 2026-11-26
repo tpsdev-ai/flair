@@ -145,13 +145,15 @@ are restricted to admin-only.
 
 Private keys at `~/.flair/keys/<agentId>.key` are created owner-only
 (`0600`) from the first byte on POSIX by `flair agent add`, `flair init` (local
-and remote agent provisioning), `flair principal add` and `flair import`. On
+and remote agent provisioning), `flair principal add`, `flair import` and
+`flair agent rotate-key` (which stages the replacement before it updates Flair
+and renames it over the current key once Flair holds its public key). On
 POSIX the keys directory is requested with mode `0700` (the umask may make it
 narrower), and an owned directory with group or world bits is tightened to
-`0700`; an existing key with group or world bits is refused with
-`chmod 600 <path>`. On Windows the create path sets the mode and the reuse path
-neither checks nor sets it. Legacy path
-`~/.tps/secrets/flair/<agentId>-priv.key` is also supported.
+`0700`; on the create and reuse paths an existing key with group or world
+bits is refused with `chmod 600 <path>`, while rotation reports it and
+replaces the file. On Windows mode bits do not establish owner-only. Legacy
+path `~/.tps/secrets/flair/<agentId>-priv.key` is also supported.
 
 ### Key Generation
 
@@ -161,8 +163,11 @@ runtime.
 
 ### Key Rotation
 
-`flair agent rotate-key <id>` generates a new key pair, updates the
-public key in Flair, and backs up the old key as `<agentId>.key.bak`.
+`flair agent rotate-key <id>` generates a new key pair, stages the new private
+key owner-only (`0600`) from creation on POSIX, updates the public key in
+Flair, reads the row back to confirm the stored key, then renames the staged
+key over the current one. The old key is backed up as a new
+`<agentId>.key.bak.<UTC timestamp>`; an existing backup is left untouched.
 
 ## Threat Model
 

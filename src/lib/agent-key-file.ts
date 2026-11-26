@@ -2,8 +2,9 @@
  * agent-key-file.ts — the shared agent private-key file helper for the five
  * provisioning paths (flair#3077 slice A): `flair agent add`, local
  * `flair init --agent/--agent-id`, remote `flair init --target ... --agent-id`,
- * `flair principal add`, and `flair import`. `flair agent rotate-key` and
- * `flair mcp grant` still write key files themselves (slice B).
+ * `flair principal add`, and `flair import`. `flair agent rotate-key` (slice B)
+ * stages and replaces through this helper; `flair mcp grant` still writes key
+ * files itself (slice C).
  *
  * POSIX policy:
  *   - the keys directory is requested with mode 0700 (the umask may make it
@@ -34,6 +35,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  renameSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
@@ -72,6 +74,13 @@ export interface AgentKeyFileContents {
   bytes: Uint8Array;
   /** True when this call created the file. */
   created: boolean;
+}
+
+export interface AgentKeyForRotation {
+  /** The raw bytes of the key being replaced. */
+  bytes: Uint8Array;
+  /** True when the key had group or world permission bits. */
+  widerThanOwnerOnly: boolean;
 }
 
 const WIN32 = process.platform === "win32";
@@ -202,15 +211,58 @@ export function readExistingAgentKey(privateKeyPath: string): Uint8Array | null 
 }
 
 /**
- * Create a new key file at 0600 from the first byte, refusing to replace an
- * existing path. The bytes go to a unique temp file in the same directory and
- * are published with a hard link, so an occupied path is never overwritten.
- * A temp name that is already taken is retried with a new random suffix; the
- * occupying entry is left untouched. On failure the temp file this call
- * created is removed, best effort.
+ * Read the key being rotated through one no-follow descriptor. A symlink, a
+ * non-regular file or another owner's file is refused. A mode wider than
+ * owner-only is reported, not refused: rotation replaces the file.
  */
-export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8Array): void {
-  const bytes = Buffer.from(data);
+export function readAgentKeyForRotation(privateKeyPath: string): AgentKeyForRotation | null {
+  if (WIN32) {
+    try {
+      return { bytes: new Uint8Array(readFileSync(privateKeyPath)), widerThanOwnerOnly: false };
+    } catch (error) {
+      if (errnoCode(error) === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  let fd: number;
+  try {
+    fd = openSync(privateKeyPath, constants.O_RDONLY | NOFOLLOW | O_NONBLOCK);
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") return null;
+    if (errnoCode(error) === "ELOOP") {
+      throw new AgentKeyFileRefusal(
+        `key file ${privateKeyPath} is a symlink; replace it with a real key file you own and run again`,
+      );
+    }
+    throw error;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) {
+      throw new AgentKeyFileRefusal(
+        `key file ${privateKeyPath} is not a regular file; replace it with a real key file you own and run again`,
+      );
+    }
+    const uid = currentUid();
+    if (uid !== undefined && st.uid !== uid) {
+      throw new AgentKeyFileRefusal(
+        `key file ${privateKeyPath} is owned by another user; move it aside and run again so flair can create a new owner-only key`,
+      );
+    }
+    testHooks?.beforeKeyRead?.(fd);
+    return { bytes: new Uint8Array(readFileSync(fd)), widerThanOwnerOnly: (st.mode & 0o077) !== 0 };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Write `data` to a unique temp file in `privateKeyPath`'s directory, at 0600
+ * from creation and fsynced, and return the temp path. The temp file is this
+ * call's to hand on: the caller publishes or removes it.
+ */
+function writeAgentKeyTemp(privateKeyPath: string, bytes: Buffer): string {
   const tempPrefix = `.${basename(privateKeyPath)}.tmp-`;
   const maxTempAttempts = 5;
   let fd: number | undefined;
@@ -248,10 +300,7 @@ export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8A
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
-    testHooks?.beforePublish?.(tempPath, privateKeyPath);
-    // linkSync fails with EEXIST when the final path appears before publication;
-    // the caller then re-reads that file.
-    linkSync(tempPath, privateKeyPath);
+    return tempPath;
   } catch (error) {
     if (fd !== undefined) {
       try {
@@ -269,11 +318,54 @@ export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8A
     }
     throw error;
   }
+}
+
+/**
+ * Create a new key file at 0600 from the first byte, refusing to replace an
+ * existing path. The bytes go to a unique temp file in the same directory and
+ * are published with a hard link, so an occupied path is never overwritten.
+ * A temp name that is already taken is retried with a new random suffix; the
+ * occupying entry is left untouched. On failure the temp file this call
+ * created is removed, best effort.
+ */
+export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8Array): void {
+  const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data));
+  try {
+    testHooks?.beforePublish?.(tempPath, privateKeyPath);
+    // linkSync fails with EEXIST when the final path appears before publication;
+    // the caller then re-reads that file.
+    linkSync(tempPath, privateKeyPath);
+  } catch (error) {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      /* best effort: remove only the temp file this call created */
+    }
+    throw error;
+  }
   try {
     unlinkSync(tempPath);
   } catch {
     /* the published key is complete; a leftover temp file is mode 0600 */
   }
+}
+
+/**
+ * Write `data` to a unique 0600 temp file beside `privateKeyPath` and leave it
+ * staged. A failure sends nothing and removes only the temp file this call
+ * created.
+ */
+export function stageAgentKeyFile(privateKeyPath: string, data: string | Uint8Array): string {
+  return writeAgentKeyTemp(privateKeyPath, Buffer.from(data));
+}
+
+/**
+ * Rename a staged temp file over `privateKeyPath`. A failed rename leaves the
+ * staged file in place so the caller can report its path.
+ */
+export function replaceAgentKeyFile(privateKeyPath: string, stagedPath: string): void {
+  testHooks?.beforePublish?.(stagedPath, privateKeyPath);
+  renameSync(stagedPath, privateKeyPath);
 }
 
 /**

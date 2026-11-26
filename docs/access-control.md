@@ -680,8 +680,8 @@ request gets `{"error":"principal_deactivated"}`.
 - sends a delete for the `Agent` record, and stops with an error if the
   operations API rejects it;
 - unless you pass `--keep-keys`, attempts to delete the agent's key files
-  (private, public and `.bak`) from the keys directory on the machine it runs
-  on, ignoring any failure;
+  (private, public, `.bak` and `<key>.bak.<UTC timestamp>` backups) from the
+  keys directory on the machine it runs on, ignoring any failure;
 - prints `Removed N key file(s).` (with `--keep-keys`,
   `Key files preserved (--keep-keys).`) and then
   `✅ Agent 'bob-the-bot' removed successfully`.

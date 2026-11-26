@@ -3,17 +3,20 @@
  *
  * Tests for:
  *   1. Plugin key resolution order (FLAIR_KEY_DIR > ~/.flair/keys > legacy paths)
- *   2. flair agent rotate-key logic (keypair gen, ops API update, verify, backup)
+ *   2. `flair agent rotate-key` through the real command (flair#3077 slice B)
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import {
   mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, chmodSync,
+  fstatSync, readdirSync, statSync, symlinkSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
 import nacl from "tweetnacl";
+import { program } from "../src/cli.js";
+import { setAgentKeyFileTestHooks } from "../src/lib/agent-key-file.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -52,6 +55,81 @@ function b64url(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64url");
 }
 
+function newPair(): { seed: Buffer; publicKey: string } {
+  const kp = nacl.sign.keyPair();
+  return { seed: Buffer.from(kp.secretKey.slice(0, 32)), publicKey: b64url(kp.publicKey) };
+}
+
+function publicKeyOfSeed(seed: Buffer): string {
+  return b64url(nacl.sign.keyPair.fromSeed(seed).publicKey);
+}
+
+function modeOf(path: string): number {
+  return statSync(path).mode & 0o777;
+}
+
+function backupsOf(keysDir: string, id: string): string[] {
+  return readdirSync(keysDir)
+    .filter((name) => name.startsWith(`${id}.key.bak.`))
+    .map((name) => join(keysDir, name))
+    .sort();
+}
+
+function stagedOf(keysDir: string): string[] {
+  return readdirSync(keysDir)
+    .filter((name) => name.includes(".tmp-"))
+    .map((name) => join(keysDir, name));
+}
+
+/** Run the real `flair agent rotate-key` command and capture its result. */
+async function runRotate(opts: {
+  id: string;
+  keysDir: string;
+  opsPort: number;
+  httpPort: number;
+}): Promise<{ code: number; stdout: string; stderr: string }> {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+    stdout.push(args.map((a) => String(a)).join(" "));
+  });
+  const errSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    stderr.push(args.map((a) => String(a)).join(" "));
+  });
+  const origExit = process.exit;
+  process.exit = ((code?: number) => {
+    throw new Error(`process.exit(${code ?? 0})`);
+  }) as typeof process.exit;
+  let code = 0;
+  try {
+    await program.parseAsync([
+      "node",
+      "flair",
+      "agent",
+      "rotate-key",
+      opts.id,
+      "--ops-port",
+      String(opts.opsPort),
+      "--port",
+      String(opts.httpPort),
+      "--admin-pass",
+      "throwaway-admin-pass-not-a-secret",
+      "--keys-dir",
+      opts.keysDir,
+    ]);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    const match = message.match(/^process\.exit\((\d+)\)$/);
+    if (!match) throw err;
+    code = Number(match[1]);
+  } finally {
+    process.exit = origExit;
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+  }
+  return { code, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
+}
+
 // ─── Inline key resolution (mirrors plugin logic) ─────────────────────────────
 
 function resolveKey(
@@ -83,71 +161,6 @@ function resolveKey(
   if (existsSync(legacy)) return { path: legacy, source: "legacy" };
 
   return { path: null, source: null };
-}
-
-// ─── Inline rotate-key logic ──────────────────────────────────────────────────
-
-async function rotateKey(opts: {
-  agentId: string;
-  keysDir: string;
-  opsPort: number;
-  httpPort: number;
-  adminPass: string;
-}): Promise<{ newPubKeyB64url: string; privPath: string; backupPath: string }> {
-  const { agentId, keysDir, opsPort, httpPort, adminPass } = opts;
-  const adminUser = "admin";
-
-  mkdirSync(keysDir, { recursive: true });
-  const privPath = join(keysDir, `${agentId}.key`);
-  const pubPath = join(keysDir, `${agentId}.pub`);
-  const backupPath = privPath + ".bak";
-
-  // Generate new keypair
-  const kp = nacl.sign.keyPair();
-  const newSeed = kp.secretKey.slice(0, 32);
-  const newPubKeyB64url = b64url(kp.publicKey);
-
-  // Back up old key if it exists
-  if (existsSync(privPath)) {
-    writeFileSync(backupPath, readFileSync(privPath));
-    chmodSync(backupPath, 0o600);
-  }
-
-  // Update in Flair via operations API
-  const opsUrl = `http://127.0.0.1:${opsPort}/`;
-  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
-  const updateBody = {
-    operation: "update",
-    database: "flair",
-    table: "Agent",
-    records: [{ id: agentId, publicKey: newPubKeyB64url, updatedAt: new Date().toISOString() }],
-  };
-  const updateRes = await fetch(opsUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
-    body: JSON.stringify(updateBody),
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!updateRes.ok) {
-    const text = await updateRes.text().catch(() => "");
-    throw new Error(`Failed to update public key (${updateRes.status}): ${text}`);
-  }
-
-  // Write new key (only after successful Flair update)
-  writeFileSync(privPath, Buffer.from(newSeed));
-  chmodSync(privPath, 0o600);
-  writeFileSync(pubPath, Buffer.from(kp.publicKey));
-
-  // Verify auth works
-  const verifyRes = await fetch(`http://127.0.0.1:${httpPort}/Agent/${agentId}`, {
-    // Simple test — just check server responds
-    signal: AbortSignal.timeout(3000),
-  });
-  if (!verifyRes.ok && verifyRes.status !== 401) {
-    throw new Error(`Verification request failed: ${verifyRes.status}`);
-  }
-
-  return { newPubKeyB64url, privPath, backupPath };
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -252,147 +265,190 @@ describe("plugin key resolution", () => {
   });
 });
 
-describe("agent rotate-key", () => {
+describe("agent rotate-key (real command)", () => {
+  const id = "agent-a";
   let tmpDir: string;
+  let keysDir: string;
+  let privPath: string;
+  let pubPath: string;
   let opsServer: { server: Server; url: string; port: number };
   let httpServer: { server: Server; url: string; port: number };
-  let opsRequests: Array<{ method: string; path: string; body: string }> = [];
+  let opsMode: "update-ok" | "update-500" | "update-no-change";
+  let storedPublicKey: string;
+  let updateBodies: any[];
+  let authHeaders: string[];
+  let opsRequestCount: number;
 
   beforeEach(async () => {
     tmpDir = makeTmpDir();
-    opsRequests = [];
+    keysDir = join(tmpDir, "keys");
+    mkdirSync(keysDir, { recursive: true });
+    privPath = join(keysDir, `${id}.key`);
+    pubPath = join(keysDir, `${id}.pub`);
+    opsMode = "update-ok";
+    storedPublicKey = "";
+    updateBodies = [];
+    authHeaders = [];
+    opsRequestCount = 0;
 
     opsServer = await startMockServer((req, body, res) => {
-      opsRequests.push({ method: req.method ?? "GET", path: req.url ?? "/", body });
-      jsonRes(res, 200, { updated_hashes: 1 });
+      opsRequestCount += 1;
+      authHeaders.push(req.headers.authorization ?? "");
+      let parsed: any = {};
+      try { parsed = JSON.parse(body || "{}"); } catch { return jsonRes(res, 400, { error: "bad json" }); }
+      if (parsed.operation === "update" && parsed.table === "Agent") {
+        updateBodies.push(parsed);
+        if (opsMode === "update-500") return jsonRes(res, 500, { error: "refused" });
+        if (opsMode === "update-ok") storedPublicKey = String(parsed.records[0].publicKey);
+        return jsonRes(res, 200, { updated_hashes: opsMode === "update-ok" ? 1 : 0 });
+      }
+      if (parsed.operation === "search_by_value" && parsed.table === "Agent") {
+        return jsonRes(res, 200, [{ id: parsed.search_value, name: parsed.search_value, publicKey: storedPublicKey }]);
+      }
+      return jsonRes(res, 200, {});
     });
 
     httpServer = await startMockServer((_req, _body, res) => {
-      jsonRes(res, 200, { id: "test-agent" });
+      jsonRes(res, 200, { id });
     });
   });
 
   afterEach(async () => {
+    setAgentKeyFileTestHooks(undefined);
     await stopServer(opsServer.server);
     await stopServer(httpServer.server);
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("generates a new 32-byte keypair", async () => {
-    const keysDir = join(tmpDir, "keys");
-    const result = await rotateKey({
-      agentId: "test-agent",
-      keysDir,
-      opsPort: opsServer.port,
-      httpPort: httpServer.port,
-      adminPass: "test123",
+  function seedCurrentKey(mode = 0o600): Buffer {
+    const pair = newPair();
+    writeFileSync(privPath, pair.seed);
+    chmodSync(privPath, mode);
+    storedPublicKey = pair.publicKey;
+    return pair.seed;
+  }
+
+  it("(a) an existing 0644 key rotates to 0600: the new key and backup are created 0600; the warning prints", async () => {
+    const oldSeed = seedCurrentKey(0o644);
+    const observedModes: number[] = [];
+    setAgentKeyFileTestHooks({
+      beforeFirstWrite: (fd) => { observedModes.push(fstatSync(fd).mode & 0o777); },
     });
 
-    const newSeed = readFileSync(result.privPath);
-    expect(newSeed.length).toBe(32);
-    expect(result.newPubKeyB64url).toBeTruthy();
-    const pubBytes = Buffer.from(result.newPubKeyB64url, "base64url");
-    expect(pubBytes.length).toBe(32);
-  });
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
 
-  it("backs up old key before writing new one", async () => {
-    const keysDir = join(tmpDir, "keys");
-    mkdirSync(keysDir, { recursive: true });
-    const privPath = join(keysDir, "test-agent.key");
-    const oldSeed = Buffer.alloc(32, 0x99);
-    writeFileSync(privPath, oldSeed);
-
-    const result = await rotateKey({
-      agentId: "test-agent",
-      keysDir,
-      opsPort: opsServer.port,
-      httpPort: httpServer.port,
-      adminPass: "test123",
-    });
-
-    expect(existsSync(result.backupPath)).toBe(true);
-    const backedUp = readFileSync(result.backupPath);
-    expect(backedUp.equals(oldSeed)).toBe(true);
-  });
-
-  it("sends update operation to ops API with new public key", async () => {
-    const keysDir = join(tmpDir, "keys");
-    const result = await rotateKey({
-      agentId: "test-agent",
-      keysDir,
-      opsPort: opsServer.port,
-      httpPort: httpServer.port,
-      adminPass: "test123",
-    });
-
-    expect(opsRequests).toHaveLength(1);
-    const body = JSON.parse(opsRequests[0].body);
-    expect(body.operation).toBe("update");
-    expect(body.table).toBe("Agent");
-    expect(body.records[0].id).toBe("test-agent");
-    expect(body.records[0].publicKey).toBe(result.newPubKeyB64url);
-  });
-
-  it("uses Basic auth for operations API", async () => {
-    const authHeaders: string[] = [];
-    await stopServer(opsServer.server);
-    opsServer = await startMockServer((req, body, res) => {
-      authHeaders.push(req.headers.authorization ?? "");
-      opsRequests.push({ method: req.method ?? "GET", path: req.url ?? "/", body });
-      jsonRes(res, 200, { updated_hashes: 1 });
-    });
-
-    const keysDir = join(tmpDir, "keys");
-    await rotateKey({
-      agentId: "test-agent",
-      keysDir,
-      opsPort: opsServer.port,
-      httpPort: httpServer.port,
-      adminPass: "rotatepass",
-    });
-
-    expect(authHeaders.length).toBeGreaterThan(0);
-    const decoded = Buffer.from(authHeaders[0].replace("Basic ", ""), "base64").toString();
-    expect(decoded).toBe("admin:rotatepass");
-  });
-
-  it("does not write new key if ops API fails", async () => {
-    await stopServer(opsServer.server);
-    opsServer = await startMockServer((_req, _body, res) => {
-      jsonRes(res, 500, { error: "internal error" });
-    });
-
-    const keysDir = join(tmpDir, "keys");
-    const privPath = join(keysDir, "test-agent.key");
-
-    await expect(rotateKey({
-      agentId: "test-agent",
-      keysDir,
-      opsPort: opsServer.port,
-      httpPort: httpServer.port,
-      adminPass: "test123",
-    })).rejects.toThrow("500");
-
-    // Key file should not exist (ops failed before write)
-    expect(existsSync(privPath)).toBe(false);
-  });
-
-  it("new key differs from old key", async () => {
-    const keysDir = join(tmpDir, "keys");
-    mkdirSync(keysDir, { recursive: true });
-    const privPath = join(keysDir, "test-agent.key");
-    const oldSeed = Buffer.alloc(32, 0x42);
-    writeFileSync(privPath, oldSeed);
-
-    await rotateKey({
-      agentId: "test-agent",
-      keysDir,
-      opsPort: opsServer.port,
-      httpPort: httpServer.port,
-      adminPass: "test123",
-    });
-
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("readable by other users and is being replaced");
+    expect(observedModes.length).toBeGreaterThanOrEqual(2);
+    expect(observedModes.every((mode) => mode === 0o600)).toBe(true);
+    expect(modeOf(privPath)).toBe(0o600);
     const newSeed = readFileSync(privPath);
+    expect(newSeed.length).toBe(32);
     expect(newSeed.equals(oldSeed)).toBe(false);
+    const backups = backupsOf(keysDir, id);
+    expect(backups.length).toBe(1);
+    expect(modeOf(backups[0])).toBe(0o600);
+    expect(readFileSync(backups[0]).equals(oldSeed)).toBe(true);
+
+    expect(updateBodies.length).toBe(1);
+    expect(updateBodies[0].records[0].publicKey).toBe(publicKeyOfSeed(newSeed));
+    const decoded = Buffer.from(authHeaders[0].replace("Basic ", ""), "base64").toString();
+    expect(decoded).toBe("admin:throwaway-admin-pass-not-a-secret");
+  });
+
+  it("(b) an occupied <key>.bak and an earlier timestamped backup stay byte-identical; a new backup is written", async () => {
+    const oldSeed = seedCurrentKey();
+    const legacyBak = `${privPath}.bak`;
+    const earlierBak = `${privPath}.bak.2020-01-01T00-00-00-000Z`;
+    const legacyBytes = Buffer.alloc(32, 0xAA);
+    const earlierBytes = Buffer.alloc(32, 0xBB);
+    writeFileSync(legacyBak, legacyBytes);
+    writeFileSync(earlierBak, earlierBytes);
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(0);
+    expect(readFileSync(legacyBak).equals(legacyBytes)).toBe(true);
+    expect(readFileSync(earlierBak).equals(earlierBytes)).toBe(true);
+    const backups = backupsOf(keysDir, id).filter((p) => p !== earlierBak);
+    expect(backups.length).toBe(1);
+    expect(readFileSync(backups[0]).equals(oldSeed)).toBe(true);
+  });
+
+  it("(c) Flair refuses the update: the current key is byte-identical and the staged 0600 key is kept and named", async () => {
+    const oldSeed = seedCurrentKey();
+    opsMode = "update-500";
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(1);
+    expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+    const staged = stagedOf(keysDir);
+    expect(staged.length).toBe(1);
+    expect(modeOf(staged[0])).toBe(0o600);
+    expect(result.stderr).toContain(staged[0]);
+    expect(result.stderr).toContain("Flair may now hold the new public key");
+    expect(result.stderr).toContain("is unchanged");
+  });
+
+  it("(d) a 2xx update that changes no row is a failure; the current key is byte-identical and the staged key is kept", async () => {
+    const oldSeed = seedCurrentKey();
+    opsMode = "update-no-change";
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(1);
+    expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+    const staged = stagedOf(keysDir);
+    expect(staged.length).toBe(1);
+    expect(modeOf(staged[0])).toBe(0o600);
+    expect(result.stderr).toContain("does not match the new key");
+  });
+
+  it("(e) a failed rename keeps the staged key, 0600, and its public key is the one Flair stored", async () => {
+    const oldSeed = seedCurrentKey();
+    setAgentKeyFileTestHooks({
+      beforePublish: (_tempPath, finalPath) => {
+        if (finalPath === privPath) throw new Error("rename refused in test");
+      },
+    });
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(1);
+    expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+    const staged = stagedOf(keysDir);
+    expect(staged.length).toBe(1);
+    expect(modeOf(staged[0])).toBe(0o600);
+    expect(publicKeyOfSeed(readFileSync(staged[0]))).toBe(storedPublicKey);
+    expect(result.stderr).toContain(staged[0]);
+  });
+
+  it("(f) a public-key write failure after the rename says the private key was already replaced and names the backup", async () => {
+    seedCurrentKey();
+    mkdirSync(pubPath, { recursive: true });
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(1);
+    const backups = backupsOf(keysDir, id);
+    expect(backups.length).toBe(1);
+    expect(result.stderr).toContain("was already replaced");
+    expect(result.stderr).toContain(backups[0]);
+  });
+
+  it("(g) a symlinked current key is refused and its target is unchanged", async () => {
+    const target = join(tmpDir, "target.key");
+    const pair = newPair();
+    writeFileSync(target, pair.seed);
+    symlinkSync(target, privPath);
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("is a symlink");
+    expect(readFileSync(target).equals(pair.seed)).toBe(true);
+    expect(stagedOf(keysDir).length).toBe(0);
+    expect(opsRequestCount).toBe(0);
   });
 });

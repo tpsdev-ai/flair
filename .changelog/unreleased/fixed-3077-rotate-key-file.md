@@ -1,0 +1,1 @@
+- **`flair agent rotate-key` stages the replacement private key owner-only on POSIX, then renames it into place once Flair holds its public key.** The old key is backed up under a new `<agentId>.key.bak.<UTC timestamp>` name; an existing backup is left untouched. If the update cannot be verified, the staged key is kept and its path is printed.
