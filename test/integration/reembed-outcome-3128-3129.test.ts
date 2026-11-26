@@ -351,7 +351,7 @@ afterAll(async () => {
   for (const server of servers) await new Promise<void>((resolve) => server.close(() => resolve()));
   if (harper) await stopHarper(harper);
   component?.cleanup();
-  for (const home of [homeAllKeys, homeMissingC, homeOnlyA]) if (home) rmSync(home, { recursive: true, force: true });
+  for (const home of [homeAllKeys, homeMissingC, homeOnlyA, homeForeign, homeUnpaired]) if (home) rmSync(home, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
 type Run = { code: number | null; stdout: string; stderr: string };
