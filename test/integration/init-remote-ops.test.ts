@@ -392,7 +392,7 @@ describe("provisionFabric — full happy path", () => {
         }
         if (body.operation === "add_user") {
           addUserErr = true;
-          return new Response(JSON.stringify({ error: "user already exists" }), {
+          return new Response(JSON.stringify({ error: "User admin already exists" }), {
             status: 409,
             headers: { "content-type": "application/json" },
           });

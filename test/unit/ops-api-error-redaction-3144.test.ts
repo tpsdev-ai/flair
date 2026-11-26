@@ -1,16 +1,18 @@
 /**
  * A non-2xx ops API response is classified internally and reported as a fixed,
  * code-defined description; Harper's response text is never echoed (issue
- * #3144). Each stub below BUILDS its answer from the request it actually
- * received, so the echo is the real submitted value. Every echo case checks
- * the thrown message directly and after decoding attempts.
+ * #3144). The echo stubs build their answer from the request they actually
+ * received, so the echo is the real submitted value; the classification stubs
+ * return fixed responses. Every echo case checks the thrown message directly
+ * and after decoding attempts.
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { chdir } from "node:process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { callOpsApi, provisionFabric } from "../../src/cli.js";
+import { gunzipSync } from "node:zlib";
+import { buildDeployTarball, callOpsApi, provisionFabric } from "../../src/cli.js";
 
 const USER = "cluster-admin";
 const PASS = "cluster-secret-3144";
@@ -31,6 +33,10 @@ type Mode =
   | "error-echoes-basic-password"
   | "error-echoes-deploy-payload"
   | "error-echoes-body-under-other-field"
+  | "already-exists-in-received"
+  | "invalid-password-with-already-exists"
+  | "not-authorized-401"
+  | "already-exists-message-only"
   | "non-json-body";
 
 let server: ReturnType<typeof Bun.serve>;
@@ -97,6 +103,22 @@ beforeEach(() => {
           break;
         case "error-echoes-body-under-other-field":
           payload = { error: "refused", received: body };
+          break;
+        case "already-exists-in-received":
+          status = 409;
+          payload = { received: { password: "already exists" } };
+          break;
+        case "invalid-password-with-already-exists":
+          status = 409;
+          payload = { error: "invalid password: already exists" };
+          break;
+        case "not-authorized-401":
+          status = 401;
+          payload = { error: "not authorized" };
+          break;
+        case "already-exists-message-only":
+          status = 409;
+          payload = { message: "User admin already exists" };
           break;
         case "non-json-body":
           return new Response(`invalid password: ${password}`, { status: 400 });
@@ -247,17 +269,30 @@ describe("callOpsApi fixed error descriptions (#3144)", () => {
     expect(message).toContain("withheld");
   });
 
-  test("never echoes a deploy payload that carries a real .env credential", async () => {
+  test("never echoes a deploy tarball built from a real operator .env", async () => {
     mode = "error-echoes-deploy-payload";
     const envCredential = "deploy-env-credential-3144";
-    const payload = Buffer.from(`FLAIR_AGENT_SECRET=${envCredential}\n`).toString("base64");
-    const message = (await thrownError({ operation: "deploy_component", project: "flair", payload, restart: "rolling" })).message;
+    const root = mkdtempSync(join(tmpdir(), "flair-unit-3144-env-"));
+    try {
+      writeFileSync(join(root, "package.json"), "{}");
+      writeFileSync(join(root, "config.yaml"), "restart: rolling\n");
+      mkdirSync(join(root, "dist"));
+      mkdirSync(join(root, "schemas"));
+      for (const name of ["LICENSE", "README.md", "SECURITY.md"]) writeFileSync(join(root, name), "fixture\n");
+      writeFileSync(join(root, ".env"), `FLAIR_AGENT_SECRET=${envCredential}\n`);
+      const { tarballB64 } = await buildDeployTarball(root, "http://127.0.0.1:9926");
+      // The operator's credential is really inside the tarball the server gets.
+      expect(gunzipSync(Buffer.from(tarballB64, "base64")).toString("utf8")).toContain(envCredential);
+      const message = (await thrownError({ operation: "deploy_component", project: "flair", payload: tarballB64, restart: "rolling" })).message;
 
-    expect(received.payload).toBe(payload);
-    expect(leaked(message, envCredential)).toBe(false);
-    // The base64 payload itself must not survive either.
-    expect(leaked(message, payload)).toBe(false);
-    expect(message).toContain("withheld");
+      expect(received.payload).toBe(tarballB64);
+      expect(message).not.toContain(tarballB64);
+      expect(leaked(message, tarballB64)).toBe(false);
+      expect(leaked(message, envCredential)).toBe(false);
+      expect(message).toContain("withheld");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("never echoes a non-JSON body", async () => {
@@ -275,6 +310,40 @@ describe("callOpsApi fixed error descriptions (#3144)", () => {
     expect(message).toContain("withheld");
     expect(leaked(message, PASSWORD)).toBe(false);
     expect(leaked(message, PASS)).toBe(false);
+  });
+
+  test("does not classify the phrase 'already exists' from another field", async () => {
+    mode = "already-exists-in-received";
+    const message = (await thrownError(addUserBody())).message;
+
+    expect(message).toContain("withheld");
+    expect(message).not.toContain("the user already exists");
+  });
+
+  test("does not classify an error string that merely contains 'already exists'", async () => {
+    mode = "invalid-password-with-already-exists";
+    const message = (await thrownError(addUserBody())).message;
+
+    expect(message).toContain("withheld");
+    expect(message).not.toContain("the user already exists");
+  });
+
+  test("does not classify a 401 refusal as a role refusal", async () => {
+    mode = "not-authorized-401";
+    const message = (await thrownError(addUserBody())).message;
+
+    expect(message).toContain("(401)");
+    expect(message).toContain("withheld");
+    expect(message).not.toContain("the operation is not permitted for this role");
+  });
+
+  test("classifies an already-exists message when the error field is absent", async () => {
+    mode = "already-exists-message-only";
+    const message = (await thrownError(addUserBody())).message;
+
+    expectStatusAndOperation(message, 409);
+    expect(message).toContain("the user already exists");
+    expect(message).not.toContain("withheld");
   });
 
   test("drives the alter_user fallback from the classification, not the message text", async () => {

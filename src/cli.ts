@@ -4006,10 +4006,11 @@ async function assertSingleInstanceRowAfterWrite(endpoint: OpsEndpoint, expected
 // creates the super_user admin account.
 
 /**
- * Categories of ops API refusal that callers act on. `callOpsApi` classifies
- * Harper's response text internally and throws a fixed, code-defined
- * description for the category; the response text itself never reaches the
- * message, in any encoding (issue #3144).
+ * Categories of ops API refusal that callers act on. `callOpsApi` reads the
+ * parsed body's `error` string (or `message` when `error` is absent), classifies
+ * it only when the response's status (and, for already-exists, operation) is the
+ * one that category describes, and throws a fixed, code-defined description; the
+ * body itself never reaches the message, in any encoding (issue #3144).
  */
 export type OpsApiErrorCategory = "already-exists" | "not-permitted" | "authentication-failed";
 
@@ -4022,14 +4023,27 @@ const OPS_API_ERROR_DESCRIPTIONS: Record<OpsApiErrorCategory, string> = {
 const OPS_API_REFUSAL_DESCRIPTION = "the ops API refused the request (details withheld)";
 
 /**
- * Harper's spellings for each category. These strings are read here, for
- * classification only, and are never copied into a message.
+ * Harper's exact wording for each category, anchored to the whole field value.
+ * These strings are read here, for classification only, and are never copied
+ * into a message.
  */
 const OPS_API_ERROR_PATTERNS: ReadonlyArray<readonly [OpsApiErrorCategory, RegExp]> = [
-  ["already-exists", /\balready exists\b/i],
-  ["not-permitted", /not permitted|not authorized|restricted to .?super_user.? roles|permission denied|forbidden/i],
-  ["authentication-failed", /login failed|invalid credentials|authentication failed|bad credentials/i],
+  ["already-exists", /^User .+ already exists$/],
+  ["not-permitted", /^This operation is not authorized due to role restrictions and\/or invalid database items$/],
+  ["authentication-failed", /^Login failed$/],
 ];
+
+/** The status (and, for already-exists, operation) each category is defined by. */
+function categoryMatches(category: OpsApiErrorCategory, status: number, operation: string): boolean {
+  switch (category) {
+    case "already-exists":
+      return status === 409 && operation === "add_user";
+    case "not-permitted":
+      return status === 403;
+    case "authentication-failed":
+      return status === 401;
+  }
+}
 
 /** A non-2xx ops API response, reduced to a category and a fixed description. */
 export class OpsApiError extends Error {
@@ -4049,22 +4063,24 @@ export class OpsApiError extends Error {
   }
 }
 
-function classifyOpsApiError(text: string): OpsApiErrorCategory | null {
-  // Classify Harper's `error`/`message` when the body is JSON; otherwise the raw
-  // text is all there is to read. The candidate is never returned or printed.
-  let candidate = text;
+function classifyOpsApiError(status: number, operation: string, text: string): OpsApiErrorCategory | null {
+  // Classify the parsed body's `error` string, or `message` when `error` is
+  // absent, and only when the status (and, for already-exists, operation) is the
+  // category's own. Anything else — a non-JSON body, a body with neither string,
+  // another field, another status or operation — is unclassified. The value is
+  // never returned or printed.
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(text);
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      const record = parsed as Record<string, unknown>;
-      const value = typeof record.error === "string" ? record.error : record.message;
-      if (typeof value === "string" && value.length > 0) candidate = value;
-    }
+    parsed = JSON.parse(text);
   } catch {
-    /* not JSON: classify the raw text */
+    return null;
   }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  const value = typeof record.error === "string" ? record.error : record.message;
+  if (typeof value !== "string") return null;
   for (const [category, pattern] of OPS_API_ERROR_PATTERNS) {
-    if (pattern.test(candidate)) return category;
+    if (categoryMatches(category, status, operation) && pattern.test(value)) return category;
   }
   return null;
 }
@@ -4096,7 +4112,7 @@ export async function callOpsApi(
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     const operation = typeof body.operation === "string" ? body.operation : "unknown";
-    throw new OpsApiError(res.status, operation, classifyOpsApiError(text));
+    throw new OpsApiError(res.status, operation, classifyOpsApiError(res.status, operation, text));
   }
   return res.json();
 }
