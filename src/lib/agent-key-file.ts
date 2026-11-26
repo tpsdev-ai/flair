@@ -79,8 +79,9 @@ export function setAgentKeyFileTestHooks(hooks: AgentKeyFileTestHooks | undefine
  * before it is published. Cleanup removes a path only if, when checked, it
  * still names the file this grant created; a path swapped between that check
  * and the unlink can still be removed, which a POSIX unlink by name cannot
- * prevent. The keys directory is owner-only (0700 on POSIX), so only a
- * process running as the same user can make that swap.
+ * prevent. On POSIX the keys directory is owner-only (0700, or narrower if it
+ * already was), so only its owning user or a privileged process can make that
+ * swap.
  */
 export interface KeyFileIdentity {
   dev: number;
@@ -380,9 +381,9 @@ export function createAgentKeyFile(
     // linkSync fails with EEXIST when the final path appears before publication.
     linkSync(temp.path, privateKeyPath);
     testHooks?.afterPublish?.(privateKeyPath);
-    // The published name is a hard link to the temp file, so the identity
-    // recorded from the temp file's descriptor is the identity at the final
-    // path; never re-derive it from the path after publication.
+    // The hard link initially publishes the temp file's inode at the final
+    // path; the identity recorded from the temp descriptor stays that inode
+    // even if the path is replaced later. Never re-derive it from the path.
     onCreated?.(privateKeyPath, temp.identity);
   } catch (error) {
     try {

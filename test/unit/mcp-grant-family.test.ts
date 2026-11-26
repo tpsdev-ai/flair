@@ -232,7 +232,7 @@ describe("grantMcpClient — duplicate-name rejection", () => {
       thrown = error as Error;
     }
     expect(thrown?.message).toMatch(/Failed to create Agent/);
-    expect(thrown?.message).toMatch(/removed the key files this call created/);
+    expect(thrown?.message).toMatch(/removed the key paths that still named this call's files when checked/);
     expect(existsSync(join(keysDir, "will-fail.key"))).toBe(false);
     expect(existsSync(join(keysDir, "will-fail.pub"))).toBe(false);
     expect(readMcpClientManifest(manifestPath)).toHaveLength(0);
@@ -386,7 +386,7 @@ describe("grantMcpClient — key files", () => {
     await expect(grantMcpClient(
       { name: "partial", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "fixture" },
       { fetchImpl },
-    )).rejects.toThrow("injected partial write; removed the key files this call created");
+    )).rejects.toThrow("injected partial write; removed the key paths that still named this call's files when checked");
     expect(readdirSync(keysDir)).toEqual([]);
     expect(calls.some(call => call.operation === "insert")).toBe(false);
   });
@@ -463,7 +463,7 @@ describe("grantMcpClient — key files", () => {
       expect(existsSync(path)).toBe(failUnlink);
       if (failUnlink) expect(message).toContain(path);
     }
-    expect(message).toContain(failUnlink ? "could not remove key file(s)" : "removed the key files this call created");
+    expect(message).toContain(failUnlink ? "could not remove key file(s)" : "removed the key paths that still named this call's files when checked");
   });
 
   test("tightens a widened existing keys directory to owner-only on POSIX", async () => {
