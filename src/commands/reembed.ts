@@ -14,7 +14,7 @@ import {
   readHttpInstanceIdentity,
   resolveTargetInstanceIdentity,
 } from "../lib/agent-home.js";
-import { proveLocalInstancePair } from "../lib/local-instance-pair.js";
+import { IncompleteInstancePairError, proveLocalInstancePair } from "../lib/local-instance-pair.js";
 import {
   MEMORY_REEMBED_PATCH_CAPABILITY,
   healthVersion,
@@ -425,13 +425,43 @@ export async function reembedServerSupportError(baseUrl: string): Promise<string
   return reembedUnsupportedMessage(healthVersion(body));
 }
 
+const REEMBED_INCOMPLETE_PAIR_REMEDY =
+  "configure the missing port settings in ~/.flair/config.yaml (or the data directory's harper-config.yaml), or correct the HTTP override (--port or FLAIR_URL) and the ops override (FLAIR_OPS_PORT).";
+
+const REEMBED_LISTENER_UNAVAILABLE_REMEDY =
+  "This CLI could not read the OS listener table; run flair reembed where it can read Harper's listeners.";
+
 /** The remedy appended to a target-pair refusal for an unbound pair (flair#3135). */
 const REEMBED_UNBOUND_TARGET_REMEDY =
-  "Remove or correct the --port or FLAIR_URL override so the instance's configured pair is used.";
+  "Remove or correct the --port or FLAIR_URL override and the FLAIR_OPS_PORT override so the instance's configured pair is used.";
 
 /** The remedy appended to a target-pair refusal for a configured pair (flair#3135). */
 const REEMBED_PAIR_MISMATCH_REMEDY =
   "The configured pair does not match the running instance; check ~/.flair/config.yaml (or the data directory's harper-config.yaml).";
+
+/** Why the all-agent run refused its target pair (flair#3135). */
+type ReembedTargetRefusalReason =
+  | { kind: "incomplete-config" }
+  | { kind: "listener-table-unavailable" }
+  | { kind: "pair-mismatch"; pairBound: boolean }
+  | { kind: "identity-mismatch" }
+  | { kind: "unproven"; remedy: string | undefined };
+
+/** Picks the remedy for every target-pair refusal; only a proven-pair mismatch reads `pairBound`. */
+function reembedTargetRefusalRemedy(reason: ReembedTargetRefusalReason): string {
+  switch (reason.kind) {
+    case "incomplete-config":
+      return REEMBED_INCOMPLETE_PAIR_REMEDY;
+    case "listener-table-unavailable":
+      return REEMBED_LISTENER_UNAVAILABLE_REMEDY;
+    case "pair-mismatch":
+      return reason.pairBound ? REEMBED_PAIR_MISMATCH_REMEDY : REEMBED_UNBOUND_TARGET_REMEDY;
+    case "identity-mismatch":
+      return REEMBED_PAIR_MISMATCH_REMEDY;
+    case "unproven":
+      return reason.remedy ?? "This CLI could not prove the local port pair; check the ops endpoint's configuration and listener visibility.";
+  }
+}
 
 /**
  * flair#3135: the administrator's Basic credential goes to the HTTP port only
@@ -446,16 +476,21 @@ async function reembedTargetPairRefusal(
   adminUser: string,
   adminPass: string,
 ): Promise<string | null> {
-  const remedy = target.pairBound ? REEMBED_PAIR_MISMATCH_REMEDY : REEMBED_UNBOUND_TARGET_REMEDY;
-  const refusal = (detail: string): string =>
-    `❌ flair reembed stopped before its first write: ${ambiguousInstanceTargetError()} — ${detail}\n   ${remedy}`;
+  const refusal = (detail: string, reason: ReembedTargetRefusalReason): string =>
+    `❌ flair reembed stopped before its first write: ${ambiguousInstanceTargetError()} — ${detail}\n   ${reembedTargetRefusalRemedy(reason)}`;
   const authorization = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
   const proof = await proveLocalInstancePair(target.opsPort, authorization);
   if (proof.kind !== "proven") {
-    return refusal(`the ops port ${target.opsPort} is not proven to pair with an HTTP port on this host: ${proof.detail}`);
+    return refusal(
+      `the ops port ${target.opsPort} is not proven to pair with an HTTP port on this host: ${proof.detail}`,
+      proof.reason === "listener-table-unavailable" ? { kind: "listener-table-unavailable" } : { kind: "unproven", remedy: proof.remedy },
+    );
   }
   if (proof.httpPort !== target.httpPort) {
-    return refusal(`the ops port ${target.opsPort} is proven to pair with HTTP port ${proof.httpPort}, not ${target.httpPort}`);
+    return refusal(
+      `the ops port ${target.opsPort} is proven to pair with HTTP port ${proof.httpPort}, not ${target.httpPort}`,
+      { kind: "pair-mismatch", pairBound: target.pairBound },
+    );
   }
   const [httpIdentity, opsIdentity] = await Promise.all([
     readHttpInstanceIdentity(`http://127.0.0.1:${target.httpPort}`, adminUser, adminPass),
@@ -463,7 +498,7 @@ async function reembedTargetPairRefusal(
   ]);
   const decision = decideProbedPairIdentity(httpIdentity, opsIdentity);
   if (decision.kind === "different") {
-    return refusal(`the HTTP port reports instance ${decision.httpId}, the ops API reports instance ${decision.opsId}`);
+    return refusal(`the HTTP port reports instance ${decision.httpId}, the ops API reports instance ${decision.opsId}`, { kind: "identity-mismatch" });
   }
   return null;
 }
@@ -530,7 +565,9 @@ program
       try {
         target = resolveAgentHomeTarget(opts);
       } catch (err) {
-        console.error(`❌ ${errorText(err)}`);
+        console.error(err instanceof IncompleteInstancePairError
+          ? `❌ ${ambiguousInstanceTargetError()} — This CLI found no complete configured pair (missing ${err.reason.missing} port settings); ${reembedTargetRefusalRemedy({ kind: "incomplete-config" })}`
+          : `❌ ${errorText(err)}`);
         process.exit(1);
       }
       baseUrl = `http://127.0.0.1:${target.httpPort}`;

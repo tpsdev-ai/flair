@@ -69,7 +69,16 @@ const LOCAL_HTTP_BIND_HOSTS = ["127.0.0.1", "localhost", "0.0.0.0", "[::]", ""];
 /** The outcome of {@link proveLocalInstancePair}. */
 export type LocalInstancePairProof =
   | { kind: "proven"; httpPort: number }
-  | { kind: "unproven"; status: number | null; detail: string; remedy?: string };
+  | { kind: "unproven"; status: number | null; detail: string; remedy?: string; reason?: "listener-table-unavailable" };
+
+export class IncompleteInstancePairError extends Error {
+  readonly reason: { kind: "incomplete-config"; missing: string };
+
+  constructor(message: string, missing: string) {
+    super(message);
+    this.reason = { kind: "incomplete-config", missing };
+  }
+}
 
 /** The OS reads behind steps 2 to 5. */
 export interface InstancePairOsReads {
@@ -271,7 +280,7 @@ function harperListenerRefusal(os: InstancePairOsReads, pid: number, label: "ops
 /** The one process listening on `port`, or an `unproven` proof naming why not. */
 function soleListener(read: ListenerRead, label: "ops" | "HTTP", port: number): { pid: number } | LocalInstancePairProof {
   if (read.kind === "unavailable") {
-    return { kind: "unproven", status: null, detail: `the listener table for ${label} port ${port} cannot be read: ${read.reason}`, remedy: read.remedy };
+    return { kind: "unproven", status: null, detail: `the listener table for ${label} port ${port} cannot be read: ${read.reason}`, remedy: read.remedy, reason: "listener-table-unavailable" };
   }
   if (read.pids.length === 0) {
     return {

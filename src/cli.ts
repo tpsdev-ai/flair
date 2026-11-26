@@ -74,7 +74,7 @@ import { flairConfigPath, flairDataDir } from "./lib/flair-paths.js";
 import { encodeRecordId } from "./lib/record-id-path.js";
 import { invalidAgentIdMessage, isValidAgentId } from "./lib/agent-id-rule.js";
 import { agentHomeEndpoint, decideProbedPairIdentity, readHttpInstanceIdentity, resolveTargetInstanceId, resolveTargetInstanceIdentity, stampAgentHome, type ProbedPairIdentity } from "./lib/agent-home.js";
-import { proveLocalInstancePair, type LocalInstancePairProof } from "./lib/local-instance-pair.js";
+import { IncompleteInstancePairError, proveLocalInstancePair, type LocalInstancePairProof } from "./lib/local-instance-pair.js";
 import {
   httpBind,
   httpCorsAccessList,
@@ -1612,9 +1612,10 @@ export function decideAgentHomeTarget(i: AgentHomeTargetInputs): AgentHomeTarget
   const opsNamed = namedOps !== null;
   if (httpNamed !== opsNamed) {
     const [named, namedPort, other] = httpNamed ? ["HTTP", httpPort, "ops"] : ["ops", namedOps, "HTTP"];
-    throw new Error(
+    throw new IncompleteInstancePairError(
       `${AMBIGUOUS_INSTANCE_TARGET_ERROR}: only the ${named} port (${namedPort}) was named, and no complete port pair could be resolved from config `
         + `(HTTP ${configuredHttp ?? "none"}, ops ${configuredOps ?? "none"}) to take the ${other} port from, so the two ports could address different instances. ${remedy}`,
+      [configuredHttp === null ? "HTTP" : null, configuredOps === null ? "ops" : null].filter(Boolean).join(" and "),
     );
   }
   if (namedOps !== null) return { httpPort, opsPort: namedOps, pairBound: false };

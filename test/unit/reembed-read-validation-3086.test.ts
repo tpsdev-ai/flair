@@ -27,12 +27,7 @@ const realExit = process.exit;
 const realLog = console.log;
 const realError = console.error;
 
-/** The pair proof reads the OS listener table; the stub server has no process, so inject one. */
-const SIMULATED_LISTENER_TABLE = {
-  listeners: () => ({ kind: "listeners" as const, pids: [24_600] }),
-  birth: () => ({ kind: "birth" as const, id: "24600@simulated" }),
-  commandLine: () => "node\u0000/simulated/node_modules/harper/dist/bin/harper.js\u0000run\u0000.",
-};
+import { SIMULATED_LISTENER_TABLE } from "../helpers/simulated-instance-pair";
 
 type Scenario = { name: string; body: unknown };
 

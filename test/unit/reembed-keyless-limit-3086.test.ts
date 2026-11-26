@@ -11,11 +11,14 @@
  */
 import { afterEach, expect, test } from "bun:test";
 import { Command } from "commander";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { tempDir } from "../helpers/temp-dir";
 import { KEYLESS_SEARCH_LIMIT, bindCli, register } from "../../src/commands/reembed.ts";
+import { resolveAgentHomeTarget } from "../../src/cli.js";
+import { setInstancePairOsReadsForTests } from "../../src/lib/local-instance-pair.ts";
+import { SIMULATED_LISTENER_TABLE } from "../helpers/simulated-instance-pair";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const patched: string[] = [];
@@ -26,6 +29,7 @@ const realLog = console.log;
 const realError = console.error;
 
 afterEach(() => {
+  setInstancePairOsReadsForTests(null);
   globalThis.fetch = realFetch;
   process.exit = realExit;
   console.log = realLog;
@@ -122,3 +126,89 @@ test("without --dry-run the limit still processes its candidate, prints the noti
   expect(notices[0]).toContain("FLAIR_ADMIN_PASS");
   expect(exitCode).toBe(1);
 }, 30_000);
+
+for (const scenario of ["missing HTTP", "missing ops", "missing both", "unavailable listener table", "different proven pair", "override-named different proven pair"] as const) {
+  test(`the ${scenario} refusal prints its corresponding remedy`, async () => {
+    const requests: string[] = [];
+    setInstancePairOsReadsForTests(scenario === "unavailable listener table" ? {
+      ...SIMULATED_LISTENER_TABLE,
+      listeners: () => ({ kind: "unavailable", reason: "simulated unreadable table", remedy: "listener visibility remedy" }),
+    } : SIMULATED_LISTENER_TABLE);
+    globalThis.fetch = (async (url: unknown) => {
+      requests.push(String(url));
+      return Response.json({ http: { port: 7926 }, operationsApi: { network: { port: 7925 } } });
+    }) as typeof fetch;
+    const home = tempDir("reembed-target-3135-");
+    const dataDir = join(home, ".flair", "data");
+    mkdirSync(dataDir, { recursive: true });
+    const configuredHttp = scenario === "missing HTTP" || scenario === "missing both" ? null
+      : scenario === "different proven pair" ? 8926 : scenario === "override-named different proven pair" ? 6926 : 7926;
+    const configuredOps = scenario === "missing ops" || scenario === "missing both" ? null
+      : scenario === "override-named different proven pair" ? 6925 : 7925;
+    writeFileSync(join(dataDir, "harper-config.yaml"), [
+      configuredHttp === null ? "" : `http:\n  port: ${configuredHttp}\n`,
+      configuredOps === null ? "" : `operationsApi:\n  network:\n    port: ${configuredOps}\n`,
+    ].join(""));
+    bindCli({
+      privKeyPath: () => { throw new Error("unexpected key read"); },
+      resolveHttpPort: () => 8926,
+      resolveOpsPort: () => 7925,
+      resolveAgentHomeTarget: () => resolveAgentHomeTarget({
+        dataDir,
+        ...(scenario === "missing HTTP" ? {} : { port: scenario === "unavailable listener table" ? 7926 : 8926 }),
+        ...(scenario === "missing ops" || scenario === "missing both" ? {} : { opsPort: 7925 }),
+      }),
+      ambiguousInstanceTargetError: "ambiguous_instance_target",
+    });
+    const logs: string[] = [];
+    process.exit = ((code?: number) => { throw new Error(`EXIT:${code}`); }) as typeof process.exit;
+    console.log = console.error = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+    const saved = {
+      pass: process.env.FLAIR_ADMIN_PASS, hdb: process.env.HDB_ADMIN_PASSWORD,
+      url: process.env.FLAIR_URL, ops: process.env.FLAIR_OPS_PORT, home: process.env.HOME,
+    };
+    process.env.HOME = home;
+    delete process.env.FLAIR_URL;
+    delete process.env.FLAIR_OPS_PORT;
+    process.env.FLAIR_ADMIN_PASS = "stub-admin-pass";
+    delete process.env.HDB_ADMIN_PASSWORD;
+    try {
+      const program = new Command().exitOverride();
+      register(program);
+      await expect(program.parseAsync(["reembed"], { from: "user" })).rejects.toThrow("EXIT:1");
+    } finally {
+      if (saved.pass === undefined) delete process.env.FLAIR_ADMIN_PASS; else process.env.FLAIR_ADMIN_PASS = saved.pass;
+      if (saved.hdb === undefined) delete process.env.HDB_ADMIN_PASSWORD; else process.env.HDB_ADMIN_PASSWORD = saved.hdb;
+      if (saved.url === undefined) delete process.env.FLAIR_URL; else process.env.FLAIR_URL = saved.url;
+      if (saved.ops === undefined) delete process.env.FLAIR_OPS_PORT; else process.env.FLAIR_OPS_PORT = saved.ops;
+      if (saved.home === undefined) delete process.env.HOME; else process.env.HOME = saved.home;
+    }
+    const output = logs.join("\n");
+    expect(output).toContain("ambiguous_instance_target");
+    const remedies = [
+      "configure the missing port settings",
+      "run flair reembed where it can read Harper's listeners",
+      "check ~/.flair/config.yaml",
+      "Remove or correct the --port or FLAIR_URL override",
+    ];
+    const expected = scenario.startsWith("missing") ? 0 : scenario === "unavailable listener table" ? 1
+      : scenario === "different proven pair" ? 2 : 3;
+    for (const [index, remedy] of remedies.entries()) {
+      if (index === expected) expect(output).toContain(remedy);
+      else expect(output).not.toContain(remedy);
+    }
+    if (expected === 0) {
+      const side = scenario === "missing both" ? "HTTP and ops" : scenario.slice("missing ".length);
+      expect(output).toContain(`missing ${side} port settings`);
+      for (const override of ["--port", "FLAIR_URL", "FLAIR_OPS_PORT"]) expect(output).toContain(override);
+      expect(requests).toEqual([]);
+    } else {
+      expect(requests).toEqual(["http://127.0.0.1:7925/"]);
+    }
+    if (expected === 1) {
+      expect(output).toContain("could not read the OS listener table");
+      expect(output).not.toContain("does not match");
+    }
+    if (expected === 2) expect(output).toContain("configured pair does not match the running instance");
+  }, 10_000);
+}

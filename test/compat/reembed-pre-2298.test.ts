@@ -10,6 +10,7 @@ import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 
 const CLI = join(resolve(import.meta.dir, "../.."), "dist", "cli.js");
+const PRELOAD = join(resolve(import.meta.dir, ".."), "helpers", "reembed-fault-preload.ts");
 const BASELINE_VERSION = "0.59.0";
 const AGENT_ID = "reembed-compat-agent";
 const MEMORY_ID = "reembed-compat-memory";
@@ -64,13 +65,14 @@ describe("HEAD reembed against published Flair 0.59.0 [flair#2337]", () => {
     return rows[0];
   }
 
-  function runReembed(args: string[], httpPort: number = port): Promise<{ code: number | null; signal: string | null; out: string }> {
+  function runReembed(args: string[], httpPort: number = port, fetchLog?: string): Promise<{ code: number | null; signal: string | null; out: string }> {
     return new Promise((resolveRun, reject) => {
-      const child = spawn("node", [CLI, "reembed", "--port", String(httpPort), ...args], {
+      const child = spawn("node", ["--import", PRELOAD, CLI, "reembed", "--port", String(httpPort), ...args], {
         cwd: baselineDir,
         env: {
           ...cleanEnv(),
           HOME: home,
+          ...(fetchLog ? { FLAIR_TEST_FETCH_LOG: fetchLog } : {}),
           FLAIR_OPS_PORT: new URL(baseline!.opsURL).port,
           FLAIR_ADMIN_USER: baseline!.admin.username,
           FLAIR_ADMIN_PASS: baseline!.admin.password,
@@ -182,13 +184,16 @@ describe("HEAD reembed against published Flair 0.59.0 [flair#2337]", () => {
     }
   }, 120_000);
 
-  test("all agents: refusal, zero writes and unchanged stored embedding", async () => {
+  test("all agents: refusal, zero PATCH requests and unchanged stored embedding", async () => {
     const before = await readMemory();
-    // The all-agent run targets the instance's real HTTP port, so the pair
-    // proof passes and the advertisement refusal is what fires. The proxy's
-    // PATCH counter covers the --agent case only; zero writes here are proven
-    // by the stored row read back unchanged.
-    const result = await runReembed([], Number(new URL(baseline!.httpURL).port));
+    // Target Harper's real port so the pair proof reaches the advertisement check.
+    const fetchLog = join(baselineDir, "all-agents-fetch.jsonl");
+    await writeFile(fetchLog, "");
+    const result = await runReembed([], Number(new URL(baseline!.httpURL).port), fetchLog);
+    const requests = (await readFile(fetchLog, "utf8")).trim().split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line) as { method: string; host: string; path: string });
+    expect(requests.some((req) => req.host === new URL(baseline!.httpURL).host && req.path === "/Health")).toBe(true);
+    expect(requests.filter((req) => req.method.toUpperCase() === "PATCH")).toHaveLength(0);
     expect(result.signal, result.out).toBeNull();
     expect(result.code, result.out).toBe(1);
     expect(result.out).toContain("does not advertise the re-embed PATCH");
