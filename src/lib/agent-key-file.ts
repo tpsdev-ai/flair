@@ -40,7 +40,7 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 /** A refusal is operator-facing: the caller prints the message and exits 1. */
 export class AgentKeyFileRefusal extends Error {
@@ -120,8 +120,23 @@ export function ensureAgentKeysDir(keysDir: string): void {
     if (errnoCode(error) !== "ENOENT") throw error;
     // The directory is owner-only from creation: the umask can only narrow the
     // mode, never widen it past 0700. No later chmod is involved.
-    mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+    const firstCreated = mkdirSync(keysDir, { recursive: true, mode: 0o700 });
     testHooks?.afterKeysDirCreate?.(keysDir);
+    if (firstCreated !== undefined) {
+      for (let created = keysDir; ; created = dirname(created)) {
+        if ([".", ".."].includes(basename(created))) continue;
+        const parent = dirname(created);
+        try {
+          syncAgentKeysDir(parent);
+        } catch (error) {
+          throw new AgentKeyFileRefusal(
+            `flair could not sync parent directory ${parent} (${error instanceof Error ? error.message : String(error)}); ` +
+              `new keys directory ${keysDir} is not confirmed durable; check the directory and filesystem, then retry`,
+          );
+        }
+        if (resolve(created) === resolve(firstCreated)) break;
+      }
+    }
     return;
   }
 
@@ -399,10 +414,10 @@ export function isAgentKeyRotationBackup(name: string, privateKeyName: string): 
   return Number.isFinite(parsed.getTime()) && rotationBackupStamp(parsed) === stamp;
 }
 
-function syncAgentKeysDir(privateKeyPath: string): void {
+function syncAgentKeysDir(directory: string): void {
   // Windows cannot open directories for fsync.
   if (WIN32) return;
-  const fd = openSync(dirname(privateKeyPath), constants.O_RDONLY | constants.O_DIRECTORY | NOFOLLOW);
+  const fd = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | NOFOLLOW);
   try {
     (testHooks?.syncKeysDir ?? fsyncSync)(fd);
   } finally {
@@ -418,8 +433,8 @@ function syncAgentKeysDir(privateKeyPath: string): void {
 export function stageAgentKeyFile(privateKeyPath: string, data: string | Uint8Array): string {
   const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data));
   try {
-    // Persist the staged name before Flair can accept the new public key.
-    syncAgentKeysDir(privateKeyPath);
+    // Sync the staged entry before Flair can accept the new public key.
+    syncAgentKeysDir(dirname(privateKeyPath));
     return tempPath;
   } catch (error) {
     try { unlinkSync(tempPath); } catch { /* best effort */ }
@@ -437,7 +452,7 @@ export function replaceAgentKeyFile(privateKeyPath: string, stagedPath: string):
   testHooks?.beforePublish?.(stagedPath, privateKeyPath);
   renameSync(stagedPath, privateKeyPath);
   try {
-    syncAgentKeysDir(privateKeyPath);
+    syncAgentKeysDir(dirname(privateKeyPath));
   } catch (error) {
     console.error(`Warning: flair could not sync keys directory ${dirname(privateKeyPath)} (${error instanceof Error ? error.message : String(error)}); the new private key is in place at ${privateKeyPath}.`);
   }

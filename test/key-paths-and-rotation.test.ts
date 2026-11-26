@@ -11,7 +11,7 @@ import {
   mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, chmodSync,
   fstatSync, readdirSync, statSync, symlinkSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import * as fs from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -375,6 +375,68 @@ describe("agent rotate-key (real command, POSIX)", () => {
     expect(result.code).toBe(0);
     expect(syncs).toBe(2);
     expect(rotationEvents).toEqual(["staged sync", "update", "rename", "installed sync"]);
+  });
+
+  for (const missing of [1, 3, "dotdot"] as const) {
+    it.skipIf(process.platform === "win32")(`syncs created-directory parents before the update (${missing})`, async () => {
+      rmSync(keysDir, { recursive: true });
+      keysDir = missing === "dotdot"
+        ? `${tmpDir}/detour/../keys`
+        : join(tmpDir, ...Array.from({ length: missing }, (_, i) => `missing-${i}`));
+      privPath = join(keysDir, `${id}.key`);
+      const parents: string[] = missing === "dotdot" ? [`${tmpDir}/detour/..`, tmpDir] : [];
+      if (missing !== "dotdot") {
+        for (let created = keysDir; created !== tmpDir; created = dirname(created)) {
+          parents.push(dirname(created));
+        }
+      }
+      const directories = [...parents, keysDir, keysDir];
+      let syncs = 0;
+      setAgentKeyFileTestHooks({
+        syncKeysDir: (fd) => {
+          const actual = fstatSync(fd);
+          const expected = statSync(directories[syncs]);
+          expect(actual.isDirectory()).toBe(true);
+          expect([actual.dev, actual.ino]).toEqual([expected.dev, expected.ino]);
+          rotationEvents.push(`sync ${directories[syncs++]}`);
+          fs.fsyncSync(fd);
+        },
+        beforePublish: () => { rotationEvents.push("rename"); },
+      });
+
+      const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+      expect(result.code).toBe(0);
+      expect(syncs).toBe(directories.length);
+      expect(rotationEvents).toEqual([
+        ...parents.map(parent => `sync ${parent}`), `sync ${keysDir}`, "update", "rename", `sync ${keysDir}`,
+      ]);
+      expect(publicKeyOfSeed(readFileSync(privPath))).toBe(storedPublicKey);
+    });
+  }
+
+  it.skipIf(process.platform === "win32")("refuses a failed created-directory parent sync before sending an update", async () => {
+    rmSync(keysDir, { recursive: true });
+    let syncs = 0;
+    setAgentKeyFileTestHooks({ syncKeysDir: (fd) => {
+      const actual = fstatSync(fd);
+      const parent = statSync(tmpDir);
+      expect(actual.isDirectory()).toBe(true);
+      expect([actual.dev, actual.ino]).toEqual([parent.dev, parent.ino]);
+      syncs += 1;
+      throw new Error("parent sync fixture failure");
+    } });
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(1);
+    expect(syncs).toBe(1);
+    expect(requestCount).toBe(0);
+    expect(updateBodies).toHaveLength(0);
+    expect(existsSync(privPath)).toBe(false);
+    expect(result.stderr).toContain(`flair could not sync parent directory ${tmpDir}`);
+    expect(result.stderr).toContain(`new keys directory ${keysDir} is not confirmed durable`);
+    expect(result.stderr).toContain("check the directory and filesystem, then retry");
   });
 
   it.skipIf(process.platform === "win32")("refuses a failed staging directory sync before sending an update", async () => {
