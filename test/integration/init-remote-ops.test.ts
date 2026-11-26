@@ -264,7 +264,7 @@ describe("callOpsApi", () => {
 
     await expect(
       callOpsApi(TEST_OPTS.opsTarget, { operation: "list_users" }, "bad", "creds"),
-    ).rejects.toThrow("Ops API call failed (401): unauthorized");
+    ).rejects.toThrow("Ops API call failed (401) for 'list_users': the response text was withheld");
   });
 });
 
@@ -391,7 +391,10 @@ describe("provisionFabric — full happy path", () => {
         }
         if (body.operation === "add_user") {
           addUserErr = true;
-          return new Response("user already exists", { status: 409 });
+          return new Response(JSON.stringify({ error: "user already exists" }), {
+            status: 409,
+            headers: { "content-type": "application/json" },
+          });
         }
         if (body.operation === "alter_user") {
           alterUserCalled = true;
@@ -594,6 +597,39 @@ describe("isStateChanging", () => {
       await server.close();
     }
   }, 20_000);
+});
+
+describe("callOpsApi on a real Harper (#3144)", () => {
+  let harper: HarperInstance;
+  const DUPLICATE_USER = "dupe-user-3144";
+  const SUBMITTED_PASSWORD = "submitted-pass-3144";
+
+  beforeAll(async () => {
+    harper = await startLocalHarper();
+    const created = await harperOps(harper, "admin", "test123", {
+      operation: "add_user", username: DUPLICATE_USER, password: SUBMITTED_PASSWORD, role: "super_user", active: true,
+    });
+    expect([200, 409], created.text).toContain(created.status);
+  }, 180_000);
+
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
+
+  test("an add_user failure carries the status and the operation, and not the password", async () => {
+    const message = await callOpsApi(harper.opsURL, {
+      operation: "add_user", username: DUPLICATE_USER, password: SUBMITTED_PASSWORD, role: "super_user", active: true,
+    }, "admin", "test123").then(
+      () => null,
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+
+    expect(message === null, "the duplicate add_user must throw").toBe(false);
+    expect((message as string).includes("add_user")).toBe(true);
+    expect(/\(\d{3}\)/.test(message as string)).toBe(true);
+    expect((message as string).includes(SUBMITTED_PASSWORD)).toBe(false);
+    expect((message as string).includes(Buffer.from(SUBMITTED_PASSWORD).toString("base64"))).toBe(false);
+    expect((message as string).includes("withheld")).toBe(false);
+    expect(/(already exists|duplicate)/i.test(message as string), "the duplicate marker must survive for the alter_user fallback").toBe(true);
+  }, 30_000);
 });
 
 describe("flair#3106 — reserved principal refusal (real Harper)", () => {
@@ -1365,10 +1401,14 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     expect(recorder.all.map((call) => call.operation)).toEqual(["list_users", "deploy_component"]);
     expect(recorder.deployAuthOk()).toBe(true);
     expect(out.error).toBeInstanceOf(Error);
-    expect(out.error?.message ?? "").toContain("Ops API call failed (403)");
-    expect(out.error?.message ?? "").toContain("Operation 'deploy_component' is not permitted for this role's operations configuration");
+    expect(out.error?.message ?? "").toContain("Ops API call failed (403) for 'deploy_component'");
+    // Harper's own error string is kept; its other body fields are not, and neither
+    // the submitted password nor the Basic credential may appear.
+    expect(out.error?.message ?? "").not.toContain("withheld");
+    expect((out.error?.message ?? "").includes("unauthorized_access")).toBe(false);
+    expect((out.error?.message ?? "").includes(NO_DEPLOY.pass)).toBe(false);
+    expect((out.error?.message ?? "").includes(basic(NO_DEPLOY.user, NO_DEPLOY.pass))).toBe(false);
     expect(out.stderr).toContain("deploy_component");
-    expect(out.stderr).toContain("not permitted for this role's operations configuration");
     expect(out.stderr).not.toContain("outcome is uncertain");
     expect(readFileSync(secretPath, "utf8")).toBe(state === "existing" ? previous : chosenPass + "\n");
     expect(statSync(secretPath).mode & 0o777).toBe(0o600);

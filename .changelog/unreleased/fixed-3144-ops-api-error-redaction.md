@@ -1,1 +1,1 @@
-- **Ops API error messages no longer include a password submitted in the request.** A failed `add_user` or `alter_user` call that echoed the request body back now shows `[redacted]` in place of the submitted value.
+- **Ops API errors now report the HTTP status and the operation, and add Harper's own error string only when it contains no submitted credential.** A non-JSON body, a body with no string `error`/`message`, or one that matches a submitted value is reported as withheld.

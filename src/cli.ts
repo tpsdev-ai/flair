@@ -4007,21 +4007,53 @@ async function assertSingleInstanceRowAfterWrite(endpoint: OpsEndpoint, expected
 
 /**
  * Request-body fields that carry a credential. The bodies `callOpsApi` sends
- * hold a password only on `add_user`/`alter_user`; a non-2xx response can echo
- * the submitted body, so each submitted value is replaced before the error is
- * thrown (issue #3144).
+ * hold a credential value on `add_user` and `alter_user` only; `deploy_component`
+ * submits a base64 tarball (src/component-env.ts) and no credential field.
+ *
+ * A non-2xx response is used as an error message only from a parsed JSON body's
+ * `error` (or `message`) string, and only when that string carries none of the
+ * values this call submitted, in any of these forms: raw, JSON-string-escaped,
+ * URL-encoded, base64, and the full Basic credential `user:password` with its
+ * base64. Anything else withholds the text (issue #3144).
  */
 const OPS_API_CREDENTIAL_BODY_FIELDS = ["password"] as const;
 
-function redactOpsApiErrorBody(text: string, body: Record<string, unknown>): string {
-  let redacted = text;
+/** Every form in which this call's submitted credentials could appear in a response. */
+function submittedOpsApiSecretForms(user: string, pass: string, body: Record<string, unknown>): string[] {
+  const values: string[] = [];
   for (const field of OPS_API_CREDENTIAL_BODY_FIELDS) {
     const value = body[field];
-    if (typeof value === "string" && value.length > 0) {
-      redacted = redacted.split(value).join("[redacted]");
-    }
+    if (typeof value === "string" && value.length > 0) values.push(value);
   }
-  return redacted;
+  // The Basic authorization header carries `user:password`.
+  if (pass.length > 0) {
+    values.push(pass);
+    if (user.length > 0) values.push(`${user}:${pass}`);
+  }
+  const forms = new Set<string>();
+  for (const value of values) {
+    forms.add(value);
+    forms.add(JSON.stringify(value).slice(1, -1));
+    forms.add(encodeURIComponent(value));
+    forms.add(Buffer.from(value).toString("base64"));
+  }
+  return [...forms].filter((form) => form.length > 0);
+}
+
+/** Harper's own error string, when the body is JSON with one and it carries no submitted credential. */
+function opsApiErrorText(text: string, user: string, pass: string, body: Record<string, unknown>): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  const value = typeof record.error === "string" ? record.error : record.message;
+  if (typeof value !== "string" || value.length === 0) return null;
+  const secrets = submittedOpsApiSecretForms(user, pass, body);
+  return secrets.some((secret) => value.includes(secret)) ? null : value;
 }
 
 export async function callOpsApi(
@@ -4050,7 +4082,10 @@ export async function callOpsApi(
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Ops API call failed (${res.status}): ${redactOpsApiErrorBody(text, body)}`);
+    const operation = typeof body.operation === "string" ? body.operation : "unknown";
+    const detail = opsApiErrorText(text, user, pass, body) ??
+      "the response text was withheld because it could contain a submitted credential";
+    throw new Error(`Ops API call failed (${res.status}) for '${operation}': ${detail}`);
   }
   return res.json();
 }
