@@ -15,8 +15,11 @@
  *   - 0600 mode on both the private key file and the manifest file
  *   - no key material ever reaches stdout/console output
  */
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, existsSync, fstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
+import { chmodSync, mkdtempSync, rmSync, existsSync, fstatSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { Command } from "commander";
+import nacl from "tweetnacl";
+import { register } from "../../src/commands/mcp.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setAgentKeyFileTestHooks } from "../../src/lib/agent-key-file.ts";
@@ -254,13 +257,16 @@ describe("grantMcpClient — key files", () => {
     writeFileSync(keyPath, original, { mode: 0o644 });
     chmodSync(keyPath, 0o644);
 
+    let generated = false;
     const { fetchImpl, calls } = mockOpsFetch();
     await expect(
       grantMcpClient(
         { name: "existing-key", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
-        { fetchImpl },
+        { fetchImpl, generateKeyPair: () => { generated = true; return nacl.sign.keyPair(); } },
       ),
-    ).rejects.toThrow(/already exists — remove it, or grant under another name/);
+    ).rejects.toThrow(keyPath);
+
+    expect(generated).toBe(false);
 
     expect(calls).toHaveLength(0);
     expect(readFileSync(keyPath).equals(original)).toBe(true);
@@ -271,26 +277,30 @@ describe("grantMcpClient — key files", () => {
 
   test("refuses a pre-existing public key path too", async () => {
     mkdirSync(keysDir, { recursive: true });
-    writeFileSync(join(keysDir, "pub-taken.pub"), Buffer.from("peer-key"));
+    const keyPath = join(keysDir, "pub-taken.pub");
+    writeFileSync(keyPath, Buffer.from("peer-key"));
+    let generated = false;
 
     const { fetchImpl, calls } = mockOpsFetch();
     await expect(
       grantMcpClient(
         { name: "pub-taken", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
-        { fetchImpl },
+        { fetchImpl, generateKeyPair: () => { generated = true; return nacl.sign.keyPair(); } },
       ),
-    ).rejects.toThrow(/already exists — remove it, or grant under another name/);
+    ).rejects.toThrow(keyPath);
+
+    expect(generated).toBe(false);
 
     expect(calls).toHaveLength(0);
     expect(existsSync(join(keysDir, "pub-taken.key"))).toBe(false);
   });
 
-  test("creates the private key through the exclusive helper, owner-only before the first byte", async () => {
-    let firstWriteMode: number | undefined;
+  test("creates keys through the exclusive helper, owner-only on POSIX before the first byte", async () => {
+    const firstWriteModes: number[] = [];
     const published: string[] = [];
     setAgentKeyFileTestHooks({
       beforeFirstWrite: (fd) => {
-        firstWriteMode = fstatSync(fd).mode & 0o777;
+        firstWriteModes.push(fstatSync(fd).mode & 0o777);
       },
       beforePublish: (_tempPath, finalPath) => {
         published.push(finalPath);
@@ -303,11 +313,119 @@ describe("grantMcpClient — key files", () => {
       { fetchImpl },
     );
 
-    expect(firstWriteMode).toBe(0o600);
-    expect(published).toEqual([entry.keyFile]);
+    expect(firstWriteModes).toEqual([0o600, 0o600]);
+    expect(published).toEqual([entry.keyFile, entry.pubKeyFile]);
+    if (process.platform !== "win32") expect(statSync(keysDir).mode & 0o077).toBe(0);
     expect(readFileSync(entry.keyFile).length).toBe(32);
     expect(statSync(entry.keyFile).mode & 0o777).toBe(0o600);
   });
+
+  test.each(["key", "pub"])("CLI refuses an occupied %s path before the metadata probe or generation", async (extension) => {
+    mkdirSync(keysDir);
+    const keyPath = join(keysDir, `cli-occupied.${extension}`);
+    writeFileSync(keyPath, "existing");
+    const fetch = globalThis.fetch;
+    const exit = process.exit;
+    const error = console.error;
+    const output: string[] = [];
+    let requests = 0;
+    const generator = spyOn(nacl.sign, "keyPair");
+    try {
+      globalThis.fetch = (async () => { requests++; throw new Error("unexpected request"); }) as unknown as typeof fetch;
+      process.exit = ((code: number) => { throw new Error(`exit ${code}`); }) as typeof process.exit;
+      console.error = (...args) => { output.push(args.join(" ")); };
+      const program = new Command();
+      register(program);
+      await expect(program.parseAsync([
+        "node", "flair", "mcp", "grant", "cli-occupied", "--issuer", ISSUER,
+        "--keys-dir", keysDir, "--manifest", manifestPath, "--admin-pass", "fixture",
+      ])).rejects.toThrow("exit 1");
+      expect(output.join("\n")).toContain(keyPath);
+      expect(requests).toBe(0);
+      expect(generator).not.toHaveBeenCalled();
+      expect(readFileSync(keyPath, "utf8")).toBe("existing");
+    } finally {
+      globalThis.fetch = fetch;
+      process.exit = exit;
+      console.error = error;
+      generator.mockRestore();
+    }
+  });
+
+  test.each(["file", "symlink"])("preserves a public %s path appearing after preflight", async (kind) => {
+    const pubPath = join(keysDir, "raced.pub");
+    const target = join(dir, "peer");
+    writeFileSync(target, "peer bytes");
+    setAgentKeyFileTestHooks({ beforePublish: (_temp, finalPath) => {
+      if (finalPath !== join(keysDir, "raced.key")) return;
+      if (kind === "symlink") symlinkSync(target, pubPath);
+      else writeFileSync(pubPath, "peer bytes");
+    } });
+    const { fetchImpl, calls } = mockOpsFetch();
+    await expect(grantMcpClient(
+      { name: "raced", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "fixture" },
+      { fetchImpl },
+    )).rejects.toThrow();
+    expect(readFileSync(pubPath, "utf8")).toBe("peer bytes");
+    expect(readFileSync(target, "utf8")).toBe("peer bytes");
+    expect(calls.some(call => call.operation === "insert")).toBe(false);
+    expect(readdirSync(keysDir)).toEqual(["raced.pub"]);
+  });
+
+  test.each([1, 2])("cleans up a partial write in key file %s", async (failAt) => {
+    let writes = 0;
+    setAgentKeyFileTestHooks({ writeSeedFile: (fd, bytes) => {
+      writes++;
+      if (writes === failAt) {
+        writeSync(fd, bytes.subarray(0, 1));
+        throw new Error("injected partial write");
+      }
+      return writeSync(fd, bytes);
+    } });
+    const { fetchImpl, calls } = mockOpsFetch();
+    await expect(grantMcpClient(
+      { name: "partial", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "fixture" },
+      { fetchImpl },
+    )).rejects.toThrow("injected partial write; removed the key files this call created");
+    expect(readdirSync(keysDir)).toEqual([]);
+    expect(calls.some(call => call.operation === "insert")).toBe(false);
+  });
+
+  test.each([false, true])("manifest write failure after insert reports cleanup (unlink fails=%s)", async (failUnlink) => {
+    mkdirSync(manifestPath);
+    const { fetchImpl, calls } = mockOpsFetch();
+    let message = "";
+    try {
+      await grantMcpClient(
+        { name: "manifest-fail", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "fixture" },
+        { fetchImpl, unlinkKeyFile: (path) => {
+          if (failUnlink && existsSync(path)) throw new Error("injected unlink failure");
+          unlinkSync(path);
+        } },
+      );
+    } catch (error) { message = (error as Error).message; }
+    expect(message).not.toBe("");
+    expect(calls.some(call => call.operation === "insert")).toBe(true);
+    for (const extension of ["key", "pub"]) {
+      const path = join(keysDir, `manifest-fail.${extension}`);
+      expect(existsSync(path)).toBe(failUnlink);
+      if (failUnlink) expect(message).toContain(path);
+    }
+    expect(message).toContain(failUnlink ? "could not remove key file(s)" : "removed the key files this call created");
+  });
+
+  test("tightens a widened existing keys directory to owner-only on POSIX", async () => {
+    if (process.platform === "win32") return;
+    mkdirSync(keysDir);
+    chmodSync(keysDir, 0o755);
+    expect(statSync(keysDir).mode & 0o077).not.toBe(0);
+    await grantMcpClient(
+      { name: "wide-dir", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "fixture" },
+      { fetchImpl: mockOpsFetch().fetchImpl },
+    );
+    expect(statSync(keysDir).mode & 0o077).toBe(0);
+  });
+
 });
 
 // ─── revoke: server-ack requirement ─────────────────────────────────────────

@@ -249,11 +249,37 @@ export interface McpGrantDeps {
   now?: () => string;
   /** Injectable Ed25519 keypair generator (tests only; defaults to tweetnacl). */
   generateKeyPair?: () => { publicKey: Uint8Array; secretKey: Uint8Array };
+  unlinkKeyFile?: (path: string) => void;
 }
 
 export interface McpGrantResult {
   entry: McpClientManifestEntry;
   config: Record<string, unknown>;
+}
+
+function preflightMcpGrantKeyPaths(name: string, keysDir: string): { privPath: string; pubPath: string } {
+  if (!isValidAgentId(name) || !/^[a-zA-Z0-9]/.test(name)) {
+    throw new Error(`Invalid machine client name '${name}' — ${invalidAgentIdMessage(name)}; must start with a letter or digit.`);
+  }
+  const privPath = privKeyPath(name, keysDir);
+  const pubPath = pubKeyPath(name, keysDir);
+  // An occupied path may retain an existing mode and contents; refuse it
+  // before key generation or network requests.
+  const existingKeyPaths: string[] = [];
+  for (const path of [privPath, pubPath]) {
+    try {
+      lstatSync(path);
+      existingKeyPaths.push(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  if (existingKeyPaths.length > 0) {
+    throw new Error(
+      `Key file ${existingKeyPaths.join(", ")} already exists — remove it, or grant under another name.`,
+    );
+  }
+  return { privPath, pubPath };
 }
 
 /**
@@ -283,24 +309,7 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     throw new McpClientNameExistsError(name);
   }
 
-  const privPath = privKeyPath(name, keysDir);
-  const pubPath = pubKeyPath(name, keysDir);
-  // Writing this grant's key into a pre-existing path would keep that path's
-  // wider mode (and replace its contents), so refuse before any request.
-  const existingKeyPaths: string[] = [];
-  for (const path of [privPath, pubPath]) {
-    try {
-      lstatSync(path);
-      existingKeyPaths.push(path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-  }
-  if (existingKeyPaths.length > 0) {
-    throw new Error(
-      `Key file ${existingKeyPaths.join(", ")} already exists — remove it, or grant under another name.`,
-    );
-  }
+  const { privPath, pubPath } = preflightMcpGrantKeyPaths(name, keysDir);
 
   // Defense-in-depth: refuse to silently reuse/clobber an unrelated
   // pre-existing Agent id (e.g. a human-run principal sharing this name).
@@ -331,11 +340,10 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
   const pubKeyB64url = b64url(kp.publicKey);
 
   const createdKeyPaths: string[] = [];
+  const trackKeyPath = (path: string) => { createdKeyPaths.push(path); };
   try {
-    createAgentKeyFile(privPath, Buffer.from(seed));
-    createdKeyPaths.push(privPath);
-    writeFileSync(pubPath, Buffer.from(kp.publicKey));
-    createdKeyPaths.push(pubPath);
+    createAgentKeyFile(privPath, Buffer.from(seed), trackKeyPath);
+    createAgentKeyFile(pubPath, Buffer.from(kp.publicKey), trackKeyPath);
 
     const nowIso = now();
     // flair#2433 — the new Agent row's home is THIS instance's federation id,
@@ -393,9 +401,9 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
       const leftBehind: string[] = [];
       for (const path of createdKeyPaths) {
         try {
-          unlinkSync(path);
-        } catch {
-          leftBehind.push(path);
+          (deps.unlinkKeyFile ?? unlinkSync)(path);
+        } catch (cleanupError) {
+          if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") leftBehind.push(path);
         }
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -721,6 +729,14 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
+      const keysDir: string = opts.keysDir ?? defaultKeysDir();
+      try {
+        preflightMcpGrantKeyPaths(name, keysDir);
+      } catch (err: any) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+      }
+
       // Workflow gate: proof `flair mcp enable` has actually run against this
       // instance — a live probe of the OAuth metadata endpoint (flair#756;
       // replaces the old DCR-gate-token presence check, which a CIMD-only
@@ -740,7 +756,6 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      const keysDir: string = opts.keysDir ?? defaultKeysDir();
       const manifestPath: string = opts.manifest ?? defaultMcpClientManifestPath();
       const opsPort = resolveOpsPort(opts);
 

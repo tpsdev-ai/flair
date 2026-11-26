@@ -1,2 +1,2 @@
-- **`flair mcp grant` creates its private key owner-only and refuses to replace an existing key file.**
+- **`flair mcp grant` creates its private key owner-only on POSIX and refuses to replace an existing key file.**
   The grant checks both key paths before generating a key: an existing private or public key path is refused with a message naming it, instead of being silently overwritten. If the Agent insert or a later step fails, the key files that grant created are removed; any it could not remove are named in the error.

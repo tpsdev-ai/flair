@@ -3,8 +3,8 @@
  * provisioning paths (flair#3077 slice A): `flair agent add`, local
  * `flair init --agent/--agent-id`, remote `flair init --target ... --agent-id`,
  * `flair principal add`, and `flair import`. `flair agent rotate-key` (slice B)
- * stages and replaces through this helper; `flair mcp grant` still writes key
- * files itself (slice C).
+ * stages and replaces through this helper; `flair mcp grant` creates its key
+ * files through it (slice C).
  *
  * POSIX policy:
  *   - the keys directory is requested with mode 0700 (the umask may make it
@@ -281,7 +281,7 @@ export function readAgentKeyForRotation(privateKeyPath: string): AgentKeyForRota
  * from creation and fsynced, and return the temp path. The temp file is this
  * call's to hand on: the caller publishes or removes it.
  */
-function writeAgentKeyTemp(privateKeyPath: string, bytes: Buffer): string {
+function writeAgentKeyTemp(privateKeyPath: string, bytes: Buffer, onCreated?: (path: string) => void): string {
   const tempPrefix = `.${basename(privateKeyPath)}.tmp-`;
   const maxTempAttempts = 5;
   let fd: number | undefined;
@@ -301,6 +301,7 @@ function writeAgentKeyTemp(privateKeyPath: string, bytes: Buffer): string {
     }
   }
   try {
+    onCreated?.(tempPath);
     // The open mode is narrowed by the umask; set it exactly, still before the
     // first byte, so the protection is the mode the file is created with.
     fchmodSync(fd, 0o600);
@@ -347,12 +348,13 @@ function writeAgentKeyTemp(privateKeyPath: string, bytes: Buffer): string {
  * occupying entry is left untouched. On failure the temp file this call
  * created is removed, best effort.
  */
-export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8Array): void {
-  const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data));
+export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8Array, onCreated?: (path: string) => void): void {
+  const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data), onCreated);
   try {
     testHooks?.beforePublish?.(tempPath, privateKeyPath);
     // linkSync fails with EEXIST when the final path appears before publication.
     linkSync(tempPath, privateKeyPath);
+    onCreated?.(privateKeyPath);
   } catch (error) {
     try {
       unlinkSync(tempPath);
