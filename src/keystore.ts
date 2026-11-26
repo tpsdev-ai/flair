@@ -9,7 +9,7 @@
  * (mode 0600). Never falls back to guessable data.
  */
 
-import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, unlinkSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { resolveHome } from "./lib/home.js";
 import { writeFilesAtomically } from "./lib/atomic-write.js";
@@ -55,25 +55,32 @@ function passphrasePath(): string {
   return join(keysDir(), ".passphrase");
 }
 
+interface PassphraseHooks {
+  beforePublish?: () => void;
+  fstat?: (fd: number) => Stats;
+  read?: (source: string | number) => string;
+}
+
 /**
  * Read the auto-generated passphrase through one no-follow descriptor, after
  * refusing a file wider than owner-only. On Windows the mode check is skipped
  * and the file is read by path.
  */
-function readPassphraseFile(pp: string): string {
+function readPassphraseFile(pp: string, hooks: PassphraseHooks): string {
+  const read = hooks.read ?? ((source: string | number) => readFileSync(source, "utf-8"));
   if (process.platform === "win32") {
-    return readFileSync(pp, "utf-8").trim();
+    return read(pp).trim();
   }
   const fd = openSync(pp, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    const st = fstatSync(fd);
+    const st = (hooks.fstat ?? fstatSync)(fd);
     if ((st.mode & 0o077) !== 0) {
       throw new Error(
         `passphrase file ${pp} is accessible to other users (mode ${(st.mode & 0o777).toString(8).padStart(3, "0")}); ` +
           `run chmod 600 ${pp} to make it owner-only`,
       );
     }
-    return readFileSync(fd, "utf-8").trim();
+    return read(fd).trim();
   } finally {
     closeSync(fd);
   }
@@ -84,7 +91,7 @@ function readPassphraseFile(pp: string): string {
  * Priority: FLAIR_KEY_PASSPHRASE env var > auto-generated file.
  * Never falls back to guessable data (hostname, username, etc.).
  */
-function getPassphrase(): string {
+function getPassphrase(hooks: PassphraseHooks = {}): string {
   // Explicit env var takes priority
   if (process.env.FLAIR_KEY_PASSPHRASE) {
     return process.env.FLAIR_KEY_PASSPHRASE;
@@ -95,7 +102,7 @@ function getPassphrase(): string {
   // Read existing auto-generated passphrase; a missing file falls through to
   // generation, and any other open/read failure propagates.
   try {
-    return readPassphraseFile(pp);
+    return readPassphraseFile(pp, hooks);
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
   }
@@ -106,8 +113,21 @@ function getPassphrase(): string {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   const generated = randomBytes(32).toString("base64url");
-  writeFilesAtomically([{ path: pp, content: generated, mode: 0o600 }]);
-  return generated;
+  const staged = join(dir, `.passphrase.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
+  writeFilesAtomically([{ path: staged, content: generated, mode: 0o600 }]);
+  try {
+    hooks.beforePublish?.();
+    // Preserve a competing passphrase; reread it on conflict.
+    try {
+      linkSync(staged, pp);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
+      return readPassphraseFile(pp, hooks);
+    }
+    return generated;
+  } finally {
+    unlinkSync(staged);
+  }
 }
 
 /**
@@ -270,4 +290,4 @@ export function recordSeedOwner(instanceId: string, dataDir: string): void {
 }
 
 // Export helpers for testing
-export { encryptSeed, decryptSeed, deriveKey, keyPath, keysDir };
+export { encryptSeed, decryptSeed, deriveKey, getPassphrase, keyPath, keysDir };

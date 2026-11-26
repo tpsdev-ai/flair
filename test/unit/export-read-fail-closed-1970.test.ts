@@ -140,14 +140,33 @@ describe("flair export: failed reads never create a complete-looking file (#1970
     const st = statSync(output);
     expect(data.privateKey).toBe("test-key-material");
     expect(st.mode & 0o777).toBe(0o600);
-    // A new inode means the bytes were published by rename, not written in place.
+    // The replacement has a new inode.
     expect(st.ino).not.toBe(inodeBefore);
   }, 25_000);
+
+  for (const keyState of ["missing", "empty"]) {
+    test(`--include-key with a ${keyState} key publishes output at 0600`, async () => {
+      const keysDir = join(scratch, `keys-${keyState}-3120`);
+      mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+      if (keyState === "empty") writeFileSync(join(keysDir, "agent-a.key"), "", { mode: 0o600 });
+      const output = join(scratch, `${keyState}-key.json`);
+      writeFileSync(output, "old", { mode: 0o644 });
+      chmodSync(output, 0o644);
+      const { code } = await runCli(
+        ["export", "agent-a", "--url", URL, "--admin-pass", "test-pass-1970", "--output", output, "--include-key", "--keys-dir", keysDir],
+        { MOCK_AGENT_STATUS: "200", MOCK_AGENT_ID: "agent-a" }, scratch,
+      );
+      expect(code).toBe(0);
+      expect(JSON.parse(readFileSync(output, "utf8")).privateKey).toBeUndefined();
+      expect(statSync(output).mode & 0o777).toBe(0o600);
+    }, 25_000);
+  }
 
   test("an export without --include-key leaves an existing 0644 output at 0644", async () => {
     const output = join(scratch, "existing-control.json");
     writeFileSync(output, '{"old":true}\n', { mode: 0o644 });
     chmodSync(output, 0o644);
+    const inodeBefore = statSync(output).ino;
     const { code } = await runCli(
       ["export", "agent-a", "--url", URL, "--admin-pass", "test-pass-1970", "--output", output],
       { MOCK_AGENT_STATUS: "200", MOCK_AGENT_ID: "agent-a" }, scratch,
@@ -157,6 +176,7 @@ describe("flair export: failed reads never create a complete-looking file (#1970
     const st = statSync(output);
     expect(data.agent.id).toBe("agent-a");
     expect(st.mode & 0o777).toBe(0o644);
+    expect(st.ino).toBe(inodeBefore);
   }, 25_000);
 
   for (const [name, path] of [["memories", "/Memory/"], ["souls", "/Soul/"], ["grants", "/MemoryGrant/"]] as const) {

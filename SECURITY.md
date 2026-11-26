@@ -155,10 +155,10 @@ neither checks nor sets it. Legacy path
 
 `flair export --include-key` publishes its output through a `0600` temp file
 renamed over the target, so an existing output file's wider mode does not apply
-to the new contents. The keystore seed file and its generated passphrase file
-are written the same way, and an existing passphrase file with group or world
-bits is refused before it is read, with `chmod 600 <path>`. On Windows the mode
-bits do not apply.
+to the new contents. The keystore seed file is replaced the same way.
+A generated passphrase is published at `0600` if its path is absent; an existing
+passphrase with group or world bits is refused unchanged before reading, with
+`chmod 600 <path>`. On Windows the mode bits do not apply.
 
 ### Key Generation
 

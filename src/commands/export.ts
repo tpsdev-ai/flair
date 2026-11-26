@@ -151,9 +151,9 @@ addAdminPassOptions(
     // Canonicalize to prevent path traversal (e.g. ../../etc/passwd)
     const outputPath = resolve(rawOutputPath);
     mkdirSync(join(outputPath, ".."), { recursive: true });
-    const fileMode = privateKey ? 0o600 : 0o644;
+    const fileMode = opts.includeKey ? 0o600 : 0o644;
     const content = JSON.stringify(exportData, null, 2);
-    if (privateKey) {
+    if (opts.includeKey) {
       // An existing output file's wider mode never applies to the new contents:
       // the bytes go to a 0600 temp file and are renamed over the target.
       writeFilesAtomically([{ path: outputPath, content, mode: 0o600 }]);
@@ -169,7 +169,7 @@ addAdminPassOptions(
       ? `${render.wrap(render.c.magenta, "included")} ${render.wrap(render.c.red, "(UNENCRYPTED — protect this file)")}`
       : render.wrap(render.c.dim, "not included");
     console.log(render.kv("Key", keyText));
-    console.log(render.kv("Mode", `${fileMode.toString(8)} ${render.wrap(render.c.dim, `(${privateKey ? "owner-only" : "standard"})`)}`));
+    console.log(render.kv("Mode", `${fileMode.toString(8)} ${render.wrap(render.c.dim, `(${opts.includeKey ? "owner-only" : "standard"})`)}`));
     console.log(render.kv("Output", render.wrap(render.c.dim, outputPath)));
   });
 
