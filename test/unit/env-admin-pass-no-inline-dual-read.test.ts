@@ -2,19 +2,18 @@
  * env-admin-pass-no-inline-dual-read.test.ts — Issue #3093.
  *
  * Asserts that ambient admin password reads in src/ use the shared envAdminPass()
- * helper, failing on any read of process.env.FLAIR_ADMIN_PASS or
- * process.env.HDB_ADMIN_PASSWORD outside envAdminPass() itself, with an explicit
- * allowlist of named exceptions.
+ * helper, walking the TypeScript AST of each file and counting every
+ * process.env.FLAIR_ADMIN_PASS and process.env.HDB_ADMIN_PASSWORD property access
+ * and process.env["..."] string-literal element access, however formatted.
  *
  * The scanner pins how many ambient reads each file has and which expressions
  * they are, but not where in the file they sit (moving an allowed read into a
  * different function of the same file would still pass). It requires the total
- * reads in each file to equal the sum of that file's allowed counts, and each
+ * AST reads in each file to equal the sum of that file's allowed counts, and each
  * allowed expression to occur exactly its listed number of times.
  *
  * Each exception names the exact expression it allows, how many times it may
- * appear in that file, how many reads it accounts for, and a reason describing
- * that one read:
+ * appear in that file, how many AST reads it accounts for, and its rationale:
  *   - lib/auth-resolve.ts:
  *       - Definition of the envAdminPass() helper itself (count: 1, reads: 2)
  *       - Diagnostic recording of adminPassEnvVar for FLAIR_ADMIN_PASS (count: 1, reads: 1)
@@ -54,6 +53,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import ts from "typescript";
 
 const SRC_DIR = resolve(import.meta.dir, "..", "..", "src");
 
@@ -292,6 +292,63 @@ export const ALLOWED_READS: AllowedRead[] = [
   },
 ];
 
+function isProcessEnv(node: ts.Node): boolean {
+  if (!ts.isPropertyAccessExpression(node)) return false;
+  return (
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === "process" &&
+    node.name.text === "env"
+  );
+}
+
+export interface AmbientReadAst {
+  variable: string;
+  line: number;
+  character: number;
+  text: string;
+}
+
+export function findAmbientReadsInAst(sourceFile: ts.SourceFile): AmbientReadAst[] {
+  const reads: AmbientReadAst[] = [];
+
+  function visit(node: ts.Node) {
+    if (ts.isPropertyAccessExpression(node)) {
+      if (isProcessEnv(node.expression)) {
+        const prop = node.name.text;
+        if (prop === "FLAIR_ADMIN_PASS" || prop === "HDB_ADMIN_PASSWORD") {
+          const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+          reads.push({
+            variable: prop,
+            line: line + 1,
+            character: character + 1,
+            text: node.getText(sourceFile),
+          });
+        }
+      }
+    } else if (ts.isElementAccessExpression(node)) {
+      if (isProcessEnv(node.expression)) {
+        let arg: string | null = null;
+        if (ts.isStringLiteral(node.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(node.argumentExpression)) {
+          arg = node.argumentExpression.text;
+        }
+        if (arg === "FLAIR_ADMIN_PASS" || arg === "HDB_ADMIN_PASSWORD") {
+          const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+          reads.push({
+            variable: arg,
+            line: line + 1,
+            character: character + 1,
+            text: node.getText(sourceFile),
+          });
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  return reads;
+}
+
 function walkTsFiles(dir: string): string[] {
   const files: string[] = [];
   for (const entry of readdirSync(dir)) {
@@ -314,16 +371,16 @@ export function scanFileLines(
   const violations: { file: string; line: number; text: string; message?: string }[] = [];
   const fileEntries = allowlist.filter((entry) => entry.file === relPath);
 
-  // Quick exit if file has no ambient reads and no allowlist entries
-  const readPatternGlobal = /process\.env\.(FLAIR_ADMIN_PASS|HDB_ADMIN_PASSWORD)/g;
-  const readMatches = content.match(readPatternGlobal);
-  const totalActualReads = readMatches ? readMatches.length : 0;
-
-  if (totalActualReads === 0 && fileEntries.length === 0) {
+  // Quick exit if file has neither ambient reads nor allowlist entries
+  const containsKeywords = content.includes("FLAIR_ADMIN_PASS") || content.includes("HDB_ADMIN_PASSWORD");
+  if (!containsKeywords && fileEntries.length === 0) {
     return [];
   }
 
-  // 1. Check total ambient read count against sum of allowed reads
+  // 1. Walk AST to count every property access and string-literal element access
+  const sf = ts.createSourceFile(relPath, content, ts.ScriptTarget.Latest, false);
+  const astReads = findAmbientReadsInAst(sf);
+  const totalActualReads = astReads.length;
   const totalAllowedReads = fileEntries.reduce(
     (sum, entry) => sum + (entry.reads ?? entry.count),
     0
@@ -333,8 +390,8 @@ export function scanFileLines(
     violations.push({
       file: relPath,
       line: 0,
-      text: `total ambient reads: ${totalActualReads}`,
-      message: `${relPath} has ${totalActualReads} ambient read(s); expected exactly ${totalAllowedReads}.`,
+      text: `total ambient reads in AST: ${totalActualReads}`,
+      message: `${relPath} has ${totalActualReads} ambient read(s) in syntax tree; expected exactly ${totalAllowedReads}.`,
     });
   }
 
@@ -352,20 +409,17 @@ export function scanFileLines(
     }
   }
 
-  // 3. Line-by-line inspection: every line containing an ambient read must match an allowed expression
+  // 3. Line inspection: every AST read must occur within an allowed expression
   const lines = content.split("\n");
-  const singleLinePattern = /process\.env\.(FLAIR_ADMIN_PASS|HDB_ADMIN_PASSWORD)/;
-  for (let i = 0; i < lines.length; i++) {
-    const lineText = lines[i];
-    if (!singleLinePattern.test(lineText)) continue;
-
-    const matchedEntry = fileEntries.find((entry) => entry.pattern.test(lineText));
-    if (!matchedEntry) {
+  for (const read of astReads) {
+    const lineText = lines[read.line - 1] ?? "";
+    const isAllowed = fileEntries.some((entry) => entry.pattern.test(lineText));
+    if (!isAllowed) {
       violations.push({
         file: relPath,
-        line: i + 1,
+        line: read.line,
         text: lineText.trim(),
-        message: `Unexpected ambient read outside allowlist: ${lineText.trim()}`,
+        message: `Unexpected ambient read outside allowlist at line ${read.line}: ${read.text}`,
       });
     }
   }
@@ -374,7 +428,7 @@ export function scanFileLines(
 }
 
 describe("source scanner: envAdminPass allowlist (#3093)", () => {
-  test("pins how many reads each file in src/ has and which expressions they are", () => {
+  test("pins AST ambient reads and exact expression occurrences for each file in src/", () => {
     const tsFiles = walkTsFiles(SRC_DIR);
     const violations: { file: string; line: number; text: string }[] = [];
 
@@ -481,6 +535,41 @@ describe("source scanner: envAdminPass allowlist (#3093)", () => {
       expect(violations.length).toBeGreaterThanOrEqual(1);
       expect(violations.some((v) => v.message?.includes("expected exactly"))).toBe(true);
     });
+
+    test("scanner goes red on an element access read with string literal: process.env[\"FLAIR_ADMIN_PASS\"]", () => {
+      const original = readFileSync(join(SRC_DIR, "commands", "agent.ts"), "utf-8");
+      // Baseline check: original file passes cleanly
+      expect(scanFileLines("commands/agent.ts", original, ALLOWED_READS)).toEqual([]);
+
+      // Red mutation: swapping property access to element access
+      const target = 'const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";';
+      const mutated = original.replace(
+        target,
+        'const adminPass: string = opts.adminPass ?? process.env["FLAIR_ADMIN_PASS"] ?? "";'
+      );
+      expect(mutated).not.toBe(original);
+      const violations = scanFileLines("commands/agent.ts", mutated, ALLOWED_READS);
+      expect(violations.length).toBeGreaterThanOrEqual(1);
+      expect(violations.some((v) => v.message?.includes("Unexpected ambient read"))).toBe(true);
+    });
+
+    test("scanner goes red on a split-line property access: process.env.\\nFLAIR_ADMIN_PASS", () => {
+      const original = readFileSync(join(SRC_DIR, "commands", "agent.ts"), "utf-8");
+      // Baseline check: original file passes cleanly
+      expect(scanFileLines("commands/agent.ts", original, ALLOWED_READS)).toEqual([]);
+
+      // Red mutation: splitting process.env. and property name across lines
+      const target = 'const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";';
+      const mutated = original.replace(
+        target,
+        'const adminPass: string = opts.adminPass ?? process.env.\n        FLAIR_ADMIN_PASS ?? "";'
+      );
+      expect(mutated).not.toBe(original);
+      const violations = scanFileLines("commands/agent.ts", mutated, ALLOWED_READS);
+      expect(violations.length).toBeGreaterThanOrEqual(1);
+      expect(violations.some((v) => v.message?.includes("Unexpected ambient read") || v.message?.includes("occurred 1 time(s)"))).toBe(true);
+    });
   });
 });
+
 
