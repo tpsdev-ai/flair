@@ -4163,14 +4163,14 @@ export interface ProvisionedFabricPrincipal {
  */
 export interface FabricProvisionHooks {
   /**
-   * Runs after the existing-user read decides this run will set `admin`'s
+   * Runs after the existing-user read decides this run will attempt to set `admin`'s
    * password, and BEFORE the first cluster write. A throw aborts with nothing
    * changed on the cluster.
    */
   beforeAdminPasswordApplied?: () => void;
   /**
-   * Runs immediately before the add_user/alter_user request that sets
-   * `admin`'s password is sent. A failure after this point may have reached
+   * Runs before attempting the add_user request (and its alter_user fallback)
+   * to set `admin`'s password. A failure after this point may have reached
    * the cluster even when this function throws.
    */
   adminPasswordRequestSent?: () => void;
@@ -4189,7 +4189,7 @@ export async function provisionFabric(
   const projectRoot = process.cwd();
 
   // 1. Read the cluster's existing users BEFORE any cluster write. The answer
-  // decides whether this run sets `admin`'s password, and a read that fails
+  // decides whether this run attempts to set `admin`'s password, and a read that fails
   // must refuse: treating an unknown as "not a super_user" would go on to
   // change a cluster we could not read.
   console.log("Checking existing cluster users via ops API...");

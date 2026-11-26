@@ -652,7 +652,7 @@ addAdminPassOptions(
           flairAdminPass = randomBytes(24).toString("base64url");
         }
 
-        // Provisioning: save the credential, deploy + wait, provision user.
+        // Provisioning: save unless reusing a super_user, deploy + wait, provision user.
         // The returned principal is the one this run set up: the existing
         // super_user cluster administrator when list_users reports the
         // operator's cluster admin as a super_user, else the `admin` user this
@@ -665,7 +665,7 @@ addAdminPassOptions(
         let provisioned: RemoteInitPrincipal;
         try {
           provisioned = await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass, {
-            // Before the first cluster write, and only when this run will set
+            // Before the first cluster write, when this run attempts to set
             // `admin`'s password. A throw here leaves the cluster unchanged.
             beforeAdminPasswordApplied: () => {
               saveAttempted = true;
@@ -689,19 +689,20 @@ addAdminPassOptions(
           }
           if (saveApplied) {
             const held = stagedAdminPass!.stagedPath;
-            if (held !== null) {
+            if (held !== null && stagedAdminPass!.stagedFileVerified) {
               console.error(`Error: the cluster accepted the Flair administrator password, but ${held} could not be moved into place: ${message}`);
               console.error(`  The cluster now holds the password in ${held}.`);
               console.error(`  Remedy: move ${held} over ${secretPath} with mode 0600.`);
             } else {
-              console.error(`Error: the cluster accepted the Flair administrator password, but the saved credential at ${secretPath} could not be confirmed: ${message}`);
-              console.error(`  The cluster now holds the password in ${secretPath}.`);
+              console.error(`Error: the cluster accepted the Flair administrator password, but the saved credential at ${held ?? secretPath} could not be confirmed: ${message}`);
+              console.error("  No verified copy of the new password remains on this machine.");
+              console.error("  Remedy: re-run the same remote init command; it saves the Flair administrator password before setting it again.");
             }
             process.exit(1);
           }
           if (stagedAdminPass && requestSent) {
             const held = stagedAdminPass.stagedPath;
-            console.error(`Error: Fabric provisioning failed after the add/alter request was sent, so the outcome is uncertain: ${message}`);
+            console.error(`Error: Fabric provisioning failed after attempting the add/alter request, so the outcome is uncertain: ${message}`);
             if (held !== null) {
               console.error(`  The cluster may hold the password in ${held}.`);
               console.error(`  If that password logs in, move ${held} over ${secretPath} with mode 0600; if it does not, delete ${held}.`);

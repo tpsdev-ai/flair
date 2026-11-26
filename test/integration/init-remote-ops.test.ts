@@ -1275,12 +1275,8 @@ describe("flair#3106 — already-running instance leg (real Harper)", () => {
 
 // ─── flair#3130: credential save ordering around a real cluster change ────────
 //
-// A remote provisioning run must save the generated Flair administrator
-// password before the cluster change that applies it, keep it when the change
-// fails, leave an existing file unchanged on failure, and refuse when the
-// existing-user read fails. These drive the command action against a spawned
-// Harper; the deploy upload is the only short-circuited step (see
-// installRecorder).
+// These drive the command action against a spawned Harper. The deploy upload
+// is stubbed; individual tests also stub list_users or drop an add/alter reply.
 describe("flair#3130 — remote init credential ordering (real Harper)", () => {
   let harper: HarperInstance;
   const WRITER = { user: "cluster-writer", pass: "cluster-writer-pass" };
@@ -1545,8 +1541,8 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
       if (operation === "deploy_component") return new Response(JSON.stringify({ ok: true }), { status: 200 });
       const res = await REAL_FETCH(input, init);
       if (operation === "add_user") {
-        // The cluster now has the new password. Make the publish fail by
-        // replacing the credential path with something a rename cannot take.
+        // The seeded admin makes add_user take the duplicate-user path;
+        // alter_user applies the password next. Use a directory at the target.
         sentWith = readdirSync(secretsDir);
         rmSync(secretPath, { force: true });
         mkdirSync(secretPath, { recursive: true });
@@ -1584,6 +1580,63 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     expect(login.status, "the staged password must log in").toBe(200);
     expect(out.stdout, "the password must not reach stdout").not.toContain(chosenPass);
     expect(out.stderr, "the password must not reach stderr").not.toContain(chosenPass);
+  }, 150_000);
+
+  test.each(["changed", "removed", "wide"] as const)("a %s stage after acceptance reports password reset and preserves the credential", async (state) => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretsDir = join(home, ".tps", "secrets");
+    const secretPath = join(secretsDir, "flair-fabric-hdb");
+    const previous = "verification-previous-5c1e\n";
+    mkdirSync(secretsDir, { recursive: true });
+    writeFileSync(secretPath, previous, { mode: 0o600 });
+    const chosenPass = `verification-applied-${state}-2f90`;
+
+    let stagedPath = "";
+    let accepted = false;
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init?: any) => {
+      let operation: string | undefined;
+      try { operation = JSON.parse(init?.body)?.operation; } catch { operation = undefined; }
+      if (operation === "deploy_component") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const res = await REAL_FETCH(input, init);
+      if (operation === "alter_user" && res.ok) {
+        accepted = true;
+        const name = readdirSync(secretsDir).find((entry) => entry.startsWith(".flair-fabric-hdb.pending-"));
+        if (name === undefined) throw new Error("no staged sibling existed after acceptance");
+        stagedPath = join(secretsDir, name);
+        if (state === "changed") writeFileSync(stagedPath, "different value\n");
+        else if (state === "removed") rmSync(stagedPath);
+        else chmodSync(stagedPath, 0o644);
+      }
+      return res;
+    }) as typeof fetch;
+    let out: Awaited<ReturnType<typeof runInitAction>>;
+    try {
+      out = await runInitAction(initArgs(harper, {
+        clusterUser: WRITER.user,
+        clusterPass: WRITER.pass,
+        flairPass: chosenPass,
+        agentId: `agent-verification-${state}`,
+        keysDir: join(tmpDir, `keys-verification-${state}`),
+      }), home, { rethrow: false });
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+
+    expect(accepted, "Harper accepted the password before verification").toBe(true);
+    expect(stagedPath).not.toBe("");
+    expect(out.exitCode).toBe(1);
+    expect(out.stderr).toContain("No verified copy of the new password remains on this machine");
+    expect(out.stderr).toContain(`the saved credential at ${stagedPath} could not be confirmed`);
+    expect(out.stderr).toContain("Remedy: re-run the same remote init command");
+    expect(out.stderr).not.toContain(`move ${stagedPath} over`);
+    expect(out.stderr).not.toContain("Remedy: move");
+    expect(readFileSync(secretPath, "utf8")).toBe(previous);
+    expect(statSync(secretPath).mode & 0o777).toBe(0o600);
+    const login = await harperOps(harper, "admin", chosenPass, { operation: "list_users" });
+    expect(login.status).toBe(200);
+    expect(out.stdout).not.toContain(chosenPass);
+    expect(out.stderr).not.toContain(chosenPass);
   }, 150_000);
 
   test("a lost reply to the add/alter request keeps the staged file and leaves the old credential unchanged", async () => {
@@ -1753,7 +1806,7 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     expect(out.stderr, "the password must not reach stderr").not.toContain(chosenPass);
   }, 150_000);
 
-  test("a failed cleanup reports the original and cleanup errors and names the remaining file", async () => {
+  test("a failed cleanup reports the original and cleanup errors and names the remaining path", async () => {
     const home = mkdtempSync(join(tmpDir, "home-"));
     const secretsDir = join(home, ".tps", "secrets");
     const secretPath = join(secretsDir, "flair-fabric-hdb");
@@ -1770,8 +1823,7 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
       let operation: string | undefined;
       try { operation = bodyText === null ? undefined : JSON.parse(bodyText)?.operation; } catch { operation = undefined; }
       if (operation === "deploy_component") {
-        // The request was never sent: make the pre-request cleanup fail by
-        // leaving a directory where the staged file was.
+        // Before attempting the password request, leave a directory at the staged path.
         const name = readdirSync(secretsDir).find((entry) => entry.startsWith(".flair-fabric-hdb.pending-"));
         if (name === undefined) throw new Error("no staged sibling existed at deploy time");
         stagedPath = join(secretsDir, name);
@@ -1798,7 +1850,7 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     expect(stagedPath, "the staged sibling must be known").not.toBe("");
     expect(out.stderr, "the original error must be reported").toContain("Ops API call failed");
     expect(out.stderr, "the cleanup error must be reported").toContain("could not remove the staged credential");
-    expect(out.stderr, "the remaining file must be named").toContain(stagedPath);
+    expect(out.stderr, "the remaining path must be named").toContain(stagedPath);
     expect(existsSync(stagedPath), "the remaining entry must still be there").toBe(true);
 
     const after = readFileSync(secretPath, "utf8");
