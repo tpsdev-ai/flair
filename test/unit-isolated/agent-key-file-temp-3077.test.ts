@@ -142,6 +142,7 @@ describe("flair#3077 — sync before publication", () => {
     ensureAgentKeysDir(dir);
     const keyPath = join(dir, "synced.key");
     const seed = Buffer.alloc(32, 5);
+    publicationEvents = [];
 
     createAgentKeyFile(keyPath, seed);
 
@@ -154,6 +155,7 @@ describe("flair#3077 — sync before publication", () => {
     const dir = keysDir();
     ensureAgentKeysDir(dir);
     const keyPath = join(dir, "sync-failure.key");
+    publicationEvents = [];
     syncFailure = true;
 
     expect(() => createAgentKeyFile(keyPath, Buffer.alloc(32, 5))).toThrow("fixture fsync failure");
